@@ -25,10 +25,26 @@ instance; stores own a driver only when they build their own (passed
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from neo4j import Driver
+
+    from trellis.stores.base.registry import RegistryContext
+
+
+_REGISTRY_DRIVERS_KEY = f"{__name__}:drivers"
+
+
+def registry_driver_cache(
+    ctx: RegistryContext,
+) -> dict[tuple[str, str], Any]:
+    """Return this backend family's namespaced registry driver cache."""
+    return cast(
+        "dict[tuple[str, str], Any]",
+        ctx.shared.setdefault(_REGISTRY_DRIVERS_KEY, {}),
+    )
+
 
 try:
     from neo4j import GraphDatabase  # noqa: F401 — imported for HAS_NEO4J check

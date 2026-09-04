@@ -23,11 +23,37 @@ import pytest
 
 pytest.importorskip("neo4j")
 
+from trellis.stores.base.registry import RegistryContext
+from trellis.stores.bolt_opencypher.base import registry_driver_cache
 from trellis.stores.registry import StoreRegistry
 
 # Test placeholder credential. ruff's S105/S106 ("hardcoded password")
 # would otherwise trigger on every ArcadeDB(..., password=...) call.
 _DUMMY_PASSWORD = "test-pw"  # noqa: S105
+
+
+def _prepare(
+    registry: StoreRegistry,
+    params: dict[str, object],
+) -> dict[str, object]:
+    from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
+
+    return ArcadeDBGraphStore.prepare_registry_params(
+        registry._registry_context("graph", "arcadedb"),
+        "graph",
+        params,
+    )
+
+
+def _drivers(registry: StoreRegistry) -> dict[tuple[str, str], object]:
+    return registry_driver_cache(registry._registry_context("graph", "arcadedb"))
+
+
+def _migrated(registry: StoreRegistry) -> set[tuple[str, str]]:
+    return registry._registry_shared.setdefault(
+        "trellis.stores.arcadedb.graph:provenance_migrations",
+        set(),
+    )
 
 
 def _silence_init_schema(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,10 +124,7 @@ class TestRegistryRunsMigrationOnNewDriverPath:
             mock_build.return_value = MagicMock()
             registry = StoreRegistry(config=_arcadedb_graph_config())
             _ = registry.knowledge.graph_store
-            assert (
-                "bolt://localhost:7687",
-                "root",
-            ) in registry._arcadedb_provenance_migrated
+            assert ("bolt://localhost:7687", "root") in _migrated(registry)
 
 
 class TestRegistryForwardsHttpUrlToConstructor:
@@ -118,12 +141,17 @@ class TestRegistryForwardsHttpUrlToConstructor:
 
         captured: dict[str, object] = {}
 
-        # Spy on _inject_arcadedb_driver's returned params (what the
-        # registry actually forwards to the store constructor).
-        original = StoreRegistry._inject_arcadedb_driver
+        from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
 
-        def _spy(self: StoreRegistry, params: dict[str, object]) -> dict[str, object]:
-            result = original(self, params)
+        original = ArcadeDBGraphStore.prepare_registry_params
+
+        def _spy(
+            _cls: type[ArcadeDBGraphStore],
+            ctx: RegistryContext,
+            store_type: str,
+            params: dict[str, object],
+        ) -> dict[str, object]:
+            result = original(ctx, store_type, params)
             captured.update(result)
             return result
 
@@ -134,7 +162,11 @@ class TestRegistryForwardsHttpUrlToConstructor:
                 "trellis.stores.arcadedb.graph."
                 "ArcadeDBGraphStore._init_arcadedb_edge_provenance_schema"
             ),
-            patch.object(StoreRegistry, "_inject_arcadedb_driver", _spy),
+            patch.object(
+                ArcadeDBGraphStore,
+                "prepare_registry_params",
+                classmethod(_spy),
+            ),
         ):
             mock_build.return_value = MagicMock()
             registry = StoreRegistry(config=_arcadedb_graph_config())
@@ -163,10 +195,10 @@ class TestCachedDriverPathRunsMigration:
         registry = StoreRegistry()
         cached_driver = MagicMock(name="cached_driver")
         key = ("bolt://localhost:7687", "root")
-        registry._bolt_drivers[key] = cached_driver
+        _drivers(registry)[key] = cached_driver
         # Deliberately do NOT pre-record migration for this key — force
         # the cached path to invoke the migration helper.
-        assert key not in registry._arcadedb_provenance_migrated
+        assert key not in _migrated(registry)
 
         with patch(
             "trellis.stores.arcadedb.graph."
@@ -179,7 +211,7 @@ class TestCachedDriverPathRunsMigration:
                 "database": "trellis_test",
                 "http_url": "http://localhost:2480",
             }
-            result = registry._inject_arcadedb_driver(params)
+            result = _prepare(registry, params)
             assert result["driver"] is cached_driver
             assert "password" not in result
             mock_migrate.assert_called_once_with(
@@ -188,7 +220,7 @@ class TestCachedDriverPathRunsMigration:
                 password=_DUMMY_PASSWORD,
                 database="trellis_test",
             )
-            assert key in registry._arcadedb_provenance_migrated
+            assert key in _migrated(registry)
 
     def test_cached_path_skips_migration_when_already_recorded(
         self, monkeypatch: pytest.MonkeyPatch
@@ -200,8 +232,8 @@ class TestCachedDriverPathRunsMigration:
         registry = StoreRegistry()
         cached_driver = MagicMock(name="cached_driver")
         key = ("bolt://localhost:7687", "root")
-        registry._bolt_drivers[key] = cached_driver
-        registry._arcadedb_provenance_migrated.add(key)
+        _drivers(registry)[key] = cached_driver
+        _migrated(registry).add(key)
 
         with patch(
             "trellis.stores.arcadedb.graph."
@@ -214,7 +246,7 @@ class TestCachedDriverPathRunsMigration:
                 "database": "trellis_test",
                 "http_url": "http://localhost:2480",
             }
-            registry._inject_arcadedb_driver(params)
+            _prepare(registry, params)
             mock_migrate.assert_not_called()
 
     def test_cached_path_warns_when_credentials_missing(
@@ -227,7 +259,7 @@ class TestCachedDriverPathRunsMigration:
         registry = StoreRegistry()
         cached_driver = MagicMock(name="cached_driver")
         key = ("bolt://10.0.0.1:7687", "root")
-        registry._bolt_drivers[key] = cached_driver
+        _drivers(registry)[key] = cached_driver
 
         with (
             patch(
@@ -244,13 +276,11 @@ class TestCachedDriverPathRunsMigration:
                 "user": "root",
                 "database": "trellis_test",
             }
-            registry._inject_arcadedb_driver(params)
+            _prepare(registry, params)
             mock_migrate.assert_not_called()
             assert mock_warning.called
             event = mock_warning.call_args.args[0]
-            assert event == (
-                "arcadedb_provenance_schema_migration_skipped_cached_driver"
-            )
+            assert event == "store_registry_backend_warning"
 
 
 class TestConstructorBranchAcceptsRegistryPath:

@@ -16,15 +16,17 @@ Enterprise/Aura users can layer a node key constraint on top.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.stores.base.registry import RegistryContext
 from trellis.stores.bolt_opencypher.graph import BoltOpenCypherGraphStore
 from trellis.stores.neo4j.base import (
     DriverConfig,
     build_driver,
     check_driver_installed,
+    prepare_neo4j_registry_params,
 )
 
 if TYPE_CHECKING:
@@ -40,6 +42,15 @@ class Neo4jGraphStore(BoltOpenCypherGraphStore):
     subclass just builds the driver with basic auth and emits Neo4j-
     labeled lifecycle log events.
     """
+
+    @classmethod
+    def prepare_registry_params(
+        cls,
+        ctx: RegistryContext,
+        store_type: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        return prepare_neo4j_registry_params(ctx, store_type, params)
 
     def __init__(
         self,

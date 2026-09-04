@@ -40,12 +40,14 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.stores.base.registry import RegistryContext
 from trellis.stores.base.vector import VectorStore
 from trellis.stores.neo4j.base import (
     DriverConfig,
     Neo4jSessionRunner,
     build_driver,
     check_driver_installed,
+    prepare_neo4j_registry_params,
     wait_for_vector_index_online,
 )
 
@@ -65,6 +67,15 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
     on ``(:Node).embedding`` and indexes only the nodes that have the
     property set.
     """
+
+    @classmethod
+    def prepare_registry_params(
+        cls,
+        ctx: RegistryContext,
+        store_type: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        return prepare_neo4j_registry_params(ctx, store_type, params)
 
     def __init__(
         self,

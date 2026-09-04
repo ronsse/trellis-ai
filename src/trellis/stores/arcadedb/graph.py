@@ -22,18 +22,22 @@ missing. See ``docs/design/adr-arcadedb-blessed-substrate.md``
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.errors import ConfigError
 from trellis.stores.arcadedb.base import (
     build_arcadedb_driver,
+    derive_http_url_from_bolt,
     ensure_database,
     execute_sql,
 )
+from trellis.stores.base.registry import RegistryContext
 from trellis.stores.bolt_opencypher.base import (
     BoltDriverConfig,
     check_driver_installed,
+    registry_driver_cache,
 )
 from trellis.stores.bolt_opencypher.graph import BoltOpenCypherGraphStore
 
@@ -41,6 +45,7 @@ if TYPE_CHECKING:
     from neo4j import Driver
 
 logger = structlog.get_logger(__name__)
+_REGISTRY_MIGRATIONS_KEY = f"{__name__}:provenance_migrations"
 
 
 #: ArcadeDB schema-typed properties for the edge provenance columns
@@ -86,6 +91,165 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
     creates the target ArcadeDB database via the HTTP admin endpoint
     before any Bolt session opens.
     """
+
+    @classmethod
+    def prepare_registry_params(  # noqa: PLR0912, PLR0915
+        cls,
+        ctx: RegistryContext,
+        store_type: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve registry-owned ArcadeDB connection and migration state."""
+        if "driver" in params:
+            return params
+
+        uri = params.get("uri") or ctx.env.get("TRELLIS_ARCADEDB_URI")
+        if not uri:
+            msg = (
+                "arcadedb backend requires 'uri' in config or "
+                "TRELLIS_ARCADEDB_URI env var (e.g. bolt://host:7687)"
+            )
+            raise ConfigError(msg, setting=f"stores.{store_type}.uri")
+        user = params.get("user") or ctx.env.get("TRELLIS_ARCADEDB_USER") or "root"
+        password = params.get("password") or ctx.env.get("TRELLIS_ARCADEDB_PASSWORD")
+        database = (
+            params.get("database")
+            or ctx.env.get("TRELLIS_ARCADEDB_DATABASE")
+            or "trellis"
+        )
+        http_url = params.get("http_url") or ctx.env.get("TRELLIS_ARCADEDB_HTTP_URL")
+        admin_user = (
+            params.get("admin_user")
+            or ctx.env.get("TRELLIS_ARCADEDB_ADMIN_USER")
+            or user
+        )
+        admin_password = (
+            params.get("admin_password")
+            or ctx.env.get("TRELLIS_ARCADEDB_ADMIN_PASSWORD")
+            or password
+        )
+        key = (uri, user)
+        drivers = registry_driver_cache(ctx)
+        migrated: set[tuple[str, str]] = ctx.shared.setdefault(
+            _REGISTRY_MIGRATIONS_KEY,
+            set(),
+        )
+        prepared = {
+            key: value
+            for key, value in params.items()
+            if key
+            not in {
+                "driver_config",
+                "ensure_database_exists",
+                "admin_user",
+                "admin_password",
+            }
+        }
+        prepared.update(uri=uri, user=user, database=database)
+
+        if key in drivers:
+            cls._prepare_cached_registry_driver(
+                ctx,
+                migrated=migrated,
+                key=key,
+                http_url=http_url,
+                uri=uri,
+                user=admin_user,
+                password=admin_password,
+                database=database,
+                params=prepared,
+            )
+            prepared.pop("password", None)
+            prepared["driver"] = drivers[key]
+            return prepared
+
+        if not password:
+            msg = (
+                "arcadedb backend requires 'password' in config or "
+                "TRELLIS_ARCADEDB_PASSWORD env var"
+            )
+            raise ConfigError(msg, setting=f"stores.{store_type}.password")
+        admin_password = admin_password or password
+
+        raw_config = params.get("driver_config")
+        if raw_config is None:
+            driver_config: BoltDriverConfig | None = None
+        elif isinstance(raw_config, BoltDriverConfig):
+            driver_config = raw_config
+        elif isinstance(raw_config, dict):
+            driver_config = BoltDriverConfig(**raw_config)
+        else:
+            msg = (
+                "driver_config must be a BoltDriverConfig, a dict, or omitted; "
+                f"got {type(raw_config).__name__}"
+            )
+            raise TypeError(msg)
+
+        if params.get("ensure_database_exists", True):
+            http_url = http_url or derive_http_url_from_bolt(uri)
+            if not http_url:
+                msg = (
+                    "arcadedb backend with ensure_database_exists=True "
+                    "needs an http_url (or a parseable host in the Bolt uri)."
+                )
+                raise ConfigError(msg, setting=f"stores.{store_type}.http_url")
+            ensure_database(http_url, admin_user, admin_password, database)
+
+        resolved_http_url = http_url or derive_http_url_from_bolt(uri)
+        if resolved_http_url:
+            cls._init_arcadedb_edge_provenance_schema(
+                http_url=resolved_http_url,
+                user=admin_user,
+                password=admin_password,
+                database=database,
+            )
+        else:
+            ctx.emit_warning(
+                "ArcadeDB provenance migration skipped: no HTTP URL could be resolved"
+            )
+        migrated.add(key)
+
+        driver = build_arcadedb_driver(uri, user, password, config=driver_config)
+        drivers[key] = driver
+        ctx.register_closer(driver.close)
+        prepared.pop("password", None)
+        prepared["driver"] = driver
+        if resolved_http_url and not prepared.get("http_url"):
+            prepared["http_url"] = resolved_http_url
+        return prepared
+
+    @classmethod
+    def _prepare_cached_registry_driver(
+        cls,
+        ctx: RegistryContext,
+        *,
+        migrated: set[tuple[str, str]],
+        key: tuple[str, str],
+        http_url: str | None,
+        uri: str,
+        user: str,
+        password: str | None,
+        database: str,
+        params: dict[str, Any],
+    ) -> None:
+        if key in migrated:
+            return
+        resolved_http_url = http_url or derive_http_url_from_bolt(uri)
+        if resolved_http_url and password:
+            cls._init_arcadedb_edge_provenance_schema(
+                http_url=resolved_http_url,
+                user=user,
+                password=password,
+                database=database,
+            )
+            migrated.add(key)
+            if not params.get("http_url"):
+                params["http_url"] = resolved_http_url
+            return
+        ctx.emit_warning(
+            "ArcadeDB provenance migration skipped for a cached driver: "
+            "HTTP URL or password unavailable"
+        )
 
     def __init__(
         self,
