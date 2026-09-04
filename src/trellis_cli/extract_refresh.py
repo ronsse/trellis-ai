@@ -448,7 +448,17 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             # requires --path`` arm above it, so it is a pattern rather
             # than a one-off. ``test_extract_refresh`` covers the branch
             # instead.
-            console.print(f"[red]Path not found: {escape(str(type_path))}[/red]")
+            # ``soft_wrap`` for the reason ``policy.py`` gives at its own
+            # path renders: Rich hard-wraps at the console width, so a path
+            # under a deep temp directory comes out as ``nope.jso\nn`` and
+            # the operator copies a filename with a newline in it. That is
+            # the third thing Rich does to operator output — #492 fixed
+            # substitution and deletion; wrapping was already solved here
+            # and the sweep did not reach this line.
+            console.print(
+                f"[red]Path not found: {escape(str(type_path))}[/red]",
+                soft_wrap=True,
+            )
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
             extractor = _resolve_extractor(extractor_type)  # type: ignore[arg-type]

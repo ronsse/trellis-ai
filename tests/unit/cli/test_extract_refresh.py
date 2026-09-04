@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis_cli.extract_refresh import _property_diff
 from trellis_cli.main import app
 
@@ -167,8 +168,14 @@ class TestRefreshCliValidation:
         )
         assert result.exit_code == 1
         assert not isinstance(result.exception, TypeError), result.exception
-        assert "Path not found" in result.stdout
-        assert "nope.json" in result.stdout
+        # Whitespace-collapsed, and the render is ``soft_wrap``: read raw,
+        # this assertion passes or fails on how long pytest's ``--basetemp``
+        # happens to be. It failed at 7411/7412 under
+        # ``--basetemp=/tmp/.../bt-final-plain`` and passed under the
+        # default, because Rich hard-wrapped the path to ``nope.jso\nn``.
+        rendered = " ".join(plain(result.stdout).split())
+        assert "Path not found" in rendered, rendered
+        assert "nope.json" in rendered, rendered
 
     def test_source_not_in_yaml_errors(self, tmp_path: Path) -> None:
         runner.invoke(app, ["admin", "init"])
