@@ -79,6 +79,7 @@
     "issue": 514,
     "title": "Structured outputs vs. five hand-rolled JSON-forcing prompt sites (deferred from #500)",
     "verdict": "valid-slice",
+    "plan": "plans/514.md",
     "wave": "W3-llm",
     "dependencies": [],
     "territories": [
@@ -152,7 +153,7 @@
   {
     "issue": 477,
     "title": "PackBuilder contradiction invariant + last_verified",
-    "verdict": "valid-slice",
+    "verdict": "blocked-decision",
     "wave": "W4-retrieval",
     "dependencies": [],
     "territories": [
@@ -197,7 +198,7 @@
   {
     "issue": 474,
     "title": "Confirm-to-save for global semantic memory (route save_memory through the executor)",
-    "verdict": "valid-slice",
+    "verdict": "blocked-decision",
     "wave": "W4-mutate",
     "dependencies": [
       360
@@ -214,7 +215,7 @@
   {
     "issue": 463,
     "title": "Chunk rows decay off the import clock: CLASSIFY_METADATA_KEYS does not carry the source stamp",
-    "verdict": "blocked-decision",
+    "verdict": "blocked-signal",
     "wave": "W4-retrieval",
     "dependencies": [
       417
@@ -232,6 +233,7 @@
     "issue": 439,
     "title": "The SDK/REST pack surfaces cannot report withholding, and hooks.for_intent reproduces #404 verbatim",
     "verdict": "valid-now",
+    "plan": "plans/439.md",
     "wave": "W2-api",
     "dependencies": [
       404
@@ -294,6 +296,7 @@
     "issue": 369,
     "title": "Name-alias resolution stops learning past DEFAULT_NAME_SCAN_LIMIT, and starts answering wrongly",
     "verdict": "valid-now",
+    "plan": "plans/369.md",
     "wave": "W2-mutate",
     "dependencies": [
       289
@@ -327,7 +330,7 @@
   {
     "issue": 364,
     "title": "42% of injected tokens get no verdict, so useful_token_fraction is computed over 58% of what it describes",
-    "verdict": "blocked-signal",
+    "verdict": "stale-fixed",
     "wave": "W5-ops",
     "dependencies": [
       359
@@ -338,13 +341,14 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
+    "status": "closure-ready",
     "pr": "none"
   },
   {
     "issue": 360,
     "title": "The governed-pipeline hard rule does not hold for the document and vector planes",
     "verdict": "valid-now",
+    "plan": "plans/360.md",
     "wave": "W2-mutate",
     "dependencies": [],
     "territories": [
@@ -407,6 +411,7 @@
     "issue": 342,
     "title": "Exercise the promote\u2192review\u2192serve chain in evals (decided: no production min_support=1 flag)",
     "verdict": "valid-slice",
+    "plan": "plans/342.md",
     "wave": "W5-learning",
     "dependencies": [],
     "territories": [
@@ -453,6 +458,7 @@
     "issue": 264,
     "title": "North star: log every judged memory operation as a training example",
     "verdict": "valid-now",
+    "plan": "plans/264.md",
     "wave": "W2-learning",
     "dependencies": [],
     "territories": [
@@ -500,6 +506,7 @@
     "issue": 256,
     "title": "Extract Bolt backends (ArcadeDB + Neo4j) to a trellis-stores-bolt plugin",
     "verdict": "valid-now",
+    "plan": "plans/256.md",
     "wave": "W2-stores",
     "dependencies": [],
     "territories": [
@@ -606,7 +613,6 @@
     "verdict": "blocked-decision",
     "wave": "W4-security",
     "dependencies": [
-      256,
       360
     ],
     "territories": [
