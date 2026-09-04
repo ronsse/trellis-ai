@@ -546,6 +546,28 @@ would have made vector rows honest while the reported symptom continued.
 
 ## Deferred
 
+### F-5 · Advisory-cap exploration and lift-based fitness ([#502](https://github.com/ronsse/trellis-ai/issues/502))
+
+The 2026-09-04 panel split. One position recommended one bounded exploration slot plus
+lift-based suppression; the adversarial position required the owner to settle
+presentation, actuator, exploration cost, and corpus-growth semantics first. Both
+rejected score-on-domain-match and preserving the absolute-rate actuator while claiming
+lift-based learning.
+
+**Owner decision (2026-09-04): defer.** Keep the current five confidence-ranked served
+advisories. Preserve `advisory_ids` as the exposure set and dispatch no #502
+implementation. [#503](https://github.com/ronsse/trellis-ai/issues/503) remains
+signal-gated.
+
+**Cost of being wrong:** the never-served tail remains unmeasured and cannot participate
+in fitness. This avoids spending one-fifth of the advisory budget on an experiment that
+may take months to reach both-arm sample floors.
+
+**Trigger:** materially higher attributed-feedback volume, a demonstrated advisory
+starvation incident, or an owner request to spend a bounded slot on exploration. Any
+reopened design must still define presentation and the zero-comparison-arm policy, cap
+per-pack cost, and prove sampling service is not silently outpaced by corpus growth.
+
 ### F-4 · The two richer shapes in [#365](https://github.com/ronsse/trellis-ai/issues/365)
 
 E2's PR shipped #365's **third** option: `analyze health` now states that

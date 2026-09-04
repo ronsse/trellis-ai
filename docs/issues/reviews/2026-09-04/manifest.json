@@ -109,16 +109,16 @@
   {
     "issue": 502,
     "title": "Capping advisory delivery caps the fitness loop's input: an advisory outside the cap can never be scored, so it can never be suppressed",
-    "verdict": "blocked-decision",
+    "verdict": "blocked-signal",
     "wave": "W4-retrieval",
     "dependencies": [],
     "territories": [
       "src/trellis/retrieve/pack_builder.py",
-      "src/trellis/learning/effectiveness.py"
+      "src/trellis/retrieve/effectiveness.py"
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
+    "status": "deferred",
     "pr": "none"
   },
   {

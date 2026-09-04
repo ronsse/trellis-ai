@@ -164,6 +164,8 @@ status on each **GitHub issue**; roadmap sections only where they govern that it
 |---|---|
 | [#371](https://github.com/ronsse/trellis-ai/issues/371) | **Behaviorally open, blocked-signal** — graph axis is a recency feed until a real seeding path exists; do not dispatch alone |
 | [#375](https://github.com/ronsse/trellis-ai/issues/375) | **Mechanisms refuted** — `SemanticSeedExtractor` changed 0/37 production packs; premise remains but proposed fixes are dead |
+| [#463](https://github.com/ronsse/trellis-ai/issues/463) | **blocked-signal** — panels agreed on no behavior change now but split on clock semantics; parent inheritance requires both evidence and an explicit owner clock definition |
+| [#502](https://github.com/ronsse/trellis-ai/issues/502) | **blocked-signal** — owner chose defer after a panel split; keep five ranked advisories until the ledger F-5 trigger fires |
 | [#503](https://github.com/ronsse/trellis-ai/issues/503) | **blocked-signal** — wait for the first item-scoped advisory to reach a pack |
 | [#208](https://github.com/ronsse/trellis-ai/issues/208) | **external** — re-home to consumer-kg or close (`human`) |
 | [#250](https://github.com/ronsse/trellis-ai/issues/250) | **blocked-operator** — Aura console credential purge |
