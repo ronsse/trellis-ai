@@ -369,6 +369,12 @@ def _package_bindings(
     tree, through the scanned package — ``from trellis_api.app import
     main`` must not admit ``trellis_cli/main.py``'s helpers into
     ``serve.py``, and before the *package* half of this check it did.
+
+    One binding form is deliberately unresolved: ``from .shared import *``
+    yields the alias name ``"*"``, which matches no helper, so a
+    star-import admits nothing. ``ruff``'s ``F403`` bans it and ``src/``
+    contains none, so the blind spot is unreachable rather than tolerated
+    — but it is a blind spot, and the safe direction: it under-admits.
     """
     bound: set[tuple[str, str | None]] = set()
 
