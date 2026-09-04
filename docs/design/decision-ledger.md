@@ -140,6 +140,41 @@ gh api --method PATCH /repos/ronsse/trellis-ai --field allow_auto_merge=true
   queue serialises. At current volume (7 PRs in a day, one merger) that is free; it
   would not be with ten concurrent agents.
 
+### D-5 · Advisory fitness: ranked exposure, exploration, or match?
+
+**Context.** [#502](https://github.com/ronsse/trellis-ai/issues/502) observes that the
+five-advisory serving cap also limits the fitness loop's input. The event records served
+`advisory_ids`, but only a count for the larger matched set. Independently, the current
+fitness blend converges to the deployment's absolute pack-success rate rather than an
+advisory's lift over an unexposed arm.
+
+**Panel: SPLIT** (2026-09-04). One analysis recommends reserving one deterministic
+exploration slot while retaining four confidence-ranked slots, scoring only actual
+exposures, and suppressing only on adequately sampled negative lift. The adversarial
+analysis agrees that score-on-domain-match is invalid, but rejects any implementation
+until presentation, actuator, exploration cost, and corpus-growth semantics are chosen;
+unbounded rotation can spend tokens without repairing the absolute-rate actuator.
+
+**Recommendation:** preserve `advisory_ids` as the exposure set; reject score-on-domain-
+match. If exploration is authorized, use one bounded deterministic slot plus additive
+selection telemetry, and pair it with lift-based suppression. Keep
+[#503](https://github.com/ronsse/trellis-ai/issues/503) signal-gated until an item-scoped
+advisory is actually served.
+
+**Owner questions:**
+1. Does presentation mean served, matched, or matched-and-subject-present?
+2. Does the actuator use absolute success or `lift_vs_baseline`, and what happens with
+   no comparison arm?
+3. Is the exploration budget zero, one bounded slot, or full rotation?
+4. Are never-served rows sampled, pruned, or handled by operator cleanup?
+
+**Safe default:** keep the current five ranked served advisories and dispatch no #502
+implementation.
+
+**Cost of the recommendation being wrong:** one-fifth of advisory capacity may be spent
+on measurement, and current feedback volume may take months to meet both-arm sample
+floors. The safe default instead leaves the tail unmeasured.
+
 ## Pending — access
 
 ### A-1 · Delete Aura API credentials `985676d4` / `d664924e`
