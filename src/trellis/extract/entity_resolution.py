@@ -1,4 +1,4 @@
-"""Indexed name → entity resolution for the extraction write paths.
+"""Indexed name → entity resolution and write-time alias maintenance.
 
 Both write paths that resolve ``@mention`` tokens against the existing
 graph — the MCP ``save_memory`` tool and the CLI bulk-ingest hook
@@ -40,10 +40,10 @@ full-node scan duplicated in both callers. Three problems:
    seeing the tail and reported "no match", which is indistinguishable
    from a genuine miss.
 
-The resolver here fixes (1), fixes (2) by *minting* an alias whenever a
-scan resolves a name unambiguously (so the next lookup is a single indexed
-row read), and fixes (3) by logging a warning when the scan is truncated
-instead of pretending the tail was empty.
+The resolver fixes (1), fixes (2) by *minting* an alias whenever a complete
+scan resolves a name unambiguously, and makes (3) loud. The write-time binder
+and bounded backfill below keep the index complete without raising the scan
+cap.
 
 Matching rule and its failure mode
 ----------------------------------
@@ -80,17 +80,17 @@ Governance note
 
 The mint is a **direct ``graph_store.upsert_alias`` call**, not a
 ``MutationExecutor`` command, because the pipeline has no alias verb —
-:mod:`trellis_api.routes.ingest` says so in as many words ("direct graph
-store; no alias mutation operation exists") and is the only other alias
-writer. Giving aliases a governed operation has to convert both callers
-at once, which is a separate change. The alias row is itself SCD-2 and
-carries ``raw_name`` / ``valid_from``, so what was bound and when is
-recoverable from the store even though no event was emitted.
+:mod:`trellis_api.routes.ingest` already writes aliases directly for the
+same reason. Adding a governed alias verb must convert that route, this
+binder, and the backfill together. The alias row is itself SCD-2 and carries
+``raw_name`` / ``valid_from``, so what was bound and when is recoverable
+from the store even though no event was emitted.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, NamedTuple
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import structlog
 
@@ -139,9 +139,8 @@ NAME_ALIAS_SOURCE_SYSTEM = "name"
 #:
 #: Raising this number is deliberately **not** the fix: it delays the
 #: cliff, multiplies the per-mention fetch linearly, and leaves the silent
-#: wrong answer intact. The fix is to stop needing the scan — mint a
-#: ``name`` alias when the entity is written, plus a one-off backfill for
-#: existing nodes — which lives on the write path, not here.
+#: wrong answer intact. :func:`bind_name_alias` runs after governed entity
+#: writes, and :func:`backfill_name_aliases` repairs existing nodes.
 DEFAULT_NAME_SCAN_LIMIT = 2000
 
 
@@ -156,6 +155,153 @@ class _ScanResult(NamedTuple):
 
     matches: list[str]
     mintable: bool
+
+
+NameAliasBindResult = Literal[
+    "bound",
+    "already_bound",
+    "kept_existing",
+    "contested",
+    "skipped",
+]
+
+
+@dataclass(frozen=True)
+class BackfillReport:
+    """Outcome of one bounded name-alias backfill pass."""
+
+    bound: int
+    already_bound: int
+    contested_keys: list[str]
+    skipped: int
+    truncated: bool
+
+
+def bind_name_alias(  # noqa: PLR0911 - each return is a distinct outcome
+    graph_store: GraphStore,
+    *,
+    entity_id: str,
+    name: str,
+) -> NameAliasBindResult:
+    """Best-effort bind of a normalized display name, preserving first-wins.
+
+    The exact-name twin check is the strongest check the current
+    :meth:`GraphStore.query` contract permits. It does not prove uniqueness
+    across case variants; callers must not treat this alias as an identity
+    merge.
+    """
+    if not isinstance(name, str):
+        return "skipped"
+    key = normalize_entity_name(name)
+    if not key:
+        return "skipped"
+
+    try:
+        row = graph_store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, key)
+    except Exception:
+        logger.exception(
+            "entity_resolution_name_alias_lookup_failed", entity_id=entity_id
+        )
+        return "skipped"
+
+    bound_id = str(row.get("entity_id")) if row and row.get("entity_id") else None
+    if bound_id == entity_id:
+        return "already_bound"
+    if bound_id is not None and _binding_is_live(
+        graph_store, entity_id=bound_id, key=key
+    ):
+        logger.warning(
+            "entity_resolution_name_alias_kept_existing",
+            alias_key=key,
+            entity_id=entity_id,
+            existing_entity_id=bound_id,
+        )
+        return "kept_existing"
+
+    try:
+        twins = graph_store.query(properties={"name": name}, limit=2)
+    except Exception:
+        logger.exception(
+            "entity_resolution_name_alias_twin_check_failed",
+            entity_id=entity_id,
+        )
+        return "skipped"
+    if any(str(node.get("node_id")) != entity_id for node in twins):
+        logger.warning(
+            "entity_resolution_name_alias_contested",
+            alias_key=key,
+            entity_id=entity_id,
+        )
+        return "contested"
+
+    if not _mint_alias(graph_store, entity_id=entity_id, key=key, mention=name):
+        return "skipped"
+    return "bound"
+
+
+def backfill_name_aliases(
+    graph_store: GraphStore,
+    *,
+    max_nodes: int,
+) -> BackfillReport:
+    """Bind unique current names from one bounded, complete graph snapshot.
+
+    A result larger than ``max_nodes`` is discarded before any alias write.
+    Re-running with a larger bound resumes safely; already-bound keys are
+    counted without creating another alias version.
+    """
+    if max_nodes < 1:
+        msg = "max_nodes must be >= 1"
+        raise ValueError(msg)
+
+    nodes = graph_store.query(limit=max_nodes + 1)
+    if len(nodes) > max_nodes:
+        return BackfillReport(
+            bound=0,
+            already_bound=0,
+            contested_keys=[],
+            skipped=0,
+            truncated=True,
+        )
+
+    by_key: dict[str, list[tuple[str, str]]] = {}
+    skipped = 0
+    for node in nodes:
+        name = (node.get("properties") or {}).get("name")
+        node_id = node.get("node_id")
+        if not isinstance(name, str) or not node_id:
+            skipped += 1
+            continue
+        key = normalize_entity_name(name)
+        if not key:
+            skipped += 1
+            continue
+        by_key.setdefault(key, []).append((str(node_id), name))
+
+    contested = {key for key, rows in by_key.items() if len(rows) > 1}
+    bound = 0
+    already_bound = 0
+    for key, rows in by_key.items():
+        if len(rows) != 1:
+            continue
+        entity_id, name = rows[0]
+        result = bind_name_alias(graph_store, entity_id=entity_id, name=name)
+        if result == "bound":
+            bound += 1
+        elif result == "already_bound":
+            already_bound += 1
+        elif result in {"contested", "kept_existing"}:
+            contested.add(key)
+        else:
+            skipped += 1
+
+    return BackfillReport(
+        bound=bound,
+        already_bound=already_bound,
+        contested_keys=sorted(contested),
+        skipped=skipped,
+        truncated=False,
+    )
 
 
 def build_name_alias_resolver(
@@ -305,7 +451,7 @@ def _scan_for_name(
 
 def _mint_alias(
     graph_store: GraphStore, *, entity_id: str, key: str, mention: str
-) -> None:
+) -> bool:
     """Bind *key* to *entity_id* so the next resolution is an index read.
 
     Written straight to the graph store rather than through the
@@ -327,10 +473,11 @@ def _mint_alias(
             mention=mention,
             entity_id=entity_id,
         )
-        return
+        return False
     logger.info(
         "entity_resolution_alias_minted",
         mention=mention,
         alias_key=key,
         entity_id=entity_id,
     )
+    return True

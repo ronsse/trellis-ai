@@ -38,6 +38,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from trellis.extract.entity_resolution import (
+    NAME_ALIAS_SOURCE_SYSTEM,
+    backfill_name_aliases,
+    bind_name_alias,
+)
+
 if TYPE_CHECKING:
     from trellis.stores.base.graph import GraphStore
 
@@ -655,6 +661,33 @@ class GraphStoreContractTests:
         historical = store.resolve_alias("local", "user-api", as_of=before_rebind)
         assert historical is not None
         assert historical["entity_id"] == "ent_a"
+
+    def test_name_alias_binding_preserves_sequential_first_wins(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("ent_a", "service", {"name": "Hermes"})
+        assert bind_name_alias(store, entity_id="ent_a", name="Hermes") == "bound"
+
+        store.upsert_node("ent_b", "service", {"name": "Hermes"})
+        assert (
+            bind_name_alias(store, entity_id="ent_b", name="Hermes") == "kept_existing"
+        )
+        resolved = store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "hermes")
+        assert resolved is not None
+        assert resolved["entity_id"] == "ent_a"
+
+    def test_truncated_name_alias_backfill_writes_nothing(
+        self, store: GraphStore
+    ) -> None:
+        for i in range(5):
+            store.upsert_node(f"ent_{i}", "service", {"name": f"Entity {i}"})
+
+        report = backfill_name_aliases(store, max_nodes=2)
+
+        assert report.truncated is True
+        assert report.bound == 0
+        for i in range(5):
+            assert store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, f"entity {i}") is None
 
     # ------------------------------------------------------------------
     # deletion

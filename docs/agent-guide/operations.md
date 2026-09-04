@@ -306,6 +306,26 @@ It is **idempotent**: a row already in agreement is not rewritten, so a second r
 {"status": "ok", "scanned": 1019, "divergent": 45, "repaired": 45, "no_vector_row": 109, "errors": 0, "keys": ["content_tags", "auto_importance"], "dry_run": false}
 ```
 
+### `trellis admin backfill-name-aliases`
+
+Bind normalized entity display names into the indexed `name` alias namespace for
+nodes created before write-time binding shipped.
+
+```bash
+trellis admin backfill-name-aliases [--max-nodes <n>] [--format text|json]
+```
+
+The default bound is the current node count plus one. The command reads one row
+beyond the bound before writing; if that extra row exists, it binds nothing and
+exits non-zero. Rerun with a larger bound to resume. Unique normalized names are
+idempotent, exact duplicate names are reported as contested, and blank names are
+skipped. The report contains counts only.
+
+Name aliases use the GraphStore's SCD-2 alias operation directly because the
+governed command vocabulary has no alias verb. Entity create/update still enters
+through `MutationExecutor`; alias binding is its best-effort post-write index
+maintenance and never turns an otherwise successful entity write into a failure.
+
 #### Document → content tags (opt-in)
 
 By default document ingestion writes no retrieval-shaping tags — the document is retrievable, but `PackBuilder`'s `tag_filters`, the `signal_quality="noise"` exclusion and the tag-derived importance boost have nothing to work with. Set `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (also accepts `true`/`yes`/`on`) to turn on **classify-on-write**: an inline, deterministic pass (structural + keyword-domain + source-system classifiers, no LLM, microseconds) that stamps `metadata.content_tags` and `metadata.auto_importance` as the document is written.

@@ -8,6 +8,7 @@ from typing import Any, cast
 import structlog
 
 from trellis.errors import NotFoundError, StoreError, ValidationError
+from trellis.extract.entity_resolution import bind_name_alias
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.retention import (
@@ -308,6 +309,11 @@ class EntityCreateHandler:
             generation_spec=generation_spec,
             document_ids=document_ids,
         )
+        bind_name_alias(
+            self._registry.knowledge.graph_store,
+            entity_id=node_id,
+            name=command.args["name"],
+        )
 
         self._registry.operational.event_log.emit(
             EventType.ENTITY_CREATED,
@@ -418,6 +424,14 @@ class EntityUpdateHandler:
             generation_spec=existing.get("generation_spec"),
             document_ids=document_ids,
         )
+        if "name" in command.args and command.args["name"] != (
+            existing.get("properties") or {}
+        ).get("name"):
+            bind_name_alias(
+                store,
+                entity_id=node_id,
+                name=command.args["name"],
+            )
 
         self._registry.operational.event_log.emit(
             EventType.ENTITY_UPDATED,

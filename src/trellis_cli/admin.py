@@ -2364,3 +2364,14 @@ from trellis_cli.admin_resync_vector_metadata import (  # noqa: E402
 )
 
 _register_resync_vector_metadata(admin_app)
+
+
+# ---------------------------------------------------------------------------
+# backfill-name-aliases — write-time alias index bootstrap (#369)
+# ---------------------------------------------------------------------------
+
+from trellis_cli.admin_backfill_name_aliases import (  # noqa: E402
+    register as _register_backfill_name_aliases,
+)
+
+_register_backfill_name_aliases(admin_app)
