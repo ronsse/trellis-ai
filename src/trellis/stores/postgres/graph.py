@@ -23,6 +23,8 @@ from trellis.stores.base.edge_provenance import (
 )
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.graph import (
+    AliasBindResult,
+    AliasBindStatus,
     GraphStore,
     check_node_role_immutable,
     validate_document_ids,
@@ -543,6 +545,75 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                     ),
                 )
         return str(alias_id)
+
+    def bind_alias_if_absent(
+        self,
+        entity_id: str,
+        source_system: str,
+        raw_id: str,
+        *,
+        raw_name: str | None = None,
+        match_confidence: float = 1.0,
+        is_primary: bool = False,
+    ) -> AliasBindResult:
+        """Atomically claim the partial-unique current-alias key."""
+        now = utc_now()
+        alias_id = generate_ulid()
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO entity_aliases
+                    (version_id, alias_id, entity_id, source_system,
+                     raw_id, raw_name, match_confidence, is_primary,
+                     created_at, updated_at, valid_from, valid_to)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                ON CONFLICT (source_system, raw_id) WHERE valid_to IS NULL
+                DO NOTHING
+                RETURNING alias_id, entity_id
+                """,
+                (
+                    generate_ulid(),
+                    alias_id,
+                    entity_id,
+                    source_system,
+                    raw_id,
+                    raw_name,
+                    match_confidence,
+                    is_primary,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            inserted = cur.fetchone()
+            if inserted is not None:
+                return AliasBindResult(
+                    status=AliasBindStatus.BOUND,
+                    alias_id=str(inserted[0]),
+                    entity_id=str(inserted[1]),
+                )
+            cur.execute(
+                """
+                SELECT alias_id, entity_id
+                FROM entity_aliases
+                WHERE source_system = %s AND raw_id = %s AND valid_to IS NULL
+                """,
+                (source_system, raw_id),
+            )
+            winner_row = cur.fetchone()
+            if winner_row is None:
+                msg = "Alias claim conflicted but no current winner was readable"
+                raise RuntimeError(msg)
+            winner = str(winner_row[1])
+            return AliasBindResult(
+                status=(
+                    AliasBindStatus.ALREADY_BOUND
+                    if winner == entity_id
+                    else AliasBindStatus.CONFLICT
+                ),
+                alias_id=str(winner_row[0]),
+                entity_id=winner,
+            )
 
     def _resolve_alias_for_update(
         self,

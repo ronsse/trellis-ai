@@ -317,14 +317,21 @@ trellis admin backfill-name-aliases [--max-nodes <n>] [--format text|json]
 
 The default bound is the current node count plus one. The command reads one row
 beyond the bound before writing; if that extra row exists, it binds nothing and
-exits non-zero. Rerun with a larger bound to resume. Unique normalized names are
-idempotent, exact duplicate names are reported as contested, and blank names are
-skipped. The report contains counts only.
+exits with validation code `2`. Rerun with a larger bound to resume. Unique
+normalized names are idempotent, exact duplicate names are reported as
+contested, and blank names are skipped.
 
-Name aliases use the GraphStore's SCD-2 alias operation directly because the
-governed command vocabulary has no alias verb. Entity create/update still enters
-through `MutationExecutor`; alias binding is its best-effort post-write index
-maintenance and never turns an otherwise successful entity write into a failure.
+Every binding is an `alias.upsert` command with `if_absent=true`, so validation,
+policy, idempotency, execution, and audit emission run for each bounded batch.
+Concurrent contenders are serialized by `GraphStore.bind_alias_if_absent`;
+losers report the existing winner and never replace it. Policy denials exit `3`;
+lookup, query, or alias-store failures are reported separately from genuine
+skips and exit `5`. JSON failure details identify only the stage, reason, and
+entity id — they never echo entity names.
+
+Entity create/update binds the final merged name inside its already-governed
+command. Alias maintenance remains fail-soft for that primary entity write; the
+backfill is strict and never reports `status: ok` when alias maintenance fails.
 
 #### Document → content tags (opt-in)
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -22,6 +24,28 @@ if TYPE_CHECKING:
 _logger = structlog.get_logger(__name__)
 
 VALID_NODE_ROLES = frozenset({"structural", "semantic", "curated"})
+
+
+class AliasBindStatus(StrEnum):
+    """Outcome of an atomic bind-if-absent alias write."""
+
+    BOUND = "bound"
+    ALREADY_BOUND = "already_bound"
+    CONFLICT = "conflict"
+
+
+@dataclass(frozen=True)
+class AliasBindResult:
+    """Winner returned by :meth:`GraphStore.bind_alias_if_absent`.
+
+    ``entity_id`` and ``alias_id`` always identify the binding that won.
+    On ``CONFLICT`` they identify the existing winner, never the losing
+    candidate. Backend errors raise; no error is represented as a status.
+    """
+
+    status: AliasBindStatus
+    alias_id: str
+    entity_id: str
 
 
 def _resolve_max_subgraph_depth() -> int:
@@ -392,6 +416,27 @@ class GraphStore(ABC):
 
         Returns:
             The logical alias ID.
+        """
+
+    @abstractmethod
+    def bind_alias_if_absent(
+        self,
+        entity_id: str,
+        source_system: str,
+        raw_id: str,
+        *,
+        raw_name: str | None = None,
+        match_confidence: float = 1.0,
+        is_primary: bool = False,
+    ) -> AliasBindResult:
+        """Atomically bind an unclaimed alias without replacing its winner.
+
+        Concurrent contenders for the same ``(source_system, raw_id)`` must
+        produce exactly one :attr:`AliasBindStatus.BOUND`; every loser returns
+        :attr:`AliasBindStatus.CONFLICT` naming that winner. A retry by the
+        winner returns :attr:`AliasBindStatus.ALREADY_BOUND`.
+
+        Backend failures raise rather than being folded into a status.
         """
 
     @abstractmethod

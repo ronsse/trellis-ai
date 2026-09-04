@@ -32,9 +32,15 @@ def _execute(
     *,
     operation: Operation = Operation.ENTITY_CREATE,
     entity_id: str,
-    name: str,
+    name: str | None = None,
+    properties: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> None:
-    args: dict[str, Any] = {"entity_id": entity_id, "name": name}
+    args: dict[str, Any] = {"entity_id": entity_id}
+    if name is not None:
+        args["name"] = name
+    if properties is not None:
+        args["properties"] = properties
     if operation == Operation.ENTITY_CREATE:
         args["entity_type"] = "Concept"
     result = build_curate_executor(registry).execute(
@@ -43,6 +49,7 @@ def _execute(
             args=args,
             target_id=entity_id,
             requested_by="test:name-alias",
+            idempotency_key=idempotency_key,
         )
     )
     assert result.status == CommandStatus.SUCCESS
@@ -90,6 +97,67 @@ class TestGovernedNameAliasWrites:
         _execute(registry, entity_id="target", name="Newest Name")
         assert resolve("newest name") == ["target"]
 
+    def test_properties_name_rename_binds_final_merged_name(
+        self, registry: StoreRegistry
+    ) -> None:
+        _execute(registry, entity_id="target", name="Old Name")
+
+        _execute(
+            registry,
+            operation=Operation.ENTITY_UPDATE,
+            entity_id="target",
+            properties={"name": "Properties Name"},
+        )
+
+        row = registry.knowledge.graph_store.resolve_alias(
+            NAME_ALIAS_SOURCE_SYSTEM,
+            "properties name",
+        )
+        assert row is not None
+        assert row["entity_id"] == "target"
+
+    def test_top_level_name_wins_over_properties_name_for_binding(
+        self, registry: StoreRegistry
+    ) -> None:
+        _execute(registry, entity_id="target", name="Old Name")
+
+        _execute(
+            registry,
+            operation=Operation.ENTITY_UPDATE,
+            entity_id="target",
+            name="Top Level Name",
+            properties={"name": "Nested Name"},
+        )
+
+        graph = registry.knowledge.graph_store
+        winner = graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "top level name")
+        assert winner is not None
+        assert winner["entity_id"] == "target"
+        assert graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "nested name") is None
+
+    def test_same_value_properties_retry_does_not_rebind(
+        self, registry: StoreRegistry, monkeypatch
+    ) -> None:
+        _execute(registry, entity_id="target", name="Stable Name")
+        graph = registry.knowledge.graph_store
+        calls = 0
+        original = graph.bind_alias_if_absent
+
+        def _counted(*args: Any, **kwargs: Any):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(graph, "bind_alias_if_absent", _counted)
+        _execute(
+            registry,
+            operation=Operation.ENTITY_UPDATE,
+            entity_id="target",
+            properties={"name": "Stable Name"},
+        )
+
+        assert calls == 0
+
     def test_same_named_creates_keep_the_first_binding(
         self, registry: StoreRegistry
     ) -> None:
@@ -124,7 +192,7 @@ class TestGovernedNameAliasWrites:
         [
             ("resolve_alias", "entity_resolution_name_alias_lookup_failed"),
             ("query", "entity_resolution_name_alias_twin_check_failed"),
-            ("upsert_alias", "entity_resolution_alias_mint_failed"),
+            ("bind_alias_if_absent", "entity_resolution_alias_bind_failed"),
         ],
     )
     def test_alias_maintenance_failure_does_not_fail_entity_write(

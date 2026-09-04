@@ -38,7 +38,7 @@ import json
 import operator
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
@@ -53,6 +53,8 @@ from trellis.stores.base.edge_provenance import (
 )
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.graph import (
+    AliasBindResult,
+    AliasBindStatus,
     GraphStore,
     check_node_role_immutable,
     validate_document_ids,
@@ -212,6 +214,13 @@ def _alias_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _alias_claim_key(source_system: str, raw_id: str) -> str:
+    """Return an injective, backend-portable key for one alias pair."""
+    return json.dumps(
+        [source_system, raw_id], ensure_ascii=False, separators=(",", ":")
+    )
+
+
 _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
     # Uniqueness on version_id (Neo4j Community + Enterprise + AuraDB).
     # Backends without DDL-level constraints (e.g. Neptune) override
@@ -224,6 +233,10 @@ _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
     (
         "CREATE CONSTRAINT alias_version_unique IF NOT EXISTS "
         "FOR (a:Alias) REQUIRE a.version_id IS UNIQUE"
+    ),
+    (
+        "CREATE CONSTRAINT alias_claim_unique IF NOT EXISTS "
+        "FOR (c:AliasClaim) REQUIRE c.claim_key IS UNIQUE"
     ),
     # Lookup indexes
     "CREATE INDEX node_id_idx IF NOT EXISTS FOR (n:Node) ON (n.node_id)",
@@ -610,42 +623,182 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         match_confidence: float = 1.0,
         is_primary: bool = False,
     ) -> str:
-        existing = self.resolve_alias(source_system, raw_id)
         now = _iso(utc_now())
-        if existing:
-            alias_id = str(existing["alias_id"])
-            created_at = existing["created_at"]
-        else:
-            alias_id = generate_ulid()
-            created_at = now
+        claim_key = _alias_claim_key(source_system, raw_id)
 
-        version_id = generate_ulid()
-        new_props = {
-            "alias_id": alias_id,
-            "version_id": version_id,
-            "entity_id": entity_id,
-            "source_system": source_system,
-            "raw_id": raw_id,
-            "raw_name": raw_name,
-            "match_confidence": match_confidence,
-            "is_primary": is_primary,
-            "created_at": created_at,
-            "updated_at": now,
-            "valid_from": now,
-            "valid_to": None,
-        }
+        def _tx(tx: ManagedTransaction) -> str:
+            record = tx.run(
+                """
+                MATCH (a:Alias {source_system: $src, raw_id: $rid})
+                WHERE a.valid_to IS NULL
+                RETURN a
+                """,
+                src=source_system,
+                rid=raw_id,
+            ).single()
+            existing = (
+                _alias_props_to_dict(dict(record["a"])) if record is not None else None
+            )
+            alias_id = (
+                str(existing["alias_id"]) if existing is not None else generate_ulid()
+            )
+            created_at = existing["created_at"] if existing is not None else now
+            if existing is not None:
+                tx.run(
+                    """
+                    MATCH (a:Alias {alias_id: $alias_id})
+                    WHERE a.valid_to IS NULL
+                    SET a.valid_to = $now
+                    """,
+                    alias_id=alias_id,
+                    now=now,
+                ).consume()
+            tx.run(
+                """
+                MERGE (c:AliasClaim {claim_key: $claim_key})
+                SET c.entity_id = $entity_id, c.alias_id = $alias_id
+                """,
+                claim_key=claim_key,
+                entity_id=entity_id,
+                alias_id=alias_id,
+            ).consume()
+            tx.run(
+                """
+                CREATE (a:Alias)
+                SET a = $new_props
+                """,
+                new_props={
+                    "alias_id": alias_id,
+                    "version_id": generate_ulid(),
+                    "entity_id": entity_id,
+                    "source_system": source_system,
+                    "raw_id": raw_id,
+                    "raw_name": raw_name,
+                    "match_confidence": match_confidence,
+                    "is_primary": is_primary,
+                    "created_at": created_at,
+                    "updated_at": now,
+                    "valid_from": now,
+                    "valid_to": None,
+                },
+            ).consume()
+            return alias_id
 
-        cypher = """
-        OPTIONAL MATCH (old:Alias {alias_id: $alias_id})
-          WHERE old.valid_to IS NULL
-        SET old.valid_to = $now
-        WITH count(old) AS _closed
-        CREATE (a:Alias)
-        SET a = $new_props
-        RETURN a.alias_id AS alias_id
-        """
-        self._run_write(cypher, alias_id=alias_id, now=now, new_props=new_props)
-        return alias_id
+        with self._driver.session(database=self._database) as session:
+            return str(session.execute_write(_tx))
+
+    def bind_alias_if_absent(
+        self,
+        entity_id: str,
+        source_system: str,
+        raw_id: str,
+        *,
+        raw_name: str | None = None,
+        match_confidence: float = 1.0,
+        is_primary: bool = False,
+    ) -> AliasBindResult:
+        """Atomically claim an alias through a unique ``AliasClaim`` node."""
+        now = _iso(utc_now())
+        candidate_alias_id = generate_ulid()
+        claim_key = _alias_claim_key(source_system, raw_id)
+
+        def _tx(tx: ManagedTransaction) -> AliasBindResult:
+            current_record = tx.run(
+                """
+                MATCH (a:Alias {source_system: $src, raw_id: $rid})
+                WHERE a.valid_to IS NULL
+                RETURN a
+                """,
+                src=source_system,
+                rid=raw_id,
+            ).single()
+            current = (
+                _alias_props_to_dict(dict(current_record["a"]))
+                if current_record is not None
+                else None
+            )
+            initial_entity_id = (
+                str(current["entity_id"]) if current is not None else entity_id
+            )
+            initial_alias_id = (
+                str(current["alias_id"]) if current is not None else candidate_alias_id
+            )
+            claim = tx.run(
+                """
+                MERGE (c:AliasClaim {claim_key: $claim_key})
+                ON CREATE SET c.entity_id = $initial_entity_id,
+                              c.alias_id = $initial_alias_id
+                RETURN c.entity_id AS entity_id, c.alias_id AS alias_id
+                """,
+                claim_key=claim_key,
+                initial_entity_id=initial_entity_id,
+                initial_alias_id=initial_alias_id,
+            ).single()
+            if claim is None:
+                msg = "Alias claim write returned no winner"
+                raise RuntimeError(msg)
+            winner = str(claim["entity_id"])
+            winner_alias_id = str(claim["alias_id"])
+            if winner != entity_id:
+                return AliasBindResult(
+                    status=AliasBindStatus.CONFLICT,
+                    alias_id=winner_alias_id,
+                    entity_id=winner,
+                )
+
+            # Re-read after MERGE: a same-entity concurrent contender may have
+            # created the current Alias while this transaction waited on the
+            # unique AliasClaim key.
+            current_record = tx.run(
+                """
+                MATCH (a:Alias {source_system: $src, raw_id: $rid})
+                WHERE a.valid_to IS NULL
+                RETURN a
+                """,
+                src=source_system,
+                rid=raw_id,
+            ).single()
+            if current_record is not None:
+                current = _alias_props_to_dict(dict(current_record["a"]))
+                current_entity_id = str(current["entity_id"])
+                return AliasBindResult(
+                    status=(
+                        AliasBindStatus.ALREADY_BOUND
+                        if current_entity_id == entity_id
+                        else AliasBindStatus.CONFLICT
+                    ),
+                    alias_id=str(current["alias_id"]),
+                    entity_id=current_entity_id,
+                )
+
+            tx.run(
+                """
+                CREATE (a:Alias)
+                SET a = $new_props
+                """,
+                new_props={
+                    "alias_id": candidate_alias_id,
+                    "version_id": generate_ulid(),
+                    "entity_id": entity_id,
+                    "source_system": source_system,
+                    "raw_id": raw_id,
+                    "raw_name": raw_name,
+                    "match_confidence": match_confidence,
+                    "is_primary": is_primary,
+                    "created_at": now,
+                    "updated_at": now,
+                    "valid_from": now,
+                    "valid_to": None,
+                },
+            ).consume()
+            return AliasBindResult(
+                status=AliasBindStatus.BOUND,
+                alias_id=candidate_alias_id,
+                entity_id=entity_id,
+            )
+
+        with self._driver.session(database=self._database) as session:
+            return cast("AliasBindResult", session.execute_write(_tx))
 
     def resolve_alias(
         self,
@@ -1099,6 +1252,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             ).consume()
             tx.run(
                 "MATCH (a:Alias {entity_id: $nid}) DETACH DELETE a", nid=node_id
+            ).consume()
+            tx.run(
+                "MATCH (c:AliasClaim {entity_id: $nid}) DETACH DELETE c",
+                nid=node_id,
             ).consume()
             return existed
 
