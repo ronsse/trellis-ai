@@ -136,27 +136,14 @@ jobs:
       - name: Install Trellis with live-infra extras
         run: pip install -e ".[dev,cloud,neo4j]"
 
-      # ``PgVectorStore`` cannot bootstrap its own extension. Its pool is
-      # opened with ``on_connect=register_vector``, and ``register_vector``
-      # looks the ``vector`` type up in the database — so on a DB where the
-      # extension is absent EVERY pooled connection fails and ``pool.wait()``
-      # raises ``PoolTimeout`` after 30s, long before ``_init_schema`` (which
-      # holds the ``CREATE EXTENSION IF NOT EXISTS vector``) is reached. The
-      # pgvector/pgvector image ships the extension files but does not create
-      # the extension in ``POSTGRES_DB``, so it has to be created here or the
-      # whole pgvector suite stalls 30s per test. Tracked as issue #350.
-      - name: Ensure the pgvector extension exists
-        env:
-          TRELLIS_TEST_PG_DSN: postgresql://trellis:trellis@localhost:5432/trellis
-        run: |
-          python - <<'PY'
-          import os
-          import psycopg
-
-          with psycopg.connect(os.environ["TRELLIS_TEST_PG_DSN"], autocommit=True) as conn:
-              conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-          print("pgvector extension ensured")
-          PY
+      # Do not CREATE EXTENSION here. ``PgVectorStore`` now runs
+      # ``CREATE EXTENSION IF NOT EXISTS vector`` on a plain connection
+      # (``_provision_vector_extension``) before ``super().__init__``
+      # opens the pool with ``register_vector`` as ``on_connect``. The
+      # pgvector/pgvector:pg16 image ships the extension files but does
+      # not create the extension in ``POSTGRES_DB``; the store must do
+      # that. If this workflow step comes back, #350 has regressed —
+      # live-infra would stay green even if store bootstrap were deleted.
 
       - name: Run live + contract suites against the containers
         env:
