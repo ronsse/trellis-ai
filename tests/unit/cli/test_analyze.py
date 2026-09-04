@@ -497,7 +497,7 @@ class TestAdvisoryCommandsOnADegradedStore:
         result = runner.invoke(app, ["analyze", "generate-advisories"])
 
         assert "ADVISORY STORE DEGRADED" in result.stdout
-        assert "No feedback recorded yet" not in result.stdout
+        assert "No feedback recorded yet" not in plain(result.stdout)
 
     def test_generate_reports_the_degradation_in_json(self, tmp_path: Path) -> None:
         """Both formats or neither — a JSON-only warning is invisible."""
@@ -1270,7 +1270,7 @@ class TestTruncationReachesTheOperator:
         self._flood(temp_stores, EventType.PACK_ASSEMBLED, 3)
         result = runner.invoke(app, ["analyze", "pack-telemetry", "--days", "30"])
         assert result.exit_code == 0
-        assert "TRUNCATED" not in result.stdout
+        assert "TRUNCATED" not in plain(result.stdout)
 
     def test_extractor_fallbacks_prints_the_truncation_note(
         self, temp_stores: StoreRegistry
@@ -1286,7 +1286,7 @@ class TestTruncationReachesTheOperator:
         self._flood(temp_stores, EventType.EXTRACTION_DISPATCHED, 3)
         result = runner.invoke(app, ["analyze", "extractor-fallbacks", "--days", "30"])
         assert result.exit_code == 0
-        assert "TRUNCATED" not in result.stdout
+        assert "TRUNCATED" not in plain(result.stdout)
 
     def test_cost_prints_the_truncation_note_before_the_dollar_figure(
         self, temp_stores: StoreRegistry
@@ -1459,7 +1459,7 @@ class TestAdvisoryCommandsOnAStaleStore:
         result = runner.invoke(app, ["analyze", "advisory-effectiveness"])
 
         assert result.exit_code == 0, result.output
-        assert "ADVISORY WRITE REFUSED" not in result.stdout
+        assert "ADVISORY WRITE REFUSED" not in plain(result.stdout)
 
     def test_generate_advisories_renders_the_refusal_too(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

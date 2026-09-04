@@ -7,8 +7,22 @@ count or a path arrives as several separately-wrapped runs, so
 plainly displays ``--include-chunks``. A CLI test that reads
 ``result.output`` directly is therefore reading decorated output as if it
 were plain text, and its outcome depends on whether the run happened to
-be coloured — which CI's is and a local ``make test`` is not (#495, and
-the environment-drift axis #398 tracks).
+be coloured.
+
+**Which surfaces colour where is worth stating precisely, because the
+obvious summary is wrong.** No environment this repo runs in colours
+these surfaces today: ``origin/main`` is green in CI and green again
+locally with ``GITHUB_ACTIONS=true`` set, because a ``trellis_cli``
+module's ``rich.Console()`` sees a pipe either way. Typer's *own*
+rendering is the exception, and the reason #488 saw a CI-only failure —
+``typer.rich_utils`` forces a terminal when ``GITHUB_ACTIONS`` /
+``FORCE_COLOR`` / ``PY_COLORS`` is set, so a *usage error* is coloured on
+CI while everything a command prints itself is not. So these assertions
+are conditioned on a renderer that is merely switched off: under
+``FORCE_COLOR=1``, 21 of them fail on ``origin/main``. That is the
+environment-drift axis #398 tracks, and it is what a TTY-attached run, a
+CI matrix leg, or a typer/rich release that widens that forcing would
+turn on with no warning (#495).
 
 Stripping is :func:`click.utils.strip_ansi` rather than a local regex:
 click owns ``CliRunner``, already strips these sequences in
@@ -45,6 +59,22 @@ def plain(text: str) -> str:
     surface, including negative ones: ``"TRUNCATED" not in output`` is
     *weaker* on coloured text, because a highlighted token can be split
     across escape runs and satisfy the negative for the wrong reason.
+
+    **The negatives are the urgent half, and that asymmetry is why they
+    were swept and the remaining raw positives were not.** A positive
+    that a coloured run would break *announces itself* — it is one of the
+    21 that fail on ``origin/main`` under ``FORCE_COLOR=1``, and it gets
+    fixed. A negative that a coloured run would break goes *green*, and
+    stays green, saying nothing. Every raw negative left in
+    ``tests/unit/cli/`` was checked one by one before this sweep and none
+    is a live false pass today — the needles Rich splits are the ones
+    adjacent to a number or a path, and ``supersede``, ``#chunk-``,
+    ``ADVISORY WRITE REFUSED`` and the two secret-leak negatives in
+    ``test_boundary_errors`` all survive raw (the last two read a
+    ``--format json`` payload, which is not a Rich surface at all). The
+    gap is latent, and it widens with every render site added; making it
+    unwritable wants an AST rule of the ``tests/unit/test_*_rule.py``
+    kind rather than a second hand sweep.
     """
     return strip_ansi(text)
 

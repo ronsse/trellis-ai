@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from tests.cli_output import assert_coloured, force_colour
+from tests.cli_output import assert_coloured, force_colour, plain
 from tests.unreadable_paths import (
     UNREADABLE_PATH_IDS,
     UNREADABLE_PATH_SHAPES,
@@ -455,7 +455,7 @@ class TestEmptyIsNotAlwaysTheSameEmpty:
         result = runner.invoke(app, ["policy", "list"])
         assert result.exit_code == 0
         assert "No policies configured" in result.stdout
-        assert "declares an empty policy list" not in result.stdout
+        assert "declares an empty policy list" not in plain(result.stdout)
 
     def test_a_file_declaring_zero_policies_says_so(self, tmp_path: Path) -> None:
         _damage(tmp_path, '{"policies": []}')
@@ -724,4 +724,4 @@ class TestWritesAreRefusedWhenAnotherProcessWroteFirst:
 
         assert theirs.policy_id in path.read_text(), "precondition: it is in the file"
         assert result.exit_code == 5, result.stdout
-        assert "not found" not in result.stdout.lower()
+        assert "not found" not in plain(result.stdout).lower()

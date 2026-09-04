@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.chunk_corpus import seed_chunk_favouring, seed_chunked
-from tests.cli_output import plain
+from tests.cli_output import assert_coloured, plain
 from trellis_cli.exit_codes import EXIT_VALIDATION
 from trellis_cli.main import app
 
@@ -695,7 +695,7 @@ class TestRetrieveChunkVisibility:
         self._seed()
         result = runner.invoke(app, ["retrieve", "search", "distinctive"])
         assert result.exit_code == 0, result.output
-        assert "#chunk-" not in result.stdout
+        assert "#chunk-" not in plain(result.stdout)
         assert "corpus:obsidian:doc0" in result.stdout
 
     def test_pack_serves_chunk_rows_and_has_no_flag_to_suppress_them(self) -> None:
@@ -747,7 +747,9 @@ class TestRetrieveChunkVisibility:
         discovers it in CI too.
 
         ``FORCE_COLOR`` is Rich's own opt-in and is read when the console
-        is constructed, which for a Typer usage error is at render time.
+        is constructed, which for a Typer usage error is at render time —
+        unlike a ``trellis_cli`` module's own console, which caches its
+        answer at import and needs ``force_colour`` (#495).
         """
         monkeypatch.setenv("FORCE_COLOR", "1")
         self._seed()
@@ -758,10 +760,13 @@ class TestRetrieveChunkVisibility:
         assert rejected.exit_code != 0
         # The escapes really are present — without this the test would
         # pass by accident on a build where Rich decided not to colour,
-        # and would then be pinning nothing.
-        assert "\x1b[" in rejected.output
+        # and would then be pinning nothing. Through ``assert_coloured``
+        # rather than a local ``"\x1b[" in ...``: the shared helper is the
+        # one spelling of this check, and it is itself pinned by
+        # ``tests/unit/test_cli_output.py``.
+        rendered = assert_coloured(rejected.output)
         assert "--include-chunks" not in rejected.output
-        assert "--include-chunks" in _plain(rejected.output)
+        assert "--include-chunks" in _plain(rendered)
 
 
 class TestRetrieveTrace:
@@ -959,7 +964,7 @@ class TestRetrieveFileContext:
     def test_unconfirmed_mints_gated_unless_requested(self) -> None:
         self._seed(extraction_status="unconfirmed")
         args = ["retrieve", "file-context", "src/trellis/retrieve/pack_builder.py"]
-        assert "PackBuilder" not in runner.invoke(app, args).stdout
+        assert "PackBuilder" not in plain(runner.invoke(app, args).stdout)
         assert (
             "PackBuilder" in runner.invoke(app, [*args, "--include-unconfirmed"]).stdout
         )

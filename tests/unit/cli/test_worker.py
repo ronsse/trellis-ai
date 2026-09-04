@@ -699,7 +699,7 @@ class TestCurateSurvivesADegradedAdvisoryStore:
         )
 
         assert result.exit_code == 0, result.output
-        assert "ADVISORY STORE DEGRADED" not in result.output
+        assert "ADVISORY STORE DEGRADED" not in plain(result.output)
 
     def test_a_dry_run_still_reports_the_degradation(
         self, tmp_path: Path, temp_stores: StoreRegistry
@@ -1439,7 +1439,7 @@ class TestWorkerCaptureSessions:
         result = runner.invoke(worker_app, ["capture-sessions"])
 
         assert result.exit_code == 0, result.output
-        assert "supersede" not in result.output
+        assert "supersede" not in plain(result.output)
 
 
 class TestEnrichedContentTags:
@@ -2069,7 +2069,7 @@ class TestCurateSurvivesASecondWriter:
         assert data["advisory_store_stale"] is None
         assert data["status"] == "ok"
         assert "advisories" not in data["skipped_stages"]
-        assert "ADVISORY WRITE REFUSED" not in result.output
+        assert "ADVISORY WRITE REFUSED" not in plain(result.output)
 
 
 class TestARefusedNightlyWriteEscalates:
