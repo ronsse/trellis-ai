@@ -46,19 +46,24 @@ cross-check by re-introducing #457's bug.
 from __future__ import annotations
 
 import ast
-from collections.abc import Callable, Iterable
+import functools
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import ClassVar
 
 import pytest
 
 from tests.ast_rules import (
     AXES,
+    DECOY_MARKER,
+    DECOYS,
     EVASION_IDS,
     EVASIONS,
     NAIVE_SCANNERS,
     PRIMARY_FILE,
     SECOND_FILE,
+    Decoy,
     Evasion,
     RenderedCorpus,
     assert_hand_read_floor,
@@ -73,6 +78,9 @@ from tests.ast_rules import (
     marker_lines,
     name_of,
     render_evasion_corpus,
+)
+from tests.ast_rules import (
+    _typed_calls as _scanner_descent,  # the ninth scanner's own descent
 )
 
 #: A stand-in name with no meaning to any rule, so nothing here passes
@@ -289,8 +297,23 @@ class TestConstructionNames:
             ("A = Widget\nB = A", {"Widget", "A", "B"}),
             ("class Mine(Widget):\n    pass", {"Widget", "Mine"}),
             ("class Mine(Widget):\n    pass\nAlso = Mine", {"Widget", "Mine", "Also"}),
+            ("W: type = Widget", {"Widget", "W"}),
+            ("if (W := Widget) is not None:\n    pass", {"Widget", "W"}),
+            (
+                "A: type = Widget\nif (B := A) is not None:\n    C = B",
+                {"Widget", "A", "B", "C"},
+            ),
         ],
-        ids=["alias", "rebind", "chain", "subclass", "subclass_then_rebind"],
+        ids=[
+            "alias",
+            "rebind",
+            "chain",
+            "subclass",
+            "subclass_then_rebind",
+            "annotated_rebind",
+            "walrus_rebind",
+            "chain_through_both",
+        ],
     )
     def test_resolves_the_shapes_the_first_cut_called_unresolvable(
         self, source: str, expected: set[str]
@@ -303,11 +326,36 @@ class TestConstructionNames:
             "import functools\nP = functools.partial(Widget)",
             "from other import Derived",
             "P = getattr(mod, 'Widget')",
+            "P: type = functools.partial(Widget)",
+            "if (P := functools.partial(Widget)) is not None:\n    pass",
+            "self.cls: type = Widget",
+            "_registry['w']: type = Widget",
         ],
-        ids=["partial", "cross_module", "getattr"],
+        ids=[
+            "partial",
+            "cross_module",
+            "getattr",
+            "annotated_partial",
+            "walrus_partial",
+            "annotated_attribute_target",
+            "annotated_subscript_target",
+        ],
     )
     def test_does_not_resolve_a_binding_with_no_name_to_read(self, source: str) -> None:
-        """The residue, as a property of the resolver rather than as prose."""
+        """The residue, as a property of the resolver rather than as prose.
+
+        The last two are what pins ``isinstance(node.target, ast.Name)`` in
+        the ``ast.AnnAssign`` branch, and they are here because the guard
+        survived a mutation battery without them: an ``ast.AnnAssign``
+        target is a ``Name``, an ``Attribute`` or a ``Subscript``, and only
+        the first has an ``.id``. Deleting the guard does not widen the
+        resolver, it makes ``self.cls: type = Widget`` — ordinary Python,
+        and a shape neither ``src/`` nor the rendered corpus happens to
+        write — raise ``AttributeError`` out of the one function every AST
+        rule in this repo calls. ``ast.NamedExpr`` cannot reach it (its
+        target is always a ``Name``), which is exactly why a shape that
+        only exercises the walrus half leaves the annotated half unpinned.
+        """
         assert construction_names("Widget", ast.parse(source)) == {"Widget"}
 
     def test_the_fixed_point_is_what_catches_a_chain(self) -> None:
@@ -346,6 +394,8 @@ class TestTheRosterIsPinned:
         "aliased_import",
         "local_rebinding",
         "rebinding_chain",
+        "walrus_rebinding",
+        "annassign_rebinding",
         "subclass_then_construct",
         "partial_binding",
         "cross_module_subclass",
@@ -356,6 +406,10 @@ class TestTheRosterIsPinned:
         "class_body",
         "async_function",
         "decorator",
+        "with_item",
+        "comprehension_clause",
+        "keyword_argument",
+        "default_argument",
         "kwargs_splat",
         "none_keyword",
         "second_file_bare_call",
@@ -578,6 +632,53 @@ class TestTheRosterIsMeasuredAgainstRealNaiveScanners:
             f"the roster rot this module exists to end."
         )
 
+    @pytest.mark.parametrize(
+        ("shape", "node_type"),
+        [
+            ("aliased_import", "ImportFrom"),
+            ("local_rebinding", "Assign"),
+            ("annassign_rebinding", "AnnAssign"),
+            ("walrus_rebinding", "NamedExpr"),
+            ("subclass_then_construct", "ClassDef"),
+        ],
+    )
+    def test_each_binding_shape_renders_the_node_it_is_named_for(
+        self, shape: str, node_type: str
+    ) -> None:
+        """A binding shape must render the grammar node its id claims.
+
+        ``missed_by`` cannot check this: every binding shape defeats all
+        nine scanners, so ``annassign_rebinding`` rewritten as a plain
+        ``_Ann = Subject`` is a second copy of ``local_rebinding`` that
+        every other assertion in this module still passes — verified by
+        mutation, where exactly that edit survived the full suite. The
+        shape would then be present, green, and probing nothing, which is
+        the failure this module exists to end one level up.
+
+        Counted as a *delta* against the corpus rendered without the
+        shape, so a node class the header or a decoy happens to contribute
+        cannot stand in for the shape's own — the same argument
+        ``test_an_unmarked_call_does_not_cover_a_gate`` makes for gates.
+        """
+        evasion = next(e for e in EVASIONS if e.id == shape)
+
+        def counted(evasions: tuple[Evasion, ...]) -> int:
+            corpus = render_evasion_corpus(
+                evasions, DECOYS, subject=SUBJECT, kwarg=KWARG
+            )
+            return sum(
+                1
+                for source in corpus.files.values()
+                for node in ast.walk(ast.parse(source))
+                if type(node).__name__ == node_type
+            )
+
+        assert counted((evasion,)) > counted(()), (
+            f"{shape} renders no ast.{node_type}, so the binding form it "
+            f"is named for is not in the corpus at all and nothing pins "
+            f"the resolver branch that reads it."
+        )
+
     def test_exactly_one_shape_is_the_control(self) -> None:
         controls = [e.id for e in EVASIONS if not e.missed_by]
         assert controls == ["bare_call"], (
@@ -608,6 +709,350 @@ class TestTheRosterIsMeasuredAgainstRealNaiveScanners:
         }
         assert unreported == RESIDUE
         assert {e.id for e in EVASIONS if e.residue} == RESIDUE
+
+
+# ---------------------------------------------------------------------------
+# The family the ninth scanner is blind to, derived from src/
+# ---------------------------------------------------------------------------
+
+
+def _parents(tree: ast.AST) -> dict[int, ast.AST]:
+    return {
+        id(child): node
+        for node in ast.walk(tree)
+        for child in ast.iter_child_nodes(node)
+    }
+
+
+def _hiding_node_type(node: ast.AST, parents: dict[int, ast.AST]) -> str | None:
+    """The nearest ancestor of *node* that is neither a statement nor an
+    expression, or ``None`` if a typed descent reaches it.
+
+    Derived by walking *up* a parent map, which shares no code with
+    :func:`~tests.ast_rules._naive_typed_descent`'s downward recursion —
+    the same argument ``marker_lines`` makes for tokenizing: a cross-check
+    that reuses the method under test checks nothing.
+    """
+    current = node
+    while id(current) in parents:
+        current = parents[id(current)]
+        if isinstance(current, ast.mod):
+            return None
+        if not isinstance(current, (ast.stmt, ast.expr)):
+            return type(current).__name__
+    return None
+
+
+@functools.cache
+def _hiding_node_types_in_src() -> Mapping[str, int]:
+    """``{node type: calls it hides}`` over the real tree.
+
+    Cached because seventeen assertions in this file read it and each
+    call re-parses every module under ``src/``. Handed back read-only so
+    a caller cannot edit the cache out from under the next one.
+    """
+    found: dict[str, int] = {}
+    for path in sorted(_src_root().rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        parents = _parents(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            gate = _hiding_node_type(node, parents)
+            if gate is not None:
+                found[gate] = found.get(gate, 0) + 1
+    return MappingProxyType(found)
+
+
+def _hiding_node_types_in_corpus(
+    evasions: tuple[Evasion, ...] = EVASIONS,
+    decoys: tuple[Decoy, ...] = DECOYS,
+) -> set[str]:
+    """The same reading, over each shape's own **marked** call.
+
+    Marked, and that is the load-bearing word: an unmarked call — a
+    decoy, a helper inside a shape's own context — that happens to sit
+    behind a gate would keep the gate covered after the shape rendering
+    it was deleted, and the coverage check would pass over a corpus that
+    no longer probes it. Pinned by
+    ``test_an_unmarked_call_does_not_cover_a_gate``.
+    """
+    corpus = render_evasion_corpus(evasions, decoys, subject=SUBJECT, kwarg=KWARG)
+    marked = set(corpus.lines.values())
+    covered: set[str] = set()
+    for source in corpus.files.values():
+        tree = ast.parse(source)
+        parents = _parents(tree)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and node.lineno in marked):
+                continue
+            gate = _hiding_node_type(node, parents)
+            if gate is not None:
+                covered.add(gate)
+    return covered
+
+
+def _uncovered_hiding_node_types(
+    evasions: tuple[Evasion, ...] = EVASIONS,
+) -> list[str]:
+    """Node types that hide a call in ``src/`` and that no shape renders.
+
+    One subtraction, in one place, in the direction that can fail — and
+    read by two tests so that reversing it is not free. Written inline in
+    the coverage check first, where the reversed form survived mutation:
+    ``src/``'s hiding types and the corpus's are the *same five* today, so
+    ``corpus - src`` is also empty and every assertion stayed green while
+    the requirement it derives had been switched off.
+    """
+    return sorted(
+        set(_hiding_node_types_in_src()) - _hiding_node_types_in_corpus(evasions)
+    )
+
+
+class TestTheNeitherStatementNorExpressionFamilyIsCovered:
+    """The ninth scanner's blind spot, required to be rostered rather than
+    written down.
+
+    :func:`~tests.ast_rules._naive_typed_descent` descends ``ast.stmt`` and
+    ``ast.expr`` — the repair a #457 author reaches for — and is still
+    blind to every call behind a node that is *neither*. #501 was filed
+    because that family was recorded in a docstring, so recording the
+    leftovers in a new docstring would reproduce it exactly. This derives
+    the requirement from ``src/`` instead: whatever node types hide a call
+    in the real tree must each hide one in the corpus.
+
+    It is a subset check in the direction that can fail. A member appearing
+    in ``src/`` that no shape renders turns the suite red; a shape kept for
+    a member ``src/`` happens not to write today does not. That is also
+    what settles ``ast.match_case`` — ``src/`` has no ``match`` statement,
+    so nothing is demanded, and the demand appears with the first one
+    written.
+    """
+
+    #: Round floors under the hand-read 2,817 lost / 13,206 reached, with
+    #: the same headroom the adopters' floors carry. See
+    #: ``test_the_scanner_and_the_reading_agree_over_src``.
+    _TYPED_DESCENT_LOSS_FLOOR = 2000
+    _TYPED_DESCENT_REACH_FLOOR = 10000
+
+    #: Hand-read off ``src/`` at ``8ec879c``: ``ast.keyword`` (1,314),
+    #: ``ast.ExceptHandler`` (584), ``ast.arguments`` (437),
+    #: ``ast.comprehension`` (315) and ``ast.withitem`` (167).
+    #: :func:`assert_hand_read_floor`'s whole point is that this number is
+    #: not computed by the scan it floors.
+    FAMILY_FLOOR = 5
+
+    #: Round floors under the hand-read per-type counts above, with the
+    #: headroom the adopters' floors carry. The *type* count alone cannot
+    #: separate the two readings — the corpus renders exactly the same
+    #: five — so these are what refuse a ``_hiding_node_types_in_src``
+    #: that has quietly become a second view of the corpus.
+    PER_TYPE_FLOORS: ClassVar[dict[str, int]] = {
+        "keyword": 1000,
+        "ExceptHandler": 400,
+        "arguments": 300,
+        "comprehension": 200,
+        "withitem": 100,
+    }
+
+    @pytest.mark.parametrize(
+        ("source", "expected"),
+        [
+            ("Widget()", None),
+            ("def f():\n    return Widget()", None),
+            ("x = [Widget() for _ in y]", None),
+            ("f(k=Widget())", "keyword"),
+            ("def f(x=Widget()):\n    pass", "arguments"),
+            ("with Widget() as h:\n    pass", "withitem"),
+            ("x = [a for a in Widget()]", "comprehension"),
+            ("try:\n    pass\nexcept E:\n    Widget()", "ExceptHandler"),
+        ],
+        ids=[
+            "module_scope",
+            "function_body",
+            "comprehension_element",
+            "keyword",
+            "default",
+            "withitem",
+            "comprehension_clause",
+            "except",
+        ],
+    )
+    def test_the_reading_names_the_node_that_hides_the_call(
+        self, source: str, expected: str | None
+    ) -> None:
+        """The reading itself, pinned against reachable calls too.
+
+        ``None`` for a call a typed descent reaches is the half that keeps
+        the family honest: a reading that stopped at the module, or at any
+        ancestor, would report a gate for every call in ``src/`` and the
+        coverage check would still pass — the roster covers module scope.
+        """
+        tree = ast.parse(source)
+        parents = _parents(tree)
+        call = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and name_of(n.func) == SUBJECT
+        )
+        assert _hiding_node_type(call, parents) == expected
+
+    def test_the_family_is_not_measured_by_its_own_scan(self) -> None:
+        assert_hand_read_floor(
+            len(_hiding_node_types_in_src()),
+            self.FAMILY_FLOOR,
+            subject="node type that is neither a statement nor an expression "
+            "and hides a call in src/",
+            hint="a reading that has collapsed reports one type, or none.",
+        )
+
+    @pytest.mark.parametrize("node_type", sorted(PER_TYPE_FLOORS))
+    def test_each_hiding_node_type_hides_a_hand_read_number_of_calls(
+        self, node_type: str
+    ) -> None:
+        """The counts, not just the type names — and that is the seam.
+
+        ``FAMILY_FLOOR`` counts *types*, and the corpus renders one call
+        per type, so a ``_hiding_node_types_in_src`` that had collapsed
+        into a second reading of the corpus reports five types and clears
+        every other check in this class. Mutation confirmed it: replacing
+        the whole function with ``dict.fromkeys(corpus_reading, 1)`` — the
+        #464 defect verbatim, two supposedly independent readings sharing
+        one — passed the full suite. A corpus of one call per shape cannot
+        produce 1,314.
+        """
+        assert_hand_read_floor(
+            _hiding_node_types_in_src().get(node_type, 0),
+            self.PER_TYPE_FLOORS[node_type],
+            subject=f"call in src/ hidden behind ast.{node_type}",
+            hint="if this reading has become a second view of the corpus "
+            "it reports one call per type and the coverage check above is "
+            "dividing by its own output.",
+        )
+
+    def test_the_scanner_and_the_reading_agree_over_src(self) -> None:
+        """The strawman is tied to the reading that derives the roster.
+
+        Everything the four new placement shapes rest on — 2,817 calls
+        lost, 17.6%, five node types — is a claim about
+        :func:`~tests.ast_rules._naive_typed_descent`, and every check in
+        this class reads ``src/`` through :func:`_hiding_node_type`
+        instead, which is a *different* implementation on purpose. That
+        independence is what makes the coverage check worth anything and
+        it is also a seam: the scanner can drift to some other blind spot
+        with every assertion here green. Mutating it to stop descending
+        into a call's own arguments — which loses every ``outer(Sub())``
+        in ``src/`` — passed the whole suite before this existed.
+
+        So the two are compared call by call — that is the half that
+        catches drift exactly — and the loss is floored so that a
+        *repaired* strawman is caught too, since a scanner that lost
+        nothing would agree with a reading that gated nothing. The floors
+        are round and well under the hand-read 2,817 / 13,206, matching
+        the headroom every other floor in this suite's adopters carries
+        (300 against 333 modules, 100 against 598 renders): a floor at
+        today's exact figure turns red on any ordinary deletion.
+        """
+        reached = 0
+        hidden = 0
+        for path in sorted(_src_root().rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            descended = {id(call) for call in _scanner_descent(tree)}
+            parents = _parents(tree)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                gate = _hiding_node_type(node, parents)
+                assert (id(node) in descended) == (gate is None), (
+                    f"{path}:{node.lineno}: the typed descent and the "
+                    f"parent-map reading disagree about whether this call "
+                    f"is reachable (gate={gate}). One of them has drifted, "
+                    f"and the roster is derived from the second."
+                )
+                if gate is None:
+                    reached += 1
+                else:
+                    hidden += 1
+        assert hidden >= self._TYPED_DESCENT_LOSS_FLOOR, (
+            f"the typed descent now loses {hidden} calls in src/ against "
+            f"the 2,817 its docstring quotes. Far below the hand-read "
+            f"number means the strawman has been repaired into something "
+            f"else, and the four placement shapes it justifies no longer "
+            f"have the scanner they were measured against."
+        )
+        assert reached >= self._TYPED_DESCENT_REACH_FLOOR, (
+            f"the typed descent now reaches {reached} calls against the "
+            f"13,206 its docstring quotes, which would make it a much "
+            f"blinder predicate than the one #457's author would write."
+        )
+
+    def test_every_hiding_node_type_in_src_has_a_shape(self) -> None:
+        missing = _uncovered_hiding_node_types()
+        assert not missing, (
+            f"calls in src/ hide behind {missing}, and no shape in EVASIONS "
+            f"renders one. A typed descent — #457's own repair — reports "
+            f"none of them, so an adopting rule inherits the blind spot "
+            f"with the guard green. Add the shape; a note in a docstring is "
+            f"what #501 was filed about."
+        )
+
+    def test_an_unmarked_call_does_not_cover_a_gate(self) -> None:
+        """The corpus reading counts shapes, not any call it can see.
+
+        Run against a corpus deliberately carrying an unmarked call
+        behind ``ast.withitem`` and watched to keep reporting the gate as
+        uncovered once the shape is gone.
+        """
+        held = Decoy(
+            id="unmarked_with_item",
+            why="an unmarked call inside a with statement, covering nothing",
+            lines=(
+                "def _decoy_unmarked_with():",
+                "    with _helper() as _h:  " + DECOY_MARKER + "unmarked_with_item",
+                "        del _h",
+            ),
+        )
+        widened = (*DECOYS, held)
+        assert "withitem" in _hiding_node_types_in_corpus(EVASIONS, widened)
+        narrowed = tuple(e for e in EVASIONS if e.id != "with_item")
+        assert "withitem" not in _hiding_node_types_in_corpus(narrowed, widened), (
+            "an unmarked call inside a `with` is covering ast.withitem, so "
+            "with_item could be deleted with this check green"
+        )
+
+    @pytest.mark.parametrize(
+        ("dropped", "gate"),
+        [
+            ("with_item", "withitem"),
+            ("comprehension_clause", "comprehension"),
+            ("keyword_argument", "keyword"),
+            ("default_argument", "arguments"),
+            ("inside_except", "ExceptHandler"),
+        ],
+    )
+    def test_the_check_fails_when_the_shape_is_removed(
+        self, dropped: str, gate: str
+    ) -> None:
+        """Run against a deliberately defective roster and watched to fail.
+
+        Without this the check above is satisfiable by a corpus reading
+        that returns every node type it can think of, and by one that reads
+        ``src/`` as empty.
+        """
+        narrowed = tuple(e for e in EVASIONS if e.id != dropped)
+        assert gate in _hiding_node_types_in_src()
+        assert gate in _hiding_node_types_in_corpus()
+        assert gate not in _hiding_node_types_in_corpus(narrowed), (
+            f"{dropped} is the only shape rendering a call behind "
+            f"ast.{gate}; if that is no longer true the parametrisation is "
+            f"stale and the coverage check has a spare it does not need."
+        )
+        assert _uncovered_hiding_node_types(narrowed) == [gate], (
+            f"dropping {dropped} must make the coverage check report "
+            f"ast.{gate} and nothing else. Reading the subtraction here "
+            f"rather than re-deriving it is what makes its direction "
+            f"load-bearing: reversed, it is empty either way."
+        )
 
 
 # ---------------------------------------------------------------------------

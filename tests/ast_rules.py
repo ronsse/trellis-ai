@@ -93,13 +93,78 @@ confidence.
 **What is *not* in the roster, and the rule for adding it.** A shape earns
 its place only when some scanner in :data:`NAIVE_SCANNERS` actually misses
 it; otherwise it inflates the roster without strengthening any guard, and
-``test_ast_rules`` fails it. Re-measured under the CI interpreter over
-the 15,977 calls in ``src/``, the uncovered placements are comprehension
-bodies (635), ``with`` items (167 — a ``with`` statement's
-``context_expr``, not its body, which is ordinary statement ground),
-``match`` (**0**: nothing in ``src/`` uses it) and the walrus (7).
-Adding one means adding the naive scanner that misses it — not the shape
-alone.
+``test_ast_rules`` fails it. #501 proposed four placements against that
+rule and the rule disposed of three of them, which is the clearest thing
+anyone has yet said in its favour.
+
+*Measured over the 16,023 calls in* ``src/`` *at* ``8ec879c``. Run every
+shape through all the scanners before writing a word about it:
+
+* A call in a **comprehension element** (``[Subject() for x in y]``, 320
+  calls) is an ordinary ``ast.expr`` child and **every scanner here
+  reports it**. Not a shape. The half that does hide is the
+  comprehension's ``iter``/``ifs`` *clause* (315 calls), because
+  ``ast.comprehension`` is neither a statement nor an expression — so
+  ``comprehension_clause`` is the entry, and the 636 calls with any
+  comprehension ancestor were never one population. (No count of this is
+  worth quoting without its definition, and every one of these is a
+  distinct-call count over ``src/`` unless it says otherwise: **636**
+  calls have a comprehension ancestor — **650** if you walk each
+  comprehension separately and double-count the nested ones — of which
+  **316** sit under an ``ast.comprehension`` clause and the remaining
+  **320** are in the element. Of those 316, **315** are *gated* by the
+  clause, which is the number the shape probes and the one
+  :func:`_naive_typed_descent` loses; the odd one out sits behind a
+  nearer ``ast.keyword``. #501 and two earlier drafts of this docstring
+  quoted 633, 635 and 612 and none said which population it meant — the
+  612 does not reproduce under any definition and is what a global
+  ``{id(node)}`` set across per-file trees returns once CPython starts
+  reusing addresses.)
+* A call **inside a walrus** (``if (x := Subject()):``) is likewise plain
+  expression ground that nothing misses. The walrus hides on the
+  **binding** axis instead — ``S := Subject`` then ``S(...)`` — which is
+  also what the live evidence said, since the local fix that motivated
+  #501 is a *name resolver*. ``walrus_rebinding`` and its annotated
+  sibling are the entries, and neither needed a new scanner: all eight
+  scanners that predate this change already miss them.
+* ``with`` **items** (167) do hide, and needed the ninth scanner —
+  :func:`_naive_typed_descent`, the repair a #457 author writes.
+* ``match`` needed **nothing**, and note that this is a *different*
+  disposal from the two above. A call in a ``case`` body really does hide
+  — from ``stmt_descent`` and from ``typed_descent`` both — so the
+  "some scanner misses it" rule would admit it. What refuses it is that
+  ``src/`` holds 0 ``ast.Match`` nodes, so no call in the real tree is
+  behind one and the derived requirement below asks for nothing. It
+  starts asking the day one is written. That is evidence *for* the rule
+  and is recorded as such rather than filled.
+
+The one new scanner brought three more placements with it, and the roster
+carries all five members of the family it is blind to rather than
+mentioning the leftovers here — a gap written into a docstring instead of
+into the roster is the artefact #501 was filed about.
+
+**The corpus is flat, and the discovery axis is thinner than it looks.**
+:data:`SECOND_FILE` is a sibling of :data:`PRIMARY_FILE`, so
+``single_file`` is probed but ``glob`` versus ``rglob`` is not, and
+neither is a walk narrowed to a subdirectory. :func:`iter_modules` is
+covered, but by the hand-read floors rather than by the roster. A third
+corpus file should therefore live in a **subdirectory**, with a
+discovery-narrowing scanner beside it. That is deliberately not done
+here, and the reason is narrower than an earlier draft of this paragraph
+claimed. It is **not** the adopters: all three shipped predicates walk
+with ``rglob`` (``_offenders`` and ``ungated_executors`` through
+:func:`iter_modules`, ``_violations`` directly), so a subdirectory shape
+would cost them nothing. What it would break is this suite's own
+reference predicates — :func:`_perfect`, ``_blind_to``,
+``_predicate_from``, ``_every_call_line`` and the two written inline in
+tests, six of them at the last count, every one discovering with
+``root.glob("*.py")`` — and :meth:`RenderedCorpus.write`, which writes
+every file flat into one directory and would raise on a name carrying a
+directory part. Both are ours to change, which is
+the point: it is a change to the corpus contract, not an entry in the
+roster. Do not repeat the earlier claim without re-running the grep;
+getting the adopters' discovery spelling wrong is what turned a cheap
+improvement into an argued-for hole.
 
 **The class is not confined to AST rules, and #495 is the proof.** Found
 the same night this module was written: 21 CLI tests fail under
@@ -197,14 +262,27 @@ def construction_names(subject: str, tree: ast.AST) -> set[str]:
     """Every local name in *tree* that reaches *subject*.
 
     Adapted from ``test_builder_factory.py::_construction_names``, written
-    for #488 and merged as ``268daa9``. Three rebindings produce the
+    for #488 and merged as ``268daa9``. Five rebindings produce the
     subject under another name and would otherwise walk past a literal
     match:
 
     * ``from pkg import Subject as Alias`` → ``Alias``
     * ``S = Subject`` → ``S``
+    * ``S: type[Subject] = Subject`` → ``S``
+    * ``if (S := Subject) is not None:`` → ``S``
     * ``class Mine(Subject)`` → ``Mine``, because a subclass constructor
       runs the same ``__init__`` and takes the same argument list
+
+    The annotated and walrus forms are #501's, and they were read off a
+    *local* fix rather than invented: ``test_machine_output_rule``'s
+    ``_serialized_names`` already handles ``ast.AnnAssign`` and
+    ``ast.NamedExpr``, in one ``isinstance`` tuple, in the module that is
+    now a roster adopter. Someone had been bitten by the walrus and closed
+    it where it bit them, while the shared resolver every other rule
+    inherits still read ``ast.Assign`` alone. That is the whole of #501's
+    argument: a fix that stays local is a blind spot that only looks
+    closed. Both are pinned by the ``walrus_rebinding`` and
+    ``annassign_rebinding`` shapes, which all nine naive scanners miss.
 
     Iterated to a fixed point, so a chain (``A = Subject``; ``B = A``) is
     caught — pinned by the ``rebinding_chain`` shape, which that loop is
@@ -231,6 +309,13 @@ def construction_names(subject: str, tree: ast.AST) -> set[str]:
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign) and name_of(node.value) in names:
                 rebound.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            elif (
+                isinstance(node, (ast.AnnAssign, ast.NamedExpr))
+                and node.value is not None
+                and name_of(node.value) in names
+                and isinstance(node.target, ast.Name)
+            ):
+                rebound.add(node.target.id)
             elif isinstance(node, ast.ClassDef) and any(
                 name_of(base) in names for base in node.bases
             ):
@@ -421,6 +506,7 @@ _ALL_NAIVE = frozenset(
     {
         "name_only",
         "stmt_descent",
+        "typed_descent",
         "shallow",
         "function_bodies_only",
         "sync_only",
@@ -518,6 +604,45 @@ EVASIONS: tuple[Evasion, ...] = (
         missed_by=_ALL_NAIVE,
     ),
     Evasion(
+        id="walrus_rebinding",
+        axis="binding",
+        why=(
+            "rebound by a walrus in an `if` test (`if (S := Subject) is "
+            "not None: S(...)`). #501's live half: "
+            "`test_machine_output_rule._serialized_names` already reads "
+            "`ast.NamedExpr`, so someone had been bitten and fixed it "
+            "*there*, while the shared resolver read `ast.Assign` alone. "
+            "Note that the walrus is a **binding** shape and not a "
+            "placement one — a call sitting inside a walrus is an "
+            "ordinary expression that no scanner here misses."
+        ),
+        call="_Walrus({ARGS})",
+        context=(
+            "def _walrus_rebinding():",
+            "    if (_Walrus := {SUBJECT}) is not None:",
+            "        {STMT}",
+        ),
+        missed_by=_ALL_NAIVE,
+    ),
+    Evasion(
+        id="annassign_rebinding",
+        axis="binding",
+        why=(
+            "rebound by an *annotated* assignment (`S: type = Subject`), "
+            "which is an `ast.AnnAssign` and not an `ast.Assign`. The "
+            "other half of the same local fix — `_serialized_names` names "
+            "both in one isinstance tuple — and lifting one without the "
+            "other is how a half-closed blind spot reads as closed."
+        ),
+        call="_Ann({ARGS})",
+        context=(
+            "def _annassign_rebinding():",
+            "    _Ann: type = {SUBJECT}",
+            "    {STMT}",
+        ),
+        missed_by=_ALL_NAIVE,
+    ),
+    Evasion(
         id="subclass_then_construct",
         axis="binding",
         why=(
@@ -574,10 +699,11 @@ EVASIONS: tuple[Evasion, ...] = (
         id="inside_except",
         axis="placement",
         why=(
-            "#457's own shape. `ast.ExceptHandler` is not an `ast.stmt`, "
-            "so a descent over statements never enters it and every site "
-            "on an error path vanishes from the population the guards "
-            "divide by."
+            "#457's own shape. `ast.ExceptHandler` is neither an "
+            "`ast.stmt` nor an `ast.expr`, so a descent over statements "
+            "never enters it — and neither does the descent over "
+            "statements *and* expressions that is #457's natural repair. "
+            "584 calls in src/ sit behind one."
         ),
         call="{SUBJECT}({ARGS})",
         context=(
@@ -587,7 +713,7 @@ EVASIONS: tuple[Evasion, ...] = (
             "    except ValueError:",
             "        {STMT}",
         ),
-        missed_by=frozenset({"stmt_descent"}),
+        missed_by=frozenset({"stmt_descent", "typed_descent"}),
     ),
     Evasion(
         id="nested_function",
@@ -666,6 +792,92 @@ EVASIONS: tuple[Evasion, ...] = (
         call="{SUBJECT}({ARGS})",
         context=("@{STMT}", "def _decorated():", "    pass"),
         missed_by=frozenset({"function_bodies_only"}),
+    ),
+    Evasion(
+        id="with_item",
+        axis="placement",
+        why=(
+            "the context manager of a `with` statement. `ast.withitem` is "
+            "neither a statement nor an expression — the same node class "
+            "as #457's `ast.ExceptHandler` — so the descent that repairs "
+            "#457 by adding expressions still walks past all 167 such "
+            "calls in src/."
+        ),
+        call="{SUBJECT}({ARGS})",
+        context=(
+            "def _with_item():",
+            "    with (",
+            "        {STMT}",
+            "    ) as _held:",
+            "        del _held",
+        ),
+        missed_by=frozenset({"typed_descent"}),
+    ),
+    Evasion(
+        id="comprehension_clause",
+        axis="placement",
+        why=(
+            "the iterable of a comprehension (`[row for row in "
+            "Subject()]`). `ast.comprehension` is the same neither-nor "
+            "node class, and it hides 315 calls in src/. Note which half "
+            "of a comprehension this is: the *element* is an ordinary "
+            "`ast.expr` child, no scanner here misses it, and it is "
+            "deliberately not a shape."
+        ),
+        call="{SUBJECT}({ARGS})",
+        context=(
+            "def _comprehension_clause():",
+            "    return [",
+            "        _row",
+            "        for _row in {STMT}",
+            "    ]",
+        ),
+        missed_by=frozenset({"typed_descent"}),
+    ),
+    Evasion(
+        id="keyword_argument",
+        axis="placement",
+        why=(
+            "constructed inline as another call's keyword argument. "
+            "`ast.keyword` is the largest member of the neither-statement-"
+            "nor-expression family: 1,314 calls in src/ sit behind one, "
+            "against 584 for the next largest and 2,817 for the family "
+            "as a whole — a little under half of it, not more than the "
+            "other four put together, which an earlier draft claimed and "
+            "the four numbers beside it refute (584 + 437 + 315 + 167 = "
+            "1,503)."
+        ),
+        call="{SUBJECT}({ARGS})",
+        context=(
+            "def _keyword_argument():",
+            "    return _helper(",
+            "        _wrapped={STMT}",
+            "    )",
+        ),
+        missed_by=frozenset({"typed_descent"}),
+    ),
+    Evasion(
+        id="default_argument",
+        axis="placement",
+        why=(
+            "a mutable default evaluated once at definition time — the "
+            "placement whose whole reputation is for surprising people. "
+            "It hangs off `ast.arguments`, neither statement nor "
+            "expression, and covers 437 calls in src/. It is one of the "
+            "two members of that family a *second* scanner also misses "
+            "(`inside_except` is the other, and its second scanner is "
+            "`stmt_descent`): iterating `node.body` never reaches the "
+            "signature, which is the same reason `decorator` hides from "
+            "that scanner."
+        ),
+        call="{SUBJECT}({ARGS})",
+        context=(
+            "def _default_argument(",
+            "    _x={STMT}",
+            "):",
+            "    return _x",
+        ),
+        missed_by=frozenset({"function_bodies_only", "typed_descent"}),
     ),
     # ── judgement ─────────────────────────────────────────────────────
     Evasion(
@@ -1012,7 +1224,7 @@ def decoy_lines(source: str) -> dict[str, int]:
 #
 # Each is a real under-collection or over-permission shape. They exist so
 # every ``Evasion.missed_by`` claim is checkable by execution rather than by
-# comment, and so a new rule can assert it beats them. Three of the eight
+# comment, and so a new rule can assert it beats them. Three of the nine
 # came from the #497 review gate, which found them by mutating the guard
 # rather than by reading it.
 
@@ -1064,6 +1276,46 @@ def _naive_stmt_descent(corpus: RenderedCorpus, subject: str, kwarg: str) -> set
         for source in _sources(corpus)
         for statement in _statements(ast.parse(source))
         for call in _own_expression_calls(statement)
+        if name_of(call.func) == subject
+    }
+
+
+def _typed_calls(node: ast.AST) -> Iterator[ast.Call]:
+    for child in ast.iter_child_nodes(node):
+        if not isinstance(child, (ast.stmt, ast.expr)):
+            continue
+        if isinstance(child, ast.Call):
+            yield child
+        yield from _typed_calls(child)
+
+
+def _naive_typed_descent(corpus: RenderedCorpus, subject: str, kwarg: str) -> set[int]:
+    """#457's *fix*, still wrong: descends ``ast.stmt`` and ``ast.expr``.
+
+    The natural repair for #457 — whose scanner descended only ``ast.stmt``
+    and so never entered an ``ast.ExceptHandler`` — is to descend
+    expressions too. It reads as exhaustive and is not: the grammar has a
+    third family of nodes that are **neither**, and every call behind one
+    is invisible. Measured over ``src/`` at ``8ec879c``, this predicate
+    finds 13,206 of 16,023 calls and loses **2,817 (17.6%)**, gated by five
+    node types — ``ast.keyword`` (1,314), ``ast.ExceptHandler`` (584),
+    ``ast.arguments`` (437), ``ast.comprehension`` (315) and
+    ``ast.withitem`` (167).
+
+    Five in ``src/`` today, and the roster carries a shape for each. It is
+    **not** an enumeration of the family, and deliberately not written as
+    one — ``ast.match_case`` and ``ast.arg`` (a call in a parameter's
+    annotation) both hide from this predicate too, and both hide zero
+    calls in ``src/`` right now. ``test_ast_rules`` therefore derives the
+    requirement from ``src/`` rather than from a list here, so a member
+    nobody thought to name is demanded the day the first call goes behind
+    it, and a list that rots cannot make the guard vacuous. Enumerating
+    this family by hand is what #501 was filed about.
+    """
+    return {
+        call.lineno
+        for source in _sources(corpus)
+        for call in _typed_calls(ast.parse(source))
         if name_of(call.func) == subject
     }
 
@@ -1179,6 +1431,7 @@ def _naive_splat_tolerant(corpus: RenderedCorpus, subject: str, kwarg: str) -> s
 NAIVE_SCANNERS: Mapping[str, Callable[[RenderedCorpus, str, str], set[int]]] = {
     "name_only": _naive_name_only,
     "stmt_descent": _naive_stmt_descent,
+    "typed_descent": _naive_typed_descent,
     "shallow": _naive_shallow,
     "function_bodies_only": _naive_function_bodies_only,
     "sync_only": _naive_sync_only,
