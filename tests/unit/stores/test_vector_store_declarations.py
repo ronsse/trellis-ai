@@ -26,7 +26,9 @@ outside ``live-infra``'s pgvector job.
 
 from __future__ import annotations
 
+import inspect
 import math
+import sys
 from typing import Any
 
 import pytest
@@ -68,6 +70,29 @@ def _run_case(name: str, store: VectorStore) -> bool:
     except (Exception, pytest.fail.Exception):
         return False
     return True
+
+
+def _module_vector_stores() -> list[type[VectorStore]]:
+    """Every concrete ``VectorStore`` subclass defined in this module.
+
+    Derived rather than listed so the biconditional below cannot be
+    satisfied by leaving a class off it. Scoped to *this* module by
+    ``__module__``, which is what keeps a shipped backend — whose
+    ``reset_storage`` really drops a table — out of a sweep that
+    constructs each class and calls it. Abstract classes are excluded
+    because they cannot be constructed at all, which is a different
+    test's subject.
+    """
+    module = sys.modules[__name__]
+    return [
+        obj
+        for obj in vars(module).values()
+        if isinstance(obj, type)
+        and issubclass(obj, VectorStore)
+        and obj is not VectorStore
+        and obj.__module__ == __name__
+        and not inspect.isabstract(obj)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +400,17 @@ class TestSupportsResetIsDerivedFromTheOverride:
         tautology that restates the implementation instead of checking
         it against behaviour.
 
+        The roster is **derived**, not hand-written, which is what makes
+        the first sentence true and the second one hold. A hand-written
+        list named six of this module's twelve stores, so the four liars
+        and the drop-only store were outside the invariant they exist to
+        exercise and a new class could be added to the module and to
+        neither side — the failure the sentence promises cannot happen.
+        Every concrete ``VectorStore`` subclass *defined here* is swept;
+        the derivation is scoped to this module deliberately, so a real
+        backend can never be swept into a test that constructs it and
+        calls ``reset_storage()`` on it.
+
         The residual, stated because the identity rule cannot see it: an
         override that *delegates* to the base
         (``def reset_storage(self): return super().reset_storage()``)
@@ -383,14 +419,24 @@ class TestSupportsResetIsDerivedFromTheOverride:
         is what catches it — by calling the thing — which is why the
         contract case exists beside this one rather than instead of it.
         """
-        classes: list[type[VectorStore]] = [
-            _MemoryVectorStore,
-            _UnpinnedStore,
-            _PinnedStore,
-            _ResettableStore,
-            _PretendResetStore,
-            _RebindsTheBaseStore,
-        ]
+        classes = _module_vector_stores()
+        # Floor against a derivation that silently collects nothing, and
+        # against one that quietly drops the shapes the module was
+        # written to carry. Both spellings of "does not override" have to
+        # be in it, or the biconditional is only being asked about
+        # overriders.
+        assert len(classes) >= 10, classes
+        assert _MemoryVectorStore in classes
+        assert _RebindsTheBaseStore in classes
+        assert _ResettableStore in classes
+        # ...and the one class that legitimately cannot be swept is
+        # excluded for the stated reason rather than by omission: it is
+        # abstract, so constructing it is the ``TypeError`` that
+        # ``TestDimensionsIsAbstract`` asserts, not a verdict about
+        # ``reset_storage``.
+        assert _UndeclaredWidthStore not in classes
+        assert inspect.isabstract(_UndeclaredWidthStore)
+
         for cls in classes:
             declines = not cls.supports_reset()
             try:
@@ -619,6 +665,76 @@ class TestShippedBackendsDeclare:
             store = object.__new__(cls)
             store._dimensions = 1536
             assert store.dimensions == 1536, cls
+
+    def test_the_declaration_cannot_be_steered_on_an_instance(self, tmp_path):
+        """A backend declares its width on the **class**, read-only.
+
+        The mutant this exists for survived the whole 7,428-test suite:
+        replace ``SQLiteVectorStore``'s ``dimensions`` property with a
+        plain class attribute ``dimensions: int | None = None`` and every
+        test still passes — because nothing reads the *shape* of the
+        declaration, only its value, and the value is identical.
+
+        What that would give back is #512's own mechanism. The route the
+        fix is about reads ``vector_store.dimensions`` off the live
+        instance and prints it in the body of a 200 that reports a
+        destructive operation; against a plain attribute
+        ``store.dimensions = 1536`` steers that report, which is exactly
+        what setting ``_dimensions`` did before #512 and what
+        ``TestVectorsResetStatusLine`` asserts is no longer possible
+        ("``dimensions`` is a property on the *class* now, so the only
+        way to make a backend report a width is for the backend to
+        declare one"). That claim was true of all four shipped backends
+        and pinned on none of them.
+
+        Scoped to the backends in ``_BUILTIN_BACKENDS`` rather than
+        promoted into ``VectorStoreContractTests``: a read-only
+        descriptor is how *these* backends declare, not something a
+        third-party backend has to promise (a ``cached_property`` or a
+        frozen-dataclass field would be a legitimate declaration and is
+        settable). The roster is derived from the registry so a fifth
+        vector backend is covered without editing this test.
+        """
+        import importlib
+
+        from trellis.stores.registry import _BUILTIN_BACKENDS
+        from trellis.stores.sqlite.vector import SQLiteVectorStore
+
+        backends = _BUILTIN_BACKENDS["knowledge"]["vector"]
+        checked: list[str] = []
+        unimportable: list[str] = []
+        for name, (module_path, class_name) in backends.items():
+            try:
+                module = importlib.import_module(module_path)
+            # The optional-driver extras are not installed in the default
+            # selection; live-infra installs `[cloud]` and covers pgvector
+            # there. Recorded rather than swallowed — see the floor below.
+            except ImportError:
+                unimportable.append(name)
+                continue
+            cls = getattr(module, class_name)
+            declaration = inspect.getattr_static(cls, "dimensions")
+            assert isinstance(declaration, property), (name, declaration)
+            assert declaration.fset is None, name
+            checked.append(name)
+
+        # Floor: the sweep found the registry's backends and actually
+        # checked most of them, so a registry that resolved to nothing —
+        # or an `except ImportError` that swallowed every one — cannot
+        # pass this by checking zero.
+        assert len(backends) >= 4, backends
+        assert len(checked) >= 3, (checked, unimportable)
+        assert "sqlite" in checked, checked
+
+        # And the consequence, on the default backend, end to end: the
+        # width an operator is told about cannot be set from outside.
+        store = SQLiteVectorStore(tmp_path / "vec.db")
+        try:
+            with pytest.raises(AttributeError):
+                store.dimensions = 1536  # type: ignore[misc]
+            assert store.dimensions is None
+        finally:
+            store.close()
 
     def test_pgvector_declares_its_column_width_and_can_be_reset(self):
         pytest.importorskip("psycopg")

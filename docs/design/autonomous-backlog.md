@@ -187,12 +187,12 @@ premise they do not share.
 | [#495](https://github.com/ronsse/trellis-ai/issues/495) | 21 CLI tests fail under `FORCE_COLOR=1`, four of them written to prove Rich does not mangle output | **done** — `aff76a4` |
 | [#498](https://github.com/ronsse/trellis-ai/issues/498) | `TRELLIS_ALLOW_ENV_DRIFT=0` *enabled* the override; `make format` ungated | **done** — `8ce5614` |
 | [#506](https://github.com/ronsse/trellis-ai/issues/506) | `POST /vectors/reset` answered 200 on an unconfigured store, a failed reset, **and** 500 on success | **done** — `5de062c` |
-| [#489](https://github.com/ronsse/trellis-ai/issues/489) | advisory refusals exit 2 where the canonical ADR says 5 | in flight |
-| [#491](https://github.com/ronsse/trellis-ai/issues/491) | the format/exit parity rule is per-module, so a shared helper disarms it | in flight |
-| [#501](https://github.com/ronsse/trellis-ai/issues/501) | the AST evasion roster has uncovered placements | in flight |
-| [#500](https://github.com/ronsse/trellis-ai/issues/500) | `temperature` is a 400 on current Claude models; the SDK floor makes it reachable | in flight |
-| [#492](https://github.com/ronsse/trellis-ai/issues/492) | `retrieve search` mangles ids through Rich (`dataset:snowflake://` → `dataset❄//`) | queued behind #489 |
-| [#493](https://github.com/ronsse/trellis-ai/issues/493) | `PackAssemblyError` is a `RuntimeError`, so it tracebacks past the CLI boundary | queued behind #492 |
+| [#489](https://github.com/ronsse/trellis-ai/issues/489) | advisory refusals exit 2 where the canonical ADR says 5 | **done** — `3abe8af` |
+| [#491](https://github.com/ronsse/trellis-ai/issues/491) | the format/exit parity rule is per-module, so a shared helper disarms it | **done** — `7844b9b` |
+| [#501](https://github.com/ronsse/trellis-ai/issues/501) | the AST evasion roster has uncovered placements | **done** — `8a21d3f` |
+| [#500](https://github.com/ronsse/trellis-ai/issues/500) | `temperature` is a 400 on current Claude models; the SDK floor makes it reachable | **done** — `854313a` |
+| [#492](https://github.com/ronsse/trellis-ai/issues/492) | `retrieve search` mangles ids through Rich (`dataset:snowflake://` → `dataset❄//`) | **done** — `b4391b6` |
+| [#493](https://github.com/ronsse/trellis-ai/issues/493) | `PackAssemblyError` is a `RuntimeError`, so it tracebacks past the CLI boundary | **done** — `b4391b6` |
 | [#494](https://github.com/ronsse/trellis-ai/issues/494) | `retrieve pack --quiet` id population is undocumented | owner call, then a doc line |
 | [#511](https://github.com/ronsse/trellis-ai/issues/511) | `POST /vectors/reset` has never worked on the blessed substrate | **done** — `8071fd4` |
 | [#512](https://github.com/ronsse/trellis-ai/issues/512) | a backend's embedding width is a private attribute the route guesses at | **done** — the width *and* the reset capability are now declared on the `VectorStore` ABC |
