@@ -41,6 +41,7 @@ from trellis_wire import (
     PackFeedbackRequest,
     PackFeedbackResponse,
 )
+from trellis_wire.withholding import withholding_from_payload
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -326,6 +327,7 @@ class AsyncTrellisClient:
             pack.get("sections", []),
             intent,
             max_tokens=max_tokens,
+            withholding=withholding_from_payload(pack.get("withholding")),
         )
 
     async def get_task_context(
@@ -363,6 +365,7 @@ class AsyncTrellisClient:
             pack.get("sections", []),
             intent,
             max_tokens=max_tokens,
+            withholding=withholding_from_payload(pack.get("withholding")),
         )
 
     async def get_entity(self, entity_id: str) -> dict[str, Any] | None:

@@ -10,9 +10,11 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from trellis.api_version import API_MINOR
 from trellis.testing import in_memory_client
 from trellis_sdk._http import (
     SDK_API_MAJOR,
+    SDK_API_MINOR,
     SDK_VERSION,
     _parse_retry_after,
     check_handshake,
@@ -103,6 +105,9 @@ class TestRetryAfterParsing:
 
 
 class TestHandshake:
+    def test_sdk_minor_matches_current_api_contract(self):
+        assert SDK_API_MINOR == API_MINOR
+
     def test_matching_major_ok(self):
         check_handshake(
             {

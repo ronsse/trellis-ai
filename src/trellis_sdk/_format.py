@@ -18,6 +18,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from trellis_wire.withholding import (
+    WithholdingSummary,
+    format_withholding_note,
+)
+
 _CHARS_PER_TOKEN = 4  # conservative estimate matching core
 
 
@@ -32,6 +37,7 @@ def format_pack_as_markdown(
     max_tokens: int = 2000,
     *,
     pack_id: str | None = None,
+    withholding: WithholdingSummary | None = None,
 ) -> str:
     """Format pack items as concise markdown for LLM consumption.
 
@@ -41,6 +47,9 @@ def format_pack_as_markdown(
     lines = [f"# Context for: {intent}"]
     if pack_id:
         lines.append(f"**pack_id:** `{pack_id}`")
+    note = format_withholding_note(withholding)
+    if note:
+        lines.append(note)
     lines.append("")
     token_budget = max_tokens - _estimate_tokens(lines[0]) - 10
     used = 0
@@ -109,6 +118,8 @@ def format_sectioned_pack_as_markdown(
     sections: list[dict[str, Any]],
     intent: str,
     max_tokens: int = 4000,
+    *,
+    withholding: WithholdingSummary | None = None,
 ) -> str:
     """Format a list of pack sections (as dicts) as markdown.
 
@@ -117,10 +128,15 @@ def format_sectioned_pack_as_markdown(
     rendered via :func:`format_pack_as_markdown` with a proportional
     slice of the overall budget.
     """
+    lines = [f"# Context for: {intent}"]
+    note = format_withholding_note(withholding)
+    if note:
+        lines.append(note)
+    lines.append("")
     if not sections:
-        return f"# Context for: {intent}\n\n*No sections available.*"
+        lines.append("*No sections available.*")
+        return "\n".join(lines)
 
-    lines = [f"# Context for: {intent}", ""]
     per_section = max(200, max_tokens // max(1, len(sections)))
     for section in sections:
         name = section.get("name", "section")
