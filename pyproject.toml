@@ -46,7 +46,7 @@ dependencies = [
     # The upper bound is the 2.x rename, not a general aversion to it:
     # lifting it is a real migration of `mcp/server.py`'s error contract and
     # wants its own PR. The floor matches what fastmcp-slim itself requires.
-    "mcp>=1.24,<2.0",
+    "mcp>=1.24,<3.0",
     "fastapi>=0.115",
     # Both are imported directly (`starlette` in `trellis_api/app.py`,
     # `middleware.py` and `trellis/testing/inmemory.py`; `anyio.to_thread` in
