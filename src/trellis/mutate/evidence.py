@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.errors import MutationError
+
 if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
 
@@ -71,15 +73,14 @@ def ensure_evidence_document(
         msg = "content must not be empty"
         raise ValueError(msg)
 
-    # Lazy imports keep the mutate package free of a classify/retrieve/core
-    # import at module load time (matches the codebase's PLC0415 convention).
-    # The other classify-on-write call sites import at module top; this one is
-    # deferred for that convention, not because the seam differs.
-    from trellis.classify.ingest import classify_metadata_on_write  # noqa: PLC0415
     from trellis.core.hashing import content_hash  # noqa: PLC0415
-    from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest  # noqa: PLC0415
+    from trellis.core.ids import generate_ulid  # noqa: PLC0415
+    from trellis.mutate import build_curate_executor  # noqa: PLC0415
+    from trellis.mutate.commands import CommandStatus  # noqa: PLC0415
+    from trellis.mutate.evidence_ingest import (  # noqa: PLC0415
+        build_evidence_ingest_command,
+    )
 
-    meta = metadata or {}
     chash = content_hash(content)
 
     existing = registry.knowledge.document_store.get_by_hash(chash)
@@ -88,17 +89,21 @@ def ensure_evidence_document(
         logger.debug("evidence_document_dedup", doc_id=existing_id, content_hash=chash)
         return existing_id
 
-    # Classify-on-write (see classify_metadata_on_write). This prose is
-    # embedded below, so it is a real retrieval surface and wants the same
-    # tags as any other write path. After the dedup short-circuit (a hit
-    # stores nothing), before the put, so the tags land in the same row.
-    meta = classify_metadata_on_write(meta, content)
-
-    doc_id = registry.knowledge.document_store.put(None, content, metadata=meta)
-
-    # Feature-flagged embed-on-ingest (TRELLIS_ENABLE_EMBED_ON_INGEST=1) so the
-    # evidence prose becomes a similarity surface. Fail-soft inside the hook.
-    run_embed_on_ingest(registry, doc_id, content, meta, source=source)
+    command = build_evidence_ingest_command(
+        doc_id=generate_ulid(),
+        content=content,
+        metadata=metadata,
+        requested_by=source,
+        derive_idempotency=False,
+    )
+    result = build_curate_executor(registry).execute(command)
+    if result.status is not CommandStatus.SUCCESS or result.created_id is None:
+        message = f"Evidence document was not stored: {result.message}"
+        raise MutationError(
+            message,
+            command_id=result.command_id,
+        )
+    doc_id = result.created_id
 
     logger.info("evidence_document_created", doc_id=doc_id, content_hash=chash)
     return doc_id

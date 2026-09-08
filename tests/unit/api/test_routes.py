@@ -19,6 +19,7 @@ from trellis.errors import StaleStoreWriteError
 from trellis.schemas.enums import PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.base import VectorStore
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_api.routes import admin, curate, ingest, mutations, policies, retrieve
 
@@ -207,6 +208,106 @@ def test_ingest_evidence_embed_flag_on(client, monkeypatch):
     row = app_module._registry.knowledge.vector_store.get(evidence_id)
     assert row is not None
     assert row["metadata"]["evidence_type"] == "document"
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "requested_by"),
+    [
+        (
+            "/api/v1/documents",
+            {"content": "governed document"},
+            "api:create-document",
+        ),
+        (
+            "/api/v1/evidence",
+            {
+                "evidence_type": "document",
+                "content": "governed evidence",
+                "source_origin": "test",
+            },
+            "api:ingest-evidence",
+        ),
+    ],
+)
+def test_document_creation_routes_emit_governed_mutation(
+    client, path, body, requested_by
+):
+    response = client.post(path, json=body)
+    assert response.status_code == 200
+
+    events = app_module._registry.operational.event_log.get_events(
+        event_type=EventType.MUTATION_EXECUTED
+    )
+    evidence_events = [
+        event for event in events if event.payload.get("operation") == "evidence.ingest"
+    ]
+    assert len(evidence_events) == 1
+    assert evidence_events[0].payload["requested_by"] == requested_by
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/v1/documents", {"content": "denied document"}),
+        (
+            "/api/v1/evidence",
+            {
+                "evidence_type": "document",
+                "content": "denied evidence",
+                "source_origin": "test",
+            },
+        ),
+    ],
+)
+def test_document_creation_routes_honor_evidence_deny(client, path, body):
+    policy = Policy(
+        policy_type="mutation",
+        scope=PolicyScope(level="global", value=None),
+        rules=[PolicyRule(operation="evidence.ingest", action="deny")],
+        enforcement="enforce",
+    )
+    policy_path = app_module._registry.stores_dir / "policies.json"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(
+        json.dumps({"policies": [policy.model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+    response = client.post(path, json=body)
+
+    assert response.status_code == 400
+    assert app_module._registry.knowledge.document_store.count() == 0
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "doc_id"),
+    [
+        (
+            "/api/v1/documents",
+            {"doc_id": "deleted-doc", "content": "same request"},
+            "deleted-doc",
+        ),
+        (
+            "/api/v1/evidence",
+            {
+                "evidence_id": "deleted-evidence",
+                "evidence_type": "document",
+                "content": "same evidence request",
+                "source_origin": "test",
+            },
+            "deleted-evidence",
+        ),
+    ],
+)
+def test_document_creation_duplicate_does_not_claim_a_missing_row(
+    client, path, body, doc_id
+):
+    assert client.post(path, json=body).status_code == 200
+    assert app_module._registry.knowledge.document_store.delete(doc_id)
+
+    replay = client.post(path, json=body)
+
+    assert replay.status_code == 409
 
 
 # -- classify-on-write (feature-flagged) --------------------------------------
@@ -846,6 +947,25 @@ def test_batch_idempotency(client):
     data = resp.json()
     assert data["succeeded"] == 1
     assert data["duplicates"] == 1
+
+
+def test_batch_evidence_ingest_allocates_document_id(client):
+    response = client.post(
+        "/api/v1/commands/batch",
+        json={
+            "commands": [
+                {
+                    "operation": "evidence.ingest",
+                    "args": {"evidence": {"content": "batch evidence"}},
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["status"] == "success"
+    assert app_module._registry.knowledge.document_store.get(result["created_id"])
 
 
 # -- Bulk ingest --

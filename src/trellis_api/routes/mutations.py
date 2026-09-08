@@ -11,15 +11,40 @@ from trellis.mutate import (
     CommandStatus,
     Operation,
     build_curate_executor,
+    build_evidence_ingest_command_from_args,
 )
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
+    BatchCommandItem,
     BatchCommandRequest,
     BatchCommandResponse,
     CommandResponse,
 )
 
 router = APIRouter()
+
+
+def _build_command(item: BatchCommandItem, requested_by: str) -> Command:
+    operation = Operation(item.operation)
+    if operation is Operation.EVIDENCE_INGEST and isinstance(
+        item.args.get("evidence"), dict
+    ):
+        return build_evidence_ingest_command_from_args(
+            item.args,
+            requested_by=requested_by,
+            target_id=item.target_id,
+            idempotency_key=item.idempotency_key,
+            command_metadata=item.metadata,
+        )
+    return Command(
+        operation=operation,
+        target_id=item.target_id,
+        target_type=item.target_type,
+        args=item.args,
+        idempotency_key=item.idempotency_key,
+        metadata=item.metadata,
+        requested_by=requested_by,
+    )
 
 
 @router.post("/commands/batch", response_model=BatchCommandResponse)
@@ -35,18 +60,7 @@ def execute_batch(req: BatchCommandRequest) -> BatchCommandResponse:
     executor = build_curate_executor(get_registry())
 
     # Build Command objects from the request items
-    commands = [
-        Command(
-            operation=Operation(item.operation),
-            target_id=item.target_id,
-            target_type=item.target_type,
-            args=item.args,
-            idempotency_key=item.idempotency_key,
-            metadata=item.metadata,
-            requested_by=req.requested_by,
-        )
-        for item in req.commands
-    ]
+    commands = [_build_command(item, req.requested_by) for item in req.commands]
 
     batch = CommandBatch(
         commands=commands,

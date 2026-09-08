@@ -14,6 +14,11 @@ from trellis.mutate.commands import (
     OperationRegistry,
 )
 from trellis.mutate.evidence import ensure_evidence_document
+from trellis.mutate.evidence_ingest import (
+    EvidenceEmbedMode,
+    build_evidence_ingest_command,
+    build_evidence_ingest_command_from_args,
+)
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_gate import DefaultPolicyGate
 from trellis.mutate.policy_source import (
@@ -28,7 +33,11 @@ if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
 
 
-def build_curate_executor(registry: StoreRegistry) -> MutationExecutor:
+def build_curate_executor(
+    registry: StoreRegistry,
+    *,
+    evidence_embed: EvidenceEmbedMode = "soft",
+) -> MutationExecutor:
     """Build a :class:`MutationExecutor` wired with the default curate handlers.
 
     Centralises the boilerplate that every surface (CLI, REST API, MCP)
@@ -68,7 +77,7 @@ def build_curate_executor(registry: StoreRegistry) -> MutationExecutor:
 
     return MutationExecutor(
         event_log=registry.operational.event_log,
-        handlers=create_curate_handlers(registry),
+        handlers=create_curate_handlers(registry, evidence_embed=evidence_embed),
         policy_gate=build_policy_gate(registry),
     )
 
@@ -82,10 +91,13 @@ __all__ = [
     "CommandResult",
     "CommandStatus",
     "DefaultPolicyGate",
+    "EvidenceEmbedMode",
     "MutationExecutor",
     "Operation",
     "OperationRegistry",
     "build_curate_executor",
+    "build_evidence_ingest_command",
+    "build_evidence_ingest_command_from_args",
     "build_policy_gate",
     "ensure_evidence_document",
     "load_policies",

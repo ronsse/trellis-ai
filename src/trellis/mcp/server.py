@@ -40,7 +40,6 @@ from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
-from trellis.classify.ingest import classify_metadata_on_write
 from trellis.core.write_config import (
     MINHASH_SEED_MAX_DOCS_ENV,
     WriteBehaviourConfig,
@@ -83,8 +82,11 @@ from trellis.mcp.reconcile import (
 from trellis.mutate import (
     Command,
     CommandStatus,
+    MutationExecutor,
     Operation,
     build_curate_executor,
+    build_evidence_ingest_command,
+    build_evidence_ingest_command_from_args,
     ensure_evidence_document,
 )
 from trellis.ops import (
@@ -1264,13 +1266,25 @@ def _resolve_evidence_pointer(
             )
         return evidence_ref, content is not None and bool(content.strip())
     if content is not None and content.strip():
-        return (
-            ensure_evidence_document(
+        from trellis.errors import MutationError  # noqa: PLC0415
+
+        try:
+            document_id = ensure_evidence_document(
                 registry,
                 content,
                 metadata={"entity_name": name, "entity_type": entity_type},
                 source="mcp:save_knowledge",
-            ),
+            )
+        except MutationError as exc:
+            _raise_mutation_failed(
+                f"failed to store evidence: {exc}",
+                data={
+                    "command_id": exc.command_id,
+                    "message": str(exc),
+                },
+            )
+        return (
+            document_id,
             False,
         )
     return None, False
@@ -1417,26 +1431,7 @@ def _emit_memory_stored_and_enrich(
     metadata: dict[str, Any],
     chash: str,
 ) -> None:
-    """Post-store tail shared by every save_memory path that persists a doc.
-
-    Emits ``MEMORY_STORED`` (a hard requirement — the store already happened),
-    then runs the two feature-flagged, best-effort enrichment stages (tiered
-    extraction, embed-on-ingest). Runs *outside* ``_save_memory_lock``; never
-    for the NOOP verdict, which stores nothing.
-
-    The payload carries ``requested_by="mcp:save_memory"`` — the same surface
-    label the executor stamps on ``MUTATION_EXECUTED`` and
-    ``record_write_rejection`` on ``WRITE_REJECTED`` — because this is the
-    only *unconditional* success signal this tool has, and the capture-health
-    banner needs one to clear against (#461). The tool's ``MUTATION_EXECUTED``
-    comes solely from ``_run_memory_extraction``, which is gated on
-    ``TRELLIS_ENABLE_MEMORY_EXTRACTION`` (default off) and returns early
-    emitting nothing when extraction yields no drafts, so under the shipped
-    defaults a perfectly healthy ``save_memory`` accepted nothing the banner
-    could see. ``Event.source`` cannot stand in: ``MEMORY_STORED`` has three
-    emitters and matching a coarse source is the looseness #458 refused.
-    """
-    # Emit MEMORY_STORED so enrichment / promotion workers can react.
+    """Emit required acceptance, then run best-effort enrichment outside lock."""
     try:
         registry.operational.event_log.emit(
             EventType.MEMORY_STORED,
@@ -1513,6 +1508,7 @@ def save_memory(
 
     registry = _get_registry()
     metadata = dict(metadata or {})
+    executor = build_curate_executor(registry, evidence_embed="none")
 
     chash = content_hash(content)
 
@@ -1521,7 +1517,14 @@ def save_memory(
     # ADD/UPDATE/SUPERSEDE/NOOP instead of today's binary keep/drop. Off by
     # default: the deterministic-only path below is unchanged.
     if reconcile_on_write_enabled():
-        return _save_memory_reconciled(registry, content, metadata, doc_id, chash)
+        return _save_memory_reconciled(
+            registry,
+            executor,
+            content,
+            metadata,
+            doc_id,
+            chash,
+        )
 
     # Dedup decision + store, serialized so concurrent http workers can't
     # both pass the checks and both persist. The returns for an existing
@@ -1560,14 +1563,13 @@ def save_memory(
                 data={"stage": "minhash_find"},
             )
 
-        # Classify-on-write (see classify_metadata_on_write). Placement is
-        # load-bearing: after both dedup stages (a hit stores nothing to tag)
-        # and before the put, and the rebind carries the tags into the
-        # MEMORY_STORED payload and the embed hook's vector row below.
-        metadata = classify_metadata_on_write(metadata, content, doc_id=doc_id or "")
-
-        stored_id = registry.knowledge.document_store.put(
-            doc_id, content, metadata=metadata
+        stored_id, metadata = _store_new_memory(
+            registry,
+            executor,
+            registry.knowledge.document_store,
+            doc_id,
+            content,
+            metadata,
         )
 
         # Add to MinHash index for future fuzzy dedup. The write already
@@ -1623,6 +1625,7 @@ def _index_stored_memory(registry: StoreRegistry, stored_id: str, content: str) 
 
 def _store_new_memory(
     registry: StoreRegistry,
+    executor: MutationExecutor,
     document_store: Any,
     doc_id: str | None,
     content: str,
@@ -1635,11 +1638,50 @@ def _store_new_memory(
     (MEMORY_STORED payload, embed hook) must see what was actually persisted —
     every reconcile verdict that stores a doc funnels through here.
     """
-    # Classify-on-write — same seam as the deterministic tier's put.
-    metadata = classify_metadata_on_write(metadata, content, doc_id=doc_id or "")
-    stored_id: str = document_store.put(doc_id, content, metadata=metadata)
+    command = build_evidence_ingest_command(
+        doc_id=doc_id,
+        content=content,
+        metadata=metadata,
+        requested_by=SAVE_MEMORY_SURFACE,
+        embed_mode="none",
+        # Dedup/repair is state-based under _save_memory_lock. A historical
+        # audit key must not suppress rebuilding a missing explicit doc_id.
+        derive_idempotency=False,
+    )
+    try:
+        result = executor.execute(command)
+    except Exception as exc:
+        logger.exception(
+            "memory_mutation_event_emission_failed",
+            doc_id=command.target_id,
+        )
+        _raise_internal(
+            f"MUTATION_EXECUTED event emit failed: {exc}",
+            cause=exc,
+            data={
+                "stage": "mutation_executed_emit",
+                "doc_id": command.target_id,
+            },
+        )
+    if result.status is not CommandStatus.SUCCESS or result.created_id is None:
+        _raise_mutation_failed(
+            f"failed to store memory: {result.message}",
+            data={
+                "status": result.status.value,
+                "command_id": result.command_id,
+                "message": result.message,
+            },
+        )
+    stored_id = result.created_id
+    stored = document_store.get(stored_id)
+    if stored is None:
+        _raise_internal(
+            f"governed memory write returned missing document: {stored_id}",
+            data={"stage": "evidence_ingest", "doc_id": stored_id},
+        )
+    stored_metadata = dict(stored.get("metadata") or {})
     _index_stored_memory(registry, stored_id, content)
-    return stored_id, metadata
+    return stored_id, stored_metadata
 
 
 def _gather_reconcile_candidate(
@@ -1757,6 +1799,7 @@ def _reverify_candidate(
 
 def _commit_reconcile_verdict(
     registry: StoreRegistry,
+    executor: MutationExecutor,
     document_store: Any,
     doc_id: str | None,
     content: str,
@@ -1783,7 +1826,9 @@ def _commit_reconcile_verdict(
             else MARKER_SKIPPED
         )
         meta = {**metadata, RECONCILIATION_KEY: marker}
-        stored = _store_new_memory(registry, document_store, doc_id, content, meta)
+        stored = _store_new_memory(
+            registry, executor, document_store, doc_id, content, meta
+        )
         return stored[0], stored[1], outcome
 
     decision = outcome.decision
@@ -1795,7 +1840,9 @@ def _commit_reconcile_verdict(
             RECONCILIATION_KEY: ReconcileDecision.UPDATE.value,
             UPDATES_DOC_KEY: candidate.doc_id,
         }
-        stored = _store_new_memory(registry, document_store, doc_id, content, meta)
+        stored = _store_new_memory(
+            registry, executor, document_store, doc_id, content, meta
+        )
         return stored[0], stored[1], outcome
     if decision == ReconcileDecision.SUPERSEDE:
         meta = {
@@ -1804,7 +1851,7 @@ def _commit_reconcile_verdict(
             SUPERSEDES_DOC_KEY: candidate.doc_id,
         }
         stored_id, stored_meta = _store_new_memory(
-            registry, document_store, doc_id, content, meta
+            registry, executor, document_store, doc_id, content, meta
         )
         if mark_document_superseded(
             document_store, old_doc_id=candidate.doc_id, new_doc_id=stored_id
@@ -1822,7 +1869,9 @@ def _commit_reconcile_verdict(
         return stored_id, meta, _downgraded_to_stale(outcome)
     # ADD
     meta = {**metadata, RECONCILIATION_KEY: ReconcileDecision.ADD.value}
-    stored = _store_new_memory(registry, document_store, doc_id, content, meta)
+    stored = _store_new_memory(
+        registry, executor, document_store, doc_id, content, meta
+    )
     return stored[0], stored[1], outcome
 
 
@@ -1871,6 +1920,7 @@ def _reconcile_result_message(
 
 def _save_memory_reconciled(
     registry: StoreRegistry,
+    executor: MutationExecutor,
     content: str,
     metadata: dict[str, Any],
     doc_id: str | None,
@@ -1901,7 +1951,12 @@ def _save_memory_reconciled(
             # No near match: an unambiguous ADD — no model call, no verdict.
             # Store under the lock exactly as the deterministic tier would.
             clean_id, clean_meta = _store_new_memory(
-                registry, document_store, doc_id, content, metadata
+                registry,
+                executor,
+                document_store,
+                doc_id,
+                content,
+                metadata,
             )
 
     if candidate is None:
@@ -1935,7 +1990,14 @@ def _save_memory_reconciled(
             return f"Memory already exists: {raced['doc_id']}"
         outcome = _reverify_candidate(document_store, candidate, outcome)
         stored_id, stored_meta, outcome = _commit_reconcile_verdict(
-            registry, document_store, doc_id, content, metadata, candidate, outcome
+            registry,
+            executor,
+            document_store,
+            doc_id,
+            content,
+            metadata,
+            candidate,
+            outcome,
         )
 
     # -- Emit + enrich outside the lock --------------------------------------
@@ -2998,12 +3060,19 @@ def execute_mutation(
     requested_by = actor.strip() if actor and actor.strip() else "mcp:execute_mutation"
 
     try:
-        command = Command(
-            operation=op,
-            args=dict(args),
-            idempotency_key=idempotency_key,
-            requested_by=requested_by,
-        )
+        if op is Operation.EVIDENCE_INGEST and isinstance(args.get("evidence"), dict):
+            command = build_evidence_ingest_command_from_args(
+                args,
+                requested_by=requested_by,
+                idempotency_key=idempotency_key,
+            )
+        else:
+            command = Command(
+                operation=op,
+                args=dict(args),
+                idempotency_key=idempotency_key,
+                requested_by=requested_by,
+            )
     except Exception as exc:
         _raise_invalid_params(
             f"invalid command: {exc}",

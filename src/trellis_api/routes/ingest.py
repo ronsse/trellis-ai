@@ -7,17 +7,15 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, HTTPException
 
-from trellis.classify.ingest import classify_metadata_on_write
 from trellis.core.ids import generate_ulid
 from trellis.extract.trace_ingest_hook import run_trace_extraction
-from trellis.mutate import build_curate_executor
+from trellis.mutate import build_curate_executor, build_evidence_ingest_command
 from trellis.mutate.commands import (
     BatchStrategy,
     Command,
     CommandStatus,
     Operation,
 )
-from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.schemas.evidence import Evidence
 from trellis.schemas.trace import Trace
 from trellis_api.app import get_registry
@@ -81,27 +79,27 @@ def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
         "evidence_type": evidence.evidence_type,
         "source_origin": evidence.source_origin,
     }
-    # Classify-on-write (see classify_metadata_on_write). ``source_origin`` is
-    # a provenance label ("trace"/"manual"/"ingestion"), not a source system,
-    # so no classification context is derived from it.
-    evidence_metadata = classify_metadata_on_write(
-        evidence_metadata, evidence.content or "", doc_id=evidence.evidence_id
-    )
-    registry.knowledge.document_store.put(
+    command = build_evidence_ingest_command(
         doc_id=evidence.evidence_id,
         content=evidence.content or "",
+        uri=evidence.uri,
         metadata=evidence_metadata,
+        requested_by="api:ingest-evidence",
     )
-
-    # Feature-flagged embedding (TRELLIS_ENABLE_EMBED_ON_INGEST=1). The hook
-    # skips content-less evidence and never fails the ingest.
-    run_embed_on_ingest(
-        registry,
-        evidence.evidence_id,
-        evidence.content or "",
-        evidence_metadata,
-        source="api:ingest-evidence",
-    )
+    result = build_curate_executor(registry).execute(command)
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        raise HTTPException(status_code=400, detail=result.message)
+    if (
+        result.status is CommandStatus.DUPLICATE
+        and registry.knowledge.document_store.get(evidence.evidence_id) is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Duplicate mutation references missing document: "
+                f"{evidence.evidence_id}"
+            ),
+        )
 
     return IngestResponse(evidence_id=evidence.evidence_id)
 
