@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 
 from trellis.testing import in_memory_client
@@ -28,6 +29,73 @@ def test_get_context_for_task_empty(client: TrellisClient):
     result = get_context_for_task(client, "test intent")
     assert isinstance(result, str)
     assert "test intent" in result.lower() or "no relevant" in result.lower()
+
+
+def test_get_context_for_task_empty_pack_includes_withholding_note() -> None:
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "pack_id": "pack:empty",
+                "count": 0,
+                "items": [],
+                "withholding": {
+                    "total": 2,
+                    "by_reason": {"archived": 1, "noise": 1},
+                    "withheld_item_ids": ["archive-id", "noise-id"],
+                    "non_absence_reasons": [],
+                    "section_filtered": 0,
+                    "served_count": 0,
+                },
+            },
+        )
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(_handler), base_url="http://testserver"
+    )
+    with TrellisClient(http=http, verify_version=False) as client:
+        result = get_context_for_task(client, "test intent")
+
+    assert "No relevant context found for: test intent" in result
+    assert "**Withheld:** 2 items" in result
+    assert "archive-id" not in result
+    assert "noise-id" not in result
+
+
+def test_get_context_for_task_places_withholding_before_served_items() -> None:
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "pack_id": "pack:mixed",
+                "count": 1,
+                "items": [
+                    {
+                        "item_type": "document",
+                        "item_id": "served-id",
+                        "excerpt": "Use a token bucket.",
+                        "relevance_score": 0.9,
+                    }
+                ],
+                "withholding": {
+                    "total": 1,
+                    "by_reason": {"noise": 1},
+                    "withheld_item_ids": ["noise-id"],
+                    "non_absence_reasons": [],
+                    "section_filtered": 0,
+                    "served_count": 1,
+                },
+            },
+        )
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(_handler), base_url="http://testserver"
+    )
+    with TrellisClient(http=http, verify_version=False) as client:
+        result = get_context_for_task(client, "test intent")
+
+    assert result.index("**Withheld:**") < result.index("## [document]")
+    assert "noise-id" not in result
 
 
 def test_get_latest_successful_trace_none(client: TrellisClient):

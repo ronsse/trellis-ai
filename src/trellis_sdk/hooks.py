@@ -71,6 +71,10 @@ import structlog
 
 from trellis_sdk._format import format_pack_as_markdown
 from trellis_sdk.exceptions import TrellisError
+from trellis_wire.withholding import (
+    format_withholding_note,
+    withholding_from_payload,
+)
 
 if TYPE_CHECKING:
     from trellis_sdk.async_client import AsyncTrellisClient
@@ -164,13 +168,15 @@ class ContextInjector:
         except TrellisError as exc:
             return self._degrade("context_injection_failed", intent, domain, exc)
         items = pack.get("items", [])
+        withholding = withholding_from_payload(pack.get("withholding"))
         if not items:
-            return ""
+            return format_withholding_note(withholding)
         return format_pack_as_markdown(
             items,
             intent,
             max_tokens=budget,
             pack_id=pack.get("pack_id"),
+            withholding=withholding,
         )
 
     def for_entities(
@@ -211,14 +217,17 @@ class ContextInjector:
                 max_tokens=budget,
             )
             items = pack.get("items", [])
+            withholding = withholding_from_payload(pack.get("withholding"))
             if items:
                 return format_pack_as_markdown(
                     items,
                     effective_intent,
                     max_tokens=budget,
                     pack_id=pack.get("pack_id"),
+                    withholding=withholding,
                 )
-            return self._entity_fallback(entity_ids, effective_intent, budget)
+            fallback = self._entity_fallback(entity_ids, effective_intent, budget)
+            return fallback or format_withholding_note(withholding)
         except TrellisError as exc:
             return self._degrade(
                 "entity_context_injection_failed", effective_intent, domain, exc

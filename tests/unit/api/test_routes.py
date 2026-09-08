@@ -524,6 +524,88 @@ def test_assemble_pack(client):
     assert data["intent"] == "test pack"
 
 
+def _seed_withholding_documents() -> None:
+    store = app_module._registry.knowledge.document_store
+    common = "failover runbook drain queue promote replica restart sidecar "
+    store.put("plain", common + "connection pooling " * 20, {})
+    store.put(
+        "noise",
+        common + "kangaroo telemetry " * 20,
+        {"content_tags": {"signal_quality": "noise"}},
+    )
+    store.put(
+        "archived",
+        common + "wombat telemetry " * 20,
+        {"lifecycle": {"state": "archived"}},
+    )
+
+
+def test_assemble_pack_returns_typed_withholding(client) -> None:
+    _seed_withholding_documents()
+
+    response = client.post("/api/v1/packs", json={"intent": "failover runbook"})
+
+    assert response.status_code == 200
+    withholding = response.json()["withholding"]
+    assert withholding["total"] == 2
+    assert withholding["by_reason"] == {"archived": 1, "noise": 1}
+    assert sorted(withholding["withheld_item_ids"]) == ["archived", "noise"]
+    assert withholding["served_count"] == 1
+
+
+def test_assemble_sectioned_pack_returns_routed_ids_and_served_count(client) -> None:
+    store = app_module._registry.knowledge.document_store
+    body = "failover runbook drain queue promote replica restart sidecar " * 20
+    store.put(
+        "pattern",
+        body,
+        {"content_tags": {"content_type": "pattern"}},
+    )
+    store.put(
+        "noise",
+        body + "kangaroo telemetry",
+        {
+            "content_tags": {
+                "content_type": "pattern",
+                "signal_quality": "noise",
+            }
+        },
+    )
+    store.put(
+        "archived",
+        body + "wombat telemetry",
+        {
+            "content_tags": {"content_type": "pattern"},
+            "lifecycle": {"state": "archived"},
+        },
+    )
+
+    routed = client.post(
+        "/api/v1/packs/sectioned",
+        json={
+            "intent": "failover runbook",
+            "sections": [{"name": "code", "content_types": ["code"]}],
+        },
+    )
+    served = client.post(
+        "/api/v1/packs/sectioned",
+        json={
+            "intent": "failover runbook",
+            "sections": [{"name": "patterns", "content_types": ["pattern"]}],
+        },
+    )
+
+    assert routed.status_code == 200
+    assert routed.json()["withholding"]["section_filtered"] == 1
+    assert routed.json()["withholding"]["served_count"] == 0
+    assert sorted(routed.json()["withholding"]["withheld_item_ids"]) == [
+        "archived",
+        "noise",
+    ]
+    assert served.status_code == 200
+    assert served.json()["withholding"]["served_count"] == 1
+
+
 def test_assemble_pack_threads_attribution_into_telemetry(client):
     """The REST seam forwards run_id / intent_family to PackBuilder.
 

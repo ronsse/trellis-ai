@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import httpx
 import pytest
 import pytest_asyncio
 
@@ -86,6 +87,39 @@ class TestAsyncRetrieve:
         pack = await client.assemble_pack("async test intent")
         assert pack["intent"] == "async test intent"
         assert "pack_id" in pack
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["get_objective_context", "get_task_context"],
+    )
+    async def test_sectioned_context_renders_empty_pack_routing(
+        self, method_name: str
+    ) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "pack_id": "p1",
+                    "sections": [{"name": "only", "items": []}],
+                    "withholding": {
+                        "total": 0,
+                        "by_reason": {},
+                        "withheld_item_ids": [],
+                        "non_absence_reasons": [],
+                        "section_filtered": 2,
+                        "served_count": 0,
+                    },
+                },
+            )
+
+        http = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://testserver"
+        )
+        async with AsyncTrellisClient(http=http, verify_version=False) as client:
+            rendered = await getattr(client, method_name)("deploy checklist")
+
+        assert "**Section routing:** this pack is empty because 2 items" in rendered
+        assert rendered.index("**Section routing:**") < rendered.index("## Section:")
 
 
 class TestAsyncCurate:

@@ -36,7 +36,8 @@ API_MAJOR = 1
 # 1 — ``GET /api/version`` gained the optional ``write_provenance``
 #     field (build identity + effective write-behaviour flags).  Purely
 #     additive; ``SDK_API_MINOR`` stays 0 because no client *needs* it.
-API_MINOR = 1
+# 2 — 2026-09-04: pack responses gained optional withholding telemetry.
+API_MINOR = 2
 
 # The wire-level Pydantic schema version. Sourced from trellis.core.base
 # so the DTOs and the handshake stay in sync automatically.

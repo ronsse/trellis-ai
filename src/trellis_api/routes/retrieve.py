@@ -133,6 +133,7 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         items=[item.model_dump() for item in pack.items],
         advisories=[a.model_dump(mode="json") for a in pack.advisories],
         retrieval_report=pack.retrieval_report.model_dump(),
+        withholding=pack.metadata.get("withholding"),
     )
 
 
@@ -172,6 +173,7 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         agent_id=pack.agent_id,
         sections=[s.model_dump(mode="json") for s in pack.sections],
         advisories=[a.model_dump(mode="json") for a in pack.advisories],
+        withholding=pack.metadata.get("withholding"),
     )
 
 
