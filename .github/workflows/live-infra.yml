@@ -1,9 +1,9 @@
 name: Live infrastructure tests
 
-# Runs the suites that exercise a real Bolt/openCypher (Neo4j) + Postgres
-# backend so connection-pool, Cypher / SCD-2, vector-index, cross-store
-# wiring, and wipe-helper regressions surface in CI rather than at deploy
-# time. Both backends run as ephemeral **service containers**, so the job
+# Runs the suites that exercise real Bolt/openCypher (Neo4j + ArcadeDB) and
+# Postgres backends so connection-pool, Cypher / SCD-2, vector-index,
+# cross-store wiring, and wipe-helper regressions surface in CI rather than
+# at deploy time. All backends run as ephemeral **service containers**, so the job
 # is hermetic and depends on no external managed instance.
 #
 # Previously this job pointed at a managed Neo4j AuraDB Free instance + a
@@ -83,11 +83,31 @@ concurrency:
 
 jobs:
   live-infra:
-    name: live-infra (containerized Neo4j + Postgres)
+    name: live-infra (containerized Neo4j + ArcadeDB + Postgres)
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     services:
+      # ArcadeDB is the blessed graph + vector substrate. The graph contract
+      # uses Bolt, which is an opt-in server plugin; HTTP creates the throwaway
+      # database and runs schema DDL. Its Bolt port maps to 17687 because
+      # Neo4j already owns 7687 on the runner.
+      arcadedb:
+        image: arcadedata/arcadedb:26.8.1
+        env:
+          JAVA_OPTS: >-
+            -Darcadedb.server.rootPassword=playwithdata
+            -Darcadedb.server.plugins=Bolt:com.arcadedb.bolt.BoltProtocolPlugin
+        ports:
+          - 2480:2480
+          - 17687:7687
+        options: >-
+          --health-cmd "wget --spider -q http://localhost:2480/api/v1/ready || exit 1"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 30
+          --health-start-period 30s
+
       # Neo4j 2025.12 (community) — the version the shape #2 vector store
       # documents for self-hosted use. Community runs the full graph + SCD-2
       # suite. The one Cypher SEARCH vector-search test self-skips here: that
@@ -152,10 +172,16 @@ jobs:
           TRELLIS_TEST_NEO4J_PASSWORD: trellistestpw
           TRELLIS_TEST_NEO4J_DATABASE: neo4j
           TRELLIS_TEST_PG_DSN: postgresql://trellis:trellis@localhost:5432/trellis
+          TRELLIS_TEST_ARCADEDB: "1"
+          TRELLIS_TEST_ARCADEDB_URI: bolt://localhost:17687
+          TRELLIS_TEST_ARCADEDB_HTTP_URL: http://localhost:2480
+          TRELLIS_TEST_ARCADEDB_USER: root
+          TRELLIS_TEST_ARCADEDB_PASSWORD: playwithdata
+          TRELLIS_TEST_ARCADEDB_DATABASE: trellis_test
           # Backend-marked tests are deselected by default (tests/conftest.py);
           # these toggles opt the gated suites in. The loop suites are marked
           # live + slow + neo4j + postgres, so those four are needed for them;
-          # `pgvector` is a fifth marker carried by the pgvector suites alone.
+          # `pgvector` and `arcadedb` select their backend suites independently.
           TRELLIS_TEST_LIVE: "1"
           TRELLIS_TEST_SLOW: "1"
           TRELLIS_TEST_NEO: "1"
@@ -164,7 +190,7 @@ jobs:
         # The contract suites (tests/unit/stores/contracts/) run the shared
         # ABC semantics against every configured backend — that's where
         # cross-backend drift (e.g. issue #195 edge re-ingest) surfaces.
-        # GraphStoreContractTests covers Postgres + Neo4j here;
+        # GraphStoreContractTests covers Postgres + Neo4j + ArcadeDB here;
         # VectorStoreContractTests covers pgvector, which is the production
         # vector backend and whose contract had never executed anywhere
         # before #345 — its fixture predated the connection-pool refactor
@@ -185,11 +211,6 @@ jobs:
         # neo4j:2025.12, so 4 cases fail against this job's container. The e2e
         # fixture probes for the clause and self-skips; this unit file does not.
         # Verified locally against the same image. Tracked as issue #356.
-        #
-        # Still not covered: the ArcadeDB graph contract
-        # (tests/unit/stores/contracts/test_arcadedb_graph_contract.py) has
-        # no service container here, so the blessed substrate's contract does
-        # not run in CI either. Tracked as issue #351.
         run: |
           pytest \
             tests/integration/test_neo4j_e2e.py \
