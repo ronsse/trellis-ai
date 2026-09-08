@@ -160,16 +160,36 @@ def _is_importorskip(node: ast.AST, pytest_modules: set[str], direct: set[str]) 
     )
 
 
+def _is_pytest_param_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "param"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pytest"
+    )
+
+
 def _marker_names(node: ast.AST) -> set[str]:
-    return {
-        child.attr
-        for child in ast.walk(node)
-        if isinstance(child, ast.Attribute)
-        and isinstance(child.value, ast.Attribute)
-        and isinstance(child.value.value, ast.Name)
-        and child.value.value.id == "pytest"
-        and child.value.attr == "mark"
-    }
+    """Collect whole-node markers, excluding per-item parameter marks."""
+    markers: set[str] = set()
+
+    def visit(current: ast.AST) -> None:
+        if _is_pytest_param_call(current):
+            return
+        if (
+            isinstance(current, ast.Attribute)
+            and isinstance(current.value, ast.Attribute)
+            and isinstance(current.value.value, ast.Name)
+            and current.value.value.id == "pytest"
+            and current.value.attr == "mark"
+        ):
+            markers.add(current.attr)
+        for child in ast.iter_child_nodes(current):
+            visit(child)
+
+    visit(node)
+    return markers
 
 
 def _module_markers(tree: ast.Module) -> set[str]:
@@ -598,6 +618,37 @@ def test_marker_selection_is_decided_at_the_owning_test_node(
     excluded = frozenset({"postgres"})
     assert _coverage_status(sites["class_dep"], leg, excluded) == "marker-deselected"
     assert _coverage_status(sites["function_dep"], leg, excluded) is None
+
+
+def test_pytest_param_mark_is_not_promoted_to_whole_test(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "test_mixed.py").write_text(
+        """\
+import pytest
+
+@pytest.mark.parametrize(
+    "backend",
+    ["sqlite", pytest.param("postgres", marks=pytest.mark.postgres)],
+)
+def test_mixed(backend):
+    pytest.importorskip("psycopg")
+""",
+        encoding="utf-8",
+    )
+    [site] = _importorskip_sites(tmp_path)
+    assert "postgres" not in site.markers
+
+    leg = WorkflowLeg(
+        workflow=Path("tests.yml"),
+        job="test",
+        extras=frozenset(),
+        distributions=frozenset(),
+        targets=(Path("tests"),),
+        included_markers=frozenset(),
+        pull_request=True,
+    )
+    assert _coverage_status(site, leg, frozenset({"postgres"})) is None
 
 
 def test_named_workflow_paths_are_compared_relative_to_tests() -> None:
