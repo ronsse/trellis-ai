@@ -76,6 +76,37 @@ class TestSuppression:
         msg = "cannot read /srv/deploy/token=hunter2/policies.json"
         assert sanitize_error_message(msg) == SUPPRESSED_MARKER
 
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "cannot read /srv/{token}/policies.json",
+            r"cannot read C:\secrets\{token}\config.json",
+            "request failed: https://api.example.com/v1/{token}/result",
+            "cannot read s3://bucket/{token}/object",
+        ],
+    )
+    def test_secret_shaped_path_component_is_suppressed(self, template: str) -> None:
+        message = template.format(token="A1" * 20)
+        assert sanitize_error_message(message) == SUPPRESSED_MARKER
+
+    @pytest.mark.parametrize("host", ["localhost", "db", "10.0.0.1", "[::1]"])
+    def test_token_only_url_userinfo_is_suppressed(self, host: str) -> None:
+        userinfo = "short-token"
+        assert (
+            sanitize_error_message(f"https://{userinfo}@{host}/path")
+            == SUPPRESSED_MARKER
+        )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://localhost?revision=abc@main",
+            "https://localhost#revision=abc@main",
+        ],
+    )
+    def test_at_sign_outside_url_authority_passes_through(self, url: str) -> None:
+        assert sanitize_error_message(url) == url
+
     def test_raw_sql_suppressed(self) -> None:
         msg = (
             "query failed: SELECT user_id, vendor_user_id FROM "
