@@ -173,7 +173,7 @@ jobs:
           TRELLIS_TEST_NEO4J_DATABASE: neo4j
           TRELLIS_TEST_PG_DSN: postgresql://trellis:trellis@localhost:5432/trellis
           TRELLIS_TEST_ARCADEDB: "1"
-          TRELLIS_TEST_ARCADEDB_URI: bolt://localhost:1
+          TRELLIS_TEST_ARCADEDB_URI: bolt://localhost:17687
           TRELLIS_TEST_ARCADEDB_HTTP_URL: http://localhost:2480
           TRELLIS_TEST_ARCADEDB_USER: root
           TRELLIS_TEST_ARCADEDB_PASSWORD: playwithdata
