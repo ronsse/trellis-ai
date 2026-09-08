@@ -15,6 +15,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.mcp.server import execute_mutation as _execute_mutation
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 execute_mutation = unwrap_tool(_execute_mutation)
@@ -153,6 +154,38 @@ class TestExecuteMutationHappyPath:
         assert first["status"] == "success"
         assert second["status"] == "duplicate"
 
+    def test_evidence_ingest_allocates_id_without_clearing_capture_banner(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        payload = json.loads(
+            execute_mutation(
+                operation="evidence.ingest",
+                args={"evidence": {"content": "operator supplied evidence"}},
+            )
+        )
+
+        assert payload["status"] == "success"
+        assert temp_registry.knowledge.document_store.get(payload["created_id"])
+        assert not temp_registry.operational.event_log.get_events(
+            event_type=EventType.MEMORY_STORED,
+            limit=50,
+        )
+
+    def test_evidence_ingest_accepts_uri_without_content(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        payload = json.loads(
+            execute_mutation(
+                operation="evidence.ingest",
+                args={"evidence": {"uri": "s3://bucket/object.json"}},
+            )
+        )
+
+        assert payload["status"] == "success"
+        stored = temp_registry.knowledge.document_store.get(payload["created_id"])
+        assert stored["content"] == ""
+        assert stored["metadata"]["uri"] == "s3://bucket/object.json"
+
 
 # ---------------------------------------------------------------------------
 # Error paths
@@ -160,6 +193,28 @@ class TestExecuteMutationHappyPath:
 
 
 class TestExecuteMutationErrors:
+    @pytest.mark.parametrize(
+        "evidence",
+        [
+            {"content": "body", "metadata": ["not", "a", "mapping"]},
+            {"content": "body", "embed_mode": "none"},
+        ],
+    )
+    def test_evidence_ingest_rejects_unsupported_shape(
+        self,
+        temp_registry: StoreRegistry,
+        evidence: dict,
+    ) -> None:
+        payload = json.loads(
+            execute_mutation(
+                operation="evidence.ingest",
+                args={"evidence": evidence},
+            )
+        )
+
+        assert payload["status"] == "rejected"
+        assert temp_registry.knowledge.document_store.count() == 0
+
     def test_unknown_operation_raises_invalid_params(
         self, temp_registry: StoreRegistry
     ) -> None:

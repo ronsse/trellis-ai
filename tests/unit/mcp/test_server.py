@@ -18,7 +18,7 @@ from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.hashing import content_hash
 from trellis.core.write_config import MINHASH_SEED_MAX_DOCS_ENV
 from trellis.errors import StoreError
-from trellis.mcp.server import RESOURCE_NOT_FOUND
+from trellis.mcp.server import MUTATION_FAILED, RESOURCE_NOT_FOUND
 from trellis.mcp.server import (
     get_context as _get_context,
 )
@@ -52,6 +52,7 @@ from trellis.mcp.server import (
 from trellis.mcp.server import (
     search as _search,
 )
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -558,6 +559,27 @@ class TestSaveKnowledge:
         # The graph↔document link rides the audit payload.
         assert events[0].payload["document_ids"]
 
+    def test_evidence_deny_blocks_content_and_graph_write(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        policy = Policy(
+            policy_type="mutation",
+            scope=PolicyScope(level="global", value=None),
+            rules=[PolicyRule(operation="evidence.ingest", action="deny")],
+            enforcement="enforce",
+        )
+        (temp_registry.stores_dir / "policies.json").write_text(
+            json.dumps({"policies": [policy.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            save_knowledge("blocked", content="policy-protected evidence")
+
+        assert excinfo.value.error.code == MUTATION_FAILED
+        assert temp_registry.knowledge.document_store.count() == 0
+        assert temp_registry.knowledge.graph_store.count_nodes() == 0
+
 
 # ---------------------------------------------------------------------------
 # save_memory
@@ -619,6 +641,67 @@ class TestSaveMemory:
         assert event.payload["content_length"] == len("event emission test")
         assert event.payload["metadata"] == {"domain": "ops"}
         assert "content_hash" in event.payload
+        governed = temp_registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_EXECUTED,
+            limit=100,
+        )
+        governed = [
+            event
+            for event in governed
+            if event.payload.get("operation") == "evidence.ingest"
+        ]
+        assert len(governed) == 1
+        assert governed[0].entity_id == doc_id
+        assert governed[0].payload["requested_by"] == "mcp:save_memory"
+
+    def test_evidence_deny_blocks_memory_write(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        policy = Policy(
+            policy_type="mutation",
+            scope=PolicyScope(level="global", value=None),
+            rules=[PolicyRule(operation="evidence.ingest", action="deny")],
+            enforcement="enforce",
+        )
+        (temp_registry.stores_dir / "policies.json").write_text(
+            json.dumps({"policies": [policy.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            save_memory("policy must stop this memory")
+
+        assert excinfo.value.error.code == MUTATION_FAILED
+        assert temp_registry.knowledge.document_store.count() == 0
+        assert not temp_registry.operational.event_log.get_events(
+            event_type=EventType.MEMORY_STORED,
+            limit=100,
+        )
+
+    def test_embedding_runs_once_outside_dedup_lock(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        lock_was_available: list[bool] = []
+
+        def observing_embedder(_content: str) -> list[float]:
+            acquired = server_mod._save_memory_lock.acquire(blocking=False)
+            lock_was_available.append(acquired)
+            if acquired:
+                server_mod._save_memory_lock.release()
+            return [1.0, 0.0, 0.5]
+
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        monkeypatch.setattr(
+            type(temp_registry),
+            "embedding_fn",
+            property(lambda _self: observing_embedder),
+        )
+
+        save_memory("embedding must not extend the dedup critical section")
+
+        assert lock_was_available == [True]
 
     def test_concurrent_identical_saves_persist_once(
         self, temp_registry: StoreRegistry
@@ -2110,9 +2193,9 @@ class TestStructuredErrorContract:
             save_memory("unique memory content for emission failure test")
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
-        assert "MEMORY_STORED" in err.error.message
+        assert "MUTATION_EXECUTED" in err.error.message
         assert err.error.data is not None
-        assert err.error.data["stage"] == "memory_stored_emit"
+        assert err.error.data["stage"] == "mutation_executed_emit"
         assert excinfo.value.__cause__ is boom
 
     def test_save_memory_minhash_init_failure_chains_cause(

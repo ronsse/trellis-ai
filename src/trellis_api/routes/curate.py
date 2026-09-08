@@ -6,7 +6,6 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from trellis.classify.ingest import classify_metadata_on_write
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import feedback_log_dir
 from trellis.feedback.recording import record_feedback as record_pack_feedback
@@ -15,8 +14,8 @@ from trellis.mutate import (
     CommandStatus,
     Operation,
     build_curate_executor,
+    build_evidence_ingest_command,
 )
-from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
     CommandResponse,
@@ -121,25 +120,31 @@ def create_document(body: dict[str, Any]) -> dict[str, Any]:
 
     Accepts: ``{"doc_id": "...", "content": "...", "metadata": {...}}``
     """
-    registry = get_registry()
     doc_id = body.get("doc_id")
     content = body.get("content", "")
     # ``or {}`` not ``.get(..., {})``: an explicit ``"metadata": null`` is a
     # shape real clients send, and every consumer below wants a mapping.
     metadata = body.get("metadata") or {}
-    if not content:
+    if not isinstance(content, str) or not content.strip():
         raise HTTPException(status_code=400, detail="content is required")
-    # Classify-on-write — see classify_metadata_on_write for the four
-    # properties it guarantees.
-    metadata = classify_metadata_on_write(metadata, content, doc_id=doc_id or "")
-    stored_id = registry.knowledge.document_store.put(
-        doc_id=doc_id, content=content, metadata=metadata
+    command = build_evidence_ingest_command(
+        doc_id=doc_id,
+        content=content,
+        metadata=metadata,
+        requested_by="api:create-document",
+        idempotency_key=body.get("idempotency_key"),
     )
-    # Feature-flagged embedding (TRELLIS_ENABLE_EMBED_ON_INGEST=1) so
-    # SemanticSearch can retrieve the document. Fail-soft inside the hook.
-    run_embed_on_ingest(
-        registry, stored_id, content, metadata, source="api:create-document"
-    )
+    response = _execute_command(command)
+    stored_id = response.created_id or command.target_id
+    if (
+        response.status == CommandStatus.DUPLICATE
+        and stored_id is not None
+        and get_registry().knowledge.document_store.get(stored_id) is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Duplicate mutation references missing document: {stored_id}",
+        )
     return {"status": "ok", "doc_id": stored_id}
 
 

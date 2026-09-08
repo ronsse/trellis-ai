@@ -57,22 +57,12 @@ GOVERNED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
         "and is reserved for the PR3 design."
     ),
     ("trellis/mcp/server.py", "document.put"): (
-        "Two memory creates route in PR2; the metadata-only stale downgrade "
-        "remains for the PR3 design."
-    ),
-    ("trellis/mutate/evidence.py", "document.put"): (
-        "This helper is not a governed handler; PR2 routes it through the "
-        "core evidence.ingest operation."
+        "The metadata-only stale reconciliation downgrade remains for the "
+        "PR3 governance and mirror design."
     ),
     ("trellis/retrieve/embed_ingest_hook.py", "vector.upsert"): (
         "Fail-soft embedding is the vector seam PR2's governed handler will "
         "call; later work must clear the direct-write roster."
-    ),
-    ("trellis_api/routes/curate.py", "document.put"): (
-        "The agent-facing document endpoint routes through evidence.ingest in PR2."
-    ),
-    ("trellis_api/routes/ingest.py", "document.put"): (
-        "The agent-facing evidence endpoint routes through evidence.ingest in PR2."
     ),
     ("trellis_api/routes/ingest.py", "vector.upsert"): (
         "The standalone vector endpoint remains direct until later issue "
@@ -92,14 +82,6 @@ GOVERNED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
     ),
     ("trellis_workers/session_capture/reconcile_pass.py", "document.put"): (
         "Metadata-only claim withdrawal awaits the PR3 governance and mirror design."
-    ),
-    ("trellis_workers/trace_embed/handler.py", "document.put"): (
-        "The worker-local governed handler is consolidated into the core "
-        "evidence.ingest handler in PR2."
-    ),
-    ("trellis_workers/trace_embed/handler.py", "vector.upsert"): (
-        "The worker's strict embedding write is consolidated into the core "
-        "evidence.ingest handler in PR2."
     ),
 }
 
@@ -131,9 +113,9 @@ UNCLASSIFIED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
 
 # Re-read on origin/main 04deb47 (2026-09-04) with git grep over the
 # document_store/doc_store/vector_store/vstore receiver names and every write
-# method, excluding store backends. It finds 24 non-handler sites: 18 document
-# and 6 vector. The AST also resolves the get_document_store() alias in
-# trellis_cli/ingest.py, making the complete non-handler inventory 25.
+# method, excluding store backends. That inventory found 25 sites. PR2 removed
+# seven agent-facing and worker-local writes through core evidence.ingest,
+# leaving 18: 13 document and 5 vector.
 #
 # The vector method set is the one VectorStore actually declares. upsert_many
 # is no method of any store in src/ -- tracking it policed nothing, while the
@@ -141,9 +123,9 @@ UNCLASSIFIED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
 # trellis_cli/admin_reindex_vectors.py write the vector plane outside the
 # ratchet. These counts are hand-derived from that grep, never from len() of
 # the scan they bound.
-_HAND_READ_SITE_COUNT = 25
-_HAND_READ_DOCUMENT_COUNT = 19
-_HAND_READ_VECTOR_COUNT = 6
+_HAND_READ_SITE_COUNT = 18
+_HAND_READ_DOCUMENT_COUNT = 13
+_HAND_READ_VECTOR_COUNT = 5
 _WRITE_METHODS = {"put", "delete", "upsert", "upsert_bulk"}
 
 
