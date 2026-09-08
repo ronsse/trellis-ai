@@ -8,7 +8,7 @@ from trellis.llm.json_response import (
 
 
 def test_strip_code_fence_keeps_last_json_line_without_closing_fence() -> None:
-    raw = '```json\n[{"title": "first"},\n{"title": "second"}]'
+    raw = '```JSON\n[{"title": "first"},\n{"title": "second"}]'
 
     stripped = strip_code_fence(raw)
 
@@ -16,6 +16,12 @@ def test_strip_code_fence_keeps_last_json_line_without_closing_fence() -> None:
     parsed = parse_json_response(raw)
     assert parsed.outcome is JSONParseOutcome.VALUE
     assert parsed.value == [{"title": "first"}, {"title": "second"}]
+
+
+def test_non_json_fence_is_not_stripped() -> None:
+    result = parse_json_response("```javascript\n{}\n```")
+
+    assert result.outcome is JSONParseOutcome.MALFORMED
 
 
 def test_parse_json_response_distinguishes_empty_from_value() -> None:

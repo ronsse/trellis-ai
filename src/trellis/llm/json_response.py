@@ -25,7 +25,7 @@ class JSONParseResult:
     error: str | None = None
 
 
-_OPENING_FENCE = re.compile(r"^```(?:json)?\s*$")
+_OPENING_FENCE = re.compile(r"^```(?:json)?\s*$", re.IGNORECASE)
 
 
 def strip_code_fence(raw: str) -> str:
