@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -22,6 +24,29 @@ if TYPE_CHECKING:
 _logger = structlog.get_logger(__name__)
 
 VALID_NODE_ROLES = frozenset({"structural", "semantic", "curated"})
+
+
+class AliasBindStatus(StrEnum):
+    """Outcome of an atomic alias claim."""
+
+    BOUND = "bound"
+    REBOUND = "rebound"
+    ALREADY_BOUND = "already_bound"
+    CONFLICT = "conflict"
+
+
+@dataclass(frozen=True)
+class AliasBindResult:
+    """Winner returned by :meth:`GraphStore.bind_alias_if_absent`.
+
+    ``entity_id`` and ``alias_id`` always identify the binding that won.
+    On ``CONFLICT`` they identify the existing winner, never the losing
+    candidate. Backend errors raise; no error is represented as a status.
+    """
+
+    status: AliasBindStatus
+    alias_id: str
+    entity_id: str
 
 
 def _resolve_max_subgraph_depth() -> int:
@@ -392,6 +417,36 @@ class GraphStore(ABC):
 
         Returns:
             The logical alias ID.
+        """
+
+    @abstractmethod
+    def bind_alias_if_absent(
+        self,
+        entity_id: str,
+        source_system: str,
+        raw_id: str,
+        *,
+        raw_name: str | None = None,
+        match_confidence: float = 1.0,
+        is_primary: bool = False,
+        stale_owner_name_key: str | None = None,
+    ) -> AliasBindResult:
+        """Atomically bind an unclaimed alias or replace a stale name owner.
+
+        Concurrent contenders for the same ``(source_system, raw_id)`` must
+        produce exactly one :attr:`AliasBindStatus.BOUND`; every loser returns
+        :attr:`AliasBindStatus.CONFLICT` naming that winner. A retry by the
+        winner returns :attr:`AliasBindStatus.ALREADY_BOUND`.
+
+        When ``stale_owner_name_key`` is supplied, a different winner remains
+        authoritative only while its current node's normalized ``name`` equals
+        that key. A missing, deleted, or renamed owner is atomically replaced
+        with an SCD-2 alias version and returns
+        :attr:`AliasBindStatus.REBOUND`. The stale check and replacement must
+        serialize on the alias claim so they cannot overwrite a winner that
+        became live first.
+
+        Backend failures raise rather than being folded into a status.
         """
 
     @abstractmethod

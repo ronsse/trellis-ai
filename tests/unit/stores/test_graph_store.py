@@ -491,6 +491,7 @@ class TestCompactVersions:
             def get_node(self, *a, **k): ...  # type: ignore[override]
             def get_nodes_bulk(self, *a, **k): ...  # type: ignore[override]
             def upsert_alias(self, *a, **k): ...  # type: ignore[override]
+            def bind_alias_if_absent(self, *a, **k): ...  # type: ignore[override]
             def resolve_alias(self, *a, **k): ...  # type: ignore[override]
             def get_aliases(self, *a, **k): ...  # type: ignore[override]
             def upsert_edge(self, *a, **k): ...  # type: ignore[override]

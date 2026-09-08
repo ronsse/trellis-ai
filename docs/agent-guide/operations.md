@@ -306,6 +306,37 @@ It is **idempotent**: a row already in agreement is not rewritten, so a second r
 {"status": "ok", "scanned": 1019, "divergent": 45, "repaired": 45, "no_vector_row": 109, "errors": 0, "keys": ["content_tags", "auto_importance"], "dry_run": false}
 ```
 
+### `trellis admin backfill-name-aliases`
+
+Bind normalized entity display names into the indexed `name` alias namespace for
+nodes created before write-time binding shipped.
+
+```bash
+trellis admin backfill-name-aliases [--max-nodes <n>] [--format text|json]
+```
+
+The default bound is the current node count plus one. The command reads one row
+beyond the bound before writing; if that extra row exists, it binds nothing and
+exits with validation code `2`. Rerun with a larger bound to resume. Unique
+normalized names are idempotent, exact duplicate names are reported as
+contested, and blank names are skipped.
+
+Every binding is an `alias.upsert` command with `if_absent=true`, so validation,
+policy, idempotency, execution, and audit emission run for each bounded batch.
+Concurrent contenders are serialized by `GraphStore.bind_alias_if_absent`;
+losers report a live existing winner and never replace it. If that winner's
+current node no longer has the normalized name, the same atomic operation closes
+the stale alias version and rebinds it; the report counts this as `rebound`.
+Policy denials exit `3`; lookup, query, or alias-store failures are reported
+separately from genuine skips and exit `5`. JSON failure details identify only
+the stage, reason, and entity id — they never echo entity names.
+
+Entity create/update binds the final merged name inside its already-governed
+command. An explicitly supplied name is checked even when it equals the stored
+value, so retrying after a transient alias failure repairs the index. Alias
+maintenance remains fail-soft for that primary entity write; the backfill is
+strict and never reports `status: ok` when alias maintenance fails.
+
 #### Document → content tags (opt-in)
 
 By default document ingestion writes no retrieval-shaping tags — the document is retrievable, but `PackBuilder`'s `tag_filters`, the `signal_quality="noise"` exclusion and the tag-derived importance boost have nothing to work with. Set `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (also accepts `true`/`yes`/`on`) to turn on **classify-on-write**: an inline, deterministic pass (structural + keyword-domain + source-system classifiers, no LLM, microseconds) that stamps `metadata.content_tags` and `metadata.auto_importance` as the document is written.

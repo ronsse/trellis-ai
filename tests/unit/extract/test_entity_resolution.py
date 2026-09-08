@@ -1,10 +1,9 @@
-"""Tests for the indexed name → entity resolver used by the write paths.
+"""Tests for the read-only indexed name → entity resolver.
 
 The behaviours worth pinning are the ones that cost the live graph seven
-duplicate ``hermes`` nodes: the resolver must actually read the display
-name where the store puts it, must write what it learns into
-``entity_aliases`` so the next lookup is indexed, and must never collapse
-two same-named entities into one.
+duplicate ``hermes`` nodes: the resolver must read the display name where the
+store puts it, prefer aliases maintained by governed writes, and never mutate
+or collapse two same-named entities into one.
 """
 
 from __future__ import annotations
@@ -60,7 +59,7 @@ class _SpyStore:
         self._inner = inner
         self.query_calls = 0
         self.resolve_alias_calls = 0
-        self.minted: list[tuple[str, str]] = []
+        self.alias_write_calls = 0
 
     def query(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         self.query_calls += 1
@@ -71,8 +70,19 @@ class _SpyStore:
         return self._inner.resolve_alias(*args, **kwargs)
 
     def upsert_alias(self, *, entity_id: str, raw_id: str, **kwargs: Any) -> str:
-        self.minted.append((raw_id, entity_id))
+        self.alias_write_calls += 1
         return self._inner.upsert_alias(entity_id=entity_id, raw_id=raw_id, **kwargs)
+
+    def bind_alias_if_absent(
+        self, entity_id: str, source_system: str, raw_id: str, **kwargs: Any
+    ):
+        self.alias_write_calls += 1
+        return self._inner.bind_alias_if_absent(
+            entity_id,
+            source_system,
+            raw_id,
+            **kwargs,
+        )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -130,64 +140,41 @@ class TestResolution:
         assert spy.resolve_alias_calls == 0
 
 
-class TestAliasMinting:
-    def test_alias_minted_on_first_resolve(self, store) -> None:
+class TestResolverIsReadOnly:
+    def test_fallback_scan_does_not_write_an_alias(self, store) -> None:
         _add_entity(store, "ent-alice", "Alice")
         spy = _SpyStore(store)
         resolve = build_name_alias_resolver(spy)
 
         assert resolve("Alice") == ["ent-alice"]
-        assert spy.minted == [("alice", "ent-alice")]
-
-        row = store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "alice")
-        assert row is not None
-        assert row["entity_id"] == "ent-alice"
-        assert row["raw_name"] == "Alice"
-
-    def test_second_resolution_uses_the_index_not_the_scan(self, store) -> None:
-        _add_entity(store, "ent-alice", "Alice")
-        spy = _SpyStore(store)
-        resolve = build_name_alias_resolver(spy)
-
-        assert resolve("Alice") == ["ent-alice"]
-        assert spy.query_calls == 1  # bootstrap scan
-
-        assert resolve("alice") == ["ent-alice"]
-        assert spy.query_calls == 1  # index answered — no second scan
-        assert len(spy.minted) == 1  # and no second mint
-
-    def test_minted_alias_serves_every_case_variant(self, store) -> None:
-        _add_entity(store, "ent-alice", "Alice")
-        spy = _SpyStore(store)
-        resolve = build_name_alias_resolver(spy)
-
-        resolve("Alice")
-        for variant in ("ALICE", " alice ", "aLiCe"):
-            assert resolve(variant) == ["ent-alice"]
-        assert spy.query_calls == 1
-
-    def test_mint_disabled_keeps_the_index_empty(self, store) -> None:
-        _add_entity(store, "ent-alice", "Alice")
-        spy = _SpyStore(store)
-        resolve = build_name_alias_resolver(spy, mint=False)
-
-        assert resolve("Alice") == ["ent-alice"]
-        assert resolve("Alice") == ["ent-alice"]
-        assert spy.query_calls == 2
-        assert spy.minted == []
+        assert spy.alias_write_calls == 0
         assert store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "alice") is None
 
-    def test_mint_failure_does_not_break_resolution(self, store, monkeypatch) -> None:
+    def test_unindexed_resolution_scans_each_time(self, store) -> None:
         _add_entity(store, "ent-alice", "Alice")
-
-        def _boom(*args: Any, **kwargs: Any) -> str:
-            msg = "alias table unavailable"
-            raise RuntimeError(msg)
-
-        monkeypatch.setattr(store, "upsert_alias", _boom)
-        resolve = build_name_alias_resolver(store)
+        spy = _SpyStore(store)
+        resolve = build_name_alias_resolver(spy)
 
         assert resolve("Alice") == ["ent-alice"]
+        assert resolve("alice") == ["ent-alice"]
+        assert spy.query_calls == 2
+        assert spy.alias_write_calls == 0
+
+    def test_governed_alias_serves_every_case_variant_without_scan(self, store) -> None:
+        _add_entity(store, "ent-alice", "Alice")
+        store.bind_alias_if_absent(
+            "ent-alice",
+            NAME_ALIAS_SOURCE_SYSTEM,
+            "alice",
+            raw_name="Alice",
+        )
+        spy = _SpyStore(store)
+        resolve = build_name_alias_resolver(spy)
+
+        for variant in ("Alice", "ALICE", " alice ", "aLiCe"):
+            assert resolve(variant) == ["ent-alice"]
+        assert spy.query_calls == 0
+        assert spy.alias_write_calls == 0
 
 
 class TestAmbiguityIsNeverMerged:
@@ -224,7 +211,7 @@ class TestAmbiguityIsNeverMerged:
 
 
 class TestBindingLifecycle:
-    """What a minted binding does when the graph moves underneath it."""
+    """What a governed binding does when the graph moves underneath it."""
 
     def test_a_later_same_named_entity_does_not_reopen_the_ambiguity(
         self, store
@@ -240,6 +227,12 @@ class TestBindingLifecycle:
         entities, which is deletable; no node is merged or rewritten.
         """
         _add_entity(store, "ent-first", "Hermes")
+        store.bind_alias_if_absent(
+            "ent-first",
+            NAME_ALIAS_SOURCE_SYSTEM,
+            "hermes",
+            raw_name="Hermes",
+        )
         spy = _SpyStore(store)
         resolve = build_name_alias_resolver(spy)
         assert resolve("Hermes") == ["ent-first"]
@@ -247,7 +240,7 @@ class TestBindingLifecycle:
         _add_entity(store, "ent-second", "Hermes")
 
         assert resolve("Hermes") == ["ent-first"]
-        assert spy.query_calls == 1  # never looked again
+        assert spy.query_calls == 0  # the governed index answered both reads
 
     def test_binding_to_a_missing_entity_is_dropped_and_rescanned(
         self, store, log_output
@@ -270,9 +263,9 @@ class TestBindingLifecycle:
         resolve = build_name_alias_resolver(store)
 
         assert resolve("Hermes") == ["ent-new"]
-        rebound = store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "hermes")
-        assert rebound is not None
-        assert rebound["entity_id"] == "ent-new"
+        stale = store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "hermes")
+        assert stale is not None
+        assert stale["entity_id"] == "ent-gone"
         dropped = [
             e
             for e in log_output
@@ -282,6 +275,12 @@ class TestBindingLifecycle:
 
     def test_renamed_entity_releases_its_binding(self, store, log_output) -> None:
         _add_entity(store, "ent-a", "Hermes")
+        store.bind_alias_if_absent(
+            "ent-a",
+            NAME_ALIAS_SOURCE_SYSTEM,
+            "hermes",
+            raw_name="Hermes",
+        )
         resolve = build_name_alias_resolver(store)
         assert resolve("Hermes") == ["ent-a"]
 
@@ -298,6 +297,12 @@ class TestBindingLifecycle:
     def test_binding_check_failure_keeps_the_binding(self, store, monkeypatch) -> None:
         """An outage on the validation read must not discard good data."""
         _add_entity(store, "ent-alice", "Alice")
+        store.bind_alias_if_absent(
+            "ent-alice",
+            NAME_ALIAS_SOURCE_SYSTEM,
+            "alice",
+            raw_name="Alice",
+        )
         resolve = build_name_alias_resolver(store)
         assert resolve("Alice") == ["ent-alice"]
 
@@ -356,17 +361,19 @@ class TestScanCap:
         resolve = build_name_alias_resolver(spy, scan_limit=2)
 
         assert resolve("Target") == ["ent-target"]
-        assert spy.minted == []
+        assert spy.alias_write_calls == 0
 
     def test_indexed_name_resolves_past_the_cap(self, store) -> None:
-        """Once minted, graph size is irrelevant — the lookup is a single
+        """Once governed, graph size is irrelevant — the lookup is a single
         indexed row read, not a scan."""
         _add_entity(store, "ent-target", "Target")
+        store.bind_alias_if_absent(
+            "ent-target",
+            NAME_ALIAS_SOURCE_SYSTEM,
+            "target",
+            raw_name="Target",
+        )
         spy = _SpyStore(store)
-
-        # Mint while the graph is small enough for the scan to see it.
-        build_name_alias_resolver(spy, scan_limit=10)("Target")
-        assert spy.query_calls == 1
 
         for i in range(20):
             _add_entity(store, f"ent-{i}", f"Filler {i}")
@@ -374,7 +381,7 @@ class TestScanCap:
         # A cap of 1 would defeat any scan-based resolver.
         resolve = build_name_alias_resolver(spy, scan_limit=1)
         assert resolve("Target") == ["ent-target"]
-        assert spy.query_calls == 1  # unchanged: no scan ran
+        assert spy.query_calls == 0
 
 
 class TestStoreFailures:
@@ -398,7 +405,7 @@ class TestStoreFailures:
             raise RuntimeError(msg)
 
         monkeypatch.setattr(store, "resolve_alias", _boom)
-        resolve = build_name_alias_resolver(store, mint=False)
+        resolve = build_name_alias_resolver(store)
 
         assert resolve("Alice") == ["ent-alice"]
 
@@ -406,7 +413,7 @@ class TestStoreFailures:
 class TestWritePathWiring:
     """Both write paths must share this builder, not re-derive it."""
 
-    def test_ingest_hook_resolver_mints(self, tmp_path: Path) -> None:
+    def test_ingest_hook_resolver_is_read_only(self, tmp_path: Path) -> None:
         from trellis.extract.memory_ingest_hook import _graph_alias_resolver
         from trellis.stores.registry import StoreRegistry
 
@@ -419,9 +426,9 @@ class TestWritePathWiring:
         resolve = _graph_alias_resolver(registry)
 
         assert resolve("alice") == ["ent-alice"]
-        assert graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "alice") is not None
+        assert graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "alice") is None
 
-    def test_mcp_resolver_mints(self, tmp_path: Path) -> None:
+    def test_mcp_resolver_is_read_only(self, tmp_path: Path) -> None:
         from trellis.mcp.server import _build_alias_resolver
         from trellis.stores.registry import StoreRegistry
 
@@ -434,7 +441,7 @@ class TestWritePathWiring:
         resolve = _build_alias_resolver(registry)
 
         assert resolve("ALICE") == ["ent-alice"]
-        assert graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "alice") is not None
+        assert graph.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, "alice") is None
 
     def test_mcp_scan_failure_is_soft_like_the_ingest_path(
         self, tmp_path: Path, monkeypatch

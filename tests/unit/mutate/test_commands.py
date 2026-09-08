@@ -26,7 +26,8 @@ class TestOperation:
         # + RETENTION_RESTORE (adr-retention-prune.md §6 — the governed
         # inverse of retention.prune, without which phase-one archival's
         # "walk it back by re-stamping" claim has no sanctioned path)
-        assert len(Operation) == 20
+        # + ALIAS_UPSERT (governed alias/backfill writes)
+        assert len(Operation) == 21
 
 
 class TestCommand:
