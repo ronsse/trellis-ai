@@ -204,3 +204,44 @@ plan predicts.
   `truncate_excerpt` are the only limiters. Measure the per-path document count after the
   backfill before adding a cap — a cap chosen before the distribution is known is the
   `max_items`-as-quota mistake (#359).
+
+## What was built — 2026-09-09
+
+Part A is implemented; Part B (the backfill and the nightly pass) remains owner-run ops.
+Four things went differently from the plan above, recorded because each was a decision
+rather than a detail.
+
+**The allowlist was widened by one file pair.** `src/trellis_cli/retrieve.py` renders the
+same result set for a human — `trellis retrieve file-context`'s text arm — and the plan only
+considered the markdown formatter. Annotating one human-facing renderer and not the other is
+the `content_type` / `document_form` drift this repo keeps producing, one surface apart
+instead of one module apart, so the CLI carries the same annotation and
+`tests/unit/cli/test_retrieve.py` pins both arms (text annotated, JSON carrying the raw key).
+The JSON/JSONL arms needed no change — they pass the entry dict through whole.
+
+**Touched documents anchor their entities.** The plan scoped `files_touched` to the document
+half. It is threaded into `anchors_by_path` as well, so the Activity entity extracted from a
+trace that edited this file surfaces alongside the trace summary. Anchoring only the
+`source_path` half would return the document and hide the entities linked to it, which is a
+stranger answer than either extreme.
+
+**The annotation says "record of changing this file", not "touched by this trace".** Nothing
+restricts `files_touched` to traces — it is ordinary metadata a `save_memory` caller can
+write — so naming the producer in the rendering would be a claim the key does not make.
+
+**A mutant survived and the test was the thing at fault.** Guarding the member list with
+`is not None` instead of `isinstance(..., list)` passed the whole suite: a bare string, the
+malformation the test used, is merely an unhelpful iterable under both. Only a non-iterable
+separates them, so the case now seeds a string, an int and a dict. Fourteen mutants across
+the four source files are killed, including the two that matter most — reading
+`files_touched_unverified` instead of the attested key, and stamping `files_read` instead of
+`files_touched`.
+
+Suite: **6720 passed, 1 skipped, 661 deselected** locally, which per `docs/design/swarm-handoff.md`
+says nothing about any cloud backend — though nothing here touches one. Ruff 0.16.5 and
+mypy clean (331 source files; the count is checked because a zero-file mypy run reads as
+success).
+
+**Still zero observable change on any deployment.** The producer writes at trace-render time
+and no trace has ever been rendered, so the measurement in the section above has to wait for
+Part B.
