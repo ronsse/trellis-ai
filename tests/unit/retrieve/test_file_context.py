@@ -461,3 +461,249 @@ class TestNewestItemAtIsAStalenessGate:
 
         after = _build(registry, ["widget.py"])["paths"][0]["newest_item_at"]
         assert after == before
+
+
+class TestFilesTouchedMatching:
+    """The second key (#549).
+
+    ``source_path`` is a self-description — *this is that file*. A trace
+    summary's is ``trace/<id>``, a namespace, so no path-matching rule
+    could ever reach it. ``files_touched`` is the other claim — *this is
+    a record of changing that file* — and matching it is what makes the
+    records of work on a file reachable from the file.
+    """
+
+    def test_a_trace_summary_is_reachable_by_a_file_it_edited(
+        self, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.document_store.put(
+            "trace-summary:t1",
+            "Fixed the drift query; both paths were dead.",
+            metadata={
+                "source_path": "trace/t1",
+                "source_system": "trellis-trace",
+                "files_touched": ["src/trellis/retrieve/file_context.py"],
+            },
+        )
+        result = _build(registry, ["src/trellis/retrieve/file_context.py"])
+        (doc,) = result["paths"][0]["documents"]
+        assert doc["doc_id"] == "trace-summary:t1"
+        assert doc["matched_via"] == "files_touched"
+        # The entry still reports the document's *own* path, unchanged —
+        # the query path is the heading, not a property of the document.
+        assert doc["source_path"] == "trace/t1"
+
+    def test_source_path_alone_would_never_have_matched(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The baseline, measured in the same file rather than asserted from
+        memory: with the touched key absent, the identical document is
+        unreachable from the path — which is what every deployment did."""
+        registry.knowledge.document_store.put(
+            "trace-summary:t1",
+            "Fixed the drift query.",
+            metadata={"source_path": "trace/t1", "source_system": "trellis-trace"},
+        )
+        result = _build(registry, ["src/trellis/retrieve/file_context.py"])
+        assert result["paths"][0]["documents"] == []
+
+    def test_source_path_match_is_labelled_and_wins(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A document satisfying both keys reports the stronger claim."""
+        registry.knowledge.document_store.put(
+            "doc-1",
+            "content",
+            metadata={
+                "source_path": "notes/foo.md",
+                "files_touched": ["notes/foo.md"],
+            },
+        )
+        (doc,) = _build(registry, ["notes/foo.md"])["paths"][0]["documents"]
+        assert doc["matched_via"] == "source_path"
+
+    def test_every_entry_carries_the_key(self, registry: StoreRegistry) -> None:
+        """Unconditional on both branches. A field present only on the new
+        kind of match would make "matched by source_path" indistinguishable
+        from "written before the field existed"."""
+        registry.knowledge.document_store.put(
+            "doc-1", "content", metadata={"source_path": "notes/foo.md"}
+        )
+        (doc,) = _build(registry, ["notes/foo.md"])["paths"][0]["documents"]
+        assert doc["matched_via"] == "source_path"
+
+    def test_members_are_matched_by_the_same_path_rule(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Per member, so the boundary and single-segment rules hold inside
+        the list: a trace that edited a bare ``TODO.md`` must not answer a
+        read of every other ``TODO.md`` on the machine."""
+        registry.knowledge.document_store.put(
+            "trace-summary:t1",
+            "Edited two files.",
+            metadata={
+                "source_path": "trace/t1",
+                "files_touched": ["TODO.md", "src/trellis/retrieve/strategies.py"],
+            },
+        )
+        assert (
+            _build(registry, ["/home/n/projects/other/TODO.md"])["paths"][0][
+                "documents"
+            ]
+            == []
+        )
+        # Same document, a member that does span a directory: reachable by
+        # an absolute query, exactly as ``source_path`` would be.
+        (doc,) = _build(
+            registry, ["/home/n/projects/trellis-ai/src/trellis/retrieve/strategies.py"]
+        )["paths"][0]["documents"]
+        assert doc["doc_id"] == "trace-summary:t1"
+
+    def test_the_unverified_companion_is_never_matched(
+        self, registry: StoreRegistry
+    ) -> None:
+        """#308 splits attested evidence from model claims precisely so a
+        join like this one can be trusted. Matching the companion would put
+        a memory in front of an agent reading a file the trace never
+        touched — the one place an unattested claim does the most damage."""
+        registry.knowledge.document_store.put(
+            "trace-summary:t1",
+            "Claimed more than it did.",
+            metadata={
+                "source_path": "trace/t1",
+                "files_touched_unverified": ["src/trellis/retrieve/file_context.py"],
+            },
+        )
+        result = _build(registry, ["src/trellis/retrieve/file_context.py"])
+        assert result["paths"][0]["documents"] == []
+
+    def test_a_malformed_value_costs_a_match_and_nothing_else(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The key is reachable through ``save_memory``'s free-form metadata,
+        so a malformed value must not take down the whole scan for every
+        path. Both shapes are here on purpose: a bare string is the likely
+        mistake (a caller writing one path instead of a list) and is merely
+        an unhelpful iterable, while a non-iterable is the one that raises —
+        a guard tested only against the string is satisfied by ``is not
+        None`` and never exercised."""
+        registry.knowledge.document_store.put(
+            "doc-str", "content", metadata={"files_touched": "notes/foo.md"}
+        )
+        registry.knowledge.document_store.put(
+            "doc-int", "content", metadata={"files_touched": 42}
+        )
+        registry.knowledge.document_store.put(
+            "doc-dict", "content", metadata={"files_touched": {"notes/foo.md": 1}}
+        )
+        registry.knowledge.document_store.put(
+            "doc-good", "content", metadata={"source_path": "notes/foo.md"}
+        )
+        (doc,) = _build(registry, ["notes/foo.md"])["paths"][0]["documents"]
+        assert doc["doc_id"] == "doc-good"
+
+    def test_a_mixed_pool_is_partitioned_not_swept(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Three documents, one call: one matching on ``source_path``, one only
+        via ``files_touched``, one matching neither. A pool where every member
+        matches the same way cannot separate "reads the new key" from "returns
+        everything" — the #447 uniformity trap, one layer up."""
+        registry.knowledge.document_store.put(
+            "doc-own",
+            "The file's own notes.",
+            metadata={"source_path": "src/trellis/retrieve/pack_builder.py"},
+        )
+        registry.knowledge.document_store.put(
+            "trace-summary:t1",
+            "Edited the pack builder.",
+            metadata={
+                "source_path": "trace/t1",
+                "files_touched": ["src/trellis/retrieve/pack_builder.py"],
+            },
+        )
+        registry.knowledge.document_store.put(
+            "trace-summary:t2",
+            "Edited something else entirely.",
+            metadata={
+                "source_path": "trace/t2",
+                "files_touched": ["src/trellis/retrieve/strategies.py"],
+            },
+        )
+        (entry,) = _build(registry, ["src/trellis/retrieve/pack_builder.py"])["paths"]
+        assert {d["doc_id"]: d["matched_via"] for d in entry["documents"]} == {
+            "doc-own": "source_path",
+            "trace-summary:t1": "files_touched",
+        }
+
+    def test_a_non_string_member_is_skipped_not_fatal(
+        self, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.document_store.put(
+            "trace-summary:t1",
+            "content",
+            metadata={
+                "source_path": "trace/t1",
+                "files_touched": [42, None, "src/trellis/retrieve/strategies.py"],
+            },
+        )
+        (doc,) = _build(registry, ["src/trellis/retrieve/strategies.py"])["paths"][0][
+            "documents"
+        ]
+        assert doc["doc_id"] == "trace-summary:t1"
+
+    def test_touched_documents_anchor_their_entities(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The Activity entity extracted from a trace that edited this file
+        is file context by the same argument the trace summary is. Anchoring
+        only the ``source_path`` half would return the document and hide the
+        entities linked to it."""
+        registry.knowledge.document_store.put(
+            "trace-summary:t1",
+            "Fixed the drift query.",
+            metadata={
+                "source_path": "trace/t1",
+                "files_touched": ["src/trellis/retrieve/file_context.py"],
+            },
+        )
+        registry.knowledge.graph_store.upsert_node(
+            "trace:t1",
+            "Activity",
+            {"name": "Fix the drift query"},
+            document_ids=["trace-summary:t1"],
+        )
+        result = _build(registry, ["src/trellis/retrieve/file_context.py"])
+        (entity,) = result["paths"][0]["entities"]
+        assert entity["entity_id"] == "trace:t1"
+
+    def test_the_producer_and_the_matcher_agree(self, registry: StoreRegistry) -> None:
+        """The seam this whole change lives or dies on, closed in one test
+        rather than across two files: the metadata the trace-embed worker
+        actually writes, fed to the matcher that actually reads it. A pair
+        of tests each asserting its own side of a key name is how #325/#326
+        shipped two readers of one seam that silently disagreed."""
+        from trellis.schemas.enums import TraceSource
+        from trellis.schemas.trace import Trace, TraceContext, TraceStep
+        from trellis_workers.trace_embed.render import build_trace_metadata
+
+        trace = Trace(
+            trace_id="t1",
+            source=TraceSource.AGENT,
+            intent="Fix the drift query",
+            context=TraceContext(domain="trellis-ops"),
+            steps=[
+                TraceStep(
+                    step_type="tool_call",
+                    name="Edit",
+                    args={"file_path": "src/trellis/retrieve/file_context.py"},
+                )
+            ],
+        )
+        registry.knowledge.document_store.put(
+            "trace-summary:t1", "Fixed it.", metadata=build_trace_metadata(trace)
+        )
+        result = _build(registry, ["src/trellis/retrieve/file_context.py"])
+        (doc,) = result["paths"][0]["documents"]
+        assert doc["doc_id"] == "trace-summary:t1"
+        assert doc["matched_via"] == "files_touched"

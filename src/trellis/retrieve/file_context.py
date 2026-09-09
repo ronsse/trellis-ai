@@ -1,8 +1,10 @@
 """File-scoped context retrieval — the server-side half of read-time file context.
 
 Given one or more file paths, surface what the memory system already knows
-about those files: documents whose ``metadata.source_path`` names the path,
-and graph entities doc-linked (``document_ids``) to those documents. The
+about those files: documents that *name* the path — either as their own
+``metadata.source_path`` or as one of the repo paths a trace's tool calls
+demonstrably modified (``metadata.files_touched``) — and graph entities
+doc-linked (``document_ids``) to those documents. The
 client half of #307 (a Claude Code ``PreToolUse`` Read hook with an mtime
 staleness gate) consumes this, so every item carries its store timestamps
 and each path carries ``newest_item_at`` — the client compares that against
@@ -34,6 +36,29 @@ the root of the vault *and* of every repo, so a bare basename identifies
 a file no better than a coin flip — and those are exactly the files a
 read-time hook asks about most. Nothing more: no case folding and no
 separator rewriting, because stored values are POSIX already.
+
+The second key, and why one key was not enough
+----------------------------------------------
+``source_path`` is a *self*-description: it says where this document came
+from. A trace summary's is ``trace/<trace_id>`` — a namespace, not a repo
+path — so no amount of path matching could ever reach the memories that
+matter most to a file: the records of work done *on* it. Traces are the
+one corpus with a second, structurally different claim on a path, so
+``metadata.files_touched`` is matched too, by the same rule per member
+(#549).
+
+Which key matched rides out on each entry as ``matched_via``
+(``"source_path"`` | ``"files_touched"``), because the two are not
+interchangeable evidence: the first says *this is that file*, the second
+says *this is a record of changing that file*, and a consumer ranking or
+rendering them identically is asserting something neither key claims.
+``source_path`` wins when a document satisfies both.
+
+Only the attested key is read. ``files_touched`` is the evidence-only
+half of #308's deterministic override — a model's *claim* about what it
+edited lives under ``files_touched_unverified`` and is deliberately not
+matched here, because an unattested claim would put a memory in front of
+an agent reading a file the trace never touched.
 
 Graph anchoring
 ---------------
@@ -93,6 +118,16 @@ _DOC_PAGE_SIZE = 500
 #: reporting the shortfall as an absence.
 DEFAULT_GRAPH_SCAN_LIMIT = 2000
 
+#: Metadata key carrying the repo paths a trace's tool calls demonstrably
+#: modified, written by ``trellis_workers.trace_embed.render``. Spelled
+#: out rather than inlined so the ``_unverified`` companion (#308) cannot
+#: be reached by a prefix match or a future ``startswith`` refactor.
+FILES_TOUCHED_KEY = "files_touched"
+
+#: Values of a document entry's ``matched_via``.
+MATCH_SOURCE_PATH = "source_path"
+MATCH_FILES_TOUCHED = "files_touched"
+
 
 def source_path_matches(stored: Any, query: str) -> bool:
     """``True`` when a stored ``source_path`` names the queried file path.
@@ -115,6 +150,23 @@ def source_path_matches(stored: Any, query: str) -> bool:
     if "/" in stored and query.endswith("/" + stored):
         return True
     return "/" in query and stored.endswith("/" + query)
+
+
+def files_touched_matches(metadata: dict[str, Any], query: str) -> bool:
+    """``True`` when a trace's attested touched files name ``query``.
+
+    Each member is matched by :func:`source_path_matches`, so the
+    single-segment rule holds per entry: a trace that edited a bare
+    ``TODO.md`` does not answer a read of every other ``TODO.md``.
+
+    A non-list value is not a match rather than an error — the key is
+    caller-reachable through ``save_memory`` metadata, which is free-form,
+    and a malformed one should cost a match and nothing else.
+    """
+    touched = metadata.get(FILES_TOUCHED_KEY)
+    if not isinstance(touched, list):
+        return False
+    return any(source_path_matches(entry, query) for entry in touched)
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -141,7 +193,11 @@ def _newest_timestamp(items: list[dict[str, Any]]) -> str | None:
     return newest.isoformat() if newest is not None else None
 
 
-def _document_entry(doc: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+def _document_entry(
+    doc: dict[str, Any],
+    metadata: dict[str, Any],
+    matched_via: str,
+) -> dict[str, Any]:
     return {
         "doc_id": doc.get("doc_id"),
         "source_path": metadata.get("source_path"),
@@ -150,6 +206,10 @@ def _document_entry(doc: dict[str, Any], metadata: dict[str, Any]) -> dict[str, 
         "excerpt": truncate_excerpt(str(doc.get("content") or "")),
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
+        # Always present, both values, for every entry. A key that appears
+        # only on the new kind of match would make "matched by source_path"
+        # and "written before this field existed" the same observation.
+        "matched_via": matched_via,
     }
 
 
@@ -175,12 +235,20 @@ def _matching_documents(
     document_store: DocumentStore,
     paths: Sequence[str],
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, set[str]]]:
-    """Scan the document store once for ``source_path`` matches.
+    """Scan the document store once for path matches on either key.
+
+    A document matches a path via its own ``source_path`` or via a member
+    of its attested ``files_touched``; ``source_path`` takes precedence
+    when both hold, so ``matched_via`` names the stronger claim.
 
     Returns per-path document entries (parent rows only — chunk rows
     repeat the parent's content and path) and per-path anchor doc-id sets
     (parents *and* chunks, because an entity's ``document_ids`` link may
-    name either).
+    name either). Anchors are taken from both match kinds: the Activity
+    entity extracted from a trace that edited this file is file context by
+    the same argument the trace summary itself is, and anchoring only the
+    ``source_path`` half would return the document while hiding the
+    entities linked to it.
     """
     # Deferred: ``trellis.ingest_corpus.__init__`` pulls ``sync``, which
     # imports back into ``trellis.retrieve`` (the embed hook). At module
@@ -202,12 +270,18 @@ def _matching_documents(
             metadata = doc.get("metadata") or {}
             stored = metadata.get("source_path")
             for path in paths:
-                if not source_path_matches(stored, path):
+                if source_path_matches(stored, path):
+                    matched_via = MATCH_SOURCE_PATH
+                elif files_touched_matches(metadata, path):
+                    matched_via = MATCH_FILES_TOUCHED
+                else:
                     continue
                 doc_id = str(doc.get("doc_id") or "")
                 anchors_by_path[path].add(doc_id)
                 if not is_chunk_doc_id(doc_id):
-                    docs_by_path[path].append(_document_entry(doc, metadata))
+                    docs_by_path[path].append(
+                        _document_entry(doc, metadata, matched_via)
+                    )
         if len(page) < _DOC_PAGE_SIZE:
             break
 
@@ -303,7 +377,8 @@ def build_file_context(
         graph_store: Knowledge-plane graph store (open ABC, hence ``Any``
             — same convention as :class:`GraphSearch`).
         paths: File paths to look up. Matched against stored
-            ``metadata.source_path`` values as described in the module
+            ``metadata.source_path`` values *and* attested
+            ``metadata.files_touched`` members as described in the module
             docstring; duplicates are collapsed, order is preserved.
         include_unconfirmed: Surface unconfirmed extraction mints (#301).
             Off by default — extraction attests *mention*, not fact.
@@ -356,6 +431,10 @@ def build_file_context(
 
 __all__ = [
     "DEFAULT_GRAPH_SCAN_LIMIT",
+    "FILES_TOUCHED_KEY",
+    "MATCH_FILES_TOUCHED",
+    "MATCH_SOURCE_PATH",
     "build_file_context",
+    "files_touched_matches",
     "source_path_matches",
 ]
