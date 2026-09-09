@@ -280,16 +280,25 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   it had a green 56-case Postgres contract run on its PR and reported it as unverified.
   Re-read `.github/workflows/live-infra.yml`'s `on:` block rather than trusting this
   sentence.
-- **Nowhere at all:** the ArcadeDB graph contract (`test_arcadedb_graph_contract.py`).
-  ArcadeDB is the *blessed* graph + vector substrate and its contract has no service
-  container in any workflow ([#351](https://github.com/ronsse/trellis-ai/issues/351)).
-  The 59 Postgres-marked tests under `tests/unit/stores/` outside `contracts/` are still
-  deselected: the all-extras leg supplies their imports but no database, while
-  `live-infra.yml` names paths rather than markers. Sweeping that whole directory into the
-  live job does not work yet:
-  `test_neo4j_vector.py::TestQuery` issues AuraDB-only Cypher that self-hosted
-  `neo4j:2025.12` cannot parse, and unlike the e2e suite it has no capability probe
-  ([#356](https://github.com/ronsse/trellis-ai/issues/356)).
+- **Also on both triggers, since [#351](https://github.com/ronsse/trellis-ai/issues/351)
+  landed (#543): the ArcadeDB graph contract.** This bullet said "**Nowhere at all**" until
+  2026-09-09 and was stale by six days. `live-infra.yml` declares the
+  `arcadedata/arcadedb:26.8.1` service (`:95`) **and** sets `TRELLIS_TEST_ARCADEDB: "1"`
+  (`:175`) — the second half is the load-bearing one, because `tests/conftest.py:68` gates
+  the `arcadedb` marker on that variable, so a service container without the toggle is a
+  decoration and the suite stays deselected. `GraphStoreContractTests` therefore covers
+  Postgres + Neo4j + ArcadeDB in that job. `tests/unit/test_arcadedb_live_infra_rule.py`
+  derives the pairing so this cannot silently regress to the state the sentence described.
+- **Two of the Postgres-marked files outside `contracts/` now run too**, since
+  [#356](https://github.com/ronsse/trellis-ai/issues/356)'s Postgres half (#545):
+  `test_postgres_stores.py` and `test_api_key_store.py` are named explicitly at
+  `live-infra.yml:217-218` and pinned by `tests/unit/test_postgres_live_infra_rule.py`. The
+  rest of `tests/unit/stores/` outside `contracts/` is still deselected — the all-extras leg
+  supplies their imports but no database, while `live-infra.yml` names paths rather than
+  markers. **Sweeping the whole directory in still does not work**, which is the open
+  remainder of #356: `test_neo4j_vector.py::TestQuery` issues AuraDB-grade
+  `SEARCH ... IN (VECTOR INDEX ...)` that self-hosted `neo4j:2025.12` cannot parse, and
+  unlike the e2e suite it has no capability probe.
 
 Note the shape of the #345 defect, because it is the one this repo keeps producing: the
 pgvector contract had *never executed anywhere*, because its fixture called `_conn` as an

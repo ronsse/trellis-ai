@@ -1,7 +1,15 @@
 # Open-issue adversarial corpus — 2026-09-04
 
 Dated snapshot of **40 open GitHub issues** reviewed against current `main` at `f9ff32c933020e267f5560493f4739538d2b95f6`.
-**Current disposition:** 40 remain open on GitHub (#525 is duplicate of #526; external close was blocked at review time — count stays 40 until the mutation actually lands).
+**The verdicts, waves and briefs below are fixed at that SHA and are not maintained** — that is what makes them evidence. Live requirements are on each GitHub issue.
+
+> ## Execution status (updated 2026-09-09, `main` at `1ef5c9c`)
+>
+> **This corpus has been executed once.** Thirteen of the forty briefs shipped a PR between `e4e7604` and `1ef5c9c`; **seven issues closed** (#342, #350, #351, #439, #522, #523, #526) and **five stayed open by design** with the remainder named in each PR body (#256, #264, #356, #360, #514). #369 shipped #530 and its stated closure gate has since been met.
+>
+> Per-issue execution state lives in [`manifest.json`](./manifest.json) — `status` is now one of `not-started` / `partial` / `closed` / `closure-ready` / `deferred`, with `pr` naming the merge. **The disposition and wave lists further down this file are the 2026-09-04 snapshot and have not been rewritten.**
+>
+> What to dispatch next: [`docs/plans/2026-09-09-overnight-corpus.md`](../../../plans/2026-09-09-overnight-corpus.md).
 
 **Sources of truth:** GitHub issue bodies/comments/labels and [`docs/design/implementation-roadmap.md`](../../../design/implementation-roadmap.md).
 This directory holds **review evidence** (verdicts, measurements, disposition criteria) — not authoritative requirements.

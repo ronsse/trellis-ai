@@ -11,8 +11,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "closed",
+    "pr": "533"
   },
   {
     "issue": 525,
@@ -28,7 +28,7 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
+    "status": "closure-ready",
     "pr": "none"
   },
   {
@@ -43,8 +43,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "closed",
+    "pr": "532"
   },
   {
     "issue": 522,
@@ -58,8 +58,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "closed",
+    "pr": "536"
   },
   {
     "issue": 515,
@@ -89,8 +89,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "partial",
+    "pr": "535"
   },
   {
     "issue": 503,
@@ -244,8 +244,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "closed",
+    "pr": "534"
   },
   {
     "issue": 405,
@@ -305,8 +305,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "closure-ready",
+    "pr": "530"
   },
   {
     "issue": 365,
@@ -356,8 +356,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "partial",
+    "pr": "538,544"
   },
   {
     "issue": 356,
@@ -373,8 +373,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "partial",
+    "pr": "545"
   },
   {
     "issue": 351,
@@ -388,8 +388,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "closed",
+    "pr": "543"
   },
   {
     "issue": 350,
@@ -402,8 +402,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "closed",
+    "pr": "539"
   },
   {
     "issue": 342,
@@ -417,8 +417,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "closed",
+    "pr": "531"
   },
   {
     "issue": 306,
@@ -466,8 +466,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "partial",
+    "pr": "540"
   },
   {
     "issue": 261,
@@ -514,8 +514,8 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "not-started",
-    "pr": "none"
+    "status": "partial",
+    "pr": "537"
   },
   {
     "issue": 250,

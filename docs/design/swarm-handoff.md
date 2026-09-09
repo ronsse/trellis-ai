@@ -315,49 +315,60 @@ optional [`plans/`](../issues/reviews/2026-09-04/plans/). Waves in
 [`autonomous-backlog.md`](./autonomous-backlog.md) are historical measurements — **not** a
 copy of the 40 briefs.
 
-Reviewed against `main` at `e4e7604` before this doc commit. **Determine live `main` via
+Reviewed against `main` at `1ef5c9c` (2026-09-09). **Determine live `main` via
 `git rev-parse origin/main`.**
 
-**Snapshot:** 40 open on GitHub (2026-09-04 review). [#525](https://github.com/ronsse/trellis-ai/issues/525)
-is **duplicate/closure-ready** (`duplicate` of #526); [#364](https://github.com/ronsse/trellis-ai/issues/364)
-is **stale-fixed/closure-ready** (PR #389) — do not dispatch either until GitHub reflects
-the close.
+**Snapshot:** 37 open on GitHub — 33 of the 2026-09-04 review's 40, plus #546–#549.
+[#525](https://github.com/ronsse/trellis-ai/issues/525) is **duplicate/closure-ready**
+(`duplicate` of #526, and **#526 has now closed** via #533);
+[#364](https://github.com/ronsse/trellis-ai/issues/364) is **stale-fixed/closure-ready**
+(PR #389). Both are closable — see Lane A of
+[`docs/plans/2026-09-09-overnight-corpus.md`](../plans/2026-09-09-overnight-corpus.md).
 
-### First executable batches *(not exhaustive)*
+### Batch 1 and Batch 2 are merged — do not re-dispatch them
 
-**Batch 1 — early parallel** (disjoint territories; recheck before dispatch):
+**This section listed #360 PR1, the #256 seam, #369, #439, #342, #514, #351, #526, #350,
+#522 and #523 as the first executable batches. Every one of them shipped between `e4e7604`
+and `1ef5c9c`**, and the list stood for six days describing finished work. If you are
+reading a batch list anywhere, check it against `git log` before dispatching — that is the
+recurring cost this repo keeps paying, one layer up from code.
 
-**Wave D (program plan order): [#360](https://github.com/ronsse/trellis-ai/issues/360) PR1 →
-[#256](https://github.com/ronsse/trellis-ai/issues/256) staged seam.** Also parallel when
-disjoint: **#369**, **#439**, **#342**, **#514**.
-
-**#256 dispatch — operator override (2026-09-04, this program only):** live `keystone`
-label normally means **human authorship only**. Operator instruction on 2026-09-04
-explicitly authorized **this plan's Wave D #256 staged seam** for swarm execution under
-`consensus_authorizes` — **not** a general keystone-label override. Scope limited to
-**reversible in-repo PR1**; excludes publishing, external package release, and credentials.
-Owner review and the adversarial merge gate (§4.1) still apply.
-
-- **#264 PR-A** after or parallel with Batch 1 if no file collision; **#264 PR-B**
-  **after #514** when `generate_call_sites` exists.
-- **Serialize #360 PR2 with #264 PR-A** — `save_memory` overlap.
-
-**Batch 2 — CI / stores:** hard dependency **#351 → #356** (manifest). **#526** and **#350**
-have no issue dependency — may parallelize if files/workflows disjoint after recheck.
-Coordinate #526/#351/#356 when touching the same CI workflows (collision scheduling only,
-not a serial chain).
-
-**Other valid-now / valid-slice items** (see manifest + roadmap for full roster):
-
-| Issue | Verdict | Note |
+| Merged | Issue | Disposition |
 |---|---|---|
-| [#522](https://github.com/ronsse/trellis-ai/issues/522) | `valid-now` | Rich renders outside #492 handle rule |
-| [#523](https://github.com/ronsse/trellis-ai/issues/523) | `valid-now` | Boundary test message suppression on long `--basetemp` |
-| [#494](https://github.com/ronsse/trellis-ai/issues/494) | `valid-now` | Document `retrieve pack --quiet` ids |
-| [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | Measurement slice — cache token fields in `TokenUsage` only |
+| #531 | #342 | **closed** |
+| #539 | #350 | **closed** |
+| #543 | #351 | **closed** — ArcadeDB service *and* `TRELLIS_TEST_ARCADEDB` toggle |
+| #534 | #439 | **closed** |
+| #536 | #522 | **closed** |
+| #532 | #523 | **closed** |
+| #533 | #526 | **closed** |
+| #537 | #256 | open — PR1 registry seam only; extraction + publish follow |
+| #540 | #264 | open — PR-A; PR-B (derived roster) was deferred and is **now unblocked** |
+| #545 | #356 | open — Postgres half only; Neo4j capability probe remains |
+| #538, #544 | #360 | open — PR1 ratchet + PR2 `evidence.ingest`; roster 25 → 18 |
+| #530 | #369 | open — its stated gate (ArcadeDB contract green in live CI) is **now met** |
 
-All others: [`manifest.json`](../issues/reviews/2026-09-04/manifest.json); live requirements
-on each **GitHub issue**; roadmap only where it governs that item.
+**The #256 operator override stands and is now spent.** The 2026-09-04 instruction authorized
+**that staged seam only** under `consensus_authorizes` — not a general `keystone` override.
+The seam landed in #537. Package extraction and publishing are **not** covered by it:
+publishing is never an agent's, at any confidence.
+
+### What is dispatchable now
+
+Full sequencing, autonomy classes and traps:
+[`docs/plans/2026-09-09-overnight-corpus.md`](../plans/2026-09-09-overnight-corpus.md).
+Short form, disjoint territories:
+
+| Item | Verdict | Note |
+|---|---|---|
+| **#264 PR-B** | follow-on | Derived judge-site roster. `generate_call_sites` now exists (`tests/ast_rules.py:405`) — reuse its `live_population=` vacuity floor. |
+| **#356** remainder | `valid-now` | Neo4j vector capability probe. Do **not** widen the live-infra selection to all of `tests/unit/stores/`; #545's structural rule pins it. |
+| [#494](https://github.com/ronsse/trellis-ai/issues/494) | `valid-now` | Document `retrieve pack --quiet` ids. Labelled `question` on GitHub, which is what keeps a selector off it. |
+| [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | Measurement slice — cache token fields in `TokenUsage` only. Never planned by the 2026-09-04 sweep. |
+
+All others: [`manifest.json`](../issues/reviews/2026-09-04/manifest.json) — whose `status`
+fields are the 2026-09-04 snapshot, not live state; live requirements on each **GitHub
+issue**; roadmap only where it governs that item.
 
 ### Owner prerequisites *(not dispatchable)*
 
