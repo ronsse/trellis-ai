@@ -28,8 +28,9 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "closure-ready",
-    "pr": "none"
+    "status": "closed",
+    "pr": "533",
+    "execution_note": "Closed 2026-09-09. Resolved by #533, which ships the invariant as a derived rule plus a dev,all PR leg covering both families #525 named."
   },
   {
     "issue": 523,
@@ -305,8 +306,9 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "closure-ready",
-    "pr": "530"
+    "status": "closed",
+    "pr": "530",
+    "execution_note": "Closed 2026-09-09. PR #530's stated closure gate met: live-infra run 34289032492 on 1ef5c9c, 106 TestArcadeDBGraphContract passed incl. all four alias-lifecycle cases."
   },
   {
     "issue": 365,
@@ -339,8 +341,9 @@
     ],
     "review_sha": "f9ff32c933020e267f5560493f4739538d2b95f6",
     "reviewed_at": "2026-09-04",
-    "status": "closure-ready",
-    "pr": "389"
+    "status": "closed",
+    "pr": "389",
+    "execution_note": "Closed 2026-09-09. Disclosure half shipped in #389; the unbuilt verdict-solicitation half is refiled as #550."
   },
   {
     "issue": 360,

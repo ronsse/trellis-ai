@@ -326,3 +326,177 @@ structural rule pins its selection.
   labels stop being advisory and start dispatching, and D1's `question` label becomes load-bearing.
 - **#525 is not a duplicate.** The verdict is one reviewer's, dated 2026-09-04, and #526's fix
   (#533) may not cover the `importorskip` surface #525 names. Check before closing.
+
+---
+
+## 10. The achievable-overnight queue (written 2026-09-09, after Lanes A/C/E executed)
+
+> §1–§9 above are the **full** corpus and stay as written. This section is the subset that is
+> genuinely landable in **one unattended overnight run**, and it exists because most of §1–§9 is
+> now either discharged, owner-gated, or refuted. Dispatch from here; read above for the why.
+
+### 10.1 Already discharged — do not dispatch
+
+| Item | State |
+|---|---|
+| **A1** #369 | **Closed.** Gate met: live-infra run `34289032492` on `1ef5c9c` reports `857 passed, 1 skipped`, incl. 106 `TestArcadeDBGraphContract` PASSED and all four alias-lifecycle cases by name. Read from the run log, not from PR prose. |
+| **A2** #525 | **Closed** — resolved by #533, not merely duplicated. #533 ships #525's invariant as a *derived rule* (`tests/unit/test_importorskip_workflow_rule.py`, 11 cases, 721 lines) plus a `dev,all` PR leg covering both families #525 named. |
+| **A3** #364 | **Closed**, disclosure half shipped in #389; the unbuilt "get more verdicts" half **refiled as #550** with #364's argument quoted verbatim so it is not filed thinner. |
+| **A4** #356 | Remainder stated on the issue. Postgres half shipped (#545), ArcadeDB verified live (#543); only the Neo4j probe remains → **B2**. |
+| **A5** #360 | Remainder stated. Ratchet at 18 (13 doc / 5 vector), hand-read, `test_governed_write_rule.py:126-129`. |
+| **A6** #256 / #264 | Remainders stated. #256 ends in a **PyPI publish** → permanently owner-only. #264 PR-B re-estimated → **B1**. |
+| **Lane C** C1–C3 | **Committed** (`5b87c32`): `CLAUDE.md` ArcadeDB line, `swarm-handoff.md` §6 batch list, review-corpus README + `manifest.json`. |
+| **E1** | **Filed as #551.** Measurement-first, no design pre-committed. |
+
+### 10.2 The queue — two PRs, in parallel, disjoint territories
+
+Sized so each can be dispatched, reviewed under §4.1, and merged inside one run. Both are
+**reversible in-repo changes**: `agent` class.
+
+#### Slot 1 — **B2 / #356: the Neo4j vector capability probe**
+
+- **Territory:** `tests/unit/stores/test_neo4j_vector.py`, `.github/workflows/live-infra.yml`
+- **Work:** port the e2e suite's `SEARCH ... IN (VECTOR INDEX ...)` capability probe onto
+  `TestQuery`, then add that one path to the live-infra pytest invocation.
+- **Serialize against every other CI-workflow edit.** #545's structural rule deliberately pins the
+  current narrow path selection; it will fail a widening not paired with the probe. That is the rule
+  working, not an obstacle — do not weaken it to get green.
+- **Do not** sweep `tests/unit/stores/` wholesale. The comment above the invocation says why and
+  points back at #356.
+- **Evidence of done:** the live-infra job on the PR (it runs on `pull_request` since #401 — re-read
+  the `on:` block rather than trusting any prose that says push-only, including `CLAUDE.md`'s, which
+  was stale for a month and caused an agent to under-state its own green run).
+
+#### Slot 2 — **D2 / #515: cache-token fields in `TokenUsage`**
+
+- **Territory:** `src/trellis/llm/types.py`, `src/trellis/llm/providers/anthropic.py`
+- **Work:** `_extract_usage` (`anthropic.py:186`) reads only `input_tokens` / `output_tokens`. Add
+  the two cache fields to `TokenUsage` (`types.py:19`) and map Anthropic's
+  `cache_creation_input_tokens` / `cache_read_input_tokens`. **The slice is the measurement, not the
+  caching** — enabling prompt caching is a separate decision that needs these numbers first.
+- **#533 changed this item's feasibility and that is why it is in tonight's queue.**
+  `tests.yml:22` now carries a fourth matrix leg, `3.13 / extras: dev,all`, and `all` resolves to
+  `trellis-ai[cloud,neo4j,arcadedb,llm-openai,llm-anthropic,observability]` (`pyproject.toml:124`).
+  So **`anthropic` installs on every PR** and an `importorskip("anthropic")` test now *executes*
+  instead of being deselected everywhere. On 2026-09-04 it would not have. #533's derived rule keeps
+  that true.
+- **Trap — the one that would make this worthless.** Anthropic's `input_tokens` **excludes** cached
+  tokens. Decide explicitly what `total_tokens` means once the fields exist and pin it by test;
+  quietly folding cache reads into the existing total is precisely the failure `CLAUDE.md` names for
+  the sibling metric — *"a metric that improves because its denominator was quietly narrowed"*. If
+  the fields read zero on every live call, **that is the finding**, and it is the correct outcome to
+  report rather than a reason to keep going.
+- `TokenUsage` extends `TrellisModel` (`extra="forbid"`); new fields need defaults so rows written
+  before they existed still parse.
+
+### 10.3 Third slot only if the first two land clean — **B1 / #264 PR-B**
+
+Re-estimated on 2026-09-09 and **the §9 refutation condition fired as designed**, in both directions:
+
+- `generate_call_sites` (`tests/ast_rules.py:405`) **does not generalize** — it is hard-wired to
+  `generate(messages=...)` with no subject parameter. PR-B needs its own ~20-line predicate over
+  `emit_memory_op_judged` call sites. The corpus's "after #514 when `generate_call_sites` exists"
+  note was wrong.
+- **But the hard part is reusable.** `assert_hand_read_floor` (`:1495`),
+  `assert_scan_is_not_vacuous` (`:1640`, which takes the *shipped predicate* as an argument) and
+  `render_evasion_corpus` (`:1105`, parameterised by `subject` / `kwarg`) are all generic, as are
+  `iter_modules` / `construction_names` / `calls_to_any` / `marker_lines` / `decoy_lines`.
+
+Net: one new predicate wired into proved machinery. Bigger than "call a helper", much smaller than
+"build a derived rule from scratch" — which is why it is a third slot and not a fourth night.
+**Trap:** `EXTRACTION` judged-event counts are zero in production while
+`TRELLIS_ENABLE_MEMORY_EXTRACTION` is off, so a rule dividing by observed emissions measures the
+flag, not the roster. Hand-read the floor from the source tree.
+
+### 10.4 Deliberately not in tonight's queue
+
+| Item | Why not |
+|---|---|
+| **D1** #494 | Carries the `question` label — an owner question by construction. The work is small; the *blocker* is the label. |
+| **B3** #514 remainder | Read #535's malformed-distill counter; do not act on it. If it is zero the area is unmeasured and stays deferred. Not a PR. |
+| **#551** (the E1 fix) | Filed tonight, measurement-first. Step 1 is a production query, not code. |
+| **#550** | Filed tonight. Its own first task is measuring grader demand on n≈17 packs — signal work, not overnight code. |
+| **#256** remainder | Ends in a PyPI publish. Never an agent's, at any confidence. |
+| **E2** harness gate (a) | Owner decision — the difference between a queue and a robot. |
+
+### 10.5 Stop condition
+
+**Two merged PRs is a successful night.** The failure mode this corpus is built against is a queue
+that looks full and dispatches agents at already-merged work — which is what §1–§9 was written to
+stop, and what Lane C fixed in three documents. Do not backfill an empty slot from §1–§9 without
+re-checking `git log --oneline origin/main` first; the batch list in `swarm-handoff.md` §6 spent six
+days naming eleven already-merged issues as the next batch.
+
+---
+
+## 11. Come back to the owner — the escalation list
+
+Everything here is either **outside the autonomy boundary** (`~/.claude/CLAUDE.md`: *"Authority is
+bounded by reversibility, not importance"*) or **a split adversarial panel**, which escalates by
+rule rather than being tie-broken. Ordered by what blocks the most.
+
+### 11.1 Panel credit is exhausted — spend, so never an agent's
+
+The `decision-panel` skill's default Nous provider returned **`HTTP Error 402: Payment Required`**
+on `openai/gpt-5.5` mid-run, after ~$0.02 of spend across two briefs. The E1 panel was re-run
+against `moonshotai/kimi-k3` + `x-ai/grok-4.5` + `nvidia:nvidia/nemotron-3-super-120b-a12b` for
+$0.0001 and completed, so **this did not block tonight** — but the default panel composition is
+currently dead, and topping it up is spend. The `nvidia:` free tier absorbed the difference; per the
+skill's own warning it is unreliable at panel timeouts, so it is a fallback, not a replacement.
+
+### 11.2 One genuinely split panel — the E1 test-only sibling
+
+Brief: should the Stage-5 audit gap be filed as **one** measurement-first issue, or **two** (that
+issue plus a test-only sibling that drives `execute()` with a raising `EventLog.emit`)?
+
+| Panelist | Choice | Confidence |
+|---|---|---|
+| `moonshotai/kimi-k3` | D (two issues) | 0.62 |
+| `x-ai/grok-4.5` | A (one issue) | 0.68 |
+| `nvidia:nvidia/nemotron-3-super-120b-a12b` | D (two issues) | 0.78 |
+
+Exit 3, min confidence 0.62. **All three agreed on the uncontested core** — file one
+measurement-first issue, no design pre-commitment, no behaviour change; nobody chose B (SUCCESS with
+a degraded marker) or C (ADR first). That core shipped as **#551**. The split is *only* over the
+second, test-only issue, so that one line comes back here.
+
+**Both `what_would_change_my_mind` conditions were checked before escalating, as the skill requires:**
+
+- Both D-voters conditioned on the same fact — Nemotron: *"Discover an existing test in
+  `tests/unit/mutate/` that mocks `EventLog.emit` to raise and verifies the audit path, making new
+  tests redundant."* One **does** exist: `tests/unit/mutate/test_policy_wiring.py:1036`'s
+  `_BrokenEventLog`, whose `emit` raises `RuntimeError("event log is down")`. **But it exercises
+  `build_policy_gate` — #425's gate-construction seam — not `MutationExecutor.execute`'s Stage 5.**
+  All 19 files in `tests/unit/mutate/` were enumerated and grepped; `test_executor.py` and
+  `test_executor_typed_errors.py` drive `execute()` but only via `h.handle.side_effect = exc`
+  (handler failures). So Nemotron's precise condition is **not** met and Kimi's looser wording
+  literally is. The split stands.
+- Grok's condition was a repo rule requiring characterization tests before design-scoped bug filing.
+  `CONTRIBUTING.md` exists and contains **no such rule**. Not met.
+
+**This also corrects the brief:** its claim that *"`tests/unit/mutate/` contains no test that makes
+`EventLog.emit` raise"* is imprecise. The load-bearing claim — that no test drives `execute()` with
+a raising emit — survives verification, and #551 records the distinction so the next reader does not
+mistake `_BrokenEventLog` for coverage of this gap.
+
+### 11.3 Owner-gated items carried forward
+
+| Item | Why it is yours |
+|---|---|
+| **#494** | Carries the `question` label — an owner question by construction. |
+| **#257** | Live label says `owner-only`; the live label beats the review corpus. |
+| **#250** | `blocked-operator` — console action. |
+| **Board #275 membership** | Blocked on `gh auth refresh -s project`. Credential op. |
+| **#546 Steps 0–4, #547, #548, #549 Part B** | Owner-run by their own briefs. |
+| **#369 production alias backfill** | Prod mutation. Tracked on #375. |
+| **#256 remainder** | Ends in a PyPI publish. |
+| **Harness gate (a)** | Whether `select_candidate` actually dispatches — the difference between a queue and a robot (§5, E2). |
+
+### 11.4 Held, pending an explicit go-ahead — outward-facing
+
+Branches exist locally and are **not pushed**; opening a PR is outward-facing and is confirmed with
+the owner first, per the standing rule.
+
+- `docs/overnight-corpus-2026-09-09` (this document + Lane C record-integrity fixes, `5b87c32`)
+- `feat/549-file-context-files-touched`
+- `plans/nightly-todos-2026-09-09` (`ebe1027`, `56f5835`)

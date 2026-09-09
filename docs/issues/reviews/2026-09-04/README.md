@@ -5,11 +5,13 @@ Dated snapshot of **40 open GitHub issues** reviewed against current `main` at `
 
 > ## Execution status (updated 2026-09-09, `main` at `1ef5c9c`)
 >
-> **This corpus has been executed once.** Thirteen of the forty briefs shipped a PR between `e4e7604` and `1ef5c9c`; **seven issues closed** (#342, #350, #351, #439, #522, #523, #526) and **five stayed open by design** with the remainder named in each PR body (#256, #264, #356, #360, #514). #369 shipped #530 and its stated closure gate has since been met.
+> **This corpus has been executed once, and its closure pass ran on 2026-09-09.** Thirteen of the forty briefs shipped a PR between `e4e7604` and `1ef5c9c`; **ten issues are now closed** — #342, #350, #351, #439, #522, #523, #526 on merge, then #364, #369 and #525 adjudicated on 2026-09-09 against evidence rather than PR prose. **Five stayed open by design**, with the remainder named in each PR body *and* now stated as a comment on each issue (#256, #264, #356, #360, #514).
 >
-> Per-issue execution state lives in [`manifest.json`](./manifest.json) — `status` is now one of `not-started` / `partial` / `closed` / `closure-ready` / `deferred`, with `pr` naming the merge. **The disposition and wave lists further down this file are the 2026-09-04 snapshot and have not been rewritten.**
+> Two issues were **filed** by that pass rather than closed by it: **#550** (the verdict-solicitation half #364 argued for and #389 did not build) and **#551** (Stage 5 commits handler writes before audit emission — measurement-first, no design pre-committed).
 >
-> What to dispatch next: [`docs/plans/2026-09-09-overnight-corpus.md`](../../../plans/2026-09-09-overnight-corpus.md).
+> Per-issue execution state lives in [`manifest.json`](./manifest.json) — `status` is now one of `not-started` / `partial` / `closed` / `closure-ready` / `deferred`, with `pr` naming the merge and `execution_note` recording the evidence a closure rested on. **The disposition and wave lists further down this file are the 2026-09-04 snapshot and have not been rewritten.**
+>
+> What to dispatch next: [`docs/plans/2026-09-09-overnight-corpus.md`](../../../plans/2026-09-09-overnight-corpus.md) — **§10 is the achievable-overnight subset**; §11 is what escalates to the owner.
 
 **Sources of truth:** GitHub issue bodies/comments/labels and [`docs/design/implementation-roadmap.md`](../../../design/implementation-roadmap.md).
 This directory holds **review evidence** (verdicts, measurements, disposition criteria) — not authoritative requirements.
