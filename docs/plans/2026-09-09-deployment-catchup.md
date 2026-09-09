@@ -49,6 +49,25 @@ unauthenticated probe"*), reached by a different route. Reproduced 2026-09-09: t
 unset → key length 0; token exported from `~/.config/op-service-token` → key length 67 and
 the stamp reads back.
 
+**Fifth finding — the drift detector has never been able to fire.** Both the runbook's
+rebuild rule and the nightly DoD-9 metric ask the same question with the same two paths:
+
+```
+git log --oneline --since="$IMG_CREATED" -- src/trellis/api src/trellis/ui
+```
+
+`drift-and-redeploy.md:28` and `skynet-hub/stacks/trellis/roadmap-nightly.sh:121`. **Neither
+path has ever existed in this repository** — `git log --all -- src/trellis/api` and
+`-- src/trellis/ui` each return **0 commits over all history**. The real packages are
+`src/trellis_api` and `src/trellis/mcp`. So `container_dod9.api_ui_commits_since` has
+reported `0` in every nightly status block since the reporter was written
+(skynet-hub `e67bfe2`, 2026-08-02) — not because the containers were current, but because
+the question addressed nothing. Measured today with the corrected paths the same query
+returns **12**. This is the repository's recurring failure mode (*a measurement path wired
+to a constant*) in the one instrument that was supposed to catch the drift this plan is
+about: the metric read `0` on 2026-09-03 while a build from a local-only branch went out,
+and read `0` every night since.
+
 ## The change
 
 ### Step 0 — assert the probe can actually fail (2 min)
@@ -119,12 +138,26 @@ Append two entries to `drift-and-redeploy.md`: a retrospective one for **2026-09
 retrospective entry is the point: the log is only useful if it records the deploys nobody
 meant to make.
 
+### Step 5 — fix the drift query in both places (the detector, not the deploy)
+
+Two files, same edit — `src/trellis/api src/trellis/ui` → `src/trellis_api src/trellis/mcp`:
+
+- `~/projects/skynet-hub/stacks/trellis/roadmap-nightly.sh:121` (the DoD-9 metric)
+- `~/projects/skynet-hub/stacks/trellis/drift-and-redeploy.md:28` (the rebuild rule)
+
+Then prove the corrected metric can be non-zero *and* can be zero, since a constant is
+what is being replaced: run it against the pre-rebuild image (expect **12**) and again
+after Step 3 (expect **0**). A metric that only ever reads `0` is indistinguishable from
+this bug; both readings are the acceptance test.
+
 ## Measurement
 
 - `GET /api/version` `write_provenance.commit` == `git rev-parse --short=9 HEAD` on `main`.
 - `git rev-list --left-right --count main...origin/main` == `0  0`.
 - No branch other than `main` checked out in `~/projects/trellis-ai` at rest (the host CLI
   and stdio MCP run it).
+- The nightly `container_dod9.api_ui_commits_since` reads **12** before the rebuild and
+  **0** after — the first time that field has carried information.
 
 ## Non-goals
 
