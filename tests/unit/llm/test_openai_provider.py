@@ -218,6 +218,27 @@ class TestExtractUsage:
         usage = _extract_usage(obj)
         assert usage == TokenUsage()
 
+    def test_openai_cached_tokens_are_not_mapped_onto_the_cache_fields(self) -> None:
+        # Deliberate, and the reason is a semantic mismatch rather than an
+        # oversight: OpenAI's ``prompt_tokens_details.cached_tokens`` is an
+        # *inclusive subset* of ``prompt_tokens``, while the ``TokenUsage``
+        # cache fields carry Anthropic's semantics, where ``prompt_tokens``
+        # EXCLUDES them. Writing one into the other makes
+        # ``prompt_tokens + cache_read`` double-count on this provider.
+        # ``None`` here means "this adapter reports no cache number", which
+        # is true and is not the same as zero.
+        obj = SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=50,
+            total_tokens=150,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=64),
+        )
+        usage = _extract_usage(obj)
+        assert usage is not None
+        assert usage.prompt_tokens == 100
+        assert usage.cache_creation_input_tokens is None
+        assert usage.cache_read_input_tokens is None
+
 
 # -- Tests: import error handling ------------------------------------------
 
