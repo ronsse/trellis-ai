@@ -44,7 +44,19 @@ def test_live_infra_selects_unwired_postgres_store_suites() -> None:
     assert ".[dev,cloud,neo4j]" in shlex.split(install["run"])
 
 
-def test_live_infra_does_not_sweep_in_neo4j_only_store_tests() -> None:
+def test_live_infra_store_targets_are_named_one_at_a_time() -> None:
+    """``tests/unit/stores/`` is enrolled per path, never swept.
+
+    A sweep would enrol suites nobody has run against these containers, and
+    the directory has already produced one instance of exactly that:
+    ``test_neo4j_vector.py``, whose ``SEARCH ... IN (VECTOR INDEX ...)`` cases
+    the self-hosted ``neo4j:2025.12`` service rejects at parse time. It is in
+    the set now because #356 gave those four cases a capability gate — the
+    condition on that entry, and the reason it is safe, is pinned separately
+    by ``tests/unit/test_neo4j_vector_live_infra_rule.py``. Adding a sixth
+    path means editing this set, which is the review this rule exists to
+    force.
+    """
     test_step = _step("Run live + contract suites against the containers")
     store_targets = {
         target
@@ -54,6 +66,7 @@ def test_live_infra_does_not_sweep_in_neo4j_only_store_tests() -> None:
 
     assert store_targets == {
         Path("tests/unit/stores/contracts"),
+        Path("tests/unit/stores/test_neo4j_vector.py"),
         Path("tests/unit/stores/test_pgvector.py"),
         Path("tests/unit/stores/test_postgres_stores.py"),
         Path("tests/unit/stores/test_api_key_store.py"),

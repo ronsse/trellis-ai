@@ -332,7 +332,7 @@ def _fake_embedder(text: str) -> list[float]:
 
 
 def test_vector_upsert_and_semantic_pack(
-    registry: Any, executor: Any, neo4j_vector_search_supported: bool
+    require_neo4j_vector_search: None, registry: Any, executor: Any
 ) -> None:
     """Embeddings attached to graph nodes are reachable through PackBuilder.
 
@@ -342,15 +342,14 @@ def test_vector_upsert_and_semantic_pack(
     against a similarity query.
 
     Skips on a backend without the Cypher ``SEARCH`` vector clause (a
-    self-hosted Docker Neo4j); runs against AuraDB. See the
-    ``neo4j_vector_search_supported`` fixture.
+    self-hosted Docker Neo4j); runs against AuraDB. The gate is the
+    ``require_neo4j_vector_search`` fixture in ``tests/conftest.py``, the
+    same one the four ``TestQuery`` cases in
+    ``tests/unit/stores/test_neo4j_vector.py`` take. It is listed first so a
+    skipped run does not pay for ``registry``, which waits on index
+    provisioning. Until #356 this test hand-wrote its own copy of that skip
+    reason, which is the drift the shared fixture exists to prevent.
     """
-    if not neo4j_vector_search_supported:
-        pytest.skip(
-            "Neo4j SEARCH vector clause unsupported on this backend "
-            "(self-hosted community/enterprise lacks it; requires AuraDB)"
-        )
-
     create = executor.execute(
         Command(
             operation=Operation.ENTITY_CREATE,
