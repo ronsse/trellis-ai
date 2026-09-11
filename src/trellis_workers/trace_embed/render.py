@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from trellis.core.elision import elide_text
+from trellis.extract.evidence import parse_trace_evidence
 from trellis.schemas.document_metadata import DocumentMetadata
 
 if TYPE_CHECKING:
@@ -191,6 +192,26 @@ def build_trace_metadata(trace: Trace) -> dict[str, Any]:
         "trace_id": trace.trace_id,
         "trace_source": trace.source.value,
     }
+    # The repo paths this trace's tool calls actually modified, so
+    # ``get_file_context`` can reach the trace by file. ``source_path`` is
+    # ``trace/<id>`` — a namespace, not a repo path — so before this key
+    # existed no writer produced anything that tool could match, and it
+    # returned empty for every path on every deployment (#549).
+    #
+    # ``files_touched`` is the **evidence-only** field of #308's deterministic
+    # override: ``parse_trace_evidence`` reads tool-call payloads, so a model's
+    # claim about what it edited lives under the ``_unverified`` companion and
+    # is deliberately not read here. A file join is exactly where an unattested
+    # claim would do the most damage — it would put a memory in front of an
+    # agent reading a file the trace never touched.
+    #
+    # No schema change: ``DocumentMetadata`` is ``extra="forbid"``, but
+    # ``from_mapping`` routes unknown keys into ``custom`` and ``to_metadata``
+    # flattens them back to top level — the same path ``trace_id`` and
+    # ``trace_source`` above already take.
+    files_touched = parse_trace_evidence(trace).files_touched
+    if files_touched:
+        raw["files_touched"] = list(files_touched)
     if trace.outcome is not None:
         raw["outcome_status"] = trace.outcome.status.value
     if ctx is not None:

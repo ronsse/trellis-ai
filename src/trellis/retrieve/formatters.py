@@ -8,6 +8,7 @@ import structlog
 
 from trellis.core.hashing import estimate_tokens as _estimate_tokens
 from trellis.retrieve.excerpts import truncate_excerpt
+from trellis.retrieve.file_context import MATCH_FILES_TOUCHED
 from trellis.retrieve.withholding import WithholdingSummary, format_withholding_note
 from trellis.schemas.advisory import Advisory
 
@@ -626,6 +627,15 @@ def format_file_context_as_markdown(
     per-path ``Newest memory`` line, so a client staleness gate can parse
     them straight out of the markdown.
 
+    A document reached by ``files_touched`` rather than by its own
+    ``source_path`` (#549) is annotated as such. The two are different
+    claims — *this is that file* against *this is a record of changing
+    that file* — and rendering them identically would hand a reader a
+    trace summary under a heading that says it is the file's own
+    documentation. The key itself is on every entry unconditionally;
+    only the *annotation* is conditional, so a programmatic consumer
+    branches on ``matched_via`` and never on this sentence.
+
     Args:
         file_context: The ``{"paths": [...]}`` result dict.
         max_tokens: Maximum token budget.
@@ -658,7 +668,10 @@ def format_file_context_as_markdown(
             for doc in documents:
                 label = doc.get("title") or doc.get("source_path") or "untitled"
                 stamp = doc.get("updated_at") or doc.get("created_at") or "?"
-                lines.append(f"- **{label}** `{doc.get('doc_id')}` (updated {stamp})")
+                line = f"- **{label}** `{doc.get('doc_id')}` (updated {stamp})"
+                if doc.get("matched_via") == MATCH_FILES_TOUCHED:
+                    line += " — record of changing this file"
+                lines.append(line)
                 excerpt = doc.get("excerpt")
                 if excerpt:
                     lines.append(f"  {excerpt}")

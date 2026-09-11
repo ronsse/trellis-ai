@@ -14,7 +14,7 @@ from trellis.retrieve.builder_factory import (
     build_pack_builder,
     describe_axes,
 )
-from trellis.retrieve.file_context import build_file_context
+from trellis.retrieve.file_context import MATCH_FILES_TOUCHED, build_file_context
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.retrieve.withholding import (
     format_withholding_note,
@@ -522,7 +522,18 @@ def file_context(
         _line(f"  Newest memory: {entry['newest_item_at']}")
         for doc in entry["documents"]:
             label = doc.get("title") or doc.get("source_path") or doc["doc_id"]
-            _line(f"  - doc {doc['doc_id']}: {label}")
+            # A document reached by ``files_touched`` is a record of work on
+            # this file, not the file's own documentation (#549). The markdown
+            # formatter annotates the same distinction; leaving it out of the
+            # other human-facing renderer is how two readers of one seam come
+            # to disagree. The JSON/JSONL arms pass ``matched_via`` through
+            # untouched, so a hook parses the key rather than this sentence.
+            via = (
+                " (record of changing this file)"
+                if doc.get("matched_via") == MATCH_FILES_TOUCHED
+                else ""
+            )
+            _line(f"  - doc {doc['doc_id']}: {label}{via}")
         for node in entry["entities"]:
             _line(
                 f"  - entity {node['entity_id']}:"
