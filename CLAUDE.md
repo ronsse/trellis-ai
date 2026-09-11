@@ -284,7 +284,15 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   stale within days of each other — check the workflow, not this bullet. The ArcadeDB
   graph contract (`test_arcadedb_graph_contract.py`) **does** run: #543 gave
   `live-infra.yml` an `arcadedb` service container on 2026-09-08 and
-  [#351](https://github.com/ronsse/trellis-ai/issues/351) closed with it. And
+  [#351](https://github.com/ronsse/trellis-ai/issues/351) closed with it — and its first
+  week of coverage immediately caught a live defect in the substrate's own write path.
+  `1ef5c9c` (#530) landed the `AliasClaim` mechanism and its concurrency test hours after
+  the container arrived, and that test failed on `main` from that commit until
+  [#555](https://github.com/ronsse/trellis-ai/pull/555), because ArcadeDB reports a lost
+  `MERGE` race through codes the driver classifies as **non-retryable**, so
+  `execute_write`'s managed retry never re-ran it. Note which way the causation runs: a
+  contract with no container does not fail, it is silent, so #351 stayed open — and the
+  substrate stayed unexercised — from the day it was blessed. And
   `test_neo4j_vector.py` is no longer excluded:
   [#356](https://github.com/ronsse/trellis-ai/issues/356) ported the e2e suite's
   capability probe up into `tests/conftest.py`, so the four `TestQuery` cases issuing
