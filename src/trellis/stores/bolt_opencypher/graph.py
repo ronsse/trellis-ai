@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import operator
+import re
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -70,6 +71,8 @@ from trellis.stores.base.graph_query import (
 from trellis.stores.bolt_opencypher.base import BoltSessionRunner
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from neo4j import Driver, ManagedTransaction
 
 logger = structlog.get_logger(__name__)
@@ -222,6 +225,71 @@ def _alias_claim_key(source_system: str, raw_id: str) -> str:
     )
 
 
+#: Label and key property of the alias claim node. The claim is the
+#: serialization point for every alias write: each writer ``MERGE``s it
+#: under a uniqueness constraint, so losing that race is how a concurrent
+#: writer learns it lost. The DDL below is built from these names so the
+#: constraint and the predicate that recognizes its violation cannot drift
+#: apart — see :func:`_is_alias_claim_contention`.
+_ALIAS_CLAIM_LABEL = "AliasClaim"
+_ALIAS_CLAIM_KEY_PROPERTY = "claim_key"
+
+#: How many times an alias write re-runs after losing the claim race.
+#: Two contenders need exactly one retry. The bound exists so that a
+#: violation which is *not* contention surfaces as an error instead of
+#: spinning.
+_ALIAS_CLAIM_RETRY_ATTEMPTS = 3
+
+
+def _names_token(message: str, token: str) -> bool:
+    """Return True when ``message`` names ``token`` as a whole identifier."""
+    return (
+        re.search(rf"(?<![0-9A-Za-z_]){re.escape(token)}(?![0-9A-Za-z_])", message)
+        is not None
+    )
+
+
+def _is_alias_claim_contention(exc: Exception) -> bool:
+    """Return True when an alias write lost the ``AliasClaim`` unique race.
+
+    Matched on the constraint's **own identity** — its label and key
+    property, which this module also builds the DDL from — rather than on
+    a driver error code, because the two backends disagree about the code
+    and one of them is simply wrong. Neo4j raises
+    ``Neo.ClientError.Schema.ConstraintValidationFailed``; ArcadeDB 26.8.1
+    detects the duplicate only **at commit time** and reports it as
+    ``Neo.ClientError.Transaction.TransactionNotFound`` (``gql_status``
+    50N42), a code about a missing transaction attached to a message about
+    a duplicate key. Keying on either code would silently cover one
+    backend and not the other.
+
+    ``Neo4jError.is_retryable()`` is ``False`` for both, so the driver's
+    own managed-transaction retry never re-runs these — measured against
+    ``arcadedata/arcadedb:26.8.1`` and ``neo4j:2025.12``.
+
+    **On Neo4j this predicate is defensive, not load-bearing, and that is
+    measured rather than assumed.** Neo4j's ``MERGE`` locks the index
+    entry the constraint is built on, so the losing contender blocks until
+    the winner commits and then reads the committed claim: it reaches
+    ``CONFLICT`` without any exception crossing the driver. Run 20 times
+    against ``neo4j:2025.12`` the race raises **0** times with the retry
+    and **0** times without it, while the same race on ArcadeDB raises on
+    every single trial. The branch is kept because the violation it names
+    is real on that engine — provoked directly, Neo4j 2025.12 answers with
+    exactly the message this predicate matches — and because a write
+    pattern that separates the existence check from the create (a cluster,
+    a future caller that does not ``MERGE``) would surface it. Do not read
+    a green Neo4j contract run as evidence that the retry works.
+
+    Both names are matched as **whole tokens**: a substring test would
+    read a future ``AliasClaimArchive`` index as this one.
+    """
+    message = str(getattr(exc, "message", "") or exc)
+    return _names_token(message, _ALIAS_CLAIM_LABEL) and _names_token(
+        message, _ALIAS_CLAIM_KEY_PROPERTY
+    )
+
+
 _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
     # Uniqueness on version_id (Neo4j Community + Enterprise + AuraDB).
     # Backends without DDL-level constraints (e.g. Neptune) override
@@ -237,7 +305,8 @@ _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
     ),
     (
         "CREATE CONSTRAINT alias_claim_unique IF NOT EXISTS "
-        "FOR (c:AliasClaim) REQUIRE c.claim_key IS UNIQUE"
+        f"FOR (c:{_ALIAS_CLAIM_LABEL}) "
+        f"REQUIRE c.{_ALIAS_CLAIM_KEY_PROPERTY} IS UNIQUE"
     ),
     # Lookup indexes
     "CREATE INDEX node_id_idx IF NOT EXISTS FOR (n:Node) ON (n.node_id)",
@@ -614,6 +683,56 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
     # Aliases
     # ------------------------------------------------------------------
 
+    def _is_alias_write_contention(self, exc: Exception) -> bool:
+        """Return True when ``exc`` means this alias write lost a race.
+
+        The portable answer is a violation of the ``AliasClaim`` unique
+        key. A backend whose driver folds *other* concurrency failures
+        into generic codes widens this — see
+        :meth:`~trellis.stores.arcadedb.graph.ArcadeDBGraphStore._is_alias_write_contention`
+        — and it is a per-backend seam rather than a shared list so that
+        one backend's mis-mapped error cannot make another backend retry
+        a failure that is genuinely fatal there.
+        """
+        return _is_alias_claim_contention(exc)
+
+    def _execute_alias_write(
+        self, tx_function: Callable[[ManagedTransaction], Any]
+    ) -> Any:
+        """Run an alias write, re-running it when it loses the claim race.
+
+        Every alias write ``MERGE``s the ``AliasClaim`` node that serializes
+        the pair, and the losing transaction is rolled back **whole** — so a
+        retry re-reads committed state and returns the answer a serialized
+        run would have produced. That is what makes a retry the right
+        recovery here rather than a way of hiding a conflict: the contended
+        path already has a name for this outcome (``CONFLICT`` for
+        :meth:`bind_alias_if_absent`, last-writer-wins for
+        :meth:`upsert_alias`), and losing the race is exactly how a writer
+        is supposed to reach it.
+
+        The driver's managed-transaction retry cannot do this: both backends
+        report the violation as non-retryable (see
+        :func:`_is_alias_claim_contention`). Anything that is not claim
+        contention propagates untouched, and exhausting the bound re-raises
+        the last error rather than returning a made-up result.
+        """
+        last_error: Exception | None = None
+        for _attempt in range(_ALIAS_CLAIM_RETRY_ATTEMPTS):
+            with self._driver.session(database=self._database) as session:
+                try:
+                    return session.execute_write(tx_function)
+                except Exception as exc:
+                    if not self._is_alias_write_contention(exc):
+                        raise
+                    last_error = exc
+                    logger.debug(
+                        "alias_claim_contention_retry",
+                        attempt=_attempt + 1,
+                        attempts=_ALIAS_CLAIM_RETRY_ATTEMPTS,
+                    )
+        raise last_error  # type: ignore[misc]
+
     def upsert_alias(
         self,
         entity_id: str,
@@ -685,8 +804,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             ).consume()
             return alias_id
 
-        with self._driver.session(database=self._database) as session:
-            return str(session.execute_write(_tx))
+        return str(self._execute_alias_write(_tx))
 
     def bind_alias_if_absent(
         self,
@@ -870,8 +988,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 entity_id=entity_id,
             )
 
-        with self._driver.session(database=self._database) as session:
-            return cast("AliasBindResult", session.execute_write(_tx))
+        return cast("AliasBindResult", self._execute_alias_write(_tx))
 
     def resolve_alias(
         self,
