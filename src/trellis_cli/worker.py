@@ -52,7 +52,6 @@ from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.core.vector_metadata import (
     resolve_vector_store,
-    sync_vector_metadata,
 )
 from trellis.errors import BackendNotInstalledError, StaleStoreWriteError
 from trellis.learning import (
@@ -1567,7 +1566,7 @@ def _run_batch_enrichment(
     ``vector_store`` is required keyword-only (``None`` is allowed) for the
     same reason it is on :func:`run_curation_cycle`: this is a *post-embed*
     writer of exactly the two keys
-    :data:`~trellis.core.vector_metadata.SYNCED_METADATA_KEYS` covers, and
+    :data:`~trellis.core.vector_metadata.MIRRORED_METADATA_KEYS` covers, and
     it selects documents that are already stored and already embedded. A
     write here that skips the mirror leaves the semantic axis scoring the
     document on its pre-enrichment ``auto_importance`` and serving its
@@ -1633,6 +1632,7 @@ def _run_batch_enrichment(
             document_store,
             doc["doc_id"],
             partial(_enrichment_updates, result=result, stamp=stamp),
+            vector_store=vector_store,
             snapshot_content=doc.get("content"),
         )
         if write.content_changed:
@@ -1675,13 +1675,11 @@ def _run_batch_enrichment(
                 operation="classification",
                 doc_id=doc["doc_id"],
             )
-        # After the authoritative write, never before — the document row is
-        # what a re-run repairs from, so it has to land first. Fail-soft: a
-        # mirror failure must not lose the tag that was already written.
-        # Mirrors ``write.metadata`` (what actually landed), never the
-        # snapshot bag — mirroring the snapshot would push the very keys the
-        # re-read exists to preserve onto the vector row.
-        if sync_vector_metadata(vector_store, doc["doc_id"], write.metadata):
+        # The mirror happened inside ``apply_derived_metadata``, off the bag
+        # that actually landed rather than the snapshot this batch started
+        # from — mirroring the snapshot would push the very keys the re-read
+        # exists to preserve onto the vector row. This only counts it.
+        if write.mirror == "synced":
             summary.vector_rows_synced += 1
         logger.info("worker_enrich.item_enriched", doc_id=doc.get("doc_id"))
     logger.info(

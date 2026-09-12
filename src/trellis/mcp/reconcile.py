@@ -48,6 +48,7 @@ import structlog
 
 from trellis.core import write_config
 from trellis.core.base import TrellisModel
+from trellis.core.document_write import put_document
 from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.core.write_config import WriteBehaviourConfig
@@ -64,6 +65,7 @@ if TYPE_CHECKING:
     from trellis.llm.protocol import LLMClient
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
+    from trellis.stores.base.vector import VectorStore
 
 logger = structlog.get_logger(__name__)
 
@@ -307,7 +309,11 @@ def judge_reconcile(
 
 
 def mark_document_superseded(
-    document_store: DocumentStore, *, old_doc_id: str, new_doc_id: str
+    document_store: DocumentStore,
+    *,
+    old_doc_id: str,
+    new_doc_id: str,
+    vector_store: VectorStore | None,
 ) -> bool:
     """SCD-2 stale-mark the superseded doc — never delete it.
 
@@ -353,19 +359,26 @@ def mark_document_superseded(
     losing version retrievable on demand", which makes the loser's recency rank
     the whole mechanism rather than an incidental score.
 
-    **Scoped to the keyword axis, and only that — but not for the reason #411
-    gave.** That docstring said no writer produces an ``updated_at`` *metadata*
-    key, so the semantic axis could never see one. **The universal negative was
-    false**: :mod:`trellis.ingest_corpus.conversations` writes both
-    ``created_at`` and ``updated_at`` into a conversation document's metadata,
+    **The `preserve_updated_at` flag is scoped to the keyword axis, and only
+    that — but not for the reason #411 gave.** That docstring said no writer
+    produces an ``updated_at`` *metadata* key, so the semantic axis could never
+    see one. **The universal negative was false**:
+    :mod:`trellis.ingest_corpus.conversations` writes both ``created_at`` and
+    ``updated_at`` into a conversation document's metadata,
     ``build_vector_row`` splats document metadata into the vector row, and 148
-    live production rows carry the key (#417). What actually scopes this write
-    to the keyword axis is narrower and holds regardless: the flag protects a
-    store **column**, and no writer copies that column into a metadata bag —
-    ``SYNCED_METADATA_KEYS`` is ``content_tags`` / ``auto_importance``, so this
-    write never reaches the vector row at all. The row never learns of the
-    supersession either — the #337 shape, inert only for as long as the state
-    goes unfiltered. Add such a filter and the mirror becomes required.
+    live production rows carry the key (#417). What actually scopes the flag to
+    the keyword axis is narrower and holds regardless: it protects a store
+    **column**, and no writer copies that column into a metadata bag.
+
+    **The supersession stamp itself now does reach the vector row**, and that
+    is new. This function wrote the document alone until 2026-09-12, on the
+    reasoning that ``lifecycle`` was outside the mirrored key set — "the #337
+    shape, inert only for as long as the state goes unfiltered. Add such a
+    filter and the mirror becomes required." Rather than wait for that filter,
+    the write goes through
+    :func:`~trellis.core.document_write.put_document`, which mirrors whatever
+    the bag carries. ``vector_store`` is a required argument for the same
+    reason: a default would restore the convention the seam exists to replace.
 
     One consequence of #417 worth knowing before reasoning about ranking here:
     :func:`~trellis.retrieve.strategies.resolve_recency_stamp` now makes *both*
@@ -388,8 +401,13 @@ def mark_document_superseded(
     metadata[LIFECYCLE_KEY] = Lifecycle(
         state="superseded", superseded_by=new_doc_id
     ).model_dump(mode="json")
-    document_store.put(
-        old_doc_id, doc["content"], metadata=metadata, preserve_updated_at=True
+    put_document(
+        document_store,
+        vector_store,
+        old_doc_id,
+        doc["content"],
+        metadata,
+        preserve_updated_at=True,
     )
     return True
 
