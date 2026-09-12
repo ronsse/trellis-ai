@@ -220,7 +220,27 @@ class CaptureReport:
     sessions_with_memory: int = 0
     malformed_lines: int = 0
     candidates_distilled: int = 0
+    #: Total rejections at the worthiness gate. Kept as the total — not
+    #: narrowed to the judged subset — so a figure taken from a sweep before
+    #: the split means the same thing as one taken after it. The two
+    #: counters below decompose it, and
+    #: ``candidates_rejected_worthiness == candidates_rejected_judged_unworthy
+    #: + candidates_rejected_floor`` on every sweep.
     candidates_rejected_worthiness: int = 0
+    #: The judge's **own** verdict: its ``durable`` / ``actionable`` booleans
+    #: came back False. This is the negative class of the #264 distillation
+    #: training pairs — it was counted and dropped, which is why that arm
+    #: recorded the literal ``keep`` on 869 of 869 production rows. Its
+    #: density is the reason it has its own counter: over the 16 sweeps to
+    #: 2026-09-12, 15 of 780 distilled candidates (1.9%), which is the entire
+    #: discriminative signal that arm has.
+    candidates_rejected_judged_unworthy: int = 0
+    #: Trellis's deterministic floor on the form of the model's output — no
+    #: evidence to attribute the claim to, or a memory under
+    #: :data:`~trellis_workers.session_capture.gating.MIN_MEMORY_CHARS`.
+    #: Counted apart from the judged verdict because it is *this repo's*
+    #: rule, not the judge's, and no training pair is emitted for it.
+    candidates_rejected_floor: int = 0
     #: Candidates dropped by the deterministic capture-instruction injection
     #: guard (imperative "remember this" shapes / rubric-stuffing).
     candidates_rejected_injection: int = 0
@@ -272,6 +292,10 @@ class CaptureReport:
             "malformed_lines": self.malformed_lines,
             "candidates_distilled": self.candidates_distilled,
             "candidates_rejected_worthiness": self.candidates_rejected_worthiness,
+            "candidates_rejected_judged_unworthy": (
+                self.candidates_rejected_judged_unworthy
+            ),
+            "candidates_rejected_floor": self.candidates_rejected_floor,
             "candidates_rejected_injection": self.candidates_rejected_injection,
             "candidates_blocked_scan": self.candidates_blocked_scan,
             "candidates_reconciled_noop": self.candidates_reconciled_noop,

@@ -39,6 +39,7 @@ from trellis.llm import Message
 from trellis.llm.json_response import JSONParseOutcome, parse_json_response
 from trellis.schemas.memory_op import (
     REF_TYPE_DOCUMENT,
+    REF_TYPE_SESSION,
     InputDigest,
     JudgedOpType,
     SubjectRef,
@@ -363,6 +364,41 @@ def _prompt_exceeds_window(
     return True
 
 
+#: The distillation arm's whole decision vocabulary — the judge either kept
+#: the candidate or refused it. Two labels, named once: a second vocabulary
+#: for the same facts is the ``content_type`` / ``document_form`` drift of
+#: #325/#326, and sub-slugs ("discard_short", "discard_unattributed") would
+#: reintroduce it inside one op_type.
+DECISION_KEEP = "keep"
+DECISION_DISCARD = "discard"
+
+
+def _judged_subject(candidate: CandidateMemory) -> tuple[SubjectRef, str]:
+    """Point the verdict at what it is actually about, and name its kind.
+
+    A kept memory is a document. A **discard has no document**:
+    ``CandidateMemory.doc_id`` is populated by the writer, after the gate
+    that rejected the candidate, so it is empty here and a ``doc`` ref would
+    carry a dangling id in half the feedback-attribution join key. The
+    discard's stable subject is the session the judgement was made about —
+    which ``input_digest.source_refs`` already names, so the two halves of
+    the pair agree.
+
+    Returns the payload's ``subject_ref`` and the event row's
+    ``entity_type``. They are deliberately not the same string: ``ref_type``
+    is the join-key vocabulary (``doc`` / ``entity`` / ``session``) and
+    ``entity_type`` is the event log's own column, where this worker's
+    sibling emitter already writes ``capture_sweep``.
+    """
+    if candidate.doc_id:
+        return SubjectRef(ref_type=REF_TYPE_DOCUMENT, ref_id=candidate.doc_id), (
+            "document"
+        )
+    return SubjectRef(
+        ref_type=REF_TYPE_SESSION, ref_id=candidate.session_id
+    ), "capture_session"
+
+
 def emit_distillation_judged(
     event_log: EventLog,
     *,
@@ -374,9 +410,10 @@ def emit_distillation_judged(
 
     The payload carries only a fingerprint of the session input (hash +
     length + the session id as an opaque ref), the verdict label, the model
-    id, and the subject doc ref — never memory content or model prose.
+    id, and the subject ref — never memory content or model prose.
     Best-effort: a telemetry failure never rolls back a committed capture.
     """
+    subject_ref, entity_type = _judged_subject(candidate)
     emit_memory_op_judged(
         event_log,
         op_type=JudgedOpType.DISTILLATION,
@@ -389,7 +426,7 @@ def emit_distillation_judged(
         ),
         decision=decision,
         confidence=candidate.confidence,
-        subject_ref=SubjectRef(ref_type=REF_TYPE_DOCUMENT, ref_id=candidate.doc_id),
-        entity_id=candidate.doc_id or candidate.session_id,
-        entity_type="document",
+        subject_ref=subject_ref,
+        entity_id=subject_ref.ref_id,
+        entity_type=entity_type,
     )
