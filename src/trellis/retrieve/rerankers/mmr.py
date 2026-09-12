@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from trellis.retrieve.rerankers.base import Reranker
+from trellis.schemas.outcome import MMR_RERANKER_COMPONENT_ID
 from trellis.schemas.pack import PackItem
 from trellis.schemas.parameters import ParameterScope
 
@@ -31,7 +32,7 @@ DEFAULT_MMR_LAMBDA = 0.7
 #: Default word n-gram size used for shingle-based similarity.
 DEFAULT_MMR_SHINGLE_SIZE = 3
 
-_COMPONENT_ID = "retrieve.rerankers.MMRReranker"
+_COMPONENT_ID = MMR_RERANKER_COMPONENT_ID
 
 
 def _word_shingles(text: str, n: int = 3) -> set[str]:

@@ -20,6 +20,11 @@ from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
     EXTRACTION_STATUS_UNCONFIRMED,
 )
+from trellis.schemas.outcome import (
+    GRAPH_SEARCH_COMPONENT_ID,
+    KEYWORD_SEARCH_COMPONENT_ID,
+    SEMANTIC_SEARCH_COMPONENT_ID,
+)
 from trellis.schemas.pack import PackItem
 from trellis.schemas.parameters import ParameterScope
 from trellis.schemas.well_known import (
@@ -119,9 +124,9 @@ GRAPH_POSITION_DECAY_STEP = 0.05
 
 # Component ids used when resolving registry overrides. Each SearchStrategy
 # has its own scope so per-domain tuning stays isolated.
-_KEYWORD_COMPONENT = "retrieve.strategies.KeywordSearch"
-_SEMANTIC_COMPONENT = "retrieve.strategies.SemanticSearch"
-_GRAPH_COMPONENT = "retrieve.strategies.GraphSearch"
+_KEYWORD_COMPONENT = KEYWORD_SEARCH_COMPONENT_ID
+_SEMANTIC_COMPONENT = SEMANTIC_SEARCH_COMPONENT_ID
+_GRAPH_COMPONENT = GRAPH_SEARCH_COMPONENT_ID
 
 #: Over-fetch multiplier for the semantic axis when a domain scope is active.
 #: The vector stores cannot express the ``content_tags`` default-pass facet
