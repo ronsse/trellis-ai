@@ -300,6 +300,21 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   ([#356](https://github.com/ronsse/trellis-ai/issues/356)) — which is why the fix is not
   "point the job at `tests/unit/stores/`".
 
+**Every line above is status, and status rots — so the mechanism is derived.**
+`tests/unit/test_ci_coverage_rule.py` parses the `pytest` invocations out of every workflow
+and computes which files a *pull-request* leg actually executes: a leg must name the file or
+an ancestor **and** leave at least one of its collectable nodes un-deselected by
+`addopts`, which is the conjunction #351 broke — `live-infra.yml` already named
+`contracts/` while nothing set `TRELLIS_TEST_ARCADEDB`, so a path-only reading called the
+blessed substrate covered for the whole time it ran nowhere. A file under
+`tests/unit/stores/contracts/` that is neither executed nor named in that module's
+`DELIBERATELY_UNWIRED` map, with a written reason, fails the suite. It asserts **no
+roster** — #443 declared 3 control keys against 6 real sites — so adding a contract stays
+ordinary and adding an *unwired* one does not. The map is **empty**, and that is a claim
+about today rather than a placeholder: all fourteen contract modules are executed, which
+has only been true since #543. The gap it cannot express is #579's, because an absent
+contract is invisible to a rule about contract *files*.
+
 Note the shape of the #345 defect, because it is the one this repo keeps producing: the
 pgvector contract had *never executed anywhere*, because its fixture called `_conn` as an
 attribute — which it stopped being when #84 pooled connections — so the one env combination
