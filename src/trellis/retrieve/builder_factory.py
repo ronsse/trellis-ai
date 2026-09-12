@@ -23,16 +23,22 @@ exactly as the old ``None`` did.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, TypedDict
+
+import structlog
 
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.rerankers import build_reranker
-from trellis.retrieve.strategies import build_strategies
+from trellis.retrieve.strategies import NamespaceSeedExtractor, build_strategies
 from trellis.stores.advisory_source import load_advisory_store
 
 if TYPE_CHECKING:
+    from trellis.retrieve.strategies import GraphSeedExtractor
     from trellis.stores.registry import StoreRegistry
+
+logger = structlog.get_logger(__name__)
 
 #: Name of the axis that only exists when the deployment has an embedder.
 #: :func:`~trellis.retrieve.strategies.build_strategies` appends
@@ -41,6 +47,33 @@ if TYPE_CHECKING:
 #: so "absent" covers two different situations and a caller reporting the
 #: gap must not collapse them. See :func:`describe_axes`.
 SEMANTIC_AXIS = "semantic"
+
+#: Kill switch for graph seeding (#375). Unset means **on**.
+#:
+#: A **read-side** knob, so it deliberately does not live in
+#: :mod:`trellis.core.write_config` — that module is the one home for
+#: *ingest-time* behaviour, and mixing a retrieval toggle into it would
+#: make ``trellis admin write-config`` report something it does not
+#: govern. Same reasoning, and the same shape, as
+#: ``TRELLIS_CAPTURE_WARN_THRESHOLD`` in :mod:`trellis.ops.capture_health`.
+#:
+#: It defaults **on** because the alternative is an opt-in nobody opts
+#: into, which leaves #375's defect — an axis that never consults the
+#: intent — true on every deployment while looking addressed. What makes
+#: that safe to switch on rather than reckless is that the branch is
+#: observable on the served record: every item carries
+#: ``metadata["graph_selection"]``, forwarded into
+#: ``PACK_ASSEMBLED.injected_items[]`` (#371), so "did seeding run, and did
+#: it help?" is answerable from the event log without a second instrument
+#: — and only produces data once the branch actually runs.
+GRAPH_SEEDING_ENV = "TRELLIS_GRAPH_SEEDING"
+
+#: Accepted spellings, matching :mod:`trellis.stores.registry`. A value in
+#: neither set is a typo, and a typo'd kill switch that silently keeps the
+#: default is how an operator ends up believing they disabled something
+#: they did not — so it warns rather than going quiet.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_FALSEY = frozenset({"0", "false", "no", "off"})
 
 
 class AxisReport(TypedDict):
@@ -64,7 +97,11 @@ def build_pack_builder(registry: StoreRegistry, *, surface: str) -> PackBuilder:
     """
     param_registry = ParameterRegistry(registry.operational.parameter_store)
     return PackBuilder(
-        strategies=build_strategies(registry, parameter_registry=param_registry),
+        strategies=build_strategies(
+            registry,
+            parameter_registry=param_registry,
+            graph_seed_extractor=_build_seed_extractor(registry),
+        ),
         event_log=registry.operational.event_log,
         advisory_store=load_advisory_store(registry.stores_dir, surface=surface),
         reranker=build_reranker("rrf", parameter_registry=param_registry),
@@ -75,6 +112,50 @@ def build_pack_builder(registry: StoreRegistry, *, surface: str) -> PackBuilder:
         # Jaccard per the config's guidance table.
         semantic_dedup=SemanticDedupConfig(),
     )
+
+
+def _build_seed_extractor(registry: StoreRegistry) -> GraphSeedExtractor | None:
+    """The graph axis's seed extractor, or ``None`` when disabled.
+
+    This is the wiring #375 asks for, and it is the *only* one: the
+    ``build_strategies`` default stays ``None`` so #371's refusal of
+    :class:`~trellis.retrieve.semantic_seeds.SemanticSeedExtractor` — a
+    different extractor, measured as a no-op — is untouched and its pinned
+    tests keep passing. A surface that assembles a pack goes through
+    :func:`build_pack_builder` and gets seeding; a caller constructing
+    strategies directly opts in by hand.
+
+    :class:`~trellis.retrieve.strategies.NamespaceSeedExtractor` needs no
+    embedder and no entity-summary corpus, so unlike the refused wiring it
+    has nothing to be silently unsatisfied by — its read of the store is
+    indexed and its miss case is the recency window that ran before.
+    """
+    if not _graph_seeding_enabled():
+        logger.info("graph_seeding_disabled", env=GRAPH_SEEDING_ENV)
+        return None
+    return NamespaceSeedExtractor(registry.knowledge.graph_store)
+
+
+def _graph_seeding_enabled() -> bool:
+    """Read :data:`GRAPH_SEEDING_ENV`; unset or unrecognised means on.
+
+    Read per build rather than at import, so a long-lived process picks up
+    an operator's change between runs — the same posture
+    ``_resolve_connectivity_check`` takes in :mod:`trellis.stores.registry`.
+    """
+    raw = os.environ.get(GRAPH_SEEDING_ENV, "").strip().lower()
+    if not raw:
+        return True
+    if raw in _FALSEY:
+        return False
+    if raw not in _TRUTHY:
+        logger.warning(
+            "graph_seeding_env_unrecognised",
+            var=GRAPH_SEEDING_ENV,
+            value=raw,
+            effective=True,
+        )
+    return True
 
 
 def describe_axes(
@@ -147,6 +228,7 @@ SEMANTIC_AXIS_NOTES: dict[str, str] = {
 
 
 __all__ = [
+    "GRAPH_SEEDING_ENV",
     "SEMANTIC_AXIS",
     "SEMANTIC_AXIS_NOTES",
     "AxisReport",
