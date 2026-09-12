@@ -2519,6 +2519,7 @@ def record_feedback(
         feedback,
         log_dir=feedback_log_dir(stores_dir),
         event_log=registry.operational.event_log,
+        outcome_store=registry.operational.outcome_store,
         pack_id=pack_id if has_pack else None,
         source="mcp",
         entity_id=None if has_pack else trace_id,
