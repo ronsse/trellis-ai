@@ -464,15 +464,38 @@ fails, before the expensive part.
 
 ### Phase 0 — reconnect what exists · days
 
-1. Pass `outcome_store=` at `mcp/server.py:2521` and `routes/curate.py:198`.
-2. Add `trellis worker tune --dry-run` to the nightly cron; leave `auto_promote`
-   disabled.
-3. Watch for a week.
+**This section said "a two-line change" and that was wrong.** Executing it — running
+`record_feedback` against a real `SQLiteOutcomeStore` rather than reading the call
+sites — found **four** defects, filed as [#557]. Two are fixed
+([#558]); two are not, and the second of those means the tuner still cannot
+match a rule after the wiring lands.
+
+| | Defect | State |
+|---|---|---|
+| **D1** | `outcome_store=` supplied at neither agent-facing call site, so `_emit_outcome` — the only producer of the only input of `RuleTuner` — has never run. `outcomes.db`: 0 rows since 2026-07-06, against 72 graded feedback events in 30 days. | **fixed** (#558) |
+| **D2** | The bridge stamps `component_id="retrieve.pack_builder.PackBuilder"`; all three `DEFAULT_RULES` target `retrieve.strategies.KeywordSearch` / `GraphSearch` / `retrieve.rerankers.RRFReranker`, matched by exact string equality. Empty intersection. A **granularity mismatch** — feedback is graded against the *pack*, rules actuate *strategies* — not a typo, so closing it needs per-strategy attribution off `PACK_ASSEMBLED.injected_items[].source_strategy` plus a mapping to the dotted class paths. | **open** |
+| **D3** | `from_agent_signal` leaves `items_served=[]` deliberately (an agent cites what helped, it does not enumerate what it was shown); `_emit_outcome` passed `len([]) == 0` as an **int**, clearing `OutcomeEvent`'s `is not None` guard, so `reference_rate` returned the sentinel `0.0` and `graph_low_reference_rate_tighten_domain_boost` (`reference_rate lt 0.2`) would have fired **always**. D1 without D3 proposes on a constant at 30 samples — strictly worse than dormant. | **fixed** (#558) |
+| **D4** | Nothing schedules a tuner pass: `tuner_cursors` is empty and the nightly cron runs `worker curate` only. An operator wiring gap, not a code defect. | **open** |
+
+So the remaining Phase 0 work is:
+
+1. **Close D2.** This is the phase's real content and the only part that is a design
+   question rather than a wiring one.
+2. **Answer D4 by hand first** — run one `trellis worker tune --dry-run` pass manually
+   before adding anything to the nightly cron. A scheduled pass that produces nothing
+   is indistinguishable from a scheduled pass that never ran, which is the shape this
+   whole phase exists to stop reproducing.
+3. Then add the dry-run pass to the nightly cron with `auto_promote` disabled, and
+   watch for a week.
 
 **Gate:** does the OutcomeStore accumulate rows, and does `RuleTuner` emit a single
 proposal against real data? If the loop cannot move one scalar parameter on production
-traffic, nothing above it is worth building. This is a two-line change that tests a
-subsystem's entire premise — do it first.
+traffic, nothing above it is worth building. **Rows alone do not pass this gate** —
+after #558 the store accumulates and the rule set still cannot match, which is exactly
+the state a rows-only gate would have reported as success.
+
+[#557]: https://github.com/ronsse/trellis-ai/issues/557
+[#558]: https://github.com/ronsse/trellis-ai/pull/558
 
 ### Phase 1 — feed it a signal that can carry an effect · weeks
 
