@@ -357,26 +357,32 @@ def test_apply_rules_idempotent_on_rerun():
 
 
 def test_default_rules_fire_on_representative_cell():
-    # Cell: keyword search, 50 calls, 12 successes -> success_rate=0.24 < 0.4
+    # The one shipped rule: GraphSearch, 10 graded packs, 42 servings,
+    # 1 citation -> reference_rate 0.0238 < 0.07.  These are the actual
+    # numbers of the worst cell measured on the reference deployment.
     agg = _agg(
         scope=ParameterScope(
-            component_id="retrieve.strategies.KeywordSearch", domain="a"
+            component_id="retrieve.strategies.GraphSearch", domain="a"
         ),
-        count=50,
-        success_count=12,
+        count=10,
+        items_served_total=42,
+        items_referenced_total=1,
     )
     proposals = apply_rules([agg], DEFAULT_RULES)
     assert len(proposals) == 1
-    assert proposals[0].proposed_values == {"recency_half_life_days": 15.0}
+    assert proposals[0].proposed_values == {"domain_match_boost": 1.15}
 
 
 def test_default_rules_skip_healthy_cells():
+    # The measured cell the rule correctly spares: 21 servings, 4
+    # citations -> 0.1905, above GraphSearch's own 0.1317 base rate.
     agg = _agg(
         scope=ParameterScope(
-            component_id="retrieve.strategies.KeywordSearch", domain="a"
+            component_id="retrieve.strategies.GraphSearch", domain="a"
         ),
-        count=50,
-        success_count=40,  # 0.8 success rate — above threshold
+        count=4,
+        items_served_total=21,
+        items_referenced_total=4,
     )
     proposals = apply_rules([agg], DEFAULT_RULES)
     assert proposals == []

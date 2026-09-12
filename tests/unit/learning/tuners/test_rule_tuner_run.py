@@ -93,13 +93,30 @@ def test_run_produces_proposals_and_advances_cursor(stores):
     assert proposal.proposed_values == {"recency_half_life_days": 15.0}
     assert proposal.sample_size == 10
 
-    # Cursor advanced to the latest event.
+    # The cursor still records the newest outcome this pass saw — kept
+    # because "when did this tuner last see fresh signal?" is the
+    # question an operator asks of a silent tuner.  It is no longer the
+    # next pass's lower bound; see the window tests below.
     cursor = state.get_cursor("rule_tuner")
     assert cursor is not None
     datetime.fromisoformat(cursor)  # parseable
 
 
 def test_rerun_is_idempotent(stores):
+    """A second pass over the same window re-affirms, never duplicates.
+
+    This used to assert ``second == []`` on the reasoning that the
+    cursor had advanced past the outcomes.  That was idempotency by
+    *not looking*, and it is what made any ``min_sample_size`` floor
+    unreachable (#562) — a pass that only ever sees what arrived since
+    the last pass aggregates a cron interval, not a sample.
+
+    Idempotency here comes from the deterministic ``proposal_id``, which
+    hashes rule + scope: the same evidence yields the same id, so an
+    overlapping re-read updates one row instead of appending a second.
+    That is the property worth pinning, and it holds no matter how many
+    times the window is re-read.
+    """
     outcome_store, state = stores
     _seed_outcomes(outcome_store, successes=1, failures=9)
 
@@ -108,9 +125,12 @@ def test_rerun_is_idempotent(stores):
     second = tuner.run()
 
     assert len(first) == 1
-    # Second run finds no new outcomes (cursor past them) -> no proposals.
-    assert second == []
-    # Only one stored proposal total.
+    # The second pass re-reads the same window and reaches the same
+    # conclusion — it does not go silent.
+    assert len(second) == 1
+    assert second[0].proposal_id == first[0].proposal_id
+    assert second[0].sample_size == first[0].sample_size
+    # ...and still only one stored proposal.
     all_proposals = state.list_proposals()
     assert len(all_proposals) == 1
     assert all_proposals[0].proposal_id == first[0].proposal_id
@@ -148,28 +168,70 @@ def test_rerun_refreshes_pending_but_not_terminal(stores):
     assert existing.notes == "A/B cohort"
 
 
-def test_explicit_since_overrides_cursor(stores):
+def test_explicit_since_overrides_the_window(stores):
+    """An explicit ``since`` wins over the trailing window, both ways."""
     outcome_store, state = stores
-    _seed_outcomes(outcome_store, successes=1, failures=9)
+    # Seed outside the default 30-day window.
+    _seed_outcomes(
+        outcome_store,
+        successes=1,
+        failures=9,
+        base_time=datetime.now(UTC) - timedelta(days=90),
+    )
 
     tuner = RuleTuner(outcome_store, state, rules=[_TEST_RULE])
-    tuner.run()  # sets cursor past all outcomes
 
-    # Pass an explicit since before the events → proposals regenerate.
-    far_past = datetime.now(UTC) - timedelta(days=365)
-    # Add one more failing event so cursor advance registers; existing
-    # proposal was already put, so nothing new is persisted but we
-    # verify that run() doesn't crash with explicit since.
+    # The window does not reach them.
+    assert tuner.run() == []
+
+    # An explicit lower bound does.
+    result = tuner.run(since=datetime.now(UTC) - timedelta(days=365))
+    assert len(result) == 1
+
+
+def test_window_bounds_the_read(stores):
+    """Outcomes older than the window are not aggregated."""
+    outcome_store, state = stores
+    now = datetime.now(UTC)
+    # Enough failures inside the window to fire on their own (min 3).
+    _seed_outcomes(
+        outcome_store, successes=0, failures=4, base_time=now - timedelta(days=2)
+    )
+    # A block of *successes* just outside it.  If the window leaked, the
+    # cell's success_rate would climb above the rule's 0.5 and nothing
+    # would fire — so this fails in the direction that matters.
+    _seed_outcomes(
+        outcome_store, successes=40, failures=0, base_time=now - timedelta(days=45)
+    )
+
+    tuner = RuleTuner(outcome_store, state, rules=[_TEST_RULE])
+    result = tuner.run()
+
+    assert len(result) == 1
+    assert result[0].sample_size == 4
+
+
+def test_window_days_is_configurable(stores):
+    """A wider window reaches evidence the default one does not."""
+    outcome_store, state = stores
     _seed_outcomes(
         outcome_store,
         successes=0,
-        failures=1,
-        base_time=datetime.now(UTC) + timedelta(hours=1),
+        failures=4,
+        base_time=datetime.now(UTC) - timedelta(days=45),
     )
-    result = tuner.run(since=far_past)
-    # 11 failing + 1 successful = 1/11 success rate, still below 0.5.
-    # Rule fires, but proposal_id matches existing pending → replaced.
-    assert len(result) == 1
+
+    assert RuleTuner(outcome_store, state, rules=[_TEST_RULE]).run() == []
+
+    wide = RuleTuner(outcome_store, state, rules=[_TEST_RULE], window_days=60)
+    assert len(wide.run()) == 1
+    assert wide.window == timedelta(days=60)
+
+
+def test_window_days_must_be_positive(stores):
+    outcome_store, state = stores
+    with pytest.raises(ValueError, match="window_days must be >= 1"):
+        RuleTuner(outcome_store, state, rules=[_TEST_RULE], window_days=0)
 
 
 def test_respects_batch_limit(stores):
@@ -220,15 +282,31 @@ def test_run_returns_persisted_not_raw(stores):
     assert second == []  # existing proposal is terminal → skipped
 
 
-def test_malformed_cursor_falls_back_to_full_history(stores):
+@pytest.mark.parametrize(
+    "stored_cursor",
+    [
+        pytest.param("not-a-valid-iso-date", id="corrupt"),
+        pytest.param(
+            (datetime.now(UTC) + timedelta(days=400)).isoformat(), id="far-future"
+        ),
+    ],
+)
+def test_stored_cursor_cannot_suppress_the_read(stores, stored_cursor):
+    """No cursor value can narrow the window — it is not read as a bound.
+
+    The ``far-future`` case is the one that matters: under the previous
+    cursor-as-lower-bound behaviour it zeroed the read and the tuner
+    went permanently silent with no error anywhere.  A corrupt value was
+    already handled (it fell back to full history); a *parseable* wrong
+    one was not.
+    """
     outcome_store, state = stores
     _seed_outcomes(outcome_store, successes=0, failures=5)
 
-    # Corrupt the cursor directly.
-    state.set_cursor("rule_tuner", "not-a-valid-iso-date")
+    state.set_cursor("rule_tuner", stored_cursor)
     tuner = RuleTuner(outcome_store, state, rules=[_TEST_RULE])
     result = tuner.run()
-    # Should have processed the outcomes despite the bad cursor.
+
     assert len(result) == 1
 
 
