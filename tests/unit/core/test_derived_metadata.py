@@ -19,6 +19,7 @@ from tests.document_recency import fake_document_clock
 from trellis.core.derived_metadata import apply_derived_metadata
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.sqlite.document import SQLiteDocumentStore
+from trellis.stores.sqlite.vector import SQLiteVectorStore
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -30,6 +31,18 @@ def document_store(tmp_path: Path) -> Iterator[SQLiteDocumentStore]:
     store = SQLiteDocumentStore(tmp_path / "docs.db")
     yield store
     store.close()
+
+
+@pytest.fixture
+def vector_store(tmp_path: Path) -> Iterator[SQLiteVectorStore]:
+    store = SQLiteVectorStore(tmp_path / "vectors.db")
+    yield store
+    store.close()
+
+
+def _demote(_current: dict[str, Any]) -> dict[str, Any]:
+    """A caller that owns a key the vector row mirrors."""
+    return {"content_tags": {"signal_quality": "noise"}}
 
 
 def _tag(_current: dict[str, Any]) -> dict[str, Any]:
@@ -46,7 +59,7 @@ class TestTheMergeItself:
         shape of the defect this module exists to close, one layer up.
         """
         document_store.put("d1", "body", {"title": "T"})
-        write = apply_derived_metadata(document_store, "d1", _tag)
+        write = apply_derived_metadata(document_store, "d1", _tag, vector_store=None)
 
         assert write.written is True
         assert write.vanished is False
@@ -58,7 +71,7 @@ class TestTheMergeItself:
         self, document_store: SQLiteDocumentStore
     ) -> None:
         document_store.put("d1", "body", {"title": "T", "source_system": "s"})
-        apply_derived_metadata(document_store, "d1", _tag)
+        apply_derived_metadata(document_store, "d1", _tag, vector_store=None)
 
         metadata = document_store.get("d1")["metadata"]
         assert metadata["title"] == "T"
@@ -75,7 +88,11 @@ class TestTheMergeItself:
         """
         document_store.put("d1", "stored body", {})
         apply_derived_metadata(
-            document_store, "d1", _tag, snapshot_content="a stale snapshot"
+            document_store,
+            "d1",
+            _tag,
+            vector_store=None,
+            snapshot_content="a stale snapshot",
         )
         assert document_store.get("d1")["content"] == "stored body"
 
@@ -95,7 +112,7 @@ class TestTheMergeItself:
             seen.append(dict(current))
             return {"counter": current["counter"] + 1}
 
-        apply_derived_metadata(document_store, "d1", bump)
+        apply_derived_metadata(document_store, "d1", bump, vector_store=None)
         assert seen == [{"counter": 41}]
         assert document_store.get("d1")["metadata"]["counter"] == 42
 
@@ -117,7 +134,7 @@ class TestTheMergeItself:
         assert before == (now - timedelta(days=365)).isoformat()
 
         clock["now"] = now
-        apply_derived_metadata(document_store, "d1", _tag)
+        apply_derived_metadata(document_store, "d1", _tag, vector_store=None)
         assert document_store.get("d1")["updated_at"] == before
 
 
@@ -127,7 +144,11 @@ class TestDetection:
     ) -> None:
         document_store.put("d1", "the new body", {})
         write = apply_derived_metadata(
-            document_store, "d1", _tag, snapshot_content="the old body"
+            document_store,
+            "d1",
+            _tag,
+            vector_store=None,
+            snapshot_content="the old body",
         )
         assert write.content_changed is True
         # Merged, not refused — the enrichment still lands.
@@ -144,7 +165,7 @@ class TestDetection:
         """
         document_store.put("d1", "body", {})
         write = apply_derived_metadata(
-            document_store, "d1", _tag, snapshot_content="body"
+            document_store, "d1", _tag, vector_store=None, snapshot_content="body"
         )
         assert write.content_changed is False
 
@@ -157,9 +178,9 @@ class TestDetection:
         manufactured for it out of ``None != "body"``.
         """
         document_store.put("d1", "body", {})
-        assert apply_derived_metadata(document_store, "d1", _tag).content_changed is (
-            False
-        )
+        assert apply_derived_metadata(
+            document_store, "d1", _tag, vector_store=None
+        ).content_changed is (False)
 
 
 class TestVanishedRow:
@@ -173,7 +194,7 @@ class TestVanishedRow:
         ``created_at``, and no record that it had ever been removed.
         """
         write = apply_derived_metadata(
-            document_store, "gone", _tag, snapshot_content="body"
+            document_store, "gone", _tag, vector_store=None, snapshot_content="body"
         )
         assert write.written is False
         assert write.vanished is True
@@ -185,7 +206,10 @@ class TestVanishedRow:
     ) -> None:
         calls: list[dict[str, Any]] = []
         apply_derived_metadata(
-            document_store, "gone", lambda current: calls.append(current) or {}
+            document_store,
+            "gone",
+            lambda current: calls.append(current) or {},
+            vector_store=None,
         )
         assert calls == []
 
@@ -202,14 +226,14 @@ class TestFailuresPropagate:
         store = MagicMock(spec=DocumentStore)
         store.get.side_effect = RuntimeError("store is down")
         with pytest.raises(RuntimeError, match="store is down"):
-            apply_derived_metadata(store, "d1", _tag)
+            apply_derived_metadata(store, "d1", _tag, vector_store=None)
 
     def test_a_write_failure_is_not_swallowed(self) -> None:
         store = MagicMock(spec=DocumentStore)
         store.get.return_value = {"doc_id": "d1", "content": "body", "metadata": {}}
         store.put.side_effect = RuntimeError("disk full")
         with pytest.raises(RuntimeError, match="disk full"):
-            apply_derived_metadata(store, "d1", _tag)
+            apply_derived_metadata(store, "d1", _tag, vector_store=None)
 
     def test_a_row_without_content_raises_rather_than_blanking_it(self) -> None:
         """``content`` is the store contract, so a missing key is a defect.
@@ -227,6 +251,93 @@ class TestFailuresPropagate:
         store.get.return_value = {"doc_id": "d1", "metadata": {"keep": "me"}}
 
         with pytest.raises(KeyError):
-            apply_derived_metadata(store, "d1", _tag)
+            apply_derived_metadata(store, "d1", _tag, vector_store=None)
 
         store.put.assert_not_called()
+
+
+class TestTheMirror:
+    """The write is a document write, so it goes through the #360 seam.
+
+    Before that seam existed this module reached ``document_store.put``
+    directly and the vector row was nobody's job — the #338 shape, one layer
+    below where #338 was found. ``mirror`` on the result is what a caller
+    tallies; ``worker enrich`` reads it to report divergence per batch.
+    """
+
+    def test_a_mirrored_key_reaches_the_vector_row(
+        self, document_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> None:
+        document_store.put("d1", "body", {})
+        vector_store.upsert("d1", [0.1, 0.2, 0.3], {"doc_id": "d1"})
+
+        write = apply_derived_metadata(
+            document_store, "d1", _demote, vector_store=vector_store
+        )
+
+        assert write.written is True
+        assert write.mirror == "synced"
+        row = vector_store.get("d1")["metadata"]
+        assert row["content_tags"] == {"signal_quality": "noise"}
+
+    def test_a_key_outside_the_mirror_set_does_not_reach_the_row(
+        self, document_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> None:
+        """The seam mirrors a fixed key set, not the bag.
+
+        A row's ``content`` is its embed-time excerpt and ``doc_id`` is its
+        identity; copying the document bag wholesale would clobber both. The
+        outcome is ``"unchanged"`` rather than ``"synced"`` because nothing
+        mirrored moved — a caller counting divergence must not see a repair
+        that did not happen.
+        """
+        document_store.put("d1", "body", {})
+        vector_store.upsert("d1", [0.1, 0.2, 0.3], {"doc_id": "d1", "content": "cut"})
+
+        write = apply_derived_metadata(
+            document_store, "d1", _tag, vector_store=vector_store
+        )
+
+        assert write.mirror == "unchanged"
+        row = vector_store.get("d1")["metadata"]
+        assert "derived" not in row
+        assert row["content"] == "cut"
+
+    def test_an_unembedded_document_is_not_a_write_failure(
+        self, document_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> None:
+        """A document that was never embedded still gets its metadata.
+
+        The document store is the authority and it has already been written
+        by the time the mirror runs; a document with no vector row is the
+        ordinary case for anything the embed hook has not reached.
+        """
+        document_store.put("d1", "body", {})
+
+        write = apply_derived_metadata(
+            document_store, "d1", _demote, vector_store=vector_store
+        )
+
+        assert write.written is True
+        assert write.mirror == "absent"
+        assert document_store.get("d1")["metadata"]["content_tags"] == {
+            "signal_quality": "noise"
+        }
+
+    def test_no_vector_store_is_reported_rather_than_assumed_clean(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """``None`` is a supported deployment, and it is distinguishable.
+
+        ``"no_store"`` and ``"unchanged"`` must not collapse: the first says
+        the vector plane was never consulted and the second that it was and
+        already agreed. A caller tallying coverage — ``worker enrich`` reads
+        this field — would otherwise report a deployment with no vector store
+        as fully mirrored.
+        """
+        document_store.put("d1", "body", {})
+
+        write = apply_derived_metadata(document_store, "d1", _demote, vector_store=None)
+
+        assert write.written is True
+        assert write.mirror == "no_store"

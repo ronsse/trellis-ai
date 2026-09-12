@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     from trellis.core.derived_metadata import DerivedMetadataWrite
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
+    from trellis.stores.base.vector import VectorStore
 
 logger = structlog.get_logger(__name__)
 
@@ -181,6 +182,7 @@ def shadow_classify_item(
     *,
     classifier: Classifier,
     document_store: DocumentStore,
+    vector_store: VectorStore | None,
     event_log: EventLog | None = None,
     context_builder: Callable[[dict[str, Any]], ClassificationContext] | None = None,
     model_id: str = "",
@@ -201,6 +203,11 @@ def shadow_classify_item(
             model, and a future distilled classifier are all the same call.
         document_store: Where the document lives and where the shadow record
             is written.
+        vector_store: Mirror target for the seam the write goes through, or
+            ``None`` on a deployment without one — see
+            :func:`~trellis.core.vector_metadata.resolve_vector_store`. No
+            shadow value is ever mirrored; why it is here at all is in
+            :func:`_write_shadow`.
         event_log: Optional. When provided, one leak-safe
             ``MEMORY_OP_JUDGED`` event is emitted per judged document.
             Emission is fail-soft — the shadow record is already durable and
@@ -281,6 +288,7 @@ def shadow_classify_item(
 
     write = _write_shadow(
         document_store,
+        vector_store=vector_store,
         item_id=item_id,
         content=content,
         shadow_json=shadow_json,
@@ -327,6 +335,7 @@ def shadow_classify_stale(
     *,
     classifier: Classifier,
     document_store: DocumentStore,
+    vector_store: VectorStore | None,
     event_log: EventLog | None = None,
     max_age_days: int | None = None,
     limit: int = 0,
@@ -340,6 +349,7 @@ def shadow_classify_stale(
     Args:
         classifier: See :func:`shadow_classify_item`.
         document_store: Store to scan and write.
+        vector_store: See :func:`shadow_classify_item`.
         event_log: Optional audit sink.
         max_age_days: Freshness window. ``None`` (the default) means *only*
             documents with no shadow record at all — the cost-conscious
@@ -396,6 +406,7 @@ def shadow_classify_stale(
                     item_id,
                     classifier=classifier,
                     document_store=document_store,
+                    vector_store=vector_store,
                     event_log=event_log,
                     context_builder=context_builder,
                     model_id=model_id,
@@ -683,6 +694,7 @@ def _first_or_none(values: Any) -> str | None:
 def _write_shadow(
     document_store: DocumentStore,
     *,
+    vector_store: VectorStore | None,
     item_id: str,
     content: str,
     shadow_json: dict[str, Any],
@@ -716,11 +728,33 @@ def _write_shadow(
     :func:`~trellis.core.derived_metadata.apply_derived_metadata`, which
     re-reads and overlays; ``content`` is passed only so a concurrent write
     can be *detected* and counted, never so it can be written back.
+
+    **Why a vector store reaches a pass whose key retrieval cannot see.**
+    :data:`SHADOW_TAGS_KEY` is not in
+    :data:`~trellis.core.vector_metadata.MIRRORED_METADATA_KEYS`, so nothing
+    about the shadow *record* needs mirroring. What needs it is the write:
+    the store API has no partial update, so this re-reads the row and puts
+    the **whole** bag back, mirrored keys included. Routing that through the
+    seam costs one ``vector_store.get`` per written row — the mirror
+    short-circuits to ``"unchanged"`` when the row already agrees — against a
+    model call that is three orders of magnitude larger, and it means a
+    corpus-wide pass over a production store cannot be the thing that leaves
+    the two planes disagreeing.
+
+    ``vector_store`` is required rather than defaulted to ``None`` for the
+    reason :func:`~trellis.core.vector_metadata.resolve_vector_store` exists:
+    ``None`` is a *legitimate* value here — a deployment without a vector
+    store must still be able to run the pass — and a default would make "this
+    deployment has none" and "the caller forgot" identical at the call site.
+    The distinction matters most exactly when the overlaid key set widens,
+    which it already has once (#337 added the lifecycle key to the mirror set
+    after #338 had added two).
     """
     return apply_derived_metadata(
         document_store,
         item_id,
         lambda _current: {SHADOW_TAGS_KEY: shadow_json},
+        vector_store=vector_store,
         snapshot_content=content,
     )
 

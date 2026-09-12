@@ -1127,7 +1127,7 @@ class TestWorkerEnrich:
 
         ``worker enrich`` is a *post-embed* writer: it selects documents
         that are already stored and already embedded, then rewrites exactly
-        the two keys ``SYNCED_METADATA_KEYS`` covers. Writing them to the
+        the two keys ``MIRRORED_METADATA_KEYS`` covers. Writing them to the
         document store alone leaves ``SemanticSearch`` scoring the document
         on its pre-enrichment ``auto_importance`` and serving its
         pre-enrichment ``content_tags``, because the vector row's metadata

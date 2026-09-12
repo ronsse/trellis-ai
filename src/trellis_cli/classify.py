@@ -345,6 +345,7 @@ def shadow(
     result = shadow_classify_stale(
         classifier=classifier,
         document_store=registry.knowledge.document_store,
+        vector_store=resolve_vector_store(registry),
         # Dry runs stay audit-silent: a MEMORY_OP_JUDGED event claims a
         # judgement that was not persisted.
         event_log=None if dry_run else registry.operational.event_log,

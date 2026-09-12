@@ -24,25 +24,16 @@ from tests.ast_rules import (
 # Module+operation keys survive line movement. The exact site count below
 # prevents a new call from inheriting an existing module-level exemption.
 GOVERNED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
-    ("trellis/classify/feedback.py", "document.put"): (
-        "Metadata-only noise tagging mirrors content tags through "
-        "sync_vector_metadata; later governance must remove this exemption."
-    ),
-    ("trellis/classify/refresh.py", "document.put"): (
-        "Metadata-only classification refresh mirrors the vector snapshot; "
-        "later governance must remove this exemption."
-    ),
-    ("trellis/core/derived_metadata.py", "document.put"): (
-        "Shared metadata-only rewrite seam; the PR3 design must govern or "
-        "transactionally mirror it."
+    ("trellis/core/document_write.py", "document.put"): (
+        "The document/vector seam every other module now routes through "
+        "(#360). Still ungoverned — it calls no MutationExecutor — so it "
+        "stays on this roster; what changed is that there is one of it. "
+        "tests/unit/core/test_document_write_rule.py is what keeps that true "
+        "and is the rule to read before adding a second."
     ),
     ("trellis/core/vector_metadata.py", "vector.upsert"): (
         "Metadata-only vector mirror repairs snapshot divergence; the PR3 "
         "design must replace this direct write."
-    ),
-    ("trellis/ingest_corpus/sync.py", "document.put"): (
-        "Bursty corpus writes await the batched audit emission required by "
-        "decision-ledger T-3."
     ),
     ("trellis/ingest_corpus/sync.py", "document.delete"): (
         "Bursty corpus deletion awaits governed batching; no governed "
@@ -51,14 +42,6 @@ GOVERNED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
     ("trellis/ingest_corpus/sync.py", "vector.delete"): (
         "Corpus cleanup mirrors document deletion directly and awaits the "
         "same governed batch boundary."
-    ),
-    ("trellis/mcp/reconcile.py", "document.put"): (
-        "Metadata-only supersession stamping is not vector-mirrored today "
-        "and is reserved for the PR3 design."
-    ),
-    ("trellis/mcp/server.py", "document.put"): (
-        "The metadata-only stale reconciliation downgrade remains for the "
-        "PR3 governance and mirror design."
     ),
     ("trellis/retrieve/embed_ingest_hook.py", "vector.upsert"): (
         "Fail-soft embedding is the vector seam PR2's governed handler will "
@@ -71,17 +54,6 @@ GOVERNED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
     ("trellis_cli/admin_reindex_vectors.py", "vector.upsert_bulk"): (
         "Admin reindex is an operator repair tool that rebuilds the vector "
         "plane in bulk; later governance must define its governed operation."
-    ),
-    ("trellis_cli/demo.py", "document.put"): (
-        "Demo fixture seeding writes synthetic documents directly and must "
-        "eventually use the governed batch path."
-    ),
-    ("trellis_cli/ingest.py", "document.put"): (
-        "CLI evidence and dbt-description ingestion are bursty paths that "
-        "await governed batching."
-    ),
-    ("trellis_workers/session_capture/reconcile_pass.py", "document.put"): (
-        "Metadata-only claim withdrawal awaits the PR3 governance and mirror design."
     ),
 }
 
@@ -111,11 +83,19 @@ UNCLASSIFIED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
     ),
 }
 
-# Re-read on origin/main 04deb47 (2026-09-04) with git grep over the
+# Re-read on 2026-09-12 with git grep over the
 # document_store/doc_store/vector_store/vstore receiver names and every write
-# method, excluding store backends. That inventory found 25 sites. PR2 removed
-# seven agent-facing and worker-local writes through core evidence.ingest,
-# leaving 18: 13 document and 5 vector.
+# method, excluding store backends. The prior reading (origin/main 04deb47,
+# 2026-09-04) found 18: 13 document and 5 vector. Routing every document write
+# through trellis/core/document_write.py took the document half from 13 to 2 --
+# the seam's own put, plus ingest_corpus/sync.py's delete, for which no
+# document-write seam exists. The vector half is untouched at 5: this issue
+# governs which *writer* owns the mirror, not how the vector plane is written.
+#
+# Run it with --untracked. The grep is over the working tree, and the seam
+# module was new and unstaged when this was re-read -- without the flag the
+# inventory silently returns 1 document site instead of 2, which reads as the
+# ratchet having caught something.
 #
 # The vector method set is the one VectorStore actually declares. upsert_many
 # is no method of any store in src/ -- tracking it policed nothing, while the
@@ -123,8 +103,8 @@ UNCLASSIFIED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
 # trellis_cli/admin_reindex_vectors.py write the vector plane outside the
 # ratchet. These counts are hand-derived from that grep, never from len() of
 # the scan they bound.
-_HAND_READ_SITE_COUNT = 18
-_HAND_READ_DOCUMENT_COUNT = 13
+_HAND_READ_SITE_COUNT = 7
+_HAND_READ_DOCUMENT_COUNT = 2
 _HAND_READ_VECTOR_COUNT = 5
 _WRITE_METHODS = {"put", "delete", "upsert", "upsert_bulk"}
 

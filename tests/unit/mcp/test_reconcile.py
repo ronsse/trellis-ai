@@ -445,7 +445,10 @@ class TestReverifyUnderLock:
             # A concurrent writer wins its own SUPERSEDE against the
             # candidate while our model is thinking — content unchanged.
             mark_document_superseded(
-                docs, old_doc_id=base_id, new_doc_id="someone-elses-successor"
+                docs,
+                old_doc_id=base_id,
+                new_doc_id="someone-elses-successor",
+                vector_store=None,
             )
 
         _enable(
@@ -694,7 +697,7 @@ class TestSupersedePreservesRecency:
         clock["now"] = now
         docs.put("new-doc", "The current note about widget calibration.", {})
         assert mark_document_superseded(
-            docs, old_doc_id="old-doc", new_doc_id="new-doc"
+            docs, old_doc_id="old-doc", new_doc_id="new-doc", vector_store=None
         )
 
         superseded = docs.get("old-doc")
@@ -743,7 +746,7 @@ class TestSupersedePreservesRecency:
         clock["now"] = now
         docs.put("new-doc", body, {})
         assert mark_document_superseded(
-            docs, old_doc_id="old-doc", new_doc_id="new-doc"
+            docs, old_doc_id="old-doc", new_doc_id="new-doc", vector_store=None
         )
 
         # Half-life pinned at the call site rather than inherited from
@@ -811,7 +814,13 @@ class TestSupersedeTargetVanished:
     def _fail_supersede(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str]]:
         calls: list[dict[str, str]] = []
 
-        def _fake(_store: Any, *, old_doc_id: str, new_doc_id: str) -> bool:
+        def _fake(
+            _store: Any,
+            *,
+            old_doc_id: str,
+            new_doc_id: str,
+            vector_store: Any = None,
+        ) -> bool:
             calls.append({"old_doc_id": old_doc_id, "new_doc_id": new_doc_id})
             return False
 
@@ -916,7 +925,10 @@ class TestSupersedeTargetVanished:
             with structlog.testing.capture_logs() as logs:
                 assert (
                     mark_document_superseded(
-                        docs, old_doc_id="gone-doc", new_doc_id="new-doc"
+                        docs,
+                        old_doc_id="gone-doc",
+                        new_doc_id="new-doc",
+                        vector_store=None,
                     )
                     is False
                 )

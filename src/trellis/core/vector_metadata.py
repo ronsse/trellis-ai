@@ -20,7 +20,7 @@ agreed** (28 carried no ``signal_quality`` at all, 17 still read
 This module is the one writer for the repair: a **metadata-only re-upsert**
 that carries the existing embedding through unchanged, so nothing is
 re-embedded and no embedding cost is incurred. It is deliberately narrow —
-see :data:`SYNCED_METADATA_KEYS` for which keys are mirrored and why the
+see :data:`MIRRORED_METADATA_KEYS` for which keys are mirrored and why the
 rest are not.
 
 It lives in :mod:`trellis.core` rather than beside either caller because
@@ -36,17 +36,28 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from trellis.schemas.classification import LIFECYCLE_KEY
+
 if TYPE_CHECKING:
     from trellis.stores.base.vector import VectorStore
     from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
 
-#: Document-metadata keys mirrored onto the vector row by
-#: :func:`sync_vector_metadata`.
+#: Document-metadata keys that must agree between a document row and its
+#: vector row — the one authoritative answer to "which keys are mirrored?".
 #:
-#: Scoped to the **classify layer's output**, which is the pair of keys the
-#: post-embed tag writers touch:
+#: **This was two disjoint sets until 2026-09-12**, and that split was the
+#: shape of the defect rather than a detail of it: ``sync_vector_metadata``
+#: carried ``content_tags`` / ``auto_importance`` while
+#: ``mutate.handlers._sync_vector_lifecycle`` carried ``lifecycle``, so every
+#: post-embed writer had to know *which* helper its own change called for.
+#: Both #337 and #338 are that question answered wrongly. A repair command
+#: that fixes a subset of what the writers maintain re-opens the same gap
+#: from the other side, so ``trellis admin resync-vector-metadata`` now
+#: repairs the lifecycle stamp too.
+#:
+#: The classify layer's output — the pair the post-embed tag writers touch:
 #:
 #: * ``content_tags`` — the facet bag. ``signal_quality`` is the facet the
 #:   noise filter acts on; ``domain`` is what
@@ -65,12 +76,21 @@ logger = structlog.get_logger(__name__)
 #: is the row's *own* excerpt, cut at embed time by ``build_vector_row``
 #: because that is the last point holding the full document; ``doc_id`` and
 #: ``created_at`` are the row's identity and recency stamp. Copying the
-#: document bag wholesale would clobber all three. ``lifecycle`` has its own
-#: writer on the retention path (#337). Shadow tags
+#: document bag wholesale would clobber all three. Shadow tags
 #: (:data:`~trellis.schemas.classification.SHADOW_TAGS_KEY`) are excluded for
 #: the reason ``build_vector_row`` already excludes them: a measurement-only
 #: record duplicated into a store with no shadow awareness can only drift.
-SYNCED_METADATA_KEYS: tuple[str, ...] = ("content_tags", "auto_importance")
+#: And the staleness state:
+#:
+#: * ``lifecycle`` — read by :func:`~trellis.retrieve.lifecycle.is_archived`
+#:   at the collect seam, which reads ``item.metadata``: on the semantic axis
+#:   that *is* the vector row's snapshot, so an archival not mirrored here
+#:   keeps serving the item (#337).
+MIRRORED_METADATA_KEYS: tuple[str, ...] = (
+    "content_tags",
+    "auto_importance",
+    LIFECYCLE_KEY,
+)
 
 
 #: What one :func:`sync_vector_metadata_outcome` call actually did.
@@ -88,7 +108,7 @@ def sync_vector_metadata_outcome(
     item_id: str,
     document_metadata: dict[str, Any] | None,
     *,
-    keys: tuple[str, ...] = SYNCED_METADATA_KEYS,
+    keys: tuple[str, ...] = MIRRORED_METADATA_KEYS,
 ) -> VectorSyncOutcome:
     """:func:`sync_vector_metadata`, saying *which* of its no-ops occurred.
 
@@ -135,7 +155,7 @@ def sync_vector_metadata(
     item_id: str,
     document_metadata: dict[str, Any] | None,
     *,
-    keys: tuple[str, ...] = SYNCED_METADATA_KEYS,
+    keys: tuple[str, ...] = MIRRORED_METADATA_KEYS,
 ) -> bool:
     """Mirror ``keys`` from a document's metadata onto its vector row.
 
@@ -153,7 +173,7 @@ def sync_vector_metadata(
             none configured (in which case this is a no-op).
         item_id: The document id, which is also the vector row's key.
         document_metadata: The document's metadata bag — the authority.
-        keys: Which keys to mirror. Defaults to :data:`SYNCED_METADATA_KEYS`.
+        keys: Which keys to mirror. Defaults to :data:`MIRRORED_METADATA_KEYS`.
 
     Returns:
         ``True`` iff a row existed and was actually rewritten. A row already
@@ -205,7 +225,7 @@ def vector_metadata_diverges(
     document_metadata: dict[str, Any] | None,
     vector_metadata: dict[str, Any] | None,
     *,
-    keys: tuple[str, ...] = SYNCED_METADATA_KEYS,
+    keys: tuple[str, ...] = MIRRORED_METADATA_KEYS,
 ) -> bool:
     """Whether a document and its vector row disagree on any of ``keys``.
 
@@ -223,7 +243,7 @@ def vector_metadata_diverges(
 
 
 __all__ = [
-    "SYNCED_METADATA_KEYS",
+    "MIRRORED_METADATA_KEYS",
     "VectorSyncOutcome",
     "resolve_vector_store",
     "sync_vector_metadata",

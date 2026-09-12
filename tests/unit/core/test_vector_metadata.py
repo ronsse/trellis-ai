@@ -13,11 +13,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from trellis.core.vector_metadata import (
-    SYNCED_METADATA_KEYS,
+    MIRRORED_METADATA_KEYS,
     resolve_vector_store,
     sync_vector_metadata,
     vector_metadata_diverges,
 )
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.vector import VectorStore
 from trellis.stores.sqlite.vector import SQLiteVectorStore
 
@@ -39,8 +40,21 @@ def _seed(store: SQLiteVectorStore, **metadata: Any) -> None:
 class TestSyncedKeys:
     """What is mirrored, and — as importantly — what is not."""
 
-    def test_keys_are_the_classify_layer_pair(self) -> None:
-        assert SYNCED_METADATA_KEYS == ("content_tags", "auto_importance")
+    def test_keys_are_the_two_snapshot_failures(self) -> None:
+        """The mirror set is the union of #338's pair and #337's key.
+
+        It was ``("content_tags", "auto_importance")`` while the two mirror
+        mechanisms were separate — #337's lifecycle stamp had its own helper
+        in ``mutate.handlers``, and a writer had to pick one. Merging them
+        (#360) makes this tuple the whole answer to "what does a document
+        write carry onto its vector row", so pinning it is pinning that the
+        two failures share one mechanism rather than two.
+        """
+        assert MIRRORED_METADATA_KEYS == (
+            "content_tags",
+            "auto_importance",
+            LIFECYCLE_KEY,
+        )
 
     def test_row_owned_keys_are_left_alone(self, store: SQLiteVectorStore) -> None:
         """``content`` / ``doc_id`` / ``created_at`` belong to the row.

@@ -11,10 +11,12 @@ from typing import NoReturn
 import typer
 from rich.markup import escape
 
+from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import (
     sanitize_error_message,
     sanitized_error_payload,
 )
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
@@ -34,7 +36,7 @@ from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.ingest_conversations import ingest_conversations
 from trellis_cli.ingest_corpus import ingest_corpus
 from trellis_cli.output import build_console, emit_json
-from trellis_cli.stores import _get_registry, get_document_store
+from trellis_cli.stores import _get_registry
 
 ingest_app = typer.Typer(no_args_is_help=True)
 console = build_console()
@@ -182,11 +184,13 @@ def ingest_evidence(
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # Persist to document store
-    store = get_document_store()
-    store.put(
-        doc_id=evidence.evidence_id,
-        content=evidence.content or "",
-        metadata={
+    registry = _get_registry()
+    put_document(
+        registry.knowledge.document_store,
+        resolve_vector_store(registry),
+        evidence.evidence_id,
+        evidence.content or "",
+        {
             "evidence_type": evidence.evidence_type,
             "source_origin": evidence.source_origin,
         },
@@ -298,14 +302,23 @@ def ingest_dbt_manifest(
     # Index descriptions into the document store (dbt-specific side-channel
     # that used to live inside the worker's load() override).
     doc_store = registry.knowledge.document_store
+    vector_store = resolve_vector_store(registry)
     doc_count = 0
     for entity in result.entities:
         desc = entity.properties.get("description", "")
         if desc:
-            doc_store.put(
-                doc_id=f"dbt:{entity.entity_id}",
-                content=desc,
-                metadata={
+            # Through the seam for uniformity, not because it repairs this
+            # path: nothing embeds or classifies a `dbt:` document, so the
+            # mirror reads "absent" every time and these descriptions stay
+            # unreachable by semantic search and untagged. That is a
+            # separate defect (#568), deliberately not fixed here — adding
+            # an embed would start charging this command for embeddings.
+            put_document(
+                doc_store,
+                vector_store,
+                f"dbt:{entity.entity_id}",
+                desc,
+                {
                     "source": "dbt",
                     "node_type": entity.entity_type,
                     "name": entity.properties.get("name", entity.name),

@@ -59,8 +59,8 @@ from trellis.classify.ingest import (
     classify_for_ingest,
     classify_on_ingest_enabled,
 )
+from trellis.core.document_write import put_document
 from trellis.core.hashing import content_hash
-from trellis.core.vector_metadata import sync_vector_metadata_outcome
 from trellis.extract.memory_ingest_hook import (
     build_memory_extractor,
     run_memory_extraction,
@@ -446,7 +446,15 @@ def _apply_record(
     # `content_type` → `document_form` key; see trellis.schemas.document_metadata.
     metadata = DocumentMetadata.from_mapping(metadata).to_metadata()
 
-    doc_store.put(outcome.doc_id, text, metadata=metadata)
+    # Through the seam, even though the unchunked branch below re-embeds and
+    # would rebuild the row wholesale anyway: ``run_embed_on_ingest`` is
+    # gated on ``TRELLIS_ENABLE_EMBED_ON_INGEST``, so on a deployment with
+    # that flag off the embed is not a mirror at all. The seam's mirror is
+    # unconditional. It also reaches the case the embed never covers — a
+    # document that has just *become* chunked keeps the whole-document
+    # vector row written by an earlier unchunked run, and nothing here
+    # re-embeds it (#567).
+    put_document(doc_store, vector_store, outcome.doc_id, text, metadata)
     outcome.chunks_written = _write_chunks(
         registry,
         parent_doc_id=outcome.doc_id,
@@ -560,7 +568,7 @@ def _write_chunks(
     and the keys it propagates are ``inherited_tags``, i.e.
     :data:`~trellis.classify.ingest.CLASSIFY_METADATA_KEYS`, which the
     mirror covers because it is contained in
-    :data:`~trellis.core.vector_metadata.SYNCED_METADATA_KEYS` (pinned by
+    :data:`~trellis.core.vector_metadata.MIRRORED_METADATA_KEYS` (pinned by
     ``test_classify_keys_are_covered_by_the_mirror`` — prose asserting an
     invariant is not the same as enforcing it). Un-mirrored, a chunk
     demoted on its parent stayed servable on the semantic axis — #338's
@@ -627,27 +635,32 @@ def _write_chunks(
         # any document whose parent gained tags is re-stamped to the sync's
         # own clock — precisely what ``KeywordSearch``'s recency decay would
         # then be ranking on.
-        doc_store.put(
+        # One call, both planes, and the mirror rides the bag that was just
+        # written rather than one a later line re-selects (#360). The
+        # ``preserve_updated_at`` conditional is unchanged and still what
+        # #406 is about; what moved is that neither branch can now reach the
+        # document store without the vector row going with it.
+        write = put_document(
+            doc_store,
+            vector_store,
             cid,
             chunk_content,
-            metadata=metadata,
+            metadata,
             preserve_updated_at=not content_changed,
         )
         if content_changed:
-            # Metadata-only refreshes deliberately don't re-embed —
-            # same convention as the document ingest paths.
+            # Re-embed: the text changed, so the *embedding* is stale too and
+            # the key mirror above is not enough. Metadata-only refreshes
+            # deliberately don't — same convention as the document ingest
+            # paths — which is why the mirror is what they are counted on.
             run_embed_on_ingest(
                 registry, cid, chunk_content, metadata, source=requested_by
             )
         else:
-            # After the authoritative document write, never before: the
-            # document row is what a re-run repairs from, and the mirror is
-            # fail-soft, so losing it must not lose the tag that landed.
             mirror.metadata_only_writes += 1
-            outcome = sync_vector_metadata_outcome(vector_store, cid, metadata)
-            if outcome == "synced":
+            if write.mirror == "synced":
                 mirror.rows_synced += 1
-            elif outcome == "absent":
+            elif write.mirror == "absent":
                 mirror.rows_absent += 1
         written += 1
     return written

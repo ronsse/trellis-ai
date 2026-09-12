@@ -529,6 +529,32 @@ transactional mirror lands that makes a direct write structurally incapable of f
 the vector row — `kimi-k3` named that as the alternative that would change its answer, and
 it would make B redundant rather than wrong.
 
+> **Amended 2026-09-12 — the premise was stale twice over, and the reopen clause is
+> what shipped ([#360](https://github.com/ronsse/trellis-ai/issues/360)).**
+> "`create_curate_handlers` registers 13 operations and **not one writes a document or
+> vector row**" was wrong on both halves by the time it was acted on: it registers **15**,
+> and `EvidenceIngestHandler` ([#544](https://github.com/ronsse/trellis-ai/pull/544),
+> `7cbe3a3`) writes both planes through the governed pipeline. So option B — promote a
+> governed `evidence.ingest` to core — had **already landed**. It did not fix #337 or
+> #338, and could not have: both are *mirror* failures, entirely inside the population of
+> direct writers #544 did not govern. **#544 governed the half that never failed.**
+>
+> What shipped instead is the second reopen condition, taken deliberately: a seam
+> (`trellis/core/document_write.py`) that makes a direct write structurally incapable of
+> forgetting the vector row, plus an AST rule
+> (`tests/unit/core/test_document_write_rule.py`) that keeps it the only way through. Note
+> `kimi-k3` called that "the alternative that would change its answer" — it makes B
+> **redundant rather than wrong**, which is exactly what the measured state shows: the
+> governance B buys is real, and it was never the thing standing between production and
+> two months of stale vector rows.
+>
+> **The correction worth carrying forward is the method, not the count.** The 13 was a
+> hand-read roster in a prose ledger, and rosters rot — the same failure
+> [#443](https://github.com/ronsse/trellis-ai/issues/443)/[#466](https://github.com/ronsse/trellis-ai/issues/466)
+> record for rules, now observed in a decision record. A premise stated as a number should
+> be re-derived at implementation time, not quoted; this one had been quoted into three
+> successive briefs.
+
 ### T-2 · Ship #338's fix wider than the issue specified
 
 The write-through [#338](https://github.com/ronsse/trellis-ai/issues/338) asked for would

@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.classify.dedup.minhash import MinHashIndex
+from trellis.core.document_write import put_document
 from trellis.core.hashing import content_hash
 from trellis.ingest_corpus.models import is_chunk_doc_id
 from trellis.mcp.reconcile import (
@@ -66,6 +67,8 @@ from trellis.mcp.reconcile import (
 
 if TYPE_CHECKING:
     from trellis.llm import LLMClient
+    from trellis.stores.base.document import DocumentStore
+    from trellis.stores.base.vector import VectorStore
     from trellis.stores.registry import StoreRegistry
     from trellis_workers.session_capture.models import CandidateMemory, CaptureReport
 
@@ -218,11 +221,19 @@ def _apply_verdict(
 
 
 def apply_supersessions(
-    doc_store: Any,
+    doc_store: DocumentStore,
     written: list[CandidateMemory],
     report: CaptureReport,
+    *,
+    vector_store: VectorStore | None,
 ) -> None:
     """Stale-mark every superseded doc, after the successors are persisted.
+
+    ``vector_store`` is required rather than defaulted to ``None`` for the
+    same reason :func:`~trellis.mcp.reconcile.mark_document_superseded` makes
+    it required: both writes below stamp a lifecycle marker, and a lifecycle
+    stamp the vector row never sees is #337 exactly. A default would let a
+    caller forget it and still typecheck.
 
     Call this only from the live write path, once ``_write_records`` has run.
     A supersession is a claim about two documents, so both have to exist for
@@ -246,7 +257,10 @@ def apply_supersessions(
             )
             continue
         if mark_document_superseded(
-            doc_store, old_doc_id=match_id, new_doc_id=candidate.doc_id
+            doc_store,
+            old_doc_id=match_id,
+            new_doc_id=candidate.doc_id,
+            vector_store=vector_store,
         ):
             continue
         # mark_document_superseded logs the miss; the report is what an
@@ -255,7 +269,9 @@ def apply_supersessions(
         _record_supersede_failure(
             report, "supersede_target_missing", match_id, candidate.doc_id
         )
-        _withdraw_supersede_claim(doc_store, candidate.doc_id, successor)
+        _withdraw_supersede_claim(
+            doc_store, candidate.doc_id, successor, vector_store=vector_store
+        )
 
 
 def _record_supersede_failure(
@@ -269,7 +285,11 @@ def _record_supersede_failure(
 
 
 def _withdraw_supersede_claim(
-    doc_store: Any, doc_id: str, stored: dict[str, Any]
+    doc_store: DocumentStore,
+    doc_id: str,
+    stored: dict[str, Any],
+    *,
+    vector_store: VectorStore | None,
 ) -> None:
     """Strip an unapplied ``supersedes_doc_id`` off a written successor.
 
@@ -285,6 +305,11 @@ def _withdraw_supersede_claim(
         if k != SUPERSEDES_DOC_KEY
     }
     metadata[RECONCILIATION_KEY] = MARKER_STALE
-    doc_store.put(
-        doc_id, stored["content"], metadata=metadata, preserve_updated_at=True
+    put_document(
+        doc_store,
+        vector_store,
+        doc_id,
+        stored["content"],
+        metadata,
+        preserve_updated_at=True,
     )
