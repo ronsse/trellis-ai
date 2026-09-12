@@ -8,60 +8,42 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) (program-level guidance where
 > it governs an item — **not** the live source for every open issue's requirements).
 >
-> Last updated 2026-09-04. Reviewed against `main` at `e4e7604` before this doc commit;
-> **determine live `main` via `git rev-parse origin/main`**. PR
-> [#527](https://github.com/ronsse/trellis-ai/pull/527) landed the dated issue corpus
-> (evidence + implementation aids, not requirements authority).
+> Last updated 2026-09-12. **This file carries mechanism, not status** — no `main` pin, no
+> merged-PR roster, no issue count. §1 names the command that answers each of those, because
+> every time one was written down here it was wrong within days.
 
 ## 1. State
 
-Reviewed against `main` at `e4e7604` before this doc commit — **`git rev-parse origin/main`
-for live state.** **No implementation work in flight** from this program; ask
-`gh pr list --state open`, GitHub issues, and
-[`implementation-roadmap.md`](./implementation-roadmap.md) for what is dispatchable. The
-[dated corpus](../issues/reviews/2026-09-04/README.md) holds adversarial review evidence.
-**The prod containers on skynet do _not_ run current `main`** — §1.2.
+**Nothing about current state is transcribed here, because every transcription of it has
+rotted.** Determine it with these, which cannot go stale:
 
-Landed 2026-09-04: PR [#527](https://github.com/ronsse/trellis-ai/pull/527) — **selectively
-transcribed** the seven implementation plans and unique review evidence into
-[`docs/issues/reviews/2026-09-04/`](../issues/reviews/2026-09-04/) (40 briefs,
-`manifest.json`, [`plans/`](../issues/reviews/2026-09-04/plans/)). Orchestration briefs
-and reports on remote branch `handoff/issue-sweep-2026-09-04` were **intentionally
-superseded** and were **not** merged as an ancestral commit. That branch is **eligible for
-owner-approved deletion** after confirming no archival retention is desired — do not
-retain its 37-open count or unsafe closure recommendations.
+| Question | Command |
+|---|---|
+| What is `main`? | `git rev-parse origin/main` |
+| What landed, and when? | `git log --oneline origin/main` |
+| What is open? | `gh pr list --state open` · `gh issue list --state open` |
+| What merged recently? | `gh pr list --state merged --limit 20` |
 
-Landed 2026-08-26: #340, #341, #304, **noise exclusion actually holding** (#343), #328,
-**attribution decomposed + join key restored** (#344), #346.
+**No implementation work is in flight from this program** — §1.1. What is dispatchable comes
+from the GitHub issue and [`implementation-roadmap.md`](./implementation-roadmap.md), never
+from a list in this file. **The prod containers on skynet do _not_ run current `main`** —
+§1.2, which is the one piece of state to read before trusting any production measurement.
 
-Landed 2026-08-27 — nine PRs closing Waves 1 and 1b: #347, **#352 (first outside
-contribution)**, **#353 (F1)**, #354, #355, **#357 (A1)**, **#358 (#345)**, **#359 (F2)**, #361.
+That rule is applied here rather than asserted, and it was earned: measured 2026-09-12
+against the revision this commit replaced, the `main` pin this file carried in **three
+separate places** was **16 commits** and 8 days stale, §6's open-issue count read **40**
+against a live **44**, and both issues §6 told agents not to dispatch *"until GitHub
+reflects the close"* had been closed since. Every transcribed figure in the file was wrong,
+and each command above would have answered correctly. §1.1 has stated the principle all
+along — *mechanism does not rot; status does* — and this section was its largest violation.
 
-Landed 2026-08-28 (all thirteen merged between 00:00Z and 03:21Z UTC). **Five of eleven
-agent PRs came back having refuted the item they were sent to implement** — #367, #368,
-#376, #380, #384. A sixth, #389, corrected its issue's premise but shipped the fix anyway;
-count it or not, but say which. This is the wave's most reusable outcome:
-
-| PR | Item | Outcome |
-|---|---|---|
-| [#367](https://github.com/ronsse/trellis-ai/pull/367) | B3 alias indexing | **already done in #289** — fixed a real cost it found instead (40.3% of resolver calls were exact **within-document** repeats — the cache is per-document, which is what makes the number actionable) |
-| [#368](https://github.com/ronsse/trellis-ai/pull/368) | B1 / #298 | **all three proposed directions refuted**; shipped `by_item_namespace`, the axis that could show it |
-| [#370](https://github.com/ronsse/trellis-ai/pull/370) | C1 policy gate | **stage 2 now runs**; a full policy CRUD surface already existed wired to nothing |
-| [#372](https://github.com/ronsse/trellis-ai/pull/372) | E2 capture coverage | denominator taken from the *deployed* gate, not a new eligibility rule |
-| [#376](https://github.com/ronsse/trellis-ai/pull/376) | #371 graph axis | **the obvious fix produced 0 seeds on 37/37 packs** (30 distinct intents) and changed no served item — but it is not free: `test_the_embed_is_still_paid_for` pins one embed call per pack |
-| [#380](https://github.com/ronsse/trellis-ai/pull/380) | A3 / #336 | **no threshold could have worked** — `usage_rate` is degenerate (`{0.0: 64, 0.333: 4, 0.5: 8, 0.8: 1, 1.0: 2}`), so every value in (0, 0.333] flags the same 64/79. #380 left the threshold alone and added a downstream evidence predicate; 64 → 24, all 8 named memories spared |
-| [#382](https://github.com/ronsse/trellis-ai/pull/382) | #373 advisories | one resolver; **and the advisories are degenerate** (#383) — 37 when measured, **51 today**, growing ~2/night because nothing is ever replaced |
-| [#384](https://github.com/ronsse/trellis-ai/pull/384) | B2 chunk rollup | **refused** — every cap loses cited-helpful bodies faster than it saves tokens |
-| [#386](https://github.com/ronsse/trellis-ai/pull/386) | #381 | nightly curate now syncs vector metadata, **proven on scratch stores** not asserted |
-| [#387](https://github.com/ronsse/trellis-ai/pull/387) | #378 | one ruff version, **enforced by a check instead of a comment** |
-| [#389](https://github.com/ronsse/trellis-ai/pull/389) | #374 / #364 | `scan_events`; `useful_token_fraction` keeps its denominator and gains a bound |
-| #366, #379 | orchestrator docs | the deployment lag, and a trap propagated to six agents |
-
-**At least six of the orchestrator's own claims were wrong and agents caught every one** —
-#374's urgency (~3.2x overstated), where #374's fix actually lives, #374's banner-suppression
-mechanism, #371's "one production seed producer" (it is zero), #336's premise, and the
-`PYTHONPATH` trap. The first draft of this sentence said *four*: do not trust a count in this
-file that flatters its author.
+The [dated corpus](../issues/reviews/2026-09-04/README.md) holds adversarial review evidence
+from the 2026-09-04 sweep — evidence and implementation aids, **not** requirements authority
+(PR [#527](https://github.com/ronsse/trellis-ai/pull/527)). Its orchestration briefs and
+reports on remote branch `handoff/issue-sweep-2026-09-04` were **intentionally superseded**
+and were **not** merged as an ancestral commit; that branch is **eligible for owner-approved
+deletion** once no archival retention is wanted. Do not retain its 37-open count or its
+unsafe closure recommendations.
 
 ### 1.1 In flight
 
@@ -92,7 +74,35 @@ was ~3.2x overstated (see the correction on it):
 
 Plus two CI-integrity defects: **[#377](https://github.com/ronsse/trellis-ai/issues/377)** (one bare `CliRunner` poisons structlog process-wide — 109 failures across 23 directories) and **[#378](https://github.com/ronsse/trellis-ai/issues/378)** (**two ruff versions run in CI at once**, 0.15.22 in `lint.yml` and 0.16.4 in `[dev]`, *and both carry a comment claiming they match*).
 
-**The pattern to internalise:** four of six agents this wave were sent to implement something and came back having refuted it. That only happened because every brief demanded a measurement *before* a patch, and ended with "report anything you found that contradicts this brief." Keep both.
+**Five of eleven agent PRs came back having refuted the item they were sent to implement**
+— #367, #368, #376, #380, #384. A sixth, #389, corrected its issue's premise but shipped
+the fix anyway; count it or not, but say which. This is the wave's most reusable outcome,
+and it is why the per-PR outcomes are recorded here while the merge dates are not:
+`git log origin/main` re-derives when these landed, and nothing re-derives what they
+refuted.
+
+| PR | Item | Outcome |
+|---|---|---|
+| [#367](https://github.com/ronsse/trellis-ai/pull/367) | B3 alias indexing | **already done in #289** — fixed a real cost it found instead (40.3% of resolver calls were exact **within-document** repeats — the cache is per-document, which is what makes the number actionable) |
+| [#368](https://github.com/ronsse/trellis-ai/pull/368) | B1 / #298 | **all three proposed directions refuted**; shipped `by_item_namespace`, the axis that could show it |
+| [#370](https://github.com/ronsse/trellis-ai/pull/370) | C1 policy gate | **stage 2 now runs**; a full policy CRUD surface already existed wired to nothing |
+| [#372](https://github.com/ronsse/trellis-ai/pull/372) | E2 capture coverage | denominator taken from the *deployed* gate, not a new eligibility rule |
+| [#376](https://github.com/ronsse/trellis-ai/pull/376) | #371 graph axis | **the obvious fix produced 0 seeds on 37/37 packs** (30 distinct intents) and changed no served item — but it is not free: `test_the_embed_is_still_paid_for` pins one embed call per pack |
+| [#380](https://github.com/ronsse/trellis-ai/pull/380) | A3 / #336 | **no threshold could have worked** — `usage_rate` is degenerate (`{0.0: 64, 0.333: 4, 0.5: 8, 0.8: 1, 1.0: 2}`), so every value in (0, 0.333] flags the same 64/79. #380 left the threshold alone and added a downstream evidence predicate; 64 → 24, all 8 named memories spared |
+| [#382](https://github.com/ronsse/trellis-ai/pull/382) | #373 advisories | one resolver; **and the advisories are degenerate** (#383) — 37 when measured, **51 today**, growing ~2/night because nothing is ever replaced |
+| [#384](https://github.com/ronsse/trellis-ai/pull/384) | B2 chunk rollup | **refused** — every cap loses cited-helpful bodies faster than it saves tokens |
+| [#386](https://github.com/ronsse/trellis-ai/pull/386) | #381 | nightly curate now syncs vector metadata, **proven on scratch stores** not asserted |
+| [#387](https://github.com/ronsse/trellis-ai/pull/387) | #378 | one ruff version, **enforced by a check instead of a comment** |
+| [#389](https://github.com/ronsse/trellis-ai/pull/389) | #374 / #364 | `scan_events`; `useful_token_fraction` keeps its denominator and gains a bound |
+| #366, #379 | orchestrator docs | the deployment lag, and a trap propagated to six agents |
+
+**At least six of the orchestrator's own claims were wrong and agents caught every one** —
+#374's urgency (~3.2x overstated), where #374's fix actually lives, #374's banner-suppression
+mechanism, #371's "one production seed producer" (it is zero), #336's premise, and the
+`PYTHONPATH` trap. The first draft of this sentence said *four*: do not trust a count in this
+file that flatters its author.
+
+**The pattern to internalise:** four of six agents this wave were sent to implement something and came back having refuted it — a count over *agents*, where the table above counts *PRs* (five of eleven). Both stand; they are not the same denominator. That only happened because every brief demanded a measurement *before* a patch, and ended with "report anything you found that contradicts this brief." Keep both.
 
 ### 1.2 The deployment lag — read this before trusting any production measurement
 
@@ -315,13 +325,11 @@ optional [`plans/`](../issues/reviews/2026-09-04/plans/). Waves in
 [`autonomous-backlog.md`](./autonomous-backlog.md) are historical measurements — **not** a
 copy of the 40 briefs.
 
-Reviewed against `main` at `e4e7604` before this doc commit. **Determine live `main` via
-`git rev-parse origin/main`.**
-
-**Snapshot:** 40 open on GitHub (2026-09-04 review). [#525](https://github.com/ronsse/trellis-ai/issues/525)
-is **duplicate/closure-ready** (`duplicate` of #526); [#364](https://github.com/ronsse/trellis-ai/issues/364)
-is **stale-fixed/closure-ready** (PR #389) — do not dispatch either until GitHub reflects
-the close.
+**There is deliberately no snapshot of the open set here.** The one that stood until
+2026-09-12 named a count that had drifted 40 → 44 and two issues to skip "until GitHub
+reflects the close" that GitHub had already closed — a caveat that survives its own
+subject is worse than none, because it spends an agent's attention on work that no longer
+exists. Ask `gh issue list --state open`; it is authoritative and costs one call.
 
 ### First executable batches *(not exhaustive)*
 
