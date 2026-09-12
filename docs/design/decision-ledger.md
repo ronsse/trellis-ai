@@ -355,6 +355,71 @@ promote→review→serve chain. **The test refined the scope rather than flippin
 **Reopen if:** an integration audit shows eval fixtures cannot execute the same promote
 pipeline code production uses.
 
+### T-6 · [#463](https://github.com/ronsse/trellis-ai/issues/463): chunk rows keep **no** source clock — measured and declined
+
+**No panel — reversible, and the question was answerable by measurement rather than by
+judgement.** Taken 2026-09-12 while executing the overnight corpus item R2.
+
+**The fork.** `resolve_recency_stamp` (#417) prefers the metadata bag's clock over the row
+column on both document-backed axes, and a chunk inherits only `CLASSIFY_METADATA_KEYS`
+(`content_tags`, `auto_importance`) — no clock among them. So a slice of a 2024
+conversation decays off its 2026-08-07 import instant while the conversation itself decays
+off 2024: **one document, two ages**, which is the exact incoherence #417 removed *between
+strategies* and left *within* a document. #417 named it and deferred it here. The fix is
+one key in one dict.
+
+**Declined, and this is what it cost to find out.** A two-arm replay over all 59 attributed
+packs, against production's own stores with the live embedder:
+
+- The stamp moves a chunk's recency multiplier **0.605 → 0.336** — *exactly* where its
+  stamped parent already sits (735 chunks under 74 stamped parents, median 128-day
+  column-minus-source gap; `RECENCY_FLOOR` 0.3, 30-day half-life). Both then floor-bound,
+  so the tiebreak falls to raw relevance, where a median-7994-char parent beats a
+  median-3011-char chunk on surface area alone.
+- **27 of 59 packs change: -49 chunk servings, +41 stamped-parent servings, +14 other.**
+- The mechanism is **not** a hand-off. Only **2** of those 41 added parents are the parent
+  of a chunk dropped from the same pack; the other 39 are unrelated parents floating up
+  together, because the fix collapses the chunk half of the conversation corpus onto the
+  multiplier the parent half already occupies.
+- That is the wrong direction. Over 55 attributed packs a stamped parent earns
+  `P(cited helpful | served)` = **0.005** (1 of 219) against a chunk's **0.082** (7 of 85)
+  and the rest of the corpus's **0.131**; both halves sit near 0.55 unhelpful. Priced at
+  those rates the swap is **-2.0 cited-helpful servings and +0.2 cited-unhelpful**, per 59
+  packs.
+
+#417 wrote "propagating the stamp would demote the better half" and was right — **though
+for a reason it had not established.** It compared the two halves' citation rates; what
+actually happens is a corpus-wide re-float of the parent population.
+
+**What the method could not do, stated rather than buried.** The replay measures the A→B
+differential cleanly but cannot *price* it in citation terms: arm A reproduces only **22%**
+of the graded ids (122/553), because the corpus grew and today's retrieval for a year-old
+intent returns largely different items. So the -2.0 is an **expected value at measured
+per-class rates, not an observed loss**.
+
+**Reopen if:** the per-class citation rates converge. A stamped parent at 1 helpful
+citation in 219 servings is the single fact carrying this decision, and it is the one most
+likely to move. A backfill of `created_at` onto the 735 existing chunk rows is **not**
+wanted while this stands.
+
+**The sweep is the deliverable, not the one decision.** The plan required a roster of
+*every* derived-row producer rather than a patch to chunking, because three successive
+`updated_at` reader lists in this repo were each wrong and #443 declared 3 control keys
+against 6 sites. Two AST scans over `src/` found **37 sites / 34 keys**, and the three
+derived-row producers resolve three different ways:
+
+| Producer | Verdict |
+|---|---|
+| `retrieve/embed_ingest_hook.py::build_vector_row` | Already correct — and correct in the *callee*, so all three call sites inherit it. |
+| `trellis_workers/trace_embed/render.py::build_trace_metadata` | **Was wrong; fixed.** Zero production rows, so latent — but the worker is a *backfill by design* ("it covers the backlog as well as new writes"), so its first run over an existing trace store would have stamped a whole history with one import instant. #417's measured shape, guaranteed rather than merely possible. |
+| `ingest_corpus/sync.py::_write_chunks` | **Declined**, per the above. |
+
+`tests/unit/retrieve/test_derived_row_clock_roster.py` holds the roster up, and pins the
+declined decision *by execution*: a real `sync_corpus` run over a vault note with
+frontmatter `created_at:` asserts the parent row carries the clock and the chunk rows carry
+none. A later agent who adds the one key fails that test, and the failure names the comment
+carrying the measurement.
+
 ### T-5 · Close [#404](https://github.com/ronsse/trellis-ai/issues/404) with a known gap, rather than hold it for the wire contract
 
 **No panel — reversible, and the alternative was to keep a shipped improvement unmerged.**

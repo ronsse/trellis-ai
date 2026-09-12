@@ -181,6 +181,28 @@ def build_trace_metadata(trace: Trace) -> dict[str, Any]:
     validated core as every other write path — the model is lenient by
     construction, so this normalises rather than rejects, and the stored shape
     is the same flat dict the store persists everywhere else.
+
+    **The row carries the trace's clock, not the worker's** (#463). This is a
+    *derived-row producer*: the content and the metadata are both composed by
+    Trellis out of another record, so the store column — set when this worker
+    happened to run — is the write clock of a summary, never the age of the
+    work it summarises. ``resolve_recency_stamp`` (#417) prefers the metadata
+    bag over the column on both document-backed axes precisely so a derived row
+    can say what its source's clock was; a bag with no clock key silently falls
+    back to the column and the axis scores a two-year-old trace as minutes old.
+
+    Unstated, that would have been guaranteed rather than merely possible. The
+    worker is a **backfill by design** — its own docstring gives that as the
+    reason it is a batch pass and not a write-path hook, "it covers the backlog
+    as well as new writes" — so the first run over an existing trace store
+    stamps a whole history with one import instant. That is exactly the shape
+    #417 measured on the conversation corpus, where 148 rows spanning 28 months
+    of source material landed inside a 72-second window and the column ranked
+    a 2024 conversation as fresh as last week's.
+
+    ``created_at`` and not ``updated_at``: a trace is immutable by hard rule, so
+    the two are the same instant here, and writing one key keeps this row's bag
+    honest about which fact it is asserting.
     """
     ctx = trace.context
     raw: dict[str, Any] = {
@@ -190,6 +212,10 @@ def build_trace_metadata(trace: Trace) -> dict[str, Any]:
         "document_form": DOCUMENT_FORM,
         "trace_id": trace.trace_id,
         "trace_source": trace.source.value,
+        # The source clock. Not a core ``DocumentMetadata`` field, so it lands
+        # in ``custom`` and re-flattens verbatim — which is the top-level key
+        # ``resolve_recency_stamp`` reads.
+        "created_at": trace.created_at.isoformat(),
     }
     if trace.outcome is not None:
         raw["outcome_status"] = trace.outcome.status.value
