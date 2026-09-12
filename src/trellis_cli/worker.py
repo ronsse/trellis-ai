@@ -1891,7 +1891,12 @@ def _render_capture_text(payload: dict[str, Any]) -> None:
         f"  candidates: {payload['candidates_distilled']} distilled  "
         f"{payload['candidates_blocked_scan']} secret-blocked  "
         f"{payload['candidates_rejected_injection']} injection-blocked  "
-        f"{payload['candidates_rejected_worthiness']} unworthy"
+        f"{payload['candidates_rejected_worthiness']} unworthy "
+        # The split is printed because only one half is a judgement, and it
+        # is the training-pair negative class (#264) — an aggregate hid the
+        # fact that it was being counted and dropped.
+        f"({payload['candidates_rejected_judged_unworthy']} judged, "
+        f"{payload['candidates_rejected_floor']} below floor)"
     )
     console.print(
         f"  memories written: {payload['memories_written']}  "

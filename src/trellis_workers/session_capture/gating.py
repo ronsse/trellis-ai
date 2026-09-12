@@ -13,7 +13,9 @@ model-judged:
   attributed) applied to each distilled candidate. The model self-assesses the
   first three; this module enforces all four deterministically, so a
   candidate that merely *claims* worthiness but carries no evidence is still
-  rejected.
+  rejected. The gate reports *which kind* of rejection it made
+  (:class:`WorthinessOutcome`), because only one of the two is a judgement —
+  see that class.
 * **Injection guard** — a v1 deterministic backstop against
   capture-instruction injection. The worthiness booleans are model
   self-report and the distillation prompt hands the model the exact rubric,
@@ -36,6 +38,7 @@ injection to junk, not leakage.
 from __future__ import annotations
 
 import re
+from enum import StrEnum
 
 from trellis.core.hashing import content_hash
 from trellis_workers.session_capture.models import CandidateMemory, SessionDigest
@@ -144,8 +147,39 @@ def looks_like_injection(candidate: CandidateMemory) -> bool:
     return rubric_hits >= 2  # noqa: PLR2004 - threshold documented above
 
 
-def passes_worthiness(candidate: CandidateMemory) -> bool:
-    """Enforce the worthiness gate deterministically over a candidate.
+class WorthinessOutcome(StrEnum):
+    """What the worthiness gate decided, and **whose** decision it was.
+
+    One gate, two kinds of rejection, and the difference is load-bearing for
+    #264: a judged memory operation is a training example
+    ``(input, decision, outcome)``, so only a decision the *model* made can
+    be a training label.
+
+    * :attr:`JUDGED_UNWORTHY` is the judge's own verdict — its ``durable``
+      and ``actionable`` booleans came back False. This is the negative
+      class of the distillation arm, and it is the only rejection the sweep
+      emits a ``discard`` training pair for.
+    * :attr:`FAILED_FLOOR` is Trellis's deterministic floor on the *form* of
+      the model's output: no evidence to attribute the claim to, or a memory
+      under :data:`MIN_MEMORY_CHARS`. The model may well have asserted the
+      memory was worthy; this is the repo overruling the assertion, not the
+      judge withdrawing it. Emitting it as a ``discard`` would attribute a
+      Trellis rule to the model, and would retroactively relabel old pairs
+      the day :data:`MIN_MEMORY_CHARS` moves.
+
+    Rejections are attributed to the **first** test that fires, so a
+    candidate the judge already called unworthy is never re-attributed to
+    the floor — the same rule ``retrieve/withholding.py`` uses for an item
+    removed by two gates.
+    """
+
+    ACCEPT = "accept"
+    JUDGED_UNWORTHY = "judged_unworthy"
+    FAILED_FLOOR = "failed_floor"
+
+
+def assess_worthiness(candidate: CandidateMemory) -> WorthinessOutcome:
+    """Enforce the worthiness gate deterministically, and say what it found.
 
     Three tests must hold: durable and actionable (model-assessed), and
     attributed (evidence present — enforced here regardless of the model's
@@ -168,14 +202,32 @@ def passes_worthiness(candidate: CandidateMemory) -> bool:
     reliably self-assess this particular abstraction, and defaults it to
     False.
 
-    So the field stays on :class:`CandidateMemory` and in the training-pair
-    events — a self-report worth collecting for #264 — but a boolean that
-    measured out constant cannot be load-bearing. Restoring it as a gate
-    needs a judge shown to vary on it (a larger model, or a prompt carrying
-    the corpus's actual domains), not a re-tuned threshold.
+    So the field stays on :class:`CandidateMemory` — a self-report worth
+    keeping — but a boolean that measured out constant cannot be
+    load-bearing. Restoring it as a gate needs a judge shown to vary on it
+    (a larger model, or a prompt carrying the corpus's actual domains), not
+    a re-tuned threshold. It does **not** ride the #264 training-pair event,
+    which this docstring and its test both claimed until 2026-09-12:
+    :class:`~trellis.schemas.memory_op.MemoryOpJudgedPayload` is
+    ``extra="forbid"`` with no field for it, so the claim was never true on
+    any deployment. If the self-report is worth collecting, it needs a field
+    on that contract, and the leak-safety rule is the reason there is none.
     """
     if not candidate.durable or not candidate.actionable:
-        return False
+        return WorthinessOutcome.JUDGED_UNWORTHY
     if not candidate.evidence.strip():
-        return False
-    return len(candidate.memory.strip()) >= MIN_MEMORY_CHARS
+        return WorthinessOutcome.FAILED_FLOOR
+    if len(candidate.memory.strip()) < MIN_MEMORY_CHARS:
+        return WorthinessOutcome.FAILED_FLOOR
+    return WorthinessOutcome.ACCEPT
+
+
+def passes_worthiness(candidate: CandidateMemory) -> bool:
+    """``True`` when the candidate clears every worthiness test.
+
+    The boolean face of :func:`assess_worthiness`, for callers that only
+    need to know whether the candidate survives. The sweep itself uses the
+    outcome, because it has to tell a judge's verdict from a deterministic
+    floor.
+    """
+    return assess_worthiness(candidate) is WorthinessOutcome.ACCEPT

@@ -147,7 +147,22 @@ class CaptureFunnel(TrellisModel):
     sessions_with_memory: int = 0
     memories_written: int = 0
     candidates_distilled: int = 0
+    #: Total worthiness-gate rejections, and it stays the total so a window
+    #: spanning the 2026-09-12 split still means one thing.
     candidates_rejected_worthiness: int = 0
+    #: The judge's own verdict (``durable`` / ``actionable`` False) — the
+    #: negative class of the #264 distillation training pairs, which used to
+    #: be counted only in aggregate and is now emitted as a ``discard``.
+    #:
+    #: **Reads 0 for sweeps that predate the split**, because a sweep payload
+    #: written before it carries no such key and
+    #: :func:`_funnel_from_events` sums what it finds. So over a mixed window
+    #: ``candidates_rejected_worthiness`` exceeds the two parts below; do not
+    #: read the shortfall as deterministic rejections.
+    candidates_rejected_judged_unworthy: int = 0
+    #: Trellis's deterministic floor on the model's output form (no evidence,
+    #: or under ``MIN_MEMORY_CHARS``). Same pre-split caveat as above.
+    candidates_rejected_floor: int = 0
     candidates_rejected_injection: int = 0
     candidates_blocked_scan: int = 0
 
