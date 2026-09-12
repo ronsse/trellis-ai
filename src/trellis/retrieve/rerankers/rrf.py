@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from trellis.retrieve.rerankers.base import Reranker
+from trellis.schemas.outcome import RRF_RERANKER_COMPONENT_ID
 from trellis.schemas.pack import PackItem
 from trellis.schemas.parameters import ParameterScope
 
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 #: Default RRF smoothing constant. Standard value from Cormack et al.
 DEFAULT_RRF_K = 60
 
-_COMPONENT_ID = "retrieve.rerankers.RRFReranker"
+_COMPONENT_ID = RRF_RERANKER_COMPONENT_ID
 
 
 class RRFReranker(Reranker):
