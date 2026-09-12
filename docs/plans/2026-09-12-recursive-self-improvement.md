@@ -580,3 +580,61 @@ done
 
 The windows roll. Re-derive rather than trusting a figure in this document — that is
 the same instruction CLAUDE.md gives about its own measurements, for the same reason.
+
+---
+
+## 9. Correction from the owner, and what it parks
+
+Recorded 2026-09-12, after this document was first delivered. It changes Finding 1's
+*meaning*, not its measurement.
+
+> "The goal of this graph is to create a provenance map of memories, and to be able to
+> connect to other things like a knowledge graph, like a local memory store, like a
+> database, like a file store, and establish relationships and what matters. It is not
+> a knowledge graph for a specific database, but it is a knowledge graph in that sense."
+
+The numbers in §1.1 stand — 1.03 edges/node, 79.8% of nodes at degree ≤ 1, six live
+edge types all PROV-O provenance plus `appliesTo`, zero semantic relations. **The
+diagnosis drawn from them was wrong.** I read "no semantic relations" as "the graph
+does not describe subject matter," and proposed Actuator 6 (mine semantic edges between
+memories) as the highest-ceiling actuator on that reading.
+
+The intent is federation. The graph is a provenance map whose referents are meant to
+reach *outside* Trellis — a file store, a database, an external knowledge graph, a local
+memory store — recording what relates to what and what matters across them. Under that
+reading the gap is not missing subject-matter edges between documents. It is that
+**every node in production refers to something inside Trellis.** A provenance map whose
+only referents are its own documents is a map of one room.
+
+Three consequences for the plan above:
+
+1. **§4.1's actuator ranking is provisional.** "Mine semantic edges between memories"
+   optimises the wrong axis if the point is external reach. The candidate that replaces
+   it is an *external-referent* edge type plus one producer per federated system.
+2. **The substrate already permits it.** CLAUDE.md's type-extensibility rule makes
+   `EntityType` / `EdgeKind` any string at the storage and API layers; the enums are
+   well-known defaults, not a closed set. So this needs **producers, not schema** — the
+   same shape as #375 (a seeded graph axis with no seed producer on the write path) and
+   #549 (`get_file_context` with no code-path producer). Note that both of those issues
+   are *already* about a missing external referent: a file path is exactly the kind of
+   outside-Trellis thing this graph is supposed to point at. They may be the first two
+   federation producers rather than maintenance items.
+3. **Do not re-litigate the term.** It is a knowledge graph, scoped to provenance and
+   federation. The useful question about any proposed edge is what *external* thing it
+   points at.
+
+### Parked for a deep-reasoning session
+
+Named by the owner in the same message, to be worked with a heavier thinking model and
+deliberately not started here:
+
+- **Gap analysis** — where the gaps are, what is unimplemented, what is untested. A
+  reasoning pass over the whole system, not a maintenance sweep.
+- **Everything local.** Trellis is not fully running locally today. Target is every
+  component on skynet with no cloud dependency inside the loop.
+- **Model tiering for the loop.** Classification already runs on a local model
+  (`hermes3:8b`). Connect more Kimi models for the heavier thinking decisions in the
+  recursive-self-improvement path — the proposal and evaluation calls the tuner cannot
+  make deterministically — with the local model keeping the high-volume judgements. The
+  `moonshot:` provider prefix already exists (added 2026-09-09 on
+  `feat/panel-multi-provider`), so this is routing and tiering, not integration.
