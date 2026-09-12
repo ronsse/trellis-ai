@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import operator
+import re
 import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -70,9 +71,22 @@ from trellis.stores.base.graph_query import (
 from trellis.stores.bolt_opencypher.base import BoltSessionRunner
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from neo4j import Driver, ManagedTransaction
 
 logger = structlog.get_logger(__name__)
+
+try:
+    from neo4j.exceptions import Neo4jError
+
+    #: Driver failures the alias-claim retry may inspect. A tuple so the
+    #: ``except`` below degrades to "matches nothing" when the optional
+    #: ``neo4j`` extra is absent — without a driver there is no store, so
+    #: the path is unreachable rather than merely unhandled.
+    _DRIVER_ERRORS: tuple[type[BaseException], ...] = (Neo4jError,)
+except ImportError:  # pragma: no cover - see ``bolt_opencypher.base``
+    _DRIVER_ERRORS = ()
 
 #: Python comparison fallbacks used when a range op lands on a
 #: ``properties.<key>`` path that we evaluate client-side after JSON
@@ -220,6 +234,67 @@ def _alias_claim_key(source_system: str, raw_id: str) -> str:
     return json.dumps(
         [source_system, raw_id], ensure_ascii=False, separators=(",", ":")
     )
+
+
+#: The label and property whose uniqueness serializes concurrent alias binds.
+#: Held as constants because :func:`_is_alias_claim_contention` matches a
+#: backend's error *message*, which is the only signal ArcadeDB gives — and a
+#: schema rename would otherwise orphan that match silently.
+#: ``test_bolt_opencypher_alias_claim.py`` re-derives both from
+#: :data:`_DEFAULT_SCHEMA_STATEMENTS` and fails on drift, and checks that no
+#: other unique index in that DDL shares either marker.
+_ALIAS_CLAIM_LABEL = "AliasClaim"
+_ALIAS_CLAIM_KEY_PROPERTY = "claim_key"
+
+#: How a backend spells a unique violation. ArcadeDB: ``Duplicated key [...]
+#: found on index 'AliasClaim[claim_key]'``. Neo4j:
+#: ``Node(...) already exists with label `AliasClaim` and property `claim_key```.
+_UNIQUE_VIOLATION_MARKERS: tuple[str, ...] = ("duplicated key", "already exists")
+
+#: Attempts, not retries. Two contenders need at most one extra: once any
+#: winner has committed its claim row, every later ``MERGE`` *matches* rather
+#: than creating, so a second loss is not reachable by contention. The third
+#: is slack for a pathological interleaving, not a backoff ladder.
+_CLAIM_CONTENTION_ATTEMPTS = 3
+
+#: The claim markers as word-boundary patterns, built from the constants above
+#: so a rename still propagates. Raw substring matching is *not* narrow enough:
+#: a neighbouring index named ``AliasClaimAudit[claim_key_hash]`` contains both
+#: names as substrings, so its duplicate would be read as contention and
+#: silently retried. ``\b`` costs nothing and stays format-agnostic — it holds
+#: for ArcadeDB's ``'AliasClaim[claim_key]'`` and Neo4j's backtick-quoted
+#: spelling alike, so neither backend's exact rendering is baked in.
+_ALIAS_CLAIM_MARKERS: tuple[re.Pattern[str], ...] = (
+    re.compile(rf"\b{re.escape(_ALIAS_CLAIM_LABEL.lower())}\b"),
+    re.compile(rf"\b{re.escape(_ALIAS_CLAIM_KEY_PROPERTY.lower())}\b"),
+)
+
+
+def _is_alias_claim_contention(exc: BaseException) -> bool:
+    """Did this write lose a race for the unique alias-claim key?
+
+    ``MERGE (c:AliasClaim {claim_key: ...})`` under a unique constraint has two
+    legitimate behaviours, and the claim algorithm below is written for the
+    first. Neo4j locks the index entry, so the loser *waits* and its ``MERGE``
+    then matches the winner's row — which is what the "Re-read after MERGE"
+    comment in :meth:`~BoltOpenCypherGraphStore.bind_alias_if_absent` assumes.
+    ArcadeDB is optimistic: both transactions proceed and the loser is rejected
+    at commit, so it surfaces a driver error where the algorithm expects a
+    matched row.
+
+    Retrying is sound because the rejected transaction rolled back whole: a
+    second attempt finds the winner's claim committed, matches it, and returns
+    the ``CONFLICT`` the contract asks for.
+
+    The match is deliberately narrow — the claim index's own label *and*
+    property must both appear, each as a whole token rather than a substring.
+    A duplicate ``version_id`` is a ULID collision, i.e. a real defect, and
+    must never be swallowed by a retry.
+    """
+    message = str(exc).lower()
+    if not any(marker in message for marker in _UNIQUE_VIOLATION_MARKERS):
+        return False
+    return all(pattern.search(message) for pattern in _ALIAS_CLAIM_MARKERS)
 
 
 _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -614,6 +689,50 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
     # Aliases
     # ------------------------------------------------------------------
 
+    def _write_alias_claim(self, tx_fn: Callable[[ManagedTransaction], Any]) -> Any:
+        """Run an alias write, retrying a lost race for the unique claim key.
+
+        Both alias writers ``MERGE`` the same unique ``AliasClaim`` row, so both
+        meet :func:`_is_alias_claim_contention` on an optimistic backend. A
+        fresh session per attempt: the rejection arrives at commit, so the
+        session that raised is done.
+
+        Returns ``Any`` for the reason :class:`BoltSessionRunner` documents —
+        without the optional ``neo4j`` extra mypy types the driver as ``Any``
+        and ``warn_return_any`` flags anything narrower. Callers cast.
+        """
+        for attempt in range(1, _CLAIM_CONTENTION_ATTEMPTS):
+            try:
+                with self._driver.session(database=self._database) as session:
+                    return session.execute_write(tx_fn)
+            except _DRIVER_ERRORS as exc:
+                if not _is_alias_claim_contention(exc):
+                    raise
+                logger.debug(
+                    "alias_claim_contention_retry",
+                    attempt=attempt,
+                    attempts_allowed=_CLAIM_CONTENTION_ATTEMPTS,
+                )
+        # Final attempt, outside the loop so there is no unreachable branch:
+        # a loss here propagates like any other write failure.
+        try:
+            with self._driver.session(database=self._database) as session:
+                return session.execute_write(tx_fn)
+        except _DRIVER_ERRORS as exc:
+            if _is_alias_claim_contention(exc):
+                # Warn, not debug: the CLI pins ``WARNING`` and the MCP server
+                # filters below it, so the retry lines above fire under no
+                # shipped log configuration. Contention alone cannot reach
+                # here — once any winner commits, every later ``MERGE``
+                # matches — so if this ever prints, the premise is wrong and
+                # this line is the only evidence that will exist.
+                logger.warning(
+                    "alias_claim_contention_exhausted",
+                    attempts=_CLAIM_CONTENTION_ATTEMPTS,
+                    error=str(exc),
+                )
+            raise
+
     def upsert_alias(
         self,
         entity_id: str,
@@ -685,8 +804,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             ).consume()
             return alias_id
 
-        with self._driver.session(database=self._database) as session:
-            return str(session.execute_write(_tx))
+        return str(self._write_alias_claim(_tx))
 
     def bind_alias_if_absent(
         self,
@@ -870,8 +988,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 entity_id=entity_id,
             )
 
-        with self._driver.session(database=self._database) as session:
-            return cast("AliasBindResult", session.execute_write(_tx))
+        return cast("AliasBindResult", self._write_alias_claim(_tx))
 
     def resolve_alias(
         self,
