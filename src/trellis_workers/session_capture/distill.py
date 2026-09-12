@@ -76,6 +76,31 @@ DEFAULT_DISTILL_MODEL = "hermes3:8b"
 #: enough.
 _MAX_SALIENT_CHARS = 8000
 
+#: Cap on the rendered tool-use rollup, in characters.
+#:
+#: The rollup is **charged against** :data:`_MAX_SALIENT_CHARS` rather than
+#: added to it, because the two failure modes are not symmetric: an
+#: over-budget prompt does not lose its tail, it is refused outright by
+#: :func:`_prompt_exceeds_window` and the session is captured *not at all*.
+#: Buying tool density with coverage would be a bad trade and a silent one.
+#:
+#: Measured over the 451 real sessions of the reference corpus: the rollup
+#: renders a median **51** chars, p90 191, max **896** — so this cap
+#: truncates **0** of them and exists only so a session with an unusual
+#: tool spread cannot starve the conversation it is supposed to describe.
+_MAX_TOOL_SUMMARY_CHARS = 900
+
+#: Label the rollup is rendered behind, charged against
+#: :data:`_MAX_SALIENT_CHARS` along with the rollup itself.
+#:
+#: It is a named constant because the charge is against the *line*, not
+#: the payload: the label is 30 chars longer than the one it replaced, and
+#: charging only the rollup left that difference uncharged — which showed
+#: up as 267 of 451 sessions growing (median +26) where the arithmetic
+#: predicted 79. A label is prompt text like any other, and an invariant
+#: that holds for part of a line is the kind that quietly stops holding.
+_TOOL_LINE_LABEL = "Tools used (calls, and how many errored): "
+
 #: Chars-per-token estimate for the truncation check — the same ~4:1
 #: convention ``PackBuilder`` uses for its token budgets.
 _CHARS_PER_TOKEN = 4
@@ -190,6 +215,82 @@ _SYSTEM_PROMPT = (
 )
 
 
+def render_tool_summary(digest: SessionDigest, *, max_chars: int | None = None) -> str:
+    """Render the tool stream as ``name xN (M errored)``, busiest first.
+
+    Replaces the bare ``sorted(set(names))`` this line used to carry, which
+    discarded three things the parse already held: **how often** each tool
+    ran, **which** of them failed, and therefore any sense of scale. Measured
+    on 451 real sessions, that set compressed a median 66 calls to 3 names
+    (median 22x, mean 27x), and 17.7% of all sessions rendered the single
+    word ``Bash`` as the complete tool record of the work they did. ``Bash``
+    is **83.4% of all 56,030 calls** and appears in 447 of the 451 sessions,
+    so as a *name* it is close to information-free; the count and the error
+    attribution are the whole signal. (The corpus is live — it grew by three
+    calls while being measured, because the measuring session is in it. Treat
+    every figure here as a re-derivable order of magnitude, not a constant.)
+
+    The error counts are the sharper half. 1,398 errored tool results across
+    308 of those sessions reached the judge as one session-level
+    ``has_error`` boolean — which the free-text backstop pushes to **True on
+    426 of 451 sessions (94.5%)**, so the flag the prompt spends a line on is
+    very close to a constant. Per-tool counts separate "one grep missed" from
+    "Bash failed 73 times", and the distiller is asked for failure memories.
+
+    Never renders an argument, a path, or any output: a
+    :class:`~trellis_workers.session_capture.models.ToolUseRollup` carries
+    counts and a tool name, so this inherits the digest's leak guarantee
+    instead of reopening it.
+
+    Truncation is marked, not silent — a dropped tail becomes ``(+N more)``
+    so the judge cannot read a cut list as a complete one.
+
+    **What this does not buy, measured.** A/B against the real judge
+    (hermes3:8b, ``temperature=0``, 60 sessions sampled deterministically,
+    both arms through the shipped ``parse_candidates``) found **no effect on
+    judge output**: 148 candidates old against 152 new, 16 sessions yielding
+    more and 14 fewer — a two-sided sign test at **p = 0.86** — with mean
+    confidence 0.965 against 0.960 and *fewer* sessions producing any
+    candidate at all (49 against 46). Failure-signal sessions moved 13 to 15,
+    inside the same noise. So the justification for this line is **not** a
+    demonstrated capture-quality gain. It is that the loss is real and
+    one-directional (a median 66 calls rendered as 3 names; 1,398 errors as
+    one boolean true on 94.5% of sessions), that closing it is deterministic
+    and costs a *smaller* prompt, and that the alternative #306 proposed was
+    a second local LLM to recover what the parse already held. A more capable
+    judge may use the signal; this one does not, and saying otherwise would
+    be the claim the measurement refuses.
+
+    Args:
+        digest: Parsed session. An empty tool stream renders ``"none"``.
+        max_chars: Budget for the rendered list. Defaults to
+            :data:`_MAX_TOOL_SUMMARY_CHARS`.
+
+    Returns:
+        One line's worth of text, never longer than *max_chars*.
+    """
+    budget = _MAX_TOOL_SUMMARY_CHARS if max_chars is None else max_chars
+    rollup = digest.tool_rollup
+    if not rollup:
+        return "none"
+
+    parts: list[str] = []
+    for index, entry in enumerate(rollup):
+        piece = f"{entry.name} x{entry.calls}"
+        if entry.errors:
+            piece += f" ({entry.errors} errored)"
+        remaining = len(rollup) - index
+        marker = f", (+{remaining} more)"
+        candidate = ", ".join([*parts, piece])
+        # Keep room for the marker only while a tail actually remains.
+        needed = len(candidate) + (len(marker) if remaining > 1 else 0)
+        if parts and needed > budget:
+            return ", ".join(parts) + f", (+{remaining} more)"
+        parts.append(piece)
+    rendered = ", ".join(parts)
+    return rendered[:budget] if len(rendered) > budget else rendered
+
+
 def build_distill_messages(digest: SessionDigest) -> list[Message]:
     """Build the distillation prompt from the secret-free digest only.
 
@@ -197,13 +298,48 @@ def build_distill_messages(digest: SessionDigest) -> list[Message]:
     cut is marked with an explicit ``<elided … />`` tag (size + reason,
     #310) so the judge knows material was removed rather than treating
     the cut as the end of the session.
+
+    The tool rollup is **charged against that same cap**, not added to it.
+    :func:`_prompt_exceeds_window` sums every message and fails *closed* —
+    an over-window prompt is not trimmed, the session is skipped and
+    captured nowhere — so a line appended on top of a full budget buys tool
+    density by dropping whole sessions, silently.
+
+    What the charge buys is a **tighter bound**, not a smaller prompt in
+    every case, and the distinction is worth stating because the measured
+    numbers disagree with the tidier claim. The old line rendered
+    ``sorted(set(names))`` *on top of* a full 8,000-char salient budget, so
+    the prompt's ceiling was 8,000 + an unbounded tool list; here the tool
+    line and the conversation share the 8,000 between them. On the
+    reference corpus (451 sessions) the salient text is already at the cap
+    on **372 of them (82.5%)**, where the line displaces conversation
+    one-for-one; on the remaining **79** nothing is displaced, because
+    neither text was near the cap, and the prompt grows by the difference
+    between the two lines — median **+46** chars, max **+84**. Across the
+    corpus the median session's prompt *shrinks* by **34** chars and the
+    worst case falls from 10,618 to **9,835**.
+
+    Neither arm puts a single session over the window: the largest prompt
+    after the change is 9,835 of the 11,584 chars the default window allows
+    (84.9%), and the replay counts **0** sessions that overflow only with
+    the rollup. So the guard is not what makes this safe today — the
+    headroom is. The charge is what keeps it safe when
+    :data:`_MAX_SALIENT_CHARS` is next raised toward the window, which is
+    the change that would otherwise turn a tool line into lost captures.
+
+    What is charged is the whole line, label included. Charging only the
+    rollup left the label's own 30-char growth uncharged, which put 267
+    sessions over their old prompt size where the arithmetic predicted 79
+    — small, but in the direction the guard exists to prevent, and found
+    only by re-measuring a figure this docstring already asserted.
     """
-    salient = elide_text(digest.salient_text, max_salient_chars())
-    tool_names = sorted({call.name for call in digest.tool_calls})
+    tool_line = _TOOL_LINE_LABEL + render_tool_summary(digest)
+    salient_budget = max(0, max_salient_chars() - len(tool_line))
+    salient = elide_text(digest.salient_text, salient_budget)
     signals = f"has_error={digest.has_error} has_correction={digest.has_correction}"
     user = (
         f"Session signals: {signals}\n"
-        f"Tools used: {', '.join(tool_names) or 'none'}\n\n"
+        f"{tool_line}\n\n"
         f"Conversation (natural-language turns only):\n{salient}\n\n"
         "Return the JSON array of qualifying memories."
     )
