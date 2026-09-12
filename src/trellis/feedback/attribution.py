@@ -23,7 +23,7 @@ deliberately leaves ``items_served`` empty rather than unioning the cited ids.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import structlog
 
@@ -43,6 +43,13 @@ _INJECTED_ITEM_IDS = "injected_item_ids"
 #: :data:`_INJECTED_ITEM_IDS` — each row carries the item's id *and* which
 #: strategy served it — and written by the same ``PackBuilder`` emit.
 _INJECTED_ITEMS = "injected_items"
+
+#: Payload keys holding the pack's own learning-scope axes. ``PackBuilder``
+#: derives ``intent_family`` through
+#: :func:`~trellis.learning.scoring.normalize_intent_family` and carries
+#: ``domain`` from the request, so the pack is where both acquire a value.
+_INTENT_FAMILY = "intent_family"
+_DOMAIN = "domain"
 
 
 def _load_pack_payload(event_log: EventLog, pack_id: str) -> dict[str, object]:
@@ -174,6 +181,80 @@ def lookup_pack_items_by_strategy(
         marks.add(item_id)
         bucket.append(item_id)
     return by_strategy
+
+
+class PackScope(NamedTuple):
+    """The learning-scope axes a pack recorded about itself.
+
+    Two of the four axes of a
+    :class:`~trellis.schemas.outcome.ParameterScope`, read back off the
+    pack that the feedback is grading.
+    """
+
+    domain: str | None
+    """The pack's request domain, or ``None`` when it carried none."""
+
+    intent_family: str | None
+    """The family ``PackBuilder`` normalized the request intent into, or
+    ``None`` when the pack recorded none."""
+
+
+#: A pack that recorded neither axis — also what an unknown pack resolves to.
+EMPTY_PACK_SCOPE = PackScope(domain=None, intent_family=None)
+
+
+def lookup_pack_scope(event_log: EventLog, pack_id: str) -> PackScope:
+    """Return the ``(domain, intent_family)`` the pack recorded for itself.
+
+    **This is the other half of what an agent cannot supply.**
+    :meth:`~trellis.feedback.models.PackFeedback.from_agent_signal` takes
+    neither axis and ``PackFeedback`` has no ``domain`` field at all, so on
+    every agent-facing surface both arrive empty — measured across 30 days on
+    the reference deployment, ``intent_family`` was empty on **72 of 72**
+    feedback events while the packs they graded carried **7** distinct
+    families, and ``domain`` was empty on all 72 against **8** distinct pack
+    values (#560). An ``OutcomeEvent`` built from the feedback alone therefore
+    keys every row into one global cell per component, which is narrower
+    information than the pack already wrote down.
+
+    The pack is the authoritative source: ``PackBuilder`` derives
+    ``intent_family`` via
+    :func:`~trellis.learning.scoring.normalize_intent_family` and stamps both
+    onto ``PACK_ASSEMBLED``. Three other consumers —
+    ``learning.pack_observations``, ``retrieve.pack_value`` and
+    ``retrieve.metrics_timeseries`` — each independently built this same
+    fallback at their own join; this is that read, once, for the outcome
+    bridge.
+
+    Values are returned **verbatim**, normalized only by stripping and by
+    mapping blank to ``None``. A pack that recorded no domain is not the same
+    as one whose domain is the empty string, and inventing a placeholder
+    family here would create a cell that no ``PackBuilder`` ever emits.
+
+    Fails soft exactly as the other lookups here do: an unknown pack, an
+    event-log outage, or a pack payload predating either key resolves to
+    :data:`EMPTY_PACK_SCOPE`, which leaves the axes at the ``None`` they
+    would have had anyway.
+    """
+    payload = _load_pack_payload(event_log, pack_id)
+    if not payload:
+        return EMPTY_PACK_SCOPE
+    return PackScope(
+        domain=_clean_axis(payload.get(_DOMAIN)),
+        intent_family=_clean_axis(payload.get(_INTENT_FAMILY)),
+    )
+
+
+def _clean_axis(raw: object) -> str | None:
+    """A scope axis as a non-blank string, or ``None``.
+
+    Blank and non-string both resolve to ``None`` — an axis is a cell key,
+    and a key of ``""`` is a *distinct* cell from "unscoped" that nothing
+    else in the loop produces.
+    """
+    if not isinstance(raw, str):
+        return None
+    return raw.strip() or None
 
 
 def payload_is_attributed(payload: dict[str, object]) -> bool:
