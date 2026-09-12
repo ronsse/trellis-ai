@@ -280,16 +280,30 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   it had a green 56-case Postgres contract run on its PR and reported it as unverified.
   Re-read `.github/workflows/live-infra.yml`'s `on:` block rather than trusting this
   sentence.
-- **Nowhere at all:** the ArcadeDB graph contract (`test_arcadedb_graph_contract.py`).
-  ArcadeDB is the *blessed* graph + vector substrate and its contract has no service
-  container in any workflow ([#351](https://github.com/ronsse/trellis-ai/issues/351)).
-  The 59 Postgres-marked tests under `tests/unit/stores/` outside `contracts/` are still
-  deselected: the all-extras leg supplies their imports but no database, while
-  `live-infra.yml` names paths rather than markers. Sweeping that whole directory into the
-  live job does not work yet:
-  `test_neo4j_vector.py::TestQuery` issues AuraDB-only Cypher that self-hosted
-  `neo4j:2025.12` cannot parse, and unlike the e2e suite it has no capability probe
-  ([#356](https://github.com/ronsse/trellis-ai/issues/356)).
+- **Nowhere at all — and the gap has moved twice, so re-derive it:** the ArcadeDB graph
+  contract (`test_arcadedb_graph_contract.py`) **does** run in `live-infra.yml` now,
+  against an `arcadedata/arcadedb:26.8.1` service container with `TRELLIS_TEST_ARCADEDB=1`
+  ([#351](https://github.com/ronsse/trellis-ai/issues/351), closed). This bullet claimed
+  the opposite until 2026-09-12, which makes it the **second** stale coverage claim in
+  this list — see the `pull_request` correction directly above, and treat the pattern as
+  the finding. So was its companion sentence about "59 Postgres-marked tests":
+  `live-infra.yml` now names `test_postgres_stores.py` and `test_api_key_store.py`
+  explicitly, and **zero** Postgres-marked tests under `tests/unit/stores/` outside
+  `contracts/` remain unwired. What *is* still unwired there is **97 tests across six
+  files**, none of them Postgres — `test_neo4j_graph.py` (39), `test_neo4j_vector.py`
+  (27), `test_arcadedb_vector.py` (17), `test_arcadedb_graph.py` (8),
+  `test_neo4j_connectivity_live.py` (4), and two `slow` cases in
+  `test_sqlite_graph_bulk_upsert.py`. Read that list for what it implies rather than as an
+  inventory: **the blessed substrate's *vector* surface is the unrun half.** ArcadeDB and
+  Neo4j vector stores are shape #2 — an upsert needs a pre-existing graph row — so they
+  deliberately do *not* subclass `VectorStoreContractTests`, and those 44 hand-written
+  tests are the only thing standing in for a contract on either. Sweeping the directory
+  into the live job still does not work: `test_neo4j_vector.py::TestQuery` issues
+  AuraDB-only Cypher that self-hosted `neo4j:2025.12` cannot parse, and unlike the e2e
+  suite it has no capability probe
+  ([#356](https://github.com/ronsse/trellis-ai/issues/356)). Every number in this bullet
+  has been wrong at least once; re-derive them with
+  `pytest <file> --collect-only -q` and read the *deselected* count.
 
 Note the shape of the #345 defect, because it is the one this repo keeps producing: the
 pgvector contract had *never executed anywhere*, because its fixture called `_conn` as an
