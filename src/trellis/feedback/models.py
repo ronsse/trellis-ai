@@ -72,6 +72,26 @@ class PackFeedback:
     # at all, so neither can be inferred from served/referenced.
     unhelpful_item_ids: list[str] = field(default_factory=list)
     followed_advisory_ids: list[str] = field(default_factory=list)
+    # The third verdict (#550): an item the caller was shown and did not
+    # use. Weaker than ``unhelpful_item_ids`` — that one claims the item
+    # was noise or misleading, this one claims only that it did not earn
+    # its tokens on this task — and it is the claim a caller can make
+    # about the majority of a pack. Measured on the reference deployment
+    # over 365 days, a bodied item carries no verdict at all in 49.8% of
+    # servings, and nothing anywhere records whether that silence meant
+    # "read and unused" or "never read".
+    #
+    # **No consumer reads it yet, and that is deliberate.** The learning
+    # join (``learning.pack_observations._join_one``) and the value
+    # report (``retrieve.pack_value``) grade on helpful/unhelpful only,
+    # so an ignored verdict is recorded and not yet scored. It is also
+    # why it is absent from
+    # :func:`~trellis.feedback.attribution.payload_is_attributed`:
+    # counting it would move ``pack_attribution_rate`` on a signal with
+    # zero readers, which is the measurement-wired-to-a-constant defect
+    # this repository keeps producing. The predicate changes in the
+    # change that gives it a reader.
+    ignored_item_ids: list[str] = field(default_factory=list)
     intent_family: str = ""
     timestamp_utc: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     agent_id: str | None = None
@@ -101,6 +121,7 @@ class PackFeedback:
         rating: float | None = None,
         helpful_item_ids: Sequence[str] = (),
         unhelpful_item_ids: Sequence[str] = (),
+        ignored_item_ids: Sequence[str] = (),
         followed_advisory_ids: Sequence[str] = (),
         pack_id: str | None = None,
         trace_id: str | None = None,
@@ -139,6 +160,9 @@ class PackFeedback:
                 ungraded and ``to_event_payload`` falls back to 1.0/0.0.
             helpful_item_ids: Items the agent actually used.
             unhelpful_item_ids: Items the agent found to be noise.
+            ignored_item_ids: Items the agent was shown and did not use —
+                the third verdict, weaker than ``unhelpful`` and not a
+                substitute for it.
             followed_advisory_ids: Advisories whose guidance was acted on.
             pack_id: Stamped into ``metadata`` — it is not a
                 :class:`PackFeedback` field, so this is what lets
@@ -174,6 +198,7 @@ class PackFeedback:
             rating=rating,
             unhelpful_item_ids=list(unhelpful_item_ids),
             followed_advisory_ids=list(followed_advisory_ids),
+            ignored_item_ids=list(ignored_item_ids),
             metadata=metadata,
         )
 
@@ -203,9 +228,14 @@ class PackFeedback:
           1.0/0.0 from ``success`` so the key is never missing — consumers
           read it as ``payload.get("rating", 0.0)`` and an absent key is
           indistinguishable from a genuine 0.0 grade.
-        * ``unhelpful_item_ids`` / ``followed_advisory_ids`` are emitted
-          only when populated, keeping the payload free of empty lists
-          the way ``pack_id`` / ``agent_id`` / ``metadata`` are.
+        * ``unhelpful_item_ids`` / ``followed_advisory_ids`` /
+          ``ignored_item_ids`` are emitted only when populated, keeping
+          the payload free of empty lists the way ``pack_id`` /
+          ``agent_id`` / ``metadata`` are. For the third of those the
+          convention also carries meaning: an absent key is a caller who
+          made no ignored claim, which is not the same as one who
+          considered every item and claimed none were ignored, and
+          emitting ``[]`` would make the two indistinguishable.
 
         Args:
             pack_id: Pack identifier, stored in ``payload.pack_id`` so
@@ -232,6 +262,8 @@ class PackFeedback:
             payload["unhelpful_item_ids"] = list(self.unhelpful_item_ids)
         if self.followed_advisory_ids:
             payload["followed_advisory_ids"] = list(self.followed_advisory_ids)
+        if self.ignored_item_ids:
+            payload["ignored_item_ids"] = list(self.ignored_item_ids)
         if pack_id is not None:
             payload["pack_id"] = pack_id
         if self.agent_id is not None:

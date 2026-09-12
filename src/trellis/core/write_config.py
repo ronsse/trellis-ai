@@ -95,6 +95,40 @@ RECONCILE_TIMEOUT_ENV = "TRELLIS_RECONCILE_TIMEOUT_S"
 #: because changing production posture is the operator's call.
 REQUIRE_PACK_ATTRIBUTION_FLAG = "TRELLIS_REQUIRE_PACK_ATTRIBUTION"
 
+#: Require a verdict on every **bodied** item of a pack-targeted feedback
+#: call (``trellis.mcp.server.record_feedback``).  **Default off.**
+#: Stricter than :data:`REQUIRE_PACK_ATTRIBUTION_FLAG`, which asks for one
+#: citation: this asks the caller to account for each item the pack put an
+#: excerpt in front of them, in ``helpful_item_ids``,
+#: ``unhelpful_item_ids`` or ``ignored_item_ids``.
+#:
+#: **The denominator is the measured half of the ask.**  Graduated
+#: disclosure (#359) serves the first ``body_items`` excerpts and demotes
+#: the rest to one-line pointers, and on the reference deployment over 365
+#: days (n=59 attributed packs) a bodied item drew *any* verdict at 0.502
+#: against a pointer's 0.256, and a *helpful* verdict at 0.143 against
+#: 0.023.  Asking about pointers spends the ask on items the caller never
+#: read; asking about bodies asks a question they can answer.
+#:
+#: **It is not free, and the arithmetic is worth having before switching
+#: it on.**  On that same window graders already supply ~8.9 verdicts per
+#: attributed call (~6.4 bodied, ~2.5 pointer) against a median 13 bodied
+#: items per pack, of which a median 6 carry no verdict.  So this asks for
+#: roughly six more verdicts per call — ~13 in total, a ~46% increase over
+#: what callers demonstrably volunteer today.  That ceiling is the reason
+#: it ships off: the failure mode of asking too much of a grading surface
+#: is the surface going quiet, and a lost rating is worse than an
+#: incomplete one.
+#:
+#: The two knobs compose and neither implies the other.  This one fires
+#: on any unjudged bodied item, so it subsumes "cite at least one"; the
+#: other keeps its own trigger because its message is about joinability
+#: rather than coverage.  One interaction is worth stating: an
+#: ``ignored``-only call satisfies *this* gate and is still refused by the
+#: other, because an ignored verdict contributes no rows to the learning
+#: join — see :attr:`trellis.feedback.models.PackFeedback.ignored_item_ids`.
+REQUIRE_BODIED_ATTRIBUTION_FLAG = "TRELLIS_REQUIRE_BODIED_ATTRIBUTION"
+
 #: How many stored documents to load into the MCP fuzzy-dedup index at
 #: first use (``trellis.mcp.server._get_minhash_index``).  **Default 0,
 #: which seeds nothing** — so ``save_memory``'s MinHash stage keeps
@@ -250,6 +284,7 @@ class WriteBehaviourConfig:
     trace_extraction: bool = False
     trace_extraction_min_confidence: float | None = None
     require_pack_attribution: bool = False
+    require_bodied_attribution: bool = False
     minhash_seed_max_docs: int = 0
     reconcile_model: str = DEFAULT_RECONCILE_MODEL
     reconcile_timeout_s: float = DEFAULT_RECONCILE_TIMEOUT_S
@@ -266,6 +301,7 @@ class WriteBehaviourConfig:
             trace_extraction=_truthy(src, TRACE_EXTRACTION_FLAG),
             trace_extraction_min_confidence=_min_confidence(src),
             require_pack_attribution=_truthy(src, REQUIRE_PACK_ATTRIBUTION_FLAG),
+            require_bodied_attribution=_truthy(src, REQUIRE_BODIED_ATTRIBUTION_FLAG),
             minhash_seed_max_docs=_seed_max_docs(src),
             reconcile_model=src.get(RECONCILE_MODEL_ENV, "").strip()
             or DEFAULT_RECONCILE_MODEL,
@@ -311,6 +347,7 @@ ENV_VAR_BY_FIELD: dict[str, str] = {
     "trace_extraction": TRACE_EXTRACTION_FLAG,
     "trace_extraction_min_confidence": TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG,
     "require_pack_attribution": REQUIRE_PACK_ATTRIBUTION_FLAG,
+    "require_bodied_attribution": REQUIRE_BODIED_ATTRIBUTION_FLAG,
     "minhash_seed_max_docs": MINHASH_SEED_MAX_DOCS_ENV,
     "reconcile_model": RECONCILE_MODEL_ENV,
     "reconcile_timeout_s": RECONCILE_TIMEOUT_ENV,
@@ -328,6 +365,7 @@ __all__ = [
     "RECONCILE_FLAG_ENV",
     "RECONCILE_MODEL_ENV",
     "RECONCILE_TIMEOUT_ENV",
+    "REQUIRE_BODIED_ATTRIBUTION_FLAG",
     "REQUIRE_PACK_ATTRIBUTION_FLAG",
     "TRACE_EXTRACTION_FLAG",
     "TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG",

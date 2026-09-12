@@ -466,6 +466,7 @@ def load_feedback_log(log_dir: Path | str) -> list[PackFeedback]:
                 "rating": data.get("rating", metadata.get("rating")),
                 "unhelpful_item_ids": data.get("unhelpful_item_ids", []),
                 "followed_advisory_ids": data.get("followed_advisory_ids", []),
+                "ignored_item_ids": data.get("ignored_item_ids", []),
                 "intent_family": data.get("intent_family", ""),
                 "timestamp_utc": data.get("timestamp_utc", ""),
                 "agent_id": data.get("agent_id"),
