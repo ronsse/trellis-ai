@@ -355,6 +355,112 @@ promote→review→serve chain. **The test refined the scope rather than flippin
 **Reopen if:** an integration audit shows eval fixtures cannot execute the same promote
 pipeline code production uses.
 
+### T-7 · `trellis retrieve pack --quiet` keeps its post-#410 population; the gap was the doc, not the flag
+
+**No panel — reversible, and the fork was underdetermined only until it was measured.**
+Taken 2026-09-12 while closing
+[#494](https://github.com/ronsse/trellis-ai/issues/494), which asked whether `--quiet`
+should keep emitting `<parent>#chunk-N` fragments and entity ids, roll chunks up to their
+parent, or prefix each line with a type. **The decision is option 1: change nothing in the
+command, and state the population in `docs/agent-guide/operations.md`.** The doc gap was
+real under all three options, so it was written first and is the whole shipped change.
+
+**What #410 actually changed** (#494's body calls it #488 — the same change, issue number
+against PR number). Routing `pack` through `PackBuilder` changed the *shape* of
+`--format json` (documented) and the *population* of `--quiet` (not documented). Pre-#410
+the command called `DocumentStore.search(..., include_chunks=False)` and `--quiet` printed
+whole-document ids; post-#410 it prints one `item_id` per `pack_result.items` entry. One
+line of three, no contract note, and the section's closing blockquote said `--quiet`
+"still prints one id per line" — true about the shape, and read by a pipeline author as
+continuity.
+
+**Measured before deciding.** The shipped `build_pack_builder(registry,
+surface="cli.retrieve")` wiring was run over all 85 distinct intents this deployment has
+ever assembled a pack for, with the command's own parameters, against production's own
+Postgres knowledge and operational planes, with `PackBuilder._event_log` swapped for
+`NullEventLog()` so the probe wrote nothing. 4,250 lines over 85 packs; every pack
+saturated `max_items=50` and ran all three axes.
+
+- `item_type`: `vector` 42.7% / `document` 37.9% / `entity` 19.5%. **`vector` is not a
+  namespace** — all 1,813 of those ids resolve in the document store; it is the semantic
+  axis's label for its own rows.
+- **Chunk fragments: 787 lines, 18.5%, present in 75 of 85 packs** (median 20% of a pack,
+  max 46%). Every one of the 787 parents resolves, so option 2 *would* produce valid
+  handles.
+- Resolution: 80.5% document, 19.5% graph, and **1 line of 4,250 resolves nowhere** —
+  `01M0M2NYZC8DHVMFBC3YFJ5SRQ`, a `vector` row at rank 50 whose document is gone. That is a
+  stale-vector-row signal in the #338 family, not a `--quiet` defect.
+- Namespaces are disjoint (1,074 document ids, 14 graph ids, zero in both) and **no prefix
+  rule separates them**: document ids run `capture:` 522 / `conversation:` 424 / bare 113 /
+  `corpus:` 14 / `kb:` 1, graph ids run bare 7 / `trace:` 7. #494's second objection is
+  correct and this is its measured form.
+
+**Why option 2 (roll chunks up, dedup) is refused — three reasons, in order of weight.**
+First, it makes `--quiet` disagree with `--format json`, with
+`PACK_ASSEMBLED.injected_item_ids`, and with the pack the agent was actually served, about
+what one pack contained. That is the two-readers-of-one-seam failure this repo keeps
+producing (#325/#326, and #417's three successive wrong enumerations of who reads a name) —
+and it would be worse here than usual, because the disagreeing reader is the one a script
+consumes silently. Second, the cost does not buy what the issue describes: rolling up
+removes **344 lines (8.1%)** across 64 of 85 packs, but **304 of those are sibling-chunk
+collapses** — two chunks of one parent, whose excerpts are cut from different slices and
+are not duplicated text (B2 measured the overlap at ~6.7%) — against only **40**
+chunk-meets-its-own-parent collapses. Only 47 of 787 served chunks have their parent served
+in the same pack at all. Third, the redundancy the issue *is* describing is already handled
+one layer down and at the right layer: the probe log caught
+`semantic_dedup_match matched_id=conversation:…fe2ba2ab
+rejected_id=conversation:…fe2ba2ab#chunk-0 similarity=1.0` — semantic dedup collapsing a
+chunk against a near-identical parent *inside the builder*, where every consumer sees the
+same answer.
+
+**Why option 3 (type-prefix each line) is refused.** `--quiet` exists to be a bare-id
+stream for `xargs` and `$(…)`. A prefix makes every consumer strip it, which is the same
+parsing burden as `--format json` with none of its structure.
+
+**What option 1 costs, stated rather than implied.** #494's objections do not evaporate;
+they move into prose. A chunk id is a worse pipeline handle than a document id — but the
+issue's framing compares the two **as inputs to a command that does not exist**: an AST
+sweep of every `typer` command parameter in `src/trellis_cli/` finds no command that
+consumes a document id (`trace_id`, `entity_id`/`source_id`/`target_id`, archived `item_id`
+from `RETENTION_PRUNED`, `key_id`, `policy_id`, `proposal_id`, `candidate_id`,
+`component_id` — and nothing else), so the only CLI command that can eat a `--quiet` line
+is `trellis retrieve entity`, taking exactly the 19.5% entity minority. Where the objection
+*does* bite is REST, which is type-split while MCP `get_items` is type-agnostic, and where a
+chunk id carries a live hazard the issue did not name: **`#` is a URL fragment delimiter, so
+an unencoded id truncates client-side and `GET /api/v1/documents/<chunk id>` returns HTTP
+200 with the parent document** — a different document, reported as success. Verified live
+against this deployment; only `%23` returns the chunk. That is now in the operations doc as
+its own paragraph, because it is the one way a consumer of this stream gets a wrong answer
+rather than an error.
+
+**Prior art, quoted because it decided this already.** #396 classified `retrieve pack` a
+whole-row surface *because* it bypassed `PackBuilder`, and said that routing it through the
+builder would make the `<parent>#chunk-N` row the retrievable unit whose excerpt the token
+budget prices. #410 did exactly that. Reversing the population on one output flag would
+re-open a classification that was made deliberately, on the surface where it was made.
+
+**Method limits.** The 85 intents were drawn from `PACK_ASSEMBLED` events over 365 days, an
+event log that also holds 118 events written by a *separate* replay experiment; those reused
+real intents, so the distinct-intent set is unaffected, but the event count is not a pack
+count. And the probe measures what today's code emits for today's stores — it is not a
+counterfactual replay and carries none of #359's caveats, but it also cannot say what a
+future corpus does: the chunk fraction is a property of how much of the corpus is long
+enough to chunk (1,926 document rows = 740 chunk + 1,186 whole), and it will move.
+
+**This agrees with the filer's own lean** — #494 says "the first is defensible and probably
+right; it just should not be arrived at silently." What this entry adds is the measurement
+that makes it more than a lean, the decomposition showing option 2 would not buy what it
+appears to, and the URL-truncation hazard the issue did not name.
+
+**Recommended tracker action (owner's call):** close #494 as documented-not-changed.
+
+**Reopen if:** a CLI command that consumes a document id is added — that is the single fact
+that makes the "worse handle" objection bite on this surface, and it flips the cost side of
+the comparison; or if `semantic_dedup` is turned off or narrowed, since the
+chunk-meets-parent case is currently absorbed there; or if the chunk fraction rises far
+enough that the 40 chunk-meets-parent collapses stop being a rounding error against the 304
+sibling collapses.
+
 ### T-5 · Close [#404](https://github.com/ronsse/trellis-ai/issues/404) with a known gap, rather than hold it for the wire contract
 
 **No panel — reversible, and the alternative was to keep a shipped improvement unmerged.**
