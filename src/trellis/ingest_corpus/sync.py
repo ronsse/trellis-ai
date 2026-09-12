@@ -607,6 +607,47 @@ def _write_chunks(
             if content_changed
             else {k: v for k, v in inherited_tags.items() if k not in stored}
         )
+        # NO SOURCE CLOCK, DELIBERATELY (#463). This is a derived-row
+        # producer and the parent's ``created_at`` / ``updated_at`` metadata —
+        # the *source's* clock, which ``resolve_recency_stamp`` (#417) prefers
+        # over the row column on both document-backed axes — is not among the
+        # keys a chunk inherits. So a slice of a 2024 conversation decays off
+        # the 2026-08-07 import instant while the conversation itself decays
+        # off 2024: one document, two ages, which is the exact incoherence
+        # #417 removed *between strategies* and this leaves *within* a
+        # document. Propagating it was measured and refused; the reasoning is
+        # kept here rather than only in the ledger because a later reader will
+        # arrive at this dict, not at ``docs/design/decision-ledger.md``.
+        #
+        # The fix is one key and it makes packs slightly worse. 735 chunks sit
+        # under 74 stamped parents at a median 128-day column-minus-source gap,
+        # so the stamp takes a chunk's recency multiplier from 0.605 to 0.336 —
+        # which is **exactly where its parent already sits**, both floor-bound
+        # (``RECENCY_FLOOR`` 0.3, 30-day half-life). Once the two halves of the
+        # conversation corpus share one multiplier the tiebreak falls to raw
+        # relevance, where a median-7994-char parent beats a median-3011-char
+        # chunk on surface area alone. A two-arm replay over all 59 attributed
+        # packs against production's own stores with the live embedder: 27/59
+        # packs change, -49 chunk servings, **+41 stamped-parent** servings,
+        # +14 everything else. Only 2 of those 41 are the parent of a chunk
+        # dropped from the same pack — the mechanism is not a hand-off, it is
+        # the whole 148-row parent population floating up together.
+        #
+        # That is the wrong direction. Over 55 attributed packs a stamped
+        # parent earns P(cited helpful | served) = **0.005** (1 of 219) against
+        # a chunk's 0.082 (7 of 85) and the rest of the corpus's 0.131; both
+        # halves sit near 0.55 unhelpful. Priced at those rates the swap is
+        # -2.0 cited-helpful servings and +0.2 cited-unhelpful, per 59 packs.
+        # #417 called this "propagating the stamp would demote the better half"
+        # and was right, though for a reason it had not established.
+        #
+        # What the replay could *not* do is price it by citation directly: arm
+        # A reproduces only 22% of the graded ids (122/553), because the corpus
+        # grew and today's retrieval for a year-old intent returns largely
+        # different items. So the -2.0 is an expected value at measured
+        # per-class rates, not an observed loss. Re-open this if the rates
+        # converge — a stamped parent at 1 helpful citation in 219 servings is
+        # the fact carrying the decision, and it is the one most likely to move.
         metadata: dict[str, Any] = {
             **stored,
             **extra_metadata,
