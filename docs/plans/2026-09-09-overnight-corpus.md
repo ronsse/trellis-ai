@@ -682,12 +682,42 @@ applied to itself.
 | **C2** · #356 capability probe | **Already built — [#552](https://github.com/ronsse/trellis-ai/pull/552), open and unmerged.** Not open work. The corpus item was written against `main` and is stale; found in minutes by re-measuring the premise before executing it. #552 is the better answer than N6's exclusion of the same file: it removes the private `index_name=` override so the suite takes the production default, which kills the vector-index collision at source rather than by exclusion. **It conflicts with #583** in three files; the verified resolution is on `merge/n6-plus-356` (`cebc404`) and is written out on #583's body. |
 
 **A standing hazard this surfaced.** `main` is red on `live-infra` — #570's
-`test_bind_alias_if_absent_is_atomic_for_concurrent_contenders`, now reproduced **four
-times with the identical record id `#9:0`** (#552's CI, #582's CI, #583's CI, and a local
-run). [#571](https://github.com/ronsse/trellis-ai/pull/571) fixes it, is green including
-`live-infra`, is based on `main` and is MERGEABLE — but characterises the failure as never
-reproduced across 18 full-contract and 25 isolated runs. On this evidence it is a hard red,
-not a flake. **Every open PR inherits that red, so #571 merges first.**
+`test_bind_alias_if_absent_is_atomic_for_concurrent_contenders`, reproduced **four times
+with the identical record id `#9:0`** (#552's CI, #582's CI, #583's CI, and a local run),
+on top of `main`'s own last `live-infra` run failing at `1ef5c9c4` (#530, 2026-09-08) and
+every run since being a PR. On this evidence it is a hard red, not a flake, and it dates
+to #530 — the change that introduced the alias lifecycle the race is on. **Every open PR
+inherits it.**
+
+**There are two independent fixes for it, and only one should merge.**
+[#555](https://github.com/ronsse/trellis-ai/pull/555) (2026-09-11) and
+[#571](https://github.com/ronsse/trellis-ai/pull/571) (2026-09-12) were built a day apart
+without either author seeing the other; both are green on `live-infra`, based on `main`,
+MERGEABLE, and land on the same file (`src/trellis/stores/bolt_opencypher/graph.py`) with
+the same design — a module-level attempt bound of 3, a message-matched contention
+predicate, a retry around the alias write. **Merging both is worse than merging either**,
+and #571's body argues it "should go first" without mentioning that #555 existed and was
+already green. This corpus's own rule caught it: `gh pr list --state open` is part of an
+item's premise, because unmerged work leaves no trace in `git log`.
+
+**Recommendation: merge #555.** It covers a second ArcadeDB failure shape the race also
+produces (`Record #\d+:\d+ not found`, via `_STALE_RECORD_RE`), and it *measures* and then
+deliberately excludes a third — the deadlock shape, where the driver's own managed retry
+already re-runs the transaction, shown identical across 120 live races with and without the
+new retry. It also measures Neo4j 20 times to document its own branch as defensive rather
+than load-bearing (Neo4j's `MERGE` locks the index entry, so the loser blocks and reads the
+committed claim; 0 raises with and without). Its predicate matches the constraint's **own
+identity** — the `AliasClaim` label and `claim_key` property as whole tokens, checked
+against the shipped DDL — with five parametrized exclusions including the
+`AliasClaimArchive` prefix trap.
+
+**What #571 has that #555 does not**, and the follow-up worth taking: #571 additionally
+requires a unique-violation marker (`"duplicated key"` / `"already exists"`) in the message,
+so an unrelated driver error that happens to name both tokens is not retried. That is a
+latency and log-noise difference rather than a correctness one — #555 re-raises `last_error`
+after exhausting `_ALIAS_CLAIM_RETRY_ATTEMPTS = 3`, so no error is ever swallowed — but the
+conjunct is cheap and strictly better. **After merging #555, add #571's marker conjunct to
+`_is_alias_claim_contention` and close #571 with a pointer to both.**
 
 ---
 
