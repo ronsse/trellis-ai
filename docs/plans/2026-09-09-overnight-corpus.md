@@ -667,6 +667,30 @@ Then, by lane, in parallel where territories do not collide:
 
 R1 and every Lane 6 item wait on an operator.
 
+## Execution log
+
+Appended as items are executed. **Read this before picking up an item** — three of the
+first six turned out to be stale against the repo, which is the corpus's own warning
+applied to itself.
+
+| Item | Outcome |
+|---|---|
+| **N3** · #351 ArcadeDB gap | **Refuted.** The premise was `grep -rl arcade .github/workflows/` returning one comment-only hit. It is wrong: `live-infra.yml` has had an `arcadedb` service container since #543 (2026-09-08), and the contract runs through `contracts/`. #351 is correctly closed. This is the refutation the corpus itself said to check for first. |
+| **N4** · #365 | Tracker-only — the recommended option shipped; nothing to build. |
+| **N5** · #369 close condition | **Refuted** with N3, which it depended on. |
+| **N6** · CI-coverage prose | **Done — [#583](https://github.com/ronsse/trellis-ai/pull/583).** Scope grew on measurement: the prose was wrong in *both* directions. The ArcadeDB claim was stale (above), and **99 tests across eight files really did run in no workflow leg** — both ArcadeDB store suites, the Neo4j graph and connectivity suites, `test_migrate_graph_live.py`, and the three `live_api_server` suites. All eight are now wired, each measured against this workflow's own images first. The durable half is `tests/unit/test_ci_coverage_rule.py`, which *derives* the join (a leg's `pytest` selects the path **and** its `TRELLIS_TEST_*` env covers every gating marker) instead of declaring a roster. CI on #583: all 99 pass. |
+| **C2** · #356 capability probe | **Already built — [#552](https://github.com/ronsse/trellis-ai/pull/552), open and unmerged.** Not open work. The corpus item was written against `main` and is stale; found in minutes by re-measuring the premise before executing it. #552 is the better answer than N6's exclusion of the same file: it removes the private `index_name=` override so the suite takes the production default, which kills the vector-index collision at source rather than by exclusion. **It conflicts with #583** in three files; the verified resolution is on `merge/n6-plus-356` (`cebc404`) and is written out on #583's body. |
+
+**A standing hazard this surfaced.** `main` is red on `live-infra` — #570's
+`test_bind_alias_if_absent_is_atomic_for_concurrent_contenders`, now reproduced **four
+times with the identical record id `#9:0`** (#552's CI, #582's CI, #583's CI, and a local
+run). [#571](https://github.com/ronsse/trellis-ai/pull/571) fixes it, is green including
+`live-infra`, is based on `main` and is MERGEABLE — but characterises the failure as never
+reproduced across 18 full-contract and 25 isolated runs. On this evidence it is a hard red,
+not a flake. **Every open PR inherits that red, so #571 merges first.**
+
+---
+
 ## What would refute this corpus
 
 Every claim above with a number or a `path:line` was checked on 2026-09-09 against
