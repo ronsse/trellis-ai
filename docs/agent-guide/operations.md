@@ -1327,6 +1327,22 @@ trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--ma
 
 **`--include-chunks` was removed by #410, not inverted.** #396 classified this command as a whole-row surface *because* it bypassed `PackBuilder`; on a pack surface the `<parent>#chunk-N` row is the retrievable unit and its excerpt is what the token budget prices, so suppressing chunks here would make the preview diverge from the agent-facing path in the opposite direction. `retrieve search` keeps the flag and its default.
 
+**What `--quiet` actually prints, measured ([#494](https://github.com/ronsse/trellis-ai/issues/494)).** One `item_id` per line for every item in the pack — and since #410 that population is the *pack's*, not the document store's. Before #410 this command called `DocumentStore.search(..., include_chunks=False)` and `--quiet` printed whole-document ids only. The shape did not change and the contents did. Replayed over the 85 distinct intents this deployment has assembled packs for, with the shipped `build_pack_builder` wiring and the command's own defaults (4,250 lines, every pack saturating `--max-items 50`, all three axes running on all 85):
+
+| Property | Measured |
+|---|---|
+| `item_type` | `vector` 42.7%, `document` 37.9%, `entity` 19.5% |
+| `<parent>#chunk-N` fragments | **18.5%** of lines, in **75 of 85 packs** (median 20% of a pack, max 46%) |
+| Resolves in the document store | 80.5% |
+| Resolves in the knowledge graph | 19.5% |
+| Resolves nowhere | 1 line of 4,250 |
+
+**The stream is two id namespaces interleaved, and no prefix rule separates them.** `item_type` is not a namespace label — `vector` is the semantic axis's name for its own rows, and all 1,813 of them resolve in the *document* store. What actually splits is document-vs-graph, and the two prefix vocabularies overlap: document ids ran `capture:` 522, `conversation:` 424, bare 113, `corpus:` 14, `kb:` 1, while graph ids ran bare 7 and `trace:` 7. A bare id can be either. The consumers disagree about whether that matters: MCP `get_items` is type-agnostic and resolves ids against the document store, the graph and the trace store in one call, while REST is type-split (`GET /api/v1/documents/{doc_id:path}` vs `GET /api/v1/entities/{entity_id:path}`) and needs the caller to know which. **No CLI command consumes a document id at all** — an AST sweep of every `typer` command parameter in `src/trellis_cli/` finds `trace_id`, `entity_id`/`source_id`/`target_id` (entity or node, never a document), archived `item_id` from the `RETENTION_PRUNED` payload, plus `key_id` / `policy_id` / `proposal_id` / `candidate_id` / `component_id`, and nothing that takes a `doc_id`. The only command that can consume a `--quiet` line is `trellis retrieve entity`, which takes exactly the 19.5% entity minority.
+
+**A chunk id is not URL-safe, and the failure is silent.** `#` appears in 18.5% of lines and is a URL fragment delimiter, so an unencoded id pasted into `GET /api/v1/documents/…` is truncated at the `#` by the *client* before the request leaves. Verified against this deployment: the raw form returned **HTTP 200 with the parent document** — a different document, reported as success — and only `%23` returned the chunk. Percent-encode the id, or use MCP `get_items`, which takes ids as JSON values and never routes them through a URL. `:` appears in 78.9% of lines and is safe in a path segment; `/` and whitespace appear in none.
+
+**`--quiet` means a different population on `retrieve search`.** Same flag, same one-id-per-line shape, and `search` excludes `<parent>#chunk-N` rows by pushing the exclusion into the store — so its line count refills with whole documents rather than shrinking. Pipelines that consume both surfaces cannot assume one id vocabulary.
+
 **The semantic axis is reported, not assumed.** `build_strategies` adds it only when an embedder resolves, and drops it with an `info` log line the CLI's `WARNING` default never prints. The `axes` block says which of four things happened:
 
 | `axes.semantic` | Meaning |
@@ -1383,6 +1399,10 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
 > with `items` a flat list of **doc-id strings**. `items` is now a list of
 > **pack-item objects**; scripts reading ids want `[i["item_id"] for i in items]`,
 > or `--quiet` without `--format json`, which still prints one id per line.
+> **`--quiet`'s shape survived that change and its population did not** — the
+> ids are now the pack's items, so chunk fragments and entity ids appear where
+> only whole-document ids used to. See *What `--quiet` actually prints* above
+> before treating an existing pipeline as unaffected.
 
 > **`--format json` is safe on its own** — the Rich mangling described under
 > `retrieve search` above is fixed ([#403](https://github.com/ronsse/trellis-ai/issues/403)),
