@@ -317,6 +317,15 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   `cli/test_subprocess_serve.py` (needs no live infrastructure at all and passes in 2.4s
   on a bare checkout — dark purely because of `live` + `slow` markers, a marker defect
   rather than a CI capability gap).
+- **An absent contract is invisible to that rule, and one is absent.** The ArcadeDB
+  **vector** backend has no contract subclass
+  ([#579](https://github.com/ronsse/trellis-ai/issues/579)): `VectorStoreContractTests`
+  has exactly two, sqlite and pgvector, so the shared vector semantics have never run
+  against `ArcadeDBVectorStore`, the blessed vector substrate. Its 17 backend-local tests
+  in `tests/unit/stores/test_arcadedb_vector.py` now execute, but a green
+  `TestArcadeDBGraphContract` says nothing about it: the vector backend talks
+  SQL-over-HTTP (`LSM_VECTOR` + `vectorNeighbors`) and shares none of the Bolt/openCypher
+  code the graph contract exercises.
 - **Still do not sweep `tests/unit/stores/` in**, even though every file in it is now
   named. Paths are added one reviewed path at a time, because the hazard a sweep meets is
   silent and lands on a *different* suite. Neo4j holds exactly one vector index per
