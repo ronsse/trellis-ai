@@ -44,21 +44,34 @@ def test_live_infra_selects_unwired_postgres_store_suites() -> None:
     assert ".[dev,cloud,neo4j]" in shlex.split(install["run"])
 
 
-def test_live_infra_does_not_sweep_in_neo4j_only_store_tests() -> None:
-    """The one store file this job cannot run must stay unselected.
+def test_live_infra_store_targets_are_named_one_at_a_time() -> None:
+    """``tests/unit/stores/`` is enrolled per path, never swept.
 
     Stated as the property rather than as the roster that used to stand
     here. The exact set of four targets this asserted was a proxy for
-    *"don't sweep the directory, because ``test_neo4j_vector.py`` cannot
-    run against a self-hosted Neo4j"* — and a proxy that fails when a
-    file is legitimately **added**. It did: four suites that pass against
-    this job's own container images executed in no workflow at all, and
-    wiring them in broke this assertion while satisfying its intent.
+    *"don't sweep the directory"* — and a proxy that fails when a file is
+    legitimately **added**. It did, twice over: four suites that pass
+    against this job's own container images executed in no workflow at
+    all, and wiring them in broke this assertion while satisfying its
+    intent; #356 then added a fifth.
 
-    Re-measured 2026-09-12 against ``neo4j:2025.12``, the image this
-    workflow starts: 23 of ``test_neo4j_vector.py``'s tests pass and its
-    four ``TestQuery`` cases fail with ``Invalid input 'SEARCH'``. The
-    capability probe that would let those four self-skip is #356.
+    What the sweep would cost is still real, and the directory has
+    already produced one instance of it. ``test_neo4j_vector.py``'s
+    ``SEARCH ... IN (VECTOR INDEX ...)`` cases are rejected at parse time
+    by the self-hosted ``neo4j:2025.12`` service this job starts, and the
+    file also used to provision a second vector index on a pair Neo4j
+    allows one of — a failure that lands 30s later on a *different*
+    suite. It is in the set now because #356 gave those four cases a
+    capability gate and took the store's production-default index name;
+    the condition on that entry, and the reason it is safe, is pinned
+    separately by ``tests/unit/test_neo4j_vector_live_infra_rule.py``.
+
+    So the invariant is enrollment granularity, not membership: the
+    directory itself is never a target, and every store target except
+    ``contracts/`` — which is swept on purpose, being the shared ABC
+    semantics every backend must honour — is a single file. Adding one
+    means editing this workflow by hand, which is the review this rule
+    exists to force.
 
     The complementary direction — a file that runs nowhere and has no
     recorded reason — is
@@ -73,12 +86,18 @@ def test_live_infra_does_not_sweep_in_neo4j_only_store_tests() -> None:
     }
 
     assert Path("tests/unit/stores") not in store_targets, (
-        "live-infra sweeps all of tests/unit/stores/, which selects "
-        "test_neo4j_vector.py's AuraDB-only TestQuery cases"
+        "live-infra sweeps all of tests/unit/stores/, which enrols every "
+        "future suite in this job without anyone running it against these "
+        "containers"
     )
-    assert Path("tests/unit/stores/test_neo4j_vector.py") not in store_targets, (
-        "test_neo4j_vector.py's TestQuery cases need AuraDB's SEARCH "
-        "clause; give them tests/integration/conftest.py's capability "
-        "probe (#356) before naming this file here"
+    swept = {
+        target
+        for target in store_targets
+        if target.suffix != ".py" and target != Path("tests/unit/stores/contracts")
+    }
+    assert not swept, (
+        f"live-infra names directories under tests/unit/stores/: {sorted(swept)}. "
+        "Only contracts/ is swept on purpose; everything else is enrolled one "
+        "reviewed file at a time"
     )
     assert store_targets, "live-infra selects no tests/unit/stores/ target at all"
