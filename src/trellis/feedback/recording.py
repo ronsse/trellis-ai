@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from trellis.feedback.attribution import lookup_pack_items_by_strategy
+from trellis.feedback.attribution import (
+    EMPTY_PACK_SCOPE,
+    PackScope,
+    lookup_pack_items_by_strategy,
+    lookup_pack_scope,
+)
 from trellis.feedback.models import PackFeedback
 from trellis.schemas.outcome import (
     COMPONENT_ID_BY_SOURCE_STRATEGY,
@@ -245,11 +250,16 @@ def record_feedback(
     strategy_outcomes_emitted = 0
     if outcome_store is not None:
         try:
+            # Resolved once, for both emitters: they must agree about which
+            # cell a pack's outcomes belong to, and the axes come from the
+            # pack rather than the feedback (#560 — see ``_resolve_scope``).
+            scope = _resolve_scope(feedback, pack_id=pack_id, event_log=event_log)
             _emit_outcome(
                 feedback,
                 outcome_store=outcome_store,
                 pack_id=pack_id,
                 component_id=component_id,
+                scope=scope,
             )
             outcome_emitted = True
             # Emitted *after* the pack-level row and reported separately:
@@ -261,6 +271,7 @@ def record_feedback(
                 outcome_store=outcome_store,
                 pack_id=pack_id,
                 event_log=event_log,
+                scope=scope,
             )
         # GRACEFUL-DEGRADATION: JSONL append is durable; OutcomeStore
         # bridge is best-effort. Failure surfaces via
@@ -413,14 +424,69 @@ def _parse_timestamp(raw: str) -> datetime | None:
         return None
 
 
+def _resolve_scope(
+    feedback: PackFeedback,
+    *,
+    pack_id: str | None,
+    event_log: EventLog | None,
+) -> PackScope:
+    """Resolve the ``(domain, intent_family)`` an outcome row is keyed on.
+
+    **Feedback first, pack as the fallback** — the same precedence
+    :func:`~trellis.learning.pack_observations.build_learning_observations_from_event_log`
+    applies, deliberately, because two joins of the same two events
+    disagreeing about which cell a pack belongs to is worse than either
+    ordering. The feedback is the closest witness to the run that consumed
+    the pack; the pack is what knows the axes when the feedback does not.
+
+    Today the fallback carries every row. ``PackFeedback`` has no ``domain``
+    field at all, and
+    :meth:`~trellis.feedback.models.PackFeedback.from_agent_signal` takes no
+    ``intent_family``, so on both agent-facing surfaces the feedback side is
+    empty by construction and the pack supplies both (#560). A caller that
+    builds a ``PackFeedback`` directly can still set ``intent_family`` and
+    have it win, which is why this is a precedence rule and not a plain read
+    of the pack.
+
+    Fails soft to :data:`~trellis.feedback.attribution.EMPTY_PACK_SCOPE`,
+    which is the ``None``/``None`` the axes held before this existed — so a
+    missing event log or an unknown pack degrades to the old behaviour rather
+    than to an error or a guessed cell.
+
+    This reads the same ``PACK_ASSEMBLED`` event
+    :func:`~trellis.feedback.attribution.lookup_pack_items_by_strategy` reads
+    a moment later, so a pack-targeted call costs two ``limit=1`` lookups on
+    one indexed key. Left unfused deliberately: both lookups answer one
+    question from a pack id, which is the shape every reader in
+    :mod:`trellis.feedback.attribution` has, and threading a payload dict
+    through the emitters to save an indexed read on a path that runs a few
+    times a day buys nothing.
+    """
+    from_feedback = feedback.intent_family.strip() or None
+    if event_log is None or not pack_id:
+        return PackScope(domain=None, intent_family=from_feedback)
+
+    from_pack = lookup_pack_scope(event_log, pack_id)
+    return PackScope(
+        domain=from_pack.domain,
+        intent_family=from_feedback or from_pack.intent_family,
+    )
+
+
 def _emit_outcome(
     feedback: PackFeedback,
     *,
     outcome_store: OutcomeStore,
     pack_id: str | None,
     component_id: str,
+    scope: PackScope = EMPTY_PACK_SCOPE,
 ) -> None:
-    """Bridge a :class:`PackFeedback` into an :class:`OutcomeEvent`."""
+    """Bridge a :class:`PackFeedback` into an :class:`OutcomeEvent`.
+
+    ``scope`` carries the learning axes the row is keyed on; it defaults to
+    the unscoped cell so a caller that has no pack to resolve them from gets
+    exactly the behaviour this bridge had before #560.
+    """
     # Import deferred to avoid importing ops in the hot path for callers
     # that never pass an outcome_store.  (``trellis.schemas`` is already
     # resident by way of ``trellis.feedback.models``, so it costs nothing
@@ -453,7 +519,8 @@ def _emit_outcome(
         component_id=component_id,
         success=success,
         latency_ms=0.0,
-        intent_family=feedback.intent_family or None,
+        domain=scope.domain,
+        intent_family=scope.intent_family,
         phase=feedback.phase or None,
         agent_id=feedback.agent_id,
         run_id=feedback.run_id,
@@ -471,6 +538,7 @@ def _emit_strategy_outcomes(
     outcome_store: OutcomeStore,
     pack_id: str | None,
     event_log: EventLog | None,
+    scope: PackScope = EMPTY_PACK_SCOPE,
 ) -> int:
     """Fan one pack grade out into one :class:`OutcomeEvent` per strategy.
 
@@ -516,6 +584,12 @@ def _emit_strategy_outcomes(
     de-duplicated), and so does this. A replay inflates the strategy rows in
     the same proportion as the pack row.
 
+    **Every row lands in the same learning cell as the pack-level row.**
+    ``scope`` is resolved once by the caller and passed to both bridges, so a
+    strategy's ``reference_rate`` and the pack ``reference_rate`` it was
+    derived from are always comparable rather than sitting in cells that a
+    tuner aggregates apart (#560).
+
     Returns:
         Number of per-strategy rows emitted. ``0`` whenever there is no
         event log, no pack, no ``injected_items``, or nothing mappable.
@@ -552,7 +626,10 @@ def _emit_strategy_outcomes(
             # The pack's bit, credited to each contributor — see docstring.
             success=feedback.succeeded,
             latency_ms=0.0,
-            intent_family=feedback.intent_family or None,
+            # The same cell as the pack-level row, so a per-strategy rate and
+            # the pack rate it was derived from are comparable.
+            domain=scope.domain,
+            intent_family=scope.intent_family,
             phase=feedback.phase or None,
             agent_id=feedback.agent_id,
             run_id=feedback.run_id,
