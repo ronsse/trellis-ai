@@ -204,6 +204,7 @@ def pack_feedback(pack_id: str, req: PackFeedbackRequest) -> PackFeedbackRespons
         feedback,
         log_dir=feedback_log_dir(stores_dir),
         event_log=registry.operational.event_log,
+        outcome_store=registry.operational.outcome_store,
         pack_id=pack_id,
     )
     return PackFeedbackResponse(
