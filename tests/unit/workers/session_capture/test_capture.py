@@ -7,6 +7,7 @@ already-running event loop.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -41,6 +42,32 @@ def _error_session(path: Path, session_id: str = "sess-fake-0001") -> None:
 def _stored_captures(registry: MagicMock) -> list[dict]:
     docs = registry.knowledge.document_store.list_documents(limit=1000)
     return [d for d in docs if d["doc_id"].startswith("capture:claude-code:")]
+
+
+def _judged_payloads(registry: MagicMock) -> list[dict]:
+    """Every ``MEMORY_OP_JUDGED`` payload the sweep emitted."""
+    return [
+        event.payload
+        for event in registry.operational.event_log.get_events(
+            event_type=EventType.MEMORY_OP_JUDGED
+        )
+    ]
+
+
+def _unworthy_candidate() -> dict:
+    """A candidate the **judge itself** refused — the negative class.
+
+    ``durable=False`` is the model's own verdict, which is what makes this a
+    training example rather than a policy block.
+    """
+    return good_candidate(
+        durable=False,
+        title="Ran the test suite once",
+        memory=(
+            "Ran the full test suite and it passed, which is what always "
+            "happens and tells a future session nothing it could act on."
+        ),
+    )
 
 
 def test_golden_transcript_writes_one_memory(tmp_path: Path) -> None:
@@ -216,6 +243,10 @@ def test_secret_bearing_candidate_is_blocked(tmp_path: Path) -> None:
     assert report.candidates_blocked_scan == 1
     assert report.scan_hits_by_class.get("key_value_secret") == 1
     assert _stored_captures(registry) == []
+    # No training pair: the scan is a guardrail, not a verdict. Labelling it
+    # ``discard`` would teach a future judge that secret-bearing memories are
+    # unworthy — a policy wearing a verdict's clothes.
+    assert _judged_payloads(registry) == []
 
 
 def test_unworthy_candidate_is_rejected(tmp_path: Path) -> None:
@@ -258,6 +289,204 @@ def test_injection_shaped_candidate_is_rejected_and_counted(tmp_path: Path) -> N
     assert report.memories_written == 0
     assert report.candidates_rejected_injection == 1
     assert _stored_captures(registry) == []
+    # Silent for the same reason the secret gate is: what this caught is
+    # adversarial *transcript* text, not the model's opinion of a memory.
+    assert _judged_payloads(registry) == []
+
+
+def test_judged_unworthy_candidate_emits_a_discard_training_pair(
+    tmp_path: Path,
+) -> None:
+    """The judge's own rejection is the negative half of the training pair.
+
+    ``_emit_training_pairs`` iterated the survivors alone and passed the
+    literal ``"keep"``, so the largest judged arm recorded one value on 869
+    of 869 production rows while the rejections it needed were counted at the
+    gate and dropped (#264).
+    """
+    registry = _registry(tmp_path)
+    root = tmp_path / "projects"
+    _error_session(root / "proj" / "sess-fake-0001.jsonl")
+    client = FakeLLMClient([candidates_json(_unworthy_candidate())])
+
+    report = run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=tmp_path / "wm.json",
+        llm_client=client,
+    )
+
+    assert report.memories_written == 0
+    assert report.candidates_rejected_worthiness == 1
+    assert report.candidates_rejected_judged_unworthy == 1
+    assert report.candidates_rejected_floor == 0
+
+    payloads = _judged_payloads(registry)
+    assert len(payloads) == 1
+    payload = payloads[0]
+    assert payload["op_type"] == "distillation"
+    assert payload["decision"] == "discard"
+    # A discard has no document — ``doc_id`` is populated by the writer,
+    # after the gate that rejected this candidate — so the subject is the
+    # session, and the join key carries no dangling document id.
+    assert payload["subject_ref"] == {
+        "ref_type": "session",
+        "ref_id": "sess-fake-0001",
+    }
+    # Half a training pair is useless without the input it judged.
+    assert payload["input_digest"]["hash"]
+    assert payload["input_digest"]["length"] > 0
+    assert payload["input_digest"]["source_refs"] == ["sess-fake-0001"]
+    # Leak-safe on the discard arm too: the rejected prose never lands here.
+    assert "suite" not in json.dumps(payload)
+
+
+def test_discard_pair_is_addressed_to_the_session_row(tmp_path: Path) -> None:
+    """The event row's own columns follow the subject, not the keep arm's.
+
+    ``entity_type`` stayed ``"document"`` for every emit while ``entity_id``
+    fell back to the session id, so a discard would have been filed as a
+    document that does not exist.
+    """
+    registry = _registry(tmp_path)
+    root = tmp_path / "projects"
+    _error_session(root / "proj" / "sess-fake-0001.jsonl")
+    client = FakeLLMClient([candidates_json(_unworthy_candidate())])
+
+    run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=tmp_path / "wm.json",
+        llm_client=client,
+    )
+
+    event = registry.operational.event_log.get_events(
+        event_type=EventType.MEMORY_OP_JUDGED
+    )[0]
+    assert event.entity_id == "sess-fake-0001"
+    assert event.entity_type == "capture_session"
+
+
+def test_both_decision_labels_are_reachable_in_one_sweep(tmp_path: Path) -> None:
+    """The anti-constant test: ``decision`` can return more than one answer.
+
+    A training pair whose label is constant by construction carries zero
+    discriminative signal, so what has to be proved is not that ``discard``
+    is emitted somewhere but that both labels come out of **one real sweep**
+    over the same code path.
+    """
+    registry = _registry(tmp_path)
+    root = tmp_path / "projects"
+    _error_session(root / "proj" / "sess-fake-0001.jsonl")
+    client = FakeLLMClient([candidates_json(good_candidate(), _unworthy_candidate())])
+
+    report = run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=tmp_path / "wm.json",
+        llm_client=client,
+    )
+
+    assert report.memories_written == 1
+    assert report.candidates_rejected_judged_unworthy == 1
+
+    by_decision = {p["decision"]: p for p in _judged_payloads(registry)}
+    assert set(by_decision) == {"keep", "discard"}
+    assert by_decision["keep"]["subject_ref"]["ref_type"] == "doc"
+    assert by_decision["keep"]["subject_ref"]["ref_id"].startswith(
+        "capture:claude-code:"
+    )
+    assert by_decision["discard"]["subject_ref"]["ref_type"] == "session"
+
+
+def test_floor_rejection_emits_no_training_pair(tmp_path: Path) -> None:
+    """An unattributed candidate is *this repo's* rejection, not the judge's.
+
+    The model asserted the memory was durable and actionable; the floor
+    overruled the form of its output. Emitting that as ``discard`` would
+    attribute a Trellis rule to the model, and would retroactively relabel
+    written pairs the day ``MIN_MEMORY_CHARS`` moves.
+    """
+    registry = _registry(tmp_path)
+    root = tmp_path / "projects"
+    _error_session(root / "proj" / "sess-fake-0001.jsonl")
+    client = FakeLLMClient([candidates_json(good_candidate(evidence="   "))])
+
+    report = run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=tmp_path / "wm.json",
+        llm_client=client,
+    )
+
+    assert report.memories_written == 0
+    assert report.candidates_rejected_worthiness == 1
+    assert report.candidates_rejected_floor == 1
+    assert report.candidates_rejected_judged_unworthy == 0
+    assert _judged_payloads(registry) == []
+
+
+def test_worthiness_counter_decomposes_into_its_two_halves(tmp_path: Path) -> None:
+    """``worthiness == judged_unworthy + floor``, on a sweep with both.
+
+    The total keeps its old meaning so a figure taken before the split
+    compares to one taken after it; this is what makes the two new counters
+    a decomposition rather than a second, differently-scoped metric.
+    """
+    registry = _registry(tmp_path)
+    root = tmp_path / "projects"
+    _error_session(root / "proj" / "sess-fake-0001.jsonl")
+    client = FakeLLMClient(
+        [
+            candidates_json(
+                good_candidate(),
+                _unworthy_candidate(),
+                good_candidate(evidence="   ", title="Unattributed claim"),
+            )
+        ]
+    )
+
+    report = run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=tmp_path / "wm.json",
+        llm_client=client,
+    )
+
+    assert report.candidates_distilled == 3
+    assert report.candidates_rejected_worthiness == 2
+    assert (
+        report.candidates_rejected_worthiness
+        == report.candidates_rejected_judged_unworthy + report.candidates_rejected_floor
+    )
+    payload = report.to_payload()
+    assert payload["candidates_rejected_judged_unworthy"] == 1
+    assert payload["candidates_rejected_floor"] == 1
+
+
+def test_dry_run_emits_neither_training_pair(tmp_path: Path) -> None:
+    """Dry runs stay audit-silent — on both arms.
+
+    A ``keep`` pair asserts a document exists and a dry run writes none; the
+    discard arm is emitted from the same block for the same reason, so that a
+    rehearsal of the sweep cannot inject rows into the dataset.
+    """
+    registry = _registry(tmp_path)
+    root = tmp_path / "projects"
+    _error_session(root / "proj" / "sess-fake-0001.jsonl")
+    client = FakeLLMClient([candidates_json(good_candidate(), _unworthy_candidate())])
+
+    report = run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=tmp_path / "wm.json",
+        llm_client=client,
+        dry_run=True,
+    )
+
+    # The plan still reports the verdict it would have recorded.
+    assert report.candidates_rejected_judged_unworthy == 1
+    assert _judged_payloads(registry) == []
 
 
 def test_clean_session_sampled_out(tmp_path: Path) -> None:

@@ -15,7 +15,9 @@ One nightly pass over the Claude Code transcript directory:
    direct store writes; content-hash idempotency; per-source id-prefix
    scoping; ``MEMORY_STORED`` events; embed-on-ingest.
 #. Emit a leak-safe ``MEMORY_OP_JUDGED`` distillation training pair per
-   written memory, then advance the watermark for judged sessions only.
+   **judged** candidate — ``keep`` for each written memory and ``discard``
+   for each one the judge itself called unworthy — then advance the
+   watermark for judged sessions only.
 """
 
 from __future__ import annotations
@@ -123,8 +125,17 @@ def _candidate_metadata(candidate: CandidateMemory) -> dict[str, object]:
 def _gate_candidates(
     candidates: list[CandidateMemory],
     report: CaptureReport,
+    discards: list[CandidateMemory],
 ) -> list[CandidateMemory]:
-    """Apply the secret-scan, injection, and worthiness gates in order."""
+    """Apply the secret-scan, injection, and worthiness gates in order.
+
+    Appends to *discards* every candidate the **judge** refused — and only
+    those. The gates above worthiness are policy, not judgement, and are
+    deliberately excluded; see :func:`_emit_training_pairs`. *discards* is an
+    accumulator rather than a second return value for the same reason
+    *report* is: it is filled across every session of one sweep, and the
+    emit happens once, after the write seam.
+    """
     survivors: list[CandidateMemory] = []
     for candidate in candidates:
         report.candidates_distilled += 1
@@ -149,8 +160,14 @@ def _gate_candidates(
             report.candidates_rejected_injection += 1
             logger.warning("capture_injection_blocked", session_id=candidate.session_id)
             continue
-        if not gating.passes_worthiness(candidate):
+        outcome = gating.assess_worthiness(candidate)
+        if outcome is not gating.WorthinessOutcome.ACCEPT:
             report.candidates_rejected_worthiness += 1
+            if outcome is gating.WorthinessOutcome.JUDGED_UNWORTHY:
+                report.candidates_rejected_judged_unworthy += 1
+                discards.append(candidate)
+            else:
+                report.candidates_rejected_floor += 1
             continue
         candidate.content = rendered
         survivors.append(candidate)
@@ -179,6 +196,10 @@ def run_capture(
     id_prefix = capture_id_prefix(source_system)
 
     written: list[CandidateMemory] = []
+    #: Candidates the judge itself called unworthy — the negative half of the
+    #: #264 training pairs, collected across the whole sweep and emitted with
+    #: the positive half below.
+    discarded: list[CandidateMemory] = []
     records: list[SyncRecord] = []
     for path in discover_sessions(transcripts_root):
         report.sessions_seen += 1
@@ -218,6 +239,7 @@ def run_capture(
             registry,
             digest,
             report=report,
+            discards=discarded,
             llm_client=llm_client,
             source_system=source_system,
             id_prefix=id_prefix,
@@ -251,7 +273,7 @@ def run_capture(
         reconcile_pass.apply_supersessions(
             registry.knowledge.document_store, written, report
         )
-        _emit_training_pairs(registry, written, distill_model_id)
+        _emit_training_pairs(registry, written, discarded, distill_model_id)
         watermark.save()
 
     _emit_sweep_completed(registry, report, source_system=source_system)
@@ -305,6 +327,7 @@ def _capture_session(
     digest: SessionDigest,
     *,
     report: CaptureReport,
+    discards: list[CandidateMemory],
     llm_client: LLMClient | None,
     source_system: str,
     id_prefix: str,
@@ -346,7 +369,7 @@ def _capture_session(
         # needs to know which kind of conversation this came from.
         candidate.is_subagent = digest.is_subagent
 
-    survivors = _gate_candidates(candidates, report)
+    survivors = _gate_candidates(candidates, report, discards)
     for candidate in survivors:
         candidate.doc_id = capture_doc_id(source_system, candidate.content)
 
@@ -394,9 +417,42 @@ def _write_records(
 def _emit_training_pairs(
     registry: StoreRegistry,
     written: list[CandidateMemory],
+    discarded: list[CandidateMemory],
     model_id: str,
 ) -> None:
-    """Emit one distillation training pair per newly written memory."""
+    """Emit the sweep's distillation training pairs — **both** labels.
+
+    A judged memory operation is a training example ``(input context,
+    decision, downstream outcome)`` (#264). This emitter used to iterate the
+    survivors alone and pass the string ``"keep"``, so its ``decision`` was
+    constant *by construction*: 869 of 869 rows on the reference deployment,
+    in what is the second-densest event type in the log. A label that can
+    only take one value carries no discriminative signal, which made the
+    largest judged arm worth nothing to the dataset it exists to accrue —
+    the "measurement wired to a constant" shape this repo keeps producing.
+
+    The negative class was never missing, only dropped: the judge's own
+    ``durable`` / ``actionable`` verdict, counted at the gate and thrown
+    away (15 over the 16 sweeps to 2026-09-12, against 620 writes).
+
+    **Only the model's own rejections are emitted.** The other three ways a
+    candidate dies are deliberately silent, because none of them is a
+    judgement the model made:
+
+    * the deterministic worthiness floor (:attr:`~trellis_workers.
+      session_capture.gating.WorthinessOutcome.FAILED_FLOOR`) — this repo's
+      rule about the *form* of the model's output, and a threshold that can
+      move would retroactively relabel pairs already written;
+    * the secret scan — a guardrail. Labelling it ``discard`` would teach a
+      future judge that secret-bearing memories are unworthy, which is a
+      policy wearing a verdict's clothes;
+    * the injection guard — same shape: it caught adversarial *transcript*
+      text, not the model's opinion of a memory.
+
+    Called only from ``run_capture``'s ``if not dry_run:`` block, so a dry
+    run stays audit-silent: a ``keep`` pair asserts a document exists, and a
+    dry run writes none.
+    """
     doc_store = registry.knowledge.document_store
     for candidate in written:
         # Only emit for a memory that actually landed in the store.
@@ -405,6 +461,16 @@ def _emit_training_pairs(
         distill.emit_distillation_judged(
             registry.operational.event_log,
             candidate=candidate,
-            decision="keep",
+            decision=distill.DECISION_KEEP,
+            model_id=model_id,
+        )
+    for candidate in discarded:
+        # No store check to make: the judgement is that nothing should be
+        # written, and the pair is subject-referenced to the session rather
+        # than to a document that by definition does not exist.
+        distill.emit_distillation_judged(
+            registry.operational.event_log,
+            candidate=candidate,
+            decision=distill.DECISION_DISCARD,
             model_id=model_id,
         )
