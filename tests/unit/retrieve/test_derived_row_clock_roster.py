@@ -80,7 +80,11 @@ population the bug had already truncated. Four things answer that here:
 
 **Coverage, stated exactly.** Two scans over all of ``src/``. Scan A finds
 every ``.put(...)`` whose receiver name contains ``store`` or ``doc``, plus
-every ``build_vector_row(...)`` call. Scan B finds every ``metadata=`` /
+every ``build_vector_row(...)`` and every ``put_document(...)`` call. The last
+is the document-plane write seam (#360): once every document-row write routes
+through it, the clock decision this roster classifies is made at the call
+*into* the seam, and the seam's own ``.put`` only forwards it
+(:data:`SEAM_FORWARDS`). Scan B finds every ``metadata=`` /
 ``meta=`` keyword whose value is a **call** — the half that catches
 ``trace_embed``, which reaches its row through a governed ``evidence.ingest``
 command and never touches a ``.put(``. What is *not* covered: a producer that
@@ -103,6 +107,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import trellis.retrieve.embed_ingest_hook as embed_hook_mod
+from trellis.core.document_write import put_document
 from trellis.ingest_corpus.models import chunk_doc_id, corpus_doc_id
 from trellis.ingest_corpus.sync import sync_corpus
 from trellis.retrieve.embed_ingest_hook import build_vector_row
@@ -137,6 +142,14 @@ PRIMARY_WRITE = "primary_write"
 #: so the write clock does not move. Verified by AST below, not taken on
 #: faith.
 IN_PLACE_REPUT = "in_place_reput"
+
+#: The document-plane write seam's own ``.put``
+#: (:func:`trellis.core.document_write.put_document`). It forwards its caller's
+#: bag and ``preserve_updated_at`` unchanged, so it makes no clock decision of
+#: its own — every caller is rostered at its ``put_document(...)`` call.
+#: Verified by execution below: a seam that hard-coded either value would
+#: silently re-decide the clock for every caller on this roster at once.
+SEAM_FORWARDS = "seam_forwards"
 
 #: A derived row that carries its source's clock. Exercised below.
 DERIVED_PROPAGATES = "derived_propagates"
@@ -193,14 +206,14 @@ ROSTER: dict[str, Rostered] = {
     ),
     "trellis_workers/trace_embed/worker.py::_process_one::"
     "metadata=build_trace_metadata()": Rostered(1, DERIVED_PROPAGATES),
-    "trellis_cli/ingest.py::ingest_dbt_manifest::doc_store.put": Rostered(
+    "trellis_cli/ingest.py::ingest_dbt_manifest::put_document": Rostered(
         1,
         DERIVED_NO_SOURCE_CLOCK,
         "The row is an entity's `description` lifted out of a dbt manifest. "
         "A manifest carries no per-entity clock, so there is no source stamp "
         "to propagate — the column is the only clock that exists.",
     ),
-    "trellis/ingest_corpus/sync.py::_write_chunks::doc_store.put": Rostered(
+    "trellis/ingest_corpus/sync.py::_write_chunks::put_document": Rostered(
         1,
         DERIVED_CLOCK_DECLINED,
         "Measured and refused (#463). Propagating the parent's stamp moves a "
@@ -212,34 +225,40 @@ ROSTER: dict[str, Rostered] = {
         "code, in `_write_chunks`.",
     ),
     # -- Primary writes ----------------------------------------------------
-    "trellis/ingest_corpus/sync.py::_apply_record::doc_store.put": Rostered(
+    "trellis/ingest_corpus/sync.py::_apply_record::put_document": Rostered(
         1, PRIMARY_WRITE
     ),
-    "trellis/mutate/handlers.py::handle::document_store.put": Rostered(
-        1, PRIMARY_WRITE
-    ),
-    "trellis_cli/demo.py::load::doc_store.put": Rostered(2, PRIMARY_WRITE),
-    "trellis_cli/ingest.py::ingest_evidence::store.put": Rostered(1, PRIMARY_WRITE),
+    "trellis/mutate/handlers.py::handle::put_document": Rostered(1, PRIMARY_WRITE),
+    "trellis_cli/demo.py::load::put_document": Rostered(2, PRIMARY_WRITE),
+    "trellis_cli/ingest.py::ingest_evidence::put_document": Rostered(1, PRIMARY_WRITE),
     # -- In-place re-puts --------------------------------------------------
-    "trellis/classify/feedback.py::apply_noise_tags::document_store.put": Rostered(
+    "trellis/classify/feedback.py::apply_noise_tags::put_document": Rostered(
         1, IN_PLACE_REPUT
     ),
-    "trellis/classify/refresh.py::reclassify_item::document_store.put": Rostered(
+    "trellis/classify/refresh.py::reclassify_item::put_document": Rostered(
         1, IN_PLACE_REPUT
     ),
-    "trellis/core/derived_metadata.py::apply_derived_metadata::document_store.put": (
+    "trellis/core/derived_metadata.py::apply_derived_metadata::put_document": (
         Rostered(1, IN_PLACE_REPUT)
     ),
-    "trellis/mcp/reconcile.py::mark_document_superseded::document_store.put": Rostered(
+    "trellis/mcp/reconcile.py::mark_document_superseded::put_document": Rostered(
         1, IN_PLACE_REPUT
     ),
-    "trellis/mcp/server.py::_commit_reconcile_verdict::document_store.put": Rostered(
+    "trellis/mcp/server.py::_commit_reconcile_verdict::put_document": Rostered(
         1, IN_PLACE_REPUT
     ),
-    "trellis/mutate/handlers.py::_archive::store.put": Rostered(1, IN_PLACE_REPUT),
-    "trellis/mutate/handlers.py::_restore::doc_store.put": Rostered(1, IN_PLACE_REPUT),
+    "trellis/mutate/handlers.py::_archive::put_document": Rostered(1, IN_PLACE_REPUT),
+    "trellis/mutate/handlers.py::_restore::put_document": Rostered(1, IN_PLACE_REPUT),
     "trellis_workers/session_capture/reconcile_pass.py::"
-    "_withdraw_supersede_claim::doc_store.put": Rostered(1, IN_PLACE_REPUT),
+    "_withdraw_supersede_claim::put_document": Rostered(1, IN_PLACE_REPUT),
+    # -- The write seam ----------------------------------------------------
+    "trellis/core/document_write.py::put_document::document_store.put": Rostered(
+        1,
+        SEAM_FORWARDS,
+        "The document-plane write seam (#360). It forwards the caller's bag and "
+        "`preserve_updated_at` unchanged, so the clock decision is the caller's "
+        "and every caller is rostered above at its `put_document(...)` call.",
+    ),
     # -- Not document rows -------------------------------------------------
     "trellis/learning/tuners/promotion.py::promote_proposal::parameter_store.put": (
         Rostered(1, NOT_A_DOCUMENT_ROW)
@@ -295,8 +314,8 @@ ROSTER: dict[str, Rostered] = {
 #: The hand count a scan cannot compute for itself. Every other guard here
 #: divides by the scan's own output, so a scan that returns nothing satisfies
 #: them all; this one does not move unless a human moves it.
-EXPECTED_ROSTER_KEYS = 34
-EXPECTED_ROSTER_SITES = 37
+EXPECTED_ROSTER_KEYS = 35
+EXPECTED_ROSTER_SITES = 38
 
 #: Per-disposition site floors. Deliberately floors and not equalities for
 #: the classes that grow with ordinary work, and an equality for the two
@@ -306,13 +325,14 @@ DISPOSITION_SITE_FLOOR = {
     NOT_A_DOCUMENT_ROW: 18,
     PRIMARY_WRITE: 5,
     IN_PLACE_REPUT: 8,
+    SEAM_FORWARDS: 1,
     DERIVED_PROPAGATES: 4,
     DERIVED_NO_SOURCE_CLOCK: 1,
     DERIVED_CLOCK_DECLINED: 1,
 }
 
 #: Floors on the two raw scans, before any classification.
-MIN_WRITE_SEAMS = 27
+MIN_WRITE_SEAMS = 28
 MIN_METADATA_COMPOSERS = 10
 
 
@@ -372,6 +392,12 @@ class _SiteVisitor(ast.NodeVisitor):
             self.seams.append(
                 Site(self.module, self._where, "build_vector_row", node.lineno)
             )
+        elif _callee_name(node.func) == "put_document":
+            # The document-plane write seam. A document row's clock decision
+            # is made at the call into it, so that call is the site.
+            self.seams.append(
+                Site(self.module, self._where, "put_document", node.lineno)
+            )
 
         # Scan B — metadata composed inline at a keyword. This is the half
         # that sees a producer reaching its row through a governed command
@@ -401,7 +427,7 @@ def _scan_tree(root: Path) -> tuple[list[Site], list[Site]]:
 
 
 def scan_write_seams() -> list[Site]:
-    """Every store-ish ``.put`` and every ``build_vector_row`` call in ``src/``."""
+    """Every store-ish ``.put``, ``build_vector_row`` and ``put_document`` call."""
     return _scan_tree(SRC_ROOT)[0]
 
 
@@ -522,6 +548,10 @@ def compose_row_metadata(source):
 def write_derived_row(doc_store, source, executor):
     doc_store.put("derived:1", source.body, metadata={"title": source.title})
     executor.execute(build(metadata=compose_row_metadata(source)))
+
+
+def write_through_the_seam(doc_store, vector_store, source):
+    put_document(doc_store, vector_store, "derived:2", source.body, {})
 '''
 
     @pytest.fixture
@@ -533,7 +563,8 @@ def write_derived_row(doc_store, source, executor):
     def test_both_scans_find_the_new_producer(self, tree: Path) -> None:
         seams, composers = _scan_tree(tree)
         assert [site.key for site in seams] == [
-            "newpkg/producer.py::write_derived_row::doc_store.put"
+            "newpkg/producer.py::write_derived_row::doc_store.put",
+            "newpkg/producer.py::write_through_the_seam::put_document",
         ]
         assert [site.key for site in composers] == [
             "newpkg/producer.py::write_derived_row::metadata=compose_row_metadata()"
@@ -546,7 +577,7 @@ def write_derived_row(doc_store, source, executor):
         # genuinely absent from the real roster before their absence means
         # anything.
         assert not ({site.key for site in found} & set(ROSTER))
-        assert len(unrostered(found, ROSTER)) == 2
+        assert len(unrostered(found, ROSTER)) == 3
 
 
 class TestInPlaceReputsActuallyPreserveTheClock:
@@ -571,6 +602,42 @@ class TestInPlaceReputsActuallyPreserveTheClock:
             "rostered as an in-place re-put but not passing "
             f"preserve_updated_at=True: {sorted(expected - preserving)}"
         )
+
+
+class TestTheSeamForwardsTheCallersDecision:
+    """``SEAM_FORWARDS`` is a claim about an argument, so run the seam.
+
+    Every ``IN_PLACE_REPUT`` literal above reaches the store only through
+    :func:`put_document`. The literals being right is necessary and not
+    sufficient: the seam has to hand them on untouched.
+    """
+
+    def test_exactly_the_seam_is_rostered_as_forwarding(self) -> None:
+        assert {
+            key for key, entry in ROSTER.items() if entry.disposition == SEAM_FORWARDS
+        } == {"trellis/core/document_write.py::put_document::document_store.put"}
+
+    @pytest.mark.parametrize("preserve", [True, False])
+    def test_the_callers_preserve_updated_at_reaches_the_store(
+        self, preserve: bool
+    ) -> None:
+        document_store = MagicMock()
+        metadata = {"created_at": "2024-02-03T10:00:00+00:00"}
+        put_document(
+            document_store,
+            None,
+            "doc-1",
+            "body",
+            metadata,
+            preserve_updated_at=preserve,
+        )
+        document_store.put.assert_called_once()
+        call = document_store.put.call_args
+        assert call.kwargs["preserve_updated_at"] is preserve
+        # The bag is where a source clock rides, so it must be the caller's
+        # own object, not a copy the seam composed.
+        forwarded = [*call.args, *call.kwargs.values()]
+        assert any(value is metadata for value in forwarded)
 
 
 def _preserve_updated_at_sites() -> list[Site]:
