@@ -109,19 +109,6 @@ DELIBERATELY_UNWIRED: dict[Path, str] = {
         "defect rather than a CI capability gap; wiring it into live-infra "
         "would paper over that instead of fixing it."
     ),
-    Path("unit/stores/test_neo4j_vector.py"): (
-        "re-measured 2026-09-12 against neo4j:2025.12: 23 of 27 pass and "
-        "the four TestQuery cases fail `Invalid input 'SEARCH'`, because "
-        "the AuraDB-grade SEARCH ... IN (VECTOR INDEX ...) clause is "
-        "absent from self-hosted Neo4j. Wiring it without a probe buys a "
-        "red job; wiring it with tests/integration/conftest.py's existing "
-        "probe (#356) buys four silently skipped tests wearing the "
-        "appearance of coverage. It also provisions "
-        "trellis_test_node_embeddings on the same (:Node, embedding) pair "
-        "the live_api_server suites use, and Neo4j keeps one vector index "
-        "per pair — measured here, running it first turned all 28 of "
-        "those tests into a 30s VectorIndexNotOnlineError apiece."
-    ),
 }
 
 _TRUTHY = {"1", "true", "yes", "on"}

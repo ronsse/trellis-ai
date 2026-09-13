@@ -282,37 +282,52 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   sentence.
 - **Nowhere at all — and this bullet has been wrong in both directions.** It claimed the
   ArcadeDB graph contract runs nowhere ([#351](https://github.com/ronsse/trellis-ai/issues/351)).
-  It does: `live-infra.yml` has had an `arcadedb` service container and the
-  `TRELLIS_TEST_ARCADEDB` env since before that sentence was last edited, and it runs
-  `test_arcadedb_graph_contract.py` through the `contracts/` directory — which is how
-  [#570](https://github.com/ronsse/trellis-ai/issues/570)'s alias-claim race was caught at
-  all. Meanwhile **99 tests across eight files really did execute in no workflow leg**, and
-  the bullet named none of them: both ArcadeDB store suites, the Neo4j graph and
-  connectivity suites (68 tests — the #351 shape one directory over from the contract it
-  was filed about), plus `test_migrate_graph_live.py` and the three `live_api_server`
-  suites (31). All eight are now named in `live-infra.yml`, each added after being run
-  against containers started from that file's own images rather than on the assumption it
-  would pass.
+  It does: #543 gave `live-infra.yml` an `arcadedb` service container on 2026-09-08, #351
+  closed with it, and `test_arcadedb_graph_contract.py` runs through the `contracts/`
+  directory. Its first week of coverage immediately caught a live defect in the
+  substrate's own write path — `1ef5c9c` (#530) landed the `AliasClaim` mechanism and its
+  concurrency test hours after the container arrived, and that test failed on `main` from
+  that commit until [#555](https://github.com/ronsse/trellis-ai/pull/555), because
+  ArcadeDB reports a lost `MERGE` race through codes the driver classifies as
+  **non-retryable**, so `execute_write`'s managed retry never re-ran it. Note which way
+  the causation runs: a contract with no container does not fail, it is *silent*, so #351
+  stayed open — and the substrate stayed unexercised — from the day it was blessed.
+  Meanwhile **99 tests across eight files really did execute in no workflow leg**, and the
+  bullet named none of them: both ArcadeDB store suites, the Neo4j graph and connectivity
+  suites (68 tests — the #351 shape one directory over from the contract it was filed
+  about), plus `test_migrate_graph_live.py` and the three `live_api_server` suites (31).
+  All eight are now named in `live-infra.yml`, each added after being run against
+  containers started from that file's own images rather than on the assumption it would
+  pass. A ninth joined them with
+  [#356](https://github.com/ronsse/trellis-ai/issues/356): `tests/unit/stores/test_neo4j_vector.py`
+  now runs 24 passed / 4 skipped, where the four `TestQuery` cases issuing AuraDB-grade
+  `SEARCH ... IN (VECTOR INDEX ...)` take a capability probe ported up into
+  `tests/conftest.py` and the rest had never executed anywhere.
 - **Coverage is a join of two facts, which is why a roster here rots.** A test file runs
   only if some leg's `pytest` invocation selects its path **and** that leg's
   `TRELLIS_TEST_*` env includes every gating marker on at least one of its nodes. Naming
   the path is not enough, and neither is setting the flag.
   `tests/unit/test_ci_coverage_rule.py` computes that join over every workflow and fails
   when a file lands outside it without a reason, so this paragraph can no longer be the
-  thing that tracks it. **Three files are outside it today**, each with a measured reason
-  in that module: `api/test_smoke_parity.py` (the pytest mirror of `deploy/smoke.sh` —
-  it probes an already-deployed orchestrator and would buy nine silent skips here),
+  thing that tracks it. **Two files are outside it today**, each with a measured reason in
+  that module: `api/test_smoke_parity.py` (the pytest mirror of `deploy/smoke.sh` — it
+  probes an already-deployed orchestrator and would buy nine silent skips here) and
   `cli/test_subprocess_serve.py` (needs no live infrastructure at all and passes in 2.4s
   on a bare checkout — dark purely because of `live` + `slow` markers, a marker defect
-  rather than a CI capability gap), and `tests/unit/stores/test_neo4j_vector.py`.
-  That last one is why sweeping all of `tests/unit/stores/` in still does not work:
-  re-measured 2026-09-12 against `neo4j:2025.12`, 23 of its 27 tests pass and the four
-  `TestQuery` cases fail `Invalid input 'SEARCH'` ([#356](https://github.com/ronsse/trellis-ai/issues/356)
-  would let them self-skip, buying four silent skips wearing the appearance of coverage).
-  It also provisions a *second* vector index on the same `(:Node, embedding)` pair the
-  `live_api_server` suites use, and Neo4j keeps one index per pair — measured here,
-  running it first turned all 28 of those tests into a 30s `VectorIndexNotOnlineError`
-  apiece.
+  rather than a CI capability gap).
+- **Still do not sweep `tests/unit/stores/` in**, even though every file in it is now
+  named. Paths are added one reviewed path at a time, because the hazard a sweep meets is
+  silent and lands on a *different* suite. Neo4j holds exactly one vector index per
+  `(label, property)`, so a suite naming a second index on `(:Node, embedding)` has its
+  `CREATE ... IF NOT EXISTS` discarded with no error, and it is the other suite in the
+  same run that dies 30s later on a timeout naming an index `SHOW INDEXES` does not list.
+  Measured: running `test_neo4j_vector.py` under its old private index name first turned
+  all 28 `live_api_server` tests into `VectorIndexNotOnlineError` (848s of red), and
+  dropping that index turned the same 28 green in 52s. #356 was one `pytest` invocation
+  away from shipping exactly that, and fixed it by taking the store's production-default
+  name — the one the e2e conftest already pinned. **Sameness is the safety property, not
+  separation**, and `tests/unit/test_neo4j_vector_live_infra_rule.py` fails if the two
+  names diverge again.
 
 Note the shape of the #345 defect, because it is the one this repo keeps producing: the
 pgvector contract had *never executed anywhere*, because its fixture called `_conn` as an
