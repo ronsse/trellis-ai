@@ -202,18 +202,88 @@ jobs:
         # half of the pgvector surface. It is NOT covered by the contracts
         # directory.
         #
-        # The two Postgres store suites are named explicitly because tests.yml
-        # deselects their backend marker even in its all-extras leg. Do not
-        # widen this to all of tests/unit/stores/: that would also select
-        # test_neo4j_vector.py, whose AuraDB-grade `SEARCH ... IN (VECTOR
-        # INDEX ...)` cases cannot run against this job's self-hosted Neo4j
-        # container. The capability-probe follow-up remains tracked in #356.
+        # Every other store suite is named explicitly because tests.yml
+        # deselects their backend markers even in its all-extras leg, so a
+        # file that is not listed here executes in no workflow at all. Four
+        # were in exactly that state and are now named: both ArcadeDB store
+        # suites (the *blessed* graph + vector substrate — the #351 shape one
+        # directory over from the contract it fixed) plus the Neo4j graph and
+        # connectivity suites. That is 68 tests that had never run in CI.
+        #
+        # They were added on measurement, not on the assumption that they
+        # would pass. Run 2026-09-12 against containers started from this
+        # file's own images — arcadedata/arcadedb:26.8.1 and neo4j:2025.12:
+        # test_arcadedb_graph 8 passed, test_arcadedb_vector 17 passed,
+        # test_neo4j_graph 39 passed, test_neo4j_connectivity_live 4 passed.
+        #
+        # The live integration suites were run-nowhere for the same reason
+        # and are now named too: test_migrate_graph_live.py plus the three
+        # that build on the live_api_server fixture (api/test_live_smoke.py,
+        # sdk/test_live_client.py, sdk/test_live_async_client.py). Their
+        # module docstrings say they need a managed Neon + AuraDB
+        # deployment, and that is what kept them out of this list. It is not
+        # what the code requires: live_api_server spawns its own uvicorn on
+        # a free port and its only skip condition is
+        # ``if not NEO4J_URI or not PG_DSN`` — both set in the env block
+        # above. Measured 2026-09-12 against the same two containers:
+        # test_migrate_graph_live 3 passed in 0.50s, and the three
+        # live_api_server suites 28 passed in 51.86s together. Read a
+        # suite's skip condition, not its docstring.
+        #
+        # Order is not load-bearing here, but adjacency is. Neo4j allows one
+        # vector index per (label, property): a second CREATE under a
+        # different name returns success and the index never exists, so the
+        # loser's 30s ONLINE wait times out on whichever suite asks second.
+        # test_neo4j_e2e.py and live_api_server both provision
+        # ``trellis_node_embeddings`` — the same name, hence a no-op
+        # IF NOT EXISTS and no collision. tests/unit/stores/test_neo4j_vector.py
+        # provisions ``trellis_test_node_embeddings`` on the same
+        # (:Node, embedding) pair, which is a second and independent reason
+        # it cannot simply be swept in: measured here, running it first
+        # turned all 28 live_api_server tests into VectorIndexNotOnlineError
+        # at 30s each (848s of red), and dropping its index turned the same
+        # 28 green in 52s.
+        #
+        # Still do not widen this to all of tests/unit/stores/. The one file
+        # that remains excluded is test_neo4j_vector.py, and the exclusion is
+        # a re-measured fact rather than an inherited note: on the same
+        # neo4j:2025.12 container 23 of its tests pass and its four
+        # TestQuery cases fail with `Invalid input 'SEARCH'`, because the
+        # AuraDB-grade `SEARCH ... IN (VECTOR INDEX ...)` clause is absent
+        # from self-hosted Neo4j. tests/integration/conftest.py already has
+        # the capability probe that would let those four self-skip; giving
+        # this suite the same probe is #356. Note what wiring it *without*
+        # the probe would buy — a red job — and what wiring it *with* the
+        # probe would buy: four silently skipped tests wearing the
+        # appearance of coverage.
+        #
+        # Two integration files stay out, and neither is a capability gap.
+        # api/test_smoke_parity.py is the pytest mirror of deploy/smoke.sh:
+        # it probes an already-deployed orchestrator at TRELLIS_BASE_URL and
+        # skips the whole module when nothing answers /healthz there. This
+        # job starts stores, not a server, so naming it would buy nine
+        # silent skips. cli/test_subprocess_serve.py needs no live infra at
+        # all — it passes in 2.4s on a bare checkout — and is unwired only
+        # because it carries live + slow markers that tests.yml deselects.
+        # Wiring it here would paper over that rather than fix it.
+        #
+        # tests/unit/test_ci_coverage_rule.py derives which test files
+        # execute in no workflow leg and fails when one appears without a
+        # recorded reason, so this list cannot silently fall behind the
+        # directory again.
         run: |
           pytest \
             tests/integration/test_neo4j_e2e.py \
+            tests/integration/test_migrate_graph_live.py \
+            tests/integration/api/test_live_smoke.py \
+            tests/integration/sdk/ \
             tests/integration/loops/ \
             tests/unit/stores/contracts/ \
             tests/unit/stores/test_pgvector.py \
             tests/unit/stores/test_postgres_stores.py \
             tests/unit/stores/test_api_key_store.py \
+            tests/unit/stores/test_arcadedb_graph.py \
+            tests/unit/stores/test_arcadedb_vector.py \
+            tests/unit/stores/test_neo4j_graph.py \
+            tests/unit/stores/test_neo4j_connectivity_live.py \
             -v
