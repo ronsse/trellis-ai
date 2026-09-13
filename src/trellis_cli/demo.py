@@ -10,7 +10,9 @@ from pathlib import Path
 import structlog
 import typer
 
+from trellis.core.document_write import put_document
 from trellis.core.ids import generate_ulid
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
@@ -1234,6 +1236,7 @@ def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
     registry = _get_registry()
     trace_store = get_trace_store()
     doc_store = get_document_store()
+    vector_store = resolve_vector_store(registry)
     graph = get_graph_store()
 
     # Check if data already exists
@@ -1273,7 +1276,9 @@ def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
     # 4. Evidence → documents
     evidence_items = _build_evidence()
     for ev in evidence_items:
-        doc_store.put(ev.evidence_id, ev.content or "", ev.metadata)
+        put_document(
+            doc_store, vector_store, ev.evidence_id, ev.content or "", ev.metadata
+        )
         # Also link evidence to entities in graph
         for att in ev.attached_to:
             graph.upsert_edge(
@@ -1287,7 +1292,7 @@ def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
     # 5. Documents (searchable)
     docs = _build_documents()
     for doc_id, content, meta in docs:
-        doc_store.put(doc_id, content, meta)
+        put_document(doc_store, vector_store, doc_id, content, meta)
     console.print(f"  [green]+[/green] {len(docs)} documents")
 
     # 6. Precedents → graph nodes + edges
