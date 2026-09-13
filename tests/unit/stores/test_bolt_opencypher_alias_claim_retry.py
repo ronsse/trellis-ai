@@ -148,6 +148,28 @@ class TestPredicate:
     def test_rejects_everything_that_is_not_this_constraint(self, message: str) -> None:
         assert _is_alias_claim_contention(_contention(message)) is False
 
+    @pytest.mark.parametrize(
+        "message",
+        [
+            # An index-state error naming the claim index exactly (an
+            # illustrative shape, not a captured message). Contention
+            # cannot clear it, so a retry only delays the real error.
+            "Index 'AliasClaim[claim_key]' is not online",
+            # #571's case: a parse error quoting the claim's label and key.
+            "Invalid input near 'AliasClaim' (claim_key)",
+        ],
+    )
+    def test_rejects_a_message_about_this_constraint_that_is_not_a_violation(
+        self, message: str
+    ) -> None:
+        """Naming the constraint is not the same as violating it.
+
+        Both messages name ``AliasClaim`` and ``claim_key`` as whole
+        tokens, so the identity check alone accepts them; only the
+        violation phrase separates them from a lost race.
+        """
+        assert _is_alias_claim_contention(_contention(message)) is False
+
     def test_the_shipped_ddl_names_both_tokens_the_predicate_matches(self) -> None:
         """The premise the predicate rests on, checked against the schema.
 
