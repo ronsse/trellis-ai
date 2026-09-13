@@ -568,6 +568,92 @@ starvation incident, or an owner request to spend a bounded slot on exploration.
 reopened design must still define presentation and the zero-comparison-arm policy, cap
 per-pack cost, and prove sampling service is not silently outpaced by corpus growth.
 
+#### Re-measured 2026-09-12 — three of this entry's premises are false
+
+The owner decision above stands. Its *reasons* do not, and one of them inverts.
+
+**1 · The cap is not deployed, so "keep the current five" describes a build that has never
+assembled a production pack.** All **92** organic `PACK_ASSEMBLED` events (2026-07-07 →
+2026-09-12 07:08) lack `advisories_matched` entirely — a build predating #392/#499. **41**
+carried at least one advisory, and the served count tracks the whole *active* population
+rather than a cap: 1, 16, 18, 25, 27, 28, 29, 44, 52, and **56 advisories in a single
+pack**. The only 118 packs that carry `advisories_matched` were written by one probe run
+spanning 1m50s on 2026-09-12 and are excluded from everything below. The deferral has been
+free because the mechanism it defers is not running.
+
+**2 · There is no never-served tail, and the loop has already used its absence.** Over the
+30 days to 2026-09-12: **54** graded packs (feedback joined to a pack), 10 successes
+(0.185), **35** carrying ≥1 advisory. All **85** stored advisories were presented and **83**
+cleared `_ADVISORY_MIN_PRESENTATIONS = 3`. The loop suppressed **56 of 85** — including
+every one of the 44 `approach` rows. The store is 85 (approach 44, anti_pattern 22, entity
+16, query 3) with **29 active** (entity 16, anti_pattern 10, query 3) and **zero active
+`approach` rows**; all 29 are `scope: global`. The cost this entry accepted — *"the
+never-served tail remains unmeasured and cannot participate in fitness"* — has not been
+paid, because uncapped serving **is** full exploration.
+
+**3 · #502's coupling is real, larger than the issue stated, and it fires on deployment
+rather than accruing over time.** Replaying the same 54 graded packs through
+`_select_advisories`' own ordering truncated to five: advisories ever presented **85 → 11**;
+scoreable rows **83 → 11** (72 lost, none gained); of the 56 rows the loop actually
+suppressed, only **5** would have been scoreable. The cap bites on 31 of the 54. So the next
+deployment past #499 does not slow the suppression half — it removes **87%** of its input in
+one step, and does so on day one. *Caveat:* the replay ranks by today's confidence, not the
+confidence at each pack's assembly time. The direction is insensitive to that (a
+deterministic argmax over 29 rows serves 5 however they are ordered); the exact membership
+is not.
+
+**4 · The argument *for* the cap that #502 did not make: the cost is real and it is
+unbudgeted.** Advisories attach *after* the budget walk
+([`pack_builder.py:821`](../../src/trellis/retrieve/pack_builder.py)) and `Pack.total_tokens`
+sums items only ([`schemas/pack.py:221`](../../src/trellis/schemas/pack.py)), so a
+56-advisory pack spends nothing from `max_tokens` and **reports nothing**. Extrapolating
+#392's measured five-advisory cost (191 tokens, ~38 each), that is ~2,100 unbudgeted tokens
+against a 2,000-token pack — the delivery is roughly double what the pack's own accounting
+says. Extrapolated, not measured; #392's per-advisory figure is the whole basis.
+
+**5 · Option 2 (score on match) should be refused, and the measurement makes refusing it
+cheap.** Score-on-match attributes a pack's outcome to an advisory the caller never saw.
+With the window success rate at 0.185, every broadly-matching row drifts toward suppression
+on outcomes it could not have influenced — the mirror of the #336 failure the demotion gate
+exists to stop, arriving with two denominators sharing one name. The 56 suppressions already
+banked were earned on **served** rows, so the corpus did not need score-on-match to be
+pruned. Both 2026-09-04 panelists rejected it independently; nothing measured since argues
+for reopening it.
+
+**6 · Recommendation — same verdict, attached to the deployment instead of the calendar.**
+Keep the deferral. Make **the first production deployment of a build carrying #499** the
+trigger, in place of a volume threshold: that is the moment the coupling goes from latent to
+87%. When it happens, ship one exploration slot (#502 Option 1) and price it honestly — at
+35 advisory-carrying graded packs per 30 days against 29 active rows, one slot yields
+≈**1.2** presentations per row per window, below the floor of 3. Reaching the floor needs
+~3 of the 5 slots on exploration, or a scoring window near 90 days. That arithmetic, not a
+principle, is what makes exploration expensive here, and it is what to re-derive before
+spending a slot.
+
+**7 · [#503](https://github.com/ronsse/trellis-ai/issues/503)'s gate has fired, and the
+hazard inverted.** #503 held itself until *"the first `entity` advisory reaching a pack"*.
+Entity rows have reached packs: 16 are active and, under the cap's own ordering, occupy
+ranks 1, 2, 4, 5, 6, 7 and 8 of the active set (rank 3 is a `query` row). But the hazard
+#503 named was *entity starved by approach*, and there are no active approach rows left —
+under a cap of five the starved category is now **`anti_pattern`** (10 active rows, none in
+the top 5). Both #503's premise (*"all 44 rows that matched were approach"*) and its
+conclusion need restating before it is worked. Still **not work**: its own rule against
+tuning a reservation to the present corpus applies with equal force to the inverted one.
+
+**8 · The audience question migrated rather than closing.** The advisory it was about —
+*"packs using the `keyword` strategy succeeded less often"*, addressed to a reader that
+cannot select strategies — is suppressed with its whole family, so the loop answered it. It
+did not answer the class. The top-ranked active rows read *"Entity
+`conversation:claude-ai:b2869174-…` appears in 45% of successful packs"* (an opaque id an
+agent can act on no better than a strategy name) and, at rank 3, *"Including 'for' in your
+context query correlates with 33% success"* — a stopword artifact. That is a **generation**
+question (#502's *"should not have been generated"*), not a delivery one, and capping
+delivery will not touch it.
+
+*Re-derive before acting: the 30-day window rolls, and the nightly generator and fitness
+loop both move these counts daily. The `advisories_matched`-absent finding is the stable
+one — it is a property of the deployed build, not of the window.*
+
 ### F-4 · The two richer shapes in [#365](https://github.com/ronsse/trellis-ai/issues/365)
 
 E2's PR shipped #365's **third** option: `analyze health` now states that
