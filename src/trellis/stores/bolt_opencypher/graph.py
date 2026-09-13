@@ -234,6 +234,16 @@ def _alias_claim_key(source_system: str, raw_id: str) -> str:
 _ALIAS_CLAIM_LABEL = "AliasClaim"
 _ALIAS_CLAIM_KEY_PROPERTY = "claim_key"
 
+#: Phrases a unique-constraint violation carries, matched case-insensitively.
+#: Naming the claim's label and key property is necessary but not
+#: sufficient: a parse error quoting the claim's DDL names both tokens too,
+#: as would any other error about the claim index that is not a violation,
+#: and retrying one re-runs a failure no contention resolves. ArcadeDB 26.8.1
+#: reports ``Duplicated key [...] found on index 'AliasClaim[claim_key]'``;
+#: Neo4j 2025.12 reports ``Node(42) already exists with label `AliasClaim`
+#: and property `claim_key```.
+_UNIQUE_VIOLATION_MARKERS: tuple[str, ...] = ("duplicated key", "already exists")
+
 #: How many times an alias write re-runs after losing the claim race.
 #: Two contenders need exactly one retry. The bound exists so that a
 #: violation which is *not* contention surfaces as an error instead of
@@ -282,9 +292,15 @@ def _is_alias_claim_contention(exc: Exception) -> bool:
     a green Neo4j contract run as evidence that the retry works.
 
     Both names are matched as **whole tokens**: a substring test would
-    read a future ``AliasClaimArchive`` index as this one.
+    read a future ``AliasClaimArchive`` index as this one. And both are
+    matched only inside a message that reads as a unique violation
+    (:data:`_UNIQUE_VIOLATION_MARKERS`): the constraint's identity says
+    *which* index a message is about, not that the index was violated.
     """
     message = str(getattr(exc, "message", "") or exc)
+    lowered = message.lower()
+    if not any(marker in lowered for marker in _UNIQUE_VIOLATION_MARKERS):
+        return False
     return _names_token(message, _ALIAS_CLAIM_LABEL) and _names_token(
         message, _ALIAS_CLAIM_KEY_PROPERTY
     )
