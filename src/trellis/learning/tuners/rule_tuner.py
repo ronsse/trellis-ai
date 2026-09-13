@@ -28,7 +28,12 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from trellis.schemas.outcome import OutcomeEvent
+from trellis.schemas.outcome import (
+    GRAPH_SEARCH_COMPONENT_ID,
+    KEYWORD_SEARCH_COMPONENT_ID,
+    RRF_RERANKER_COMPONENT_ID,
+    OutcomeEvent,
+)
 from trellis.schemas.parameters import ParameterProposal, ParameterScope
 
 if TYPE_CHECKING:
@@ -319,7 +324,7 @@ def apply_rules(
 DEFAULT_RULES: Final[tuple[TuningRule, ...]] = (
     TuningRule(
         name="keyword_low_success_halve_half_life",
-        target_component_id="retrieve.strategies.KeywordSearch",
+        target_component_id=KEYWORD_SEARCH_COMPONENT_ID,
         min_sample_size=30,
         condition_key="success_rate",
         condition_op="lt",
@@ -333,7 +338,7 @@ DEFAULT_RULES: Final[tuple[TuningRule, ...]] = (
     ),
     TuningRule(
         name="graph_low_reference_rate_tighten_domain_boost",
-        target_component_id="retrieve.strategies.GraphSearch",
+        target_component_id=GRAPH_SEARCH_COMPONENT_ID,
         min_sample_size=30,
         condition_key="reference_rate",
         condition_op="lt",
@@ -348,7 +353,7 @@ DEFAULT_RULES: Final[tuple[TuningRule, ...]] = (
     ),
     TuningRule(
         name="rrf_low_success_reduce_smoothing",
-        target_component_id="retrieve.rerankers.RRFReranker",
+        target_component_id=RRF_RERANKER_COMPONENT_ID,
         min_sample_size=30,
         condition_key="success_rate",
         condition_op="lt",
