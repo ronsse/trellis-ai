@@ -517,6 +517,16 @@ outcome, not merely emitted. 1,868 emitted rows do not satisfy this gate and mus
 counted toward it; that substitution is the whole error this section was rewritten to
 avoid. Below 500, §5.1's arithmetic says stop.
 
+**Measured 2026-09-13 on a prod copy (#584): not met.** Edit 1 is #566 and edit 2 is #584.
+- The strict reading, rows cited after their judgment, is **289** per 30 days. Graded is 493 and served is 749.
+- 119 of the 289 are the one-off classification shadow batch.
+- Distillation, the recurring arm, gives ~254 per 30 days at its historical rate and **~90** at last week's. Capture sees every transcript; fewer new sessions is the cause.
+- A cited row can only come from an attributed pack (57 in the window). So the join is as thin as pack grading, the constraint §5.1 set out to escape.
+
+So edit 3's exporter is not built. Phase 3's paired comparison is measured in the same signal and inherits the same limit.
+
+What would move it is more attributed grading or more captured sessions. Owner call: whether *served* counts as the outcome (point 1 above). It passes at the historical rate (669) and fails at last week's (163).
+
 ### Phase 2 — give the graph a shape worth changing · weeks
 
 #375 (no seed producer exists on the write path) · #371 (graph axis ignores its query)
@@ -561,6 +571,8 @@ Stated up front so it is checkable rather than defended:
   column, and give the decision variance first." The load-bearing assumption was wrong in
   its stated form and the plan changed shape rather than being defended — which is the
   point of writing this section before the work, not after.
+- **The joined signal stays below 500.** **Fired 2026-09-13** (Phase 1's gate, #584). The emitted
+  stream is dense, but its join to an outcome is capped by pack grading.
 - **The graph axis is dispensable.** If Phase 2's seeding replay shows packs do not
   change, then the graph is not a retrieval surface and reshaping it optimises
   something nobody reads. That would redirect this work to the document and vector
