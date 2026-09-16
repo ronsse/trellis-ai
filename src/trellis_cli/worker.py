@@ -67,6 +67,7 @@ from trellis.learning.tuners import (
     report_to_dict,
     run_auto_promotion,
 )
+from trellis.llm.routing import LLMConsumer
 from trellis.ops.write_health import record_write_rejection
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import (
@@ -1314,7 +1315,7 @@ def enrich_cmd(
     message — it never silently no-ops.
     """
     document_store = get_document_store()
-    llm = _require_llm_client_or_exit()
+    llm = _require_llm_client_or_exit(LLMConsumer.ENRICHMENT, command="worker enrich")
 
     candidates = _select_enrichment_candidates(
         document_store, limit=limit, reenrich=reenrich
@@ -1378,19 +1379,27 @@ def enrich_cmd(
         )
 
 
-def _require_llm_client_or_exit() -> Any:
-    """Return a built LLM client or exit loudly when none is available.
+def _require_llm_client_or_exit(consumer: LLMConsumer, *, command: str) -> Any:
+    """Return ``consumer``'s LLM client or exit loudly when none is available.
 
-    Enrichment is opt-in but must be loud on misuse: an operator who runs
-    ``worker enrich`` without an LLM configured gets a clear, actionable
-    error naming the missing config / extra rather than a silent skip.
+    Enrichment and precedent mining are opt-in but must be loud on misuse:
+    an operator who runs ``command`` without an LLM configured gets a
+    clear, actionable error naming the missing config / extra rather than
+    a silent skip.
+
+    ``consumer`` selects the ``llm.routes`` entry, so each command runs on
+    the tier the operator assigned it. A malformed ``llm.tiers`` /
+    ``llm.routes`` block raises :class:`~trellis.llm.routing.LLMRoutingError`
+    and is deliberately not caught here: it is a ``ConfigError``, so the CLI
+    boundary renders it on the caller's ``--format`` and exits with the code
+    :func:`~trellis_cli.exit_codes.exit_code_for` assigns (``EXIT_STORE``).
     """
     registry = _get_registry()
     try:
-        llm = registry.build_llm_client()
+        llm = registry.build_llm_client(consumer=consumer)
     except BackendNotInstalledError as exc:
         console.print(
-            f"[red]worker enrich requires an LLM SDK that is not installed: "
+            f"[red]{command} requires an LLM SDK that is not installed: "
             f"{exc}[/red]\n"
             "[dim]Install it, e.g. 'uv pip install trellis-ai[llm-openai]', "
             "and configure an 'llm:' block in config.yaml.[/dim]"
@@ -1398,7 +1407,7 @@ def _require_llm_client_or_exit() -> Any:
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     if llm is None:
         console.print(
-            "[red]worker enrich requires an LLM client but none is "
+            f"[red]{command} requires an LLM client but none is "
             "configured.[/red]\n"
             "[dim]Add an 'llm:' block to ~/.trellis/config.yaml (provider, "
             "api_key_env, model) and install the matching extra "
@@ -1729,7 +1738,9 @@ def mine_precedents_cmd(
     """
     trace_store = get_trace_store()
     event_log = get_event_log()
-    llm = _require_llm_client_or_exit()
+    llm = _require_llm_client_or_exit(
+        LLMConsumer.PRECEDENT_MINING, command="worker mine-precedents"
+    )
 
     if dry_run:
         in_scope = _count_failure_traces(trace_store, domain=domain, limit=limit)
