@@ -280,16 +280,44 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   it had a green 56-case Postgres contract run on its PR and reported it as unverified.
   Re-read `.github/workflows/live-infra.yml`'s `on:` block rather than trusting this
   sentence.
-- **Nowhere at all:** the ArcadeDB graph contract (`test_arcadedb_graph_contract.py`).
-  ArcadeDB is the *blessed* graph + vector substrate and its contract has no service
-  container in any workflow ([#351](https://github.com/ronsse/trellis-ai/issues/351)).
-  The 59 Postgres-marked tests under `tests/unit/stores/` outside `contracts/` are still
-  deselected: the all-extras leg supplies their imports but no database, while
-  `live-infra.yml` names paths rather than markers. Sweeping that whole directory into the
-  live job does not work yet:
-  `test_neo4j_vector.py::TestQuery` issues AuraDB-only Cypher that self-hosted
-  `neo4j:2025.12` cannot parse, and unlike the e2e suite it has no capability probe
-  ([#356](https://github.com/ronsse/trellis-ai/issues/356)).
+- **Nowhere at all: 140 tests, measured 2026-09-16.** Both of this bullet's previous
+  claims had gone stale and both were wrong in the *pessimistic* direction, which is the
+  direction that wastes work — an agent reads them and re-does something already covered.
+  The ArcadeDB graph contract **does** run: 106 cases on `live-infra`, wired by `638b241`
+  ([#543](https://github.com/ronsse/trellis-ai/issues/543)), so
+  [#351](https://github.com/ronsse/trellis-ai/issues/351)'s headline is closed even where
+  the issue is not. And there were never 59 unwired Postgres-marked tests outside
+  `contracts/` — **there are 3**, all in `test_api_key_store.py`, all covered since
+  `179577a` ([#545](https://github.com/ronsse/trellis-ai/issues/545)).
+
+  What actually runs on no leg, by file:
+
+  ```
+  39  tests/unit/stores/test_neo4j_graph.py             8  tests/integration/sdk/test_live_client.py
+  27  tests/unit/stores/test_neo4j_vector.py            8  tests/unit/stores/test_arcadedb_graph.py
+  17  tests/unit/stores/test_arcadedb_vector.py         7  tests/integration/sdk/test_live_async_client.py
+  13  tests/integration/api/test_live_smoke.py          4  tests/unit/stores/test_neo4j_connectivity_live.py
+   9  tests/integration/api/test_smoke_parity.py        3  tests/integration/test_migrate_graph_live.py
+   2  tests/integration/test_recommended_config.py      2  tests/unit/stores/test_sqlite_graph_bulk_upsert.py
+   1  tests/integration/cli/test_subprocess_serve.py
+  ```
+
+  So the uncovered surface is the **unit** suites for the two Bolt backends (70 `neo4j`,
+  25 `arcadedb`) plus the `live`-marked integration smoke tests — *not* the contracts,
+  which are the authoritative spec and are covered. One member needs nothing at all:
+  `test_sqlite_graph_bulk_upsert.py` is **2 pure-SQLite tests marked `slow`**, no service
+  container required. Sweeping the rest of `tests/unit/stores/` into the live job still
+  does not work: `test_neo4j_vector.py::TestQuery` issues AuraDB-only Cypher that
+  self-hosted `neo4j:2025.12` cannot parse, and unlike the e2e suite it has no capability
+  probe ([#356](https://github.com/ronsse/trellis-ai/issues/356)).
+
+  **Derive this rather than trusting it.** Coverage is a *join* — a test runs only if a
+  leg selects its path **and** sets every gating marker on it — so the way to re-measure
+  is to collect the universe, collect each leg under its own environment, and subtract
+  (`pytest tests/ --collect-only -q -q`; two `-q` because `addopts` carries `-v`). Both
+  stale claims above survived for months because each checked one half. Full method and
+  the per-marker breakdown live in the 2026-09-13 gap analysis
+  ([#594](https://github.com/ronsse/trellis-ai/pull/594)).
 
 Note the shape of the #345 defect, because it is the one this repo keeps producing: the
 pgvector contract had *never executed anywhere*, because its fixture called `_conn` as an
@@ -307,5 +335,9 @@ database without the extension every pooled connection fails and `pool.wait()` r
 
 ## Product docs
 
+- `docs/ROADMAP.md` — a **router**, not a roadmap of its own: which of the five planning
+  documents is authoritative for what, and the Now / Next / Later gates stated as
+  acceptance checks rather than as an item list. Carries no queue and no Done section on
+  purpose — the queue is the tracker and the open PRs, which no file in this repo can see.
 - `docs/PRD.md` — product thesis, adopter profiles, component disposition
 - `docs/design/implementation-roadmap.md` — authoritative single-page roadmap; §3.H is the Productionization milestone (the 2026-07-11 edit-set has been applied into it and removed)
