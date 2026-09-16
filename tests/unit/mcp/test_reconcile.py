@@ -28,6 +28,7 @@ import pytest
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.hashing import content_hash
+from trellis.llm.routing import LLMConsumer
 from trellis.llm.types import LLMResponse
 from trellis.mcp.reconcile import ReconcileDecision, parse_verdict
 from trellis.schemas.memory_op import JudgedOpType, MemoryOpJudgedPayload
@@ -95,7 +96,9 @@ def _verdict_json(decision: str, confidence: float = 0.9) -> str:
 def _enable(monkeypatch: pytest.MonkeyPatch, client: Any | None) -> None:
     """Turn the verdict tier on and pin the client boundary to *client*."""
     monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
-    monkeypatch.setattr(server_mod, "_build_llm_client", lambda _registry: client)
+    monkeypatch.setattr(
+        server_mod, "_build_llm_client", lambda _registry, _consumer: client
+    )
 
 
 def _judged_events(registry: StoreRegistry) -> list[Any]:
@@ -170,6 +173,22 @@ class TestParseVerdict:
 
 
 class TestVerdictMatrix:
+    def test_the_judge_is_built_for_the_reconcile_consumer(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``llm.routes.reconcile`` can only pick this judge's tier if it is asked."""
+        save_memory(_BASE)
+        monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
+        seen: list[LLMConsumer] = []
+
+        def _record(_registry: Any, consumer: LLMConsumer) -> Any:
+            seen.append(consumer)
+            return FakeLLMClient(content=_verdict_json("add"))
+
+        monkeypatch.setattr(server_mod, "_build_llm_client", _record)
+        save_memory(_NEAR)
+        assert seen == [LLMConsumer.RECONCILE]
+
     def test_add_stores_second_doc_and_emits(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -357,7 +376,7 @@ class TestFallbacks:
         base_id = _doc_id(save_memory(_BASE))
         monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
 
-        def _boom(_registry: Any) -> Any:
+        def _boom(_registry: Any, _consumer: Any) -> Any:
             msg = "provider misconfigured"
             raise RuntimeError(msg)
 

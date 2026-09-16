@@ -22,6 +22,7 @@ from tests.cli_output import assert_coloured, force_colour, plain
 from tests.document_recency import fake_document_clock
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.llm import LLMResponse, Message
+from trellis.llm.routing import LLMConsumer
 from trellis.ops.capture_health import check_capture_health, is_capture_surface
 from trellis.ops.write_health import WriteHealthReport, summarize_write_health
 from trellis.schemas.advisory import (
@@ -923,7 +924,9 @@ class TestWorkerEnrich:
 
         # Inject a stub LLM so the client check passes; dry-run won't call it.
         monkeypatch.setattr(
-            worker, "_require_llm_client_or_exit", lambda: _StubLLM("{}")
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM("{}"),
         )
         result = runner.invoke(
             app, ["worker", "enrich", "--dry-run", "--format", "json"]
@@ -958,7 +961,7 @@ class TestWorkerEnrich:
         monkeypatch.setattr(
             worker,
             "_require_llm_client_or_exit",
-            ModelLessLLM,
+            lambda _consumer, *, command: ModelLessLLM(),
         )
 
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
@@ -1007,7 +1010,7 @@ class TestWorkerEnrich:
         monkeypatch.setattr(
             worker,
             "_require_llm_client_or_exit",
-            SelectiveLLM,
+            lambda _consumer, *, command: SelectiveLLM(),
         )
 
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
@@ -1084,7 +1087,9 @@ class TestWorkerEnrich:
             }
         )
         monkeypatch.setattr(
-            worker, "_require_llm_client_or_exit", lambda: _StubLLM(canned)
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM(canned),
         )
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
         assert result.exit_code == 0, result.output
@@ -1162,7 +1167,9 @@ class TestWorkerEnrich:
             }
         )
         monkeypatch.setattr(
-            worker, "_require_llm_client_or_exit", lambda: _StubLLM(canned)
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM(canned),
         )
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
         assert result.exit_code == 0, result.output
@@ -1196,7 +1203,9 @@ class TestWorkerEnrich:
         monkeypatch.setattr(
             worker,
             "_require_llm_client_or_exit",
-            lambda: _StubLLM(json.dumps({"tags": ["a"], "importance": 0.6})),
+            lambda _consumer, *, command: _StubLLM(
+                json.dumps({"tags": ["a"], "importance": 0.6})
+            ),
         )
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
         assert result.exit_code == 0, result.output
@@ -1233,7 +1242,9 @@ class TestWorkerMinePrecedents:
         for _ in range(3):
             trace_store.append(_make_failure_trace())
         monkeypatch.setattr(
-            worker, "_require_llm_client_or_exit", lambda: _StubLLM("[]")
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM("[]"),
         )
         result = runner.invoke(
             app,
@@ -1262,7 +1273,9 @@ class TestWorkerMinePrecedents:
             ]
         )
         monkeypatch.setattr(
-            worker, "_require_llm_client_or_exit", lambda: _StubLLM(canned)
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM(canned),
         )
         result = runner.invoke(app, ["worker", "mine-precedents", "--format", "json"])
         assert result.exit_code == 0, result.output
@@ -1657,7 +1670,9 @@ class TestEnrichPreservesRecency:
 
         clock["now"] = now
         monkeypatch.setattr(
-            worker, "_require_llm_client_or_exit", lambda: _StubLLM(self._CANNED)
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM(self._CANNED),
         )
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
 
@@ -1706,7 +1721,9 @@ class TestEnrichPreservesRecency:
 
         clock["now"] = now
         monkeypatch.setattr(
-            worker, "_require_llm_client_or_exit", lambda: _StubLLM(self._CANNED)
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM(self._CANNED),
         )
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
         assert result.exit_code == 0, result.output
@@ -1793,7 +1810,9 @@ class TestEnrichSurvivesAConcurrentWrite:
         monkeypatch.setattr(
             worker,
             "_require_llm_client_or_exit",
-            lambda: self._llm_that_writes(self._CANNED, concurrent_write),
+            lambda _consumer, *, command: self._llm_that_writes(
+                self._CANNED, concurrent_write
+            ),
         )
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
         assert result.exit_code == 0, result.output
@@ -1823,7 +1842,7 @@ class TestEnrichSurvivesAConcurrentWrite:
         monkeypatch.setattr(
             worker,
             "_require_llm_client_or_exit",
-            lambda: self._llm_that_writes(
+            lambda _consumer, *, command: self._llm_that_writes(
                 self._CANNED, lambda: doc_store.put("doc-x", "rewritten", {})
             ),
         )
@@ -1838,7 +1857,9 @@ class TestEnrichSurvivesAConcurrentWrite:
         doc_store = temp_stores.knowledge.document_store
         doc_store.put("doc-x", "the original body", {"title": "X"})
         monkeypatch.setattr(
-            worker, "_require_llm_client_or_exit", lambda: _StubLLM(self._CANNED)
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM(self._CANNED),
         )
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
         assert result.exit_code == 0, result.output
@@ -1880,7 +1901,9 @@ class TestEnrichSurvivesAConcurrentWrite:
         monkeypatch.setattr(
             worker,
             "_require_llm_client_or_exit",
-            lambda: self._llm_that_writes(self._CANNED, concurrent_write),
+            lambda _consumer, *, command: self._llm_that_writes(
+                self._CANNED, concurrent_write
+            ),
         )
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
         assert result.exit_code == 0, result.output
@@ -1913,7 +1936,9 @@ class TestEnrichSurvivesAConcurrentWrite:
         monkeypatch.setattr(
             worker,
             "_require_llm_client_or_exit",
-            lambda: self._llm_that_writes(self._CANNED, concurrent_tag_write),
+            lambda _consumer, *, command: self._llm_that_writes(
+                self._CANNED, concurrent_tag_write
+            ),
         )
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
         assert result.exit_code == 0, result.output
@@ -1935,7 +1960,7 @@ class TestEnrichSurvivesAConcurrentWrite:
         monkeypatch.setattr(
             worker,
             "_require_llm_client_or_exit",
-            lambda: self._llm_that_writes(
+            lambda _consumer, *, command: self._llm_that_writes(
                 self._CANNED, lambda: doc_store.delete("doc-x")
             ),
         )
@@ -1975,7 +2000,9 @@ class TestEnrichSurvivesAConcurrentWrite:
         monkeypatch.setattr(
             worker,
             "_require_llm_client_or_exit",
-            lambda: self._llm_that_writes(self._CANNED, concurrent_tag_write),
+            lambda _consumer, *, command: self._llm_that_writes(
+                self._CANNED, concurrent_tag_write
+            ),
         )
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
         assert result.exit_code == 0, result.output
@@ -2434,3 +2461,78 @@ class TestARefusedNightlyWriteEscalates:
         assert result is not None
         worker._exit_if_advisory_write_refused(result)
         worker._exit_if_advisory_write_refused(None)
+
+
+class TestWorkerLlmRouting:
+    """Each LLM-backed worker command builds its client from its own route."""
+
+    @pytest.mark.parametrize(
+        ("command", "consumer"),
+        [
+            ("enrich", LLMConsumer.ENRICHMENT),
+            ("mine-precedents", LLMConsumer.PRECEDENT_MINING),
+        ],
+    )
+    def test_the_command_names_its_consumer(
+        self,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        command: str,
+        consumer: LLMConsumer,
+    ) -> None:
+        seen: list[tuple[LLMConsumer, str]] = []
+
+        def _record(consumer_arg: LLMConsumer, *, command: str) -> _StubLLM:
+            seen.append((consumer_arg, command))
+            return _StubLLM("[]")
+
+        monkeypatch.setattr(worker, "_require_llm_client_or_exit", _record)
+        result = runner.invoke(
+            app, ["worker", command, "--dry-run", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        assert seen == [(consumer, f"worker {command}")]
+
+    def test_the_consumer_reaches_the_registry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry = MagicMock()
+        client = object()
+        registry.build_llm_client.return_value = client
+        monkeypatch.setattr(worker, "_get_registry", lambda: registry)
+        built = worker._require_llm_client_or_exit(
+            LLMConsumer.PRECEDENT_MINING, command="worker mine-precedents"
+        )
+        assert built is client
+        registry.build_llm_client.assert_called_once_with(
+            consumer=LLMConsumer.PRECEDENT_MINING
+        )
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_a_malformed_route_exits_store_on_either_format(
+        self, temp_stores: StoreRegistry, tmp_path: Path, fmt: str
+    ) -> None:
+        """Not the "no LLM configured" exit: there is a config line to fix.
+
+        Runs the real chain — config file, registry, route resolution, the
+        root CLI boundary — because ``_require_llm_client_or_exit`` passing
+        the error through is the whole behaviour under test.
+        """
+        _write_config(
+            tmp_path / "config",
+            "llm:\n"
+            "  provider: openai\n"
+            "  api_key_env: OPENAI_API_KEY\n"
+            "  routes:\n"
+            "    enrichment: deep\n",
+        )
+        _reset_registry()
+        result = runner.invoke(app, ["worker", "enrich", "--format", fmt])
+        assert result.exit_code == EXIT_STORE, result.output
+        if fmt == "json":
+            payload = json.loads(result.stdout.strip())
+            assert payload["status"] == "error"
+            assert payload["error_type"] == "LLMRoutingError"
+            assert payload["setting"] == "llm.routes.enrichment"
+        else:
+            assert "(defined: none)" in plain(result.output)
