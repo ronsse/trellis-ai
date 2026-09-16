@@ -131,6 +131,108 @@ def _feedback_id_in_event_log(event_log: EventLog, feedback_id: str) -> bool:
     return bool(events)
 
 
+@dataclass(frozen=True)
+class BridgedOutcomes:
+    """What one :func:`bridge_feedback_to_outcomes` call wrote.
+
+    ``error`` is the exception the bridge caught, if any; the bridge
+    fails soft, so a caller reads this rather than catching.
+    """
+
+    pack_outcome_emitted: bool = False
+    strategy_outcomes_emitted: int = 0
+    error: Exception | None = None
+
+
+def bridge_feedback_to_outcomes(
+    feedback: PackFeedback,
+    *,
+    outcome_store: OutcomeStore,
+    pack_id: str | None = None,
+    event_log: EventLog | None = None,
+    component_id: str = _DEFAULT_COMPONENT_ID,
+) -> BridgedOutcomes:
+    """Emit the :class:`OutcomeEvent` rows a feedback signal implies.
+
+    The one bridge from ``PackFeedback`` into the ops tier: a pack-level
+    row stamped with ``component_id``, plus the per-strategy fan-out
+    when the pack's ``PACK_ASSEMBLED`` event can be read back.
+    :func:`record_feedback` calls it on the live path and
+    :mod:`trellis.feedback.backfill` calls it when replaying history, so
+    a replayed row and a live one are produced by the same code rather
+    than by two implementations that agree until they don't.
+
+    Fails soft, exactly as the live path it was extracted from: any
+    exception is caught, logged, and returned on
+    :attr:`BridgedOutcomes.error`.  The JSONL append is the durability
+    guarantee on that path and the event log is the durability
+    guarantee on the replay path, so neither wants an exception here.
+
+    **Not idempotent**, and deliberately so — see :func:`record_feedback`.
+    A replayed ``feedback_id`` re-emits every row, inflating the strategy
+    rows in the same proportion as the pack row.  A caller replaying
+    history supplies its own de-duplication; the backfill keys on
+    ``(feedback_id, component_id)``, which is unique because both
+    emitters stamp ``metadata["feedback_id"]`` and
+    ``COMPONENT_ID_BY_SOURCE_STRATEGY`` is injective.
+
+    Args:
+        feedback: The feedback signal to bridge.
+        outcome_store: Store receiving the rows.  Swapping in a
+            collecting store is what makes the backfill's dry run run
+            the real bridge instead of a model of it.
+        pack_id: Pack the feedback grades.  Without one the fan-out has
+            no ``PACK_ASSEMBLED`` event to read and emits nothing, which
+            is the trace-level feedback case.
+        event_log: Log holding that ``PACK_ASSEMBLED`` event.  Supplies
+            both the per-strategy item map and the scope axes.
+        component_id: Component id for the pack-level row.  Defaults to
+            the PackBuilder.
+
+    Returns:
+        :class:`BridgedOutcomes` reporting the pack-level row, the
+        fan-out count, and any captured error.
+    """
+    try:
+        # Resolved once, for both emitters: they must agree about which
+        # cell a pack's outcomes belong to, and the axes come from the
+        # pack rather than the feedback (#560 — see ``_resolve_scope``).
+        scope = _resolve_scope(feedback, pack_id=pack_id, event_log=event_log)
+        _emit_outcome(
+            feedback,
+            outcome_store=outcome_store,
+            pack_id=pack_id,
+            component_id=component_id,
+            scope=scope,
+        )
+        # Emitted *after* the pack-level row and reported separately:
+        # the fan-out is an additional signal, and a partial fan-out
+        # must not make ``pack_outcome_emitted`` read False for a row
+        # that is already in the store.
+        strategy_outcomes_emitted = _emit_strategy_outcomes(
+            feedback,
+            outcome_store=outcome_store,
+            pack_id=pack_id,
+            event_log=event_log,
+            scope=scope,
+        )
+    # GRACEFUL-DEGRADATION: the caller's own sink is durable; this
+    # bridge is best-effort. Failure surfaces via BridgedOutcomes.error.
+    # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
+    except Exception as exc:
+        logger.exception(
+            "feedback_outcome_emit_failed",
+            run_id=feedback.run_id,
+            pack_id=pack_id,
+            feedback_id=feedback.feedback_id,
+        )
+        return BridgedOutcomes(error=exc)
+    return BridgedOutcomes(
+        pack_outcome_emitted=True,
+        strategy_outcomes_emitted=strategy_outcomes_emitted,
+    )
+
+
 def record_feedback(
     feedback: PackFeedback,
     *,
@@ -249,42 +351,16 @@ def record_feedback(
     outcome_error: Exception | None = None
     strategy_outcomes_emitted = 0
     if outcome_store is not None:
-        try:
-            # Resolved once, for both emitters: they must agree about which
-            # cell a pack's outcomes belong to, and the axes come from the
-            # pack rather than the feedback (#560 — see ``_resolve_scope``).
-            scope = _resolve_scope(feedback, pack_id=pack_id, event_log=event_log)
-            _emit_outcome(
-                feedback,
-                outcome_store=outcome_store,
-                pack_id=pack_id,
-                component_id=component_id,
-                scope=scope,
-            )
-            outcome_emitted = True
-            # Emitted *after* the pack-level row and reported separately:
-            # the fan-out is an additional signal, and a partial fan-out
-            # must not make ``outcome_emitted`` read False for a row that
-            # is already in the store.
-            strategy_outcomes_emitted = _emit_strategy_outcomes(
-                feedback,
-                outcome_store=outcome_store,
-                pack_id=pack_id,
-                event_log=event_log,
-                scope=scope,
-            )
-        # GRACEFUL-DEGRADATION: JSONL append is durable; OutcomeStore
-        # bridge is best-effort. Failure surfaces via
-        # FeedbackRecordResult.outcome_error.
-        # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
-        except Exception as exc:
-            outcome_error = exc
-            logger.exception(
-                "feedback_outcome_emit_failed",
-                run_id=feedback.run_id,
-                pack_id=pack_id,
-                feedback_id=feedback.feedback_id,
-            )
+        bridged = bridge_feedback_to_outcomes(
+            feedback,
+            outcome_store=outcome_store,
+            pack_id=pack_id,
+            event_log=event_log,
+            component_id=component_id,
+        )
+        outcome_emitted = bridged.pack_outcome_emitted
+        strategy_outcomes_emitted = bridged.strategy_outcomes_emitted
+        outcome_error = bridged.error
 
     logger.debug(
         "feedback_recorded",

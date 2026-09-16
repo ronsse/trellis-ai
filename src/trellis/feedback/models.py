@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -239,3 +239,116 @@ class PackFeedback:
         if self.metadata:
             payload["metadata"] = dict(self.metadata)
         return payload
+
+    @classmethod
+    def from_event_payload(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        default_timestamp_utc: str | None = None,
+    ) -> PackFeedback | None:
+        """Rebuild the feedback that wrote a ``FEEDBACK_RECORDED`` payload.
+
+        The inverse of :meth:`to_event_payload`, for replaying history
+        through a bridge that did not exist when the event was written
+        (:mod:`trellis.feedback.backfill`).
+
+        Returns ``None`` for a payload this model did not write.  The
+        discriminator is ``feedback_id``, which :meth:`to_event_payload`
+        always emits and the governed surface never does — ``CLAUDE.md``
+        § "Feedback path" tabulates the two families, and the governed
+        one emits ``{target_id, rating, comment, success}``.  That is a
+        fact about **which writer produced the row**, not an inference
+        from its contents: those rows never reached the outcome bridge,
+        they carry no item attribution to fan out, and replaying them
+        would hand every strategy a fabricated ``0/N`` reference rate.
+
+        Two things do not survive the round trip.  ``rating`` is written
+        as :attr:`effective_rating`, so an ungraded signal comes back
+        graded 1.0/0.0 and the payload cannot distinguish it from a real
+        grade — nothing in the outcome bridge reads ``rating``.  And
+        ``pack_id`` is not a field of this model: it rides the payload
+        alongside, and callers pass it to the bridge themselves.
+
+        Args:
+            payload: A ``FEEDBACK_RECORDED`` event payload.
+            default_timestamp_utc: Used when the payload carries no
+                ``timestamp_utc``.  Pass the event row's own
+                ``occurred_at`` — the outcome bridge stamps
+                ``OutcomeEvent.occurred_at`` from this field, so
+                falling through to "now" would file a historical row in
+                the current window.
+
+        Returns:
+            The reconstructed feedback, or ``None`` when the payload
+            carries no ``feedback_id``.
+        """
+        feedback_id = payload.get("feedback_id")
+        if not isinstance(feedback_id, str) or not feedback_id:
+            return None
+        timestamp_utc = _coerce_str(payload.get("timestamp_utc"))
+        if not timestamp_utc:
+            timestamp_utc = default_timestamp_utc or datetime.now(UTC).isoformat()
+        agent_id = payload.get("agent_id")
+        return cls(
+            run_id=_coerce_str(payload.get("run_id")),
+            phase=_coerce_str(payload.get("phase")),
+            intent=_coerce_str(payload.get("intent")),
+            outcome=_coerce_str(payload.get("outcome")),
+            items_served=_coerce_str_list(payload.get("items_served")),
+            items_referenced=_coerce_str_list(payload.get("helpful_item_ids")),
+            relevance_scores=_coerce_score_map(payload.get("relevance_scores")),
+            rating=_coerce_rating(payload.get("rating")),
+            unhelpful_item_ids=_coerce_str_list(payload.get("unhelpful_item_ids")),
+            followed_advisory_ids=_coerce_str_list(
+                payload.get("followed_advisory_ids")
+            ),
+            intent_family=_coerce_str(payload.get("intent_family")),
+            timestamp_utc=timestamp_utc,
+            agent_id=agent_id if isinstance(agent_id, str) and agent_id else None,
+            metadata=_coerce_metadata(payload.get("metadata")),
+            feedback_id=feedback_id,
+        )
+
+
+def _coerce_str(value: object) -> str:
+    """A payload string, or ``""`` for anything else.
+
+    Event payloads are jsonb on the Postgres backend and free-form JSON
+    on SQLite, so a reader cannot assume a writer's types held.
+    """
+    return value if isinstance(value, str) else ""
+
+
+def _coerce_str_list(value: object) -> list[str]:
+    """The string members of a payload list, dropping anything else."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _coerce_score_map(value: object) -> dict[str, float]:
+    """A payload ``item_id → score`` map, dropping unusable entries."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: float(score)
+        for key, score in value.items()
+        if isinstance(key, str)
+        and isinstance(score, int | float)
+        and not isinstance(score, bool)
+    }
+
+
+def _coerce_rating(value: object) -> float | None:
+    """A payload rating, or ``None`` when absent or unusable."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def _coerce_metadata(value: object) -> dict[str, Any]:
+    """A payload metadata bag with non-string keys dropped."""
+    if not isinstance(value, dict):
+        return {}
+    return {key: item for key, item in value.items() if isinstance(key, str)}
