@@ -8,9 +8,17 @@ ArcadeDB's vector store, like Neo4j's, attaches embeddings as
 test creates a node via :class:`ArcadeDBGraphStore` first and then
 attaches a vector via :class:`ArcadeDBVectorStore`. This pairing
 follows the established Neo4j shape-#2 test pattern (see
-``test_neo4j_vector.py``) — neither vector store satisfies the
-independent ``VectorStoreContractTests`` suite because their upserts
-require a pre-existing graph row.
+``test_neo4j_vector.py``).
+
+This file used to say that neither store satisfies the shared
+``VectorStoreContractTests`` suite, because their upserts require a
+pre-existing graph row. That was a statement about a *storage
+prerequisite*, not about vector semantics, and #579 made the contract
+say so: the suite has a ``provision_storage`` hook, and
+``contracts/test_arcadedb_vector_contract.py`` runs all 40 shared cases
+against this backend. What stays here is what is specific to ArcadeDB
+— the SQL-over-HTTP path, the vector literal ``upsert`` has to inline,
+and the error raised when the node does not exist.
 """
 
 from __future__ import annotations

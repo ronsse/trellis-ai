@@ -208,11 +208,22 @@ jobs:
         # test_neo4j_vector.py, whose AuraDB-grade `SEARCH ... IN (VECTOR
         # INDEX ...)` cases cannot run against this job's self-hosted Neo4j
         # container. The capability-probe follow-up remains tracked in #356.
+        #
+        # The three files below carry backend markers but live outside
+        # contracts/, so naming paths meant nothing selected them (#579).
+        # They are named individually rather than by widening a directory,
+        # for the test_neo4j_vector.py reason above. The roster is derived
+        # and checked, not maintained by hand:
+        # tests/unit/test_arcadedb_live_infra_rule.py scans for the marker
+        # and fails when a marked file is not selected here.
         run: |
           pytest \
             tests/integration/test_neo4j_e2e.py \
+            tests/integration/test_recommended_config.py \
             tests/integration/loops/ \
             tests/unit/stores/contracts/ \
+            tests/unit/stores/test_arcadedb_graph.py \
+            tests/unit/stores/test_arcadedb_vector.py \
             tests/unit/stores/test_pgvector.py \
             tests/unit/stores/test_postgres_stores.py \
             tests/unit/stores/test_api_key_store.py \
