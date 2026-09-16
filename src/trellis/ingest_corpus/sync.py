@@ -473,6 +473,26 @@ def _apply_record(
         run_embed_on_ingest(
             registry, outcome.doc_id, text, metadata, source=requested_by
         )
+    else:
+        # A document that has just *become* chunked keeps the whole-document
+        # vector row an earlier unchunked run wrote, and nothing above
+        # rebuilds it: the orphan loop's range is empty on that transition
+        # (``old_chunk_count`` is 0) and the re-embed is on the other branch
+        # (#567). That row is not a duplicate of the chunks, it is a *stale*
+        # one — still carrying the pre-edit embedding and excerpt — so the
+        # semantic axis can serve the old text of a document the sync has
+        # already rewritten.
+        #
+        # Unconditional on the chunked branch, not conditioned on
+        # ``old_chunk_count == 0``: deleting an absent row is a no-op, the
+        # count is only meaningful for updates, and the row's writer is not
+        # always this path. The invariant is about the shape of the store —
+        # whole-document row XOR chunk rows — not about who wrote it.
+        #
+        # The parent *document* stays. It holds the full text, it is what the
+        # keyword axis serves and what a re-run rebuilds the chunks from;
+        # only its semantic handle moves down to the chunks.
+        _delete_vector_row(vector_store, outcome.doc_id)
 
     if outcome.action == "move" and outcome.moved_from is not None:
         old = doc_store.get(outcome.moved_from)
@@ -716,12 +736,13 @@ def _delete_document_tree(
     _delete_doc_and_vector(doc_store, vector_store, doc_id)
 
 
-def _delete_doc_and_vector(
-    doc_store: DocumentStore,
-    vector_store: Any,
-    doc_id: str,
-) -> None:
-    doc_store.delete(doc_id)
+def _delete_vector_row(vector_store: Any, doc_id: str) -> None:
+    """Drop one vector row. Absent is a no-op, and failure is survivable.
+
+    ``VectorStore.delete`` returns ``False`` for an id it does not hold
+    (pinned by the contract suite), so callers may delete unconditionally
+    rather than reading the store first.
+    """
     if vector_store is None:
         return
     try:
@@ -730,6 +751,15 @@ def _delete_doc_and_vector(
         # GRACEFUL-DEGRADATION: a stale vector row degrades retrieval
         # quality; a failed vector backend must not abort the sync.
         logger.exception("corpus_vector_delete_failed", doc_id=doc_id)
+
+
+def _delete_doc_and_vector(
+    doc_store: DocumentStore,
+    vector_store: Any,
+    doc_id: str,
+) -> None:
+    doc_store.delete(doc_id)
+    _delete_vector_row(vector_store, doc_id)
 
 
 def _stored_metadata(doc: dict[str, Any] | None) -> dict[str, Any]:
