@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -685,6 +686,188 @@ class TestIdempotentResync:
         assert chunk_meta["signal_quality"] == "high"
         assert chunk_meta["team"] == "core"
         assert store.get(parent_id)["metadata"]["team"] == "core"
+
+
+class TestBecomingChunkedRetiresTheWholeDocumentVectorRow:
+    """A document has whole-document *or* chunk vector rows, never both (#567).
+
+    The shrink direction was already handled — ``_apply_record`` deletes the
+    orphaned chunks and re-embeds the whole document. The *grow* direction was
+    not: on the unchunked→chunked transition the orphan loop's range is empty
+    (``old_chunk_count`` is 0) and the re-embed sits on the other branch, so
+    the row an earlier unchunked run wrote survived, still carrying the
+    pre-edit embedding and excerpt.
+    """
+
+    def _grow_past_the_threshold(self, vault: Path) -> None:
+        (vault / "note-a.md").write_text(_long_markdown())
+
+    def test_becoming_chunked_retires_the_whole_document_row(
+        self, registry, vault, monkeypatch
+    ):
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc_id = corpus_doc_id("obsidian", "note-a.md")
+        vectors = registry.knowledge.vector_store
+        # The row this test is about: written because the first run was short.
+        assert vectors.get(doc_id) is not None
+
+        self._grow_past_the_threshold(vault)
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        count = registry.knowledge.document_store.get(doc_id)["metadata"]["chunk_count"]
+        assert count >= 2
+        assert vectors.get(doc_id) is None
+        for index in range(count):
+            assert vectors.get(chunk_doc_id(doc_id, index)) is not None
+
+    def test_the_row_is_retired_even_with_embed_on_ingest_off(
+        self, registry, vault, monkeypatch
+    ):
+        """The delete is not gated on the embed flag.
+
+        A deployment that has since turned embedding off still carries rows an
+        earlier run wrote, and the row's *writer* is not always this path — the
+        invariant is about the shape of the store, not about who wrote it.
+        """
+        monkeypatch.delenv(EMBED_ON_INGEST_FLAG, raising=False)
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc_id = corpus_doc_id("obsidian", "note-a.md")
+        vectors = registry.knowledge.vector_store
+        assert vectors.get(doc_id) is None
+        vectors.upsert(doc_id, _embed("planted by an earlier run"), metadata={})
+
+        self._grow_past_the_threshold(vault)
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        assert vectors.get(doc_id) is None
+
+    def test_an_already_chunked_document_drops_a_row_from_another_writer(
+        self, registry, vault, monkeypatch
+    ):
+        """Why the delete is not conditioned on ``old_chunk_count == 0``.
+
+        That reads as the transition and is nearly right, but it assumes this
+        path is the only writer that can put a row under a parent id. The
+        invariant is a property of the store, so it is enforced on every
+        chunked write rather than on the one transition that motivated it.
+        """
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        self._grow_past_the_threshold(vault)
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc_id = corpus_doc_id("obsidian", "note-a.md")
+        vectors = registry.knowledge.vector_store
+        assert vectors.get(doc_id) is None
+        vectors.upsert(doc_id, _embed("written by some other path"), metadata={})
+
+        (vault / "note-a.md").write_text(_long_markdown(("otters", "trombones")))
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        assert vectors.get(doc_id) is None
+
+    def test_an_unchunked_document_keeps_its_whole_document_row(
+        self, registry, vault, monkeypatch
+    ):
+        """The dangerous direction. A delete that is not conditioned on the
+        chunked branch would wipe the whole-document row of every short
+        document in the corpus — the semantic axis's only handle on them."""
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc_id = corpus_doc_id("obsidian", "note-a.md")
+        vectors = registry.knowledge.vector_store
+        assert vectors.get(doc_id) is not None
+
+        (vault / "note-a.md").write_text("---\ntitle: Note A\n---\n\nEdited body.\n")
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        assert vectors.get(doc_id) is not None
+
+    def test_the_parent_document_itself_survives(self, registry, vault, monkeypatch):
+        """Only the *vector* row goes. The parent document stays authoritative:
+        it holds the full text, serves the keyword axis, and is what a re-run
+        repairs the chunks from."""
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc_id = corpus_doc_id("obsidian", "note-a.md")
+
+        self._grow_past_the_threshold(vault)
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        parent = registry.knowledge.document_store.get(doc_id)
+        assert parent is not None
+        assert parent["content"] == _long_markdown()
+
+    def test_shrinking_back_restores_the_whole_document_row(
+        self, registry, vault, monkeypatch
+    ):
+        """The round trip. Retiring the row on the way up must not cost the
+        document its semantic handle on the way back down."""
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc_id = corpus_doc_id("obsidian", "note-a.md")
+        vectors = registry.knowledge.vector_store
+        self._grow_past_the_threshold(vault)
+        sync_corpus(registry, vault, source_system="obsidian")
+        count = registry.knowledge.document_store.get(doc_id)["metadata"]["chunk_count"]
+
+        (vault / "note-a.md").write_text("---\ntitle: Note A\n---\n\nShort again.\n")
+        sync_corpus(registry, vault, source_system="obsidian")
+
+        assert vectors.get(doc_id) is not None
+        for index in range(count):
+            assert vectors.get(chunk_doc_id(doc_id, index)) is None
+
+    def test_a_broken_vector_backend_does_not_abort_the_sync(
+        self, registry, vault, monkeypatch
+    ):
+        """Same graceful-degradation contract the chunk deletes already hold:
+        a stale row degrades retrieval, a failed backend must not lose the
+        document write that already landed."""
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        sync_corpus(registry, vault, source_system="obsidian")
+        doc_id = corpus_doc_id("obsidian", "note-a.md")
+
+        attempted: list[str] = []
+        real = registry.knowledge.vector_store
+
+        class _BrokenDelete:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(real, name)
+
+            def delete(self, item_id: str) -> bool:
+                attempted.append(item_id)
+                msg = "vector backend down"
+                raise RuntimeError(msg)
+
+        registry.knowledge.vector_store = _BrokenDelete()
+        self._grow_past_the_threshold(vault)
+        report = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert doc_id in attempted
+        assert report.counts()["updated"] == 1
+        parent = registry.knowledge.document_store.get(doc_id)
+        assert parent["content"] == _long_markdown()
+
+    def test_no_vector_store_is_a_no_op_and_logs_nothing(
+        self, registry, vault, monkeypatch
+    ):
+        """An absent vector store is a configuration, not a failure.
+
+        Routing ``None`` into the ``except`` arm would also "work" — the
+        ``AttributeError`` is an ``Exception`` — while writing an exception
+        traceback per chunked document on every deployment that runs without
+        a vector backend.
+        """
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        sync_corpus(registry, vault, source_system="obsidian")
+        registry.knowledge.vector_store = None
+
+        self._grow_past_the_threshold(vault)
+        with capture_logs() as logs:
+            report = sync_corpus(registry, vault, source_system="obsidian")
+
+        assert report.counts()["updated"] == 1
+        assert not [e for e in logs if e["event"] == "corpus_vector_delete_failed"]
 
 
 class TestMoveDetection:
