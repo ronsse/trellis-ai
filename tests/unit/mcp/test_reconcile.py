@@ -29,7 +29,13 @@ import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.hashing import content_hash
 from trellis.llm.types import LLMResponse
-from trellis.mcp.reconcile import ReconcileDecision, parse_verdict
+from trellis.mcp.reconcile import (
+    JUDGE_FAILURE_REASONS,
+    ReconcileDecision,
+    ReconcileFallbackReason,
+    ReconcileOutcome,
+    parse_verdict,
+)
 from trellis.schemas.memory_op import JudgedOpType, MemoryOpJudgedPayload
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -101,6 +107,12 @@ def _enable(monkeypatch: pytest.MonkeyPatch, client: Any | None) -> None:
 def _judged_events(registry: StoreRegistry) -> list[Any]:
     return registry.operational.event_log.get_events(
         event_type=EventType.MEMORY_OP_JUDGED, limit=100
+    )
+
+
+def _degraded_events(registry: StoreRegistry) -> list[Any]:
+    return registry.operational.event_log.get_events(
+        event_type=EventType.RECONCILE_DEGRADED, limit=100
     )
 
 
@@ -333,7 +345,11 @@ class TestLockDiscipline:
 
 class TestFallbacks:
     def _assert_skipped_add(
-        self, registry: StoreRegistry, base_id: str, result: str
+        self,
+        registry: StoreRegistry,
+        base_id: str,
+        result: str,
+        reason: ReconcileFallbackReason,
     ) -> None:
         new_id = _doc_id(result)
         assert result.startswith("Memory saved:")
@@ -343,13 +359,32 @@ class TestFallbacks:
         assert meta["reconciliation"] == "skipped"
         # A fallback judged nothing — no training pair emitted.
         assert _judged_events(registry) == []
+        # ...but the degradation is still countable, and says WHICH route it
+        # took. Asserting the reason per route is what makes these five tests
+        # five tests: a single `len(...) == 1` would pass with every route
+        # emitting the same wrong slug (#447 — the filtering half of a gate
+        # gets covered and the emission half does not).
+        events = _degraded_events(registry)
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["reason"] == reason.value
+        assert payload["judge_failure"] is True
+        assert payload["decision"] == "add"
+        assert payload["subject_ref_type"] == "doc"
+        assert payload["subject_ref_id"] == new_id
+        assert events[0].source == "save_memory.reconcile"
 
     def test_model_unavailable_adds_with_marker(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         base_id = _doc_id(save_memory(_BASE))
         _enable(monkeypatch, None)  # _build_llm_client → None
-        self._assert_skipped_add(temp_registry, base_id, save_memory(_NEAR))
+        self._assert_skipped_add(
+            temp_registry,
+            base_id,
+            save_memory(_NEAR),
+            ReconcileFallbackReason.MODEL_UNAVAILABLE,
+        )
 
     def test_client_build_raises_adds_with_marker(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
@@ -362,7 +397,12 @@ class TestFallbacks:
             raise RuntimeError(msg)
 
         monkeypatch.setattr(server_mod, "_build_llm_client", _boom)
-        self._assert_skipped_add(temp_registry, base_id, save_memory(_NEAR))
+        self._assert_skipped_add(
+            temp_registry,
+            base_id,
+            save_memory(_NEAR),
+            ReconcileFallbackReason.MODEL_UNAVAILABLE,
+        )
 
     def test_timeout_adds_with_marker(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
@@ -373,14 +413,24 @@ class TestFallbacks:
             monkeypatch,
             FakeLLMClient(content=_verdict_json("supersede"), delay=0.5),
         )
-        self._assert_skipped_add(temp_registry, base_id, save_memory(_NEAR))
+        self._assert_skipped_add(
+            temp_registry,
+            base_id,
+            save_memory(_NEAR),
+            ReconcileFallbackReason.TIMEOUT,
+        )
 
     def test_malformed_response_adds_with_marker(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         base_id = _doc_id(save_memory(_BASE))
         _enable(monkeypatch, FakeLLMClient(content="I think you should keep both!"))
-        self._assert_skipped_add(temp_registry, base_id, save_memory(_NEAR))
+        self._assert_skipped_add(
+            temp_registry,
+            base_id,
+            save_memory(_NEAR),
+            ReconcileFallbackReason.MALFORMED_RESPONSE,
+        )
 
     def test_transport_error_adds_with_marker(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
@@ -390,7 +440,12 @@ class TestFallbacks:
             monkeypatch,
             FakeLLMClient(raises=ConnectionError("connection refused")),
         )
-        self._assert_skipped_add(temp_registry, base_id, save_memory(_NEAR))
+        self._assert_skipped_add(
+            temp_registry,
+            base_id,
+            save_memory(_NEAR),
+            ReconcileFallbackReason.MODEL_ERROR,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +480,14 @@ class TestReverifyUnderLock:
         assert "lifecycle" not in (docs.get(base_id)["metadata"] or {})
         # No judged event — the verdict was never applied.
         assert _judged_events(temp_registry) == []
+        # It IS recorded as a degradation, but flagged as not a judge failure:
+        # the judge answered fine and the world moved. Counting a correctly
+        # handled race as a broken judge is the `sessions_skipped_empty` /
+        # `sessions_sampled_out` conflation (#332) one layer over.
+        events = _degraded_events(temp_registry)
+        assert len(events) == 1
+        assert events[0].payload["reason"] == ReconcileFallbackReason.STALE_RECHECK
+        assert events[0].payload["judge_failure"] is False
 
     def test_candidate_superseded_midflight_downgrades_to_add(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
@@ -557,6 +620,10 @@ class TestPhaseBGuard:
         docs = temp_registry.knowledge.document_store
         assert docs.get(new_id)["metadata"]["reconciliation"] == "skipped"
         assert _judged_events(temp_registry) == []
+        events = _degraded_events(temp_registry)
+        assert len(events) == 1
+        assert events[0].payload["reason"] == ReconcileFallbackReason.JUDGE_ERROR
+        assert events[0].payload["judge_failure"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +660,172 @@ class TestEmissionPayload:
         blob = json.dumps(event.payload)
         assert _NEAR not in blob
         assert _BASE not in blob
+
+
+# ---------------------------------------------------------------------------
+# Degradation is countable, exclusive, and cannot be unattributable (#514)
+# ---------------------------------------------------------------------------
+
+
+class TestDegradedEmission:
+    """The half that #514 was actually about.
+
+    Four of the five fail-closed LLM fallbacks in this codebase are countable
+    — distillation's ``sessions_judge_malformed``, and ``EXTRACTION_FAILED``
+    for the miner, the enrichment service and the LLM extractor. Reconcile's
+    was not: three routes in ``judge_reconcile`` plus two in ``server`` all
+    logged a warning and returned, and the one event on the path was
+    deliberately suppressed for fallbacks. So on a deployment with the flag
+    on, "the judge was never consulted" and "the judge failed every time"
+    produced byte-identical event logs.
+    """
+
+    def test_the_two_streams_are_mutually_exclusive(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real verdict emits judged and NOT degraded.
+
+        The exclusivity is the property that keeps #582's exporter honest: a
+        fallback ADD is not a training pair, so leaking one into the judged
+        stream would inflate that stream's denominator with rows no model
+        produced.
+        """
+        _doc_id(save_memory(_BASE))
+        _enable(monkeypatch, FakeLLMClient(content=_verdict_json("update", 0.83)))
+        save_memory(_NEAR)
+
+        assert len(_judged_events(temp_registry)) == 1
+        assert _degraded_events(temp_registry) == []
+
+    def test_deterministic_short_circuit_emits_neither(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No candidate means no reconciliation, which is not a degradation.
+
+        The counter has to divide by reconciliations *attempted*; emitting on
+        a clean ADD would wire the numerator to the write rate instead.
+        """
+        _enable(monkeypatch, FakeLLMClient(content=_verdict_json("noop")))
+        save_memory(_BASE)
+        save_memory(_UNRELATED)
+
+        assert _judged_events(temp_registry) == []
+        assert _degraded_events(temp_registry) == []
+
+    def test_payload_is_leak_safe(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Refs and slugs only — the same rule the judged event follows.
+
+        A malformed *verdict* is the one degradation whose cause is a piece of
+        model prose, which makes it the one most tempting to attach. The event
+        log has a different access and retention profile than the document
+        store, so neither the memory nor the model's answer rides along.
+        """
+        _doc_id(save_memory(_BASE))
+        _enable(
+            monkeypatch,
+            FakeLLMClient(content=f"Keep both, because: {_BASE}"),
+        )
+        save_memory(_NEAR)
+
+        blob = json.dumps(_degraded_events(temp_registry)[0].payload)
+        assert _BASE not in blob
+        assert _NEAR not in blob
+
+    def test_a_broken_event_log_does_not_fail_the_write(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-soft, and the direction matters.
+
+        The write already committed under the lock. Letting a telemetry
+        outage raise here would turn a *degraded* reconciliation into a
+        *failed save* — inverting the entire reason this path fails closed to
+        an ADD.
+        """
+        base_id = _doc_id(save_memory(_BASE))
+        _enable(monkeypatch, None)
+
+        real_emit = temp_registry.operational.event_log.emit
+
+        def _selective_boom(*args: Any, **kwargs: Any) -> Any:
+            event_type = args[0] if args else kwargs.get("event_type")
+            if event_type == EventType.RECONCILE_DEGRADED:
+                msg = "event log unavailable"
+                raise RuntimeError(msg)
+            return real_emit(*args, **kwargs)
+
+        monkeypatch.setattr(
+            temp_registry.operational.event_log, "emit", _selective_boom
+        )
+
+        result = save_memory(_NEAR)
+        assert result.startswith("Memory saved:")
+        assert _doc_id(result) != base_id
+        assert temp_registry.knowledge.document_store.count() == 2
+
+    def test_a_genuine_verdict_emits_no_degradation(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Called directly with a real verdict, the emitter declines.
+
+        Unreachable from ``_save_memory_reconciled``, which branches before
+        calling — but the cost of the caller error is a *phantom* row in a
+        count whose only value is being trusted, so the emitter does not take
+        the branch on faith.
+        """
+        from trellis.mcp.reconcile import emit_reconcile_degraded
+
+        emit_reconcile_degraded(
+            temp_registry.operational.event_log,
+            outcome=ReconcileOutcome(
+                decision=ReconcileDecision.SUPERSEDE,
+                confidence=0.9,
+                model_id="hermes3:8b",
+            ),
+            subject_ref_type="doc",
+            subject_ref_id="doc-1",
+        )
+        assert _degraded_events(temp_registry) == []
+
+    def test_a_fallback_cannot_be_constructed_without_a_reason(self) -> None:
+        """An unattributable degradation is refused at the model.
+
+        Enforced here rather than checked at the emit seam because the seam
+        can only report what a construction site handed it: a fallback with a
+        null reason would emit an event that counts a degradation nobody can
+        act on, which is only marginally better than the silence it replaced.
+        """
+        with pytest.raises(ValueError, match="fallback_reason"):
+            ReconcileOutcome(
+                decision=ReconcileDecision.ADD,
+                confidence=0.0,
+                model_id="hermes3:8b",
+                fallback=True,
+            )
+
+        # The non-fallback case is untouched: a real verdict needs no reason.
+        assert (
+            ReconcileOutcome(
+                decision=ReconcileDecision.ADD, confidence=0.9, model_id="hermes3:8b"
+            ).fallback_reason
+            is None
+        )
+
+    def test_judge_failure_reasons_is_derived_not_hand_listed(self) -> None:
+        """Exactly one reason is excluded, and the set is computed.
+
+        Written as a complement so that adding a reason to the enum enrolls it
+        as a judge failure by default — the safe direction. A hand-kept roster
+        rots the other way (#443 declared three control keys against six live
+        sites), and here that rot is silent: a reason missing from the set
+        would simply stop being counted as a failure.
+        """
+        assert ReconcileFallbackReason.STALE_RECHECK not in JUDGE_FAILURE_REASONS
+        expected = set(ReconcileFallbackReason) - {
+            ReconcileFallbackReason.STALE_RECHECK
+        }
+        assert expected == JUDGE_FAILURE_REASONS
 
 
 # ---------------------------------------------------------------------------

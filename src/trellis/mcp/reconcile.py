@@ -42,9 +42,10 @@ from __future__ import annotations
 
 import asyncio
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
+from pydantic import model_validator
 
 from trellis.core import write_config
 from trellis.core.base import TrellisModel
@@ -120,6 +121,48 @@ class ReconcileDecision(StrEnum):
     NOOP = "noop"
 
 
+class ReconcileFallbackReason(StrEnum):
+    """Why a reconciliation produced a fallback ADD instead of a verdict.
+
+    A closed vocabulary rather than a free ``str``, because the only thing
+    recording it buys is a group-by: a reason minted at one construction site
+    and spelled differently at another splits the count that answers *how
+    often does the judge fail, and how*. ``mypy`` is the roster guard here —
+    #443 declared three control keys against six live sites, and a hand-kept
+    list of slugs rots in exactly that direction.
+    """
+
+    #: The model call exceeded ``reconcile_timeout_s``.
+    TIMEOUT = "timeout"
+    #: The model call raised — transport, auth, or provider error.
+    MODEL_ERROR = "model_error"
+    #: The model answered, and the answer was not a usable verdict. This is
+    #: the reason #514 is about: the JSON seam parsed, and what it parsed was
+    #: not a verdict this code can act on.
+    MALFORMED_RESPONSE = "malformed_response"
+    #: No client could be built — the tier is off, or no provider is wired.
+    MODEL_UNAVAILABLE = "model_unavailable"
+    #: Phase B escaped its own exhaustive handling and hit the
+    #: belt-and-suspenders guard in ``server._save_memory_reconciled``.
+    JUDGE_ERROR = "judge_error"
+    #: **Not a judge failure.** The candidate changed between verdict and
+    #: commit, so a real verdict was deliberately downgraded under the lock.
+    #: It shares this vocabulary because it reaches the same fallback ADD, and
+    #: :data:`JUDGE_FAILURE_REASONS` is what keeps a health count from
+    #: reporting a correctly-handled race as a degradation — the
+    #: ``sessions_skipped_empty`` split (#332), one layer over.
+    STALE_RECHECK = "stale_recheck"
+
+
+#: The reasons that mean *the judge did not answer usably*. The complement is
+#: deliberate and is the whole reason this set is written down rather than
+#: derived as "every reason": see
+#: :attr:`ReconcileFallbackReason.STALE_RECHECK`.
+JUDGE_FAILURE_REASONS: frozenset[ReconcileFallbackReason] = frozenset(
+    ReconcileFallbackReason
+) - {ReconcileFallbackReason.STALE_RECHECK}
+
+
 class ReconcileCandidate(TrellisModel):
     """A near-duplicate the deterministic tier surfaced for adjudication."""
 
@@ -134,14 +177,32 @@ class ReconcileOutcome(TrellisModel):
     ``fallback=True`` marks an outcome the model did *not* produce (it was
     unavailable, timed out, or returned malformed JSON). Fallback outcomes are
     always :attr:`ReconcileDecision.ADD` and are *not* emitted as judged events
-    — no model judged, so there is no training pair.
+    — no model judged, so there is no training pair. They emit
+    :attr:`~trellis.stores.base.event_log.EventType.RECONCILE_DEGRADED`
+    instead, so that "the judge was never consulted" and "the judge failed
+    every time" stop being the same silence (#514).
     """
 
     decision: ReconcileDecision
     confidence: float
     model_id: str
     fallback: bool = False
-    fallback_reason: str | None = None
+    fallback_reason: ReconcileFallbackReason | None = None
+
+    @model_validator(mode="after")
+    def _fallback_carries_a_reason(self) -> ReconcileOutcome:
+        """A fallback with no reason is a degradation nothing can attribute.
+
+        Enforced on the model rather than checked at the emit seam, because
+        the seam can only report what the construction sites handed it — the
+        #447 shape, where a gate's *filtering* half was covered and its
+        *emission* half was not. An outcome that cannot say why it degraded
+        should not be constructible.
+        """
+        if self.fallback and self.fallback_reason is None:
+            msg = "a fallback ReconcileOutcome must carry a fallback_reason"
+            raise ValueError(msg)
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +297,9 @@ def parse_verdict(raw: str) -> tuple[ReconcileDecision, float] | None:
     return decision, confidence
 
 
-def _fallback_outcome(model_id: str, reason: str) -> ReconcileOutcome:
+def _fallback_outcome(
+    model_id: str, reason: ReconcileFallbackReason
+) -> ReconcileOutcome:
     """A model-unavailable outcome: plain ADD, marked for a later sweep."""
     return ReconcileOutcome(
         decision=ReconcileDecision.ADD,
@@ -276,17 +339,17 @@ def judge_reconcile(
     except TimeoutError:
         # asyncio.TimeoutError is an alias of the builtin on 3.11+.
         logger.warning("reconcile_verdict_timeout", timeout=timeout)
-        return _fallback_outcome(model_id, "timeout")
+        return _fallback_outcome(model_id, ReconcileFallbackReason.TIMEOUT)
     except Exception as exc:
         # Any model / transport failure resolves to a fallback ADD — the
         # judge is never a hard dependency of capture.
         logger.warning("reconcile_verdict_model_error", error=str(exc))
-        return _fallback_outcome(model_id, "model_error")
+        return _fallback_outcome(model_id, ReconcileFallbackReason.MODEL_ERROR)
 
     parsed = parse_verdict(response.content)
     if parsed is None:
         logger.warning("reconcile_verdict_malformed")
-        return _fallback_outcome(model_id, "malformed_response")
+        return _fallback_outcome(model_id, ReconcileFallbackReason.MALFORMED_RESPONSE)
 
     decision, confidence = parsed
     resolved_model = response.model or model_id
@@ -429,3 +492,64 @@ def emit_reconcile_verdict(
         confidence=outcome.confidence,
         subject_ref=SubjectRef(ref_type=subject_ref_type, ref_id=subject_ref_id),
     )
+
+
+def emit_reconcile_degraded(
+    event_log: EventLog,
+    *,
+    outcome: ReconcileOutcome,
+    subject_ref_type: str,
+    subject_ref_id: str,
+) -> None:
+    """Emit ``RECONCILE_DEGRADED`` for one fail-closed reconciliation.
+
+    The counterpart of :func:`emit_reconcile_verdict`, and the two are
+    mutually exclusive by construction: a fallback ADD judged nothing, so it
+    is not a training pair and must not enter the ``MEMORY_OP_JUDGED`` stream
+    that #582's exporter reads. Suppressing it there was right; suppressing it
+    *everywhere* is what made a judge that fails every time look exactly like
+    a judge nobody consulted (#514).
+
+    Best-effort — a broken event log must not turn a degraded reconciliation
+    into a failed write, which would invert the whole point of failing closed
+    to an ADD.
+
+    Emits nothing for a genuine verdict. That is a caller error rather than a
+    reachable state, but the failure mode is a *phantom degradation* in a
+    count whose whole job is to be trusted, so it is checked here and not
+    left to the one call site.
+    """
+    reason = outcome.fallback_reason
+    if not outcome.fallback or reason is None:
+        logger.warning(
+            "reconcile_degraded_emit_skipped_not_a_fallback",
+            decision=outcome.decision.value,
+            subject_ref_id=subject_ref_id,
+        )
+        return
+
+    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    payload: dict[str, Any] = {
+        "reason": reason.value,
+        "judge_failure": reason in JUDGE_FAILURE_REASONS,
+        "model_id": outcome.model_id,
+        "decision": outcome.decision.value,
+        "subject_ref_type": subject_ref_type,
+        "subject_ref_id": subject_ref_id,
+    }
+    try:
+        event_log.emit(
+            EventType.RECONCILE_DEGRADED,
+            source="save_memory.reconcile",
+            entity_id=subject_ref_id,
+            payload=payload,
+        )
+    # GRACEFUL-DEGRADATION: the write already succeeded under the lock. An
+    # event-log outage must cost the measurement, never the memory.
+    except Exception:
+        logger.exception(
+            "reconcile_degraded_emit_failed",
+            reason=reason.value,
+            subject_ref_id=subject_ref_id,
+        )

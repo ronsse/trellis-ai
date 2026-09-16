@@ -71,8 +71,10 @@ from trellis.mcp.reconcile import (
     UPDATES_DOC_KEY,
     ReconcileCandidate,
     ReconcileDecision,
+    ReconcileFallbackReason,
     ReconcileOutcome,
     configured_model_id,
+    emit_reconcile_degraded,
     emit_reconcile_verdict,
     judge_reconcile,
     mark_document_superseded,
@@ -1730,7 +1732,7 @@ def _compute_reconcile_outcome(
             confidence=0.0,
             model_id=model_id,
             fallback=True,
-            fallback_reason="model_unavailable",
+            fallback_reason=ReconcileFallbackReason.MODEL_UNAVAILABLE,
         )
     return judge_reconcile(
         client,
@@ -1792,7 +1794,7 @@ def _reverify_candidate(
             confidence=outcome.confidence,
             model_id=outcome.model_id,
             fallback=True,
-            fallback_reason="stale_recheck",
+            fallback_reason=ReconcileFallbackReason.STALE_RECHECK,
         )
     return outcome
 
@@ -1822,7 +1824,7 @@ def _commit_reconcile_verdict(
     if outcome.fallback:
         marker = (
             MARKER_STALE
-            if outcome.fallback_reason == "stale_recheck"
+            if outcome.fallback_reason is ReconcileFallbackReason.STALE_RECHECK
             else MARKER_SKIPPED
         )
         meta = {**metadata, RECONCILIATION_KEY: marker}
@@ -1888,7 +1890,7 @@ def _downgraded_to_stale(outcome: ReconcileOutcome) -> ReconcileOutcome:
         confidence=outcome.confidence,
         model_id=outcome.model_id,
         fallback=True,
-        fallback_reason="stale_recheck",
+        fallback_reason=ReconcileFallbackReason.STALE_RECHECK,
     )
 
 
@@ -1978,7 +1980,7 @@ def _save_memory_reconciled(
             confidence=0.0,
             model_id=configured_model_id(),
             fallback=True,
-            fallback_reason="judge_error",
+            fallback_reason=ReconcileFallbackReason.JUDGE_ERROR,
         )
 
     # -- Phase C: re-verify + commit under the lock --------------------------
@@ -2002,16 +2004,27 @@ def _save_memory_reconciled(
 
     # -- Emit + enrich outside the lock --------------------------------------
     # A genuine model verdict (not a fallback / stale downgrade) is a training
-    # pair: emit MEMORY_OP_JUDGED. Fallback ADDs judged nothing, so no event.
+    # pair: emit MEMORY_OP_JUDGED. Fallback ADDs judged nothing, so they are
+    # kept out of that stream — and emit RECONCILE_DEGRADED instead, so the
+    # fallback leaves a countable trace rather than a log line nothing reads
+    # (#514). Every fallback route funnels through this one branch, which is
+    # why the emit lives here and not at each of the four mint sites.
+    subject_type, subject_id = _reconcile_subject(
+        outcome.decision, candidate, stored_id
+    )
     if not outcome.fallback:
-        subject_type, subject_id = _reconcile_subject(
-            outcome.decision, candidate, stored_id
-        )
         emit_reconcile_verdict(
             registry.operational.event_log,
             outcome=outcome,
             new_content=content,
             candidate=candidate,
+            subject_ref_type=subject_type,
+            subject_ref_id=subject_id,
+        )
+    else:
+        emit_reconcile_degraded(
+            registry.operational.event_log,
+            outcome=outcome,
             subject_ref_type=subject_type,
             subject_ref_id=subject_id,
         )
