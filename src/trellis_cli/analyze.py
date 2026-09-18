@@ -1057,6 +1057,121 @@ def value(
         console.print(f"  [dim]note: {note}[/dim]")
 
 
+@analyze_app.command("judged-outcomes")
+def judged_outcomes(
+    days: int = typer.Option(30, help="Days of history to analyze"),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan per event type. Raise it when the report says "
+            "TRUNCATED; the newest events are kept and rates use the window "
+            "the evidence actually covers."
+        ),
+    ),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
+) -> None:
+    """What followed each judged memory operation: served, graded, cited.
+
+    Joins MEMORY_OP_JUDGED.subject_ref.ref_id to the packs that later served
+    that memory (PACK_ASSEMBLED.injected_items[], where a document subject
+    also matches its own chunks) and to the verdicts graders gave those packs
+    (FEEDBACK_RECORDED), per op_type x decision.
+
+    The Phase 1 gate reads graded rows per 30 days, where graded means joined
+    to an outcome rather than merely emitted. It is decided on rows cited
+    after their judgment, and every looser reading is printed beside it.
+    Read-only.
+    """
+    from trellis.learning.judged_outcomes import (  # noqa: PLC0415
+        summarize_judged_outcomes,
+    )
+
+    event_log = get_event_log()
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.judged_outcomes",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = summarize_judged_outcomes(event_log, days=days, limit=limit)
+        if _meta_record.enabled and report.totals.judged > 0:
+            _meta_record.produced_finding(
+                f"judged-outcomes-report-d{days}",
+                finding_type="JudgedOutcomesReport",
+            )
+
+    if output_format == "json":
+        emit_json(report.model_dump())
+        return
+
+    console.print(f"[bold]Judged-Operation Outcomes[/bold] (last {days} days)")
+    if report.scan.truncated:
+        console.print(
+            f"  [yellow]window[/yellow] evidence covers "
+            f"{report.effective_window_days:g} of {days} days"
+        )
+    totals = report.totals
+    console.print(
+        f"  {totals.judged} judged row(s) over {totals.distinct_subjects} "
+        f"subject(s); {report.flat_packs}/{report.packs} packs attributable, "
+        f"{report.attributed_packs} graded per item"
+    )
+    if not totals.judged:
+        console.print("  [dim]No judged memory operations in the window.[/dim]")
+
+    per_30d = "n/a" if report.gate_number is None else f"{report.gate_number:g}"
+    style = "green" if report.gate_verdict == "passes" else "yellow"
+    console.print()
+    console.print(
+        f"  [bold]Phase 1 gate: [{style}]{escape(report.gate_verdict)}"
+        f"[/{style}][/bold] — {per_30d} {escape(report.gate_reading)} per 30 "
+        f"days against > {report.gate_threshold}"
+    )
+    for reading in report.gate_readings[1:]:
+        rate = "n/a" if reading.per_30d is None else f"{reading.per_30d:g}"
+        mark = "passes" if reading.passes else "below"
+        console.print(
+            f"    [dim]{escape(reading.reading)}: {reading.count} "
+            f"({rate}/30d, {mark})[/dim]"
+        )
+
+    for title, cells in (("By op type", report.by_op_type), ("By cell", report.cells)):
+        if not cells:
+            continue
+        console.print()
+        console.print(f"  [bold]{title}[/bold]")
+        for cell in cells:
+            label = (
+                cell.op_type
+                if cell.decision == "(all)"
+                else f"{cell.op_type} / {cell.decision}"
+            )
+            console.print(
+                f"    {escape(label)}: judged {cell.judged}, "
+                f"never served {cell.never_served}, "
+                f"served {cell.served}, graded {cell.graded}, "
+                f"cited helpful {cell.cited_helpful}, "
+                f"cited unhelpful {cell.cited_unhelpful}"
+                + (f", unservable {cell.unservable}" if cell.unservable else "")
+            )
+
+    if report.stray_citations:
+        console.print()
+        console.print(
+            f"  {report.stray_citations} citation(s) named an id their pack "
+            f"never served; {report.stray_citations_matching_judged} would "
+            "have matched a judged subject"
+        )
+
+    for note in report.notes:
+        console.print(f"  [dim]note: {escape(note)}[/dim]")
+
+
 @analyze_app.command("cost")
 def cost(
     days: int = typer.Option(7, help="Days of history to analyze"),

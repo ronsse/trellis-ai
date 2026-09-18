@@ -1722,6 +1722,36 @@ at `--model local` → $0.
 {"period_days": 7, "overhead_events": 28, "overhead_tokens": 34800, "model": "claude-opus", "price_per_mtok": 5.0, "price_source": "model_table", "overhead_dollars": 0.174, "by_operation": [{"operation": "get_context", "layer": "mcp", "calls": 20, "tokens": 30000, "dollars": 0.15}], "estimator": "estimate_4_chars_per_token"}
 ```
 
+### `trellis analyze judged-outcomes`
+
+Read-only join from each judged memory operation to what followed it.
+`MEMORY_OP_JUDGED` records the system's own decision (a classification label, a
+distillation `keep` or `discard`); this follows its `subject_ref.ref_id` into the
+packs that later served that memory (`PACK_ASSEMBLED.injected_items[]`) and the
+per-item verdicts graders gave those packs (`FEEDBACK_RECORDED`).
+
+```bash
+trellis analyze judged-outcomes [--days N] [--limit N] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--days` | `30` | Days of history to analyze, for all three event types |
+| `--limit` | `5000` | Max events scanned per event type |
+
+Each judged row lands on one rung — `never_served`, `served_ungraded`,
+`graded_uncited`, `cited_unhelpful`, `cited_helpful`, or `unservable` for a
+subject no pack can serve (a distillation `discard` refs a session) — reported
+per `op_type` × `decision`. Only servings at or after the judgment count; the
+`*_any_order` fields drop that constraint. A document subject also matches its
+own `<id>#chunk-N` servings, while a chunk subject matches only itself.
+
+The **Phase 1 gate** asks for more than 500 graded rows per 30 days, where graded
+means joined to an outcome. `gate_verdict` is decided on rows cited after their
+judgment; `gate_readings` lists every looser reading, so `fails_strict_reading`
+means a looser count would have passed. When a scan truncates, rows older than
+the evidence start are dropped and rates use the covered window.
+
 ### `trellis analyze domains`
 
 Read-only usage report for the primary retrieval slice, `domain`. Joins observed
