@@ -2506,3 +2506,14 @@ from trellis_cli.admin_backfill_name_aliases import (  # noqa: E402
 )
 
 _register_backfill_name_aliases(admin_app)
+
+
+# ---------------------------------------------------------------------------
+# backfill-outcomes — replay feedback history into the ops-tier store (B3)
+# ---------------------------------------------------------------------------
+
+from trellis_cli.admin_backfill_outcomes import (  # noqa: E402
+    register as _register_backfill_outcomes,
+)
+
+_register_backfill_outcomes(admin_app)
