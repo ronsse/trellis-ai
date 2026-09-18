@@ -336,7 +336,18 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   real ArcadeDB — ran nowhere until #579 named the file in `live-infra.yml`. For that marker
   the roster is **derived, not declared**: `tests/unit/test_arcadedb_live_infra_rule.py`
   scans for `pytest.mark.arcadedb` by AST and fails when a marked file is not selected, so
-  the next one cannot arrive silently unwired.
+  the next one cannot arrive silently unwired. **It is not the last one.** Joined per
+  *node* instead — the same module's `_test_nodes` scan, checked against each leg — **12
+  tests run on no leg** (measured 2026-09-18, on the tree carrying #579): the nine in
+  `test_smoke_parity.py` and the one in `test_subprocess_serve.py`, both named above with
+  reasons, plus two `slow`-marked timing guards in
+  `tests/unit/stores/test_sqlite_graph_bulk_upsert.py`. Those two need no container — they
+  are pure SQLite — and the per-file join reports them covered because the file's other
+  three tests run on every pull request. The previous full inventory, **140** tests across
+  thirteen files on 2026-09-16, is in
+  [`docs/plans/2026-09-13-gap-analysis.md`](docs/plans/2026-09-13-gap-analysis.md); every
+  other file in it is now selected by `live-infra.yml`. Re-derive rather than trusting
+  either figure.
 - **Still do not sweep `tests/unit/stores/` in**, even though every file in it is now
   named. Paths are added one reviewed path at a time, because the hazard a sweep meets is
   silent and lands on a *different* suite. Neo4j holds exactly one vector index per
@@ -367,5 +378,9 @@ database without the extension every pooled connection fails and `pool.wait()` r
 
 ## Product docs
 
+- `docs/ROADMAP.md` — a **router**, not a roadmap of its own: which of the five planning
+  documents is authoritative for what, and the Now / Next / Later gates stated as
+  acceptance checks rather than as an item list. Carries no queue and no Done section on
+  purpose — the queue is the tracker and the open PRs, which no file in this repo can see.
 - `docs/PRD.md` — product thesis, adopter profiles, component disposition
 - `docs/design/implementation-roadmap.md` — authoritative single-page roadmap; §3.H is the Productionization milestone (the 2026-07-11 edit-set has been applied into it and removed)

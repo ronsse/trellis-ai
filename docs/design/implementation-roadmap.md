@@ -392,7 +392,7 @@ Read in order:
 1. **`CLAUDE.md`** — project conventions, hard rules, terminology.
 2. **This file** — what's done, what's gated, where the gates are (§4).
 3. **The ADR / plan for whichever gate fired.** Don't read every ADR cold; they're long.
-4. **The contract test suites under `tests/unit/stores/contracts/`** — the authoritative behavioural spec for the storage layer. **Which of them actually run, and where, is in `CLAUDE.md`'s test-coverage caveat** — it is not the same on PRs as on push to `main`, and the ArcadeDB contract runs nowhere at all ([#351](https://github.com/ronsse/trellis-ai/issues/351)). Deliberately a pointer, not a restatement, for the reason given two bullets below.
+4. **The contract test suites under `tests/unit/stores/contracts/`** — the authoritative behavioural spec for the storage layer. **Which of them actually run, and where, is in `CLAUDE.md`'s test-coverage caveat.** Deliberately a pointer, not a restatement, for the reason given two bullets below — and the pointer's own summary had rotted anyway: this line said the ArcadeDB contract runs nowhere, which stopped being true when `638b241` ([#543](https://github.com/ronsse/trellis-ai/issues/543)) wired it onto `live-infra` at 106 cases. Every contract suite is now covered on some leg, and since that was measured (2026-09-16) so are the two Bolt backends' **unit** suites; the few tests that still run on no leg are counted in `CLAUDE.md`. Re-derive rather than trusting this sentence.
 
 Before writing code:
 
