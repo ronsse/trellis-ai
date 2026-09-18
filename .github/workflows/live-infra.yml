@@ -278,6 +278,16 @@ jobs:
         # because it carries live + slow markers that tests.yml deselects.
         # Wiring it here would paper over that rather than fix it.
         #
+        # tests/integration/test_recommended_config.py is named for #579. Its
+        # blessed-shape test validates the shipped recommended config end to
+        # end against a real ArcadeDB and carries the live + arcadedb markers,
+        # while its other tests run unmarked in tests.yml — so a file-level join
+        # counts the file as covered and the one test that needs this job's
+        # ArcadeDB container ran nowhere. The arcadedb-marked roster is derived
+        # rather than declared: tests/unit/test_arcadedb_live_infra_rule.py
+        # scans for the marker by AST and fails when a marked file is not
+        # selected here.
+        #
         # tests/unit/test_ci_coverage_rule.py derives which test files
         # execute in no workflow leg and fails when one appears without a
         # recorded reason, so this list cannot silently fall behind the
@@ -287,6 +297,7 @@ jobs:
         run: |
           pytest \
             tests/integration/test_neo4j_e2e.py \
+            tests/integration/test_recommended_config.py \
             tests/integration/test_migrate_graph_live.py \
             tests/integration/api/test_live_smoke.py \
             tests/integration/sdk/ \

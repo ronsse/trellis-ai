@@ -53,7 +53,10 @@ def test_live_infra_store_targets_are_named_one_at_a_time() -> None:
     legitimately **added**. It did, twice over: four suites that pass
     against this job's own container images executed in no workflow at
     all, and wiring them in broke this assertion while satisfying its
-    intent; #356 then added a fifth.
+    intent; #356 then added a fifth. #579's first replacement made the
+    same mistake one layer in, pinning "``test_neo4j_vector.py`` is never
+    collected" — an assertion that a *fix* must not happen, which is
+    worse than a roster.
 
     What the sweep would cost is still real, and the directory has
     already produced one instance of it. ``test_neo4j_vector.py``'s
@@ -101,3 +104,8 @@ def test_live_infra_store_targets_are_named_one_at_a_time() -> None:
         "reviewed file at a time"
     )
     assert store_targets, "live-infra selects no tests/unit/stores/ target at all"
+    single_files = sorted(str(t) for t in store_targets if t.suffix == ".py")
+    assert single_files, (
+        "live-infra names no single file under tests/unit/stores/ — a target "
+        "list naming only contracts/ would satisfy the sweep checks vacuously"
+    )
