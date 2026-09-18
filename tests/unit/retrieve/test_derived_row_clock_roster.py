@@ -279,6 +279,17 @@ ROSTER: dict[str, Rostered] = {
     "trellis_cli/classify.py::_tag_evolution_registry::store.put": Rostered(
         1, NOT_A_DOCUMENT_ROW
     ),
+    "trellis/feedback/models.py::from_event_payload::metadata=_coerce_metadata()": (
+        Rostered(
+            1,
+            NOT_A_DOCUMENT_ROW,
+            "A `PackFeedback` rebuilt from its own `FEEDBACK_RECORDED` payload, "
+            "replayed into the outcome store (#562 B3). An outcome row is not "
+            "scored by any retrieval axis. Its historical clock is handled at "
+            "the replay instead: `default_timestamp_utc` takes the event's "
+            "`occurred_at`.",
+        )
+    ),
     "trellis/mutate/evidence_ingest.py::"
     "build_evidence_ingest_command::metadata=dict()": Rostered(
         1,
@@ -314,15 +325,15 @@ ROSTER: dict[str, Rostered] = {
 #: The hand count a scan cannot compute for itself. Every other guard here
 #: divides by the scan's own output, so a scan that returns nothing satisfies
 #: them all; this one does not move unless a human moves it.
-EXPECTED_ROSTER_KEYS = 35
-EXPECTED_ROSTER_SITES = 38
+EXPECTED_ROSTER_KEYS = 36
+EXPECTED_ROSTER_SITES = 39
 
 #: Per-disposition site floors. Deliberately floors and not equalities for
 #: the classes that grow with ordinary work, and an equality for the two
 #: derived classes that are the subject of #463 — a fourth derived-row
 #: producer appearing unannounced is the event this module exists to catch.
 DISPOSITION_SITE_FLOOR = {
-    NOT_A_DOCUMENT_ROW: 18,
+    NOT_A_DOCUMENT_ROW: 19,
     PRIMARY_WRITE: 5,
     IN_PLACE_REPUT: 8,
     SEAM_FORWARDS: 1,
