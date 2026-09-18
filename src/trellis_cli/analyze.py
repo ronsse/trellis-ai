@@ -678,6 +678,28 @@ def health(
             f"{serve.untargeted_feedback} named no pack "
             "(unjoinable by construction)"
         )
+    if serve.stray_cited_ids:
+        # #574. Rendered under the citation rate it qualifies, because
+        # "cited" and "joined" read as the same thing and are not: these
+        # verdicts were given and then dropped by the learning join.
+        shapes = ", ".join(
+            f"{count} {shape}"
+            for shape, count in sorted(
+                serve.stray_citations_by_shape.items(), key=lambda item: -item[1]
+            )
+        )
+        # One f-string, not a concatenation: #492's rule judges a render
+        # per ``{...}``, and a ``+`` hands it the whole line as one
+        # expression that no inner ``escape`` can satisfy.
+        detail = f" — {shapes}" if shapes else ""
+        console.print(
+            f"    [yellow]stray[/yellow] "
+            f"{escape(str(serve.stray_cited_ids))}/"
+            f"{escape(str(serve.cited_ids))} cited ids "
+            f"({serve.stray_citation_rate:.1%}) were never served by the pack "
+            f"that cited them, across {serve.packs_with_stray_citations} "
+            f"pack(s){detail}"
+        )
     if serve.retrieval_availability_note:
         # #365. Printed next to the number it qualifies, not in a footnote:
         # untargeted feedback is routinely read as "agents are not

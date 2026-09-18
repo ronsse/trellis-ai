@@ -348,6 +348,89 @@ def test_cited_ids_not_served_are_counted() -> None:
     assert any("not served" in note for note in report.notes)
 
 
+def test_the_note_separates_a_mis_spelled_id_from_an_invented_one() -> None:
+    """The note has to say which kind of defect it found.
+
+    "Not served" reads as the grader naming something out of thin air, and
+    on the reference deployment it almost never is: 13 of 14 strays are the
+    same pack's own ids with a namespace prefix added or dropped. Those two
+    populations have different owners — a caller's id spelling versus
+    retrieval — so a single count sends the reader to the wrong one.
+    """
+    log = _FakeEventLog()
+    _populate(log, MIN_ATTRIBUTED_PACKS)
+    _emit_feedback(
+        log,
+        "pack_0",
+        helpful=["entity:pack_0_a"],  # prefix added to an id it WAS served
+        unhelpful=["nothing-like-this"],  # genuinely foreign
+    )
+    report = summarize_pack_value(log, days=30)
+
+    assert report.cited_ids_not_served == 2
+    note = next(note for note in report.notes if "not served" in note)
+    assert "2 cited id(s) were not served" in note
+    assert "1 of those" in note
+    assert "different namespace prefix" in note
+
+
+def test_a_prefix_dropped_stray_counts_as_a_near_miss_too() -> None:
+    """The mirror shape, which is 4 of the 14 measured on production.
+
+    A grader citing ``af366b3f`` for a served ``capture:claude-code:af366b3f``
+    has the same defect as one citing ``entity:trace:X`` for ``trace:X``, and
+    reporting only the first would leave a third of the near misses in the
+    "invented" bucket.
+    """
+    log = _FakeEventLog()
+    _populate(log, MIN_ATTRIBUTED_PACKS)
+    _emit_feedback(log, "pack_0", helpful=["pack_0_a"])
+    _emit_pack(log, "pack_pfx", [("capture:cc:abc123", 100, "semantic", "document")])
+    _emit_feedback(log, "pack_pfx", helpful=["abc123"])
+    report = summarize_pack_value(log, days=30)
+
+    assert report.cited_ids_not_served == 1
+    note = next(note for note in report.notes if "not served" in note)
+    assert "1 of those" in note
+
+
+def test_served_membership_is_read_from_the_canonical_list() -> None:
+    """The served set is ``injected_item_ids``, not the token loop's rows.
+
+    The two agree on every pack this deployment has assembled (219 of 219,
+    measured 2026-09-16), so this is a guard against drift rather than a
+    live fix — but the direction matters: scoring a pack against the
+    smaller of the two would invent strays out of a telemetry gap and
+    attribute them to the grader.
+    """
+    log = _FakeEventLog()
+    _populate(log, MIN_ATTRIBUTED_PACKS)
+    log.emit(
+        EventType.PACK_ASSEMBLED,
+        source="test",
+        entity_id="pack_partial",
+        entity_type="pack",
+        payload={
+            "intent_family": "general_context",
+            # Served three; only one carries a per-item row.
+            "injected_item_ids": ["a", "b", "c"],
+            "injected_items": [
+                {
+                    "item_id": "a",
+                    "estimated_tokens": 100,
+                    "strategy_source": "semantic",
+                    "item_type": "document",
+                    "rank": 0,
+                }
+            ],
+        },
+    )
+    _emit_feedback(log, "pack_partial", helpful=["b"], unhelpful=["c"])
+    report = summarize_pack_value(log, days=30)
+
+    assert report.cited_ids_not_served == 0
+
+
 def test_helpful_wins_over_contradictory_unhelpful() -> None:
     log = _FakeEventLog()
     for index in range(MIN_ATTRIBUTED_PACKS):

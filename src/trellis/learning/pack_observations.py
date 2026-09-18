@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.feedback.attribution import StrayCitationTally, served_item_ids
 from trellis.stores.base.event_log import EventType, merge_coverage, scan_events
 
 if TYPE_CHECKING:
@@ -61,6 +62,18 @@ def build_learning_observations_from_event_log(
     Packs without matching feedback are excluded — they have no outcome
     to attribute.
 
+    **A cited id the pack never served reaches nothing, and that loss is
+    logged rather than repaired** (#574). :func:`_join_one` builds its
+    item rows from ``injected_items`` alone, so a verdict naming an id
+    outside that list is dropped here in silence; measured on the
+    reference deployment, 14 of 699 citations (2.0%) across 6 packs, and
+    one pack lost 6 of its 15. The remedy is a count and a ``warning``
+    line — not a synthesized row, because this bridge must never invent
+    an item the pack cannot be shown to have served. The level is
+    deliberate: ``debug`` fires under no shipped log configuration (the
+    CLI pins ``WARNING``, the MCP server filters lower), which is what
+    made this loss invisible for the whole life of the join.
+
     Args:
         event_log: Source event log.
         days: Look-back window for both event types.
@@ -81,6 +94,7 @@ def build_learning_observations_from_event_log(
     )
 
     observations: list[dict[str, Any]] = []
+    strays = StrayCitationTally()
     for event in feedback_events:
         payload = event.payload or {}
         pack_id = str(payload.get("pack_id") or "").strip()
@@ -89,6 +103,7 @@ def build_learning_observations_from_event_log(
         pack_payload = pack_payloads.get(pack_id)
         if pack_payload is None:
             continue
+        strays.add(payload, served_item_ids(pack_payload), pack_id=pack_id)
         observations.append(_join_one(payload, pack_payload))
 
     logger.debug(
@@ -98,6 +113,18 @@ def build_learning_observations_from_event_log(
         feedback_events=len(feedback_events),
         days=days,
     )
+    if strays.stray:
+        logger.warning(
+            "learning_join_dropped_stray_citations",
+            strays=strays.stray,
+            cited=strays.cited,
+            stray_rate=strays.stray_rate,
+            packs_with_stray=len(strays.packs_with_stray),
+            packs_cited=len(strays.packs_cited),
+            by_namespace=dict(strays.by_namespace),
+            by_shape=dict(strays.by_shape),
+            days=days,
+        )
     return observations
 
 
