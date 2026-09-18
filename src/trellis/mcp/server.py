@@ -1680,17 +1680,25 @@ def _store_new_memory(
     )
     try:
         result = executor.execute(command)
+    # The arm named the Stage 5 audit emit because that was the only thing
+    # that could escape ``execute`` (#551). It no longer can — the emit is
+    # guarded and degrades onto ``CommandResult.warnings`` — so the one
+    # cause this message used to name is now the one cause it cannot have.
+    # Whatever still escapes is a bug in the pipeline, not an emit, and is
+    # reported as itself. ``evidence_ingest`` is this function's existing
+    # stage name rather than a second word for the same place (#325/#326).
     except Exception as exc:
         logger.exception(
-            "memory_mutation_event_emission_failed",
+            "memory_governed_write_failed",
             doc_id=command.target_id,
         )
         _raise_internal(
-            f"MUTATION_EXECUTED event emit failed: {exc}",
+            f"governed memory write failed: {exc}",
             cause=exc,
             data={
-                "stage": "mutation_executed_emit",
+                "stage": "evidence_ingest",
                 "doc_id": command.target_id,
+                "error_class": type(exc).__name__,
             },
         )
     if result.status is not CommandStatus.SUCCESS or result.created_id is None:
