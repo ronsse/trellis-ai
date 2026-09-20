@@ -274,8 +274,9 @@ That leaves eight issues of pure maintenance, which is the right amount of it.
 
 ### 4.1 What it concretely means
 
-"The system decides the graph should look different" resolves to six actuators,
-ordered by how reversible each one is:
+"The system decides the graph should look different" resolves to six actuators. The
+table below orders them **by how reversible each one is**, which is what §4.2 consumes.
+It is not a build order, and §4.1.1 says why not.
 
 | # | Actuator | Trigger shape | Reversal |
 |---|---|---|---|
@@ -288,6 +289,79 @@ ordered by how reversible each one is:
 
 Actuator 6 is the one that changes the graph from a provenance ledger into a knowledge
 graph. It is also the only one with no existing analogue in the codebase.
+
+### 4.1.1 Build order is not that order — reversibility governs authority, not sequence
+
+The table above was read as a queue when it was first written, and that is a category
+error this plan should not ship with. Reversibility decides *what an agent may do
+without asking* (§4.2). It says nothing about which actuator is worth building, and the
+two orderings turn out to be close to opposites: merging duplicates is second-most
+reversible and has almost nothing to merge, while the thing with the largest ceiling
+needs a prerequisite that is not in the table at all.
+
+§5.2's own rule settles it — **measure the ceiling before building the actuator** — so
+the build order is derived from base rates, re-measured on production on **2026-09-20**
+(read-only, 1,975 current nodes / 2,026 current edges / 0 alias rows; #594's reading a
+week earlier was 1,896 / 1,945, and the shape is stable: mean degree 2.05 both times,
+isolation 11.2% → 11.5%).
+
+**0 · Referent identity and qualifier capture — a prerequisite, not an actuator.**
+PR #599 (`docs/design/adr-referent-identity.md`, status Proposed, **not merged**, so
+the path does not resolve from this branch) chose `EntityAlias` per
+`(source_system, raw_id)` and leads with what that does *not* solve:
+the mechanism supplies convergence, the producer must supply the qualifier, and
+**0 of 991** outward-denoting nodes carries one today. Adopting the mechanism first is
+worse than the status quo, because it converts an ambiguous name into an authoritative
+binding. Nothing that mints an external edge can precede this.
+
+**1 · Mint semantic edges, starting at the `save_knowledge` seam (actuator 6).** The
+highest ceiling, and the seam is now identified rather than asserted. Of 196 nodes
+minted under the lowercase `save_knowledge` types, **182 are isolated (93%)** —
+`gotcha` at 81/83, `concept` at 70/76. Against a whole-graph isolation of 228/1,975
+(11.5%), those 196 nodes are **10% of the graph and 80% of all its isolation**. The
+tool built for durable knowledge deposits entities with no edges at all, so this is a
+producer-seam repair with a known denominator, not a mining exercise over the whole
+corpus.
+
+**2 · Re-type (actuator 5), which is most of what looks like dedup.** Six of the
+eight duplicate-name groups are cross-type (item 4), so three-quarters of the work
+a dedup actuator appears to have is actually a type disagreement.
+
+**3 · Summarise (1), adjust confidence (3), retire (4)** — untested ceilings, and each
+needs a signal Phase 1 has not yet produced.
+
+**4 · Merge duplicates (actuator 2) — provisionally refuse.** 8 duplicate-name groups
+covering 14 extra nodes (0.71% of nodes), and splitting them by type leaves **2
+same-type groups** against **6 cross-type**. Cross-type collisions are type
+disagreements, not merges; they belong to actuator 5. So the merge ceiling is ~2 groups,
+≈0.1% of the graph, which is the size §5.2 says to refuse at. This is also why K4 found
+**zero** exact-name collisions among outward referents: for the `artifact:` namespace
+the minted id *is* the verbatim name, so two producers typing the same string converge
+by construction. The defect there is under-qualification, not divergence — and
+under-qualification is item 0's problem, not a merge's.
+
+**The two items M4 orders ahead of dedup are two ends of one missing seam.** Every
+locator-shaped property in the graph — 137 key instances, `repo` 65, `machine` 41,
+`host` 17, `file` 9, `endpoint` 4, `url` 1 — sits on a lowercase `save_knowledge` node.
+**Zero** sit on any of the 991 nodes whose type denotes something outside Trellis
+(`SoftwareApplication` 851, `File` 125, `Dataset` 7, `Device` 4, and one each of
+`API` / `Command` / `SystemdUnit` / `Wrapper`). So the nodes that hold addresses have no
+edges, and the nodes that *are* external referents have no addresses. Edge-minting and
+qualifier capture are not two independent prerequisites; they are the same gap seen from
+both ends, which is the argument for doing them adjacently and before anything else.
+
+**Reconciling this with #594, because the numbers differ.** #594 reported "265
+external-referent nodes carry one `url` and four `endpoint`s between them" and "only 4
+edges connect two external referents". Under K4's definition — the eight node types that
+denote something outside Trellis — the same prod database gives **991 nodes, 0 carrying
+any locator key, and 0 edges with such a node at both ends** (`used` 901 and
+`wasGeneratedBy` 138 touch one; nothing joins two). The sets are not comparable: #594
+stated no definition for its 265. The reconciliation is that the graph's single `url`
+and four `endpoint` keys sit on `system` and `gotcha` nodes — `save_knowledge` deposits,
+not extractor-minted referents — so #594's set must have included the lowercase types,
+and its conclusion ("there is no addressing scheme for a federation map to resolve
+against") holds *more* strongly than it stated, not less. **State the type set with any
+count of this population**; without one the number is not re-derivable.
 
 ### 4.2 The reversibility boundary — this is inside your existing rule
 
@@ -429,6 +503,15 @@ answer is small. Actuator 6 (semantic edges) has the highest ceiling by a distan
 the graph axis currently contributes a recency feed; making it query-relevant is the
 difference between one of three retrieval axes working and not.
 
+That rule has now been applied to all six, and it changed the order (§4.1.1, measured
+2026-09-20). Two results are worth carrying here rather than only there. Actuator 6's
+ceiling has a **denominator**: 182 isolated nodes out of the 196 the `save_knowledge`
+types have minted, which is 80% of the whole graph's isolation concentrated in 10% of
+its nodes. And actuator 2 (merge duplicates) is the second case after domain promotion
+where the rule says **refuse** — 2 same-type duplicate groups on a 1,975-node graph,
+≈0.1%, with the other 6 groups being type disagreements that belong to actuator 5.
+Refusing an actuator is the rule working, not the rule failing.
+
 ### 5.3 The immutable core — the part that makes it *safe* to be recursive
 
 A system that tunes its own parameters will, given a throughput objective and enough
@@ -543,7 +626,10 @@ Run that replay before building on top.
 
 Shadow overlay, the six actuators behind a handler allowlist, the governed-mutation
 path, promotion via `promote_proposal`, rollback via `monitor_post_promotion`. Ship
-actuators one at a time, each with its base rate measured first per §4.4.
+actuators one at a time, each with its base rate measured first per §4.4, **in §4.1.1's
+order and not §4.1's**: qualifier capture (#599's prerequisite, not an actuator) →
+semantic edges at the `save_knowledge` seam → re-type → summarise / confidence / retire
+→ merge duplicates last, and only if its ceiling has moved off ≈0.1%.
 
 **Gate:** the paired shadow/live comparison must show a positive effect on at least one
 actuator before the second is built.
@@ -646,6 +732,12 @@ Three consequences for the plan above:
 1. **§4.1's actuator ranking is provisional.** "Mine semantic edges between memories"
    optimises the wrong axis if the point is external reach. The candidate that replaces
    it is an *external-referent* edge type plus one producer per federated system.
+   **Resolved 2026-09-20 in §4.1.1**, which derives a build order from measured
+   ceilings and puts referent identity ahead of every edge-minting actuator. The
+   correction survived the measurement: the largest edge-minting ceiling turned out to
+   be at the `save_knowledge` producer seam, whose nodes are 93% isolated *and* are the
+   only nodes in the graph carrying locator properties — so "one producer per federated
+   system" and "mine semantic edges" meet at the same seam rather than competing.
 2. **The substrate already permits it.** CLAUDE.md's type-extensibility rule makes
    `EntityType` / `EdgeKind` any string at the storage and API layers; the enums are
    well-known defaults, not a closed set. So this needs **producers, not schema** — the
