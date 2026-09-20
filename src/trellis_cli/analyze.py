@@ -2390,18 +2390,19 @@ def _print_graph_types(report: GraphShapeReport) -> None:
 
     if not report.uncovered_splits:
         console.print(
-            "[dim]  No uncovered case splits: every raw type that differs only"
-            " in case buckets together.[/dim]"
+            "[dim]  No uncovered splits: every raw type that shares a bucket"
+            " once lowercased landed in that bucket.[/dim]"
         )
         return
     console.print()
     console.print(
-        "[yellow]Uncovered case splits[/yellow] — raw types that differ only in"
-        " case and landed in different buckets."
+        "[yellow]Uncovered splits[/yellow] — raw types that share a canonical"
+        " bucket once lowercased, but landed in different ones."
     )
     console.print(
         "[dim]  ENTITY_TYPE_ALIASES is keyed on lowercase legacy names, so a"
-        " PascalCase spelling misses the alias and becomes its own type.[/dim]"
+        " PascalCase spelling misses the alias and becomes its own type. The"
+        " halves need not differ only in case.[/dim]"
     )
     for split in report.uncovered_splits:
         halves = ", ".join(

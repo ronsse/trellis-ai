@@ -186,16 +186,26 @@ class TypeBucket(TrellisModel):
 
 
 class UncoveredSplit(TrellisModel):
-    """Raw types that differ only in case and did *not* bucket together.
+    """Raw types that *should* have bucketed together and did not.
 
-    ``ENTITY_TYPE_ALIASES`` is keyed on lowercase legacy names, so an
-    entity written as ``System`` misses the ``system -> SoftwareApplication``
-    alias and becomes its own type. The alias map covers the vocabulary it
-    was written for; this names where the data left it behind.
+    The grouping key is ``canonicalize_entity_type(raw.lower())`` — where a
+    raw type would land if the alias map were case-insensitive. A group is a
+    split when its members actually landed in more than one bucket.
+
+    ``ENTITY_TYPE_ALIASES`` is keyed on lowercase legacy names, so an entity
+    written as ``System`` misses the ``system -> SoftwareApplication`` alias
+    and becomes its own type. Note the members need **not** differ only in
+    case: prod groups ``{System, Tool, system}``, where ``Tool`` and
+    ``system`` share a bucket only through the alias map. Describing this as
+    a case split is narrower than what the code measures, and the narrower
+    reading is how a consumer ends up filtering out the halves that matter.
     """
 
-    lowercase_key: str = Field(
-        description="The canonical bucket these types share once lowercased"
+    canonical_key: str = Field(
+        description=(
+            "Bucket these raw types share once lowercased — i.e. the one "
+            "bucket they would all have landed in"
+        )
     )
     buckets: dict[str, int] = Field(
         description="Canonical bucket -> node count, one entry per split half"
@@ -450,7 +460,7 @@ def _collect_uncovered_splits(
         grouped[canonicalize_entity_type(raw.lower())].add(raw)
 
     splits: list[UncoveredSplit] = []
-    for lowercase_key, raws in grouped.items():
+    for canonical_key, raws in grouped.items():
         landed = {raw_to_bucket[raw] for raw in raws}
         if len(landed) < MIN_DISAGREEMENT:
             continue
@@ -460,14 +470,14 @@ def _collect_uncovered_splits(
         nodes = sum(per_bucket.values())
         splits.append(
             UncoveredSplit(
-                lowercase_key=lowercase_key,
+                canonical_key=canonical_key,
                 buckets=dict(per_bucket.most_common()),
                 raw_types={raw: raw_counts[raw] for raw in sorted(raws)},
                 nodes=nodes,
                 share=_share(nodes, total_nodes),
             )
         )
-    splits.sort(key=lambda split: (-split.nodes, split.lowercase_key))
+    splits.sort(key=lambda split: (-split.nodes, split.canonical_key))
     return splits
 
 

@@ -201,7 +201,7 @@ class TestUncoveredSplits:
 
         assert len(report.uncovered_splits) == 1
         split = report.uncovered_splits[0]
-        assert split.lowercase_key == "SoftwareApplication"
+        assert split.canonical_key == "SoftwareApplication"
         assert split.buckets == {"SoftwareApplication": 1, "System": 1}
         assert split.nodes == 2
         assert split.share == pytest.approx(1.0)
@@ -234,6 +234,28 @@ class TestUncoveredSplits:
 
         assert len(report.uncovered_splits) == 1
         assert report.uncovered_splits[0].buckets == {"gotcha": 1, "Gotcha": 1}
+
+    def test_a_split_half_need_not_differ_only_in_case(self, graph_store) -> None:
+        """Reproduces the shape production actually has.
+
+        ``system`` and ``tool`` both alias to ``SoftwareApplication``, so the
+        group keyed on that bucket holds ``{System, Tool, system}`` — halves
+        that do *not* differ only in case. Calling this a "case split" is
+        narrower than the rule, and a consumer filtering on that reading
+        would drop ``Tool`` while keeping ``System``.
+        """
+        graph_store.upsert_node("a", "system", {"name": "alpha"})
+        graph_store.upsert_node("b", "System", {"name": "beta"})
+        graph_store.upsert_node("c", "Tool", {"name": "gamma"})
+
+        report = _analyze(graph_store)
+
+        assert len(report.uncovered_splits) == 1
+        split = report.uncovered_splits[0]
+        assert split.canonical_key == "SoftwareApplication"
+        assert set(split.raw_types) == {"system", "System", "Tool"}
+        assert split.buckets == {"SoftwareApplication": 1, "System": 1, "Tool": 1}
+        assert split.nodes == 3
 
     def test_one_spelling_alone_is_never_a_split(self, graph_store) -> None:
         graph_store.upsert_node("a", "System", {"name": "alpha"})
