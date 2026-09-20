@@ -1,5 +1,13 @@
 """Learning module for Trellis — intent-family scoring and promotion."""
 
+from trellis.learning.evidence_gate import (
+    MIN_ATTRIBUTED_OBSERVATIONS,
+    MIN_UNHELPFUL_CITATIONS,
+    CandidateDecision,
+    CitationEvidence,
+    NoiseEvidenceScreen,
+    screen_noise_candidates,
+)
 from trellis.learning.pack_observations import (
     build_learning_observations_from_event_log,
     derive_selection_efficiency,
@@ -37,11 +45,16 @@ __all__ = [
     "LEARNING_PROMOTE_RETRY_KEY",
     "LEARNING_PROMOTE_SUCCESS_KEY",
     "LEARNING_SCORING_COMPONENT",
+    "MIN_ATTRIBUTED_OBSERVATIONS",
+    "MIN_UNHELPFUL_CITATIONS",
     "PROMOTE_RECOMMENDATIONS",
     "RECOMMENDED_SEED_VALUES",
     "REQUIRED_LEARNING_PARAMETER_KEYS",
     "REQUIRED_SCHEMA_EVOLUTION_PARAM_KEYS",
     "SCHEMA_EVOLUTION_PARAM_COMPONENT_ID",
+    "CandidateDecision",
+    "CitationEvidence",
+    "NoiseEvidenceScreen",
     "WellKnownCandidate",
     "analyze_learning_observations",
     "analyze_well_known_candidates",
@@ -50,6 +63,7 @@ __all__ = [
     "derive_selection_efficiency",
     "normalize_intent_family",
     "prepare_learning_promotions",
+    "screen_noise_candidates",
     "submit_learning_promotion",
     "write_learning_review_artifacts",
 ]

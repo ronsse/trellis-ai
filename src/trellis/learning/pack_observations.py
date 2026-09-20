@@ -163,13 +163,31 @@ def _join_one(
     pack_payload: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Combine one feedback payload + its pack payload into one observation."""
+    # Per-item verdicts. The grader names ids; whether an id resolves to an
+    # item this pack actually served is a separate question, answered per
+    # item below. Both are needed: the *named* set says whether grading
+    # happened at all (the coverage floor
+    # ``trellis.learning.evidence_gate`` screens on), the *resolved* set
+    # says what the grading was about.
+    helpful_ids = _citation_ids(feedback_payload.get("helpful_item_ids"))
+    unhelpful_ids = _citation_ids(feedback_payload.get("unhelpful_item_ids"))
+
     items: list[dict[str, Any]] = []
     for raw in pack_payload.get("injected_items", []) or []:
         if not isinstance(raw, Mapping):
             continue
+        raw_item_id = str(raw.get("item_id") or "").strip()
         item: dict[str, Any] = {
             "item_id": raw.get("item_id"),
             "item_type": raw.get("item_type"),
+            # Stamped on every item, not only the cited ones: a bare
+            # ``False`` on an item in a graded pack is a real observation
+            # — served, and the grader did not name it — which is exactly
+            # what the noise screen weighs against an unhelpful citation.
+            # An item in an *ungraded* pack is distinguished by
+            # ``citation_attributed`` on the observation, not here.
+            "cited_helpful": bool(raw_item_id) and raw_item_id in helpful_ids,
+            "cited_unhelpful": bool(raw_item_id) and raw_item_id in unhelpful_ids,
         }
         # ``analyze_learning_observations`` reads ``source_strategy``;
         # the PackBuilder telemetry stamps the same concept under
@@ -208,6 +226,11 @@ def _join_one(
         "outcome": feedback_payload.get("outcome")
         or ("success" if feedback_payload.get("success") else "failure"),
         "phase": feedback_payload.get("phase") or "",
+        # True when the grader named any item id at all, resolved or not.
+        # Deliberately *not* conditioned on resolution: this is the
+        # "is the grading surface alive" coverage signal (#309), and a
+        # grader naming ids that miss is still a grader that graded.
+        "citation_attributed": bool(helpful_ids or unhelpful_ids),
         "items": items,
     }
 
@@ -276,6 +299,18 @@ def derive_selection_efficiency(pack_payload: Mapping[str, Any]) -> float | None
     if seen == 0:
         return None
     return len(injected) / seen
+
+
+def _citation_ids(raw: Any) -> frozenset[str]:
+    """Normalize a ``*_item_ids`` field into a set of non-empty ids.
+
+    Tolerant of the field being absent, ``None``, or a bare string — a
+    string is *not* iterated into characters, which would manufacture
+    citations for single-character item ids.
+    """
+    if not isinstance(raw, Sequence) or isinstance(raw, str | bytes):
+        return frozenset()
+    return frozenset(cleaned for entry in raw if (cleaned := str(entry or "").strip()))
 
 
 __all__ = [

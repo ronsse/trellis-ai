@@ -101,6 +101,7 @@ def _record(
     items_referenced: list[str],
     outcome: str,
     phase: str = "GENERATE",
+    items_unhelpful: list[str] | None = None,
 ) -> None:
     feedback = PackFeedback(
         run_id=run_id,
@@ -109,6 +110,7 @@ def _record(
         outcome=outcome,
         items_served=items_served,
         items_referenced=items_referenced,
+        unhelpful_item_ids=list(items_unhelpful or []),
         intent_family=intent_family,
     )
     record_feedback(
@@ -997,3 +999,163 @@ class TestObservableMetrics:
         assert "retry_rate not measured" in description
         assert "retry_rate=0.0" not in description
         assert payloads["entity_payload"]["properties"]["retry_rate"] is None
+
+
+class TestCitationAttributionAtTheJoin:
+    """Per-item verdicts must survive the PACK ⋈ FEEDBACK join.
+
+    Before this, the join carried ``helpful_item_ids`` no further than the
+    pack-level ``outcome``: every item of a graded pack inherited the same
+    verdict, so the scorer could not tell an item the grader *named* from
+    one that merely rode along. #336's rule needs the distinction.
+    """
+
+    def _pack(self, event_log: SQLiteEventLog, pack_id: str) -> None:
+        _emit_pack_assembled(
+            event_log,
+            pack_id=pack_id,
+            domain="deploy",
+            intent="ship the thing",
+            items=[
+                {"item_id": "doc:a", "item_type": "document"},
+                {"item_id": "doc:b", "item_type": "document"},
+                {"item_id": "doc:c", "item_type": "document"},
+            ],
+        )
+
+    def test_citations_stamp_only_the_items_they_name(
+        self, event_log: SQLiteEventLog, tmp_path: Path
+    ) -> None:
+        self._pack(event_log, "pack-1")
+        _record(
+            event_log,
+            tmp_path,
+            pack_id="pack-1",
+            run_id="run-1",
+            intent="ship the thing",
+            intent_family="deploy",
+            items_served=["doc:a", "doc:b", "doc:c"],
+            items_referenced=["doc:a"],
+            items_unhelpful=["doc:b"],
+            outcome="success",
+        )
+        (observation,) = build_learning_observations_from_event_log(event_log)
+        verdicts = {
+            item["item_id"]: (item["cited_helpful"], item["cited_unhelpful"])
+            for item in observation["items"]
+        }
+        assert verdicts == {
+            "doc:a": (True, False),
+            "doc:b": (False, True),
+            # Served and ungraded — the majority case, and the one #336
+            # showed must never be read as a negative verdict.
+            "doc:c": (False, False),
+        }
+        assert observation["citation_attributed"] is True
+
+    def test_an_ungraded_pack_is_not_attributed(
+        self, event_log: SQLiteEventLog, tmp_path: Path
+    ) -> None:
+        self._pack(event_log, "pack-2")
+        _record(
+            event_log,
+            tmp_path,
+            pack_id="pack-2",
+            run_id="run-2",
+            intent="ship the thing",
+            intent_family="deploy",
+            items_served=["doc:a", "doc:b", "doc:c"],
+            items_referenced=[],
+            outcome="success",
+        )
+        (observation,) = build_learning_observations_from_event_log(event_log)
+        assert observation["citation_attributed"] is False
+        assert not any(
+            item["cited_helpful"] or item["cited_unhelpful"]
+            for item in observation["items"]
+        )
+
+    def test_an_id_that_matches_nothing_still_counts_as_attributed(
+        self, event_log: SQLiteEventLog, tmp_path: Path
+    ) -> None:
+        """Coverage is about the grading surface, not about resolution.
+
+        A grader naming ids that miss every served item is still a grader
+        that graded — which is the #309 signal ``citation_attributed``
+        feeds. Resolving it to nothing is a separate (and quieter) defect.
+        """
+        self._pack(event_log, "pack-3")
+        _record(
+            event_log,
+            tmp_path,
+            pack_id="pack-3",
+            run_id="run-3",
+            intent="ship the thing",
+            intent_family="deploy",
+            items_served=["doc:a"],
+            items_referenced=["doc:nonexistent"],
+            outcome="success",
+        )
+        (observation,) = build_learning_observations_from_event_log(event_log)
+        assert observation["citation_attributed"] is True
+        assert not any(item["cited_helpful"] for item in observation["items"])
+
+    def test_a_bare_string_is_not_iterated_into_characters(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        """``"a"`` is a string, not the one-element list ``["a"]``.
+
+        Iterating it would manufacture a citation for every single-character
+        item id in the pack, which is a wrong verdict rather than a missing
+        one. Emitted raw because no writer in the tree produces this shape —
+        only a hand-edited or third-party event would.
+        """
+        _emit_pack_assembled(
+            event_log,
+            pack_id="pack-4",
+            domain="deploy",
+            intent="ship the thing",
+            items=[{"item_id": "a", "item_type": "document"}],
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id="fb-4",
+            entity_type="feedback",
+            payload={
+                "pack_id": "pack-4",
+                "intent_family": "deploy",
+                "success": True,
+                "helpful_item_ids": "a",
+            },
+        )
+        (observation,) = build_learning_observations_from_event_log(event_log)
+        assert observation["items"][0]["cited_helpful"] is False
+        assert observation["citation_attributed"] is False
+
+    def test_blank_and_null_ids_are_dropped(self, event_log: SQLiteEventLog) -> None:
+        _emit_pack_assembled(
+            event_log,
+            pack_id="pack-5",
+            domain="deploy",
+            intent="ship the thing",
+            items=[{"item_id": "doc:a", "item_type": "document"}],
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id="fb-5",
+            entity_type="feedback",
+            payload={
+                "pack_id": "pack-5",
+                "intent_family": "deploy",
+                "success": True,
+                "helpful_item_ids": ["  ", None],
+                "unhelpful_item_ids": [" doc:a "],
+            },
+        )
+        (observation,) = build_learning_observations_from_event_log(event_log)
+        # Whitespace is stripped on both sides, so a padded id still lands.
+        assert observation["items"][0]["cited_unhelpful"] is True
+        assert observation["items"][0]["cited_helpful"] is False
+        assert observation["citation_attributed"] is True
