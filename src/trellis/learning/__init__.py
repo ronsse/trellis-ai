@@ -2,6 +2,7 @@
 
 from trellis.learning.pack_observations import (
     build_learning_observations_from_event_log,
+    derive_selection_efficiency,
 )
 from trellis.learning.schema_evolution import (
     PARAM_COMPONENT_ID as SCHEMA_EVOLUTION_PARAM_COMPONENT_ID,
@@ -46,6 +47,7 @@ __all__ = [
     "analyze_well_known_candidates",
     "build_learning_observations_from_event_log",
     "build_learning_promotion_payloads",
+    "derive_selection_efficiency",
     "normalize_intent_family",
     "prepare_learning_promotions",
     "submit_learning_promotion",

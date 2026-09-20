@@ -27,6 +27,7 @@ from trellis.feedback.recording import record_feedback
 from trellis.learning import (
     analyze_learning_observations,
     build_learning_observations_from_event_log,
+    derive_selection_efficiency,
     prepare_learning_promotions,
     write_learning_review_artifacts,
 )
@@ -687,3 +688,312 @@ class TestRealPackBuilderAttribution:
         promotion_log = registry.operational.event_log
         assert len(list_precedents(promotion_log, domain="platform")) == 1
         assert list_precedents(promotion_log, domain="dbt") == []
+
+
+# ---------------------------------------------------------------------------
+# The ranking metrics, and which of them anything can answer
+# ---------------------------------------------------------------------------
+
+
+class TestObservableMetrics:
+    """Three of the four ranking metrics read keys no producer writes.
+
+    ``analyze_learning_observations`` ranks candidates on ``success_rate``,
+    ``retry_rate``, ``injection_rate`` and ``avg_selection_efficiency``.
+    Only the first is answerable: ``selection_efficiency`` was read off a
+    ``PACK_ASSEMBLED`` key ``_emit_telemetry`` has never written, and
+    ``had_retry`` / ``injected`` off ``FEEDBACK_RECORDED`` keys that no
+    feedback surface produces — :class:`PackFeedback` carries neither
+    field, and its ``metadata`` lands under a nested ``metadata`` key
+    rather than flattened, so a caller cannot smuggle one in either.
+
+    Each unanswerable metric then divided by ``times_served`` and reported
+    a confident ``0.0``. That is the failure this repo keeps producing —
+    a measurement path wired to a constant — and it is worse than a
+    missing metric, because ``retry_rate=0.0`` reads as *measured, clean*
+    and is the exact value that satisfies the promote conjunct.
+
+    These tests therefore assert **derivation and reachability**, never
+    key presence: a red test that only demands a key gets greened by
+    someone stamping a constant at emission, which is how the bug arrived.
+    """
+
+    @staticmethod
+    def _build_pack_with(
+        event_log: SQLiteEventLog,
+        *,
+        run_id: str,
+        candidates: int,
+        max_items: int,
+    ) -> str:
+        """Assemble a real pack from ``candidates`` items, admitting
+        ``max_items`` of them. The rest are rejected under ``max_items``,
+        so the emitted payload carries both sides of the ratio."""
+        from trellis.schemas.pack import PackBudget
+
+        items = [
+            PackItem(
+                item_id=f"doc:runbook-{n}",
+                item_type="document",
+                excerpt=f"rollback procedure number {n} for the deploy pipeline",
+                relevance_score=1.0 - (n / 100),
+                metadata={"source_strategy": "keyword", "title": f"Runbook {n}"},
+            )
+            for n in range(candidates)
+        ]
+        strategy = MagicMock(spec=SearchStrategy)
+        strategy.name = "keyword"
+        strategy.search.return_value = items
+        builder = PackBuilder(strategies=[strategy], event_log=event_log)
+        pack = builder.build(
+            "validate the deploy convention",
+            domain="platform",
+            run_id=run_id,
+            budget=PackBudget(max_items=max_items),
+        )
+        return pack.pack_id
+
+    @staticmethod
+    def _pack_payload(event_log: SQLiteEventLog, pack_id: str) -> dict:
+        events = event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, entity_id=pack_id, limit=10
+        )
+        return dict(events[0].payload)
+
+    # -- selection_efficiency --------------------------------------------
+
+    def test_selection_efficiency_is_derived_from_the_two_candidate_counts(
+        self, event_log, tmp_path: Path
+    ) -> None:
+        """Served over seen, computed from the payload's own two lists.
+
+        The number is asserted *and* so is the arithmetic that produced
+        it, because a stamped ``"selection_efficiency": 0.3`` would
+        satisfy the former alone. Ten candidates with ``max_items=3``
+        gives 3 admitted and 7 rejected, so the ratio is exactly 0.3 and
+        no other quantity on the row equals it.
+        """
+        pack_id = self._build_pack_with(
+            event_log, run_id="run-a", candidates=10, max_items=3
+        )
+        payload = self._pack_payload(event_log, pack_id)
+        assert len(payload["injected_items"]) == 3
+        assert len(payload["rejected_items"]) == 7
+        assert {r["reason"] for r in payload["rejected_items"]} == {"max_items"}
+
+        assert derive_selection_efficiency(payload) == pytest.approx(0.3)
+
+        _record(
+            event_log,
+            tmp_path,
+            pack_id=pack_id,
+            run_id="run-a",
+            intent="validate the deploy convention",
+            intent_family="deploy_validation",
+            items_served=["doc:runbook-0"],
+            items_referenced=["doc:runbook-0"],
+            outcome="success",
+        )
+        observation = build_learning_observations_from_event_log(event_log)[0]
+        assert observation["selection_efficiency"] == pytest.approx(0.3)
+
+    def test_rejecting_nothing_is_full_efficiency_not_unobserved(
+        self, event_log
+    ) -> None:
+        """A present-but-empty ``rejected_items`` is a measurement.
+
+        The walk saw two candidates and admitted both: efficiency 1.0.
+        Reporting that as unobserved would discard a real observation,
+        which is the mirror of the bug being fixed rather than a fix.
+        """
+        pack_id = self._build_pack_with(
+            event_log, run_id="run-a", candidates=2, max_items=10
+        )
+        payload = self._pack_payload(event_log, pack_id)
+        assert payload["rejected_items"] == []
+        assert derive_selection_efficiency(payload) == pytest.approx(1.0)
+
+    def test_a_row_with_no_rejected_items_key_is_unobserved_not_zero(
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
+    ) -> None:
+        """An absent key means the row cannot answer, so nothing is
+        reported — and the coverage block says how many rows could."""
+        for run in ("run-a", "run-b"):
+            pack_id = f"pack-{run}"
+            _emit_pack_assembled(
+                event_log,
+                pack_id=pack_id,
+                domain="platform",
+                intent="validate the deploy convention",
+                items=[{"item_id": "doc:runbook-0", "item_type": "document"}],
+            )
+            _record(
+                event_log,
+                tmp_path,
+                pack_id=pack_id,
+                run_id=run,
+                intent="validate the deploy convention",
+                intent_family="deploy_validation",
+                items_served=["doc:runbook-0"],
+                items_referenced=["doc:runbook-0"],
+                outcome="success",
+            )
+        observations = build_learning_observations_from_event_log(event_log)
+        assert all("selection_efficiency" not in obs for obs in observations)
+
+        report = analyze_learning_observations(
+            observations=observations, registry=learning_registry
+        )
+        candidate = report["candidates"][0]
+        assert candidate["metrics"]["avg_selection_efficiency"] is None
+        assert candidate["metrics_coverage"]["selection_efficiency_observed"] == 0
+        assert candidate["metrics_coverage"]["observations"] == 2
+
+    # -- had_retry / injected --------------------------------------------
+
+    def test_real_feedback_path_reports_retry_and_injection_as_unmeasured(
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
+    ) -> None:
+        """Through the surface production actually uses, both are ``None``.
+
+        Driven off :func:`record_feedback` rather than a hand-written
+        payload, so this measures what the deployed feedback family emits.
+        It goes red when a real producer for either field is added — which
+        is the moment a human should look at the classifier again.
+        """
+        for run in ("run-a", "run-b"):
+            pack_id = self._build_pack_with(
+                event_log, run_id=run, candidates=4, max_items=2
+            )
+            _record(
+                event_log,
+                tmp_path,
+                pack_id=pack_id,
+                run_id=run,
+                intent="validate the deploy convention",
+                intent_family="deploy_validation",
+                items_served=["doc:runbook-0"],
+                items_referenced=["doc:runbook-0"],
+                outcome="success",
+            )
+        observations = build_learning_observations_from_event_log(event_log)
+        assert all("had_retry" not in obs for obs in observations)
+        assert all("injected" not in obs for obs in observations)
+
+        report = analyze_learning_observations(
+            observations=observations, registry=learning_registry
+        )
+        candidate = report["candidates"][0]
+        assert candidate["metrics"]["retry_rate"] is None
+        assert candidate["metrics"]["injection_rate"] is None
+        assert candidate["metrics_coverage"]["retry_observed"] == 0
+        assert candidate["metrics_coverage"]["injected_observed"] == 0
+        # The one metric that *is* answerable keeps its value, so the
+        # candidate is still rankable — this is a reporting fix, not a
+        # withdrawal of the signal.
+        assert candidate["metrics"]["success_rate"] == pytest.approx(1.0)
+        assert candidate["metrics"]["avg_selection_efficiency"] == pytest.approx(0.5)
+
+    def test_the_retry_conjunct_is_reachable_and_flips_the_verdict(
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
+    ) -> None:
+        """Anti-vacuity: prove the rule still has two variables.
+
+        Dropping an unmeasured conjunct is only safe if the conjunct comes
+        back when something measures it. The same four servings are scored
+        twice — once as the real feedback path emits them, once with a
+        hypothetical producer stamping ``had_retry`` on two of the four.
+        Success is 4/4 either way, so ``success_rate`` alone cannot
+        explain the difference: the first run promotes, the second is
+        ``investigate_noise`` on the retry disjunct alone (0.5 >= the 0.5
+        noise threshold, while success 1.0 is far above the 0.4 one).
+
+        The ``had_retry`` arm is synthesized directly onto the event
+        because no surface produces it. That is the point of the test: it
+        is the contract a producer would have to meet, pinned before one
+        exists rather than after.
+        """
+
+        def _score(*, with_retry: bool) -> str:
+            log = SQLiteEventLog(tmp_path / f"retry-{with_retry}.db")
+            try:
+                for n in range(4):
+                    pack_id = self._build_pack_with(
+                        log, run_id=f"run-{n}", candidates=4, max_items=2
+                    )
+                    payload = {
+                        "feedback_id": f"fb-{n}",
+                        "run_id": f"run-{n}",
+                        "pack_id": pack_id,
+                        "intent_family": "deploy_validation",
+                        "outcome": "success",
+                        "success": True,
+                        "helpful_item_ids": ["doc:runbook-0"],
+                    }
+                    if with_retry:
+                        payload["had_retry"] = n < 2
+                    log.emit(
+                        EventType.FEEDBACK_RECORDED,
+                        source="test:hypothetical-producer",
+                        entity_id=pack_id,
+                        entity_type="pack",
+                        payload=payload,
+                    )
+                observations = build_learning_observations_from_event_log(log)
+                assert len(observations) == 4
+                report = analyze_learning_observations(
+                    observations=observations, registry=learning_registry
+                )
+                candidate = report["candidates"][0]
+                assert candidate["metrics"]["success_rate"] == pytest.approx(1.0)
+                if with_retry:
+                    assert candidate["metrics"]["retry_rate"] == pytest.approx(0.5)
+                    assert candidate["metrics_coverage"]["retry_observed"] == 4
+                else:
+                    assert candidate["metrics"]["retry_rate"] is None
+                return str(candidate["recommendation_type"])
+            finally:
+                log.close()
+
+        assert _score(with_retry=False) == "promote_guidance"
+        assert _score(with_retry=True) == "investigate_noise"
+
+    def test_promotion_description_states_retry_as_unmeasured(
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
+    ) -> None:
+        """A promotion mints a durable node read back as context.
+
+        Its description must not assert ``retry_rate=0.0`` for a quantity
+        nothing measured — that would persist a fabricated measurement
+        into the graph, where no later reader can tell it from a real one.
+        """
+        from trellis.learning import build_learning_promotion_payloads
+
+        for run in ("run-a", "run-b"):
+            pack_id = self._build_pack_with(
+                event_log, run_id=run, candidates=4, max_items=2
+            )
+            _record(
+                event_log,
+                tmp_path,
+                pack_id=pack_id,
+                run_id=run,
+                intent="validate the deploy convention",
+                intent_family="deploy_validation",
+                items_served=["doc:runbook-0"],
+                items_referenced=["doc:runbook-0"],
+                outcome="success",
+            )
+        report = analyze_learning_observations(
+            observations=build_learning_observations_from_event_log(event_log),
+            registry=learning_registry,
+        )
+        payloads = build_learning_promotion_payloads(
+            candidate=report["candidates"][0],
+            promotion_name="Deploy runbook",
+            rationale="Consistently precedes clean deploys.",
+        )
+        description = payloads["entity_payload"]["properties"]["description"]
+        assert "retry_rate not measured" in description
+        assert "retry_rate=0.0" not in description
+        assert payloads["entity_payload"]["properties"]["retry_rate"] is None

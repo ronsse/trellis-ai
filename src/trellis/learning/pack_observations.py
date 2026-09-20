@@ -22,7 +22,7 @@ because the JSONL alone does not carry the per-item ``item_type`` /
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -224,11 +224,61 @@ def _join_one(
         observation["had_retry"] = bool(feedback_payload["had_retry"])
     if "injected" in feedback_payload:
         observation["injected"] = bool(feedback_payload["injected"])
-    selection_efficiency = pack_payload.get("selection_efficiency")
-    if isinstance(selection_efficiency, int | float):
-        observation["selection_efficiency"] = float(selection_efficiency)
+    selection_efficiency = derive_selection_efficiency(pack_payload)
+    if selection_efficiency is not None:
+        observation["selection_efficiency"] = selection_efficiency
 
     return observation
 
 
-__all__ = ["build_learning_observations_from_event_log"]
+def derive_selection_efficiency(pack_payload: Mapping[str, Any]) -> float | None:
+    """What fraction of the candidates the walk saw actually got served.
+
+    ``analyze_learning_observations`` has ranked on
+    ``avg_selection_efficiency`` since the initial commit and read it from
+    ``pack_payload["selection_efficiency"]`` — **a key no emitter has ever
+    written**, on any deployment (0 of 216 ``PACK_ASSEMBLED`` rows in the
+    reference deployment's trailing 30 days). The quantity itself was
+    never missing, only the name: ``PackBuilder._emit_telemetry`` records
+    every candidate the walk saw, split into the ones it admitted
+    (``injected_items``) and the ones it rejected (``rejected_items``), so
+    the ratio is already on the row. Deriving it is strictly better than
+    adding a field for a caller to supply, because a field nobody supplies
+    is how this metric came to read a constant in the first place.
+
+    This is the pack-level form of the per-strategy ``yield_rate`` in
+    :mod:`trellis.retrieve.telemetry`, which divides the same two counts
+    over a whole window rather than over one pack. The two are deliberately
+    computed from the same payload keys rather than from a second stored
+    number — see #464: two counters over one tree drift.
+
+    Returns ``None`` — *unobserved*, not ``0.0`` — when the row carries no
+    ``rejected_items`` key at all. A **present but empty** list is a real
+    measurement (the walk rejected nothing, efficiency 1.0); an **absent**
+    key means the row did not come from ``_emit_telemetry``, which writes
+    it unconditionally for every flat pack. Collapsing those two into one
+    number is the same conflation that makes ``had_retry`` unreadable
+    below, and ``analyze_learning_observations`` already knows how to carry
+    the distinction: it keeps a ``selection_efficiency_count`` and reports
+    ``None`` when nothing was observed.
+
+    Sectioned packs emit no ``injected_items`` at all and so contribute no
+    observations to this join (CLAUDE.md, "Feedback path"); they reach here
+    only as an absent numerator, which is likewise reported as unobserved.
+    """
+    rejected = pack_payload.get("rejected_items")
+    injected = pack_payload.get("injected_items")
+    if not isinstance(rejected, Sequence) or isinstance(rejected, str | bytes):
+        return None
+    if not isinstance(injected, Sequence) or isinstance(injected, str | bytes):
+        return None
+    seen = len(injected) + len(rejected)
+    if seen == 0:
+        return None
+    return len(injected) / seen
+
+
+__all__ = [
+    "build_learning_observations_from_event_log",
+    "derive_selection_efficiency",
+]

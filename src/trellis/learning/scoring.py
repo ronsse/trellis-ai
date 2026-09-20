@@ -114,7 +114,9 @@ def _accumulate_item(
             "times_served": 0,
             "success_count": 0,
             "retry_count": 0,
+            "retry_observed_count": 0,
             "injected_count": 0,
+            "injected_observed_count": 0,
             "selection_efficiency_total": 0.0,
             "selection_efficiency_count": 0,
             "source_strategies": {},
@@ -150,10 +152,24 @@ def _accumulate_item(
     )
     if str(observation.get("outcome", "")).strip() == "success":
         metrics["success_count"] += 1
-    if bool(observation.get("had_retry")):
-        metrics["retry_count"] += 1
-    if bool(observation.get("injected")):
-        metrics["injected_count"] += 1
+    # ``had_retry`` and ``injected`` keep a *coverage* denominator beside
+    # the numerator, the way ``selection_efficiency`` always has. Without
+    # one, ``observation.get(...)`` returns ``None`` for a field no
+    # producer writes and ``bool()`` renders it ``False`` — so "no agent
+    # reported a retry" and "nothing can report a retry" both arrive as
+    # ``retry_count == 0`` and leave as ``retry_rate == 0.0``. That is the
+    # conflation, not the missing field: a rate of 0.0 is a measurement,
+    # and this one was manufactured. Absence is reported as absence (the
+    # ``capture_coverage`` idiom) so a reviewer can tell a clean record
+    # from an unwired one.
+    if "had_retry" in observation:
+        metrics["retry_observed_count"] += 1
+        if bool(observation["had_retry"]):
+            metrics["retry_count"] += 1
+    if "injected" in observation:
+        metrics["injected_observed_count"] += 1
+        if bool(observation["injected"]):
+            metrics["injected_count"] += 1
 
     sel_eff = observation.get("selection_efficiency")
     if isinstance(sel_eff, float | int):
@@ -194,9 +210,14 @@ def analyze_learning_observations(
 
         times_served = int(metrics["times_served"])
         success_rate = metrics["success_count"] / times_served if times_served else 0.0
-        retry_rate = metrics["retry_count"] / times_served if times_served else 0.0
+        # Divided by the observations that *reported* the field, not by
+        # every serving — an unreported serving is not a serving without a
+        # retry. ``None`` when nothing reported it at all.
+        retry_observed = int(metrics["retry_observed_count"])
+        retry_rate = metrics["retry_count"] / retry_observed if retry_observed else None
+        injected_observed = int(metrics["injected_observed_count"])
         injection_rate = (
-            metrics["injected_count"] / times_served if times_served else 0.0
+            metrics["injected_count"] / injected_observed if injected_observed else None
         )
         avg_selection_efficiency = (
             metrics["selection_efficiency_total"]
@@ -237,12 +258,28 @@ def analyze_learning_observations(
             "metrics": {
                 "times_served": times_served,
                 "success_rate": round(success_rate, 4),
-                "retry_rate": round(retry_rate, 4),
-                "injection_rate": round(injection_rate, 4),
+                "retry_rate": None if retry_rate is None else round(retry_rate, 4),
+                "injection_rate": (
+                    None if injection_rate is None else round(injection_rate, 4)
+                ),
                 "avg_selection_efficiency": (
                     None
                     if avg_selection_efficiency is None
                     else round(avg_selection_efficiency, 4)
+                ),
+            },
+            # How much of the corpus could answer each metric at all.
+            # ``times_served`` is the denominator every rate would have
+            # used before; the per-metric counts say which of them were
+            # actually divisible. A reviewer reading
+            # ``"retry_rate": null`` needs to know whether that is a
+            # sparse signal or an unwired one.
+            "metrics_coverage": {
+                "observations": times_served,
+                "retry_observed": retry_observed,
+                "injected_observed": injected_observed,
+                "selection_efficiency_observed": int(
+                    metrics["selection_efficiency_count"]
                 ),
             },
             "evidence_refs": sorted(set(metrics["evidence_refs"]))[:10],
@@ -253,7 +290,7 @@ def analyze_learning_observations(
                 "source_item_id": item_id,
                 "source_item_type": metrics.get("item_type"),
                 "success_rate": round(success_rate, 4),
-                "retry_rate": round(retry_rate, 4),
+                "retry_rate": None if retry_rate is None else round(retry_rate, 4),
                 "support_count": times_served,
                 "source_of_truth": "reviewed_promotion",
             },
@@ -581,9 +618,23 @@ def _recommend_learning_action(
     *,
     item_type: str,
     success_rate: float,
-    retry_rate: float,
+    retry_rate: float | None,
     registry: ParameterRegistry,
 ) -> str | None:
+    """Classify one candidate, skipping any conjunct nothing measured.
+
+    ``retry_rate`` is ``None`` when no observation reported ``had_retry``.
+    An unmeasured conjunct **drops out of the rule** rather than
+    evaluating: it must not silently satisfy the promote conjunct (which
+    a fabricated ``0.0`` did, since ``0.0 <= promote_retry`` for every
+    threshold an operator would set) nor silently fail the noise disjunct
+    (which the same ``0.0`` did, since ``0.0 >= noise_retry`` never
+    holds). Both arms therefore behave exactly as they did while the rate
+    was manufactured — the rule was *already* single-variable and this
+    only makes it say so. ``metrics_coverage`` on the candidate records
+    which conjuncts were evaluated, so a reviewer reads a rule that ran on
+    one variable as a rule that ran on one variable.
+    """
     scope = ParameterScope(component_id=LEARNING_SCORING_COMPONENT)
     promote_success = _resolve_required_threshold(
         registry, scope, LEARNING_PROMOTE_SUCCESS_KEY
@@ -596,11 +647,14 @@ def _recommend_learning_action(
     )
     noise_retry = _resolve_required_threshold(registry, scope, LEARNING_NOISE_RETRY_KEY)
 
-    if success_rate >= promote_success and retry_rate <= promote_retry:
+    retry_low = retry_rate is None or retry_rate <= promote_retry
+    retry_high = retry_rate is not None and retry_rate >= noise_retry
+
+    if success_rate >= promote_success and retry_low:
         if item_type == "precedent":
             return "promote_precedent"
         return "promote_guidance"
-    if success_rate <= noise_success or retry_rate >= noise_retry:
+    if success_rate <= noise_success or retry_high:
         return "investigate_noise"
     return None
 
@@ -625,9 +679,19 @@ def _build_precedent_description(
     item = candidate.get("item_id", "unknown")
     sr = metrics.get("success_rate")
     rr = metrics.get("retry_rate")
+    # A promotion mints a durable node whose description is read by humans
+    # and served back as context, so it states only what was measured.
+    # ``retry_rate`` is ``None`` on every deployment that has no producer
+    # for ``had_retry``; printing "retry_rate=0.0" there would persist a
+    # fabricated measurement into the graph permanently.
+    measured = (
+        f"success_rate={sr} and retry_rate={rr}"
+        if rr is not None
+        else f"success_rate={sr} (retry_rate not measured)"
+    )
     parts = [
         f"Reviewed learning for intent family '{family}'.",
-        f"Source item '{item}' showed success_rate={sr} and retry_rate={rr}.",
+        f"Source item '{item}' showed {measured}.",
     ]
     if rationale:
         parts.append(f"Review rationale: {rationale}")
