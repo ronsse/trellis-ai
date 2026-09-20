@@ -280,16 +280,26 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   it had a green 56-case Postgres contract run on its PR and reported it as unverified.
   Re-read `.github/workflows/live-infra.yml`'s `on:` block rather than trusting this
   sentence.
-- **Nowhere at all:** the ArcadeDB graph contract (`test_arcadedb_graph_contract.py`).
-  ArcadeDB is the *blessed* graph + vector substrate and its contract has no service
-  container in any workflow ([#351](https://github.com/ronsse/trellis-ai/issues/351)).
-  The 59 Postgres-marked tests under `tests/unit/stores/` outside `contracts/` are still
-  deselected: the all-extras leg supplies their imports but no database, while
-  `live-infra.yml` names paths rather than markers. Sweeping that whole directory into the
-  live job does not work yet:
-  `test_neo4j_vector.py::TestQuery` issues AuraDB-only Cypher that self-hosted
+- **Partly — and this bullet read "nowhere at all" until 2026-09-20, by which time both
+  of its halves were false.** The ArcadeDB graph contract runs: PR #543 gave `live-infra.yml`
+  an `arcadedata/arcadedb:26.8.1` service and `TRELLIS_TEST_ARCADEDB=1`, and
+  `tests/unit/stores/contracts/` is in its path list, closing
+  [#351](https://github.com/ronsse/trellis-ai/issues/351) on 2026-09-08. And the residual
+  it claimed — "59 Postgres-marked tests under `tests/unit/stores/` outside `contracts/`" —
+  is **zero**: all 61 marked tests in `test_postgres_stores.py`, `test_pgvector.py` and
+  `test_api_key_store.py` are named individually in that path list. What is actually
+  unreached there is **27 tests, and none of them Postgres**: `test_arcadedb_graph.py` (8)
+  and `test_arcadedb_vector.py` (17), whose marker the job now enables but whose paths it
+  does not name, plus two `slow` cases in `test_sqlite_graph_bulk_upsert.py`
+  (AST count over `tests/unit/stores/*.py`, 2026-09-20). Separately, `contracts/` holds
+  **no ArcadeDB vector contract at all** — `VectorStoreContractTests` is subclassed for
+  pgvector and SQLite only, so the blessed *vector* substrate is measured by
+  `test_arcadedb_vector.py`, which nothing runs. **Re-derive this bullet rather than
+  editing its numbers**: a hand-written roster of what CI reaches rots in both directions,
+  and this one was wrong in both at once. Sweeping the whole directory in still does not
+  work: `test_neo4j_vector.py::TestQuery` issues AuraDB-only Cypher that self-hosted
   `neo4j:2025.12` cannot parse, and unlike the e2e suite it has no capability probe
-  ([#356](https://github.com/ronsse/trellis-ai/issues/356)).
+  ([#356](https://github.com/ronsse/trellis-ai/issues/356), still open).
 
 Note the shape of the #345 defect, because it is the one this repo keeps producing: the
 pgvector contract had *never executed anywhere*, because its fixture called `_conn` as an
