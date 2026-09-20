@@ -41,6 +41,28 @@ that a naive `def test_` scan reports as zero nodes; and an independent
 tokenizer scan of the same nodes, compared over line numbers so a
 divergence names the line it missed. Each guard is itself proved by a
 mutant: re-introducing the blind spot must make the guard fail.
+
+**A second relation, for the files this one structurally cannot see.**
+Everything above reasons over files pytest collects — `test_*.py`. The
+shared contract suites under `tests/unit/stores/contracts/` are not
+among them: `graph_store_contract.py` defines the spec and collects
+nothing, running exactly insofar as some *executed* module subclasses
+it. So a suite can be perfectly covered by the rule above (it is not a
+test file, so it is not in the population) while pinning semantics no
+backend has ever been checked against. That is
+[#579](https://github.com/ronsse/trellis-ai/issues/579) read from the
+other side, and `test_every_shared_contract_suite_has_an_executed_subclass`
+is where it was first derived, in #578. The two rules ship in one file
+because they are one question asked of two file kinds, and because a
+second module would need its own copy of the coverage join — the
+duplication #464 turned into two counters that drifted.
+
+The subclass scan reads the **whole** covered tree, not just
+`contracts/`. All 14 subclasses live there today (measured, not
+assumed), so the narrower scan #578 shipped returns the same answer —
+but a subclass moved one directory out would make the narrow version
+report a suite as unreached while it runs on every pull request, and a
+rule that cries wolf about coverage is how the next one gets deleted.
 """
 
 from __future__ import annotations
@@ -81,6 +103,16 @@ TEST_FILE_FLOOR = 350
 TEST_NODE_FLOOR = 6000
 WORKFLOW_LEG_FLOOR = 5
 GATING_MARKER_FLOOR = 6
+
+# Hand-read at 1ef5c9c: six shared suite classes, one module each under
+# contracts/, one class per store ABC in `src/trellis/stores/base/`. The
+# floor sits one below because consolidating two suites is an ordinary
+# change, while deleting a store ABC is a design decision that arrives
+# with its own review — whereas a scan that stops finding suite classes
+# makes `test_every_shared_contract_suite_has_an_executed_subclass` pass
+# over an empty population, which is the one failure it cannot report
+# about itself.
+SHARED_SUITE_FLOOR = 5
 
 #: Files that run in no workflow leg, each with the measured reason.
 #:
@@ -123,6 +155,27 @@ DELIBERATELY_UNWIRED: dict[Path, str] = {
         "those tests into a 30s VectorIndexNotOnlineError apiece."
     ),
 }
+
+#: Shared contract suites no executed module subclasses, each with why.
+#:
+#: Separate from :data:`DELIBERATELY_UNWIRED` rather than folded into
+#: it, because the two key spaces are disjoint and the failures are not
+#: the same fact: that map is keyed by files pytest collects and asserts
+#: its entries are *uncovered*, so a suite module named there would be
+#: reported stale by its own both-directions check. A dark test file is
+#: coverage that never ran; an unsubclassed suite is a spec no backend
+#: was ever measured against.
+#:
+#: **It is empty, and that is a claim rather than a placeholder.** All
+#: six suites have a subclass that runs on every pull request, which has
+#: only been true since #543 gave the ArcadeDB graph contract a service
+#: container. The remaining gap cannot be written here: `ArcadeDBVectorStore`
+#: has no `VectorStoreContractTests` subclass *at all* (#579), so the
+#: suite is reached — by sqlite and pgvector — while the blessed vector
+#: substrate is unchecked. An absent subclass is invisible to a rule
+#: about the subclasses that exist, which is why #579 is an issue and
+#: not an entry.
+DELIBERATELY_UNSUBCLASSED: dict[Path, str] = {}
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -329,6 +382,152 @@ def _uncovered_files(
     return uncovered
 
 
+@dataclass(frozen=True)
+class SharedSuite:
+    """A contract suite: test methods pytest can reach only by inheritance.
+
+    Structural, not a directory or a naming convention: a class holding
+    at least one ``test*`` method, declared in a file pytest's
+    ``python_files`` does not collect. Both halves matter.
+    ``GraphStoreContractTests`` is not ``Test``-prefixed, so it would be
+    skipped even if its module *were* collected; and its module is named
+    ``graph_store_contract.py``, so it is not collected in the first
+    place. Either property alone makes the class run through subclasses;
+    the conjunction is what makes it a *spec*.
+
+    Matching on shape rather than on ``tests/unit/stores/contracts/``
+    means a suite moved, renamed, or added one directory over is still
+    in the population — the roster-rot direction this whole module
+    exists to avoid. Measured at 1ef5c9c: the shape finds exactly the
+    six, tree-wide, with no false positives.
+    """
+
+    path: Path
+    name: str
+    lineno: int
+    methods: int
+
+    def describe(self) -> str:
+        return f"{self.path}:{self.lineno}: {self.name} ({self.methods} test methods)"
+
+
+def _base_names(cls: ast.ClassDef) -> set[str]:
+    """Base class names as written, bare or dotted.
+
+    ``ast.Attribute`` contributes its final ``.attr`` so
+    ``contracts.GraphStoreContractTests`` and a bare
+    ``GraphStoreContractTests`` resolve to the same name — matching is by
+    bare name because that is what a subclass site actually writes after
+    importing. A name collision between two unrelated classes can
+    therefore only make a suite look *reached*, never unreached, which
+    is the direction that fails quietly rather than crying wolf.
+    """
+    names: set[str] = set()
+    for base in cls.bases:
+        if isinstance(base, ast.Name):
+            names.add(base.id)
+        elif isinstance(base, ast.Attribute):
+            names.add(base.attr)
+    return names
+
+
+def _shared_suites(root: Path = TESTS_ROOT) -> list[SharedSuite]:
+    """Every uncollected class holding test methods, relative to *root*."""
+    collected = set(_test_files(root))
+    suites: list[SharedSuite] = []
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" in path.parts or path in collected:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for statement in tree.body:
+            if not isinstance(statement, ast.ClassDef):
+                continue
+            methods = sum(1 for child in statement.body if _is_test_function(child))
+            if methods:
+                suites.append(
+                    SharedSuite(
+                        path=path.relative_to(root),
+                        name=statement.name,
+                        lineno=statement.lineno,
+                        methods=methods,
+                    )
+                )
+    return suites
+
+
+def _covered_files(
+    root: Path = TESTS_ROOT,
+    legs: list[WorkflowLeg] | None = None,
+    gating: frozenset[str] | None = None,
+) -> list[Path]:
+    """The complement of :func:`_uncovered_files` over the same walk.
+
+    Defined by subtraction rather than by a second join. Two functions
+    computing "runs" and "does not run" independently is #464's shape —
+    two counters over one tree that agree until they do not — and here
+    the drift would be silent in the worst direction: a file the suite
+    rule calls dark while this one reads its subclasses as executed.
+    """
+    uncovered = set(_uncovered_files(root, legs, gating))
+    return [
+        path.relative_to(root)
+        for path in _test_files(root)
+        if path.relative_to(root) not in uncovered
+    ]
+
+
+def _executed_bases(paths: list[Path], root: Path = TESTS_ROOT) -> set[str]:
+    """Class names reachable as a base from something pytest collects.
+
+    Transitive, and seeded only from ``Test``-prefixed classes. Both
+    choices are load-bearing in opposite directions. Seeding from every
+    class would count ``class _Intermediate(VectorStoreContractTests)``
+    as reaching the suite when pytest collects nothing from it — the
+    suite would read as executed while running nowhere, which is exactly
+    the false negative this rule exists to catch. Walking only *direct*
+    bases would then report a genuine ``TestX(_Mixin)`` chain as
+    unreached — a false positive, and a rule that cries wolf about
+    coverage is a rule someone deletes.
+    """
+    declared: dict[str, set[str]] = {}
+    roots: set[str] = set()
+    for relative in paths:
+        tree = ast.parse((root / relative).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            declared.setdefault(node.name, set()).update(_base_names(node))
+            if node.name.startswith("Test"):
+                roots.add(node.name)
+    reached: set[str] = set()
+    queue = sorted(roots)
+    while queue:
+        for base in sorted(declared.get(queue.pop(), ())):
+            if base not in reached:
+                reached.add(base)
+                queue.append(base)
+    return reached
+
+
+def _unreached_suites(
+    root: Path = TESTS_ROOT,
+    legs: list[WorkflowLeg] | None = None,
+    gating: frozenset[str] | None = None,
+) -> list[SharedSuite]:
+    """Shared suites no *executed* module inherits.
+
+    #579 read from the other side: ``VectorStoreContractTests`` has two
+    subclasses where the registry has three vector backends, and the
+    missing one is the blessed substrate. This function cannot see that
+    particular gap — an absent subclass leaves no trace to scan — but it
+    is the same question, and it does catch the version that has
+    actually shipped here twice: a subclass that exists and runs
+    nowhere, which reads identically to coverage.
+    """
+    executed = _executed_bases(_covered_files(root, legs, gating), root)
+    return [suite for suite in _shared_suites(root) if suite.name not in executed]
+
+
 def _conftest_include_flags(path: Path = CONFTEST) -> dict[str, frozenset[str]]:
     """``{env var: markers}`` read out of ``tests/conftest.py`` by AST.
 
@@ -498,8 +697,68 @@ def test_every_unwired_reason_is_written() -> None:
     )
 
 
+def test_every_shared_contract_suite_has_an_executed_subclass() -> None:
+    """A spec runs exactly insofar as an executed module inherits it.
+
+    The rule above cannot ask this. A suite module is not a test file,
+    so it is not in that population at all — and "absent from the
+    population" renders identically to "covered". This is the same
+    question asked of the other file kind, and it is where
+    [#579](https://github.com/ronsse/trellis-ai/issues/579)'s shape
+    lives: 100 graph-contract tests pinning the semantics every backend
+    must honour are worth exactly as much as the number of executed
+    backends that inherit them.
+
+    Both directions, like its neighbour, and for the same reason: a
+    named suite that is now reached is the roster rotting the other way.
+    """
+    unreached = {suite.name: suite for suite in _unreached_suites()}
+    named = set(DELIBERATELY_UNSUBCLASSED)
+
+    unnamed = sorted(
+        suite.describe() for suite in unreached.values() if suite.path not in named
+    )
+    assert not unnamed, (
+        "these contract suites define a spec that no executed module "
+        "subclasses, so the shared semantics they pin have never run:\n  "
+        + "\n  ".join(unnamed)
+        + "\n\nA suite is reached when some test file that CI actually runs "
+        "declares a Test*-prefixed class inheriting it. Adding a subclass "
+        "is not enough on its own — the file holding it has to be covered "
+        "by the rule above, or this stays red. Only name it here when "
+        "running a backend against it would be dishonest, and write down "
+        "what you measured."
+    )
+
+    reached_paths = {suite.path for suite in unreached.values()}
+    stale = sorted(str(path) for path in named - reached_paths)
+    assert not stale, (
+        "these suites are named in DELIBERATELY_UNSUBCLASSED but now have "
+        "an executed subclass:\n  " + "\n  ".join(stale) + "\n\nDelete the entry."
+    )
+
+    thin = sorted(
+        str(path)
+        for path, reason in DELIBERATELY_UNSUBCLASSED.items()
+        if not _written(reason)
+    )
+    assert not thin, (
+        f"DELIBERATELY_UNSUBCLASSED entries with no written reason: {thin}. "
+        f"At least 20 characters and 4 words."
+    )
+
+    missing = sorted(
+        str(path)
+        for path in DELIBERATELY_UNSUBCLASSED
+        if not (TESTS_ROOT / path).is_file()
+    )
+    assert not missing, (
+        f"DELIBERATELY_UNSUBCLASSED names files that do not exist: {missing}."
+    )
+
+
 def test_the_population_the_rule_reasons_over_is_hand_read() -> None:
-    """Four floors, because the rule divides by four different scans.
+    """Five floors, because the rule divides by five different scans.
 
     Every other guard here is relative to one of these numbers, so a scan
     that merely *shrinks* satisfies all of them — #466's floor was
@@ -539,6 +798,16 @@ def test_the_population_the_rule_reasons_over_is_hand_read() -> None:
         subject="default-deselected marker",
         hint="derived from pyproject's addopts -m expression; an empty set "
         "makes every marker-gated file look runnable everywhere.",
+    )
+
+    assert_hand_read_floor(
+        len(_shared_suites()),
+        SHARED_SUITE_FLOOR,
+        subject="shared contract suite",
+        hint="the two halves of the suite rule fail in opposite ways, and "
+        "only one of them is loud: an empty base set reports all six "
+        "suites unreached, while an empty suite set passes over nothing "
+        "at all. This floor is the guard for the silent half.",
     )
 
 
@@ -1060,3 +1329,312 @@ def test_a_leg_that_names_a_path_does_not_cover_its_siblings(tmp_path: Path) -> 
         "a leg naming test_module_marked.py must not cover a sibling whose "
         "name merely starts with it."
     )
+
+
+# --------------------------------------------------------------------------
+# The suite relation — a synthetic tree where the answer is known
+# --------------------------------------------------------------------------
+
+_SYNTHETIC_SUITE_TREE: dict[str, str] = {
+    # Not matched by python_files, so nothing here is collected directly.
+    "shared/store_contracts.py": """
+class GraphStoreContractTests:
+    def test_upsert(self):
+        assert True
+
+    def test_query(self):
+        assert True
+
+
+class VectorStoreContractTests:
+    def test_similarity(self):
+        assert True
+
+
+class EventLogContractTests:
+    def test_emit(self):
+        assert True
+
+
+class BlobStoreContractTests:
+    def test_put(self):
+        assert True
+
+
+class TraceStoreContractTests:
+    def test_ingest(self):
+        assert True
+
+
+class Fixtures:
+    def make_store(self):
+        return None
+""",
+    "contracts/test_reached.py": """
+from shared.store_contracts import GraphStoreContractTests
+
+
+class TestReached(GraphStoreContractTests):
+    pass
+""",
+    # The same shape, one directory outside contracts/.
+    "far/test_elsewhere.py": """
+from shared.store_contracts import VectorStoreContractTests
+
+
+class TestElsewhere(VectorStoreContractTests):
+    pass
+""",
+    # A real subclass in a file no synthetic leg runs.
+    "contracts/test_dark.py": """
+import pytest
+
+from shared.store_contracts import EventLogContractTests
+
+pytestmark = pytest.mark.postgres
+
+
+class TestDark(EventLogContractTests):
+    pass
+""",
+    # Covered file, but the only thing inheriting the suite is a class
+    # pytest never collects.
+    "contracts/test_private.py": """
+from shared.store_contracts import BlobStoreContractTests
+
+
+class _Intermediate(BlobStoreContractTests):
+    pass
+
+
+def test_unrelated():
+    assert True
+""",
+    # Collectable, but two levels up from the suite.
+    "contracts/test_chain.py": """
+from shared.store_contracts import TraceStoreContractTests
+
+
+class _Mixin(TraceStoreContractTests):
+    pass
+
+
+class TestChained(_Mixin):
+    pass
+""",
+}
+
+#: What ``_unreached_suites`` must report over the tree above. An exact
+#: set: four of the six suites are reached by four different routes and
+#: two are not, so every branch of the relation is pinned from both
+#: sides at once.
+_SYNTHETIC_UNREACHED = {"EventLogContractTests", "BlobStoreContractTests"}
+
+_SUITE_GATING = frozenset({"postgres", "neo4j", "arcadedb", "live", "slow"})
+
+
+def _write_synthetic_suite_tree(root: Path) -> None:
+    for name, source in _SYNTHETIC_SUITE_TREE.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source.lstrip("\n"), encoding="utf-8")
+
+
+def _suite_verdict(tests_root: Path, legs: list[WorkflowLeg]) -> set[str]:
+    return {suite.name for suite in _unreached_suites(tests_root, legs, _SUITE_GATING)}
+
+
+def test_the_suite_relation_is_computed_from_the_tree(tmp_path: Path) -> None:
+    """Four routes to reached, two to unreached, through the shipped call.
+
+    The live rule passes today because all six suites are reached, and a
+    rule that only ever returns the empty list is indistinguishable from
+    one wired to ``return []``. So the same functions are run against a
+    tree written here, where the answer is known and every branch is
+    exercised: reached in ``contracts/``, reached outside it, reached
+    through an intermediate class, unreached because the only subclass
+    is dark, and unreached because the only inheritor is uncollectable.
+    """
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    _write_synthetic_suite_tree(tests_root)
+
+    suites = {suite.name for suite in _shared_suites(tests_root)}
+    assert suites == {
+        "GraphStoreContractTests",
+        "VectorStoreContractTests",
+        "EventLogContractTests",
+        "BlobStoreContractTests",
+        "TraceStoreContractTests",
+    }, (
+        "the suite population must hold every uncollected class carrying "
+        "test methods, and nothing else: Fixtures has no test methods and "
+        "must not be counted, or the rule starts demanding subclasses for "
+        "every helper in the tree."
+    )
+
+    legs = _synthetic_legs(tmp_path, _SYNTHETIC_WORKFLOW_UNMARKED)
+    assert _suite_verdict(tests_root, legs) == _SYNTHETIC_UNREACHED
+
+    assert _suite_verdict(tests_root, []) == suites, (
+        "with no workflow legs at all, no module executes, so every suite "
+        "must be unreached. If it is not, the relation is not reading "
+        "coverage."
+    )
+
+
+def test_the_suite_corpus_carries_every_shape_the_relation_must_separate(
+    tmp_path: Path,
+) -> None:
+    """Before asking whether the verdict is right, ask whether this can tell.
+
+    The exact set above pins whatever this corpus happens to hold, which
+    is #488's weakness restated: a corpus of one reached suite and one
+    dark suite would pin both perfectly and separate none of the four
+    decisions the relation actually makes. So each shape is asserted by
+    name, and deleting one from ``_SYNTHETIC_SUITE_TREE`` fails *here*,
+    saying which distinction went unguarded.
+    """
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    _write_synthetic_suite_tree(tests_root)
+    legs = _synthetic_legs(tmp_path, _SYNTHETIC_WORKFLOW_UNMARKED)
+    covered = set(_covered_files(tests_root, legs, _SUITE_GATING))
+
+    assert Path("far/test_elsewhere.py") in covered, (
+        "no covered subclass outside contracts/; without one, a scan "
+        "restricted to that directory looks correct here."
+    )
+    assert Path("contracts/test_dark.py") not in covered, (
+        "no dark subclass; without one, using every test file instead of "
+        "the covered ones looks correct here — and that is the whole "
+        "point of the relation."
+    )
+    assert Path("contracts/test_private.py") in covered, (
+        "the private-inheritor file must itself be covered, or it proves "
+        "nothing about the Test* seed: an uncovered file is excluded one "
+        "step earlier, for a different reason."
+    )
+    assert Path("contracts/test_chain.py") in covered, (
+        "no two-level inheritance chain in a covered file; without one, "
+        "reading only direct bases looks correct here."
+    )
+    assert any(
+        suite.name == "GraphStoreContractTests" and suite.methods == 2
+        for suite in _shared_suites(tests_root)
+    ), "no multi-method suite; the method count is what excludes helpers."
+
+
+def test_a_contracts_only_subclass_scan_is_caught_by_this_corpus(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """#578's narrower scan, restricted at the input rather than rewritten.
+
+    The mutant hands the *shipped* ``_executed_bases`` a smaller file
+    list, so what is being tested is still the function the rule calls.
+    A suite reached only from outside ``tests/unit/stores/contracts/``
+    then reads as unreached — a false alarm about a file that runs on
+    every pull request, which is the failure mode that gets a coverage
+    rule deleted rather than fixed.
+    """
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    _write_synthetic_suite_tree(tests_root)
+    legs = _synthetic_legs(tmp_path, _SYNTHETIC_WORKFLOW_UNMARKED)
+    shipped = _executed_bases
+
+    def contracts_only(paths: list[Path], root: Path = TESTS_ROOT) -> set[str]:
+        return shipped([p for p in paths if p.parts[0] == "contracts"], root)
+
+    monkeypatch.setattr(sys.modules[__name__], "_executed_bases", contracts_only)
+    assert _suite_verdict(tests_root, legs) == _SYNTHETIC_UNREACHED | {
+        "VectorStoreContractTests"
+    }
+
+
+def test_treating_every_file_as_executed_is_caught_by_this_corpus(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Drop the coverage join and the dark suite reads as reached.
+
+    This is the mutant that matters most, because it is the one a
+    refactor produces by accident: ``_covered_files`` and ``_test_files``
+    differ by three entries on the live tree, and every other assertion
+    in this module would stay green.
+    """
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    _write_synthetic_suite_tree(tests_root)
+    legs = _synthetic_legs(tmp_path, _SYNTHETIC_WORKFLOW_UNMARKED)
+
+    def every_file(
+        root: Path = TESTS_ROOT,
+        legs: list[WorkflowLeg] | None = None,
+        gating: frozenset[str] | None = None,
+    ) -> list[Path]:
+        return [path.relative_to(root) for path in _test_files(root)]
+
+    monkeypatch.setattr(sys.modules[__name__], "_covered_files", every_file)
+    assert _suite_verdict(tests_root, legs) == _SYNTHETIC_UNREACHED - {
+        "EventLogContractTests"
+    }
+
+
+def test_seeding_from_uncollectable_classes_is_caught_by_this_corpus(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """``_Intermediate(BlobStoreContractTests)`` must not count as running.
+
+    One line of ``_executed_bases`` re-implemented, which is weaker than
+    restricting its input — but the property is worth the weaker proof:
+    seeding from every class is the natural simplification, it reads as
+    more thorough, and it silently converts the rule into one that asks
+    whether a suite is *imported*.
+    """
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    _write_synthetic_suite_tree(tests_root)
+    legs = _synthetic_legs(tmp_path, _SYNTHETIC_WORKFLOW_UNMARKED)
+
+    def seed_from_every_class(paths: list[Path], root: Path = TESTS_ROOT) -> set[str]:
+        reached: set[str] = set()
+        for relative in paths:
+            tree = ast.parse((root / relative).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    reached |= _base_names(node)
+        return reached
+
+    monkeypatch.setattr(sys.modules[__name__], "_executed_bases", seed_from_every_class)
+    assert _suite_verdict(tests_root, legs) == _SYNTHETIC_UNREACHED - {
+        "BlobStoreContractTests"
+    }
+
+
+def test_walking_only_direct_bases_is_caught_by_this_corpus(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """``TestChained(_Mixin(TraceStoreContractTests))`` really does run.
+
+    The other side of the previous mutant, and the reason the closure
+    exists rather than a flat ``Test*``-only base read: that version
+    reports a suite as unreached while every one of its tests executes.
+    """
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    _write_synthetic_suite_tree(tests_root)
+    legs = _synthetic_legs(tmp_path, _SYNTHETIC_WORKFLOW_UNMARKED)
+
+    def direct_bases_only(paths: list[Path], root: Path = TESTS_ROOT) -> set[str]:
+        reached: set[str] = set()
+        for relative in paths:
+            tree = ast.parse((root / relative).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                    reached |= _base_names(node)
+        return reached
+
+    monkeypatch.setattr(sys.modules[__name__], "_executed_bases", direct_bases_only)
+    assert _suite_verdict(tests_root, legs) == _SYNTHETIC_UNREACHED | {
+        "TraceStoreContractTests"
+    }
