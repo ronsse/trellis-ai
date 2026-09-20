@@ -22,6 +22,7 @@ from trellis.mutate.commands import (
     CommandStatus,
     OperationRegistry,
 )
+from trellis.mutate.immutable_core import unattended_writer_refusal
 from trellis.stores.base.event_log import EventLog, EventType
 
 logger = structlog.get_logger()
@@ -119,6 +120,28 @@ class MutationExecutor:
         log = logger.bind(command_id=command.command_id, operation=command.operation)
 
         # Stage 1: Validate
+        #
+        # The unattended-writer roster is checked first, above the arg
+        # schema. A writer that runs without a human in the call must be
+        # refused an operation outside its allow-list whether or not the
+        # args happen to be well-formed — otherwise the refusal *reason*
+        # in the audit log depends on arg shape, and the same forbidden
+        # write reports as ``validate`` on one call and
+        # ``immutable_core`` on the next. See
+        # :mod:`trellis.mutate.immutable_core`.
+        roster_refusal = unattended_writer_refusal(command)
+        if roster_refusal is not None:
+            log.warning("immutable_core_rejected", reason=roster_refusal)
+            self._emit_rejection(
+                command, reason="immutable_core", message=roster_refusal
+            )
+            return CommandResult(
+                command_id=command.command_id,
+                status=CommandStatus.REJECTED,
+                operation=command.operation,
+                message=roster_refusal,
+            )
+
         valid, errors = self._registry.validate(command)
         if not valid:
             message = f"Validation failed: {'; '.join(errors)}"
@@ -161,42 +184,9 @@ class MutationExecutor:
                 )
 
         # Stage 3: Idempotency Check
-        if command.idempotency_key:
-            if command.idempotency_key in self._seen_idempotency_keys:
-                # Refresh recency so hot keys aren't evicted ahead of cold ones.
-                self._seen_idempotency_keys.move_to_end(command.idempotency_key)
-                message = f"Duplicate command: {command.idempotency_key}"
-                log.info("duplicate_command", key=command.idempotency_key)
-                self._emit_rejection(
-                    command,
-                    reason="idempotency_replay",
-                    message=message,
-                )
-                return CommandResult(
-                    command_id=command.command_id,
-                    status=CommandStatus.DUPLICATE,
-                    operation=command.operation,
-                    message=message,
-                )
-            # Check persisted events for cross-restart deduplication
-            if self._event_log is not None and self._event_log.has_idempotency_key(
-                command.idempotency_key,
-            ):
-                self._record_idempotency_key(command.idempotency_key)
-                message = f"Duplicate command (persisted): {command.idempotency_key}"
-                log.info("duplicate_command_persisted", key=command.idempotency_key)
-                self._emit_rejection(
-                    command,
-                    reason="idempotency_replay",
-                    message=message,
-                )
-                return CommandResult(
-                    command_id=command.command_id,
-                    status=CommandStatus.DUPLICATE,
-                    operation=command.operation,
-                    message=message,
-                )
-            self._record_idempotency_key(command.idempotency_key)
+        duplicate = self._check_idempotency(command, log)
+        if duplicate is not None:
+            return duplicate
 
         # Stage 4: Execute
         handler = self._handlers.get(command.operation)
@@ -429,6 +419,60 @@ class MutationExecutor:
             policy_warnings=policy_warnings,
         )
 
+    def _check_idempotency(
+        self,
+        command: Command,
+        log: structlog.stdlib.BoundLogger,
+    ) -> CommandResult | None:
+        """Stage 3 — return a DUPLICATE result if this command is a replay.
+
+        Extracted verbatim from :meth:`execute` so the stage list there
+        reads as a sequence of gates rather than as one of them inlined.
+        Returns ``None`` when the command is not a replay, having recorded
+        its key for the next call.
+        """
+        if not command.idempotency_key:
+            return None
+
+        if command.idempotency_key in self._seen_idempotency_keys:
+            # Refresh recency so hot keys aren't evicted ahead of cold ones.
+            self._seen_idempotency_keys.move_to_end(command.idempotency_key)
+            message = f"Duplicate command: {command.idempotency_key}"
+            log.info("duplicate_command", key=command.idempotency_key)
+            self._emit_rejection(
+                command,
+                reason="idempotency_replay",
+                message=message,
+            )
+            return CommandResult(
+                command_id=command.command_id,
+                status=CommandStatus.DUPLICATE,
+                operation=command.operation,
+                message=message,
+            )
+
+        # Check persisted events for cross-restart deduplication
+        if self._event_log is not None and self._event_log.has_idempotency_key(
+            command.idempotency_key,
+        ):
+            self._record_idempotency_key(command.idempotency_key)
+            message = f"Duplicate command (persisted): {command.idempotency_key}"
+            log.info("duplicate_command_persisted", key=command.idempotency_key)
+            self._emit_rejection(
+                command,
+                reason="idempotency_replay",
+                message=message,
+            )
+            return CommandResult(
+                command_id=command.command_id,
+                status=CommandStatus.DUPLICATE,
+                operation=command.operation,
+                message=message,
+            )
+
+        self._record_idempotency_key(command.idempotency_key)
+        return None
+
     def _emit_rejection(
         self,
         command: Command,
@@ -438,9 +482,10 @@ class MutationExecutor:
     ) -> None:
         """Emit a uniform :attr:`EventType.MUTATION_REJECTED` event.
 
-        Called from every rejection stage (``validate`` / ``policy_violation``
-        / ``idempotency_replay``) so the audit trail is symmetric — one event
-        per rejection, ``reason`` discriminates the stage.
+        Called from every rejection stage (``immutable_core`` / ``validate``
+        / ``policy_violation`` / ``idempotency_replay``) so the audit trail
+        is symmetric — one event per rejection, ``reason`` discriminates the
+        stage.
         """
         self._emit_event(
             EventType.MUTATION_REJECTED,
