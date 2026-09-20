@@ -173,30 +173,45 @@ def _score_via_cli(
     assert helpful["recommendation_type"] in PROMOTE_RECOMMENDATIONS, helpful
     assert helpful["metrics"]["times_served"] >= _PACK_ROUNDS
     assert helpful["metrics"]["success_rate"] == pytest.approx(1.0)
-    # The other three ranking metrics are ``None`` here, not ``0.0``, and
-    # this loop is the outside-in proof of why: every pack above was
+    # The other three ranking metrics got two different remedies, and this
+    # loop is where the difference is provable: every pack above was
     # assembled through the real REST surface and graded through the real
-    # MCP ``record_feedback`` tool, so if anything wrote ``had_retry``,
-    # ``injected`` or ``selection_efficiency`` it would have been these
-    # producers. Nothing does. The paired ``metrics_coverage`` counts are
-    # the load-bearing half: ``retry_rate is None`` alone cannot separate
-    # "nobody retried" from "nothing can report a retry", and it was the
-    # fabricated ``0.0`` that let an unwired metric rank candidates as
-    # though it had measured them.
-    #
-    # If you are here because you just wired one of these, that is the
-    # good outcome — assert the value it now produces instead of ``None``,
-    # and move the metric out of this block.
+    # MCP ``record_feedback`` tool, so these are exactly the producers
+    # that would have to write them.
     metrics = helpful["metrics"]
     coverage = helpful["metrics_coverage"]
-    assert coverage["observations"] >= _PACK_ROUNDS, coverage
+    observations = coverage["observations"]
+    assert observations >= _PACK_ROUNDS, coverage
+
+    # (a) ``had_retry`` and ``injected`` have no producer anywhere, and
+    # none was invented. They report ``None`` — *unobserved* — rather than
+    # the fabricated ``0.0`` that let the ranker treat an unwired metric
+    # as a measured one. The coverage count is the load-bearing half:
+    # ``retry_rate is None`` alone cannot separate "nobody retried" from
+    # "nothing can report a retry"; ``retry_observed == 0`` says which.
+    #
+    # If you are here because you just wired one of these, that is the
+    # good outcome — assert the value it now produces, and move the
+    # metric down to (b).
     for metric_key, coverage_key in (
         ("retry_rate", "retry_observed"),
         ("injection_rate", "injected_observed"),
-        ("avg_selection_efficiency", "selection_efficiency_observed"),
     ):
         assert metrics[metric_key] is None, (metric_key, metrics, coverage)
         assert coverage[coverage_key] == 0, (coverage_key, coverage)
+
+    # (b) ``selection_efficiency`` was never missing, only misnamed: the
+    # ratio is derived from the ``injected_items`` / ``rejected_items``
+    # counts ``PackBuilder._emit_telemetry`` writes unconditionally on
+    # every flat pack. So it is *observed*, on all of them — that
+    # ``selection_efficiency_observed == observations`` is the assertion,
+    # not the value. A number here with a short count would mean the
+    # derivation is falling through to ``None`` on some rows, which is
+    # how this metric read as a constant before.
+    assert coverage["selection_efficiency_observed"] == observations, coverage
+    efficiency = metrics["avg_selection_efficiency"]
+    assert isinstance(efficiency, float), (efficiency, metrics)
+    assert 0.0 < efficiency <= 1.0, (efficiency, metrics)
     return payload
 
 
