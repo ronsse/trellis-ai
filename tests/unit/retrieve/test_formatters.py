@@ -929,3 +929,70 @@ class TestFormatFileContext:
         assert "may be incomplete" not in format_file_context_as_markdown(
             {"paths": [entry], "graph_scan_truncated": False}
         )
+
+    def _one_doc(self, **overrides):
+        doc = {
+            "doc_id": "trace-summary:t1",
+            "source_path": "trace/t1",
+            "title": "Fix the drift query",
+            "excerpt": "Both paths were dead.",
+            "created_at": "2026-09-09T10:00:00+00:00",
+            "updated_at": "2026-09-09T10:00:00+00:00",
+            "matched_via": "files_touched",
+        }
+        doc.update(overrides)
+        return format_file_context_as_markdown(
+            {
+                "paths": [
+                    {
+                        "path": "src/trellis/retrieve/file_context.py",
+                        "documents": [doc],
+                        "entities": [],
+                        "newest_item_at": doc["updated_at"],
+                    }
+                ]
+            }
+        )
+
+    def test_a_touched_file_match_says_what_kind_of_match_it_is(self):
+        """The heading is a file path; without the annotation a reader takes
+        the trace summary under it for that file's own documentation. The two
+        keys make different claims (#549) and must not render identically."""
+        result = self._one_doc()
+        assert "**Fix the drift query** `trace-summary:t1`" in result
+        assert "record of changing this file" in result
+
+    def test_a_source_path_match_is_not_annotated(self):
+        result = self._one_doc(
+            matched_via="source_path",
+            source_path="src/trellis/retrieve/file_context.py",
+        )
+        assert "record of changing this file" not in result
+
+    def test_the_annotation_does_not_displace_the_excerpt(self):
+        assert "Both paths were dead." in self._one_doc()
+
+    def test_a_document_with_no_matched_via_renders_unannotated(self):
+        """Rows predating the field, and any caller hand-building this dict,
+        degrade to the old rendering rather than raising."""
+        doc = {
+            "doc_id": "d1",
+            "source_path": "notes/foo.md",
+            "title": "Foo",
+            "excerpt": "text",
+            "updated_at": "2026-08-01T00:00:00+00:00",
+        }
+        result = format_file_context_as_markdown(
+            {
+                "paths": [
+                    {
+                        "path": "notes/foo.md",
+                        "documents": [doc],
+                        "entities": [],
+                        "newest_item_at": doc["updated_at"],
+                    }
+                ]
+            }
+        )
+        assert "**Foo** `d1`" in result
+        assert "record of changing this file" not in result

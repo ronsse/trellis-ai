@@ -355,6 +355,112 @@ promote→review→serve chain. **The test refined the scope rather than flippin
 **Reopen if:** an integration audit shows eval fixtures cannot execute the same promote
 pipeline code production uses.
 
+### T-7 · `trellis retrieve pack --quiet` keeps its post-#410 population; the gap was the doc, not the flag
+
+**No panel — reversible, and the fork was underdetermined only until it was measured.**
+Taken 2026-09-12 while closing
+[#494](https://github.com/ronsse/trellis-ai/issues/494), which asked whether `--quiet`
+should keep emitting `<parent>#chunk-N` fragments and entity ids, roll chunks up to their
+parent, or prefix each line with a type. **The decision is option 1: change nothing in the
+command, and state the population in `docs/agent-guide/operations.md`.** The doc gap was
+real under all three options, so it was written first and is the whole shipped change.
+
+**What #410 actually changed** (#494's body calls it #488 — the same change, issue number
+against PR number). Routing `pack` through `PackBuilder` changed the *shape* of
+`--format json` (documented) and the *population* of `--quiet` (not documented). Pre-#410
+the command called `DocumentStore.search(..., include_chunks=False)` and `--quiet` printed
+whole-document ids; post-#410 it prints one `item_id` per `pack_result.items` entry. One
+line of three, no contract note, and the section's closing blockquote said `--quiet`
+"still prints one id per line" — true about the shape, and read by a pipeline author as
+continuity.
+
+**Measured before deciding.** The shipped `build_pack_builder(registry,
+surface="cli.retrieve")` wiring was run over all 85 distinct intents this deployment has
+ever assembled a pack for, with the command's own parameters, against production's own
+Postgres knowledge and operational planes, with `PackBuilder._event_log` swapped for
+`NullEventLog()` so the probe wrote nothing. 4,250 lines over 85 packs; every pack
+saturated `max_items=50` and ran all three axes.
+
+- `item_type`: `vector` 42.7% / `document` 37.9% / `entity` 19.5%. **`vector` is not a
+  namespace** — all 1,813 of those ids resolve in the document store; it is the semantic
+  axis's label for its own rows.
+- **Chunk fragments: 787 lines, 18.5%, present in 75 of 85 packs** (median 20% of a pack,
+  max 46%). Every one of the 787 parents resolves, so option 2 *would* produce valid
+  handles.
+- Resolution: 80.5% document, 19.5% graph, and **1 line of 4,250 resolves nowhere** —
+  `01M0M2NYZC8DHVMFBC3YFJ5SRQ`, a `vector` row at rank 50 whose document is gone. That is a
+  stale-vector-row signal in the #338 family, not a `--quiet` defect.
+- Namespaces are disjoint (1,074 document ids, 14 graph ids, zero in both) and **no prefix
+  rule separates them**: document ids run `capture:` 522 / `conversation:` 424 / bare 113 /
+  `corpus:` 14 / `kb:` 1, graph ids run bare 7 / `trace:` 7. #494's second objection is
+  correct and this is its measured form.
+
+**Why option 2 (roll chunks up, dedup) is refused — three reasons, in order of weight.**
+First, it makes `--quiet` disagree with `--format json`, with
+`PACK_ASSEMBLED.injected_item_ids`, and with the pack the agent was actually served, about
+what one pack contained. That is the two-readers-of-one-seam failure this repo keeps
+producing (#325/#326, and #417's three successive wrong enumerations of who reads a name) —
+and it would be worse here than usual, because the disagreeing reader is the one a script
+consumes silently. Second, the cost does not buy what the issue describes: rolling up
+removes **344 lines (8.1%)** across 64 of 85 packs, but **304 of those are sibling-chunk
+collapses** — two chunks of one parent, whose excerpts are cut from different slices and
+are not duplicated text (B2 measured the overlap at ~6.7%) — against only **40**
+chunk-meets-its-own-parent collapses. Only 47 of 787 served chunks have their parent served
+in the same pack at all. Third, the redundancy the issue *is* describing is already handled
+one layer down and at the right layer: the probe log caught
+`semantic_dedup_match matched_id=conversation:…fe2ba2ab
+rejected_id=conversation:…fe2ba2ab#chunk-0 similarity=1.0` — semantic dedup collapsing a
+chunk against a near-identical parent *inside the builder*, where every consumer sees the
+same answer.
+
+**Why option 3 (type-prefix each line) is refused.** `--quiet` exists to be a bare-id
+stream for `xargs` and `$(…)`. A prefix makes every consumer strip it, which is the same
+parsing burden as `--format json` with none of its structure.
+
+**What option 1 costs, stated rather than implied.** #494's objections do not evaporate;
+they move into prose. A chunk id is a worse pipeline handle than a document id — but the
+issue's framing compares the two **as inputs to a command that does not exist**: an AST
+sweep of every `typer` command parameter in `src/trellis_cli/` finds no command that
+consumes a document id (`trace_id`, `entity_id`/`source_id`/`target_id`, archived `item_id`
+from `RETENTION_PRUNED`, `key_id`, `policy_id`, `proposal_id`, `candidate_id`,
+`component_id` — and nothing else), so the only CLI command that can eat a `--quiet` line
+is `trellis retrieve entity`, taking exactly the 19.5% entity minority. Where the objection
+*does* bite is REST, which is type-split while MCP `get_items` is type-agnostic, and where a
+chunk id carries a live hazard the issue did not name: **`#` is a URL fragment delimiter, so
+an unencoded id truncates client-side and `GET /api/v1/documents/<chunk id>` returns HTTP
+200 with the parent document** — a different document, reported as success. Verified live
+against this deployment; only `%23` returns the chunk. That is now in the operations doc as
+its own paragraph, because it is the one way a consumer of this stream gets a wrong answer
+rather than an error.
+
+**Prior art, quoted because it decided this already.** #396 classified `retrieve pack` a
+whole-row surface *because* it bypassed `PackBuilder`, and said that routing it through the
+builder would make the `<parent>#chunk-N` row the retrievable unit whose excerpt the token
+budget prices. #410 did exactly that. Reversing the population on one output flag would
+re-open a classification that was made deliberately, on the surface where it was made.
+
+**Method limits.** The 85 intents were drawn from `PACK_ASSEMBLED` events over 365 days, an
+event log that also holds 118 events written by a *separate* replay experiment; those reused
+real intents, so the distinct-intent set is unaffected, but the event count is not a pack
+count. And the probe measures what today's code emits for today's stores — it is not a
+counterfactual replay and carries none of #359's caveats, but it also cannot say what a
+future corpus does: the chunk fraction is a property of how much of the corpus is long
+enough to chunk (1,926 document rows = 740 chunk + 1,186 whole), and it will move.
+
+**This agrees with the filer's own lean** — #494 says "the first is defensible and probably
+right; it just should not be arrived at silently." What this entry adds is the measurement
+that makes it more than a lean, the decomposition showing option 2 would not buy what it
+appears to, and the URL-truncation hazard the issue did not name.
+
+**Recommended tracker action (owner's call):** close #494 as documented-not-changed.
+
+**Reopen if:** a CLI command that consumes a document id is added — that is the single fact
+that makes the "worse handle" objection bite on this surface, and it flips the cost side of
+the comparison; or if `semantic_dedup` is turned off or narrowed, since the
+chunk-meets-parent case is currently absorbed there; or if the chunk fraction rises far
+enough that the 40 chunk-meets-parent collapses stop being a rounding error against the 304
+sibling collapses.
+
 ### T-5 · Close [#404](https://github.com/ronsse/trellis-ai/issues/404) with a known gap, rather than hold it for the wire contract
 
 **No panel — reversible, and the alternative was to keep a shipped improvement unmerged.**
@@ -529,6 +635,32 @@ transactional mirror lands that makes a direct write structurally incapable of f
 the vector row — `kimi-k3` named that as the alternative that would change its answer, and
 it would make B redundant rather than wrong.
 
+> **Amended 2026-09-12 — the premise was stale twice over, and the reopen clause is
+> what shipped ([#360](https://github.com/ronsse/trellis-ai/issues/360)).**
+> "`create_curate_handlers` registers 13 operations and **not one writes a document or
+> vector row**" was wrong on both halves by the time it was acted on: it registers **15**,
+> and `EvidenceIngestHandler` ([#544](https://github.com/ronsse/trellis-ai/pull/544),
+> `7cbe3a3`) writes both planes through the governed pipeline. So option B — promote a
+> governed `evidence.ingest` to core — had **already landed**. It did not fix #337 or
+> #338, and could not have: both are *mirror* failures, entirely inside the population of
+> direct writers #544 did not govern. **#544 governed the half that never failed.**
+>
+> What shipped instead is the second reopen condition, taken deliberately: a seam
+> (`trellis/core/document_write.py`) that makes a direct write structurally incapable of
+> forgetting the vector row, plus an AST rule
+> (`tests/unit/core/test_document_write_rule.py`) that keeps it the only way through. Note
+> `kimi-k3` called that "the alternative that would change its answer" — it makes B
+> **redundant rather than wrong**, which is exactly what the measured state shows: the
+> governance B buys is real, and it was never the thing standing between production and
+> two months of stale vector rows.
+>
+> **The correction worth carrying forward is the method, not the count.** The 13 was a
+> hand-read roster in a prose ledger, and rosters rot — the same failure
+> [#443](https://github.com/ronsse/trellis-ai/issues/443)/[#466](https://github.com/ronsse/trellis-ai/issues/466)
+> record for rules, now observed in a decision record. A premise stated as a number should
+> be re-derived at implementation time, not quoted; this one had been quoted into three
+> successive briefs.
+
 ### T-2 · Ship #338's fix wider than the issue specified
 
 The write-through [#338](https://github.com/ronsse/trellis-ai/issues/338) asked for would
@@ -567,6 +699,92 @@ may take months to reach both-arm sample floors.
 starvation incident, or an owner request to spend a bounded slot on exploration. Any
 reopened design must still define presentation and the zero-comparison-arm policy, cap
 per-pack cost, and prove sampling service is not silently outpaced by corpus growth.
+
+#### Re-measured 2026-09-12 — three of this entry's premises are false
+
+The owner decision above stands. Its *reasons* do not, and one of them inverts.
+
+**1 · The cap is not deployed, so "keep the current five" describes a build that has never
+assembled a production pack.** All **92** organic `PACK_ASSEMBLED` events (2026-07-07 →
+2026-09-12 07:08) lack `advisories_matched` entirely — a build predating #392/#499. **41**
+carried at least one advisory, and the served count tracks the whole *active* population
+rather than a cap: 1, 16, 18, 25, 27, 28, 29, 44, 52, and **56 advisories in a single
+pack**. The only 118 packs that carry `advisories_matched` were written by one probe run
+spanning 1m50s on 2026-09-12 and are excluded from everything below. The deferral has been
+free because the mechanism it defers is not running.
+
+**2 · There is no never-served tail, and the loop has already used its absence.** Over the
+30 days to 2026-09-12: **54** graded packs (feedback joined to a pack), 10 successes
+(0.185), **35** carrying ≥1 advisory. All **85** stored advisories were presented and **83**
+cleared `_ADVISORY_MIN_PRESENTATIONS = 3`. The loop suppressed **56 of 85** — including
+every one of the 44 `approach` rows. The store is 85 (approach 44, anti_pattern 22, entity
+16, query 3) with **29 active** (entity 16, anti_pattern 10, query 3) and **zero active
+`approach` rows**; all 29 are `scope: global`. The cost this entry accepted — *"the
+never-served tail remains unmeasured and cannot participate in fitness"* — has not been
+paid, because uncapped serving **is** full exploration.
+
+**3 · #502's coupling is real, larger than the issue stated, and it fires on deployment
+rather than accruing over time.** Replaying the same 54 graded packs through
+`_select_advisories`' own ordering truncated to five: advisories ever presented **85 → 11**;
+scoreable rows **83 → 11** (72 lost, none gained); of the 56 rows the loop actually
+suppressed, only **5** would have been scoreable. The cap bites on 31 of the 54. So the next
+deployment past #499 does not slow the suppression half — it removes **87%** of its input in
+one step, and does so on day one. *Caveat:* the replay ranks by today's confidence, not the
+confidence at each pack's assembly time. The direction is insensitive to that (a
+deterministic argmax over 29 rows serves 5 however they are ordered); the exact membership
+is not.
+
+**4 · The argument *for* the cap that #502 did not make: the cost is real and it is
+unbudgeted.** Advisories attach *after* the budget walk
+([`pack_builder.py:821`](../../src/trellis/retrieve/pack_builder.py)) and `Pack.total_tokens`
+sums items only ([`schemas/pack.py:221`](../../src/trellis/schemas/pack.py)), so a
+56-advisory pack spends nothing from `max_tokens` and **reports nothing**. Extrapolating
+#392's measured five-advisory cost (191 tokens, ~38 each), that is ~2,100 unbudgeted tokens
+against a 2,000-token pack — the delivery is roughly double what the pack's own accounting
+says. Extrapolated, not measured; #392's per-advisory figure is the whole basis.
+
+**5 · Option 2 (score on match) should be refused, and the measurement makes refusing it
+cheap.** Score-on-match attributes a pack's outcome to an advisory the caller never saw.
+With the window success rate at 0.185, every broadly-matching row drifts toward suppression
+on outcomes it could not have influenced — the mirror of the #336 failure the demotion gate
+exists to stop, arriving with two denominators sharing one name. The 56 suppressions already
+banked were earned on **served** rows, so the corpus did not need score-on-match to be
+pruned. Both 2026-09-04 panelists rejected it independently; nothing measured since argues
+for reopening it.
+
+**6 · Recommendation — same verdict, attached to the deployment instead of the calendar.**
+Keep the deferral. Make **the first production deployment of a build carrying #499** the
+trigger, in place of a volume threshold: that is the moment the coupling goes from latent to
+87%. When it happens, ship one exploration slot (#502 Option 1) and price it honestly — at
+35 advisory-carrying graded packs per 30 days against 29 active rows, one slot yields
+≈**1.2** presentations per row per window, below the floor of 3. Reaching the floor needs
+~3 of the 5 slots on exploration, or a scoring window near 90 days. That arithmetic, not a
+principle, is what makes exploration expensive here, and it is what to re-derive before
+spending a slot.
+
+**7 · [#503](https://github.com/ronsse/trellis-ai/issues/503)'s gate has fired, and the
+hazard inverted.** #503 held itself until *"the first `entity` advisory reaching a pack"*.
+Entity rows have reached packs: 16 are active and, under the cap's own ordering, occupy
+ranks 1, 2, 4, 5, 6, 7 and 8 of the active set (rank 3 is a `query` row). But the hazard
+#503 named was *entity starved by approach*, and there are no active approach rows left —
+under a cap of five the starved category is now **`anti_pattern`** (10 active rows, none in
+the top 5). Both #503's premise (*"all 44 rows that matched were approach"*) and its
+conclusion need restating before it is worked. Still **not work**: its own rule against
+tuning a reservation to the present corpus applies with equal force to the inverted one.
+
+**8 · The audience question migrated rather than closing.** The advisory it was about —
+*"packs using the `keyword` strategy succeeded less often"*, addressed to a reader that
+cannot select strategies — is suppressed with its whole family, so the loop answered it. It
+did not answer the class. The top-ranked active rows read *"Entity
+`conversation:claude-ai:b2869174-…` appears in 45% of successful packs"* (an opaque id an
+agent can act on no better than a strategy name) and, at rank 3, *"Including 'for' in your
+context query correlates with 33% success"* — a stopword artifact. That is a **generation**
+question (#502's *"should not have been generated"*), not a delivery one, and capping
+delivery will not touch it.
+
+*Re-derive before acting: the 30-day window rolls, and the nightly generator and fitness
+loop both move these counts daily. The `advisories_matched`-absent finding is the stable
+one — it is a property of the deployed build, not of the window.*
 
 ### F-4 · The two richer shapes in [#365](https://github.com/ronsse/trellis-ai/issues/365)
 

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from trellis.core.vector_metadata import sync_vector_metadata
+from trellis.core.document_write import put_document
 from trellis.stores.base.document import DocumentStore
 
 if TYPE_CHECKING:
@@ -35,8 +35,8 @@ def apply_noise_tags(
     exactly what #338 measured in production: 45 noise-tagged documents, not
     one whose vector row agreed. When a store is supplied the new tags are
     mirrored onto the row by
-    :func:`~trellis.core.vector_metadata.sync_vector_metadata`, a
-    metadata-only re-upsert that re-embeds nothing.
+    :func:`~trellis.core.document_write.put_document`, which writes both
+    planes from one bag — a metadata-only re-upsert that re-embeds nothing.
 
     The parameter is optional only because a deployment may have no vector
     store configured at all; omitting it on one that does re-opens the
@@ -87,12 +87,23 @@ def apply_noise_tags(
         # from ``list_documents`` with no noise or lifecycle predicate at
         # all, so a bump there makes memory look newer than the file and the
         # hook injects context it exists to suppress.
-        document_store.put(item_id, doc["content"], metadata, preserve_updated_at=True)
-        updated += 1
-        # After the authoritative write, never before: the document row is
-        # what a re-run repairs from, so it has to land first.
-        if sync_vector_metadata(vector_store, item_id, metadata):
+        # One call, both planes. The mirror is not a second step a future
+        # edit here can drop: ``put_document`` mirrors the same bag it wrote
+        # (#337/#338), after the authoritative document write and never
+        # before, because the document row is what a re-run repairs from.
+        if (
+            put_document(
+                document_store,
+                vector_store,
+                item_id,
+                doc["content"],
+                metadata,
+                preserve_updated_at=True,
+            ).mirror
+            == "synced"
+        ):
             vector_rows_synced += 1
+        updated += 1
         logger.info("noise_tag_applied", item_id=item_id)
 
     logger.info(

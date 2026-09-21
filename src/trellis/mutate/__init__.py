@@ -20,6 +20,14 @@ from trellis.mutate.evidence_ingest import (
     build_evidence_ingest_command_from_args,
 )
 from trellis.mutate.executor import MutationExecutor
+from trellis.mutate.immutable_core import (
+    DESTRUCTIVE_OPERATIONS,
+    GOVERNING_KEYS,
+    NON_DESTRUCTIVE_OPERATIONS,
+    UNATTENDED_WRITERS,
+    governing_key_refusal,
+    unattended_writer_refusal,
+)
 from trellis.mutate.policy_gate import DefaultPolicyGate
 from trellis.mutate.policy_source import (
     POLICY_FILENAME,
@@ -83,8 +91,12 @@ def build_curate_executor(
 
 
 __all__ = [
+    "DESTRUCTIVE_OPERATIONS",
+    "GOVERNING_KEYS",
+    "NON_DESTRUCTIVE_OPERATIONS",
     "POLICY_FILENAME",
     "POLICY_GATE_SURFACE",
+    "UNATTENDED_WRITERS",
     "BatchStrategy",
     "Command",
     "CommandBatch",
@@ -100,6 +112,8 @@ __all__ = [
     "build_evidence_ingest_command_from_args",
     "build_policy_gate",
     "ensure_evidence_document",
+    "governing_key_refusal",
     "load_policies",
     "resolve_policy_path",
+    "unattended_writer_refusal",
 ]

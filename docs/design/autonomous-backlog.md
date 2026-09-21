@@ -74,7 +74,8 @@ Every item is tagged with who decides when a fork appears mid-item.
 > [`docs/issues/reviews/2026-09-04/README.md`](../issues/reviews/2026-09-04/README.md),
 > [`manifest.json`](../issues/reviews/2026-09-04/manifest.json), per-issue `#NNN.md`
 > briefs, and optional [`plans/`](../issues/reviews/2026-09-04/plans/) for seven issues
-> (#256, #264, #342, #360, #369, #439, #514). **Do not copy the 40 briefs here;** read
+> (#256, #264, #342, #360, #369, #439, #514 — of which **#342, #369 and #439 are now
+> closed**, 2026-09-20). **Do not copy the 40 briefs here;** read
 > the corpus for measured evidence and close criteria, then confirm status on GitHub and
 > the roadmap before dispatching.
 >
@@ -85,16 +86,18 @@ Every item is tagged with who decides when a fork appears mid-item.
 > refuted. For live state and requirements, **the GitHub issue wins**; the corpus supplies
 > measured evidence only.
 
-**Snapshot:** **40 open** on GitHub as of the 2026-09-04 review. The count stays 40 until
-close/duplicate mutations actually land — the configured automation token currently lacks
-GitHub **Issues write** permission, so corpus disposition actions (e.g. closing
-[#525](https://github.com/ronsse/trellis-ai/issues/525) / [#364](https://github.com/ronsse/trellis-ai/issues/364))
-cannot be applied from agents until that is restored.
+**Snapshot:** **44 open** on `1ef5c9c`, **2026-09-20**
+(`gh issue list --repo ronsse/trellis-ai --state open --limit 400 --json number | jq length`).
+Re-derive it rather than reading this line; a count with no command behind it is how §5 of
+the PRD went stale for two months.
 
-| Issue | Corpus verdict | Agent note |
-|---|---|---|
-| [#525](https://github.com/ronsse/trellis-ai/issues/525) | `duplicate` | **Closure-ready** — duplicate of #526; do not dispatch |
-| [#364](https://github.com/ronsse/trellis-ai/issues/364) | `stale-fixed` | **Closure-ready** — PR #389; do not dispatch |
+> The 2026-09-04 snapshot read **40 open** and predicted "the count stays 40 until
+> close/duplicate mutations actually land", blaming an automation token without GitHub
+> **Issues write**. **That prediction was falsified in both directions.** The closures it
+> said could not happen did happen — [#525](https://github.com/ronsse/trellis-ai/issues/525) and [#364](https://github.com/ronsse/trellis-ai/issues/364) are both closed —
+> and the count still rose, to 44, because new issues were filed faster than old ones were
+> closed. A backlog total is a *net* of two flows; predicting it from one of them is a
+> category error, and the prediction is not repeated here.
 
 PR [#527](https://github.com/ronsse/trellis-ai/pull/527) **selectively transcribed** the
 seven implementation plans and unique review evidence into `docs/issues/reviews/2026-09-04/`.
@@ -109,7 +112,8 @@ owner-approved deletion** after confirming no archival retention is desired.
 
 **Wave D (program plan order): [#360](https://github.com/ronsse/trellis-ai/issues/360) PR1 →
 [#256](https://github.com/ronsse/trellis-ai/issues/256) staged seam.** Also parallel when
-disjoint: **#369**, **#439**, **#342**, **#514**.
+disjoint: **#514**. (**#369**, **#439** and **#342** were listed here and are now closed —
+verified 2026-09-20; #369's work merged as `1ef5c9c`.)
 
 **#256 dispatch — operator override (2026-09-04, this program only):** live `keystone`
 label normally means **human authorship only**. Operator instruction on 2026-09-04
@@ -123,29 +127,28 @@ Owner review and the adversarial merge gate ([swarm-handoff §4.1](./swarm-hando
   adjacency, not a manifest dependency).
 - **Serialize #360 PR2 with #264 PR-A** — extraction/MCP overlap on `save_memory`.
 
-**Batch 2 — CI / stores** (hard dependency **#351 → #356** per manifest; no issue
-dependency between #526 and #350):
+**Batch 2 — CI / stores.** Three of its four items are closed as of **2026-09-20**, and the
+batch's one hard dependency has therefore been discharged: **#356 is unblocked.**
 
-| Issue | Verdict | Note |
+| Issue | State 2026-09-20 | Note |
 |---|---|---|
-| [#526](https://github.com/ronsse/trellis-ai/issues/526) | `valid-now` | May parallelize with #350 if territories/workflows disjoint after recheck |
-| [#351](https://github.com/ronsse/trellis-ai/issues/351) | `valid-now` | **Before #356** (manifest dependency) |
-| [#356](https://github.com/ronsse/trellis-ai/issues/356) | `valid-now` | After #351 |
-| [#350](https://github.com/ronsse/trellis-ai/issues/350) | `valid-now` | May parallelize with #526 if disjoint |
+| [#356](https://github.com/ronsse/trellis-ai/issues/356) | **open** | The whole live remainder of this batch. Its blocker #351 is closed, so the manifest's `#351 → #356` dependency no longer gates it |
+| [#526](https://github.com/ronsse/trellis-ai/issues/526) | closed | — |
+| [#351](https://github.com/ronsse/trellis-ai/issues/351) | closed | ArcadeDB graph contract got a service container in #543 |
+| [#350](https://github.com/ronsse/trellis-ai/issues/350) | closed | — |
 
-**Workflow-collision scheduling (optional):** #526, #351, and #356 share CI workflow
-territory — coordinate merges when touching the same files; this is **not** a serial
-issue dependency.
+The workflow-collision note that stood here (#526/#351/#356 sharing CI territory) is moot
+with two of the three closed; #356 now has that territory to itself.
 
 **Other valid-now / valid-slice items** (dispatch when Batch 1–2 are full or territories
 allow; full roster in manifest + roadmap):
 
 | Issue | Verdict | Note |
 |---|---|---|
-| [#522](https://github.com/ronsse/trellis-ai/issues/522) | `valid-now` | Rich operator-output renders outside #492 handle rule |
-| [#523](https://github.com/ronsse/trellis-ai/issues/523) | `valid-now` | `sanitize_error_message` suppresses boundary test messages on long `--basetemp` |
 | [#494](https://github.com/ronsse/trellis-ai/issues/494) | `valid-now` | Document `retrieve pack --quiet` id population |
 | [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | **Measurement slice only** — map Anthropic cache token fields into `TokenUsage`; defer `cache_control` until benefit measured |
+
+*#522 and #523 stood in this table and are closed as of 2026-09-20.*
 
 All other open items: verdict and wave in
 [`manifest.json`](../issues/reviews/2026-09-04/manifest.json); live requirements and
@@ -182,9 +185,19 @@ status on each **GitHub issue**; roadmap sections only where they govern that it
 > [#459](https://github.com/ronsse/trellis-ai/issues/459)) and most Lane G review-gate
 > items landed before the 2026-09-04 corpus — verify issue state on GitHub before acting.
 > For current work, use [Current queue — 2026-09-04](#current-queue--2026-09-04) above.
+>
+> ⚠️ **The lane letters below are a different namespace from the `A1`–`F3` item codes in
+> Waves 1–5, and they collide.** "Lane A" is the file-store guard family (#448, #459,
+> #471); items **A1–A4** are Wave 1 measurement work (#260, #336, #338, #345) — **disjoint
+> sets**. Same for C (#348/#362/#363/#364 vs #194/#256/#264/#360/#413) and F (#474–#478 vs
+> Wave 1b, which cites no issues at all). Lane B and B1–B3 share exactly **one** issue of
+> nine and four (#298), which is the worst case: close enough to look like the same thing.
+> Bare codes travel — `CLAUDE.md` cites `C1`, `C2`, `B2`, `A4`, `E2` — so a reader who
+> resolves one against the wrong scheme lands on unrelated work with no error. Measured
+> 2026-09-20; the letters are left as-is because this section is frozen record.
 
-Re-derived from the **37 open issues** on 2026-09-03 (superseded; the corpus now tracks
-**40**). Roughly a third were swarm-ready, a third needed a design call, and a third were
+Re-derived from the **37 open issues** on 2026-09-03 (superseded: 40 on 2026-09-04, **44** on
+2026-09-20). Roughly a third were swarm-ready, a third needed a design call, and a third were
 operator-gated. **Lane G** was added 2026-09-04 for the cluster filed since — most of it
 by adversarial gate reviews of the PRs the other lanes produced.
 
@@ -686,14 +699,87 @@ implementation gate. Spec: [`adr-query-history-promotion.md`](./adr-query-histor
 
 ## Wave 5 — capture density
 
-**E1 — [#306](https://github.com/ronsse/trellis-ai/issues/306) observer-agent capture via local model.** `class: panel`
-Extends #255 session auto-capture from session-level to tool-level density using
-hermes3:8b as observer (free, private — `DETERMINISTIC > LOCAL > FRONTIER`). Drafts
-route through the governed pipeline and the memory-path draft policy.
-**Precondition:** #255's own defect history is instructive — it shipped in July and did
-not actually run until August because of blocked turn ordering and a context-window
-coupling where Ollama ignores `num_ctx` and hermes fabricates. Verify the observer
-produces non-fabricated output on a held-out transcript *before* wiring it to writes.
+**E1 — [#306](https://github.com/ronsse/trellis-ai/issues/306) observer-agent capture via local model.** ~~`class: panel`~~ — **the observer was measured and refused; the density it was for shipped deterministically.** `feat/306-tool-use-density`
+
+The item proposed a second local model (hermes3:8b) watching every tool use, to lift
+#255 capture from session-level to tool-level density. Its own precondition — verify the
+observer does not fabricate before wiring it to writes — was never reached, because a
+cheaper question came first: **what does the existing parse already see and throw away?**
+
+Measured over the 451 real sessions of the local corpus, the answer is *almost all of
+it*. `parse_session` observes **56,030 tool calls** and hands the judge
+`sorted({call.name for call in digest.tool_calls})` — a median **66 calls compressed to
+3 names** (median 22×, mean 27×). It observes **1,398 errored calls across 308
+sessions** and folds them into one session-level boolean, `has_error`, which the
+free-text backstop pushes true on **426 of 451 sessions (94.5%)** — so the flag the
+prompt spends a line on is close to a constant. And the name axis carries less than it
+looks: `Bash` is **83.4%** of all calls and appears in **447 of 451** sessions, while
+**80 sessions (17.7%)** render the single word `Bash` as the complete record of their
+work.
+
+So the observer would have been a second LLM paying for signal the deterministic parse
+already held. `docs/PRD.md` §6's ladder — `DETERMINISTIC > LOCAL > FRONTIER` — is the
+issue's own citation, and it points the other way once the compression is measured. What
+shipped instead is a **per-tool rollup** (`name xN (M errored)`, busiest first, ties
+alphabetical) on the existing judge prompt: no second model, no new `llm:` enablement,
+no new write path, and the error signal attributed to the tool that produced it. The
+rollup's content is *volume and failure density*, not tool variety — with `Bash` at
+83.4% of calls, "how much work and how much of it failed" is what the names were hiding.
+
+Four things worth carrying forward.
+
+- **The prompt budget fails closed, so density trades against coverage silently.**
+  `_prompt_exceeds_window` does not trim an over-budget prompt — it refuses to judge the
+  session, which is then captured *not at all*. The rollup is therefore **charged
+  against** `_MAX_SALIENT_CHARS`, not added to it. Replayed over all 451 sessions: **0**
+  overflow only with the rollup, the median prompt *shrinks* by 34 chars, and the worst
+  case falls from 10,618 to 9,835 of the 11,584 chars the default window allows (84.9%).
+  **The headroom is what makes this safe today; the charge is what keeps it safe when
+  `_MAX_SALIENT_CHARS` is next raised.**
+- **Charge the whole line, label included.** The first cut charged the rollup and not
+  the 30 chars its longer label added, which put **267** sessions over their old prompt
+  size where the arithmetic predicted **79**. It was found only by re-measuring a figure
+  the docstring already asserted — an invariant that holds for part of a line is the
+  kind that quietly stops holding.
+- **Do not route an existing gate through a new join.** `has_error` is now attributed
+  per tool through `tool_use_id`, but it stays set on *any* errored result whether or
+  not that join resolves. On today's corpus the join never fails — 0 of 1,398 errored
+  results lack an id and 0 fail to resolve — so this is a defensive choice rather than a
+  fix for observed loss, and the test that pins it (`test_has_error_survives_an_
+  unjoinable_result`) is therefore synthetic on purpose. The reason to keep it is the
+  direction of the trade: a saturated boolean is a poor signal, an intermittently absent
+  one is a worse bug.
+- **[#447](https://github.com/ronsse/trellis-ai/issues/447)'s uniform-fixture trap was
+  reproduced here, by someone who had just read #447.** The ordering test used
+  `Bash x3, Grep x1`, which cannot distinguish count-ordering from name-ordering because
+  `Bash` sorts first under both. That mutant survived the full suite. Fixed with
+  `Write x3, Bash x1` plus an explicit tie-break case. Every new behaviour carries a
+  mutant; all **8** are killed, including the half-charge above.
+
+One measurement trap for the next reader: `elide_text`'s marker rides *on top of* the
+cap by documented contract, so a budget assertion has to exclude it. The honest form of
+"charged, not added" is a comparison between a tool-heavy and a tool-light session, not
+an arithmetic identity against the constant — the identity version fails against correct
+code, and weakening it to "cap + slack" would have made it pass against anything.
+
+**The A/B says it changes nothing, and that is the reported result.** Both prompts were
+run through the real judge — hermes3:8b at `temperature=0`, 60 sessions sampled
+deterministically, both arms through the shipped `parse_candidates`, varying only the
+tool line. Old produced **148** candidates, new **152**; 16 sessions yielded more, 14
+fewer, 30 identical — a two-sided sign test at **p = 0.86**. Mean confidence 0.965 →
+0.960. Sessions producing *any* candidate went **49 → 46**, i.e. slightly the wrong way.
+Sessions carrying a `failure`-signal memory went 13 → 15, well inside the same noise.
+`non_derivable` was 2 and 1, near-zero in both arms.
+
+So the case for the change is **not** a capture-quality gain; there is no evidence of
+one. It is that the loss is real and one-directional, that closing it is deterministic
+and yields a *smaller* prompt, and that the thing it replaces is a second local LLM
+proposed to recover signal the parse already held. Two caveats stated rather than
+buried: n=60 can only detect a large effect, and the arm tested charged the rollup but
+not its label (42 chars of conversation on capped sessions), a difference far too small
+to move a null this flat. If a more capable judge is wired later — the Kimi tiering the
+owner wants for the heavier decisions — the signal is then already on the prompt; that
+is a prediction, not a result.
 
 **E2 — Capture-coverage measurement.** ~~`class: panel`~~ — ✅ **DONE and MERGED** as `627536f` ([PR #372](https://github.com/ronsse/trellis-ai/pull/372), 2026-08-28).
 [#332](https://github.com/ronsse/trellis-ai/issues/332) fixed the sidechain rule that

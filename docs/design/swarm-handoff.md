@@ -342,7 +342,7 @@ Owner review and the adversarial merge gate (§4.1) still apply.
   **after #514** when `generate_call_sites` exists.
 - **Serialize #360 PR2 with #264 PR-A** — `save_memory` overlap.
 
-**Batch 2 — CI / stores:** hard dependency **#351 → #356** (manifest). **#526** and **#350**
+**Batch 2 — CI / stores:** #351 is closed, so **#356** no longer waits on it (manifest). **#526** and **#350**
 have no issue dependency — may parallelize if files/workflows disjoint after recheck.
 Coordinate #526/#351/#356 when touching the same CI workflows (collision scheduling only,
 not a serial chain).
@@ -428,15 +428,30 @@ is closure-ready (PR #389), not dispatchable:
 | [#364](https://github.com/ronsse/trellis-ai/issues/364) | **closure-ready** — PR #389 shipped judged coverage beside the ratio |
 | [#365](https://github.com/ronsse/trellis-ai/issues/365) | a retrieval that fails in transport is invisible |
 
-**CI coverage holes** — Batch 2 above; hard **#351 → #356** dependency:
-[#350](https://github.com/ronsse/trellis-ai/issues/350) (pgvector extension bootstrap),
-[#351](https://github.com/ronsse/trellis-ai/issues/351) (ArcadeDB graph contract — still
-unwired in any workflow),
-[#356](https://github.com/ronsse/trellis-ai/issues/356) (`tests/unit/stores/` unwired).
-[#526](https://github.com/ronsse/trellis-ai/issues/526) shares CI territory — coordinate,
-do not assume serial dependency with #350. Note: `live-infra.yml` runs Postgres + Neo4j
-graph contracts and the pgvector vector contract on **pull requests and push to `main`** —
-not push-to-main only.
+**CI coverage holes** — Batch 2 above. The **#351 → #356** dependency is **discharged**:
+[#351](https://github.com/ronsse/trellis-ai/issues/351) is closed and the ArcadeDB graph
+contract runs in `live-infra.yml` against an `arcadedata/arcadedb:26.8.1` service
+container, so [#356](https://github.com/ronsse/trellis-ai/issues/356)
+(`tests/unit/stores/` unwired) is unblocked and can be picked up on its own.
+[#350](https://github.com/ronsse/trellis-ai/issues/350) (pgvector extension bootstrap) is
+independent. [#526](https://github.com/ronsse/trellis-ai/issues/526) shares CI territory —
+coordinate, do not assume serial dependency with #350.
+
+Two corrections this section carried for a while, both in the direction of under-stating
+coverage: `live-infra.yml` runs on **pull requests and push to `main`**, not push-to-main
+only; and #351 shipped. #356's scope measured **97 tests in six files** on 2026-09-12,
+with **no Postgres-marked tests left** in it — and
+[#583](https://github.com/ronsse/trellis-ai/pull/583) has since wired **68 of them**
+(`test_neo4j_graph.py` 39, `test_arcadedb_vector.py` 17, `test_arcadedb_graph.py` 8,
+`test_neo4j_connectivity_live.py` 4, re-counted 2026-09-21), leaving
+`test_neo4j_vector.py` (**27**, the AuraDB-only-Cypher blocker) as the load-bearing half
+still dark. **Do not re-derive that number by hand here** —
+`tests/unit/test_ci_coverage_rule.py` computes the workflow × marker join and fails when
+a file falls outside it without a reason, which is precisely what this paragraph kept
+getting wrong. The design point behind #356 is unchanged: both stores' vector suites are
+shape #2 (an upsert needs a pre-existing graph row) so neither subclasses
+`VectorStoreContractTests`, and those hand-written tests are the only contract-equivalent
+either has.
 
 **File territories** — from corpus collision map; dispatch parallel only when territories
 do not overlap:
