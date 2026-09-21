@@ -167,19 +167,41 @@ def join_pack_feedback_with_coverage(
     disclosure is worth exactly nothing if adding it breaks the analyzers
     that would carry it.
     """
+    feedback_events, pack_events, pack_event_count, coverage = (
+        join_pack_events_with_coverage(event_log, since=since, limit=limit)
+    )
+    pack_payloads = {
+        pack_id: event.payload or {} for pack_id, event in pack_events.items()
+    }
+    return feedback_events, pack_payloads, pack_event_count, coverage
+
+
+def join_pack_events_with_coverage(
+    event_log: EventLog, *, since: datetime, limit: int
+) -> tuple[list[Event], dict[str, Event], int, ScanCoverage]:
+    """:func:`join_pack_feedback_with_coverage`, keeping the whole pack event.
+
+    The payload-only join discards ``PACK_ASSEMBLED.occurred_at``, and a
+    reader that has to order a serving against something that happened
+    before it — :mod:`trellis.learning.judged_outcomes` asks whether a
+    memory was served *after* it was judged — needs that stamp. The dedup
+    rule is the one the payload join has always applied, because that join
+    is now a projection of this one: the newest event per ``entity_id``
+    wins and falsy ids are dropped.
+    """
     pack_scan = scan_events(
         event_log, event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
     )
     feedback_scan = scan_events(
         event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
     )
-    pack_payloads: dict[str, dict[str, Any]] = {}
+    pack_events: dict[str, Event] = {}
     for event in pack_scan.events:
         if event.entity_id:
-            pack_payloads[event.entity_id] = event.payload or {}
+            pack_events[event.entity_id] = event
     return (
         feedback_scan.events,
-        pack_payloads,
+        pack_events,
         len(pack_scan.events),
         merge_coverage(pack_scan.coverage, feedback_scan.coverage),
     )
