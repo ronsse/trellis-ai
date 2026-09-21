@@ -275,3 +275,33 @@ preserves each one's unique non-contested content (#595's ROADMAP, #601's PRD +
 backlog, #564's swarm-handoff, #572's separate correction to the `live-infra.yml`
 bullet) and installs **none** of the five counts. The bullet is then re-derived once,
 from post-merge state, in a single corrective PR.
+
+### 8.5 The keep-`main` policy is wrong for this one bullet, and that inverts the order
+
+The round-5 rule was: *for the contested bullet only, keep what is on `main`; take the
+incoming PR's changes everywhere else* — on the reasoning that every incoming number
+measures a pre-wiring world, so "newest wins" installs whichever roster merged last rather
+than the true one. **That reasoning assumed `main`'s version was the pre-wiring baseline.
+It is not.** `main`'s bullet is itself a roster, older than all seven, and false in both of
+its halves. Verified against the files, not against any PR's description:
+
+| `main`'s claim | Reality on `origin/main` |
+|---|---|
+| the ArcadeDB graph contract "has no service container in any workflow" | `live-infra.yml:95` runs `arcadedata/arcadedb:26.8.1`; `:192` sets `TRELLIS_TEST_ARCADEDB_URI`; `:231` puts `tests/unit/stores/contracts/` in the pytest path list; `test_arcadedb_graph_contract.py:44` is `class TestArcadeDBGraphContract(GraphStoreContractTests)`, whose `skipif` guards on exactly that env var. **106 inherited cases run on every PR and every push to `main`.** |
+| "The 59 Postgres-marked tests under `tests/unit/stores/` outside `contracts/` are still deselected" | `:232`–`:234` name `test_pgvector.py`, `test_postgres_stores.py` and `test_api_key_store.py` explicitly. The residual is **zero**. |
+
+Both errors run in the direction that **under-states** coverage, which is the expensive
+direction: it is the one that makes an agent re-do covered work, or report verified
+evidence as unverified — the failure the bullet directly above it already records about
+`pull_request`. Seven PRs found this independently; five of them state it in prose.
+
+So keeping `main`'s bullet preserves a known falsehood, while "newest wins" installs one
+arbitrary population out of five. Neither is right, and the third option is the one three
+of the PRs argue for in their own words: **derive it.**
+
+**Consequence for ordering.** #583 must land before any prose PR — not for merge mechanics
+(§2 measured that no ordering avoids the conflicts) but because it is the only member that
+replaces the bullet with something derived from the workflow files instead of transcribed
+into prose. Once it has landed, keep-`main` becomes correct, because `main`'s bullet is
+then #583's derived one. The policy was right about the mechanism and wrong about when it
+starts applying.
