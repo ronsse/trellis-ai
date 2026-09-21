@@ -1251,6 +1251,10 @@ Show what memory already holds about specific files — the shell-callable surfa
 
 A **single-segment** stored value matches by equality only. `README.md` / `TODO.md` sit at the root of the vault and of every repo, so treating a bare basename as a suffix would answer a read of one project's file with another's notes.
 
+**Two keys are matched, and each entry says which one hit** (#549). `source_path` is a self-description — *this is that file*. A trace summary's is `trace/<id>`, a namespace rather than a repo path, so no path rule could ever reach the records of work done *on* a file; `metadata.files_touched` — the repo paths a trace's tool calls demonstrably modified — is therefore matched too, by the same rule per member. Every document entry carries `matched_via` (`"source_path"` | `"files_touched"`), unconditionally and on both branches, and `source_path` wins when a document satisfies both. The text renderer annotates a `files_touched` hit as *record of changing this file*; parse the key, not the sentence.
+
+Only the attested key is read. `files_touched` is the evidence-only half of #308's deterministic override, so a model's *claim* about what it edited lives under `files_touched_unverified` and is deliberately never matched — a file join is where an unattested claim would do the most damage.
+
 ```bash
 trellis retrieve file-context <path> [<path>...] [--include-unconfirmed] [--format text|json|jsonl] [--quiet]
 ```
@@ -1280,7 +1284,8 @@ Batch the paths into one call — the lookup scans the document store once per c
           "title": "Pack builder notes",
           "excerpt": "Gotcha: the two-stage budget truncates before scoring.",
           "created_at": "2026-08-01T09:12:00+00:00",
-          "updated_at": "2026-08-14T10:00:00+00:00"
+          "updated_at": "2026-08-14T10:00:00+00:00",
+          "matched_via": "source_path"
         }
       ],
       "entities": [
@@ -2137,7 +2142,7 @@ Start with `trellis-mcp`. 16 tools returning token-budgeted markdown — 10 core
 | `get_items` | `item_ids`, `pack_id?`, `max_tokens?` | Markdown bodies for known ids (max 50), resolved against the document store, the graph, then the trace store. Items over budget are omitted whole with their ids listed for a follow-up call — never truncated; unknown ids are listed as not found. Emits `PACK_ITEMS_FETCHED` with the served ids; pass the `pack_id` that surfaced them to keep the fetch attributable. |
 | `record_feedback` | `trace_id?`, `pack_id?`, `success?`, `rating?`, `notes?`, `helpful_item_ids?`, `unhelpful_item_ids?`, `followed_advisory_ids?` | Confirmation |
 | `search` | `query`, `limit?`, `max_tokens?`, `index?` | Markdown search results |
-| `get_file_context` | `paths`, `include_unconfirmed?`, `max_tokens?` | Markdown context per file path (#307): documents whose `metadata.source_path` names the path (exact, or a `/`-boundary suffix match so absolute paths find stored relpaths) plus graph entities doc-linked to them. Every item carries store timestamps and each path a `Newest memory` line so a client can staleness-gate against the file's mtime. Unconfirmed extraction mints are excluded unless `include_unconfirmed=true` (#301). |
+| `get_file_context` | `paths`, `include_unconfirmed?`, `max_tokens?` | Markdown context per file path (#307): documents that name the path — as their own `metadata.source_path` (exact, or a `/`-boundary suffix match so absolute paths find stored relpaths) **or** as a member of `metadata.files_touched`, the repo paths a trace's tool calls demonstrably modified (#549) — plus graph entities doc-linked to them. Each document reports `matched_via`, and a `files_touched` hit renders annotated: a record of *changing* the file is a different claim from the file's own documentation. Every item carries store timestamps and each path a `Newest memory` line so a client can staleness-gate against the file's mtime. Unconfirmed extraction mints are excluded unless `include_unconfirmed=true` (#301). |
 
 **Sectioned-context tools (deprecated aliases — #262)**
 

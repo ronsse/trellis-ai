@@ -12,10 +12,12 @@ import typer
 from rich.markup import escape
 
 from trellis.classify.ingest import classify_metadata_on_write
+from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import (
     sanitize_error_message,
     sanitized_error_payload,
 )
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
@@ -35,7 +37,7 @@ from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.ingest_conversations import ingest_conversations
 from trellis_cli.ingest_corpus import ingest_corpus
 from trellis_cli.output import build_console, emit_json
-from trellis_cli.stores import _get_registry, get_document_store
+from trellis_cli.stores import _get_registry
 
 ingest_app = typer.Typer(no_args_is_help=True)
 console = build_console()
@@ -183,11 +185,13 @@ def ingest_evidence(
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # Persist to document store
-    store = get_document_store()
-    store.put(
-        doc_id=evidence.evidence_id,
-        content=evidence.content or "",
-        metadata={
+    registry = _get_registry()
+    put_document(
+        registry.knowledge.document_store,
+        resolve_vector_store(registry),
+        evidence.evidence_id,
+        evidence.content or "",
+        {
             "evidence_type": evidence.evidence_type,
             "source_origin": evidence.source_origin,
         },
@@ -319,10 +323,16 @@ def ingest_dbt_manifest(
     # here — it would start charging this command for embeddings, which is a
     # cost decision its callers have not opted into.
     doc_store = registry.knowledge.document_store
+    vector_store = resolve_vector_store(registry)
     doc_count = 0
     for entity in result.entities:
         desc = entity.properties.get("description", "")
         if desc:
+            # Through `put_document` so the document and its vector row
+            # cannot diverge (#360), and through `classify_metadata_on_write`
+            # so the row lands tagged like every other single-document write.
+            # `source_system` is what makes that worth doing: without it the
+            # classifiers have nothing to key on and the call is a near-no-op.
             doc_id = f"dbt:{entity.entity_id}"
             metadata: dict[str, Any] = {
                 "source": "dbt",
@@ -331,10 +341,12 @@ def ingest_dbt_manifest(
                 "name": entity.properties.get("name", entity.name),
                 "unique_id": entity.entity_id,
             }
-            doc_store.put(
-                doc_id=doc_id,
-                content=desc,
-                metadata=classify_metadata_on_write(metadata, desc, doc_id=doc_id),
+            put_document(
+                doc_store,
+                vector_store,
+                doc_id,
+                desc,
+                classify_metadata_on_write(metadata, desc, doc_id=doc_id),
             )
             doc_count += 1
 

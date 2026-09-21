@@ -40,6 +40,8 @@ from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
+from trellis.core.document_write import put_document
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.core.write_config import (
     MINHASH_SEED_MAX_DOCS_ENV,
     WriteBehaviourConfig,
@@ -1853,8 +1855,12 @@ def _commit_reconcile_verdict(
         stored_id, stored_meta = _store_new_memory(
             registry, executor, document_store, doc_id, content, meta
         )
+        vector_store = resolve_vector_store(registry)
         if mark_document_superseded(
-            document_store, old_doc_id=candidate.doc_id, new_doc_id=stored_id
+            document_store,
+            old_doc_id=candidate.doc_id,
+            new_doc_id=stored_id,
+            vector_store=vector_store,
         ):
             return stored_id, stored_meta, outcome
         # The target vanished between the under-lock re-verify and this write
@@ -1865,7 +1871,14 @@ def _commit_reconcile_verdict(
         # ``preserve_updated_at`` (#397).
         meta = {k: v for k, v in stored_meta.items() if k != SUPERSEDES_DOC_KEY}
         meta[RECONCILIATION_KEY] = MARKER_STALE
-        document_store.put(stored_id, content, metadata=meta, preserve_updated_at=True)
+        put_document(
+            document_store,
+            vector_store,
+            stored_id,
+            content,
+            meta,
+            preserve_updated_at=True,
+        )
         return stored_id, meta, _downgraded_to_stale(outcome)
     # ADD
     meta = {**metadata, RECONCILIATION_KEY: ReconcileDecision.ADD.value}
