@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trellis_workers.session_capture.models import ToolUseRollup
 from trellis_workers.session_capture.transcripts import (
     discover_sessions,
     is_ephemeral_project,
@@ -16,6 +17,7 @@ from trellis_workers.session_capture.transcripts import (
 )
 
 from .conftest import (
+    assistant_tools,
     assistant_turn,
     tool_result_turn,
     user_turn,
@@ -326,3 +328,100 @@ class TestEphemeralProjectSkip:
         write_transcript(tmp_path / "-tmp-tmpxyz" / "s1.jsonl", [user_turn("hi")])
         write_transcript(tmp_path / "-home-me-proj" / "s2.jsonl", [user_turn("yo")])
         assert len(discover_sessions(tmp_path)) == 2
+
+
+class TestToolErrorAttribution:
+    """#306: a ``tool_result`` is joined back to the call it answers.
+
+    ``ToolCall.is_error`` was declared and documented from the start and
+    written by nothing — the flag was read off the result and folded
+    straight into the session-level ``has_error``, so per-call attribution
+    was parsed and then discarded. These pin the join, and pin that it did
+    not become a new gate on the flag it replaced.
+    """
+
+    def test_error_attributed_to_the_calling_tool_only(self, tmp_path: Path) -> None:
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            [
+                user_turn("try both"),
+                assistant_tools(("Bash", "u-1"), ("Read", "u-2")),
+                tool_result_turn(is_error=True, tool_use_id="u-1"),
+                tool_result_turn(is_error=False, tool_use_id="u-2"),
+            ],
+        )
+        digest = parse_session(path)
+        assert {(c.name, c.is_error) for c in digest.tool_calls} == {
+            ("Bash", True),
+            ("Read", False),
+        }
+
+    def test_rollup_counts_repeats_and_errors_per_tool(self, tmp_path: Path) -> None:
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            [
+                user_turn("sweep the tree"),
+                assistant_tools(("Bash", "u-1"), ("Bash", "u-2"), ("Grep", "u-3")),
+                tool_result_turn(is_error=True, tool_use_id="u-2"),
+            ],
+        )
+        rollup = parse_session(path).tool_rollup
+        assert [(r.name, r.calls, r.errors) for r in rollup] == [
+            ("Bash", 2, 1),
+            ("Grep", 1, 0),
+        ]
+
+    def test_has_error_survives_an_unjoinable_result(self, tmp_path: Path) -> None:
+        """The load-bearing one.
+
+        An errored result whose ``tool_use_id`` names no call in this file
+        still means the session hit an error. Routing the existing
+        session-level gate through the new join would narrow coverage
+        silently — this fails if ``has_error`` is ever derived from the
+        join's outcome.
+        """
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            [
+                user_turn("continue from the compaction"),
+                assistant_turn("resuming", "Bash", use_id="u-1"),
+                tool_result_turn(is_error=True, tool_use_id="u-gone"),
+            ],
+        )
+        digest = parse_session(path)
+        assert digest.has_error is True
+        # ...and the call it could not be attributed to is not falsely blamed.
+        assert [c.is_error for c in digest.tool_calls] == [False]
+
+    def test_has_error_survives_a_result_with_no_id_at_all(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            [
+                user_turn("go"),
+                assistant_turn("running", "Bash", use_id="u-1"),
+                tool_result_turn(is_error=True, tool_use_id=None),
+            ],
+        )
+        digest = parse_session(path)
+        assert digest.has_error is True
+        assert [c.is_error for c in digest.tool_calls] == [False]
+
+    def test_clean_session_flags_nothing(self, tmp_path: Path) -> None:
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            [
+                user_turn("go"),
+                assistant_turn("running", "Bash", use_id="u-1"),
+                tool_result_turn(is_error=False, tool_use_id="u-1"),
+            ],
+        )
+        digest = parse_session(path)
+        assert digest.has_error is False
+        assert digest.tool_rollup == [ToolUseRollup(name="Bash", calls=1, errors=0)]

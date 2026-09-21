@@ -43,7 +43,7 @@ logger = structlog.get_logger(__name__)
 # package that's pinned to an old SDK still refuses to talk to a
 # newer incompatible server.
 SDK_API_MAJOR = 1
-SDK_API_MINOR = 0
+SDK_API_MINOR = 2
 SDK_WIRE_SCHEMA = "0.1.0"
 SDK_VERSION = "0.1.0"
 

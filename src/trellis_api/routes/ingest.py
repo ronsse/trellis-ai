@@ -7,21 +7,20 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, HTTPException
 
-from trellis.classify.ingest import classify_metadata_on_write
 from trellis.core.ids import generate_ulid
 from trellis.extract.trace_ingest_hook import run_trace_extraction
-from trellis.mutate import build_curate_executor
+from trellis.mutate import build_curate_executor, build_evidence_ingest_command
 from trellis.mutate.commands import (
     BatchStrategy,
     Command,
     CommandStatus,
     Operation,
 )
-from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.schemas.evidence import Evidence
 from trellis.schemas.trace import Trace
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
+    BulkAliasItem,
     BulkEdgeItem,
     BulkEntityItem,
     BulkGroupResult,
@@ -81,27 +80,27 @@ def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
         "evidence_type": evidence.evidence_type,
         "source_origin": evidence.source_origin,
     }
-    # Classify-on-write (see classify_metadata_on_write). ``source_origin`` is
-    # a provenance label ("trace"/"manual"/"ingestion"), not a source system,
-    # so no classification context is derived from it.
-    evidence_metadata = classify_metadata_on_write(
-        evidence_metadata, evidence.content or "", doc_id=evidence.evidence_id
-    )
-    registry.knowledge.document_store.put(
+    command = build_evidence_ingest_command(
         doc_id=evidence.evidence_id,
         content=evidence.content or "",
+        uri=evidence.uri,
         metadata=evidence_metadata,
+        requested_by="api:ingest-evidence",
     )
-
-    # Feature-flagged embedding (TRELLIS_ENABLE_EMBED_ON_INGEST=1). The hook
-    # skips content-less evidence and never fails the ingest.
-    run_embed_on_ingest(
-        registry,
-        evidence.evidence_id,
-        evidence.content or "",
-        evidence_metadata,
-        source="api:ingest-evidence",
-    )
+    result = build_curate_executor(registry).execute(command)
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        raise HTTPException(status_code=400, detail=result.message)
+    if (
+        result.status is CommandStatus.DUPLICATE
+        and registry.knowledge.document_store.get(evidence.evidence_id) is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Duplicate mutation references missing document: "
+                f"{evidence.evidence_id}"
+            ),
+        )
 
     return IngestResponse(evidence_id=evidence.evidence_id)
 
@@ -191,6 +190,23 @@ def _edge_command(item: BulkEdgeItem, requested_by: str) -> Command:
     )
 
 
+def _alias_command(item: BulkAliasItem, requested_by: str) -> Command:
+    return Command(
+        operation=Operation.ALIAS_UPSERT,
+        args={
+            "entity_id": item.entity_id,
+            "source_system": item.source_system,
+            "raw_id": item.raw_id,
+            "raw_name": item.raw_name,
+            "match_confidence": item.match_confidence,
+            "is_primary": item.is_primary,
+        },
+        target_id=item.entity_id,
+        target_type="alias",
+        requested_by=requested_by,
+    )
+
+
 def _record_status(group: BulkGroupResult, status: CommandStatus) -> None:
     if status == CommandStatus.SUCCESS:
         group.succeeded += 1
@@ -211,10 +227,8 @@ def _is_terminal_failure(status: CommandStatus) -> bool:
 def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
     """Bulk ingest entities, edges, and aliases in one request.
 
-    Entities and edges flow through the governed mutation pipeline
-    (audit events, per-item idempotency). Aliases route directly to the
-    graph store -- there is no alias mutation operation yet; the graph
-    store handles alias versioning (SCD Type 2) natively.
+    Entities, edges, and aliases flow through the governed mutation pipeline
+    (validation, policy, idempotency, execution, and audit emission).
 
     Strategies:
 
@@ -293,12 +307,7 @@ def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
         ):
             halted = True
 
-    # -- Aliases (direct graph store; no alias mutation operation exists) --
-    # Unlike entities/edges which flow through MutationExecutor and only
-    # halt on FAILED/REJECTED (not DUPLICATE), aliases have no CommandStatus
-    # distinction. Any exception halts under stop_on_error. This is
-    # intentional: the graph store's upsert_alias is idempotent (SCD Type 2
-    # versioning), so genuine failures indicate a real problem worth halting.
+    # -- Aliases --
     for alias in req.aliases:
         if halted:
             response.aliases.skipped += 1
@@ -310,46 +319,20 @@ def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
                 )
             )
             continue
-        try:
-            alias_id = registry.knowledge.graph_store.upsert_alias(
-                entity_id=alias.entity_id,
-                source_system=alias.source_system,
-                raw_id=alias.raw_id,
-                raw_name=alias.raw_name,
-                match_confidence=alias.match_confidence,
-                is_primary=alias.is_primary,
+        result = executor.execute(_alias_command(alias, req.requested_by))
+        _record_status(response.aliases, result.status)
+        response.aliases.results.append(
+            BulkItemResult(
+                status=result.status.value,
+                id=result.created_id,
+                name=f"{alias.source_system}:{alias.raw_id}",
+                message=result.message,
             )
-            response.aliases.succeeded += 1
-            response.aliases.results.append(
-                BulkItemResult(
-                    status="success",
-                    id=alias_id,
-                    name=f"{alias.source_system}:{alias.raw_id}",
-                    message=f"Alias bound to entity {alias.entity_id}",
-                )
-            )
-        # AGGREGATE: per-alias failures are collected into
-        # ``response.aliases.results`` with status="failed" and the
-        # error message; STOP_ON_ERROR mode halts the rest of the
-        # batch via the ``halted`` flag above.
-        except Exception as exc:
-            logger.warning(
-                "bulk_alias_failed",
-                entity_id=alias.entity_id,
-                source_system=alias.source_system,
-                raw_id=alias.raw_id,
-                error=str(exc),
-            )
-            response.aliases.failed += 1
-            response.aliases.results.append(
-                BulkItemResult(
-                    status="failed",
-                    name=f"{alias.source_system}:{alias.raw_id}",
-                    message=str(exc),
-                )
-            )
-            if req.strategy == BatchStrategy.STOP_ON_ERROR:
-                halted = True
+        )
+        if req.strategy == BatchStrategy.STOP_ON_ERROR and _is_terminal_failure(
+            result.status
+        ):
+            halted = True
 
     logger.info(
         "bulk_ingest_completed",

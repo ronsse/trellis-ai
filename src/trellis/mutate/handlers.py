@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
+from trellis.core.document_write import put_document
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import NotFoundError, StoreError, ValidationError
+from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.mutate.commands import Command, Operation
+from trellis.mutate.evidence_ingest import EvidenceEmbedMode
 from trellis.mutate.retention import (
     ARCHIVED_STATE,
     MAX_DOCUMENTS_SCANNED,
@@ -27,12 +31,196 @@ from trellis.schemas.well_known import (
     HAS_OBSERVATION,
     MEASUREMENT,
     OBSERVATION,
+    normalize_entity_name,
 )
 from trellis.stores.base.event_log import EventType
+from trellis.stores.base.graph import AliasBindResult, AliasBindStatus, GraphStore
 from trellis.stores.null.event_log import NullEventLog
 from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+class EvidenceIngestHandler:
+    """Store a document and optionally create its vector row.
+
+    Agent-facing writes use ``soft`` embedding because the document is
+    authoritative and must survive an embedder outage. Repair workers use
+    ``strict`` because their success contract is the vector row itself.
+    ``none`` lets ``save_memory`` keep embedding outside its process-wide
+    deduplication lock.
+    """
+
+    def __init__(
+        self,
+        registry: StoreRegistry,
+        *,
+        embed: EvidenceEmbedMode = "soft",
+        embedding_fn: Callable[[str], list[float]] | None = None,
+        empty_error_code: str = "evidence_ingest_empty",
+    ) -> None:
+        self._registry = registry
+        self._embed = embed
+        self._embedding_fn = embedding_fn
+        self._empty_error_code = empty_error_code
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        evidence = command.args.get("evidence")
+        if not isinstance(evidence, dict):
+            msg = "evidence must be a mapping"
+            raise ValidationError(msg, code="evidence_ingest_shape")
+
+        doc_id = evidence.get("doc_id")
+        content = evidence.get("content")
+        uri = evidence.get("uri")
+        if not isinstance(doc_id, str) or not doc_id:
+            msg = "evidence.doc_id must be a non-empty string"
+            raise ValidationError(msg, code="evidence_ingest_shape")
+        if not isinstance(content, str):
+            msg = "evidence.content must be a string"
+            raise ValidationError(msg, code="evidence_ingest_shape")
+        if not content.strip() and not (isinstance(uri, str) and bool(uri.strip())):
+            msg = "evidence content or uri is required"
+            raise ValidationError(msg, code=self._empty_error_code)
+
+        raw_metadata = evidence.get("metadata")
+        if raw_metadata is not None and not isinstance(raw_metadata, dict):
+            msg = "evidence.metadata must be a mapping"
+            raise ValidationError(msg, code="evidence_ingest_shape")
+        metadata: dict[str, Any] = dict(raw_metadata or {})
+        if isinstance(uri, str) and uri.strip():
+            metadata.setdefault("uri", uri)
+
+        preserve_updated_at = evidence.get("preserve_updated_at", False)
+        if not isinstance(preserve_updated_at, bool):
+            msg = "evidence.preserve_updated_at must be a boolean"
+            raise ValidationError(msg, code="evidence_ingest_shape")
+
+        requested_mode = evidence.get("embed_mode")
+        if requested_mode is not None and requested_mode != self._embed:
+            msg = (
+                f"evidence embed_mode {requested_mode!r} does not match "
+                f"handler mode {self._embed!r}"
+            )
+            raise ValidationError(msg, code="evidence_ingest_mode")
+
+        from trellis.classify.ingest import classify_metadata_on_write  # noqa: PLC0415
+
+        metadata = classify_metadata_on_write(
+            metadata,
+            content,
+            source_system=str(metadata.get("source_system") or ""),
+            doc_id=doc_id,
+        )
+        # Through the seam even though both embed modes below rebuild the
+        # whole row: ``run_embed_on_ingest`` is gated on
+        # ``TRELLIS_ENABLE_EMBED_ON_INGEST``, so on a deployment with that
+        # flag off the ``"soft"`` arm mirrors nothing at all — and an
+        # evidence write may be metadata-only (``preserve_updated_at``),
+        # where there is no embed to piggyback on in either mode.
+        put_document(
+            self._registry.knowledge.document_store,
+            resolve_vector_store(self._registry),
+            doc_id,
+            content,
+            metadata,
+            preserve_updated_at=preserve_updated_at,
+        )
+
+        if self._embed == "soft":
+            from trellis.retrieve.embed_ingest_hook import (  # noqa: PLC0415
+                run_embed_on_ingest,
+            )
+
+            run_embed_on_ingest(
+                self._registry,
+                doc_id,
+                content,
+                metadata,
+                source=command.requested_by,
+            )
+        elif self._embed == "strict":
+            from trellis.retrieve.embed_ingest_hook import (  # noqa: PLC0415
+                build_vector_row,
+            )
+
+            vector_store = getattr(self._registry.knowledge, "vector_store", None)
+            if vector_store is None:
+                msg = "no vector store configured"
+                raise StoreError(msg, store="vector")
+            if self._embedding_fn is None:
+                msg = "no embedding function configured"
+                raise StoreError(msg, store="vector")
+            raw_created_at = evidence.get("created_at")
+            created_at = raw_created_at if isinstance(raw_created_at, str) else None
+            row = build_vector_row(
+                doc_id,
+                content,
+                metadata,
+                self._embedding_fn,
+                created_at=created_at,
+            )
+            vector_store.upsert(
+                item_id=row["item_id"],
+                vector=row["vector"],
+                metadata=row["metadata"],
+            )
+
+        return doc_id, f"Evidence stored: {doc_id}"
+
+
+def _bind_entity_name_alias(
+    graph_store: GraphStore,
+    *,
+    entity_id: str,
+    name: object,
+) -> AliasBindResult | None:
+    """Best-effort derived write inside an already-governed entity command."""
+    if not isinstance(name, str):
+        return None
+    key = normalize_entity_name(name)
+    if not key:
+        return None
+
+    try:
+        twins = graph_store.query(properties={"name": name}, limit=2)
+    except Exception:
+        logger.exception(
+            "entity_resolution_name_alias_twin_check_failed",
+            entity_id=entity_id,
+        )
+        return None
+    if any(str(node.get("node_id")) != entity_id for node in twins):
+        logger.warning(
+            "entity_resolution_name_alias_contested",
+            entity_id=entity_id,
+        )
+        return None
+
+    try:
+        result = graph_store.bind_alias_if_absent(
+            entity_id,
+            NAME_ALIAS_SOURCE_SYSTEM,
+            key,
+            raw_name=name,
+            stale_owner_name_key=key,
+        )
+    except Exception:
+        logger.exception(
+            "entity_resolution_alias_bind_failed",
+            entity_id=entity_id,
+        )
+        return None
+    if result.status is AliasBindStatus.CONFLICT:
+        logger.warning(
+            "entity_resolution_name_alias_lost_race",
+            entity_id=entity_id,
+            existing_entity_id=result.entity_id,
+        )
+    return result
 
 
 class TraceIngestHandler:
@@ -308,6 +496,11 @@ class EntityCreateHandler:
             generation_spec=generation_spec,
             document_ids=document_ids,
         )
+        _bind_entity_name_alias(
+            self._registry.knowledge.graph_store,
+            entity_id=node_id,
+            name=command.args["name"],
+        )
 
         self._registry.operational.event_log.emit(
             EventType.ENTITY_CREATED,
@@ -418,6 +611,17 @@ class EntityUpdateHandler:
             generation_spec=existing.get("generation_spec"),
             document_ids=document_ids,
         )
+        final_name = props.get("name")
+        supplied_properties = command.args.get("properties") or {}
+        name_was_supplied = "name" in command.args or (
+            isinstance(supplied_properties, dict) and "name" in supplied_properties
+        )
+        if name_was_supplied:
+            _bind_entity_name_alias(
+                store,
+                entity_id=node_id,
+                name=final_name,
+            )
 
         self._registry.operational.event_log.emit(
             EventType.ENTITY_UPDATED,
@@ -431,6 +635,42 @@ class EntityUpdateHandler:
             },
         )
         return node_id, f"Entity updated: {node_id}"
+
+
+class AliasUpsertHandler:
+    """Bind or explicitly rebind an alias through the governed pipeline."""
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        store = self._registry.knowledge.graph_store
+        kwargs = {
+            "raw_name": command.args.get("raw_name"),
+            "match_confidence": command.args.get("match_confidence", 1.0),
+            "is_primary": command.args.get("is_primary", False),
+        }
+        try:
+            if command.args.get("if_absent", False):
+                result = store.bind_alias_if_absent(
+                    command.args["entity_id"],
+                    command.args["source_system"],
+                    command.args["raw_id"],
+                    stale_owner_name_key=command.args.get("stale_owner_name_key"),
+                    **kwargs,
+                )
+                return result.alias_id, f"Alias bind outcome: {result.status.value}"
+
+            alias_id = store.upsert_alias(
+                command.args["entity_id"],
+                command.args["source_system"],
+                command.args["raw_id"],
+                **kwargs,
+            )
+        except Exception as exc:
+            msg = "Alias store operation failed"
+            raise StoreError(msg, store="graph") from exc
+        return alias_id, "Alias upserted"
 
 
 class LinkCreateHandler:
@@ -920,7 +1160,14 @@ def _sync_vector_lifecycle(
     item_id: str,
     lifecycle: dict[str, Any],
 ) -> None:
-    """Mirror a lifecycle stamp onto the item's vector row.
+    """Stamp a lifecycle record onto a vector row that has no document write.
+
+    **Repair only.** The writers that stamp a document and its row together
+    (``_archive``, ``_restore``) go through
+    :func:`~trellis.core.document_write.put_document`, which mirrors the bag
+    it just wrote — so the mirror cannot be the step a future edit forgets.
+    What is left here is ``_resync_archived``: a row that diverged *before*
+    that seam existed, repaired with no document write to mirror off.
 
     **A vector row's metadata is a snapshot taken at embed time**, and the
     semantic strategy builds its :class:`~trellis.schemas.pack.PackItem`
@@ -1245,10 +1492,14 @@ class RetentionPruneHandler:
             # predicate, so an archived document's bump moves the
             # ``newest_item_at`` its path reports to the read hook's staleness
             # gate immediately.
-            store.put(
-                candidate.item_id, doc["content"], metadata, preserve_updated_at=True
+            put_document(
+                store,
+                resolve_vector_store(self._registry),
+                candidate.item_id,
+                doc["content"],
+                metadata,
+                preserve_updated_at=True,
             )
-            _sync_vector_lifecycle(self._registry, candidate.item_id, lifecycle)
             return True
 
         graph = self._registry.knowledge.graph_store
@@ -1390,8 +1641,14 @@ class RetentionRestoreHandler:
             # the writers that actually move a node's ``updated_at`` are the
             # ordinary ones (``entity.update``, extraction upserts), which no
             # kwarg here would ever have been passed on.
-            doc_store.put(item_id, doc["content"], metadata, preserve_updated_at=True)
-            _sync_vector_lifecycle(self._registry, item_id, current)
+            put_document(
+                doc_store,
+                resolve_vector_store(self._registry),
+                item_id,
+                doc["content"],
+                metadata,
+                preserve_updated_at=True,
+            )
             return True
 
         graph = self._registry.knowledge.graph_store
@@ -1416,9 +1673,15 @@ class RetentionRestoreHandler:
 
 def create_curate_handlers(
     registry: StoreRegistry,
+    *,
+    evidence_embed: EvidenceEmbedMode = "soft",
 ) -> dict[str, Any]:
     """Create all curate operation handlers for a given registry."""
     return {
+        Operation.EVIDENCE_INGEST: EvidenceIngestHandler(
+            registry,
+            embed=evidence_embed,
+        ),
         Operation.TRACE_INGEST: TraceIngestHandler(registry),
         Operation.PRECEDENT_PROMOTE: PrecedentPromoteHandler(registry),
         Operation.LABEL_ADD: LabelAddHandler(registry),
@@ -1426,6 +1689,7 @@ def create_curate_handlers(
         Operation.FEEDBACK_RECORD: FeedbackRecordHandler(registry),
         Operation.ENTITY_CREATE: EntityCreateHandler(registry),
         Operation.ENTITY_UPDATE: EntityUpdateHandler(registry),
+        Operation.ALIAS_UPSERT: AliasUpsertHandler(registry),
         Operation.LINK_CREATE: LinkCreateHandler(registry),
         Operation.OBSERVATION_RECORD: ObservationRecordHandler(registry),
         Operation.MEASUREMENT_RECORD: MeasurementRecordHandler(registry),

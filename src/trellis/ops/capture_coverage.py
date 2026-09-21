@@ -143,10 +143,26 @@ class CaptureFunnel(TrellisModel):
     sessions_sampled_out: int = 0
     sessions_triggered: int = 0
     sessions_judge_unavailable: int = 0
+    sessions_judge_malformed: int = 0
     sessions_with_memory: int = 0
     memories_written: int = 0
     candidates_distilled: int = 0
+    #: Total worthiness-gate rejections, and it stays the total so a window
+    #: spanning the 2026-09-12 split still means one thing.
     candidates_rejected_worthiness: int = 0
+    #: The judge's own verdict (``durable`` / ``actionable`` False) — the
+    #: negative class of the #264 distillation training pairs, which used to
+    #: be counted only in aggregate and is now emitted as a ``discard``.
+    #:
+    #: **Reads 0 for sweeps that predate the split**, because a sweep payload
+    #: written before it carries no such key and
+    #: :func:`_funnel_from_events` sums what it finds. So over a mixed window
+    #: ``candidates_rejected_worthiness`` exceeds the two parts below; do not
+    #: read the shortfall as deterministic rejections.
+    candidates_rejected_judged_unworthy: int = 0
+    #: Trellis's deterministic floor on the model's output form (no evidence,
+    #: or under ``MIN_MEMORY_CHARS``). Same pre-split caveat as above.
+    candidates_rejected_floor: int = 0
     candidates_rejected_injection: int = 0
     candidates_blocked_scan: int = 0
 
@@ -337,6 +353,12 @@ def summarize_capture_coverage(
     report.last_sweep_at = max(e.occurred_at for e in events)
     report.eligible_sessions = funnel.sessions_triggered
     report.sessions_with_memory = funnel.sessions_with_memory
+    if funnel.sessions_judge_malformed > 0:
+        report.notes.append(
+            f"{funnel.sessions_judge_malformed} malformed distillation "
+            "response(s) were judged empty and watermarked; inspect "
+            "distill_response_malformed warnings"
+        )
 
     if funnel.sessions_triggered == 0:
         report.state = "degraded"

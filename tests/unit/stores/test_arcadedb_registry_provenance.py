@@ -88,8 +88,8 @@ class TestRegistryRunsMigrationOnNewDriverPath:
         _silence_init_schema(monkeypatch)
 
         with (
-            patch("trellis.stores.arcadedb.base.build_arcadedb_driver") as mock_build,
-            patch("trellis.stores.arcadedb.base.ensure_database"),
+            patch("trellis.stores.arcadedb.graph.build_arcadedb_driver") as mock_build,
+            patch("trellis.stores.arcadedb.graph.ensure_database"),
             patch(
                 "trellis.stores.arcadedb.graph."
                 "ArcadeDBGraphStore._init_arcadedb_edge_provenance_schema"
@@ -114,8 +114,8 @@ class TestRegistryRunsMigrationOnNewDriverPath:
         _silence_init_schema(monkeypatch)
 
         with (
-            patch("trellis.stores.arcadedb.base.build_arcadedb_driver") as mock_build,
-            patch("trellis.stores.arcadedb.base.ensure_database"),
+            patch("trellis.stores.arcadedb.graph.build_arcadedb_driver") as mock_build,
+            patch("trellis.stores.arcadedb.graph.ensure_database"),
             patch(
                 "trellis.stores.arcadedb.graph."
                 "ArcadeDBGraphStore._init_arcadedb_edge_provenance_schema"
@@ -156,8 +156,8 @@ class TestRegistryForwardsHttpUrlToConstructor:
             return result
 
         with (
-            patch("trellis.stores.arcadedb.base.build_arcadedb_driver") as mock_build,
-            patch("trellis.stores.arcadedb.base.ensure_database"),
+            patch("trellis.stores.arcadedb.graph.build_arcadedb_driver") as mock_build,
+            patch("trellis.stores.arcadedb.graph.ensure_database"),
             patch(
                 "trellis.stores.arcadedb.graph."
                 "ArcadeDBGraphStore._init_arcadedb_edge_provenance_schema"

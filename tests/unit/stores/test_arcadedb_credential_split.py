@@ -56,8 +56,8 @@ class TestRegistryGraphCredentialSplit:
         _silence_init_schema(monkeypatch)
 
         with (
-            patch("trellis.stores.arcadedb.base.build_arcadedb_driver") as mock_build,
-            patch("trellis.stores.arcadedb.base.ensure_database") as mock_ensure,
+            patch("trellis.stores.arcadedb.graph.build_arcadedb_driver") as mock_build,
+            patch("trellis.stores.arcadedb.graph.ensure_database") as mock_ensure,
             patch(
                 "trellis.stores.arcadedb.graph."
                 "ArcadeDBGraphStore._init_arcadedb_edge_provenance_schema"
@@ -93,8 +93,8 @@ class TestRegistryGraphCredentialSplit:
         registry = StoreRegistry(config=_split_config())
 
         with (
-            patch("trellis.stores.arcadedb.base.build_arcadedb_driver") as mock_build,
-            patch("trellis.stores.arcadedb.base.ensure_database"),
+            patch("trellis.stores.arcadedb.graph.build_arcadedb_driver") as mock_build,
+            patch("trellis.stores.arcadedb.graph.ensure_database"),
             patch(
                 "trellis.stores.arcadedb.graph."
                 "ArcadeDBGraphStore._init_arcadedb_edge_provenance_schema"
@@ -123,8 +123,8 @@ class TestRegistryGraphCredentialSplit:
         del config["graph"]["admin_password"]
 
         with (
-            patch("trellis.stores.arcadedb.base.build_arcadedb_driver") as mock_build,
-            patch("trellis.stores.arcadedb.base.ensure_database") as mock_ensure,
+            patch("trellis.stores.arcadedb.graph.build_arcadedb_driver") as mock_build,
+            patch("trellis.stores.arcadedb.graph.ensure_database") as mock_ensure,
             patch(
                 "trellis.stores.arcadedb.graph."
                 "ArcadeDBGraphStore._init_arcadedb_edge_provenance_schema"
@@ -150,8 +150,8 @@ class TestRegistryGraphCredentialSplit:
         del config["graph"]["admin_password"]
 
         with (
-            patch("trellis.stores.arcadedb.base.build_arcadedb_driver") as mock_build,
-            patch("trellis.stores.arcadedb.base.ensure_database") as mock_ensure,
+            patch("trellis.stores.arcadedb.graph.build_arcadedb_driver") as mock_build,
+            patch("trellis.stores.arcadedb.graph.ensure_database") as mock_ensure,
             patch(
                 "trellis.stores.arcadedb.graph."
                 "ArcadeDBGraphStore._init_arcadedb_edge_provenance_schema"

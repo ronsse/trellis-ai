@@ -71,14 +71,13 @@ class TestDefaults:
         assert WriteBehaviourConfig.from_env(env) == WriteBehaviourConfig()
 
 
-#: The knobs that are plain on/off switches.
-BOOLEAN_FIELDS = (
-    "classify_on_ingest",
-    "embed_on_ingest",
-    "memory_extraction",
-    "reconcile_on_write",
-    "trace_extraction",
-    "require_pack_attribution",
+#: The knobs that are plain on/off switches — **derived**, not listed.
+#: A hand-written roster here silently stops covering a new flag, which
+#: is how a roster rots (#443 declared three control keys against six
+#: call sites). The derivation is the dataclass's own defaults, so a
+#: boolean field that is not exercised below cannot exist.
+BOOLEAN_FIELDS = tuple(
+    name for name, value in WriteBehaviourConfig().as_dict().items() if value is False
 )
 
 
@@ -106,6 +105,81 @@ class TestBooleanFlags:
             if value != defaults.as_dict()[name]
         }
         assert changed == {field}
+
+
+class TestBooleanRosterIsNotVacuous:
+    """The derivation above divides by its own output; pin a floor.
+
+    Every other guard in this file is satisfied by a roster that merely
+    *shrinks*, so the count is the one thing the derivation cannot
+    compute for itself.
+    """
+
+    def test_covers_the_known_switches(self) -> None:
+        assert set(BOOLEAN_FIELDS) >= {
+            "classify_on_ingest",
+            "embed_on_ingest",
+            "memory_extraction",
+            "reconcile_on_write",
+            "trace_extraction",
+            "require_pack_attribution",
+            "require_bodied_attribution",
+        }
+
+    def test_excludes_the_non_boolean_knobs(self) -> None:
+        """``value is False`` must not sweep in ``0`` / ``0.0`` / ``""``."""
+        assert "minhash_seed_max_docs" not in BOOLEAN_FIELDS
+        assert "trace_extraction_min_confidence" not in BOOLEAN_FIELDS
+        assert "reconcile_timeout_s" not in BOOLEAN_FIELDS
+
+
+class TestBodiedAttributionFlag:
+    """#550's capability ships **off**, and that is the decision.
+
+    The measured ask is ~6 more verdicts per pack on top of the ~8.9 a
+    grader already volunteers — a ~46% increase that exceeds the observed
+    ceiling. The failure mode of asking too much of a grading surface is
+    the surface going quiet, so the default is off and an operator turns
+    it on against their own callers.
+    """
+
+    def test_ships_off(self) -> None:
+        assert WriteBehaviourConfig().require_bodied_attribution is False
+        assert WriteBehaviourConfig.from_env({}).require_bodied_attribution is False
+
+    def test_is_independent_of_the_pack_attribution_gate(self) -> None:
+        """Two requirements, two switches — neither implies the other.
+
+        They ask different questions (*can this join at all?* against
+        *is every body accounted for?*), so an operator must be able to
+        run either alone.
+        """
+        bodied_only = WriteBehaviourConfig.from_env(
+            {ENV_VAR_BY_FIELD["require_bodied_attribution"]: "1"}
+        )
+        assert bodied_only.require_bodied_attribution is True
+        assert bodied_only.require_pack_attribution is False
+
+        pack_only = WriteBehaviourConfig.from_env(
+            {ENV_VAR_BY_FIELD["require_pack_attribution"]: "1"}
+        )
+        assert pack_only.require_pack_attribution is True
+        assert pack_only.require_bodied_attribution is False
+
+    def test_appears_in_the_operator_report(self) -> None:
+        """``trellis admin write-config`` is how a host is compared."""
+        config = WriteBehaviourConfig.from_env(
+            {ENV_VAR_BY_FIELD["require_bodied_attribution"]: "1"}
+        )
+        row = next(
+            entry
+            for entry in config.describe()
+            if entry["name"] == "require_bodied_attribution"
+        )
+        assert row["env_var"] == "TRELLIS_REQUIRE_BODIED_ATTRIBUTION"
+        assert row["value"] is True
+        assert row["default"] is False
+        assert row["overridden"] is True
 
 
 class TestConfidenceFloor:

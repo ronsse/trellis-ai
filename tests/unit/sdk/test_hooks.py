@@ -180,6 +180,62 @@ class TestContextInjectorHappyPath:
         assert "token bucket" in md
         assert "pack:ctx" in md
 
+    def test_for_intent_returns_withholding_when_every_item_was_removed(self) -> None:
+        client = _client_returning(
+            200,
+            {
+                "pack_id": "pack:empty",
+                "count": 0,
+                "items": [],
+                "withholding": {
+                    "total": 2,
+                    "by_reason": {"archived": 1, "noise": 1},
+                    "withheld_item_ids": ["archive-id", "noise-id"],
+                    "non_absence_reasons": [],
+                    "section_filtered": 0,
+                    "served_count": 0,
+                },
+            },
+        )
+
+        rendered = ContextInjector(client).for_intent("rate limiting")
+
+        assert "**Withheld:** 2 items" in rendered
+        assert "archived 1" in rendered
+        assert "noise 1" in rendered
+        assert "archive-id" not in rendered
+        assert "noise-id" not in rendered
+
+    def test_for_intent_renders_withholding_before_items(self) -> None:
+        client = _client_returning(
+            200,
+            {
+                "pack_id": "pack:mixed",
+                "count": 1,
+                "items": [
+                    {
+                        "item_type": "document",
+                        "item_id": "served-id",
+                        "excerpt": "Use a token bucket.",
+                        "relevance_score": 0.9,
+                    }
+                ],
+                "withholding": {
+                    "total": 1,
+                    "by_reason": {"noise": 1},
+                    "withheld_item_ids": ["noise-id"],
+                    "non_absence_reasons": [],
+                    "section_filtered": 0,
+                    "served_count": 1,
+                },
+            },
+        )
+
+        rendered = ContextInjector(client).for_intent("rate limiting")
+
+        assert rendered.index("**Withheld:**") < rendered.index("## [document]")
+        assert "noise-id" not in rendered
+
     def test_for_entities_falls_back_to_per_entity_lookup(self) -> None:
         def _handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/api/v1/packs":
@@ -206,6 +262,71 @@ class TestContextInjectorHappyPath:
             md = ContextInjector(client).for_entities(["e1"], intent="ship it")
         assert "orders-api" in md
         assert "order placement" in md
+
+    def test_for_entities_renders_withholding_with_primary_pack_items(self) -> None:
+        client = _client_returning(
+            200,
+            {
+                "pack_id": "pack:mixed",
+                "count": 1,
+                "items": [
+                    {
+                        "item_type": "document",
+                        "item_id": "served-id",
+                        "excerpt": "Use a token bucket.",
+                        "relevance_score": 0.9,
+                    }
+                ],
+                "withholding": {
+                    "total": 1,
+                    "by_reason": {"noise": 1},
+                    "withheld_item_ids": ["noise-id"],
+                    "non_absence_reasons": [],
+                    "section_filtered": 0,
+                    "served_count": 1,
+                },
+            },
+        )
+
+        rendered = ContextInjector(client).for_entities(
+            ["entity-1"], intent="rate limiting"
+        )
+
+        assert rendered.index("**Withheld:**") < rendered.index("## [document]")
+        assert "noise-id" not in rendered
+
+    def test_for_entities_returns_withholding_after_empty_fallback(self) -> None:
+        withholding = {
+            "total": 1,
+            "by_reason": {"noise": 1},
+            "withheld_item_ids": ["noise-id"],
+            "non_absence_reasons": [],
+            "section_filtered": 0,
+            "served_count": 0,
+        }
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/v1/packs":
+                return httpx.Response(
+                    200,
+                    json={
+                        "pack_id": "pack:empty",
+                        "count": 0,
+                        "items": [],
+                        "withholding": withholding,
+                    },
+                )
+            return httpx.Response(404, json={"detail": "not found"})
+
+        transport = httpx.MockTransport(_handler)
+        http = httpx.Client(transport=transport, base_url="http://testserver")
+        with TrellisClient(http=http, verify_version=False) as client:
+            rendered = ContextInjector(client).for_entities(
+                ["missing"], intent="rate limiting"
+            )
+
+        assert "**Withheld:** 1 item" in rendered
+        assert "noise-id" not in rendered
 
 
 class TestContextInjectorDegradation:

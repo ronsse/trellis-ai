@@ -26,8 +26,9 @@ future local memory model's dataset accrues from the first run (#264).
 from __future__ import annotations
 
 import asyncio
-import json
 import os
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -35,8 +36,10 @@ import structlog
 from trellis.core.elision import elide_text
 from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.llm import Message
+from trellis.llm.json_response import JSONParseOutcome, parse_json_response
 from trellis.schemas.memory_op import (
     REF_TYPE_DOCUMENT,
+    REF_TYPE_SESSION,
     InputDigest,
     JudgedOpType,
     SubjectRef,
@@ -73,6 +76,31 @@ DEFAULT_DISTILL_MODEL = "hermes3:8b"
 #: :func:`_prompt_exceeds_window` to refuse the case where it was not raised
 #: enough.
 _MAX_SALIENT_CHARS = 8000
+
+#: Cap on the rendered tool-use rollup, in characters.
+#:
+#: The rollup is **charged against** :data:`_MAX_SALIENT_CHARS` rather than
+#: added to it, because the two failure modes are not symmetric: an
+#: over-budget prompt does not lose its tail, it is refused outright by
+#: :func:`_prompt_exceeds_window` and the session is captured *not at all*.
+#: Buying tool density with coverage would be a bad trade and a silent one.
+#:
+#: Measured over the 451 real sessions of the reference corpus: the rollup
+#: renders a median **51** chars, p90 191, max **896** — so this cap
+#: truncates **0** of them and exists only so a session with an unusual
+#: tool spread cannot starve the conversation it is supposed to describe.
+_MAX_TOOL_SUMMARY_CHARS = 900
+
+#: Label the rollup is rendered behind, charged against
+#: :data:`_MAX_SALIENT_CHARS` along with the rollup itself.
+#:
+#: It is a named constant because the charge is against the *line*, not
+#: the payload: the label is 30 chars longer than the one it replaced, and
+#: charging only the rollup left that difference uncharged — which showed
+#: up as 267 of 451 sessions growing (median +26) where the arithmetic
+#: predicted 79. A label is prompt text like any other, and an invariant
+#: that holds for part of a line is the kind that quietly stops holding.
+_TOOL_LINE_LABEL = "Tools used (calls, and how many errored): "
 
 #: Chars-per-token estimate for the truncation check — the same ~4:1
 #: convention ``PackBuilder`` uses for its token budgets.
@@ -138,6 +166,26 @@ def judge_context_tokens(env: Mapping[str, str] | None = None) -> int:
 #: Per-session distillation timeout (seconds).
 DEFAULT_TIMEOUT_S = 60.0
 
+
+class DistillOutcome(StrEnum):
+    """Session-level outcomes from the distillation judge."""
+
+    CANDIDATES = "candidates"
+    EMPTY = "empty"
+    MALFORMED = "malformed"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class DistillResult:
+    """Concrete judge outcome; no sentinel values or union return."""
+
+    outcome: DistillOutcome
+    candidates: tuple[CandidateMemory, ...] = ()
+    parse_error: str | None = None
+    unavailable_reason: str | None = None
+
+
 _SYSTEM_PROMPT = (
     "You distill durable operator memories from an AI coding session. "
     "Return ONLY memories that pass ALL FOUR tests:\n"
@@ -168,6 +216,82 @@ _SYSTEM_PROMPT = (
 )
 
 
+def render_tool_summary(digest: SessionDigest, *, max_chars: int | None = None) -> str:
+    """Render the tool stream as ``name xN (M errored)``, busiest first.
+
+    Replaces the bare ``sorted(set(names))`` this line used to carry, which
+    discarded three things the parse already held: **how often** each tool
+    ran, **which** of them failed, and therefore any sense of scale. Measured
+    on 451 real sessions, that set compressed a median 66 calls to 3 names
+    (median 22x, mean 27x), and 17.7% of all sessions rendered the single
+    word ``Bash`` as the complete tool record of the work they did. ``Bash``
+    is **83.4% of all 56,030 calls** and appears in 447 of the 451 sessions,
+    so as a *name* it is close to information-free; the count and the error
+    attribution are the whole signal. (The corpus is live — it grew by three
+    calls while being measured, because the measuring session is in it. Treat
+    every figure here as a re-derivable order of magnitude, not a constant.)
+
+    The error counts are the sharper half. 1,398 errored tool results across
+    308 of those sessions reached the judge as one session-level
+    ``has_error`` boolean — which the free-text backstop pushes to **True on
+    426 of 451 sessions (94.5%)**, so the flag the prompt spends a line on is
+    very close to a constant. Per-tool counts separate "one grep missed" from
+    "Bash failed 73 times", and the distiller is asked for failure memories.
+
+    Never renders an argument, a path, or any output: a
+    :class:`~trellis_workers.session_capture.models.ToolUseRollup` carries
+    counts and a tool name, so this inherits the digest's leak guarantee
+    instead of reopening it.
+
+    Truncation is marked, not silent — a dropped tail becomes ``(+N more)``
+    so the judge cannot read a cut list as a complete one.
+
+    **What this does not buy, measured.** A/B against the real judge
+    (hermes3:8b, ``temperature=0``, 60 sessions sampled deterministically,
+    both arms through the shipped ``parse_candidates``) found **no effect on
+    judge output**: 148 candidates old against 152 new, 16 sessions yielding
+    more and 14 fewer — a two-sided sign test at **p = 0.86** — with mean
+    confidence 0.965 against 0.960 and *fewer* sessions producing any
+    candidate at all (49 against 46). Failure-signal sessions moved 13 to 15,
+    inside the same noise. So the justification for this line is **not** a
+    demonstrated capture-quality gain. It is that the loss is real and
+    one-directional (a median 66 calls rendered as 3 names; 1,398 errors as
+    one boolean true on 94.5% of sessions), that closing it is deterministic
+    and costs a *smaller* prompt, and that the alternative #306 proposed was
+    a second local LLM to recover what the parse already held. A more capable
+    judge may use the signal; this one does not, and saying otherwise would
+    be the claim the measurement refuses.
+
+    Args:
+        digest: Parsed session. An empty tool stream renders ``"none"``.
+        max_chars: Budget for the rendered list. Defaults to
+            :data:`_MAX_TOOL_SUMMARY_CHARS`.
+
+    Returns:
+        One line's worth of text, never longer than *max_chars*.
+    """
+    budget = _MAX_TOOL_SUMMARY_CHARS if max_chars is None else max_chars
+    rollup = digest.tool_rollup
+    if not rollup:
+        return "none"
+
+    parts: list[str] = []
+    for index, entry in enumerate(rollup):
+        piece = f"{entry.name} x{entry.calls}"
+        if entry.errors:
+            piece += f" ({entry.errors} errored)"
+        remaining = len(rollup) - index
+        marker = f", (+{remaining} more)"
+        candidate = ", ".join([*parts, piece])
+        # Keep room for the marker only while a tail actually remains.
+        needed = len(candidate) + (len(marker) if remaining > 1 else 0)
+        if parts and needed > budget:
+            return ", ".join(parts) + f", (+{remaining} more)"
+        parts.append(piece)
+    rendered = ", ".join(parts)
+    return rendered[:budget] if len(rendered) > budget else rendered
+
+
 def build_distill_messages(digest: SessionDigest) -> list[Message]:
     """Build the distillation prompt from the secret-free digest only.
 
@@ -175,13 +299,48 @@ def build_distill_messages(digest: SessionDigest) -> list[Message]:
     cut is marked with an explicit ``<elided … />`` tag (size + reason,
     #310) so the judge knows material was removed rather than treating
     the cut as the end of the session.
+
+    The tool rollup is **charged against that same cap**, not added to it.
+    :func:`_prompt_exceeds_window` sums every message and fails *closed* —
+    an over-window prompt is not trimmed, the session is skipped and
+    captured nowhere — so a line appended on top of a full budget buys tool
+    density by dropping whole sessions, silently.
+
+    What the charge buys is a **tighter bound**, not a smaller prompt in
+    every case, and the distinction is worth stating because the measured
+    numbers disagree with the tidier claim. The old line rendered
+    ``sorted(set(names))`` *on top of* a full 8,000-char salient budget, so
+    the prompt's ceiling was 8,000 + an unbounded tool list; here the tool
+    line and the conversation share the 8,000 between them. On the
+    reference corpus (451 sessions) the salient text is already at the cap
+    on **372 of them (82.5%)**, where the line displaces conversation
+    one-for-one; on the remaining **79** nothing is displaced, because
+    neither text was near the cap, and the prompt grows by the difference
+    between the two lines — median **+46** chars, max **+84**. Across the
+    corpus the median session's prompt *shrinks* by **34** chars and the
+    worst case falls from 10,618 to **9,835**.
+
+    Neither arm puts a single session over the window: the largest prompt
+    after the change is 9,835 of the 11,584 chars the default window allows
+    (84.9%), and the replay counts **0** sessions that overflow only with
+    the rollup. So the guard is not what makes this safe today — the
+    headroom is. The charge is what keeps it safe when
+    :data:`_MAX_SALIENT_CHARS` is next raised toward the window, which is
+    the change that would otherwise turn a tool line into lost captures.
+
+    What is charged is the whole line, label included. Charging only the
+    rollup left the label's own 30-char growth uncharged, which put 267
+    sessions over their old prompt size where the arithmetic predicted 79
+    — small, but in the direction the guard exists to prevent, and found
+    only by re-measuring a figure this docstring already asserted.
     """
-    salient = elide_text(digest.salient_text, max_salient_chars())
-    tool_names = sorted({call.name for call in digest.tool_calls})
+    tool_line = _TOOL_LINE_LABEL + render_tool_summary(digest)
+    salient_budget = max(0, max_salient_chars() - len(tool_line))
+    salient = elide_text(digest.salient_text, salient_budget)
     signals = f"has_error={digest.has_error} has_correction={digest.has_correction}"
     user = (
         f"Session signals: {signals}\n"
-        f"Tools used: {', '.join(tool_names) or 'none'}\n\n"
+        f"{tool_line}\n\n"
         f"Conversation (natural-language turns only):\n{salient}\n\n"
         "Return the JSON array of qualifying memories."
     )
@@ -222,28 +381,30 @@ def _coerce_candidate(item: Any, session_id: str) -> CandidateMemory | None:
     )
 
 
-def parse_candidates(raw: str, session_id: str) -> list[CandidateMemory]:
-    """Parse the model's JSON array into candidates; ``[]`` if malformed.
-
-    Tolerant of a fenced code block; a non-array or non-JSON response yields
-    an empty list (fail-closed), never an exception.
-    """
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = [ln for ln in text.splitlines() if not ln.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return []
-    if not isinstance(parsed, list):
-        return []
+def parse_candidates(raw: str, session_id: str) -> DistillResult:
+    """Parse the model's response into a concrete distillation outcome."""
+    parsed = parse_json_response(raw)
+    if parsed.outcome is JSONParseOutcome.MALFORMED:
+        return DistillResult(
+            outcome=DistillOutcome.MALFORMED,
+            parse_error=parsed.error,
+        )
+    if parsed.outcome is JSONParseOutcome.EMPTY:
+        return DistillResult(outcome=DistillOutcome.EMPTY)
+    if not isinstance(parsed.value, list):
+        return DistillResult(
+            outcome=DistillOutcome.MALFORMED,
+            parse_error="expected a JSON array of candidate memories",
+        )
     candidates: list[CandidateMemory] = []
-    for item in parsed:
+    for item in parsed.value:
         candidate = _coerce_candidate(item, session_id)
         if candidate is not None:
             candidates.append(candidate)
-    return candidates
+    return DistillResult(
+        outcome=DistillOutcome.CANDIDATES,
+        candidates=tuple(candidates),
+    )
 
 
 def distill_session(
@@ -251,26 +412,24 @@ def distill_session(
     digest: SessionDigest,
     *,
     timeout: float = DEFAULT_TIMEOUT_S,
-) -> list[CandidateMemory] | None:
-    """Distil candidate memories from a session. Fail-closed on any problem.
-
-    Returns:
-        * ``None`` — the judge could not be reached (missing client, transport
-          error, timeout). The caller writes nothing **and** leaves the
-          session un-watermarked so a later run retries it: a model outage
-          must never silently lose a session's memories.
-        * ``list`` (possibly empty) — the judge responded. An empty list means
-          "judged, nothing worthy"; the caller safely advances the watermark.
+) -> DistillResult:
+    """Distil candidate memories from a session into a concrete outcome.
 
     The autonomous sweep never writes raw or guessed content when the judge is
     down — the opposite of #263's reconcile fail-open.
     """
     if client is None:
         logger.info("distill_skipped_no_client", session_id=digest.session_id)
-        return None
+        return DistillResult(
+            outcome=DistillOutcome.UNAVAILABLE,
+            unavailable_reason="no_client",
+        )
     messages = build_distill_messages(digest)
     if _prompt_exceeds_window(messages, session_id=digest.session_id):
-        return None
+        return DistillResult(
+            outcome=DistillOutcome.UNAVAILABLE,
+            unavailable_reason="prompt_too_large",
+        )
     try:
         response = asyncio.run(
             asyncio.wait_for(
@@ -280,10 +439,16 @@ def distill_session(
         )
     except TimeoutError:
         logger.warning("distill_timeout", session_id=digest.session_id)
-        return None
+        return DistillResult(
+            outcome=DistillOutcome.UNAVAILABLE,
+            unavailable_reason="timeout",
+        )
     except Exception:
         logger.warning("distill_model_error", session_id=digest.session_id)
-        return None
+        return DistillResult(
+            outcome=DistillOutcome.UNAVAILABLE,
+            unavailable_reason="model_error",
+        )
     return parse_candidates(response.content, digest.session_id)
 
 
@@ -335,6 +500,41 @@ def _prompt_exceeds_window(
     return True
 
 
+#: The distillation arm's whole decision vocabulary — the judge either kept
+#: the candidate or refused it. Two labels, named once: a second vocabulary
+#: for the same facts is the ``content_type`` / ``document_form`` drift of
+#: #325/#326, and sub-slugs ("discard_short", "discard_unattributed") would
+#: reintroduce it inside one op_type.
+DECISION_KEEP = "keep"
+DECISION_DISCARD = "discard"
+
+
+def _judged_subject(candidate: CandidateMemory) -> tuple[SubjectRef, str]:
+    """Point the verdict at what it is actually about, and name its kind.
+
+    A kept memory is a document. A **discard has no document**:
+    ``CandidateMemory.doc_id`` is populated by the writer, after the gate
+    that rejected the candidate, so it is empty here and a ``doc`` ref would
+    carry a dangling id in half the feedback-attribution join key. The
+    discard's stable subject is the session the judgement was made about —
+    which ``input_digest.source_refs`` already names, so the two halves of
+    the pair agree.
+
+    Returns the payload's ``subject_ref`` and the event row's
+    ``entity_type``. They are deliberately not the same string: ``ref_type``
+    is the join-key vocabulary (``doc`` / ``entity`` / ``session``) and
+    ``entity_type`` is the event log's own column, where this worker's
+    sibling emitter already writes ``capture_sweep``.
+    """
+    if candidate.doc_id:
+        return SubjectRef(ref_type=REF_TYPE_DOCUMENT, ref_id=candidate.doc_id), (
+            "document"
+        )
+    return SubjectRef(
+        ref_type=REF_TYPE_SESSION, ref_id=candidate.session_id
+    ), "capture_session"
+
+
 def emit_distillation_judged(
     event_log: EventLog,
     *,
@@ -346,9 +546,10 @@ def emit_distillation_judged(
 
     The payload carries only a fingerprint of the session input (hash +
     length + the session id as an opaque ref), the verdict label, the model
-    id, and the subject doc ref — never memory content or model prose.
+    id, and the subject ref — never memory content or model prose.
     Best-effort: a telemetry failure never rolls back a committed capture.
     """
+    subject_ref, entity_type = _judged_subject(candidate)
     emit_memory_op_judged(
         event_log,
         op_type=JudgedOpType.DISTILLATION,
@@ -361,7 +562,7 @@ def emit_distillation_judged(
         ),
         decision=decision,
         confidence=candidate.confidence,
-        subject_ref=SubjectRef(ref_type=REF_TYPE_DOCUMENT, ref_id=candidate.doc_id),
-        entity_id=candidate.doc_id or candidate.session_id,
-        entity_type="document",
+        subject_ref=subject_ref,
+        entity_id=subject_ref.ref_id,
+        entity_type=entity_type,
     )

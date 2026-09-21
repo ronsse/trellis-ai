@@ -116,6 +116,17 @@ class PackRequest(WireRequestModel):
     tag_filters: dict[str, dict[str, Any]] | None = None
 
 
+class WithholdingResponse(WireModel):
+    """Pack withholding telemetry exposed without item content."""
+
+    total: int
+    by_reason: dict[str, int]
+    withheld_item_ids: list[str]
+    non_absence_reasons: list[str]
+    section_filtered: int
+    served_count: int
+
+
 class PackResponse(WireModel):
     """Response containing an assembled context pack."""
 
@@ -128,6 +139,9 @@ class PackResponse(WireModel):
     items: list[dict[str, Any]]
     advisories: list[dict[str, Any]] = Field(default_factory=list)
     retrieval_report: dict[str, Any] | None = None
+    #: Verbatim ``Pack.metadata["withholding"]`` telemetry. ``None`` means
+    #: the response came from a server older than API 1.2.
+    withholding: WithholdingResponse | None = None
 
 
 class SectionedPackRequest(WireRequestModel):
@@ -159,6 +173,9 @@ class SectionedPackResponse(WireModel):
     agent_id: str | None = None
     sections: list[dict[str, Any]]
     advisories: list[dict[str, Any]] = Field(default_factory=list)
+    #: Verbatim ``SectionedPack.metadata["withholding"]`` telemetry. ``None``
+    #: means the response came from a server older than API 1.2.
+    withholding: WithholdingResponse | None = None
 
 
 # -- Curate --
@@ -272,6 +289,15 @@ class CommandResponse(WireModel):
     operation: str
     message: str
     created_id: str | None = None
+    # Non-blocking policy verdicts (``Enforcement.WARN``, or an
+    # ``action="warn"`` rule) carried forward from
+    # ``CommandResult.warnings``. Always present, unlike the event
+    # payload's conditional ``policy_warnings`` key -- an audit event
+    # keeps that key absent so a zero-policy deployment emits a
+    # byte-identical payload to the pre-gate world, but for a response a
+    # caller reads, an always-present ``[]`` is what distinguishes "the
+    # gate ran and nothing warned" from "this build predates the field".
+    warnings: list[str] = Field(default_factory=list)
 
 
 # -- Batch mutations --

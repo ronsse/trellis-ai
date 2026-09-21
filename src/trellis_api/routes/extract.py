@@ -34,8 +34,8 @@ from trellis.wire.translate import (
     extraction_batch_to_core_result,
 )
 from trellis_api.app import get_registry
+from trellis_api.routes._results import command_response
 from trellis_wire import (
-    CommandResponse,
     DraftSubmissionRequest,
     DraftSubmissionResult,
 )
@@ -113,14 +113,5 @@ def submit_drafts(
         failed=sum(1 for r in results if r.status == CommandStatus.FAILED),
         rejected=sum(1 for r in results if r.status == CommandStatus.REJECTED),
         duplicates=sum(1 for r in results if r.status == CommandStatus.DUPLICATE),
-        results=[
-            CommandResponse(
-                status=r.status.value,
-                command_id=r.command_id,
-                operation=r.operation,
-                message=r.message,
-                created_id=r.created_id,
-            )
-            for r in results
-        ],
+        results=[command_response(r) for r in results],
     )

@@ -5,20 +5,26 @@ from __future__ import annotations
 import contextlib
 import inspect
 import json
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import structlog
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
+from structlog.testing import capture_logs
 
 import trellis.mcp.server as server_mod
+from tests.structlog_isolation import clear_cached_logger_proxies
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.hashing import content_hash
 from trellis.core.write_config import MINHASH_SEED_MAX_DOCS_ENV
 from trellis.errors import StoreError
-from trellis.mcp.server import RESOURCE_NOT_FOUND
+from trellis.llm.routing import LLMConsumer
+from trellis.mcp.server import MUTATION_FAILED, RESOURCE_NOT_FOUND
 from trellis.mcp.server import (
     get_context as _get_context,
 )
@@ -52,6 +58,8 @@ from trellis.mcp.server import (
 from trellis.mcp.server import (
     search as _search,
 )
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.schemas.well_known import APPLIES_TO, CONCEPT, SOFTWARE_APPLICATION
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -443,6 +451,218 @@ class TestSaveKnowledge:
         assert "Warning" in result
         assert "edge not created" in result
 
+    # -- linking by name and by domain (K1) ---------------------------------
+
+    @staticmethod
+    def _out_edges(registry: StoreRegistry, node_id: str) -> list[dict[str, Any]]:
+        return registry.knowledge.graph_store.get_edges(node_id, direction="outgoing")
+
+    def test_links_to_a_tool_by_its_name(self, temp_registry: StoreRegistry) -> None:
+        temp_registry.knowledge.graph_store.upsert_node(
+            "tool:mcp-trellis-search",
+            SOFTWARE_APPLICATION,
+            {"name": "mcp__trellis__search"},
+        )
+
+        result = save_knowledge("search gotcha", relates_to="mcp__trellis__search")
+        node_id = self._node_id_from_result(result)
+
+        assert (
+            "Resolved relates_to 'mcp__trellis__search' -> tool:mcp-trellis-search"
+            in result
+        )
+        assert "Edge created" in result
+        edges = self._out_edges(temp_registry, node_id)
+        assert [(e["target_id"], e["edge_type"]) for e in edges] == [
+            ("tool:mcp-trellis-search", "entity_related_to")
+        ]
+
+    def test_an_exact_id_links_without_a_resolution_line(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.graph_store.upsert_node(
+            "tool:bash", SOFTWARE_APPLICATION, {"name": "Bash"}
+        )
+        result = save_knowledge("bash note", relates_to="tool:bash")
+        assert "Edge created" in result
+        assert "Resolved relates_to" not in result
+
+    def test_an_ambiguous_name_links_nothing_and_lists_candidates(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        graph = temp_registry.knowledge.graph_store
+        graph.upsert_node("domain:deploy", CONCEPT, {"name": "deploy"})
+        graph.upsert_node("tool:deploy", SOFTWARE_APPLICATION, {"name": "deploy"})
+
+        result = save_knowledge("deploy note", relates_to="deploy")
+        node_id = self._node_id_from_result(result)
+
+        assert "names 2 nodes" in result
+        assert "domain:deploy" in result
+        assert "tool:deploy" in result
+        assert "edge not created" in result
+        assert self._out_edges(temp_registry, node_id) == []
+
+    def test_an_unknown_name_links_nothing(self, temp_registry: StoreRegistry) -> None:
+        result = save_knowledge("lonely", relates_to="no such node")
+        node_id = self._node_id_from_result(result)
+        assert "Warning: target entity not found: no such node" in result
+        assert self._out_edges(temp_registry, node_id) == []
+
+    def test_a_note_never_resolves_to_itself(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        # entity.create binds the note's own name alias before linking runs,
+        # so without self-exclusion "docker" would name the note itself. The
+        # tool is spelled differently on purpose: an exact-name twin makes
+        # the alias contested, and then there is no self-alias to exclude.
+        temp_registry.knowledge.graph_store.upsert_node(
+            "tool:docker", SOFTWARE_APPLICATION, {"name": "Docker"}
+        )
+
+        result = save_knowledge("docker", relates_to="docker")
+        node_id = self._node_id_from_result(result)
+
+        bound = temp_registry.knowledge.graph_store.resolve_alias("name", "docker")
+        assert bound is not None
+        assert bound["entity_id"] == node_id
+        assert "names 2 nodes" not in result
+        edges = self._out_edges(temp_registry, node_id)
+        assert [e["target_id"] for e in edges] == ["tool:docker"]
+
+    def test_self_reference_alone_is_not_found(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        result = save_knowledge("hermes", relates_to="hermes")
+        node_id = self._node_id_from_result(result)
+        bound = temp_registry.knowledge.graph_store.resolve_alias("name", "hermes")
+        assert bound is not None
+        assert bound["entity_id"] == node_id
+        assert "target entity not found" in result
+        assert self._out_edges(temp_registry, node_id) == []
+
+    def test_domain_property_links_the_existing_domain_node(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.graph_store.upsert_node(
+            "domain:trellis-ai", CONCEPT, {"name": "trellis-ai"}
+        )
+
+        result = save_knowledge("retrieval gotcha", properties={"domain": "Trellis AI"})
+        node_id = self._node_id_from_result(result)
+
+        assert f"--[{APPLIES_TO}]--> domain:trellis-ai" in result
+        edges = self._out_edges(temp_registry, node_id)
+        assert len(edges) == 1
+        assert edges[0]["target_id"] == "domain:trellis-ai"
+        assert edges[0]["edge_type"] == APPLIES_TO
+        assert edges[0]["properties"]["derived_from"] == "properties.domain"
+
+    def test_a_domain_with_no_node_is_reported_and_never_minted(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        result = save_knowledge("stray", properties={"domain": "nowhere"})
+        node_id = self._node_id_from_result(result)
+
+        assert "Note: domain 'nowhere' has no domain node" in result
+        graph = temp_registry.knowledge.graph_store
+        assert graph.get_node("domain:nowhere") is None
+        assert graph.count_nodes() == 1
+        assert self._out_edges(temp_registry, node_id) == []
+
+    def test_a_domain_list_links_each_existing_node(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        graph = temp_registry.knowledge.graph_store
+        graph.upsert_node("domain:trellis", CONCEPT, {"name": "trellis"})
+        graph.upsert_node("domain:infra", CONCEPT, {"name": "infra"})
+
+        result = save_knowledge(
+            "cross-cutting", properties={"domain": ["trellis", "infra", "absent"]}
+        )
+        node_id = self._node_id_from_result(result)
+
+        targets = sorted(
+            e["target_id"] for e in self._out_edges(temp_registry, node_id)
+        )
+        assert targets == ["domain:infra", "domain:trellis"]
+        assert "Note: domain 'absent' has no domain node" in result
+
+    def test_relates_to_and_domain_naming_one_link_create_one_edge(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        # The store absorbs a second LINK_CREATE for the same triple by
+        # re-versioning the edge, so an edge count cannot see it. What it
+        # would do is relabel the edge the caller asked for as derived from
+        # the domain property, and a revert of derived links would then
+        # remove it.
+        temp_registry.knowledge.graph_store.upsert_node(
+            "domain:trellis", CONCEPT, {"name": "trellis"}
+        )
+
+        result = save_knowledge(
+            "note",
+            properties={"domain": "trellis"},
+            relates_to="trellis",
+            edge_kind=APPLIES_TO,
+        )
+        node_id = self._node_id_from_result(result)
+
+        edges = self._out_edges(temp_registry, node_id)
+        assert [(e["target_id"], e["edge_type"]) for e in edges] == [
+            ("domain:trellis", APPLIES_TO)
+        ]
+        assert "derived_from" not in (edges[0]["properties"] or {})
+        assert "Domain link:" not in result
+        events = temp_registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_EXECUTED
+        )
+        operations = [e.payload["operation"] for e in events]
+        assert operations.count("link.create") == 1
+
+    def test_links_are_governed_and_attributed(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        graph = temp_registry.knowledge.graph_store
+        graph.upsert_node("domain:trellis", CONCEPT, {"name": "trellis"})
+        graph.upsert_node("tool:bash", SOFTWARE_APPLICATION, {"name": "Bash"})
+
+        save_knowledge("note", properties={"domain": "trellis"}, relates_to="Bash")
+
+        events = temp_registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_EXECUTED
+        )
+        links = [e for e in events if e.payload["operation"] == "link.create"]
+        assert len(links) == 2
+        assert {e.payload["requested_by"] for e in links} == {"mcp:save_knowledge"}
+
+    def test_a_denied_link_is_reported_and_the_note_kept(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        graph = temp_registry.knowledge.graph_store
+        graph.upsert_node("domain:trellis", CONCEPT, {"name": "trellis"})
+        graph.upsert_node("tool:bash", SOFTWARE_APPLICATION, {"name": "Bash"})
+        policy = Policy(
+            policy_type="mutation",
+            scope=PolicyScope(level="global", value=None),
+            rules=[PolicyRule(operation="link.create", action="deny")],
+            enforcement="enforce",
+        )
+        (temp_registry.stores_dir / "policies.json").write_text(
+            json.dumps({"policies": [policy.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+
+        result = save_knowledge(
+            "note", properties={"domain": "trellis"}, relates_to="Bash"
+        )
+        node_id = self._node_id_from_result(result)
+
+        assert "Warning: edge not created:" in result
+        assert "Warning: domain link to domain:trellis not created:" in result
+        assert graph.get_node(node_id) is not None
+        assert self._out_edges(temp_registry, node_id) == []
+
     @staticmethod
     def _node_id_from_result(result: str) -> str:
         # Result shape: "Entity created: <node_id> (<type>: <name>)".
@@ -558,6 +778,27 @@ class TestSaveKnowledge:
         # The graph↔document link rides the audit payload.
         assert events[0].payload["document_ids"]
 
+    def test_evidence_deny_blocks_content_and_graph_write(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        policy = Policy(
+            policy_type="mutation",
+            scope=PolicyScope(level="global", value=None),
+            rules=[PolicyRule(operation="evidence.ingest", action="deny")],
+            enforcement="enforce",
+        )
+        (temp_registry.stores_dir / "policies.json").write_text(
+            json.dumps({"policies": [policy.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            save_knowledge("blocked", content="policy-protected evidence")
+
+        assert excinfo.value.error.code == MUTATION_FAILED
+        assert temp_registry.knowledge.document_store.count() == 0
+        assert temp_registry.knowledge.graph_store.count_nodes() == 0
+
 
 # ---------------------------------------------------------------------------
 # save_memory
@@ -619,6 +860,67 @@ class TestSaveMemory:
         assert event.payload["content_length"] == len("event emission test")
         assert event.payload["metadata"] == {"domain": "ops"}
         assert "content_hash" in event.payload
+        governed = temp_registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_EXECUTED,
+            limit=100,
+        )
+        governed = [
+            event
+            for event in governed
+            if event.payload.get("operation") == "evidence.ingest"
+        ]
+        assert len(governed) == 1
+        assert governed[0].entity_id == doc_id
+        assert governed[0].payload["requested_by"] == "mcp:save_memory"
+
+    def test_evidence_deny_blocks_memory_write(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        policy = Policy(
+            policy_type="mutation",
+            scope=PolicyScope(level="global", value=None),
+            rules=[PolicyRule(operation="evidence.ingest", action="deny")],
+            enforcement="enforce",
+        )
+        (temp_registry.stores_dir / "policies.json").write_text(
+            json.dumps({"policies": [policy.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            save_memory("policy must stop this memory")
+
+        assert excinfo.value.error.code == MUTATION_FAILED
+        assert temp_registry.knowledge.document_store.count() == 0
+        assert not temp_registry.operational.event_log.get_events(
+            event_type=EventType.MEMORY_STORED,
+            limit=100,
+        )
+
+    def test_embedding_runs_once_outside_dedup_lock(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        lock_was_available: list[bool] = []
+
+        def observing_embedder(_content: str) -> list[float]:
+            acquired = server_mod._save_memory_lock.acquire(blocking=False)
+            lock_was_available.append(acquired)
+            if acquired:
+                server_mod._save_memory_lock.release()
+            return [1.0, 0.0, 0.5]
+
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        monkeypatch.setattr(
+            type(temp_registry),
+            "embedding_fn",
+            property(lambda _self: observing_embedder),
+        )
+
+        save_memory("embedding must not extend the dedup critical section")
+
+        assert lock_was_available == [True]
 
     def test_concurrent_identical_saves_persist_once(
         self, temp_registry: StoreRegistry
@@ -1031,7 +1333,7 @@ class TestSaveMemoryExtractionFeatureFlag:
         monkeypatch.setattr(
             temp_registry,
             "build_llm_client",
-            lambda: registry_llm_instance,
+            lambda *, consumer: registry_llm_instance,
         )
 
         # Sentinel: if env path is consulted, this blows up loudly.
@@ -1050,6 +1352,238 @@ class TestSaveMemoryExtractionFeatureFlag:
         assert server_mod._memory_extractor is not None
         # The registry-sourced client handled the extraction call.
         assert call_count["registry_llm"] == 1
+
+    def test_the_extractor_client_is_built_for_memory_extraction(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        temp_registry: StoreRegistry,
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        seen: list[LLMConsumer] = []
+
+        def _record(_registry: Any, consumer: LLMConsumer) -> None:
+            seen.append(consumer)
+
+        monkeypatch.setattr(server_mod, "_build_llm_client", _record)
+        assert server_mod._get_memory_extractor(temp_registry) is None
+        assert seen == [LLMConsumer.MEMORY_EXTRACTION]
+
+
+# ---------------------------------------------------------------------------
+# _build_llm_client — per-consumer routing (llm.tiers / llm.routes)
+# ---------------------------------------------------------------------------
+
+_PARENT_KEY_ENV = "TRELLIS_TEST_PARENT_KEY"
+_TIER_KEY_ENV = "TRELLIS_TEST_TIER_KEY"
+
+_ROUTED_LLM = {
+    "provider": "openai",
+    "base_url": "http://localhost:11434/v1",
+    "api_key_env": _PARENT_KEY_ENV,
+    "model": "hermes3:8b",
+    "tiers": {
+        "deep": {
+            "base_url": "http://localhost:4000/v1",
+            "api_key_env": _TIER_KEY_ENV,
+            "model": "deep",
+        }
+    },
+    "routes": {"reconcile": "deep"},
+}
+
+
+class TestBuildLlmClientRouting:
+    """The env-var fallback is for consumers nobody routed, and only for them.
+
+    ``OPENAI_API_KEY`` answering for a consumer the operator pinned to a tier
+    would run it on a model nobody chose, so a routed consumer that cannot be
+    built — and every consumer under a malformed routing block — gets None.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_PARENT_KEY_ENV, "sk-parent-0001")
+        monkeypatch.setenv(_TIER_KEY_ENV, "sk-tier-0002")
+
+    @pytest.fixture
+    def logs(self) -> Iterator[list[dict[str, Any]]]:
+        """Capture every level, so an asserted ``log_level`` can fail.
+
+        ``capture_logs`` replaces processors and leaves ``wrapper_class``
+        alone, and the package's autouse ``_suppress_structlog`` filters below
+        CRITICAL — so without lifting it nothing is captured at all, and with
+        it lifted a demotion to ``debug`` would still be captured (#395).
+
+        Reconfiguring is **not sufficient on its own**, and the difference is
+        invisible in an isolated run: ``server.py``'s module-level logger is a
+        lazy proxy that memoises its bind on first use, so once any earlier
+        test in the session has logged through it, neither ``configure`` nor
+        ``capture_logs`` reaches it and this fixture captures nothing. Evicting
+        the proxy caches — :func:`clear_cached_logger_proxies`, the repo's one
+        copy of that rationale — is what makes the capture order-independent.
+        Teardown evicts again so the next test does not inherit a bind
+        memoised against ``capture_logs``'s processors.
+        """
+        prior = structlog.get_config()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.NOTSET)
+        )
+        try:
+            with capture_logs() as captured:
+                clear_cached_logger_proxies()
+                yield captured
+        finally:
+            structlog.configure(**prior)
+            clear_cached_logger_proxies()
+
+    @pytest.fixture
+    def built(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+        """Record every provider client the registry constructs."""
+        calls: list[dict[str, Any]] = []
+
+        class _Recorder:
+            def __init__(self, **kwargs: Any) -> None:
+                calls.append(kwargs)
+
+        monkeypatch.setattr("trellis.llm.providers.openai.OpenAIClient", _Recorder)
+        return calls
+
+    @pytest.fixture
+    def env_clients(self, monkeypatch: pytest.MonkeyPatch) -> list[object]:
+        """Replace the env-var path; each call appends the client it returns."""
+        clients: list[object] = []
+
+        def _from_env() -> object:
+            clients.append(object())
+            return clients[-1]
+
+        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", _from_env)
+        return clients
+
+    @staticmethod
+    def _registry(tmp_path: Path, llm: dict[str, Any]) -> StoreRegistry:
+        return StoreRegistry(stores_dir=tmp_path / "routing", llm_config=llm)
+
+    @pytest.mark.parametrize(
+        ("consumer", "expected"),
+        [
+            (
+                LLMConsumer.RECONCILE,
+                {
+                    "api_key": "sk-tier-0002",
+                    "base_url": "http://localhost:4000/v1",
+                    "default_model": "deep",
+                },
+            ),
+            (
+                LLMConsumer.MEMORY_EXTRACTION,
+                {
+                    "api_key": "sk-parent-0001",
+                    "base_url": "http://localhost:11434/v1",
+                    "default_model": "hermes3:8b",
+                },
+            ),
+        ],
+    )
+    def test_each_consumer_builds_from_its_own_block(
+        self,
+        tmp_path: Path,
+        built: list[dict[str, Any]],
+        env_clients: list[object],
+        consumer: LLMConsumer,
+        expected: dict[str, Any],
+    ) -> None:
+        client = server_mod._build_llm_client(
+            self._registry(tmp_path, _ROUTED_LLM), consumer
+        )
+        assert client is not None
+        assert built == [expected]
+        assert env_clients == []
+
+    def test_an_unbuildable_routed_consumer_never_reaches_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        built: list[dict[str, Any]],
+        env_clients: list[object],
+        logs: list[dict[str, Any]],
+    ) -> None:
+        monkeypatch.delenv(_TIER_KEY_ENV)
+        registry = self._registry(tmp_path, _ROUTED_LLM)
+        client = server_mod._build_llm_client(registry, LLMConsumer.RECONCILE)
+        assert client is None
+        assert built == []
+        assert env_clients == []
+        (warning,) = [
+            e for e in logs if e["event"] == "llm_client_routed_tier_unbuildable"
+        ]
+        assert warning["log_level"] == "warning"
+        assert (warning["consumer"], warning["tier"]) == ("reconcile", "deep")
+
+    def test_an_unbuildable_unrouted_consumer_still_falls_back_to_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        built: list[dict[str, Any]],
+        env_clients: list[object],
+    ) -> None:
+        """The documented fallback survives for a consumer nobody routed."""
+        monkeypatch.delenv(_PARENT_KEY_ENV)
+        registry = self._registry(tmp_path, _ROUTED_LLM)
+        client = server_mod._build_llm_client(registry, LLMConsumer.MEMORY_EXTRACTION)
+        assert built == []
+        assert env_clients == [client]
+
+    @pytest.mark.parametrize(
+        "consumer", [LLMConsumer.MEMORY_EXTRACTION, LLMConsumer.RECONCILE]
+    )
+    def test_a_malformed_routing_block_never_reaches_env(
+        self,
+        tmp_path: Path,
+        built: list[dict[str, Any]],
+        env_clients: list[object],
+        logs: list[dict[str, Any]],
+        consumer: LLMConsumer,
+    ) -> None:
+        """One bad route disables every consumer, routed or not, loudly."""
+        malformed = {
+            "provider": "openai",
+            "api_key_env": _PARENT_KEY_ENV,
+            "routes": {"reconcile": "deep"},
+        }
+        registry = self._registry(tmp_path, malformed)
+        client = server_mod._build_llm_client(registry, consumer)
+        assert client is None
+        assert built == []
+        assert env_clients == []
+        (error,) = [e for e in logs if e["event"] == "llm_routing_invalid"]
+        assert error["log_level"] == "error"
+        assert error["consumer"] == consumer.value
+        assert error["setting"] == "llm.routes.reconcile"
+        assert "exc_info" not in error
+
+    @pytest.mark.parametrize(
+        ("consumer", "reaches_env"),
+        [(LLMConsumer.RECONCILE, False), (LLMConsumer.MEMORY_EXTRACTION, True)],
+    )
+    def test_a_registry_build_failure_reaches_env_only_when_unrouted(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        env_clients: list[object],
+        consumer: LLMConsumer,
+        reaches_env: bool,
+    ) -> None:
+        registry = self._registry(tmp_path, _ROUTED_LLM)
+
+        def _boom(*, consumer: LLMConsumer) -> None:
+            msg = "provider SDK exploded"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(registry, "build_llm_client", _boom)
+        client = server_mod._build_llm_client(registry, consumer)
+        assert env_clients == ([client] if reaches_env else [])
+        assert (client is None) is not reaches_env
 
 
 # ---------------------------------------------------------------------------
@@ -2097,8 +2631,17 @@ class TestStructuredErrorContract:
         temp_registry: StoreRegistry,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """An event-log emit failure inside ``save_memory`` raises with
-        the original exception chained — used to be a silent debug log."""
+        """An event-log outage inside ``save_memory`` raises with the
+        original exception chained — used to be a silent debug log.
+
+        It surfaces at the ``MEMORY_STORED`` emit, which is this tool's own
+        documented acceptance record and a hard requirement. Before #551 it
+        surfaced one emit earlier, at the executor's Stage 5 audit event,
+        because that was the first ``emit`` a total outage reached and
+        nothing guarded it — so this test passed while reading the *audit*
+        failure, not the tool's. The guard moved the boundary; it did not
+        make the outage quiet.
+        """
         boom = RuntimeError("fake event-log outage")
 
         def _boom(*args: object, **kwargs: object) -> None:
@@ -2113,6 +2656,84 @@ class TestStructuredErrorContract:
         assert "MEMORY_STORED" in err.error.message
         assert err.error.data is not None
         assert err.error.data["stage"] == "memory_stored_emit"
+        assert excinfo.value.__cause__ is boom
+
+    def test_save_memory_survives_an_audit_emit_outage_and_says_nothing_false(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#551 at the surface that motivated it, with only Stage 5 dark.
+
+        The document is committed before Stage 5 runs, so failing the call
+        would report a completed write as a failure and leave no audit
+        record of either. The write now stands, the tool's own required
+        ``MEMORY_STORED`` record is written, and the missing audit event is
+        missing *and nothing claims otherwise* — the trade the guard makes,
+        pinned here rather than implied.
+        """
+        event_log = temp_registry.operational.event_log
+        real_emit = event_log.emit
+        boom = StoreError("audit log is down")
+
+        def _fail_only_the_audit_event(
+            event_type: EventType, *args: object, **kwargs: object
+        ) -> object:
+            if event_type is EventType.MUTATION_EXECUTED:
+                raise boom
+            return real_emit(event_type, *args, **kwargs)
+
+        monkeypatch.setattr(event_log, "emit", _fail_only_the_audit_event)
+
+        result = save_memory("memory written while the audit log is down")
+
+        assert result.startswith("Memory saved: ")
+        stored_id = result.removeprefix("Memory saved: ").strip()
+        assert temp_registry.knowledge.document_store.get(stored_id) is not None
+        assert [
+            event
+            for event in event_log.get_events(
+                event_type=EventType.MEMORY_STORED, limit=50
+            )
+            if event.entity_id == stored_id
+        ], "the tool's own acceptance record is not what the guard covers"
+        assert not [
+            event
+            for event in event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED, limit=50
+            )
+            if event.entity_id == stored_id
+        ], "the audit event really is absent — that is the degradation"
+
+    def test_save_memory_governed_write_failure_chains_cause(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Whatever still escapes ``execute`` is reported as itself.
+
+        The arm used to attribute every escape to the Stage 5 emit, which
+        was ~true only because the emit was the sole thing that could get
+        out. Now that it cannot, an unqualified attribution would be wrong
+        every single time, so the message names the write, not a stage it
+        cannot have failed at.
+        """
+        boom = RuntimeError("pipeline blew up before any emit")
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise boom
+
+        monkeypatch.setattr(server_mod.MutationExecutor, "execute", _boom)
+
+        with pytest.raises(McpError) as excinfo:
+            save_memory("unique content for a non-emit pipeline failure")
+        err = excinfo.value
+        assert err.error.code == INTERNAL_ERROR
+        assert "governed memory write failed" in err.error.message
+        assert "MUTATION_EXECUTED" not in err.error.message
+        assert err.error.data is not None
+        assert err.error.data["stage"] == "evidence_ingest"
+        assert err.error.data["error_class"] == "RuntimeError"
         assert excinfo.value.__cause__ is boom
 
     def test_save_memory_minhash_init_failure_chains_cause(

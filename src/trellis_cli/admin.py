@@ -32,6 +32,7 @@ from trellis.core.write_config import (
 )
 from trellis.core.write_provenance import build_write_provenance
 from trellis.errors import BackendNotInstalledError
+from trellis.llm.routing import LLMConsumer, LLMRoute, LLMRoutingError
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.claude_integration import (
     get_claude_settings_path,
@@ -1157,13 +1158,21 @@ def _memory_prompt_available() -> bool:
     return True
 
 
-def _build_check_extractors_report() -> dict[str, Any]:
-    """Collect readiness signals for the ``save_memory`` extractor.
+def _resolve_extractor_llm(
+    registry: Any,
+) -> tuple[LLMRoute | None, LLMRoutingError | None, Any]:
+    """Resolve the extractor's route and try to build its client.
 
-    Returns a structured report with the ``status``/``exit_code`` pair
-    already filled in so the caller only renders it.
+    The extractor builds its client as ``LLMConsumer.MEMORY_EXTRACTION``, so
+    the report resolves that consumer's route: a routed tier reports its own
+    provider and model, and a malformed ``llm.tiers`` / ``llm.routes`` block
+    is returned as the finding rather than raised as a traceback. No client
+    is attempted when the route does not resolve.
     """
-    registry = _get_registry()
+    try:
+        route = registry.llm_route(LLMConsumer.MEMORY_EXTRACTION)
+    except LLMRoutingError as exc:
+        return None, exc, None
 
     # ``build_llm_client`` now raises ``BackendNotInstalledError`` when
     # the configured provider's optional SDK is missing. For this
@@ -1171,15 +1180,31 @@ def _build_check_extractors_report() -> dict[str, Any]:
     # downstream status logic already covers the "blocked vs env
     # fallback" cases.
     try:
-        llm_client = registry.build_llm_client()
+        llm_client = registry.build_llm_client(consumer=LLMConsumer.MEMORY_EXTRACTION)
     except BackendNotInstalledError:
         logger.debug("check_extractors_llm_sdk_not_installed", exc_info=True)
         llm_client = None
-    llm_cfg: dict[str, Any] = dict(registry._llm_config or {})
-    provider = llm_cfg.get("provider")
-    model = llm_cfg.get("model")
+    return route, None, llm_client
+
+
+def _build_check_extractors_report() -> dict[str, Any]:
+    """Collect readiness signals for the ``save_memory`` extractor.
+
+    Returns a structured report with the ``status``/``exit_code`` pair
+    already filled in so the caller only renders it.
+    """
+    registry = _get_registry()
+    route, routing_error, llm_client = _resolve_extractor_llm(registry)
+    provider = None if route is None else route.provider
+    model = None if route is None else route.model
+    tier = None if route is None else route.tier
 
     env_fallback_available = any(os.environ.get(v) for v in _LLM_API_KEY_ENVS)
+    # MCP's ``_build_llm_client`` skips the env-var fallback for a consumer
+    # ``llm.routes`` pins to a tier and for a malformed routing block: the
+    # operator chose a model, and ``OPENAI_API_KEY`` would run another one.
+    env_fallback_applies = route is not None and not route.routed
+    env_fallback_usable = env_fallback_available and env_fallback_applies
     flag_raw = os.environ.get(MEMORY_EXTRACTION_FLAG, "").strip().lower()
     flag_set = flag_raw in TRUTHY
 
@@ -1190,8 +1215,10 @@ def _build_check_extractors_report() -> dict[str, Any]:
     warnings: list[dict[str, str]] = []
 
     # Status logic:
-    # * BLOCKED — flag set AND no LLM client obtainable from either
-    #   config or env. Extraction would silently skip in prod. Emits
+    # * BLOCKED — ``llm.tiers`` / ``llm.routes`` is malformed (whatever the
+    #   flag: no consumer can build a client until it is fixed), or the flag
+    #   is set AND no LLM client is obtainable from config or a usable env
+    #   fallback. Extraction would silently skip in prod. Emits
     #   EXIT_INTERNAL (1) under the ADR — "blocked" is a deployment-
     #   misconfiguration probe failure, not a validation / policy /
     #   store error. was: code=2 (predates exit-code ADR)
@@ -1199,19 +1226,47 @@ def _build_check_extractors_report() -> dict[str, Any]:
     #     (a) LLM buildable but flag unset.
     #     (b) Flag set, config-path unbuildable, but env fallback present.
     # * READY (exit 0) — flag set AND config-buildable LLM.
-    if flag_set and not config_buildable and not env_fallback_available:
+    if routing_error is not None:
         status = "blocked"
         exit_code = EXIT_INTERNAL
         warnings.append(
             {
                 "severity": "critical",
-                "signal": "no_llm_client",
+                "signal": "llm_routing_invalid",
                 "message": (
-                    "Feature flag is set but no LLM client can be built from"
-                    " config or env — memory extraction will silently skip."
+                    f"{routing_error.setting}: {routing_error.message} No LLM"
+                    " consumer can build a client until this is fixed, and the"
+                    " env-var fallback is disabled."
                 ),
             }
         )
+    elif flag_set and not config_buildable and not env_fallback_usable:
+        status = "blocked"
+        exit_code = EXIT_INTERNAL
+        if tier is not None:
+            warnings.append(
+                {
+                    "severity": "critical",
+                    "signal": "routed_tier_unbuildable",
+                    "message": (
+                        "Feature flag is set but llm.routes.memory_extraction"
+                        f" pins tier {tier!r}, which cannot build a client. A"
+                        " routed consumer never falls back to the parent block"
+                        " or to env vars — memory extraction will silently skip."
+                    ),
+                }
+            )
+        else:
+            warnings.append(
+                {
+                    "severity": "critical",
+                    "signal": "no_llm_client",
+                    "message": (
+                        "Feature flag is set but no LLM client can be built from"
+                        " config or env — memory extraction will silently skip."
+                    ),
+                }
+            )
     elif not flag_set and config_buildable:
         status = "warn"
         exit_code = EXIT_INTERNAL
@@ -1225,7 +1280,7 @@ def _build_check_extractors_report() -> dict[str, Any]:
                 ),
             }
         )
-    elif flag_set and not config_buildable and env_fallback_available:
+    elif flag_set and not config_buildable and env_fallback_usable:
         status = "warn"
         exit_code = EXIT_INTERNAL
         warnings.append(
@@ -1262,9 +1317,11 @@ def _build_check_extractors_report() -> dict[str, Any]:
         "exit_code": exit_code,
         "llm_client": {
             "config_buildable": config_buildable,
+            "tier": tier,
             "provider": provider,
             "model": model,
             "env_fallback_available": env_fallback_available,
+            "env_fallback_applies": env_fallback_applies,
         },
         "feature_flag": {
             "name": MEMORY_EXTRACTION_FLAG,
@@ -1272,7 +1329,7 @@ def _build_check_extractors_report() -> dict[str, Any]:
         },
         "dependencies": {
             "alias_resolver": alias_resolver_ok,
-            "llm_client": config_buildable or env_fallback_available,
+            "llm_client": config_buildable or env_fallback_usable,
             "memory_prompt": memory_prompt_ok,
         },
         "warnings": warnings,
@@ -1285,21 +1342,30 @@ def _print_check_extractors_report(report: dict[str, Any]) -> None:
 
     llm = report["llm_client"]
     console.print("[bold]LLM client:[/bold]")
+    tier = llm.get("tier")
+    via = f"tier={escape(tier)}, " if tier else ""
     if llm["config_buildable"]:
-        provider = llm.get("provider") or "?"
-        model = llm.get("model") or "(default)"
+        provider = escape(llm.get("provider") or "?")
+        model = escape(llm.get("model") or "(default)")
         console.print(
             f"  [green]OK[/green] configurable from ~/.trellis/config.yaml"
-            f" (provider={provider}, model={model})"
+            f" ({via}provider={provider}, model={model})"
         )
     else:
+        suffix = f" ({via.removesuffix(', ')})" if via else ""
         console.print(
-            "  [red]MISSING[/red] not configurable from ~/.trellis/config.yaml"
+            f"  [red]MISSING[/red] not configurable from ~/.trellis/config.yaml{suffix}"
         )
-    if llm["env_fallback_available"]:
+    if llm["env_fallback_available"] and llm["env_fallback_applies"]:
         console.print(
             "  [green]OK[/green] OPENAI_API_KEY/ANTHROPIC_API_KEY env var is set"
             " (env fallback available)"
+        )
+    elif llm["env_fallback_available"]:
+        console.print(
+            "  [yellow]--[/yellow] OPENAI_API_KEY/ANTHROPIC_API_KEY env var is set"
+            " but unused: the env fallback never applies to a routed consumer"
+            " or a malformed routing block"
         )
     else:
         console.print(
@@ -1343,7 +1409,7 @@ def _print_check_extractors_report(report: dict[str, Any]) -> None:
                 w["severity"], "white"
             )
             console.print(
-                f"  [{color}]{w['severity'].upper()}[/{color}]: {w['message']}"
+                f"  [{color}]{w['severity'].upper()}[/{color}]: {escape(w['message'])}"
             )
 
 
@@ -1363,7 +1429,12 @@ def check_extractors(
     * :data:`~trellis_cli.exit_codes.EXIT_INTERNAL` — WARN or BLOCKED.
       WARN: buildable but flag unset, or flag set with only env-var
       fallback available. BLOCKED: flag set AND no LLM client
-      obtainable anywhere — extraction would silently skip in prod.
+      obtainable anywhere — extraction would silently skip in prod — or
+      ``llm.tiers`` / ``llm.routes`` is malformed, whatever the flag.
+
+    The client is resolved as ``LLMConsumer.MEMORY_EXTRACTION``: when
+    ``llm.routes`` pins that consumer to a tier, the report names the tier
+    and its model, and an env-var key does not count as a fallback.
     """
     report = _build_check_extractors_report()
     if output_format == "json":
@@ -1372,6 +1443,66 @@ def check_extractors(
         _print_check_extractors_report(report)
     if report["exit_code"] != 0:
         raise typer.Exit(code=report["exit_code"])
+
+
+@admin_app.command("llm-routes")
+def llm_routes(
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json"
+    ),
+) -> None:
+    """Show the tier, provider and model each LLM consumer builds from.
+
+    Resolves ``llm.tiers`` / ``llm.routes`` for every
+    :class:`~trellis.llm.routing.LLMConsumer` without building a client.
+    ``credential_source`` says where a key would come from right now
+    (``env``, ``literal`` or ``null`` for none); the key itself is never
+    read out.
+
+    Exit codes: :data:`~trellis_cli.exit_codes.EXIT_OK` when the routing
+    block resolves, :data:`~trellis_cli.exit_codes.EXIT_STORE` when it is
+    malformed — the code the CLI boundary gives every ``ConfigError`` —
+    on either format.
+    """
+    registry = _get_registry()
+    routes: list[dict[str, Any]] = []
+    error: dict[str, Any] | None = None
+    try:
+        routes = [registry.llm_route(consumer).describe() for consumer in LLMConsumer]
+    except LLMRoutingError as exc:
+        error = {"setting": exc.setting, "message": exc.message}
+
+    if output_format == "json":
+        status = "ok" if error is None else "error"
+        emit_json({"status": status, "routes": routes, "error": error})
+    elif error is not None:
+        console.print(
+            f"[red]{escape(str(error['setting']))}: {escape(error['message'])}[/red]"
+        )
+    else:
+        table = Table(title="LLM routes")
+        for column in ("Consumer", "Tier", "Provider", "Model", "Base URL", "Key"):
+            table.add_column(column)
+        for row in routes:
+            key = row["credential_source"] or "none"
+            if row["api_key_env"]:
+                key = f"{key} ({row['api_key_env']})"
+            table.add_row(
+                *(
+                    escape(str(value)) if value is not None else "-"
+                    for value in (
+                        row["consumer"],
+                        row["tier"] or "(parent)",
+                        row["provider"],
+                        row["model"],
+                        row["base_url"],
+                        key,
+                    )
+                )
+            )
+        console.print(table)
+    if error is not None:
+        raise typer.Exit(code=EXIT_STORE)
 
 
 @admin_app.command("check-plugins")
@@ -2364,3 +2495,14 @@ from trellis_cli.admin_resync_vector_metadata import (  # noqa: E402
 )
 
 _register_resync_vector_metadata(admin_app)
+
+
+# ---------------------------------------------------------------------------
+# backfill-name-aliases — write-time alias index bootstrap (#369)
+# ---------------------------------------------------------------------------
+
+from trellis_cli.admin_backfill_name_aliases import (  # noqa: E402
+    register as _register_backfill_name_aliases,
+)
+
+_register_backfill_name_aliases(admin_app)

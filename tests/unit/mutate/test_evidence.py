@@ -14,6 +14,7 @@ import pytest
 
 from trellis.core.hashing import content_hash
 from trellis.mutate import ensure_evidence_document
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 
@@ -30,6 +31,12 @@ class TestEnsureEvidenceDocument:
         stored = registry.knowledge.document_store.get(doc_id)
         assert stored is not None
         assert stored["content"] == "the evidence prose"
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_EXECUTED
+        )
+        assert len(events) == 1
+        assert events[0].payload["operation"] == "evidence.ingest"
+        assert events[0].payload["requested_by"] == "mcp:save_knowledge"
 
     def test_is_idempotent_on_same_content(self, registry: StoreRegistry) -> None:
         first = ensure_evidence_document(registry, "identical body")

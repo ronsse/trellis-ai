@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
 from typing import (
@@ -15,6 +16,7 @@ from typing import (
 
 import structlog
 
+from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
@@ -25,11 +27,12 @@ from trellis.schemas.parameters import ParameterScope
 from trellis.schemas.well_known import (
     canonicalize_entity_type,
     expand_entity_type_query,
+    normalize_entity_name,
 )
 from trellis.stores.base.graph_query import FilterClause, NodeQuery
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from trellis.ops.registry import ParameterRegistry
     from trellis.stores.registry import StoreRegistry
@@ -315,11 +318,348 @@ class GraphSeedExtractor(Protocol):
       Requires entity-summary documents in the vector store; read that
       module's docstring before wiring it, because a corpus without them
       makes it a measured no-op (#371); a production path needs #375 first.
+    * :class:`NamespaceSeedExtractor` — resolves intent words to node ids
+      through the alias index and Trellis's deterministic id prefixes.
+      Indexed reads only, no embedder, and the one wired by default
+      (#375).
     """
 
     def extract(self, intent: str) -> list[str]:
         """Return graph node ids to seed traversal from, best first."""
         ...  # pragma: no cover - protocol declaration
+
+
+#: Node-id namespaces :class:`NamespaceSeedExtractor` probes by default.
+#:
+#: Trellis mints deterministic, prefixed node ids — ``domain:<name>``,
+#: ``tool:<name>``, ``artifact:<path>``, ``agent:<name>``, ``team:<name>``
+#: — so a name-to-id lookup is a primary-key read rather than a search.
+#: That is the whole reason this extractor can exist without the scan
+#: #375 refuses.
+#:
+#: The roster is **measured, not enumerated from the schema**. On the
+#: reference deployment (1,696 current nodes, 2026-09-12), replaying the
+#: 85 real intents this deployment has assembled packs for:
+#:
+#: ==========================  ================
+#: namespaces probed           intents seeded
+#: ==========================  ================
+#: all five (the default)      **51/85**
+#: ``domain`` alone            38/85
+#: ``tool`` alone              10/85
+#: ``artifact`` alone          3/85
+#: ==========================  ================
+#:
+#: The combination is worth more than its best member, which is the
+#: reason it is a roster and not a single prefix.
+#:
+#: ``trace:`` is deliberately **absent** and is the roster's negative
+#: control: 165 such nodes exist, and **0** of them carry an id derivable
+#: from their name (the id is a ULID; the name is the task's prose
+#: title). Probing it would add a namespace's worth of round-trip payload
+#: for a structurally impossible hit.
+#:
+#: An empty string is a legal member and probes the bare key as a whole
+#: node id, for a deployment whose ids are not namespaced. It is not in
+#: the default because it was measured and yields nothing here: 51/85
+#: either way, same 18 distinct seeds.
+DEFAULT_SEED_NAMESPACES: tuple[str, ...] = (
+    "domain",
+    "team",
+    "artifact",
+    "agent",
+    "tool",
+)
+
+#: Upper bound on distinct intent keys probed for one pack.
+#:
+#: This is the extractor's cost bound, and it is **where the yield
+#: saturates**, not a round number. Over the same 85 intents: a cap of 16
+#: seeds 46, 24 seeds 49, and **32 seeds 51 — identical to no cap at
+#: all**, down to the same 18 distinct seed ids. The median intent
+#: produces 20 keys, so the cap does not bind on a typical pack; it
+#: bounds the tail (the longest real intent produces 54).
+DEFAULT_MAX_SEED_KEYS = 32
+
+#: Upper bound on seeds handed back for expansion.
+#:
+#: Every seed is a BFS root, so this bounds the subgraph the seeded
+#: branch asks for. Measured over the same intents the ceiling is **3**
+#: seeds, so this never binds today — it exists so that a future corpus
+#: whose names collide with common words cannot turn one pack into a
+#: whole-graph traversal.
+DEFAULT_MAX_SEEDS = 8
+
+#: Traversal depth for seeds an extractor derived, as opposed to seeds a
+#: caller named through ``filters["seed_ids"]``.
+#:
+#: A caller who names a seed is making a claim about that entity and gets
+#: the historical default of 2. A *derived* seed is an inference from a
+#: word in the intent, and the measurement says one hop is where its value
+#: is. Across the 18 distinct seeds this deployment's intents resolve to,
+#: depth 1 yields **90** non-structural nodes in total and depth 2 yields
+#: **344** — and the extra 254 are not more of the same. The seeds that
+#: resolve are provenance hubs (``domain:fincore`` alone goes 13 nodes ->
+#: 105 at depth 2), so the second hop reaches the hub's whole cohort
+#: rather than the intent's neighbourhood.
+#:
+#: Latency is *not* the reason (1.4-6.5 ms either way). The reason is that
+#: :meth:`GraphSearch.search` finishes with ``scored = nodes[:limit]`` over
+#: an **unordered** subgraph, so a depth-2 hub expansion does not rank the
+#: generic nodes below the on-topic ones — it hands the slice ~100 of them
+#: and displaces the session Activities depth 1 returns cleanly. A wider
+#: net plus an arbitrary slice is a worse pack, not a bigger one.
+EXTRACTED_SEED_DEPTH = 1
+
+#: Tokenizer for intent text. Deliberately permissive about the
+#: characters that appear *inside* a Trellis name — ``_ . : / # + -`` —
+#: because the names being matched are file paths, tool names and domain
+#: slugs, not English words.
+_SEED_TOKEN_RE = re.compile(r"[A-Za-z0-9_.:/#+-]+")
+
+
+class NamespaceSeedExtractor:
+    """Resolve intent words to node ids with indexed reads only (#375).
+
+    The graph axis's unseeded branch is ``ORDER BY created_at DESC LIMIT
+    n``, so without an extractor the axis never consults the intent and
+    its coverage decays as 1/N. This is the production-viable extractor:
+    it needs no embedder, no entity-summary corpus, and — the load-bearing
+    property — **no scan**.
+
+    How it resolves, per normalized key, in this order:
+
+    1. ``resolve_alias("name", key)`` — the governed display-name index
+       #530 maintains. One indexed read; the authoritative binding.
+    2. ``f"{namespace}:{key}"`` for each of :data:`DEFAULT_SEED_NAMESPACES`
+       — candidate primary keys under Trellis's deterministic id scheme.
+
+    Every candidate from step 2 is then confirmed in **one**
+    ``get_subgraph(candidates, depth=0)`` call, which the
+    ``GraphStoreContractTests`` pin to return exactly the seed nodes that
+    exist. That is the batch primary-key read this design rests on, and
+    it is why the cost does not grow with the number of namespaces.
+
+    **What this costs, stated against the mechanism it replaces.**
+    Measured on the reference deployment by running *this class* over all
+    85 real intents: ``extract`` is a **median 7.7 ms** per pack (p90
+    11.9, max 15.9), which splits **6.0 ms step 1 / 1.3 ms step 2 / 0.14
+    ms CPU**. Read that split before optimising anything here — **78% of
+    the cost is the alias half, which resolves nothing on this deployment
+    today** (see *What it does not buy* below). The confirm call is the
+    cheap half at a median 1.3 ms (p90 2.5, max 4.1) for a median 100
+    candidate ids; the same 100 ids fetched one at a time cost **29.8
+    ms**, and the whole-table scan #375 refuses costs **24.4 ms** at
+    1,696 rows. So the batched form is ~19x cheaper than the refused scan
+    *and* O(1) in graph size, where the scan is O(N) and silently
+    truncates past ``DEFAULT_NAME_SCAN_LIMIT``. Both properties matter;
+    only the second one was the stated reason for the refusal.
+
+    For scale: a pack on this deployment assembles in ~2.2 s, so the
+    whole extractor is ~0.35% of it. Nothing here is a latency problem —
+    the split is recorded because the *shape* of the cost is surprising,
+    not because the total is.
+
+    **What it buys.** Over the 85 real intents this deployment has
+    assembled packs for, **51** resolve to at least one seed, and every
+    one of those seeds is expandable by construction (it was confirmed to
+    exist). The alternative the issue refused — an ideal client-side name
+    match, i.e. the scan performing perfectly — reaches 40 intents and
+    only **35** with a seed that has any neighbourhood to expand.
+
+    **What it does not buy, today.** Step 1 resolves nothing on this
+    deployment: ``entity_aliases`` holds 0 rows, because the alias-minting
+    code (#530) is merged but not yet deployed here and the #369 backfill
+    has not been run. It is wired anyway because it is the *durable* half
+    — the id-prefix convention is a property of today's writers, while
+    the alias index is the governed mechanism that survives a node whose
+    id is a ULID. This is stated rather than elided: an extractor that
+    were *only* step 1 would be a measured no-op and must not ship as
+    one.
+
+    **And it is not free, which is the part worth carrying forward.** It
+    is one indexed read *per key*, unbatched — 1,624 round trips across
+    the 85 intents, a median of 20 per pack — so on a deployment with an
+    empty ``entity_aliases`` it is **78% of this extractor's runtime for
+    zero seeds**. That buys nothing until #530 deploys and the #369
+    backfill runs, after which it is the half that keeps working when an
+    id stops being a readable name. It is left unbatched here because
+    ``resolve_alias`` is a single-id API and giving it a batch form is a
+    store-side change, outside what this issue touches; the numbers are
+    recorded so that change can be justified without re-deriving them.
+
+    Unigrams only. Bigrams and trigrams were measured and add nothing
+    (51/85 at every n), while tripling the candidate count.
+
+    Never raises, per :class:`GraphSeedExtractor`: a store failure
+    returns ``[]`` and the axis falls back to its recency window.
+    """
+
+    def __init__(
+        self,
+        graph_store: Any,
+        *,
+        namespaces: Sequence[str] = DEFAULT_SEED_NAMESPACES,
+        max_keys: int = DEFAULT_MAX_SEED_KEYS,
+        max_seeds: int = DEFAULT_MAX_SEEDS,
+    ) -> None:
+        """Wire an extractor against one graph store.
+
+        Args:
+            graph_store: The knowledge plane's ``GraphStore``. Only
+                ``resolve_alias`` and ``get_subgraph`` are used, and both
+                are read-only.
+            namespaces: Id prefixes to probe, best first. An empty-string
+                member probes the bare key as a whole node id. See
+                :data:`DEFAULT_SEED_NAMESPACES` for why this roster.
+            max_keys: Cost bound — distinct intent keys probed per pack.
+            max_seeds: Bound on the seeds returned, i.e. on BFS roots.
+        """
+        self._store = graph_store
+        self._namespaces = tuple(namespaces)
+        self._max_keys = max_keys
+        self._max_seeds = max_seeds
+
+    def extract(self, intent: str) -> list[str]:
+        """Return live node ids the intent names, best first.
+
+        ``[]`` means "this intent anchors on no entity I can name" and is
+        a valid answer — :class:`GraphSearch` reads it as *run the recency
+        window*, never as *serve nothing*.
+        """
+        keys = self._keys(intent)
+        if not keys:
+            return []
+
+        # Step 1. One indexed alias read per key. ``alias_by_id`` also
+        # records which key produced an id, so the liveness confirm below
+        # can re-check the binding's *name* — the check
+        # ``entity_resolution._binding_is_live`` makes, done here for free
+        # from properties the confirm call already returned.
+        alias_by_id: dict[str, str] = {}
+        for key in keys:
+            entity_id = self._alias_id(key)
+            if entity_id and entity_id not in alias_by_id:
+                alias_by_id[entity_id] = key
+
+        # Step 2. Candidate primary keys under the deterministic id
+        # scheme. Ordered key-major so the returned seeds follow the order
+        # the entities were mentioned in, which is the only ranking signal
+        # available at this layer.
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for key in keys:
+            for candidate in self._candidates(key, alias_by_id):
+                if candidate not in seen:
+                    seen.add(candidate)
+                    ordered.append(candidate)
+
+        live = self._confirm(ordered)
+        seeds: list[str] = []
+        for candidate in ordered:
+            node = live.get(candidate)
+            if node is None:
+                continue
+            alias_key = alias_by_id.get(candidate)
+            if alias_key is not None and not _alias_binding_matches(node, alias_key):
+                continue
+            seeds.append(candidate)
+            if len(seeds) >= self._max_seeds:
+                break
+
+        logger.debug(
+            "namespace_seed_extractor_resolved",
+            keys=len(keys),
+            candidates=len(ordered),
+            seeds=len(seeds),
+        )
+        return seeds
+
+    def _keys(self, intent: str) -> list[str]:
+        """Normalized, de-duplicated intent unigrams, capped and in order."""
+        keys: list[str] = []
+        seen: set[str] = set()
+        for token in _SEED_TOKEN_RE.findall(intent or ""):
+            key = normalize_entity_name(token)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+            if len(keys) >= self._max_keys:
+                break
+        return keys
+
+    def _candidates(self, key: str, alias_by_id: dict[str, str]) -> list[str]:
+        """Candidate ids for one key: its alias binding, then namespaces."""
+        candidates = [i for i, k in alias_by_id.items() if k == key]
+        candidates.extend(f"{ns}:{key}" if ns else key for ns in self._namespaces)
+        return candidates
+
+    def _alias_id(self, key: str) -> str | None:
+        """One indexed alias read, or ``None`` on a miss or an outage."""
+        try:
+            row = self._store.resolve_alias(NAME_ALIAS_SOURCE_SYSTEM, key)
+        # GRACEFUL-DEGRADATION: the alias index is one of two resolution
+        # paths and the other needs no index at all. An outage here must
+        # cost the miss, not the pack.
+        except Exception:
+            logger.warning("namespace_seed_alias_lookup_failed", exc_info=True)
+            return None
+        entity_id = row.get("entity_id") if isinstance(row, dict) else None
+        return entity_id if isinstance(entity_id, str) and entity_id else None
+
+    def _confirm(self, candidates: list[str]) -> dict[str, dict[str, Any]]:
+        """Which candidates exist, in one batched primary-key read.
+
+        ``get_subgraph(ids, depth=0)`` returns exactly the seed nodes that
+        are current — pinned by
+        ``GraphStoreContractTests.test_subgraph_seed_only_at_depth_zero``,
+        so every shipped backend answers it the same way. This is the call
+        that keeps the extractor's cost independent of graph size.
+        """
+        if not candidates:
+            return {}
+        try:
+            subgraph = self._store.get_subgraph(candidates, depth=0)
+        # GRACEFUL-DEGRADATION: seeding is additive. A confirm failure
+        # yields no seeds and the axis serves its recency window, which is
+        # exactly what it served before this extractor existed.
+        except Exception:
+            logger.warning("namespace_seed_confirm_failed", exc_info=True)
+            return {}
+        nodes = subgraph.get("nodes", []) if isinstance(subgraph, dict) else []
+        resolved: dict[str, dict[str, Any]] = {}
+        for node in nodes:
+            node_id = node.get("node_id")
+            if isinstance(node_id, str) and node_id:
+                resolved.setdefault(node_id, node)
+        return resolved
+
+
+def _alias_binding_matches(node: dict[str, Any], key: str) -> bool:
+    """Is *node* still named *key*?
+
+    The retrieval-side half of
+    :func:`trellis.extract.entity_resolution._binding_is_live`. An alias
+    row binds a *normalized name* to an id, so a renamed node leaves a
+    binding that points somewhere real and wrong — and seeding a
+    neighbourhood on it would serve a caller an entity they did not name.
+    Checked only for alias-derived ids: a namespace candidate is its own
+    evidence (the id was constructed from the key), and Trellis slugifies
+    some ids away from their display name (``merge_prs`` mints
+    ``tool:merge-prs``), so the same check there would reject good seeds.
+
+    Costs nothing extra — the properties come from the confirm call.
+    """
+    name = (node.get("properties") or {}).get("name")
+    if isinstance(name, str) and normalize_entity_name(name) == key:
+        return True
+    logger.debug(
+        "namespace_seed_stale_alias_skipped",
+        alias_key=key,
+        entity_id=node.get("node_id"),
+    )
+    return False
 
 
 def _passes_domain_scope(metadata: dict[str, Any], domain: str) -> bool:
@@ -1017,18 +1357,26 @@ class GraphSearch(SearchStrategy):
       axis therefore returns **the most recently created nodes**, filtered
       structurally and scored — without consulting what was asked.
 
-    The second branch is the production default, and the first has **no
-    production producer at all**: ``build_strategies`` injects no
-    extractor, and nothing in the repo puts ``seed_ids`` into the filters
-    a pack is assembled with. The entity-neighbourhood surfaces
-    (``GET /entities/{id}``, MCP ``get_graph``) call
-    ``graph_store.get_subgraph`` *directly* and never reach this class; a
-    section's ``entity_ids`` is a
+    **Since #375 the first branch has a production producer**, and that
+    is the one change worth reading carefully if you knew this class
+    before. :func:`~trellis.retrieve.builder_factory.build_pack_builder`
+    wires a :class:`NamespaceSeedExtractor` by default, so an intent that
+    names an entity Trellis can resolve now expands that entity's
+    neighbourhood. Two things it does **not** change. ``build_strategies``
+    still defaults to ``graph_seed_extractor=None`` — the refusal #371
+    recorded there was about a *specific* extractor measured as a no-op,
+    and it stands. And ``seed_ids`` still has no in-repo producer: the
+    entity-neighbourhood surfaces (``GET /entities/{id}``, MCP
+    ``get_graph``) call ``graph_store.get_subgraph`` *directly* and never
+    reach this class, and a section's ``entity_ids`` is a
     :class:`~trellis.retrieve.tier_mapping.TierMapper` routing filter over
-    items already retrieved, not a seed. This is deliberate as of #371,
-    not an oversight — see :func:`build_strategies` for why the obvious
-    wiring was measured and refused — but the consequences are sharp and
-    worth stating where a reader meets them:
+    items already retrieved, not a seed.
+
+    **The recency window is still the branch that runs when the intent
+    names nothing resolvable**, which on the reference deployment is 34 of
+    85 real intents. Everything below therefore remains live for those
+    packs, and is stated where a reader meets it rather than in the issue
+    that measured it:
 
     * The reachable set is a **fixed row count**
       (``limit * _GRAPH_RECENCY_OVERFETCH``), not a fraction of the graph,
@@ -1172,6 +1520,37 @@ class GraphSearch(SearchStrategy):
         )
         return rows
 
+    def _resolve_seeds(self, query: str, filters: dict[str, Any]) -> list[str]:
+        """Decide which seeds this search expands, consuming ``filters``.
+
+        Mutates ``filters`` — it pops the ``seed_ids`` control key and,
+        on the derived path only, defaults ``depth``. Both are the
+        caller's own copy, made at the top of :meth:`search`.
+
+        An explicit seed set always wins: a caller that passed
+        ``seed_ids`` has already decided which neighbourhood it wants, and
+        re-deriving seeds from prose would silently widen a deliberately
+        narrow request. No in-repo production caller does this today — see
+        the class docstring.
+        """
+        if "seed_ids" in filters:
+            # Annotated rather than returned straight out of the bag: the
+            # value is caller-supplied and unvalidated, and this is the
+            # same ``list[str]`` assertion the pre-#375 code made at this
+            # same point. Nothing here starts trusting it more than before.
+            named_seeds: list[str] = filters.pop("seed_ids")
+            return named_seeds
+
+        seed_ids = self._seeds_from_extractor(query)
+        if seed_ids:
+            # A derived seed gets one hop, a named one keeps the historical
+            # two — see :data:`EXTRACTED_SEED_DEPTH`. ``setdefault`` and
+            # not an assignment: a caller who passed ``depth`` explicitly
+            # asked for that depth, and this path is about the *absence* of
+            # an instruction.
+            filters.setdefault("depth", EXTRACTED_SEED_DEPTH)
+        return seed_ids
+
     def _seeds_from_extractor(self, query: str) -> list[str]:
         """Ask the injected extractor for seeds; never let it break a pack.
 
@@ -1295,16 +1674,7 @@ class GraphSearch(SearchStrategy):
         filters: dict[str, Any] | None = None,
     ) -> list[PackItem]:
         filters = dict(filters) if filters else {}
-        seed_ids: list[str]
-        if "seed_ids" in filters:
-            # An explicit seed set always wins: a caller that passed
-            # ``seed_ids`` has already decided which neighbourhood it
-            # wants, and re-deriving seeds from prose would silently widen
-            # a deliberately narrow request. No in-repo production caller
-            # does this today — see the class docstring.
-            seed_ids = filters.pop("seed_ids")
-        else:
-            seed_ids = self._seeds_from_extractor(query)
+        seed_ids = self._resolve_seeds(query, filters)
 
         include_structural = bool(filters.pop("include_structural", False))
         include_unconfirmed = bool(filters.pop("include_unconfirmed", False))
@@ -1540,10 +1910,16 @@ def build_strategies(
     both a VectorStore and an ``embedding_fn`` callable are available.
 
     **The graph axis is query-independent unless you pass
-    ``graph_seed_extractor``**, and the default is deliberately ``None``.
-    See :class:`GraphSearch` for what that means for a served pack. The
-    reasoning behind the default, recorded so it is not re-litigated on
-    taste (#371):
+    ``graph_seed_extractor``**, and the default here is deliberately
+    ``None`` even though production now seeds. The seeding wiring lives
+    one layer up in
+    :func:`~trellis.retrieve.builder_factory.build_pack_builder`, which
+    passes a
+    :class:`NamespaceSeedExtractor` (#375). This default stays ``None``
+    because the reasoning below is about a **different extractor** that
+    was measured and refused — it is not a general argument against
+    seeding, and collapsing the two would re-open a question that has been
+    answered twice in opposite directions for opposite reasons (#371):
 
     * The obvious wiring — construct a
       :class:`~trellis.retrieve.semantic_seeds.SemanticSeedExtractor`
@@ -1581,9 +1957,11 @@ def build_strategies(
             scoring overrides.  When ``None`` the module-level defaults
             apply unchanged.
         graph_seed_extractor: Optional :class:`GraphSeedExtractor` handed
-            to :class:`GraphSearch`.  ``None`` (the default, and what every
-            in-repo caller passes) keeps the recency-window behaviour.
-            Never derived from ``embedding_fn`` — see above.
+            to :class:`GraphSearch`.  ``None`` (the default) keeps the
+            recency-window behaviour; ``build_pack_builder`` supplies a
+            :class:`NamespaceSeedExtractor`, and it is the only in-repo
+            caller that supplies one.  Never derived from ``embedding_fn``
+            — see above.
     """
     strategies: list[SearchStrategy] = [
         KeywordSearch(registry.knowledge.document_store, registry=parameter_registry),

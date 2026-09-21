@@ -33,10 +33,14 @@ Subclass shape::
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from threading import Barrier
 from typing import TYPE_CHECKING
 
 import pytest
+
+from trellis.stores.base.graph import AliasBindStatus
 
 if TYPE_CHECKING:
     from trellis.stores.base.graph import GraphStore
@@ -655,6 +659,186 @@ class GraphStoreContractTests:
         historical = store.resolve_alias("local", "user-api", as_of=before_rebind)
         assert historical is not None
         assert historical["entity_id"] == "ent_a"
+
+    def test_bind_alias_if_absent_preserves_sequential_first_wins(
+        self, store: GraphStore
+    ) -> None:
+        first = store.bind_alias_if_absent(
+            "ent_a",
+            "name",
+            "hermes",
+            raw_name="Hermes",
+        )
+        retry = store.bind_alias_if_absent(
+            "ent_a",
+            "name",
+            "hermes",
+            raw_name="HERMES",
+        )
+        loser = store.bind_alias_if_absent(
+            "ent_b",
+            "name",
+            "hermes",
+            raw_name="Hermes",
+        )
+
+        assert first.status is AliasBindStatus.BOUND
+        assert first.entity_id == "ent_a"
+        assert retry.status is AliasBindStatus.ALREADY_BOUND
+        assert retry.alias_id == first.alias_id
+        assert loser.status is AliasBindStatus.CONFLICT
+        assert loser.entity_id == "ent_a"
+        assert loser.alias_id == first.alias_id
+        resolved = store.resolve_alias("name", "hermes")
+        assert resolved is not None
+        assert resolved["entity_id"] == "ent_a"
+
+    def test_bind_alias_if_absent_is_atomic_for_concurrent_contenders(
+        self, store: GraphStore
+    ) -> None:
+        barrier = Barrier(2)
+
+        def _contend(entity_id: str):
+            barrier.wait()
+            return store.bind_alias_if_absent(
+                entity_id,
+                "name",
+                "hermes",
+                raw_name="Hermes",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(_contend, ("ent_a", "ent_b")))
+
+        assert {result.status for result in results} == {
+            AliasBindStatus.BOUND,
+            AliasBindStatus.CONFLICT,
+        }
+        winner = next(
+            result.entity_id
+            for result in results
+            if result.status is AliasBindStatus.BOUND
+        )
+        assert all(result.entity_id == winner for result in results)
+        resolved = store.resolve_alias("name", "hermes")
+        assert resolved is not None
+        assert resolved["entity_id"] == winner
+
+    def test_bind_alias_replaces_stale_name_owner(self, store: GraphStore) -> None:
+        store.upsert_node("ent_a", "service", {"name": "Hermes"})
+        store.upsert_node("ent_b", "service", {"name": "Hermes"})
+        first = store.bind_alias_if_absent(
+            "ent_a",
+            "name",
+            "hermes",
+            stale_owner_name_key="hermes",
+        )
+        store.upsert_node("ent_a", "service", {"name": "Mercury"})
+        _sleep_for_ordering()
+        before_rebind = _now()
+        _sleep_for_ordering()
+
+        replacement = store.bind_alias_if_absent(
+            "ent_b",
+            "name",
+            "hermes",
+            stale_owner_name_key="hermes",
+        )
+
+        assert first.status is AliasBindStatus.BOUND
+        assert replacement.status is AliasBindStatus.REBOUND
+        assert replacement.alias_id == first.alias_id
+        resolved = store.resolve_alias("name", "hermes")
+        assert resolved is not None
+        assert resolved["entity_id"] == "ent_b"
+        historical = store.resolve_alias("name", "hermes", as_of=before_rebind)
+        assert historical is not None
+        assert historical["entity_id"] == "ent_a"
+
+    def test_bind_alias_serializes_concurrent_stale_owner_replacement(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("stale", "service", {"name": "Hermes"})
+        store.upsert_node("ent_a", "service", {"name": "Hermes"})
+        store.upsert_node("ent_b", "service", {"name": "Hermes"})
+        store.bind_alias_if_absent(
+            "stale",
+            "name",
+            "hermes",
+            stale_owner_name_key="hermes",
+        )
+        store.upsert_node("stale", "service", {"name": "Mercury"})
+        barrier = Barrier(2)
+
+        def _replace(entity_id: str):
+            barrier.wait()
+            return store.bind_alias_if_absent(
+                entity_id,
+                "name",
+                "hermes",
+                stale_owner_name_key="hermes",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(_replace, ("ent_a", "ent_b")))
+
+        assert {result.status for result in results} == {
+            AliasBindStatus.REBOUND,
+            AliasBindStatus.CONFLICT,
+        }
+        winner = next(
+            result.entity_id
+            for result in results
+            if result.status is AliasBindStatus.REBOUND
+        )
+        assert all(result.entity_id == winner for result in results)
+
+    def test_stale_replacement_never_overwrites_new_live_owner(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("stale", "service", {"name": "Hermes"})
+        store.upsert_node("new_owner", "service", {"name": "Hermes"})
+        store.upsert_node("loser", "service", {"name": "Hermes"})
+        store.bind_alias_if_absent(
+            "stale",
+            "name",
+            "hermes",
+            stale_owner_name_key="hermes",
+        )
+        store.upsert_node("stale", "service", {"name": "Mercury"})
+        replacement = store.bind_alias_if_absent(
+            "new_owner",
+            "name",
+            "hermes",
+            stale_owner_name_key="hermes",
+        )
+
+        loser = store.bind_alias_if_absent(
+            "loser",
+            "name",
+            "hermes",
+            stale_owner_name_key="hermes",
+        )
+
+        assert replacement.status is AliasBindStatus.REBOUND
+        assert loser.status is AliasBindStatus.CONFLICT
+        assert loser.entity_id == "new_owner"
+
+    def test_physical_delete_releases_atomic_alias_claim(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("ent_a", "service", {})
+        store.upsert_node("ent_b", "service", {})
+        first = store.bind_alias_if_absent("ent_a", "name", "hermes")
+        assert first.status is AliasBindStatus.BOUND
+
+        assert store.delete_node("ent_a") is True
+        replacement = store.bind_alias_if_absent("ent_b", "name", "hermes")
+
+        assert replacement.status is AliasBindStatus.BOUND
+        resolved = store.resolve_alias("name", "hermes")
+        assert resolved is not None
+        assert resolved["entity_id"] == "ent_b"
 
     # ------------------------------------------------------------------
     # deletion

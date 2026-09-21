@@ -41,9 +41,9 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Email address (user identifier).
     re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
     # URL with inline credentials — postgres://user:pass@host,
-    # bolt://u:p@..., https://token@... . Connection errors from
-    # drivers routinely echo the DSN they failed to reach.
-    re.compile(r"\w+://[^/\s@:]+:[^@\s]+@"),
+    # bolt://u:p@..., https://token@localhost/... . A password
+    # separator and a dotted host are both optional.
+    re.compile(r"\w+://[^\s/@?#]+@"),
     # Secret-shaped assignment: password=..., token: ...,
     # Authorization: Bearer ... . Word-bounded so prose like
     # "password must be set" stays clean.
@@ -51,10 +51,6 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization|bearer)\b"
         r"\s*[=:]\s*\S+"
     ),
-    # Long unbroken token-shaped run (API keys, JWTs, hex digests).
-    # 40+ chars clears ULIDs (26) and short ids; dots and slashes break
-    # runs, so file paths and dotted module paths stay clean.
-    re.compile(r"[A-Za-z0-9+_-]{40,}"),
     # Raw SQL statement shape. Curator/scout errors quoting warehouse
     # SQL must not put statement text into artifacts.
     re.compile(
@@ -62,6 +58,30 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"|delete\s+from\s|drop\s+(table|database)\s)"
     ),
 )
+
+_LONG_TOKEN_RUN = re.compile(
+    r"(?<![A-Za-z0-9+_-])[A-Za-z0-9+_-]{40,}(?![A-Za-z0-9+_-])"
+)
+_PATH_SEPARATORS = frozenset("/\\")
+
+
+def _is_repeated_character_path_component(text: str, match: re.Match[str]) -> bool:
+    """Recognize the low-entropy component used by long pytest basetemps."""
+    token = match.group()
+    start = match.start()
+    if start == 0 or text[start - 1] not in _PATH_SEPARATORS:
+        return False
+    if len(set(token)) != 1:
+        return False
+    whitespace_start = max(text.rfind(" ", 0, start), text.rfind("\t", 0, start))
+    return "://" not in text[whitespace_start + 1 : start]
+
+
+def _has_long_opaque_token(text: str) -> bool:
+    return any(
+        not _is_repeated_character_path_component(text, match)
+        for match in _LONG_TOKEN_RUN.finditer(text)
+    )
 
 
 def sanitize_error_message(text: str, *, max_len: int = DEFAULT_MAX_LEN) -> str:
@@ -77,6 +97,8 @@ def sanitize_error_message(text: str, *, max_len: int = DEFAULT_MAX_LEN) -> str:
     text risks leaving a recoverable fragment.
     """
     if any(pattern.search(text) for pattern in _LEAK_PATTERNS):
+        return SUPPRESSED_MARKER
+    if _has_long_opaque_token(text):
         return SUPPRESSED_MARKER
     if len(text) > max_len:
         return text[:max_len] + "…[truncated]"

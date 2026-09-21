@@ -13,6 +13,10 @@ from trellis_sdk._format import (
     format_traces_as_markdown,
 )
 from trellis_sdk.client import TrellisClient
+from trellis_wire.withholding import (
+    format_withholding_note,
+    withholding_from_payload,
+)
 
 _MAX_PREVIEW_STEPS = 5
 
@@ -37,9 +41,17 @@ def get_context_for_task(
     """
     pack = client.assemble_pack(intent, domain=domain, max_items=20)
     items = pack.get("items", [])
+    withholding = withholding_from_payload(pack.get("withholding"))
     if not items:
-        return f"No relevant context found for: {intent}"
-    return format_pack_as_markdown(items, intent, max_tokens=max_tokens)
+        message = f"No relevant context found for: {intent}"
+        note = format_withholding_note(withholding)
+        return f"{message}\n\n{note}" if note else message
+    return format_pack_as_markdown(
+        items,
+        intent,
+        max_tokens=max_tokens,
+        withholding=withholding,
+    )
 
 
 def get_latest_successful_trace(

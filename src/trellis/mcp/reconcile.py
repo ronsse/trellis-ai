@@ -41,17 +41,19 @@ when off, ``save_memory`` behaves exactly as the deterministic tier does today.
 from __future__ import annotations
 
 import asyncio
-import json
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
+from pydantic import model_validator
 
 from trellis.core import write_config
 from trellis.core.base import TrellisModel
+from trellis.core.document_write import put_document
 from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.core.write_config import WriteBehaviourConfig
+from trellis.llm.json_response import JSONParseOutcome, parse_json_response
 from trellis.llm.types import Message
 from trellis.schemas.classification import Lifecycle
 from trellis.schemas.memory_op import (
@@ -64,6 +66,7 @@ if TYPE_CHECKING:
     from trellis.llm.protocol import LLMClient
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
+    from trellis.stores.base.vector import VectorStore
 
 logger = structlog.get_logger(__name__)
 
@@ -120,6 +123,48 @@ class ReconcileDecision(StrEnum):
     NOOP = "noop"
 
 
+class ReconcileFallbackReason(StrEnum):
+    """Why a reconciliation produced a fallback ADD instead of a verdict.
+
+    A closed vocabulary rather than a free ``str``, because the only thing
+    recording it buys is a group-by: a reason minted at one construction site
+    and spelled differently at another splits the count that answers *how
+    often does the judge fail, and how*. ``mypy`` is the roster guard here —
+    #443 declared three control keys against six live sites, and a hand-kept
+    list of slugs rots in exactly that direction.
+    """
+
+    #: The model call exceeded ``reconcile_timeout_s``.
+    TIMEOUT = "timeout"
+    #: The model call raised — transport, auth, or provider error.
+    MODEL_ERROR = "model_error"
+    #: The model answered, and the answer was not a usable verdict. This is
+    #: the reason #514 is about: the JSON seam parsed, and what it parsed was
+    #: not a verdict this code can act on.
+    MALFORMED_RESPONSE = "malformed_response"
+    #: No client could be built — the tier is off, or no provider is wired.
+    MODEL_UNAVAILABLE = "model_unavailable"
+    #: Phase B escaped its own exhaustive handling and hit the
+    #: belt-and-suspenders guard in ``server._save_memory_reconciled``.
+    JUDGE_ERROR = "judge_error"
+    #: **Not a judge failure.** The candidate changed between verdict and
+    #: commit, so a real verdict was deliberately downgraded under the lock.
+    #: It shares this vocabulary because it reaches the same fallback ADD, and
+    #: :data:`JUDGE_FAILURE_REASONS` is what keeps a health count from
+    #: reporting a correctly-handled race as a degradation — the
+    #: ``sessions_skipped_empty`` split (#332), one layer over.
+    STALE_RECHECK = "stale_recheck"
+
+
+#: The reasons that mean *the judge did not answer usably*. The complement is
+#: deliberate and is the whole reason this set is written down rather than
+#: derived as "every reason": see
+#: :attr:`ReconcileFallbackReason.STALE_RECHECK`.
+JUDGE_FAILURE_REASONS: frozenset[ReconcileFallbackReason] = frozenset(
+    ReconcileFallbackReason
+) - {ReconcileFallbackReason.STALE_RECHECK}
+
+
 class ReconcileCandidate(TrellisModel):
     """A near-duplicate the deterministic tier surfaced for adjudication."""
 
@@ -134,14 +179,32 @@ class ReconcileOutcome(TrellisModel):
     ``fallback=True`` marks an outcome the model did *not* produce (it was
     unavailable, timed out, or returned malformed JSON). Fallback outcomes are
     always :attr:`ReconcileDecision.ADD` and are *not* emitted as judged events
-    — no model judged, so there is no training pair.
+    — no model judged, so there is no training pair. They emit
+    :attr:`~trellis.stores.base.event_log.EventType.RECONCILE_DEGRADED`
+    instead, so that "the judge was never consulted" and "the judge failed
+    every time" stop being the same silence (#514).
     """
 
     decision: ReconcileDecision
     confidence: float
     model_id: str
     fallback: bool = False
-    fallback_reason: str | None = None
+    fallback_reason: ReconcileFallbackReason | None = None
+
+    @model_validator(mode="after")
+    def _fallback_carries_a_reason(self) -> ReconcileOutcome:
+        """A fallback with no reason is a degradation nothing can attribute.
+
+        Enforced on the model rather than checked at the emit seam, because
+        the seam can only report what the construction sites handed it — the
+        #447 shape, where a gate's *filtering* half was covered and its
+        *emission* half was not. An outcome that cannot say why it degraded
+        should not be constructible.
+        """
+        if self.fallback and self.fallback_reason is None:
+            msg = "a fallback ReconcileOutcome must carry a fallback_reason"
+            raise ValueError(msg)
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -207,15 +270,10 @@ def parse_verdict(raw: str) -> tuple[ReconcileDecision, float] | None:
     ``None`` return is the malformed-response signal the caller turns into a
     safe fallback ADD.
     """
-    text = raw.strip()
-    if text.startswith("```"):
-        # Tolerate a fenced code block: drop the fence lines.
-        lines = [ln for ln in text.splitlines() if not ln.strip().startswith("```")]
-        text = "\n".join(lines).strip()
-    try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+    parsed = parse_json_response(raw)
+    if parsed.outcome is JSONParseOutcome.MALFORMED:
         return None
+    data = parsed.value
     if not isinstance(data, dict):
         return None
 
@@ -241,7 +299,9 @@ def parse_verdict(raw: str) -> tuple[ReconcileDecision, float] | None:
     return decision, confidence
 
 
-def _fallback_outcome(model_id: str, reason: str) -> ReconcileOutcome:
+def _fallback_outcome(
+    model_id: str, reason: ReconcileFallbackReason
+) -> ReconcileOutcome:
     """A model-unavailable outcome: plain ADD, marked for a later sweep."""
     return ReconcileOutcome(
         decision=ReconcileDecision.ADD,
@@ -281,17 +341,17 @@ def judge_reconcile(
     except TimeoutError:
         # asyncio.TimeoutError is an alias of the builtin on 3.11+.
         logger.warning("reconcile_verdict_timeout", timeout=timeout)
-        return _fallback_outcome(model_id, "timeout")
+        return _fallback_outcome(model_id, ReconcileFallbackReason.TIMEOUT)
     except Exception as exc:
         # Any model / transport failure resolves to a fallback ADD — the
         # judge is never a hard dependency of capture.
         logger.warning("reconcile_verdict_model_error", error=str(exc))
-        return _fallback_outcome(model_id, "model_error")
+        return _fallback_outcome(model_id, ReconcileFallbackReason.MODEL_ERROR)
 
     parsed = parse_verdict(response.content)
     if parsed is None:
         logger.warning("reconcile_verdict_malformed")
-        return _fallback_outcome(model_id, "malformed_response")
+        return _fallback_outcome(model_id, ReconcileFallbackReason.MALFORMED_RESPONSE)
 
     decision, confidence = parsed
     resolved_model = response.model or model_id
@@ -312,7 +372,11 @@ def judge_reconcile(
 
 
 def mark_document_superseded(
-    document_store: DocumentStore, *, old_doc_id: str, new_doc_id: str
+    document_store: DocumentStore,
+    *,
+    old_doc_id: str,
+    new_doc_id: str,
+    vector_store: VectorStore | None,
 ) -> bool:
     """SCD-2 stale-mark the superseded doc — never delete it.
 
@@ -358,19 +422,26 @@ def mark_document_superseded(
     losing version retrievable on demand", which makes the loser's recency rank
     the whole mechanism rather than an incidental score.
 
-    **Scoped to the keyword axis, and only that — but not for the reason #411
-    gave.** That docstring said no writer produces an ``updated_at`` *metadata*
-    key, so the semantic axis could never see one. **The universal negative was
-    false**: :mod:`trellis.ingest_corpus.conversations` writes both
-    ``created_at`` and ``updated_at`` into a conversation document's metadata,
+    **The `preserve_updated_at` flag is scoped to the keyword axis, and only
+    that — but not for the reason #411 gave.** That docstring said no writer
+    produces an ``updated_at`` *metadata* key, so the semantic axis could never
+    see one. **The universal negative was false**:
+    :mod:`trellis.ingest_corpus.conversations` writes both ``created_at`` and
+    ``updated_at`` into a conversation document's metadata,
     ``build_vector_row`` splats document metadata into the vector row, and 148
-    live production rows carry the key (#417). What actually scopes this write
-    to the keyword axis is narrower and holds regardless: the flag protects a
-    store **column**, and no writer copies that column into a metadata bag —
-    ``SYNCED_METADATA_KEYS`` is ``content_tags`` / ``auto_importance``, so this
-    write never reaches the vector row at all. The row never learns of the
-    supersession either — the #337 shape, inert only for as long as the state
-    goes unfiltered. Add such a filter and the mirror becomes required.
+    live production rows carry the key (#417). What actually scopes the flag to
+    the keyword axis is narrower and holds regardless: it protects a store
+    **column**, and no writer copies that column into a metadata bag.
+
+    **The supersession stamp itself now does reach the vector row**, and that
+    is new. This function wrote the document alone until 2026-09-12, on the
+    reasoning that ``lifecycle`` was outside the mirrored key set — "the #337
+    shape, inert only for as long as the state goes unfiltered. Add such a
+    filter and the mirror becomes required." Rather than wait for that filter,
+    the write goes through
+    :func:`~trellis.core.document_write.put_document`, which mirrors whatever
+    the bag carries. ``vector_store`` is a required argument for the same
+    reason: a default would restore the convention the seam exists to replace.
 
     One consequence of #417 worth knowing before reasoning about ranking here:
     :func:`~trellis.retrieve.strategies.resolve_recency_stamp` now makes *both*
@@ -393,8 +464,13 @@ def mark_document_superseded(
     metadata[LIFECYCLE_KEY] = Lifecycle(
         state="superseded", superseded_by=new_doc_id
     ).model_dump(mode="json")
-    document_store.put(
-        old_doc_id, doc["content"], metadata=metadata, preserve_updated_at=True
+    put_document(
+        document_store,
+        vector_store,
+        old_doc_id,
+        doc["content"],
+        metadata,
+        preserve_updated_at=True,
     )
     return True
 
@@ -434,3 +510,64 @@ def emit_reconcile_verdict(
         confidence=outcome.confidence,
         subject_ref=SubjectRef(ref_type=subject_ref_type, ref_id=subject_ref_id),
     )
+
+
+def emit_reconcile_degraded(
+    event_log: EventLog,
+    *,
+    outcome: ReconcileOutcome,
+    subject_ref_type: str,
+    subject_ref_id: str,
+) -> None:
+    """Emit ``RECONCILE_DEGRADED`` for one fail-closed reconciliation.
+
+    The counterpart of :func:`emit_reconcile_verdict`, and the two are
+    mutually exclusive by construction: a fallback ADD judged nothing, so it
+    is not a training pair and must not enter the ``MEMORY_OP_JUDGED`` stream
+    that #582's exporter reads. Suppressing it there was right; suppressing it
+    *everywhere* is what made a judge that fails every time look exactly like
+    a judge nobody consulted (#514).
+
+    Best-effort — a broken event log must not turn a degraded reconciliation
+    into a failed write, which would invert the whole point of failing closed
+    to an ADD.
+
+    Emits nothing for a genuine verdict. That is a caller error rather than a
+    reachable state, but the failure mode is a *phantom degradation* in a
+    count whose whole job is to be trusted, so it is checked here and not
+    left to the one call site.
+    """
+    reason = outcome.fallback_reason
+    if not outcome.fallback or reason is None:
+        logger.warning(
+            "reconcile_degraded_emit_skipped_not_a_fallback",
+            decision=outcome.decision.value,
+            subject_ref_id=subject_ref_id,
+        )
+        return
+
+    from trellis.stores.base.event_log import EventType  # noqa: PLC0415
+
+    payload: dict[str, Any] = {
+        "reason": reason.value,
+        "judge_failure": reason in JUDGE_FAILURE_REASONS,
+        "model_id": outcome.model_id,
+        "decision": outcome.decision.value,
+        "subject_ref_type": subject_ref_type,
+        "subject_ref_id": subject_ref_id,
+    }
+    try:
+        event_log.emit(
+            EventType.RECONCILE_DEGRADED,
+            source="save_memory.reconcile",
+            entity_id=subject_ref_id,
+            payload=payload,
+        )
+    # GRACEFUL-DEGRADATION: the write already succeeded under the lock. An
+    # event-log outage must cost the measurement, never the memory.
+    except Exception:
+        logger.exception(
+            "reconcile_degraded_emit_failed",
+            reason=reason.value,
+            subject_ref_id=subject_ref_id,
+        )

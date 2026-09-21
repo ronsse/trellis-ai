@@ -1266,3 +1266,63 @@ class TestRetrieveHelp:
         assert result.exit_code == 0
         for cmd in ["pack", "search", "trace", "entity", "precedents", "file-context"]:
             assert cmd in result.stdout
+
+
+class TestRetrieveFileContextMatchKind:
+    """A trace reached by ``files_touched`` is annotated here too (#549).
+
+    The markdown formatter draws the same distinction. Two human-facing
+    renderers of one seam that disagree is the ``content_type`` /
+    ``document_form`` drift this repo keeps producing.
+    """
+
+    @staticmethod
+    def _seed() -> None:
+        from trellis_cli.stores import get_document_store
+
+        get_document_store().put(
+            "trace-summary:t1",
+            "Fixed the drift query.",
+            metadata={
+                "source_path": "trace/t1",
+                "title": "Fix the drift query",
+                "files_touched": ["src/trellis/retrieve/pack_builder.py"],
+            },
+        )
+        get_document_store().put(
+            "corpus:vault:abc",
+            "Gotcha: the pack builder truncates before scoring.",
+            metadata={"source_path": "src/trellis/retrieve/pack_builder.py"},
+        )
+
+    def test_text_output_says_which_kind_of_match_each_document_is(self) -> None:
+        self._seed()
+        result = runner.invoke(
+            app,
+            ["retrieve", "file-context", "src/trellis/retrieve/pack_builder.py", "-q"],
+        )
+        assert result.exit_code == 0
+        lines = [ln for ln in result.stdout.splitlines() if "- doc " in ln]
+        annotated = [ln for ln in lines if "record of changing this file" in ln]
+        assert len(lines) == 2
+        assert len(annotated) == 1
+        assert "trace-summary:t1" in annotated[0]
+
+    def test_json_output_carries_the_key_for_a_hook_to_parse(self) -> None:
+        self._seed()
+        result = runner.invoke(
+            app,
+            [
+                "retrieve",
+                "file-context",
+                "src/trellis/retrieve/pack_builder.py",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+        (entry,) = json.loads(result.stdout.strip())["paths"]
+        assert {d["doc_id"]: d["matched_via"] for d in entry["documents"]} == {
+            "trace-summary:t1": "files_touched",
+            "corpus:vault:abc": "source_path",
+        }

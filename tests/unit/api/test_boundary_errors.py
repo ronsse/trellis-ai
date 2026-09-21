@@ -47,7 +47,8 @@ TRACE_BODY = {"source": "agent", "intent": "probe", "steps": [], "context": {}}
 
 @pytest.fixture
 def stores_dir(tmp_path: Path) -> Path:
-    path = tmp_path / "stores"
+    # Exercise the sanitizer's exact long-token boundary (#523).
+    path = tmp_path / ("a" * 40) / "stores"
     path.mkdir(parents=True)
     return path
 
