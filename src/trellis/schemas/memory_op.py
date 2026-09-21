@@ -70,6 +70,16 @@ class JudgedOpType(StrEnum):
 #: a consumer joining on ``(ref_type, ref_id)`` saw two names for one kind.
 REF_TYPE_DOCUMENT = "doc"
 
+#: ``SubjectRef.ref_type`` for a capture-session referent. A judged operation
+#: can decide **not** to produce a document: a distillation ``discard`` is
+#: refused at the gate, and ``CandidateMemory.doc_id`` is populated by the
+#: writer *after* that gate — so a discard has no document to point at, and
+#: pointing at one anyway would put a dangling id in half the join key. Its
+#: stable subject is the session the judgement was made about. Same rationale
+#: as :data:`REF_TYPE_DOCUMENT` for being a constant: one spelling, because
+#: the emitters are written independently.
+REF_TYPE_SESSION = "session"
+
 
 class InputDigest(TrellisModel):
     """Leak-safe fingerprint of the input a judged op saw.
@@ -142,9 +152,17 @@ class MemoryOpJudgedPayload(TrellisModel):
 
     decision: str
     """The verdict label — a short slug whose vocabulary depends on
-    ``op_type`` (reconciliation: ``add`` / ``update`` / ``supersede`` /
-    ``noop``; curation: ``keep`` / ``discard``; ...). A label, not
-    prose."""
+    ``op_type``. What the shipped emitters write: reconciliation ``add`` /
+    ``update`` / ``supersede`` / ``noop``; distillation ``keep`` /
+    ``discard``; extraction the drafted entity type; classification the
+    proposed ``content_type``. A label, not prose.
+
+    **A one-valued vocabulary is a defect, not a simple stage.** The
+    distillation arm passed a literal ``keep`` over a list of survivors and
+    so recorded ``keep`` on 869 of 869 production rows — a training pair
+    whose label is constant by construction carries no discriminative
+    signal at all. Before adding an emitter, check that its ``decision``
+    can return more than one answer on the path that actually runs."""
 
     confidence: float = Field(ge=0.0, le=1.0)
     """Producer's confidence in the decision, in ``[0.0, 1.0]``."""
