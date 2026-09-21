@@ -8,6 +8,13 @@ from pathlib import Path
 import pytest
 
 from tests.unit.learning._registry_fixture import build_seeded_registry
+from trellis.learning.evidence_gate import (
+    MIN_ATTRIBUTED_OBSERVATIONS,
+    NOT_SCREENED,
+    REFUSED_CONTESTED,
+    REFUSED_NO_UNHELPFUL,
+    REFUSED_THIN_CORPUS,
+)
 from trellis.learning.scoring import (
     LEARNING_NOISE_SUCCESS_KEY,
     LEARNING_PROMOTE_SUCCESS_KEY,
@@ -115,6 +122,7 @@ def _make_observation(
     items: list | None = None,
     seed_entity_ids: list | None = None,
     selection_efficiency: float | None = None,
+    citation_attributed: bool = False,
 ) -> dict:
     obs: dict = {
         "run_id": run_id,
@@ -128,6 +136,8 @@ def _make_observation(
     }
     if selection_efficiency is not None:
         obs["selection_efficiency"] = selection_efficiency
+    if citation_attributed:
+        obs["citation_attributed"] = True
     return obs
 
 
@@ -136,12 +146,17 @@ def _make_item(
     item_type: str = "guidance",
     title: str = "Some Guidance",
     source_strategy: str = "keyword",
+    *,
+    cited_helpful: bool = False,
+    cited_unhelpful: bool = False,
 ) -> dict:
     return {
         "item_id": item_id,
         "item_type": item_type,
         "title": title,
         "source_strategy": source_strategy,
+        "cited_helpful": cited_helpful,
+        "cited_unhelpful": cited_unhelpful,
     }
 
 
@@ -652,3 +667,335 @@ class TestWriteLearningReviewArtifacts:
         }
         paths = write_learning_review_artifacts(report=report, output_dir=nested)
         assert Path(paths["candidates_path"]).exists()
+
+
+# ---------------------------------------------------------------------------
+# Noise evidence screen (the #336 rule, ported into the learning layer)
+# ---------------------------------------------------------------------------
+
+
+class TestNoiseEvidenceScreen:
+    """The screen must report a verdict without narrowing the proposal.
+
+    #336's shape: ``noise_candidates`` (what the rule proposed) and
+    ``demotion_screen.admitted`` (what survived evidence) are reported
+    *separately*, because a proposal that shrinks by 80% at the gate is a
+    fact about the proposal rule and collapsing them would hide it.
+    """
+
+    def _failing(
+        self,
+        *,
+        run: str,
+        cited_unhelpful: bool = False,
+        cited_helpful: bool = False,
+        attributed: bool = True,
+        item_id: str = "item-noise",
+    ) -> dict:
+        return _make_observation(
+            run_id=run,
+            outcome="failure",
+            citation_attributed=attributed,
+            items=[
+                _make_item(
+                    item_id=item_id,
+                    cited_unhelpful=cited_unhelpful,
+                    cited_helpful=cited_helpful,
+                )
+            ],
+        )
+
+    def _window(self, *extra: dict) -> list[dict]:
+        """Pad to the coverage floor with observations about other items.
+
+        The floor is a property of the *window*, so the padding must not
+        touch the candidate under test — otherwise a test meaning to
+        exercise the per-item rule would be exercising the floor.
+        """
+        padding = [
+            _make_observation(
+                run_id=f"pad-{n}",
+                outcome="success",
+                citation_attributed=True,
+                items=[_make_item(item_id=f"item-pad-{n}", cited_helpful=True)],
+            )
+            for n in range(MIN_ATTRIBUTED_OBSERVATIONS)
+        ]
+        return [*padding, *extra]
+
+    def _candidate(self, report: dict, item_id: str) -> dict:
+        matches = [c for c in report["candidates"] if c["item_id"] == item_id]
+        assert len(matches) == 1, f"{item_id}: {len(matches)} candidates"
+        return matches[0]
+
+    def test_repeatedly_cited_unhelpful_is_admitted(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        report = analyze_learning_observations(
+            observations=self._window(
+                self._failing(run="r1", cited_unhelpful=True),
+                self._failing(run="r2", cited_unhelpful=True),
+            ),
+            registry=learning_registry,
+        )
+        candidate = self._candidate(report, "item-noise")
+        assert candidate["recommendation_type"] == "investigate_noise"
+        assert candidate["evidence_verdict"] == "admitted"
+        assert candidate["citation_evidence"] == {
+            "appearances": 2,
+            "helpful_count": 0,
+            "unhelpful_count": 2,
+        }
+        screen = report["noise_screen"]
+        assert screen["proposed"] == 1
+        assert screen["admitted"] == 1
+        assert screen["admitted_candidate_ids"] == [candidate["candidate_id"]]
+        assert screen["suppressed"] is False
+
+    def test_an_uncited_noise_candidate_is_refused_but_not_dropped(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        """#336's rule: absence of helpful citation is not evidence of noise.
+
+        The candidate stays in ``candidates`` — the screen is a verdict
+        on the proposal, not a filter over it, so a reviewer can still see
+        what the rule proposed and why it was refused.
+        """
+        report = analyze_learning_observations(
+            observations=self._window(
+                self._failing(run="r1"),
+                self._failing(run="r2"),
+            ),
+            registry=learning_registry,
+        )
+        candidate = self._candidate(report, "item-noise")
+        assert candidate["recommendation_type"] == "investigate_noise"
+        assert candidate["evidence_verdict"] == REFUSED_NO_UNHELPFUL
+        screen = report["noise_screen"]
+        assert screen["proposed"] == 1
+        assert screen["admitted"] == 0
+        assert screen["refused_by_reason"] == {REFUSED_NO_UNHELPFUL: 1}
+
+    def test_a_single_unhelpful_citation_is_not_enough(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        report = analyze_learning_observations(
+            observations=self._window(
+                self._failing(run="r1", cited_unhelpful=True),
+                self._failing(run="r2"),
+            ),
+            registry=learning_registry,
+        )
+        assert self._candidate(report, "item-noise")["evidence_verdict"] == (
+            "insufficient_unhelpful_citations"
+        )
+
+    def test_a_contested_candidate_is_refused(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        """Never exercised by the live corpus — covered only here.
+
+        Measured on the reference deployment: of 265 proposals, **zero**
+        reached the contested branch (every candidate with two unhelpful
+        citations had strictly more unhelpful than helpful). A mutant
+        deleting the branch survives real data entirely.
+        """
+        report = analyze_learning_observations(
+            observations=self._window(
+                self._failing(run="r1", cited_unhelpful=True),
+                self._failing(run="r2", cited_unhelpful=True),
+                self._failing(run="r3", cited_helpful=True),
+                self._failing(run="r4", cited_helpful=True),
+            ),
+            registry=learning_registry,
+        )
+        candidate = self._candidate(report, "item-noise")
+        assert candidate["citation_evidence"]["helpful_count"] == 2
+        assert candidate["citation_evidence"]["unhelpful_count"] == 2
+        assert candidate["evidence_verdict"] == REFUSED_CONTESTED
+        assert report["noise_screen"]["admitted"] == 0
+
+    def test_promote_candidates_are_never_screened(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        """The promote arm was built, measured and refused.
+
+        Blocking promotion on absence of a helpful citation would repeat
+        #336's error mirrored — with ``P(cited helpful | served) ≈ 0.10``,
+        "never cited helpful" is the *expected* state of a good item. So a
+        promote candidate carries ``not_screened``, not a verdict.
+        """
+        report = analyze_learning_observations(
+            observations=self._window(
+                _make_observation(
+                    run_id="p1",
+                    outcome="success",
+                    citation_attributed=True,
+                    items=[_make_item(item_id="item-good")],
+                ),
+                _make_observation(
+                    run_id="p2",
+                    outcome="success",
+                    citation_attributed=True,
+                    items=[_make_item(item_id="item-good")],
+                ),
+            ),
+            registry=learning_registry,
+        )
+        candidate = self._candidate(report, "item-good")
+        assert candidate["recommendation_type"] == "promote_guidance"
+        assert candidate["evidence_verdict"] == NOT_SCREENED
+        screen = report["noise_screen"]
+        assert candidate["candidate_id"] not in screen["admitted_candidate_ids"]
+        assert screen["proposed"] == 0
+
+    def test_a_thin_window_suppresses_every_admission(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        """The coverage floor guards against a grading surface going dark.
+
+        Strong per-item evidence is not enough on its own: if almost
+        nothing in the window carries a verdict, the few that do are not a
+        sample worth acting on (#309).
+        """
+        report = analyze_learning_observations(
+            observations=[
+                self._failing(run="r1", cited_unhelpful=True),
+                self._failing(run="r2", cited_unhelpful=True),
+                self._failing(run="r3", cited_unhelpful=True),
+            ],
+            registry=learning_registry,
+        )
+        candidate = self._candidate(report, "item-noise")
+        assert candidate["citation_evidence"]["unhelpful_count"] == 3
+        assert candidate["evidence_verdict"] == REFUSED_THIN_CORPUS
+        screen = report["noise_screen"]
+        assert screen["suppressed"] is True
+        assert screen["suppressed_reason"] == REFUSED_THIN_CORPUS
+        assert screen["admitted"] == 0
+        assert screen["attributed_observations"] == 3
+        assert screen["min_attributed_observations"] == MIN_ATTRIBUTED_OBSERVATIONS
+
+    def test_unattributed_observations_do_not_count_toward_coverage(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        """Serving a pack is not grading it.
+
+        An observation with no per-item verdict at all contributes to the
+        success rate but cannot make the window look graded, which is the
+        whole point of a coverage floor.
+        """
+        report = analyze_learning_observations(
+            observations=[
+                *[
+                    _make_observation(
+                        run_id=f"quiet-{n}",
+                        outcome="success",
+                        items=[_make_item(item_id=f"item-pad-{n}")],
+                    )
+                    for n in range(MIN_ATTRIBUTED_OBSERVATIONS + 3)
+                ],
+                self._failing(run="r1", cited_unhelpful=True),
+                self._failing(run="r2", cited_unhelpful=True),
+            ],
+            registry=learning_registry,
+        )
+        assert report["attributed_observation_count"] == 2
+        assert report["noise_screen"]["suppressed"] is True
+
+    def test_citation_counts_reach_the_promoted_node(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        """``precedent_properties`` lands verbatim on the durable node.
+
+        A reviewer approving a promotion months later has the grader
+        evidence on the node itself, not only in a report that rolled out
+        of the window.
+        """
+        report = analyze_learning_observations(
+            observations=self._window(
+                _make_observation(
+                    run_id="p1",
+                    outcome="success",
+                    citation_attributed=True,
+                    items=[_make_item(item_id="item-good", cited_helpful=True)],
+                ),
+                _make_observation(
+                    run_id="p2",
+                    outcome="success",
+                    citation_attributed=True,
+                    items=[_make_item(item_id="item-good", cited_helpful=True)],
+                ),
+            ),
+            registry=learning_registry,
+        )
+        candidate = self._candidate(report, "item-good")
+        assert candidate["precedent_properties"]["helpful_citations"] == 2
+        assert candidate["precedent_properties"]["unhelpful_citations"] == 0
+        payloads = build_learning_promotion_payloads(
+            candidate=candidate,
+            promotion_name="Good guidance",
+            rationale="Cited by graders.",
+        )
+        properties = payloads["entity_payload"]["properties"]
+        assert properties["helpful_citations"] == 2
+        assert "Graders cited it helpful 2 time(s)" in properties["description"]
+
+    def test_description_says_so_when_no_grader_cited_the_item(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        report = analyze_learning_observations(
+            observations=self._window(
+                _make_observation(
+                    run_id="p1",
+                    outcome="success",
+                    citation_attributed=True,
+                    items=[_make_item(item_id="item-good")],
+                ),
+                _make_observation(
+                    run_id="p2",
+                    outcome="success",
+                    citation_attributed=True,
+                    items=[_make_item(item_id="item-good")],
+                ),
+            ),
+            registry=learning_registry,
+        )
+        payloads = build_learning_promotion_payloads(
+            candidate=self._candidate(report, "item-good"),
+            promotion_name="Uncited guidance",
+            rationale="High success rate.",
+        )
+        description = payloads["entity_payload"]["properties"]["description"]
+        assert "No grader cited this item either way." in description
+
+    def test_citations_are_counted_per_serving_not_per_item(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        """Two unhelpful citations must mean two *packs*, not one pack twice.
+
+        ``unhelpful >= 2`` is a claim about repeated judgement. Counting
+        per distinct item would let a single bad pack satisfy it.
+        """
+        report = analyze_learning_observations(
+            observations=self._window(
+                _make_observation(
+                    run_id="r1",
+                    outcome="failure",
+                    citation_attributed=True,
+                    items=[
+                        _make_item(item_id="item-noise", cited_unhelpful=True),
+                        _make_item(item_id="item-other", item_type="precedent"),
+                    ],
+                ),
+                self._failing(run="r2"),
+            ),
+            registry=learning_registry,
+        )
+        candidate = self._candidate(report, "item-noise")
+        assert candidate["citation_evidence"] == {
+            "appearances": 2,
+            "helpful_count": 0,
+            "unhelpful_count": 1,
+        }
+        assert candidate["evidence_verdict"] == "insufficient_unhelpful_citations"

@@ -25,6 +25,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from trellis.learning.evidence_gate import (
+    NOT_SCREENED,
+    CitationEvidence,
+    screen_noise_candidates,
+)
 from trellis.schemas.parameters import ParameterScope
 
 if TYPE_CHECKING:
@@ -114,9 +119,13 @@ def _accumulate_item(
             "times_served": 0,
             "success_count": 0,
             "retry_count": 0,
+            "retry_observed_count": 0,
             "injected_count": 0,
+            "injected_observed_count": 0,
             "selection_efficiency_total": 0.0,
             "selection_efficiency_count": 0,
+            "helpful_citations": 0,
+            "unhelpful_citations": 0,
             "source_strategies": {},
         },
     )
@@ -150,10 +159,34 @@ def _accumulate_item(
     )
     if str(observation.get("outcome", "")).strip() == "success":
         metrics["success_count"] += 1
-    if bool(observation.get("had_retry")):
-        metrics["retry_count"] += 1
-    if bool(observation.get("injected")):
-        metrics["injected_count"] += 1
+    # ``had_retry`` and ``injected`` keep a *coverage* denominator beside
+    # the numerator, the way ``selection_efficiency`` always has. Without
+    # one, ``observation.get(...)`` returns ``None`` for a field no
+    # producer writes and ``bool()`` renders it ``False`` — so "no agent
+    # reported a retry" and "nothing can report a retry" both arrive as
+    # ``retry_count == 0`` and leave as ``retry_rate == 0.0``. That is the
+    # conflation, not the missing field: a rate of 0.0 is a measurement,
+    # and this one was manufactured. Absence is reported as absence (the
+    # ``capture_coverage`` idiom) so a reviewer can tell a clean record
+    # from an unwired one.
+    if "had_retry" in observation:
+        metrics["retry_observed_count"] += 1
+        if bool(observation["had_retry"]):
+            metrics["retry_count"] += 1
+    if "injected" in observation:
+        metrics["injected_observed_count"] += 1
+        if bool(observation["injected"]):
+            metrics["injected_count"] += 1
+
+    # Per-item verdicts, stamped at the join (``pack_observations``).
+    # These are counted per *serving*, not per distinct item: a memory the
+    # grader called unhelpful in two separate packs has two unhelpful
+    # citations, which is what makes ``unhelpful >= 2`` a statement about
+    # repeated judgement rather than about one bad pack.
+    if bool(item.get("cited_helpful")):
+        metrics["helpful_citations"] += 1
+    if bool(item.get("cited_unhelpful")):
+        metrics["unhelpful_citations"] += 1
 
     sel_eff = observation.get("selection_efficiency")
     if isinstance(sel_eff, float | int):
@@ -175,8 +208,15 @@ def analyze_learning_observations(
     artifacts_root: str | Path | None = None,
 ) -> dict[str, Any]:
     candidate_map: dict[tuple[str, str], dict[str, Any]] = {}
+    # Window-level coverage for the evidence screen: observations whose
+    # grader named any item id at all. Counted over every observation,
+    # including ones contributing no candidate, because it describes the
+    # grading surface rather than the candidate set.
+    attributed_observations = 0
 
     for observation in observations:
+        if bool(observation.get("citation_attributed")):
+            attributed_observations += 1
         intent_family = (
             str(observation.get("intent_family", "")).strip() or "general_context"
         )
@@ -194,9 +234,14 @@ def analyze_learning_observations(
 
         times_served = int(metrics["times_served"])
         success_rate = metrics["success_count"] / times_served if times_served else 0.0
-        retry_rate = metrics["retry_count"] / times_served if times_served else 0.0
+        # Divided by the observations that *reported* the field, not by
+        # every serving — an unreported serving is not a serving without a
+        # retry. ``None`` when nothing reported it at all.
+        retry_observed = int(metrics["retry_observed_count"])
+        retry_rate = metrics["retry_count"] / retry_observed if retry_observed else None
+        injected_observed = int(metrics["injected_observed_count"])
         injection_rate = (
-            metrics["injected_count"] / times_served if times_served else 0.0
+            metrics["injected_count"] / injected_observed if injected_observed else None
         )
         avg_selection_efficiency = (
             metrics["selection_efficiency_total"]
@@ -237,13 +282,41 @@ def analyze_learning_observations(
             "metrics": {
                 "times_served": times_served,
                 "success_rate": round(success_rate, 4),
-                "retry_rate": round(retry_rate, 4),
-                "injection_rate": round(injection_rate, 4),
+                "retry_rate": None if retry_rate is None else round(retry_rate, 4),
+                "injection_rate": (
+                    None if injection_rate is None else round(injection_rate, 4)
+                ),
                 "avg_selection_efficiency": (
                     None
                     if avg_selection_efficiency is None
                     else round(avg_selection_efficiency, 4)
                 ),
+            },
+            # How much of the corpus could answer each metric at all.
+            # ``times_served`` is the denominator every rate would have
+            # used before; the per-metric counts say which of them were
+            # actually divisible. A reviewer reading
+            # ``"retry_rate": null`` needs to know whether that is a
+            # sparse signal or an unwired one.
+            "metrics_coverage": {
+                "observations": times_served,
+                "retry_observed": retry_observed,
+                "injected_observed": injected_observed,
+                "selection_efficiency_observed": int(
+                    metrics["selection_efficiency_count"]
+                ),
+            },
+            # What graders actually said about this item, per serving.
+            # Attached to *both* arms: the noise arm is screened on it
+            # (``evidence_gate``), the promote arm is not — but a reviewer
+            # approving a promotion should be able to see that nobody ever
+            # cited the item helpful, which on this corpus is the usual
+            # case. See ``evidence_gate`` for why that is evidence for a
+            # human and not a rule.
+            "citation_evidence": {
+                "appearances": times_served,
+                "helpful_count": int(metrics["helpful_citations"]),
+                "unhelpful_count": int(metrics["unhelpful_citations"]),
             },
             "evidence_refs": sorted(set(metrics["evidence_refs"]))[:10],
             "precedent_name": f"Learning: {intent_family} :: {title[:96]}".strip(),
@@ -253,12 +326,48 @@ def analyze_learning_observations(
                 "source_item_id": item_id,
                 "source_item_type": metrics.get("item_type"),
                 "success_rate": round(success_rate, 4),
-                "retry_rate": round(retry_rate, 4),
+                "retry_rate": None if retry_rate is None else round(retry_rate, 4),
                 "support_count": times_served,
+                # Carried onto the durable node, for the same reason
+                # ``retry_rate`` stopped being printed when unmeasured: a
+                # promoted precedent is served back as context, so it
+                # should state the citation evidence behind it rather than
+                # let ``success_rate`` imply one.
+                "helpful_citations": int(metrics["helpful_citations"]),
+                "unhelpful_citations": int(metrics["unhelpful_citations"]),
                 "source_of_truth": "reviewed_promotion",
             },
         }
         candidates.append(candidate)
+
+    # The proposal and the verdict are reported *separately*, per #336:
+    # a screen that admits a fraction of the proposals is a fact about the
+    # proposal rule, and collapsing the two would hide it. Every proposed
+    # candidate stays in ``candidates`` carrying its own verdict; nothing
+    # is dropped here.
+    noise_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate["recommendation_type"] == "investigate_noise"
+    ]
+    screen = screen_noise_candidates(
+        (candidate["candidate_id"] for candidate in noise_candidates),
+        (CitationEvidence.from_candidate(c) for c in noise_candidates),
+        attributed_observations=attributed_observations,
+    )
+    verdict_by_id = {decision.candidate_id: decision for decision in screen.decisions}
+    for candidate in candidates:
+        decision = verdict_by_id.get(candidate["candidate_id"])
+        if decision is None:
+            # The promote arm. ``NOT_SCREENED`` is distinct from every
+            # refusal slug: no gate ran, rather than one running and
+            # declining. The mirror-image promote gate was built, measured
+            # at chance and refused — see ``evidence_gate``.
+            candidate["evidence_verdict"] = NOT_SCREENED
+            continue
+        candidate["evidence_verdict"] = (
+            "admitted" if decision.admitted else decision.reason
+        )
 
     return {
         "artifact_version": _LEARNING_ARTIFACT_VERSION,
@@ -266,7 +375,19 @@ def analyze_learning_observations(
         "artifacts_root": None if artifacts_root is None else str(artifacts_root),
         "min_support": int(min_support),
         "observation_count": len(observations),
+        "attributed_observation_count": attributed_observations,
         "candidate_count": len(candidates),
+        "noise_screen": {
+            "proposed": screen.candidates_considered,
+            "admitted": len(screen.admitted),
+            "admitted_candidate_ids": list(screen.admitted),
+            "refused_by_reason": dict(screen.refused_by_reason),
+            "attributed_observations": screen.attributed_observations,
+            "min_attributed_observations": screen.min_attributed_observations,
+            "min_unhelpful_citations": screen.min_unhelpful_citations,
+            "suppressed": screen.suppressed,
+            "suppressed_reason": screen.suppressed_reason,
+        },
         "candidates": candidates,
     }
 
@@ -581,9 +702,23 @@ def _recommend_learning_action(
     *,
     item_type: str,
     success_rate: float,
-    retry_rate: float,
+    retry_rate: float | None,
     registry: ParameterRegistry,
 ) -> str | None:
+    """Classify one candidate, skipping any conjunct nothing measured.
+
+    ``retry_rate`` is ``None`` when no observation reported ``had_retry``.
+    An unmeasured conjunct **drops out of the rule** rather than
+    evaluating: it must not silently satisfy the promote conjunct (which
+    a fabricated ``0.0`` did, since ``0.0 <= promote_retry`` for every
+    threshold an operator would set) nor silently fail the noise disjunct
+    (which the same ``0.0`` did, since ``0.0 >= noise_retry`` never
+    holds). Both arms therefore behave exactly as they did while the rate
+    was manufactured — the rule was *already* single-variable and this
+    only makes it say so. ``metrics_coverage`` on the candidate records
+    which conjuncts were evaluated, so a reviewer reads a rule that ran on
+    one variable as a rule that ran on one variable.
+    """
     scope = ParameterScope(component_id=LEARNING_SCORING_COMPONENT)
     promote_success = _resolve_required_threshold(
         registry, scope, LEARNING_PROMOTE_SUCCESS_KEY
@@ -596,11 +731,14 @@ def _recommend_learning_action(
     )
     noise_retry = _resolve_required_threshold(registry, scope, LEARNING_NOISE_RETRY_KEY)
 
-    if success_rate >= promote_success and retry_rate <= promote_retry:
+    retry_low = retry_rate is None or retry_rate <= promote_retry
+    retry_high = retry_rate is not None and retry_rate >= noise_retry
+
+    if success_rate >= promote_success and retry_low:
         if item_type == "precedent":
             return "promote_precedent"
         return "promote_guidance"
-    if success_rate <= noise_success or retry_rate >= noise_retry:
+    if success_rate <= noise_success or retry_high:
         return "investigate_noise"
     return None
 
@@ -625,10 +763,35 @@ def _build_precedent_description(
     item = candidate.get("item_id", "unknown")
     sr = metrics.get("success_rate")
     rr = metrics.get("retry_rate")
+    # A promotion mints a durable node whose description is read by humans
+    # and served back as context, so it states only what was measured.
+    # ``retry_rate`` is ``None`` on every deployment that has no producer
+    # for ``had_retry``; printing "retry_rate=0.0" there would persist a
+    # fabricated measurement into the graph permanently.
+    measured = (
+        f"success_rate={sr} and retry_rate={rr}"
+        if rr is not None
+        else f"success_rate={sr} (retry_rate not measured)"
+    )
     parts = [
         f"Reviewed learning for intent family '{family}'.",
-        f"Source item '{item}' showed success_rate={sr} and retry_rate={rr}.",
+        f"Source item '{item}' showed {measured}.",
     ]
+    # Citation evidence, stated rather than implied. ``success_rate`` is a
+    # pack-level outcome that says nothing about whether a grader ever
+    # found *this item* useful, and on the live corpus most promote
+    # candidates were never cited helpful by anyone.
+    citations = candidate.get("citation_evidence")
+    if isinstance(citations, Mapping):
+        helpful = int(citations.get("helpful_count", 0) or 0)
+        unhelpful = int(citations.get("unhelpful_count", 0) or 0)
+        if helpful or unhelpful:
+            parts.append(
+                f"Graders cited it helpful {helpful} time(s) and unhelpful "
+                f"{unhelpful} time(s)."
+            )
+        else:
+            parts.append("No grader cited this item either way.")
     if rationale:
         parts.append(f"Review rationale: {rationale}")
     return " ".join(parts)

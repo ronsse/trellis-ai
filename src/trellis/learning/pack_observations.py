@@ -22,7 +22,7 @@ because the JSONL alone does not carry the per-item ``item_type`` /
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -212,13 +212,31 @@ def _join_one(
     pack_payload: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Combine one feedback payload + its pack payload into one observation."""
+    # Per-item verdicts. The grader names ids; whether an id resolves to an
+    # item this pack actually served is a separate question, answered per
+    # item below. Both are needed: the *named* set says whether grading
+    # happened at all (the coverage floor
+    # ``trellis.learning.evidence_gate`` screens on), the *resolved* set
+    # says what the grading was about.
+    helpful_ids = _citation_ids(feedback_payload.get("helpful_item_ids"))
+    unhelpful_ids = _citation_ids(feedback_payload.get("unhelpful_item_ids"))
+
     items: list[dict[str, Any]] = []
     for raw in pack_payload.get("injected_items", []) or []:
         if not isinstance(raw, Mapping):
             continue
+        raw_item_id = str(raw.get("item_id") or "").strip()
         item: dict[str, Any] = {
             "item_id": raw.get("item_id"),
             "item_type": raw.get("item_type"),
+            # Stamped on every item, not only the cited ones: a bare
+            # ``False`` on an item in a graded pack is a real observation
+            # — served, and the grader did not name it — which is exactly
+            # what the noise screen weighs against an unhelpful citation.
+            # An item in an *ungraded* pack is distinguished by
+            # ``citation_attributed`` on the observation, not here.
+            "cited_helpful": bool(raw_item_id) and raw_item_id in helpful_ids,
+            "cited_unhelpful": bool(raw_item_id) and raw_item_id in unhelpful_ids,
         }
         # ``analyze_learning_observations`` reads ``source_strategy``;
         # the PackBuilder telemetry stamps the same concept under
@@ -257,6 +275,11 @@ def _join_one(
         "outcome": feedback_payload.get("outcome")
         or ("success" if feedback_payload.get("success") else "failure"),
         "phase": feedback_payload.get("phase") or "",
+        # True when the grader named any item id at all, resolved or not.
+        # Deliberately *not* conditioned on resolution: this is the
+        # "is the grading surface alive" coverage signal (#309), and a
+        # grader naming ids that miss is still a grader that graded.
+        "citation_attributed": bool(helpful_ids or unhelpful_ids),
         "items": items,
     }
 
@@ -273,11 +296,73 @@ def _join_one(
         observation["had_retry"] = bool(feedback_payload["had_retry"])
     if "injected" in feedback_payload:
         observation["injected"] = bool(feedback_payload["injected"])
-    selection_efficiency = pack_payload.get("selection_efficiency")
-    if isinstance(selection_efficiency, int | float):
-        observation["selection_efficiency"] = float(selection_efficiency)
+    selection_efficiency = derive_selection_efficiency(pack_payload)
+    if selection_efficiency is not None:
+        observation["selection_efficiency"] = selection_efficiency
 
     return observation
 
 
-__all__ = ["build_learning_observations_from_event_log"]
+def derive_selection_efficiency(pack_payload: Mapping[str, Any]) -> float | None:
+    """What fraction of the candidates the walk saw actually got served.
+
+    ``analyze_learning_observations`` has ranked on
+    ``avg_selection_efficiency`` since the initial commit and read it from
+    ``pack_payload["selection_efficiency"]`` — **a key no emitter has ever
+    written**, on any deployment (0 of 216 ``PACK_ASSEMBLED`` rows in the
+    reference deployment's trailing 30 days). The quantity itself was
+    never missing, only the name: ``PackBuilder._emit_telemetry`` records
+    every candidate the walk saw, split into the ones it admitted
+    (``injected_items``) and the ones it rejected (``rejected_items``), so
+    the ratio is already on the row. Deriving it is strictly better than
+    adding a field for a caller to supply, because a field nobody supplies
+    is how this metric came to read a constant in the first place.
+
+    This is the pack-level form of the per-strategy ``yield_rate`` in
+    :mod:`trellis.retrieve.telemetry`, which divides the same two counts
+    over a whole window rather than over one pack. The two are deliberately
+    computed from the same payload keys rather than from a second stored
+    number — see #464: two counters over one tree drift.
+
+    Returns ``None`` — *unobserved*, not ``0.0`` — when the row carries no
+    ``rejected_items`` key at all. A **present but empty** list is a real
+    measurement (the walk rejected nothing, efficiency 1.0); an **absent**
+    key means the row did not come from ``_emit_telemetry``, which writes
+    it unconditionally for every flat pack. Collapsing those two into one
+    number is the same conflation that makes ``had_retry`` unreadable
+    below, and ``analyze_learning_observations`` already knows how to carry
+    the distinction: it keeps a ``selection_efficiency_count`` and reports
+    ``None`` when nothing was observed.
+
+    Sectioned packs emit no ``injected_items`` at all and so contribute no
+    observations to this join (CLAUDE.md, "Feedback path"); they reach here
+    only as an absent numerator, which is likewise reported as unobserved.
+    """
+    rejected = pack_payload.get("rejected_items")
+    injected = pack_payload.get("injected_items")
+    if not isinstance(rejected, Sequence) or isinstance(rejected, str | bytes):
+        return None
+    if not isinstance(injected, Sequence) or isinstance(injected, str | bytes):
+        return None
+    seen = len(injected) + len(rejected)
+    if seen == 0:
+        return None
+    return len(injected) / seen
+
+
+def _citation_ids(raw: Any) -> frozenset[str]:
+    """Normalize a ``*_item_ids`` field into a set of non-empty ids.
+
+    Tolerant of the field being absent, ``None``, or a bare string — a
+    string is *not* iterated into characters, which would manufacture
+    citations for single-character item ids.
+    """
+    if not isinstance(raw, Sequence) or isinstance(raw, str | bytes):
+        return frozenset()
+    return frozenset(cleaned for entry in raw if (cleaned := str(entry or "").strip()))
+
+
+__all__ = [
+    "build_learning_observations_from_event_log",
+    "derive_selection_efficiency",
+]
