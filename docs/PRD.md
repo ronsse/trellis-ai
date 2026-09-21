@@ -3,11 +3,17 @@
 ```yaml
 status: active
 owner: nronsse
-last-review: 2026-08-22
+last-review: 2026-09-20
 ```
 
-> Rules: ≤ 2 pages. §3 contains only verifiable facts — every claim cites a path or command.
-> Agents load §3–§5 before working here; write for them. Bump `last-review` whenever touched.
+> Rules: ≤ 2 pages. §3 **and §5** contain only verifiable facts — every claim cites a path or
+> command, and **every count carries the date it was taken**. Agents load §3–§5 before working
+> here; write for them. Bump `last-review` whenever touched.
+>
+> The dating rule was added 2026-09-20 because it was missing: §3 carried dates and was
+> refreshed once (`b066228`, #320); §5 carried none and every LOC figure in it had been
+> stale since `df69cba` (2026-07-11) — `src/trellis/retrieve/` had grown 8.1k → 14.9k while
+> the table still read 8.1k. An undated count reads as current forever.
 
 ## 1. Problem
 
@@ -32,13 +38,13 @@ Honesty note: verified deployments today = the author's dogfood + that paused pi
 
 - **v0.9.0** tagged (`git tag`), published on PyPI as `trellis-ai`; Python ≥3.11, MIT (`pyproject.toml`).
 - **Six shipped packages** — `trellis`, `trellis_cli`, `trellis_api`, `trellis_sdk`, `trellis_workers`, `trellis_wire` (`pyproject.toml [tool.hatch.build.targets.wheel]`); entry points `trellis` / `trellis-mcp` / `trellis-api`.
-- **Six store ABCs, multi-backend**: graph = SQLite/Postgres/ArcadeDB/Neo4j, vector = SQLite/pgvector/ArcadeDB/Neo4j, blob = local/S3 (`src/trellis/stores/`, table in `CLAUDE.md`). Backends pass shared contract suites (`tests/unit/stores/contracts/` — 49 graph + 25 vector tests per backend).
+- **Six store ABCs, multi-backend**: graph = SQLite/Postgres/ArcadeDB/Neo4j, vector = SQLite/pgvector/ArcadeDB/Neo4j, blob = local/S3 (`src/trellis/stores/`, table in `CLAUDE.md`). Backends pass shared contract suites (`tests/unit/stores/contracts/` — 106 graph + 38 vector tests per backend, `grep -c 'def test_' tests/unit/stores/contracts/{graph,vector}_store_contract.py`, 2026-09-20).
 - **16 MCP tools** (`grep -c '@mcp.tool' src/trellis/mcp/server.py` → 16), markdown output, opt-in HTTP transport with scoped API keys (#252, `docs/design/adr-mcp-http-transport.md`).
 - **REST API with scoped auth** (`TRELLIS_AUTH_MODE`, PR #242) + Memory Explorer UI (`src/trellis_api/`); dual-mode Python SDK (`src/trellis_sdk/`).
 - **Governed mutation pipeline** — validate → policy → idempotency → execute → emit event (`src/trellis/mutate/executor.py`); traces immutable.
-- **Tests/CI**: 5038 unit tests collected by default, 5609 total, as of 2026-08-22 (`.venv/bin/python -m pytest tests/unit/ -q --co`); all six workflows green on main 2026-08-22 (`gh run list --repo ronsse/trellis-ai --branch main`).
+- **Tests/CI**: 7534 unit tests collected by default of 7846, and 7719 of 8085 across `tests/`, on `1ef5c9c` 2026-09-20 (`python -m pytest tests/unit/ -q --co`). Six workflows gate every PR (`.github/workflows/`); `main` itself has **no required status checks**, so a green run is a convention the agent enforces, not a control (`docs/design/autonomous-backlog.md` §"Repo-level gap").
 - **Landed 2026-07-11**: `trellis ingest corpus` (bb5a882), `trellis ingest conversations` (0a7e482), `--extract` entity mining (7431488), `trellis analyze cost` (5ea7cd5).
-- **Live-deployment truth** (dogfood analysis, `TODO.md` §"Dogfood gap analysis — 2026-07-11"): 36 docs / 6 traces / 44 nodes / 187 events / 5 packs and **0 advisories / 0 lessons** — the learning loop runs but is input-starved; three retrieval defects verified live over MCP (`domain=` hard-exclusion, missing `pack_id` on flat `get_context`, `get_context`/`search` bypassing PackBuilder). **All three landed 2026-07-14 (#254/#262, §3.H.0); loop-starvation persists pending the enrichment `llm:` block.**
+- **Live-deployment truth — a 2026-07-11 reading, not a current one** (dogfood analysis, `TODO.md` §"Dogfood gap analysis — 2026-07-11"): 36 docs / 6 traces / 44 nodes / 187 events / 5 packs and **0 advisories / 0 lessons**. Nothing has refreshed these numbers since, and the deployment has grown by more than an order of magnitude; treat them as the shape of the question, not as counts. The three retrieval defects named there (`domain=` hard-exclusion, missing `pack_id` on flat `get_context`, `get_context`/`search` bypassing PackBuilder) all landed 2026-07-14 (#254/#262, §3.H.0). **The causal claim attached to the zero — "loop-starvation persists pending the enrichment `llm:` block" — is refuted.** The host had an `llm:` block throughout; "0 advisories served" has at least four independently sufficient causes (item attribution, #373's writer/reader path split, the flat pack path never rendering advisories at all, and #383's generator where 36/37 rows carry `success_rate_without=0.0`). A single-cause story about a zero is the failure mode here — see `CLAUDE.md` §"Retrieval & Pack Builder".
 
 ## 4. Invariants / product principles
 
@@ -52,17 +58,19 @@ Honesty note: verified deployments today = the author's dogfood + that paused pi
 
 ## 5. Component disposition
 
+LOC re-derived on `1ef5c9c` **2026-09-20** with `find <dir> -name '*.py' -exec cat {} + | wc -l` (blank lines and comments included — it is a size cue, not a metric). `src/` totals 102,741.
+
 | Component | Verdict | Rationale |
 |---|---|---|
-| PackBuilder + strategies + effectiveness (`src/trellis/retrieve/`, ~8.1k LOC) | keep internal | The attribution seam (pack_id → per-item feedback) *is* the product; no OSS retriever (LlamaIndex, Haystack) carries it. Fix direction is more PackBuilder, not less — route the MCP `get_context`/`search` defects through it. |
+| PackBuilder + strategies + effectiveness (`src/trellis/retrieve/`, ~14.9k LOC) | keep internal | The attribution seam (pack_id → per-item feedback) *is* the product; no OSS retriever (LlamaIndex, Haystack) carries it. Fix direction is more PackBuilder, not less — the MCP `get_context`/`search` bypass named here was fixed by `4c8f2fe` (2026-07-13, #262/#269) and every pack surface now routes through it. It is also the fastest-growing component in the repo (8.1k → 14.9k since 2026-07-11), which is the cost side of that verdict. |
 | Graph/vector backends: SQLite + Postgres/pgvector | keep internal | Local default + the only backends running in production (skynet). Non-negotiable. |
-| Graph/vector backends: ArcadeDB + Neo4j (Bolt pair, ~3.3k LOC incl. shared `bolt_opencypher/` base) | keep internal, **feature-frozen** | Zero known external users; carry-cost is capped by the shared base + contract suites + containerized CI, so deleting now buys little — but no new features until an external user exists. If the matrix ever taxes a change (e.g. #194 enforcement), cut to pgvector-only and re-home the pair as a plugin (`docs/design/adr-plugin-contract.md`); extraction cost = a second release train + cross-repo contract-suite wiring. |
-| Classification pipeline (`src/trellis/classify/`, ~2k LOC) | keep internal | Deterministic-inline design matches the cost thesis and it's small. But `DataClassification` is dead weight until #194 enforces it — enforce it or stop presenting it as a security feature. |
-| Feedback / fitness loops (`feedback` + `learning` + `workers`, ~7.4k LOC) | keep internal | This is the differentiator vs Zep/Mem0 (session/user-level attribution). Live verdict: starved, not broken (0 advisories/0 lessons). Feed it via capture work; re-judge 30 days after session auto-capture lands. |
-| MCP server (`src/trellis/mcp/`, ~2.5k LOC) | keep internal | Primary adoption surface; fastmcp does transport. Known defect: hand-rolled retrieval in 2 tools — fix by delegating to PackBuilder. |
-| REST API + Memory Explorer (`src/trellis_api/`, ~3.6k LOC) | keep internal | Thin FastAPI over the same registry; SDK-remote and the UI depend on it. There is no replacement that preserves the auth-scope model. |
+| Graph/vector backends: ArcadeDB + Neo4j (Bolt pair, ~3.9k LOC incl. shared `bolt_opencypher/` base) | keep internal, **feature-frozen** | Zero known external users; carry-cost is capped by the shared base + contract suites + containerized CI, so deleting now buys little — but no new features until an external user exists. If the matrix ever taxes a change (e.g. #194 enforcement), cut to pgvector-only and re-home the pair as a plugin (`docs/design/adr-plugin-contract.md`); extraction cost = a second release train + cross-repo contract-suite wiring. |
+| Classification pipeline (`src/trellis/classify/`, ~3.9k LOC) | keep internal | Deterministic-inline design matches the cost thesis and it's small. But `DataClassification` is dead weight until #194 enforces it — enforce it or stop presenting it as a security feature. |
+| Feedback / fitness loops (`feedback` + `learning` + `workers`, ~13.4k LOC) | keep internal | This is the differentiator vs Zep/Mem0 (session/user-level attribution). **The 2026-07-11 verdict "starved, not broken" was wrong** — it read one zero as one cause. Session auto-capture landed 2026-08-24, so the re-judge it asked for is due **2026-09-23**, and it must enumerate every sufficient cause of a zero before naming one (§3, and `CLAUDE.md` §"Retrieval & Pack Builder"). |
+| MCP server (`src/trellis/mcp/`, ~4.1k LOC) | keep internal | Primary adoption surface; fastmcp does transport. The "hand-rolled retrieval in 2 tools" defect recorded here is **fixed** (`4c8f2fe`, 2026-07-13): of the 16 `@mcp.tool` functions only `get_graph` and `query_observations` touch a store directly, and both are deliberate — they are neighbourhood and observation queries, not pack assembly. |
+| REST API + Memory Explorer (`src/trellis_api/`, ~4.4k LOC) | keep internal | Thin FastAPI over the same registry; SDK-remote and the UI depend on it. There is no replacement that preserves the auth-scope model. |
 | LLM provider wrappers (`src/trellis/llm/providers/`) | keep protocol; **cap at 2 wrappers**; new providers via a LiteLLM adapter | `adr-llm-client-abstraction.md` already rejected litellm-in-core; the sanctioned pattern is a ~30-LOC `LiteLLMClient(LLMClient)` consumer-side adapter. Never grow a first-party provider matrix. |
-| Tiered extraction (`src/trellis/extract/`, ~4.6k LOC) | keep internal | The LLM-bootstraps/deterministic-inherits ladder is core thesis; extracting it as a standalone lib costs schema+executor decoupling for zero demand. |
+| Tiered extraction (`src/trellis/extract/`, ~6.3k LOC) | keep internal | The LLM-bootstraps/deterministic-inherits ladder is core thesis; extracting it as a standalone lib costs schema+executor decoupling for zero demand. |
 
 ## 6. Scope: now / next / not
 

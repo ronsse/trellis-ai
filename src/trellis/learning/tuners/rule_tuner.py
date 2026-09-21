@@ -75,10 +75,19 @@ class AggregatedOutcomes:
         return self.total_latency_ms / self.count if self.count else 0.0
 
     @property
-    def reference_rate(self) -> float:
-        """Ratio of items_referenced to items_served across the cell."""
+    def reference_rate(self) -> float | None:
+        """Ratio of items_referenced to items_served across the cell.
+
+        Returns ``None`` when no sample reported a serving count, for the
+        same reason :meth:`mean_metric` does — a rule must be able to
+        tell "no signal" from "signal = 0.0". The ``0.0`` this used to
+        return was indistinguishable from a real cell where nothing was
+        cited, and every producer of these rows leaves ``items_served``
+        unset (an agent cites what helped, it does not enumerate what it
+        was shown), so ``reference_rate lt 0.2`` fired on a constant.
+        """
         if self.items_served_total <= 0:
-            return 0.0
+            return None
         return self.items_referenced_total / self.items_served_total
 
     def mean_metric(self, key: str) -> float | None:

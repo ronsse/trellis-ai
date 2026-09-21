@@ -96,12 +96,24 @@ def user_turn(text: str, session_id: str = "sess-fake-0001") -> dict[str, Any]:
 
 
 def assistant_turn(
-    text: str, tool_name: str | None = None, session_id: str = "sess-fake-0001"
+    text: str,
+    tool_name: str | None = None,
+    session_id: str = "sess-fake-0001",
+    *,
+    use_id: str = "t-fake",
 ) -> dict[str, Any]:
+    """One assistant record, optionally carrying a single ``tool_use``.
+
+    ``use_id`` is a parameter rather than a constant because the error join
+    is keyed on it: a fixture set where every call shares one id cannot
+    distinguish a join that resolves correctly from one that marks
+    everything, which is #447's "pool too uniform to see the field under
+    test" in its transcript form.
+    """
     content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     if tool_name is not None:
         content.append(
-            {"type": "tool_use", "id": "t-fake", "name": tool_name, "input": {}}
+            {"type": "tool_use", "id": use_id, "name": tool_name, "input": {}}
         )
     return {
         "type": "assistant",
@@ -111,23 +123,49 @@ def assistant_turn(
     }
 
 
-def tool_result_turn(
-    *, is_error: bool, session_id: str = "sess-fake-0001"
+def assistant_tools(
+    *calls: tuple[str, str], session_id: str = "sess-fake-0001"
 ) -> dict[str, Any]:
-    """A user record carrying a tool_result content array (F8 trap)."""
+    """An assistant record carrying several ``tool_use`` blocks.
+
+    Each entry is ``(tool_name, use_id)``. Claude Code emits parallel tool
+    calls in one assistant message, so a per-call rollup has to survive it.
+    """
+    content: list[dict[str, Any]] = [{"type": "text", "text": "working"}]
+    content.extend(
+        {"type": "tool_use", "id": use_id, "name": name, "input": {}}
+        for name, use_id in calls
+    )
+    return {
+        "type": "assistant",
+        "uuid": "a-fake-multi",
+        "sessionId": session_id,
+        "message": {"role": "assistant", "content": content},
+    }
+
+
+def tool_result_turn(
+    *,
+    is_error: bool,
+    session_id: str = "sess-fake-0001",
+    tool_use_id: str | None = "t-fake",
+) -> dict[str, Any]:
+    """A user record carrying a tool_result content array (F8 trap).
+
+    ``tool_use_id=None`` omits the key entirely, which is the shape a
+    compaction boundary or a truncated write leaves behind: an errored
+    result whose call this file never held.
+    """
+    block: dict[str, Any] = {
+        "type": "tool_result",
+        "content": [{"type": "text", "text": "raw tool output here"}],
+        "is_error": is_error,
+    }
+    if tool_use_id is not None:
+        block["tool_use_id"] = tool_use_id
     return {
         "type": "user",
         "uuid": "u-fake-tr",
         "sessionId": session_id,
-        "message": {
-            "role": "user",
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": "t-fake",
-                    "content": [{"type": "text", "text": "raw tool output here"}],
-                    "is_error": is_error,
-                }
-            ],
-        },
+        "message": {"role": "user", "content": [block]},
     }

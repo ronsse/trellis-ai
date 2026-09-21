@@ -121,6 +121,103 @@ def pytest_configure(config: pytest.Config) -> None:
     config.option.markexpr = expr
 
 
+@pytest.fixture(scope="session")
+def neo4j_vector_search_supported() -> bool:
+    """Whether the connected Neo4j can run the vector store's ``SEARCH`` query.
+
+    :meth:`Neo4jVectorStore.query` uses the Cypher 25 ``SEARCH ... IN (
+    VECTOR INDEX ... )`` clause. AuraDB supports it; a self-hosted Docker
+    instance (community *or* enterprise, through at least 2025.12) does not —
+    it raises ``51N26 'not supported in this version'`` — and a
+    Cypher-5-default server rejects the keyword at parse time
+    (``Invalid input 'SEARCH'``, which is what ``neo4j:2025.12`` actually
+    returns). The probe mirrors the production query exactly (no ``CYPHER 25``
+    prefix) against a throwaway index name, so it is a faithful "can the real
+    query run here?" check: an index-resolution error means SEARCH is
+    available, while a feature/parse error means it is not.
+
+    A capability is not a marker. ``--include-neo`` above says an operator
+    *configured* a Neo4j; this says what that Neo4j can *do*, which is the
+    difference between the AuraDB the integration suite was written against
+    and the container CI provisions. It lives in the root conftest rather than
+    beside either consumer because it classifies support by string-matching
+    three error substrings, and that is exactly the roster-shaped thing this
+    repo has watched rot in duplicate: one copy gets a fourth substring, the
+    other silently flips to "supported", and a skip becomes a red CI. One
+    probe, two suites — ``tests/unit/stores/test_neo4j_vector.py`` and
+    ``tests/integration/test_neo4j_e2e.py``, both through
+    :func:`require_neo4j_vector_search`. It is separate from that gate because
+    it is **session**-scoped: the probe opens a driver and runs a query, and
+    doing that per test would cost a connection for every gated case.
+    """
+    uri = os.environ.get("TRELLIS_TEST_NEO4J_URI", "")
+    if not uri:
+        return False
+    from neo4j import GraphDatabase
+
+    probe = (
+        "MATCH (n:Node) SEARCH n IN ( VECTOR INDEX __vs_probe__ "
+        "FOR [0.0] LIMIT 1 ) SCORE AS s RETURN n LIMIT 0"
+    )
+    driver = GraphDatabase.driver(
+        uri,
+        auth=(
+            os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j"),
+            os.environ.get("TRELLIS_TEST_NEO4J_PASSWORD", ""),
+        ),
+    )
+    try:
+        with driver.session(
+            database=os.environ.get("TRELLIS_TEST_NEO4J_DATABASE", "neo4j")
+        ) as session:
+            try:
+                session.run(probe).consume()
+            except Exception as exc:
+                # Classify any driver/Cypher failure: a feature/parse error
+                # means SEARCH is unavailable here; anything else (e.g. a
+                # missing-index error) means it is available.
+                msg = str(exc)
+                unsupported = (
+                    "51N26" in msg
+                    or "not available in this implementation" in msg
+                    or "Invalid input 'SEARCH'" in msg
+                )
+                return not unsupported
+            else:
+                return True
+    finally:
+        driver.close()
+
+
+@pytest.fixture
+def require_neo4j_vector_search(neo4j_vector_search_supported: bool) -> None:
+    """Skip a test that needs the ``SEARCH`` clause on a backend without it.
+
+    Requesting this fixture by name *is* the gate, which is why it exists
+    beside the bool rather than every call site repeating
+    ``if not neo4j_vector_search_supported: pytest.skip(...)``. Two things
+    follow. The skip reason is written once, so the four gated tests cannot
+    drift into four different explanations of the same fact. And the gate is a
+    parameter name, which
+    ``tests/unit/test_neo4j_vector_live_infra_rule.py`` reads by AST to prove
+    every SEARCH-issuing test in the unit suite is gated — an assertion it
+    could not make against an ``if``-and-``skip`` idiom without pattern-
+    matching statements, which reformatting breaks.
+
+    Every gated test in both suites takes this fixture; nothing branches on the
+    bool. An earlier cut of #356 claimed otherwise — that the e2e test read the
+    bool "inside a test that also covers non-SEARCH ground" — and that was never
+    true: its skip was the first statement in the body, so the whole test went
+    either way, and the only thing the hand-rolled branch bought was a fifth
+    verbatim copy of the reason string above.
+    """
+    if not neo4j_vector_search_supported:
+        pytest.skip(
+            "Neo4j SEARCH vector clause unsupported on this backend "
+            "(self-hosted community/enterprise lacks it; requires AuraDB)"
+        )
+
+
 @pytest.fixture(autouse=True)
 def _reset_write_provenance() -> Iterator[None]:
     """Drop the memoized write-provenance stamp around every test.
