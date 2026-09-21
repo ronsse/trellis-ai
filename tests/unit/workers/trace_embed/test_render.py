@@ -128,3 +128,99 @@ class TestMetadata:
     def test_title_falls_back_to_the_trace_id(self) -> None:
         trace = make_trace(3).model_copy(update={"intent": ""})
         assert build_trace_metadata(trace)["title"] == trace.trace_id
+
+
+class TestFilesTouchedStamp:
+    """The key that makes a trace reachable by file (#549).
+
+    ``source_path`` is ``trace/<id>`` — a namespace, not a repo path — so
+    until this key existed ``get_file_context`` had nothing to match and
+    returned empty for every path on every deployment. The tests below
+    pin *what* is stamped and, just as importantly, what is not.
+    """
+
+    def test_edited_paths_are_stamped(self) -> None:
+        trace = make_trace(1)
+        trace.steps.append(
+            TraceStep(
+                step_type="tool_call",
+                name="Edit",
+                args={"file_path": "src/trellis/retrieve/file_context.py"},
+            )
+        )
+        trace.steps.append(
+            TraceStep(
+                step_type="tool_call",
+                name="Write",
+                args={"file_path": "tests/unit/retrieve/test_file_context.py"},
+            )
+        )
+        assert build_trace_metadata(trace)["files_touched"] == [
+            "src/trellis/retrieve/file_context.py",
+            "tests/unit/retrieve/test_file_context.py",
+        ]
+
+    def test_a_trace_that_touched_nothing_omits_the_key(self) -> None:
+        """Absent, not ``[]``. The consumer's tag filters and the file-context
+        matcher are both key-presence predicates, so an empty list would make
+        "this trace edited nothing" and "this build predates the key" the same
+        observation on the read side."""
+        assert "files_touched" not in build_trace_metadata(make_trace(1))
+
+    def test_reading_a_file_is_not_touching_it(self) -> None:
+        """``files_read`` is a different field with a different claim. A file
+        merely read must not surface the trace under that file's heading as a
+        record of changing it."""
+        trace = make_trace(1)
+        trace.steps.append(
+            TraceStep(
+                step_type="tool_call",
+                name="Read",
+                args={"file_path": "src/trellis/retrieve/strategies.py"},
+            )
+        )
+        meta = build_trace_metadata(trace)
+        assert "files_touched" not in meta
+        assert "strategies.py" not in str(meta)
+
+    def test_only_the_attested_key_is_written(self) -> None:
+        """#308's split is the whole reason this is safe to join on: the
+        attested key carries evidence only, and a model's claim about what it
+        modified lives under the ``_unverified`` companion. Nothing here may
+        write that companion — a file join is exactly where an unattested
+        claim would do the most damage."""
+        trace = make_trace(1)
+        trace.steps.append(
+            TraceStep(
+                step_type="tool_call",
+                name="Edit",
+                args={"file_path": "src/a.py"},
+            )
+        )
+        meta = build_trace_metadata(trace)
+        assert meta["files_touched"] == ["src/a.py"]
+        assert not [k for k in meta if k.endswith("_unverified")]
+
+    def test_the_key_survives_the_metadata_round_trip_as_a_list(self) -> None:
+        """``DocumentMetadata`` is ``extra="forbid"``, so this is load-bearing
+        and not obvious: ``from_mapping`` routes the unknown key into
+        ``custom`` and ``to_metadata`` flattens it back to top level. A schema
+        field was therefore not needed — but a silent coercion to ``str``
+        would break the matcher, which iterates members."""
+        trace = make_trace(1)
+        trace.steps.append(
+            TraceStep(
+                step_type="tool_call",
+                name="Edit",
+                args={"file_path": "src/a.py"},
+            )
+        )
+        meta = build_trace_metadata(trace)
+        touched = meta["files_touched"]
+        assert isinstance(touched, list)
+        assert all(isinstance(entry, str) for entry in touched)
+        # Top level, not left inside the bag it was routed through. The
+        # matcher reads ``metadata["files_touched"]``, so a ``to_metadata``
+        # that stopped flattening would break the join with both sides of
+        # it still passing their own tests.
+        assert "custom" not in meta

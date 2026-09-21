@@ -229,3 +229,20 @@
 #   embedding:
 #     provider: openai
 #     model: text-embedding-3-small
+#
+# Per-consumer tiers: optional, and inert until a route names a consumer.
+# `tiers:` declares alternative blocks, `routes:` assigns one of the six
+# LLMConsumer values (memory_extraction, session_capture, classify_shadow,
+# enrichment, precedent_mining, reconcile) to a tier. A tier inherits
+# provider / base_url / model from the parent for whatever it omits;
+# credentials move as a unit (a tier carrying any api_key* key supplies
+# all of them); a tier changing `provider` must set its own `base_url`;
+# and a routed consumer never silently falls back to the parent block.
+# Check with `trellis admin llm-routes`.
+#
+#   tiers:
+#     deep:
+#       model: o3                  # inherits provider/key/base_url above
+#   routes:
+#     reconcile: deep
+#     precedent_mining: deep

@@ -108,9 +108,31 @@ def test_aggregate_reference_rate():
 
 
 def test_aggregate_reference_rate_with_no_items_served():
+    """No denominator is ``None``, not ``0.0`` (#557).
+
+    ``0.0`` is a *value* a rule acts on: ``reference_rate lt 0.2`` is
+    true of it, so the sentinel made the graph rule fire on every cell
+    whose producer never reported a serving count — which is every
+    producer there is. ``None`` is what ``TuningRule.applies`` skips.
+    """
     outcomes = [_event()]  # items_served=None
     agg = aggregate_outcomes(outcomes)[0]
-    assert agg.reference_rate == 0.0
+    assert agg.reference_rate is None
+
+
+def test_no_denominator_does_not_trigger_the_low_reference_rate_rule():
+    """The regression the sentinel caused, pinned against the shipped rule."""
+    rule = next(r for r in DEFAULT_RULES if r.condition_key == "reference_rate")
+    agg = aggregate_outcomes(
+        [
+            _event(component_id=rule.target_component_id, items_referenced=3)
+            for _ in range(rule.min_sample_size)
+        ]
+    )[0]
+
+    assert agg.items_served_total == 0
+    assert agg.reference_rate is None
+    assert rule.applies(agg) is False
 
 
 def test_aggregate_metrics_accumulate():

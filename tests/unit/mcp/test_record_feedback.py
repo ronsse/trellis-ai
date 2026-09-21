@@ -24,15 +24,23 @@ from mcp.shared.exceptions import McpError
 from mcp.types import INVALID_PARAMS
 
 from tests.unit.mcp.conftest import unwrap_tool
+from trellis.feedback.attribution import (
+    lookup_pack_bodied_item_ids,
+    payload_is_attributed,
+)
 from trellis.feedback.recording import (
     load_feedback_log,
     reconcile_feedback_log_to_event_log,
 )
 from trellis.mcp.server import record_feedback as _record_feedback
+from trellis.retrieve.disclosure import DisclosureConfig
 from trellis.retrieve.metrics_timeseries import (
     METRIC_REFERENCE_RATE,
     compute_timeseries,
 )
+from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.strategies import SearchStrategy
+from trellis.schemas.pack import PackBudget, PackItem
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -63,6 +71,27 @@ def _emit_boom(*args: Any, **kwargs: Any) -> None:
 
 #: Module-level so the raise site stays a bare ``raise <var>``.
 _SINK_DOWN = RuntimeError("event sink down")
+
+
+class _FixedStrategy(SearchStrategy):
+    """Returns a fixed candidate list, so the pack shape is the variable."""
+
+    def __init__(self, items: list[PackItem]) -> None:
+        self._items = items
+
+    @property
+    def name(self) -> str:
+        return "keyword"
+
+    def search(
+        self,
+        intent: str,
+        domain: str | None = None,
+        limit: int = 20,
+        filters: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[PackItem]:
+        return [item.model_copy() for item in self._items[:limit]]
 
 
 def _payloads(registry: StoreRegistry) -> list[dict[str, Any]]:
@@ -491,3 +520,485 @@ class TestPackAttributionRequirement:
         )
         assert len(rejections) == 1
         assert rejections[0].payload["tool"] == "record_feedback"
+
+
+class TestIgnoredVerdict:
+    """The third verdict (#550): read, and not used.
+
+    Its whole value is that it is a claim a caller can make about the
+    *majority* of a pack — measured, 49.8% of bodied servings carry no
+    verdict at all — without inventing the judgement ``unhelpful`` makes.
+    """
+
+    def test_reaches_both_sinks(self, temp_registry: StoreRegistry) -> None:
+        record_feedback(
+            pack_id="pack_i",
+            rating=0.5,
+            helpful_item_ids=["doc_a"],
+            ignored_item_ids=["doc_b", "doc_c"],
+        )
+
+        (payload,) = _payloads(temp_registry)
+        assert payload["helpful_item_ids"] == ["doc_a"]
+        assert payload["ignored_item_ids"] == ["doc_b", "doc_c"]
+
+        (row,) = _rows(temp_registry)
+        assert row["ignored_item_ids"] == ["doc_b", "doc_c"]
+
+    def test_absent_when_not_supplied(self, temp_registry: StoreRegistry) -> None:
+        """Absent is "no third verdict given", not "considered and ignored none"."""
+        record_feedback(pack_id="pack_i", rating=0.5, helpful_item_ids=["doc_a"])
+
+        (payload,) = _payloads(temp_registry)
+        assert "ignored_item_ids" not in payload
+
+    def test_it_is_not_folded_into_the_graded_verdicts(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """An ignored id must never reach the two the learning join grades.
+
+        ``learning.pack_observations`` reads helpful/unhelpful; letting
+        an ignored id leak into either would turn "I did not use this"
+        into a graded outcome nobody claimed.
+        """
+        record_feedback(pack_id="pack_i", rating=0.5, ignored_item_ids=["doc_b"])
+
+        (payload,) = _payloads(temp_registry)
+        assert payload["helpful_item_ids"] == []
+        # ``unhelpful_item_ids`` is omitted rather than empty by the same
+        # convention the third verdict follows, so its absence — not an
+        # empty list — is what "nothing was graded unhelpful" looks like.
+        assert "unhelpful_item_ids" not in payload
+        assert payload["ignored_item_ids"] == ["doc_b"]
+
+
+class TestIgnoredDoesNotSatisfyPackAttribution:
+    """An ignored-only call is honest, complete — and joins to nothing.
+
+    The pack gate's trigger is deliberately the three keys
+    ``payload_is_attributed`` reads, so the MCP boundary and
+    ``analyze health`` cannot disagree about what "attributed" means.
+    Adding the third verdict to one side only is the exact defect this
+    change is otherwise built to avoid.
+    """
+
+    def _serve_pack(self, registry: StoreRegistry, pack_id: str) -> None:
+        registry.operational.event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={"intent": "t", "injected_item_ids": ["doc_1", "doc_2"]},
+        )
+
+    def test_ignored_only_is_still_rejected_when_enforced(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        monkeypatch.delenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", raising=False)
+        self._serve_pack(temp_registry, "pack_a")
+
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(
+                pack_id="pack_a", rating=0.4, ignored_item_ids=["doc_1", "doc_2"]
+            )
+
+        assert excinfo.value.error.code == INVALID_PARAMS
+
+    def test_the_refusal_says_why_rather_than_claiming_nothing_was_cited(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A caller who did the work deserves the real reason.
+
+        "none cited" is false here and reads as a bug in the tool; the
+        honest answer is that non-use contributes no rows to the join.
+        """
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        monkeypatch.delenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", raising=False)
+        self._serve_pack(temp_registry, "pack_a")
+
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(pack_id="pack_a", rating=0.4, ignored_item_ids=["doc_1"])
+
+        message = excinfo.value.error.message
+        assert "ignored" in message
+        assert "none cited" not in message
+
+        (rejection,) = temp_registry.operational.event_log.get_events(
+            event_type=EventType.WRITE_REJECTED, limit=10
+        )
+        assert rejection.payload["tool"] == "record_feedback"
+
+    def test_off_by_default_an_ignored_only_call_is_recorded(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", raising=False)
+        monkeypatch.delenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", raising=False)
+        self._serve_pack(temp_registry, "pack_a")
+
+        result = record_feedback(
+            pack_id="pack_a", rating=0.4, ignored_item_ids=["doc_1"]
+        )
+
+        assert "Feedback recorded" in result
+
+    @pytest.mark.parametrize("subset", range(16))
+    def test_gate_and_predicate_agree_on_every_combination(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        subset: int,
+    ) -> None:
+        """Derived agreement across all 16 shapes of the four id fields.
+
+        The boundary refuses exactly when ``payload_is_attributed`` says
+        the recorded event would be unattributed. Pinning the two against
+        each other — rather than listing the cases each should accept —
+        is what makes it impossible to teach one of them about
+        ``ignored_item_ids`` and not the other.
+        """
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        monkeypatch.delenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", raising=False)
+        self._serve_pack(temp_registry, "pack_a")
+
+        kwargs: dict[str, list[str]] = {}
+        for bit, field in enumerate(
+            (
+                "helpful_item_ids",
+                "unhelpful_item_ids",
+                "followed_advisory_ids",
+                "ignored_item_ids",
+            )
+        ):
+            if subset & (1 << bit):
+                kwargs[field] = ["doc_1"]
+
+        try:
+            record_feedback(pack_id="pack_a", rating=0.4, **kwargs)
+        except McpError:
+            recorded = None
+        else:
+            (recorded,) = _payloads(temp_registry)
+
+        if recorded is None:
+            # Rejected — so the event the call *would* have written must
+            # be one the predicate calls unattributed.
+            assert payload_is_attributed(kwargs) is False
+        else:
+            assert payload_is_attributed(recorded) is True
+
+
+class TestBodiedAttributionRequirement:
+    """``TRELLIS_REQUIRE_BODIED_ATTRIBUTION`` — a verdict per *shown* item.
+
+    A different question from the pack gate. That one asks whether the
+    feedback can join at all; this one asks whether every item the pack
+    put an excerpt in front of the caller came back with a verdict.
+
+    Ships **off**, and the arithmetic is why: graders already volunteer
+    ~8.9 verdicts per pack, the median pack bodies 13 items, so full
+    coverage is a ~46% increase on what the surface has ever produced.
+    The failure mode of asking too much of a grading surface is the
+    surface going quiet, and a lost rating is worse than an incomplete
+    one.
+
+    Pointers are outside the ask by construction — a caller shown a
+    one-line label has no basis for a verdict — and every unknown
+    narrows the ask to nothing rather than widening it.
+    """
+
+    def _serve(
+        self,
+        registry: StoreRegistry,
+        pack_id: str,
+        served: list[str],
+        pointers: list[str] | None = None,
+        **extra: Any,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "intent": "t",
+            "injected_item_ids": served,
+            **extra,
+        }
+        if pointers is not None:
+            payload["disclosure"] = {"mode": "on", "pointer_item_ids": pointers}
+        registry.operational.event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload=payload,
+        )
+
+    def test_off_by_default_a_partial_verdict_is_recorded(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Explicit: a developer's shell must not decide what "default" means.
+        monkeypatch.delenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", raising=False)
+        self._serve(temp_registry, "pack_b", ["doc_1", "doc_2", "doc_3"], ["doc_3"])
+
+        result = record_feedback(
+            pack_id="pack_b", rating=0.5, helpful_item_ids=["doc_1"]
+        )
+
+        assert "Feedback recorded" in result
+
+    def test_enforced_hands_back_only_the_unjudged_bodies(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+        self._serve(
+            temp_registry,
+            "pack_b",
+            ["doc_1", "doc_2", "doc_3", "doc_4"],
+            ["doc_4"],
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(pack_id="pack_b", rating=0.5, helpful_item_ids=["doc_1"])
+
+        data = excinfo.value.error.data
+        assert isinstance(data, dict)
+        # Not the served list and not the bodied list — the ids still
+        # owed, so the retry is a list of things to do rather than a
+        # list to diff.
+        assert data["item_ids"] == ["doc_2", "doc_3"]
+        assert data["bodied_item_count"] == 3
+        assert data["fields"] == [
+            "helpful_item_ids",
+            "unhelpful_item_ids",
+            "ignored_item_ids",
+        ]
+        assert _payloads(temp_registry) == []
+        assert _rows(temp_registry) == []
+
+    def test_a_followed_advisory_cannot_discharge_an_item_verdict(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An advisory is not a pack item, so it is absent from the fields.
+
+        Offering it as a way to satisfy this gate would let a caller
+        close out a twelve-item pack by naming one advisory.
+        """
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+        self._serve(temp_registry, "pack_b", ["doc_1"], [])
+
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(
+                pack_id="pack_b", rating=0.5, followed_advisory_ids=["adv_1"]
+            )
+
+        data = excinfo.value.error.data
+        assert isinstance(data, dict)
+        assert data["item_ids"] == ["doc_1"]
+        assert "followed_advisory_ids" not in data["fields"]
+
+    @pytest.mark.parametrize(
+        "field", ["helpful_item_ids", "unhelpful_item_ids", "ignored_item_ids"]
+    )
+    def test_any_of_the_three_verdicts_discharges_an_item(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        field: str,
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+        monkeypatch.delenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", raising=False)
+        self._serve(temp_registry, "pack_b", ["doc_1", "doc_2"], ["doc_2"])
+
+        result = record_feedback(pack_id="pack_b", rating=0.5, **{field: ["doc_1"]})
+
+        assert "Feedback recorded" in result
+
+    def test_pointers_are_not_asked_about(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The half the caller never saw is outside the requirement.
+
+        Bodied items draw a verdict at 0.502 against a pointer's 0.256
+        and a *helpful* verdict at 0.143 against 0.023 — asking for the
+        pointer half spends the ask where the caller has nothing to say.
+        """
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+        self._serve(
+            temp_registry,
+            "pack_b",
+            ["doc_1", "doc_2", "doc_3"],
+            ["doc_2", "doc_3"],
+        )
+
+        result = record_feedback(
+            pack_id="pack_b", rating=0.5, helpful_item_ids=["doc_1"]
+        )
+
+        assert "Feedback recorded" in result
+
+    def test_a_pack_with_no_disclosure_record_asks_for_every_item(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No graduation ran, so every served item carried a body."""
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+        self._serve(temp_registry, "pack_b", ["doc_1", "doc_2"])
+
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(pack_id="pack_b", rating=0.5, helpful_item_ids=["doc_1"])
+
+        data = excinfo.value.error.data
+        assert isinstance(data, dict)
+        assert data["item_ids"] == ["doc_2"]
+
+    @pytest.mark.parametrize(
+        ("pack_id", "served", "pointers", "extra"),
+        [
+            ("pack_index", ["doc_1", "doc_2"], [], {"index_mode": True}),
+            ("pack_sectioned", [], None, {"section_count": 2}),
+            ("pack_broken", ["doc_1"], None, {"disclosure": "off"}),
+        ],
+    )
+    def test_every_unknown_fails_open(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        pack_id: str,
+        served: list[str],
+        pointers: list[str] | None,
+        extra: dict[str, Any],
+    ) -> None:
+        """Refusing for an item the caller was never shown is the costly error.
+
+        An index pack (all pointers), a sectioned pack (no per-item rows
+        at all), and a disclosure record this build does not recognise
+        each yield no bodied ids — and a gate that cannot be computed
+        must not be enforced.
+        """
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+        monkeypatch.delenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", raising=False)
+        self._serve(temp_registry, pack_id, served, pointers, **extra)
+
+        result = record_feedback(pack_id=pack_id, rating=0.5)
+
+        assert "Feedback recorded" in result
+
+    def test_unknown_pack_fails_open(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+        monkeypatch.delenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", raising=False)
+
+        result = record_feedback(pack_id="pack_missing", rating=0.5)
+
+        assert "Feedback recorded" in result
+
+    def test_trace_level_feedback_is_never_rejected(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+
+        result = record_feedback(trace_id="trace_1", rating=0.9)
+
+        assert "Feedback recorded" in result
+
+    def test_rejection_is_recorded_as_boundary_telemetry(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A refusal has to be visible in ``trellis analyze health`` (#297)."""
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+        self._serve(temp_registry, "pack_b", ["doc_1", "doc_2"], [])
+
+        with pytest.raises(McpError):
+            record_feedback(pack_id="pack_b", rating=0.5, helpful_item_ids=["doc_1"])
+
+        (rejection,) = temp_registry.operational.event_log.get_events(
+            event_type=EventType.WRITE_REJECTED, limit=10
+        )
+        assert rejection.payload["tool"] == "record_feedback"
+
+    def test_the_bodied_gate_runs_first(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With both on and nothing cited, the caller gets the useful message.
+
+        Both gates fire on an uncited call. The bodied refusal names the
+        specific ids still owed; the pack refusal only says that
+        *something* must be cited. Ordering is the whole difference
+        between a retry the caller can execute and one they have to
+        reconstruct.
+        """
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        self._serve(temp_registry, "pack_b", ["doc_1", "doc_2", "doc_3"], ["doc_3"])
+
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(pack_id="pack_b", rating=0.5)
+
+        data = excinfo.value.error.data
+        assert isinstance(data, dict)
+        assert data["item_ids"] == ["doc_1", "doc_2"]
+        assert data["fields"] == [
+            "helpful_item_ids",
+            "unhelpful_item_ids",
+            "ignored_item_ids",
+        ]
+
+    def test_both_gates_are_satisfiable_together(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The strictest posture must have a call that passes it.
+
+        An ignored verdict covers the body, a helpful citation makes it
+        joinable — so the two requirements compose rather than deadlock.
+        """
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
+        self._serve(temp_registry, "pack_b", ["doc_1", "doc_2", "doc_3"], ["doc_3"])
+
+        result = record_feedback(
+            pack_id="pack_b",
+            rating=0.5,
+            helpful_item_ids=["doc_1"],
+            ignored_item_ids=["doc_2"],
+        )
+
+        assert "Feedback recorded" in result
+        (payload,) = _payloads(temp_registry)
+        assert payload["ignored_item_ids"] == ["doc_2"]
+
+    def test_a_real_pack_build_defines_what_is_asked_for(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end through the writer, not a hand-written payload.
+
+        Every other test here encodes the bodied/pointer split in its own
+        fixture, which keeps passing if ``PackBuilder`` moves the key
+        (#325/#326). This one asks a real build and asserts the gate
+        requests exactly the ids that build gave a body to.
+        """
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
+        monkeypatch.delenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", raising=False)
+        event_log = temp_registry.operational.event_log
+        body = "the northwind loader retries on a stale manifest " * 8
+        candidates = [
+            PackItem(
+                item_id=f"doc:{index:03d}",
+                item_type="document",
+                excerpt=body,
+                relevance_score=1.0 - index * 0.01,
+                estimated_tokens=60,
+            )
+            for index in range(5)
+        ]
+        builder = PackBuilder(
+            strategies=[_FixedStrategy(candidates)],
+            event_log=event_log,
+            disclosure=DisclosureConfig(body_items=2),
+        )
+        pack = builder.build(intent="loader retries", budget=PackBudget(max_items=10))
+        bodied = lookup_pack_bodied_item_ids(event_log, pack.pack_id)
+        assert len(bodied) == 2
+
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(pack_id=pack.pack_id, rating=0.5)
+
+        data = excinfo.value.error.data
+        assert isinstance(data, dict)
+        assert data["item_ids"] == bodied
