@@ -414,11 +414,23 @@ derived-row producers resolve three different ways:
 | `trellis_workers/trace_embed/render.py::build_trace_metadata` | **Was wrong; fixed.** Zero production rows, so latent — but the worker is a *backfill by design* ("it covers the backlog as well as new writes"), so its first run over an existing trace store would have stamped a whole history with one import instant. #417's measured shape, guaranteed rather than merely possible. |
 | `ingest_corpus/sync.py::_write_chunks` | **Declined**, per the above. |
 
-`tests/unit/retrieve/test_derived_row_clock_roster.py` holds the roster up, and pins the
+`tests/unit/retrieve/test_derived_row_source_clock.py` pins the
 declined decision *by execution*: a real `sync_corpus` run over a vault note with
 frontmatter `created_at:` asserts the parent row carries the clock and the chunk rows carry
 none. A later agent who adds the one key fails that test, and the failure names the comment
 carrying the measurement.
+
+**The roster half of that sweep did not survive to merge, and was deleted rather than
+re-floored.** Between this decision and its merge, #569 routed every document write through
+`src/trellis/core/document_write.py::put_document`, collapsing 14 of the 37 rostered seams
+into one and leaving the scan finding 13. `MIN_WRITE_SEAMS = 27` and the `primary_write`
+floor of 5 both became structurally unreachable, so the only way to make the test pass was
+to lower the floors it divides by — the #457 shape the test itself was written to warn
+about. The three-producer finding above is unaffected (it is a fact about the tree, not
+about the scan), and `tests/unit/core/test_document_write_rule.py` now enforces the routing
+half. **What is left unguarded is the clock disposition of a `put_document` caller** — a
+real gap, wanting a rule written against the new single seam rather than a resurrection of
+the per-site one.
 
 ### T-7 · `trellis retrieve pack --quiet` keeps its post-#410 population; the gap was the doc, not the flag
 
