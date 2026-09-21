@@ -17,6 +17,7 @@ from trellis.mutate import (
     build_evidence_ingest_command,
 )
 from trellis_api.app import get_registry
+from trellis_api.routes._results import command_response
 from trellis_wire.dtos import (
     CommandResponse,
     EntityCreateRequest,
@@ -38,13 +39,7 @@ def _execute_command(cmd: Command) -> CommandResponse:
     # API caller's perspective. See adr-extraction-validation.md §5.5.
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         raise HTTPException(status_code=400, detail=result.message)
-    return CommandResponse(
-        status=result.status.value,
-        command_id=result.command_id,
-        operation=result.operation,
-        message=result.message,
-        created_id=result.created_id,
-    )
+    return command_response(result)
 
 
 @router.post("/precedents", response_model=CommandResponse)
@@ -204,6 +199,7 @@ def pack_feedback(pack_id: str, req: PackFeedbackRequest) -> PackFeedbackRespons
         feedback,
         log_dir=feedback_log_dir(stores_dir),
         event_log=registry.operational.event_log,
+        outcome_store=registry.operational.outcome_store,
         pack_id=pack_id,
     )
     return PackFeedbackResponse(

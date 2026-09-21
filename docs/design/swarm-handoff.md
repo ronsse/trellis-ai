@@ -439,12 +439,19 @@ coordinate, do not assume serial dependency with #350.
 
 Two corrections this section carried for a while, both in the direction of under-stating
 coverage: `live-infra.yml` runs on **pull requests and push to `main`**, not push-to-main
-only; and #351 shipped. #356's remaining scope is **97 tests in six files** — 39 + 27
-Neo4j graph/vector, 17 + 8 ArcadeDB vector/graph, 4 Neo4j connectivity-live, 2 `slow`
-SQLite — with **no Postgres-marked tests left** in it. The 44 Neo4j + ArcadeDB *vector*
-tests are the load-bearing part: both stores are shape #2 (an upsert needs a pre-existing
-graph row) so neither subclasses `VectorStoreContractTests`, and those hand-written tests
-are the only contract-equivalent either has.
+only; and #351 shipped. #356's scope measured **97 tests in six files** on 2026-09-12,
+with **no Postgres-marked tests left** in it — and
+[#583](https://github.com/ronsse/trellis-ai/pull/583) has since wired **68 of them**
+(`test_neo4j_graph.py` 39, `test_arcadedb_vector.py` 17, `test_arcadedb_graph.py` 8,
+`test_neo4j_connectivity_live.py` 4, re-counted 2026-09-21), leaving
+`test_neo4j_vector.py` (**27**, the AuraDB-only-Cypher blocker) as the load-bearing half
+still dark. **Do not re-derive that number by hand here** —
+`tests/unit/test_ci_coverage_rule.py` computes the workflow × marker join and fails when
+a file falls outside it without a reason, which is precisely what this paragraph kept
+getting wrong. The design point behind #356 is unchanged: both stores' vector suites are
+shape #2 (an upsert needs a pre-existing graph row) so neither subclasses
+`VectorStoreContractTests`, and those hand-written tests are the only contract-equivalent
+either has.
 
 **File territories** — from corpus collision map; dispatch parallel only when territories
 do not overlap:

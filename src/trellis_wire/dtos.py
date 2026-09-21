@@ -289,6 +289,15 @@ class CommandResponse(WireModel):
     operation: str
     message: str
     created_id: str | None = None
+    # Non-blocking policy verdicts (``Enforcement.WARN``, or an
+    # ``action="warn"`` rule) carried forward from
+    # ``CommandResult.warnings``. Always present, unlike the event
+    # payload's conditional ``policy_warnings`` key -- an audit event
+    # keeps that key absent so a zero-policy deployment emits a
+    # byte-identical payload to the pre-gate world, but for a response a
+    # caller reads, an always-present ``[]`` is what distinguishes "the
+    # gate ran and nothing warned" from "this build predates the field".
+    warnings: list[str] = Field(default_factory=list)
 
 
 # -- Batch mutations --

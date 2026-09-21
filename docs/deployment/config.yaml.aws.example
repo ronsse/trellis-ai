@@ -44,3 +44,13 @@ operational:
 #   embedding:
 #     provider: openai
 #     model: text-embedding-3-small
+#
+#   # Optional per-consumer tiers. Inert until `routes:` names a consumer;
+#   # see docs/agent-guide/playbooks.md Playbook 12. A second Secrets
+#   # Manager key belongs in the tier body — credentials resolve as a unit,
+#   # so a tier carrying any api_key* key supplies all of them.
+#   tiers:
+#     deep:
+#       model: o3
+#   routes:
+#     reconcile: deep
