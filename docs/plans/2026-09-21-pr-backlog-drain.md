@@ -1,0 +1,358 @@
+# Draining the 44-PR backlog
+
+**Measured 2026-09-21**, against `origin/main` at `ba18fb3` — the first green `live-infra`
+in 13 days, unblocked when [#555](https://github.com/ronsse/trellis-ai/pull/555) merged the
+ArcadeDB `AliasClaim` race fix.
+
+Every number here is a timestamped measurement, not an estimate. Re-derive before acting:
+the queue moves daily.
+
+## 1. The population
+
+| Bucket | Count | Disposition |
+|---|---:|---|
+| Stale-red — alias-race family only | 33 | Clear on rebase. No work. |
+| Genuinely broken | 2 | #541, #542 — regenerate, don't repair |
+| CI-dark (the stack) | 4 | #559, #561, #563, #588 |
+| Fully green | 5 | #571, #580, #596, #602, #603 |
+| **Total open** | **44** | |
+
+### The stale-red 33 are stale, not broken — verified at full population
+
+Not sampled. All 33 failing jobs were read. **32 fail exactly one test**,
+`test_bind_alias_if_absent_is_atomic_for_concurrent_contenders`. **#591 fails two** — that
+one plus `test_bind_alias_serializes_concurrent_stale_owner_replacement`, the other half of
+the same race (the `UnknownError` channel, which #555's
+`TestArcadeDBWidensOverItsGenericErrorChannel` also covers).
+
+Both pass on `main` at `ba18fb3` (857 passed, 1 skipped, 0 failed), so all 33 clear on
+rebase. Only **#571** touches any file #555 changed, and #571 is the known duplicate.
+
+> **This paragraph exists because a six-PR sample got it wrong.** The sample said "all fail
+> the identical single test". The population says 32 do and one fails two. The conclusion
+> survived; the claim did not. This repo's recurring defect is a measurement wired to a
+> constant or a roster that rots — a sample generalized to a population is the same shape.
+
+## 2. The `CLAUDE.md` contention is order-independent
+
+**Ten** PRs touch `CLAUDE.md`, not eight. Eight edit the same contended block (#552,
+#564, #572, #578, #583, #589, #595, #601) and all 28 pairs conflict. Two more — #575 and
+#581 — touch the file incidentally, at unrelated lines. The eight-PR figure counted the
+*contention*; the ten-PR figure is what a file-level `gh pr view --json files` returns,
+and the gap is why a "which PRs touch CLAUDE.md" query and a "which PRs conflict" query
+disagree. Both are right about different questions.
+
+Measured, and it refutes the obvious plan:
+
+- Each of the eight merges into `main` **clean today** — zero `CLAUDE.md` conflicts.
+- Merge **any one** of them first, and **all seven** remaining conflict. Tested with #583,
+  #552, #601 and #589 as first-mover: 7 of 7 every time.
+
+So there is no ordering that avoids this, and **merging #583 first does not collapse the
+others into no-ops** — a plausible guess that measurement refutes.
+
+> **"Each conflict is a single hunk. Budget seven trivial resolutions" was wrong**, and
+> the drain refuted it. Four of the conflicts that actually materialised were genuine
+> semantic collisions in *code*, not one-hunk prose edits: #587 (12 blocks), #573 (4),
+> #598 (2), #590 (2). In every one of the four, neither `--ours` nor `--theirs` was
+> correct — the answer was a **union**, because two PRs had independently added a
+> different thing to the same signature. A hunk count measures textual overlap; it does
+> not predict whether a resolution is mechanical. Do not budget from it.
+
+#583 still belongs early, on unrelated grounds: it replaces the hand-maintained "what CI
+actually covers" roster with a rule derived from the workflow files, so the block stops
+rotting. That is a reason about durability, not about merge mechanics.
+
+## 3. The stack: use merge commits, not squash
+
+The stack is strictly linear and each child's branch contains its parent's tip:
+
+```
+#558 (base: main) -> #559 -> #561 -> #563 -> #588
+```
+
+#558 is **dual-member**: it is based on `main`, it is inside the `src/trellis/mcp/server.py`
+contention cluster of seven, *and* it is the stack's bottom. Any `update-branch` on #558
+moves the base under all four children.
+
+Simulated both merge methods end to end:
+
+| Method | #558 | #559 | #561 | #563 | #588 |
+|---|---|---|---|---|---|
+| **Merge commit** | clean | clean | clean | clean | clean |
+| **Squash** (repo default) | clean | clean | **2 files / 8 hunks** | **1 file / 3 hunks** | **1 file / 1 hunk** |
+
+Squash breaks ancestry, so from step three each child re-proposes its parents' content
+against a base that already has it. At #561 every hunk has an empty `HEAD` side — pure
+mechanical noise. At #563 and #588 both sides carry content and a hand-resolver could
+plausibly merge them wrongly.
+
+**Resolving every conflict with "take theirs" reproduces the stack tip's
+`src/trellis/feedback` and `src/trellis/learning` content byte-exactly**, because each child
+branch already holds the cumulative state. That is safe *here* and the reason is checkable:
+the three files that conflict are **disjoint** from the three files `main` has changed since
+the fork (`stores/arcadedb/graph.py`, `stores/bolt_opencypher/graph.py`,
+`tests/unit/stores/test_bolt_opencypher_alias_claim_retry.py`). Verified: #555's work
+survives the chain.
+
+**That disjointness is a precondition, not a property.** The moment `main` gains a commit
+touching `feedback/` or `learning/tuners/`, take-theirs stops being safe. Re-check the two
+file sets before relying on it.
+
+The repo's default merge method is SQUASH — the arm that conflicts. Use merge commits for
+this stack, or squash and resolve take-theirs after re-checking disjointness.
+
+## 4. Recommended order
+
+1. **#565** — update-branch it first (it carries the inherited red like everything else),
+   then merge. It conflicts with nothing and is the only PR that gives the four CI-dark
+   PRs any checks at all. Every later step benefits.
+2. **#583** — retires the rotting CI roster for a derived rule. Expect the other seven
+   `CLAUDE.md` PRs to need a one-hunk resolve afterwards; that is unavoidable, not a
+   consequence of this choice.
+3. **The remaining stale-red.** Update-branch, confirm green, merge. Only contended files
+   force serialization; the rest can be updated in parallel batches.
+4. **The serial chains.** `src/trellis/mutate/executor.py` is a genuine three-way chain
+   (#587, #598, #600 — all three pairs conflict). `src/trellis/mcp/server.py` has seven
+   members but only one conflicting pair, so it is not the bottleneck it looks like.
+   Ordering largest-first does **not** reduce total rebases in a cluster — every merge
+   forces every other member to update regardless of order. It only spares the largest.
+5. **#558 early within the `server.py` cluster**, since it blocks the stack. Then
+   #559 -> #561 -> #563 -> #588 **with merge commits**.
+
+### Drop rather than fix
+
+- **#541 / #542** — both touch only `pyproject.toml`, so they conflict with each other, and
+  their premise is 14 days stale. Regenerate.
+- **#571** — duplicate of the merged #555. Before closing, salvage four behaviours #555
+  never tests: transport-failure passthrough, the one-transaction cost of the happy path,
+  the structural rule that both alias writers route through the runner, and observable
+  exhaustion.
+
+## 5. Sustainability
+
+`live-infra` runs ~7 minutes. A strict serial update -> green -> merge across ~40 PRs is
+multiple days of supervised babysitting, and `main` has **no required status checks** — so
+the failure mode is not a broken build, it is the operator quietly dropping the
+update-then-merge discipline partway through and the invariant going unenforced.
+
+Two structural mitigations, neither taken yet: required status checks on `main`, or a merge
+queue that rebases and retests immediately before merge. Without one of them, "update the
+branch immediately before merging" does not protect against a second merge landing between
+the update and the merge.
+
+## 6. What is not verified
+
+- Steps 4 and 5 of the squash chain were resolved take-theirs by this analysis, not by a
+  human reading the hunks. #563 and #588 have no empty-`HEAD` marker, so they warrant a
+  read before being resolved that way.
+- Whether the seven `CLAUDE.md` PRs' content is still *correct* after #583 rewrites the
+  block — only that they conflict. Several may be arguing about a roster that no longer
+  exists.
+- `delete_branch_on_merge` is `false`, so nothing auto-retargets a stacked PR when its
+  parent merges. Each child must be retargeted by hand.
+
+## 7. What the drain found — recorded 2026-09-21, mid-execution
+
+Nineteen PRs merged under one discipline: update-branch, wait for 10/10 SUCCESS with
+`MERGEABLE/CLEAN`, squash. No PR merged red. Four findings the plan did not predict.
+
+### 7.1 The drain invalidated one of its own members (#575)
+
+#575 (`fix(retrieve): derived rows carry their source clock, with a roster`) went from
+inherited-red to **genuinely** red, and the cause was the drain. Its 761-line roster
+enumerates every document write seam — `MIN_WRITE_SEAMS = 27`, with per-disposition
+floors. On the post-drain tree the scan finds **13**, `primary_write` falls to **0**
+against a floor of 5, and 14 roster keys match no site.
+
+Nothing is broken. Main consolidated every direct `document_store.put` into the single
+`put_document` seam in `core/document_write.py` (#553 / #569 / #590 — three PRs merged in
+this drain). The 14 "missing" sites all now route through it, and `put_document` threads
+`preserve_updated_at`, which is the clock-preservation mechanism #575 exists to guarantee.
+The invariant survived; the seam moved.
+
+**This is not a roster refresh and must not be done as one.** The roster's dispositions
+(`primary_write`, `in_place_reput`, `derived_propagates`, …) describe what the *caller*
+intends, and after consolidation that intent sits upstream of the seam the scan finds — so
+the scan itself has to change (follow `put_document(` call sites rather than `.put(`), and
+every one of the 14 keys has to be re-classified against the new seam. The file's own
+doctrine forbids the shortcut: a rotted roster "gets 'repaired' by renumbering — which is
+indistinguishable from re-classifying." Rewriting 14 keys from `doc_store.put` to
+`put_document` *is* re-classifying. **Held for the author, with the measurement above.**
+
+### 7.2 Two PRs were complementary halves of one fix (#568)
+
+#569 (merged) fixed the `put_document` half of #568 and left a comment saying the classify
+half was "a separate defect, deliberately not fixed here". #590 *is* that half. Merging
+either alone leaves #568 half-fixed, and nothing in either PR's description says so — the
+link existed only in a code comment on one side. The comment was deleted in the
+resolution, because the merge falsifies its first clause; this is the recorded
+"a docstring narrating a defect is past tense" shape, caught at merge time.
+
+### 7.3 `mergeStateStatus` cannot distinguish pending from failing
+
+`UNSTABLE` means "mergeable, checks not all SUCCESS" — and a *pending* check produces it
+just as a failing one does. A rollup filter that keys on `.conclusion` alone reads every
+in-progress check as a failure: in one sweep it reported 5 failing checks on a PR that had
+zero. Key on `.status` (`QUEUED` / `IN_PROGRESS` / `COMPLETED`) and treat only
+`FAILURE` / `TIMED_OUT` / `CANCELLED` as red. `MERGEABLE`/`UNKNOWN` is a *third* state —
+GitHub recomputing after a base change — and is never safe to merge on.
+
+### 7.4 The real constraint is runner concurrency, not conflicts
+
+Every merge to `main` fires six workflow runs, and every `update-branch` fires ten checks.
+Nineteen merges plus fifteen in-flight PRs put ~130 jobs in one queue behind a ~7-minute
+`live-infra`. §5's worry was the operator dropping the discipline; the actual pressure to
+drop it comes from the queue, because the update → green → merge cycle stops being minutes
+and starts being hours. **Batch update-branch is the thing to avoid** — updating all eight
+remaining `CLAUDE.md` PRs at once would queue eighty checks to merge one.
+
+### 7.5 The checkpoint that replaced re-updating everything
+
+Re-updating every open branch after each merge is O(n²) and never converges. All six
+workflows also run on **push to `main`**, so each merge already retests the merged result.
+That main-push run is the semantic-conflict checkpoint, and the stop condition is: **if
+`main` goes red, halt the drain**. Across all nineteen merges it never did — zero failures
+in 60 runs. The gap this leaves is honest and unchanged: a PR green on an older base can
+still merge, and only the checkpoint catches it, *after* the fact.
+
+## 8. The seven `CLAUDE.md` PRs: what they actually disagree about
+
+§6 left open "whether the seven `CLAUDE.md` PRs' content is still *correct* after #583
+rewrites the block — only that they conflict." Measured 2026-09-21. They are not seven
+opinions about one fact.
+
+### 8.1 Three wire, four describe
+
+| PR | Changes `live-infra.yml`? | Adds a derived rule? | Other content |
+|---|---|---|---|
+| #583 | yes (8 files) | `test_ci_coverage_rule.py` (**new**, 1640 lines) | — |
+| #589 | yes (ArcadeDB vector) | edits `test_arcadedb_live_infra_rule.py` | a real `ArcadeDBVectorContract` |
+| #552 | yes (Neo4j vector, behind a capability probe) | `test_neo4j_vector_live_infra_rule.py` (new) | conftest + e2e |
+| #578 | no | `test_ci_coverage_rule.py` (**new**, 1054 lines) | `swarm-handoff.md` +66 |
+| #595 | no | no | `ROADMAP.md` +146 |
+| #601 | no | no | `PRD.md` +21, `autonomous-backlog.md` +39 |
+| #564 | no | no | `swarm-handoff.md` +18 |
+| #572 | no | no | none — `CLAUDE.md` only |
+
+### 8.2 The five counts are not contradictory. They are five populations.
+
+Each prose PR replaces the "Nowhere at all" bullet with a different residual. The numbers
+look like a disagreement about a measurement; they are not. They reconcile exactly:
+
+| PR | Count | Population it counted |
+|---|---:|---|
+| #601 | 27 | ArcadeDB store suites (8 + 17) + 2 `slow` SQLite — what `live-infra.yml` does not *name by path* |
+| #572 | 95 | backend-marked unit tests: 70 `neo4j` + 25 `arcadedb` |
+| #564 | 97 | = 95 + the two `slow` SQLite cases — everything unwired under `tests/unit/stores/` |
+| #583 | 99 | the eight files it *wires*: 68 store + 31 `live`-marked integration |
+| #595 | 140 | = 97 + 43 — everything that runs on no leg anywhere, every marker |
+
+95 ⊂ 97 ⊂ 140 exactly. #583's 99 is 140 less the 27 Neo4j-vector cases #356 blocks and 14
+it does not wire. #601's 27 is 140 less everything Neo4j and every integration file.
+
+**So the authors did not measure badly. The sentence asks for a number without declaring a
+population, and five careful people picked five different ones.** Two of them say so in
+their own prose — #601: "Re-derive this bullet rather than editing its numbers"; #564:
+"Every number in this bullet has been wrong at least once." That is five independent
+confirmations of #583's thesis, arrived at without coordination, which is stronger evidence
+for the derived rule than #583's own argument for it.
+
+### 8.3 #583 and #578 cannot both merge
+
+Both add `tests/unit/test_ci_coverage_rule.py` as a **new file** — 1640 lines against 1054.
+Whichever lands first makes the other an add/add conflict over the whole file. This is the
+one pair the round-5 policy ("keep `main`'s version of the contested bullet, take the
+incoming PR's changes everywhere else") cannot resolve: the collision is a thousand-line
+test, not a prose hunk, and picking a survivor is a re-classification rather than a merge
+mechanic — the #575 shape. **#583 merges (it carries the wiring and §4 already ranks it
+early); #578 is held for its author** with this measurement attached.
+
+### 8.4 Disposition
+
+Merge the three wiring PRs, then the prose PRs under the keep-`main` policy — which
+preserves each one's unique non-contested content (#595's ROADMAP, #601's PRD +
+backlog, #564's swarm-handoff, #572's separate correction to the `live-infra.yml`
+bullet) and installs **none** of the five counts. The bullet is then re-derived once,
+from post-merge state, in a single corrective PR.
+
+### 8.5 The keep-`main` policy is wrong for this one bullet, and that inverts the order
+
+The round-5 rule was: *for the contested bullet only, keep what is on `main`; take the
+incoming PR's changes everywhere else* — on the reasoning that every incoming number
+measures a pre-wiring world, so "newest wins" installs whichever roster merged last rather
+than the true one. **That reasoning assumed `main`'s version was the pre-wiring baseline.
+It is not.** `main`'s bullet is itself a roster, older than all seven, and false in both of
+its halves. Verified against the files, not against any PR's description:
+
+| `main`'s claim | Reality on `origin/main` |
+|---|---|
+| the ArcadeDB graph contract "has no service container in any workflow" | `live-infra.yml:95` runs `arcadedata/arcadedb:26.8.1`; `:192` sets `TRELLIS_TEST_ARCADEDB_URI`; `:231` puts `tests/unit/stores/contracts/` in the pytest path list; `test_arcadedb_graph_contract.py:44` is `class TestArcadeDBGraphContract(GraphStoreContractTests)`, whose `skipif` guards on exactly that env var. **106 inherited cases run on every PR and every push to `main`.** |
+| "The 59 Postgres-marked tests under `tests/unit/stores/` outside `contracts/` are still deselected" | `:232`–`:234` name `test_pgvector.py`, `test_postgres_stores.py` and `test_api_key_store.py` explicitly. The residual is **zero**. |
+
+Both errors run in the direction that **under-states** coverage, which is the expensive
+direction: it is the one that makes an agent re-do covered work, or report verified
+evidence as unverified — the failure the bullet directly above it already records about
+`pull_request`. Seven PRs found this independently; five of them state it in prose.
+
+So keeping `main`'s bullet preserves a known falsehood, while "newest wins" installs one
+arbitrary population out of five. Neither is right, and the third option is the one three
+of the PRs argue for in their own words: **derive it.**
+
+**Consequence for ordering.** #583 must land before any prose PR — not for merge mechanics
+(§2 measured that no ordering avoids the conflicts) but because it is the only member that
+replaces the bullet with something derived from the workflow files instead of transcribed
+into prose. Once it has landed, keep-`main` becomes correct, because `main`'s bullet is
+then #583's derived one. The policy was right about the mechanism and wrong about when it
+starts applying.
+
+## 9. The drain halted on a flake, and the halt could not have cleared
+
+At `f7247d95` (the #587 merge) `live-infra` on `main` went red and `drain.sh`
+stopped with `exit 9`, one PR (#583) unmerged. The failure:
+
+```
+FAILED tests/unit/stores/contracts/test_arcadedb_graph_contract.py::
+       TestArcadeDBGraphContract::test_bind_alias_serializes_concurrent_stale_owner_replacement
+  neo4j.exceptions.DatabaseError: {neo4j_code: Neo.DatabaseError.General.UnknownError}
+  {message: Error executing Cypher command:
+      MATCH (a:Alias {source_system: $src, raw_id: $rid})
+      WHERE a.valid_to IS NULL SET a.valid_to = $now}
+  {gql_status: 50N42}
+1 failed, 856 passed, 1 skipped in 114.74s
+```
+
+### 9.1 It is a flake, and the evidence is structural rather than statistical
+
+| Question | Answer |
+|---|---|
+| Does main's **current tip** pass? | `7b5845ef` — **success**, 857 passed. It *contains* `f7247d95`, so a regression there would reproduce. |
+| Did #587 touch the failing area? | No. Its five files are `mcp/server.py`, `mutate/executor.py` and three tests. Nothing ArcadeDB, nothing alias, nothing graph. |
+| Has it happened before this drain? | Yes — 2 failures in 40 `live-infra` runs on `main`, and the other (run `34289032492`) predates the drain entirely. |
+| Same defect both times? | Same *family*, different test: the other was `test_bind_alias_if_absent_is_atomic_for_concurrent_contenders`. Both are alias-race tests on the same error channel. |
+
+The mechanism is documented in the code that fails. `ArcadeDBGraphStore._is_alias_write_contention`
+widens the retry predicate over `Neo.DatabaseError.General.UnknownError`, and its
+own comment states why that is hard: the code is *the generic bucket unrelated
+failures land in — so the message is the only discriminator available*. The
+predicate therefore keys on a **message regex**, `Record #\d+:\d+ not found`. Any
+stale-record wording ArcadeDB emits that the regex does not match escapes the
+retry envelope and surfaces as a fatal error. That is a residual gap in a
+message-shaped guard, not a regression, and it is not in scope for a merge pass.
+
+### 9.2 The halt condition had the #461 defect — a banner that cannot clear
+
+`drain.sh` asked *"is there any failed run in main's last 40?"*. That is
+window-scoped, so the first flake pins it permanently: every subsequent round
+re-reads the same historical failure and halts again, no matter how many green
+commits land on top. `CLAUDE.md` records exactly this shape for the capture-health
+banner (#461) — **a banner must be able to clear** — and the same defect was sitting
+in the tool I wrote to watch for it.
+
+The check now resolves `git ls-remote origin main` and asks whether **that sha**
+has a failed run. This is self-correcting in the direction that matters: a real
+regression is inherited by every subsequent tip and keeps halting, while a flake
+is superseded by the next green merge. The weaker property — a tip whose runs have
+not concluded yet reads as non-failing — is deliberate, because the primary gate is
+per-PR (10/10 SUCCESS on a branch updated to current `main`) and the main-push run
+is a backstop, not the gate.
