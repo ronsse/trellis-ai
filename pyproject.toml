@@ -34,7 +34,16 @@ dependencies = [
     "typer>=0.9",
     "rich>=13.0",
     "httpx>=0.27",
-    "fastmcp>=2.0",
+    # The upper bound is what actually holds the fastmcp major. It was
+    # unbounded, and the major was held *by the `mcp` bound below* — a
+    # constraint on a different package — because fastmcp declares `mcp`
+    # itself: 3.4.7 wants `mcp>=1.24,<2.0`, 4.0.5 wants `mcp>=2.0,<3.0`.
+    # Measured on #542: a clean `uv pip install -e ".[dev,all]"` resolved
+    # fastmcp 3.4.7 + mcp 1.29.1 as written, and fastmcp 4.0.5 + mcp 2.2.0
+    # the moment the `mcp` bound was widened to `<3.0` — so a dependabot PR
+    # titled "update mcp requirement" was a two-library major upgrade.
+    # The two bounds move together, in one reviewed change, or not at all.
+    "fastmcp>=2.0,<4.0",
     # Declared because `trellis.mcp.server` imports `mcp.shared.exceptions`
     # and `mcp.types` **directly**. It arrived only through fastmcp's
     # transitive graph, and `fastmcp-slim` constrains `mcp<2.0` only under
@@ -45,7 +54,13 @@ dependencies = [
     #
     # The upper bound is the 2.x rename, not a general aversion to it:
     # lifting it is a real migration of `mcp/server.py`'s error contract and
-    # wants its own PR. The floor matches what fastmcp-slim itself requires.
+    # wants its own PR. Sized on #542, against a clean fastmcp-4 / mcp-2
+    # venv: `MCPError.__init__` takes `(code, message, data)` rather than an
+    # `ErrorData`, which all four `_raise_*` helpers construct, and 127
+    # `.error.code` / `.error.message` / `.error.data` reads across `src/`
+    # and `tests/` sit on the old attribute shape -- shimming the import
+    # alone leaves `tests/unit/mcp` at 66 failed / 406 passed.
+    # The floor matches what fastmcp-slim itself requires.
     "mcp>=1.24,<2.0",
     "fastapi>=0.115",
     # Both are imported directly (`starlette` in `trellis_api/app.py`,
