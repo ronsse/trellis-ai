@@ -141,19 +141,6 @@ DELIBERATELY_UNWIRED: dict[Path, str] = {
         "defect rather than a CI capability gap; wiring it into live-infra "
         "would paper over that instead of fixing it."
     ),
-    Path("unit/stores/test_neo4j_vector.py"): (
-        "re-measured 2026-09-12 against neo4j:2025.12: 23 of 27 pass and "
-        "the four TestQuery cases fail `Invalid input 'SEARCH'`, because "
-        "the AuraDB-grade SEARCH ... IN (VECTOR INDEX ...) clause is "
-        "absent from self-hosted Neo4j. Wiring it without a probe buys a "
-        "red job; wiring it with tests/integration/conftest.py's existing "
-        "probe (#356) buys four silently skipped tests wearing the "
-        "appearance of coverage. It also provisions "
-        "trellis_test_node_embeddings on the same (:Node, embedding) pair "
-        "the live_api_server suites use, and Neo4j keeps one vector index "
-        "per pair — measured here, running it first turned all 28 of "
-        "those tests into a 30s VectorIndexNotOnlineError apiece."
-    ),
 }
 
 #: Shared contract suites no executed module subclasses, each with why.
@@ -343,11 +330,15 @@ def _file_is_covered(
 
     A file counts as covered on **one** runnable node, not all of them.
     That is the weaker claim on purpose: this rule asks whether a file is
-    dark, and `tests/unit/stores/test_neo4j_vector.py` — 23 of whose 27
-    nodes pass against this workflow's own Neo4j image — is the standing
+    dark, and `tests/unit/stores/test_neo4j_vector.py` is the standing
     reminder that "the file runs" and "the file is verified" are
-    different questions. The second one belongs to the capability probe
-    in [#356](https://github.com/ronsse/trellis-ai/issues/356), not here.
+    different questions. It is now wired, and 24 of its 28 nodes pass
+    against this workflow's own Neo4j image while four self-skip: the
+    capability probe from
+    [#356](https://github.com/ronsse/trellis-ai/issues/356) answers the
+    second question, and this rule still only answers the first. A file
+    can satisfy it on one runnable node while most of it skips, which is
+    why a green result here is not a coverage claim.
     """
     for leg in legs:
         if not leg.selects(path):
