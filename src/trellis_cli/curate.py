@@ -29,6 +29,18 @@ def _execute_command(cmd: Command, output_format: str) -> None:
     """Submit a command to the MutationExecutor and display the result."""
     result = build_curate_executor(_get_registry()).execute(cmd)
 
+    # ``Enforcement.WARN`` means "allow, but say so", and the only
+    # caller-facing channel it has is ``CommandResult.warnings``. The CLI
+    # is also the surface where the structlog fallback is unavailable:
+    # ``trellis_cli.main`` pins ``TRELLIS_LOG_LEVEL`` to WARNING absent
+    # ``-v``, and the gate logs ``policy_warning`` at ``info``.
+    #
+    # The JSON key is unconditional. An always-present ``[]`` tells a
+    # machine consumer that the gate ran and nothing warned; a key that
+    # appears only when a policy fires is indistinguishable from a build
+    # that predates the field. (The audit *event* keeps its key
+    # conditional for a different and still-good reason -- see
+    # ``MutationExecutor._emit_event``.)
     if output_format == "json":
         emit_json(
             {
@@ -37,6 +49,7 @@ def _execute_command(cmd: Command, output_format: str) -> None:
                 "operation": result.operation,
                 "message": result.message,
                 "created_id": result.created_id,
+                "warnings": list(result.warnings),
             }
         )
     else:
@@ -48,6 +61,8 @@ def _execute_command(cmd: Command, output_format: str) -> None:
             )
         console.print(f"  ID: {escape(result.command_id)}")
         console.print(f"  Message: {result.message}")
+        for warning in result.warnings:
+            console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}")
 
 
 @curate_app.command()

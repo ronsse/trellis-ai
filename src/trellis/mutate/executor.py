@@ -172,13 +172,25 @@ class MutationExecutor:
         #
         # ``policy_warnings`` carries a non-blocking verdict (an
         # ``Enforcement.WARN`` policy, or an ``action="warn"`` rule)
-        # forward to the SUCCESS result and its audit event. Before this,
+        # forward to the result and its audit event. Before this,
         # warnings were computed and then dropped on the allow path, so
         # the entire ``warn`` enforcement level was unobservable to
         # callers — a policy could fire on every write and nothing
         # downstream could tell. An empty gate yields ``[]``, which is
         # ``CommandResult.warnings``' own default, so the transparency of
         # the default posture is unaffected.
+        #
+        # The rule from here down is uniform and deliberately has no
+        # exceptions: **every outcome reachable after this point carries
+        # the warnings**, on both the ``CommandResult`` and the emitted
+        # event. Forwarding them only on the paths that seemed to matter
+        # is how this was lost the first time — the gate accumulates
+        # warnings *before* it reaches the rule that blocks, so a ``warn``
+        # rule firing ahead of a ``deny`` rode only a ``CommandResult``
+        # that 34 of 35 call sites discard, and the same loss applies to
+        # a duplicate, a handler rejection and a failed write. Stage 1 is
+        # the only outcome that omits them, because it runs before the
+        # gate and there is nothing yet to forward.
         policy_warnings: list[str] = []
         if self._policy_gate is not None:
             allowed, message, policy_warnings = self._policy_gate.check(command)
@@ -188,6 +200,7 @@ class MutationExecutor:
                     command,
                     reason="policy_violation",
                     message=message,
+                    policy_warnings=policy_warnings,
                 )
                 return CommandResult(
                     command_id=command.command_id,
@@ -208,13 +221,14 @@ class MutationExecutor:
                     command,
                     reason="idempotency_replay",
                     message=message,
+                    policy_warnings=policy_warnings,
                 )
                 return CommandResult(
                     command_id=command.command_id,
                     status=CommandStatus.DUPLICATE,
                     operation=command.operation,
                     message=message,
-                    warnings=_audit_warnings(audit),
+                    warnings=[*policy_warnings, *_audit_warnings(audit)],
                 )
             # Check persisted events for cross-restart deduplication
             if self._event_log is not None and self._event_log.has_idempotency_key(
@@ -227,13 +241,14 @@ class MutationExecutor:
                     command,
                     reason="idempotency_replay",
                     message=message,
+                    policy_warnings=policy_warnings,
                 )
                 return CommandResult(
                     command_id=command.command_id,
                     status=CommandStatus.DUPLICATE,
                     operation=command.operation,
                     message=message,
-                    warnings=_audit_warnings(audit),
+                    warnings=[*policy_warnings, *_audit_warnings(audit)],
                 )
             self._record_idempotency_key(command.idempotency_key)
 
@@ -246,6 +261,7 @@ class MutationExecutor:
                 status=CommandStatus.FAILED,
                 operation=command.operation,
                 message=f"No handler registered for: {command.operation}",
+                warnings=policy_warnings,
             )
 
         try:
@@ -258,13 +274,18 @@ class MutationExecutor:
             # if the handler didn't supply one via ValidationError.code).
             log.warning("handler_rejected", errors=exc.errors)
             reason = exc.code if exc.code != "VALIDATION_ERROR" else "handler_validate"
-            audit = self._emit_rejection(command, reason=reason, message=str(exc))
+            audit = self._emit_rejection(
+                command,
+                reason=reason,
+                message=str(exc),
+                policy_warnings=policy_warnings,
+            )
             return CommandResult(
                 command_id=command.command_id,
                 status=CommandStatus.REJECTED,
                 operation=command.operation,
                 message=str(exc),
-                warnings=_audit_warnings(audit),
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
         except PolicyViolationError as exc:
             # Handlers may evaluate row-level policies that the gate
@@ -278,13 +299,14 @@ class MutationExecutor:
                 command,
                 reason="policy_violation",
                 message=str(exc),
+                policy_warnings=policy_warnings,
             )
             return CommandResult(
                 command_id=command.command_id,
                 status=CommandStatus.REJECTED,
                 operation=command.operation,
                 message=str(exc),
-                warnings=_audit_warnings(audit),
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
         except IdempotencyError as exc:
             # Handler-level duplicate detection (e.g., a downstream
@@ -296,13 +318,14 @@ class MutationExecutor:
                 command,
                 reason="idempotency_replay",
                 message=str(exc),
+                policy_warnings=policy_warnings,
             )
             return CommandResult(
                 command_id=command.command_id,
                 status=CommandStatus.DUPLICATE,
                 operation=command.operation,
                 message=str(exc),
-                warnings=_audit_warnings(audit),
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
         except (StoreError, TrellisError) as exc:
             # Typed Trellis failures other than the rejection set
@@ -321,13 +344,18 @@ class MutationExecutor:
                 error_code=getattr(exc, "code", None),
                 store=store_name,
             )
-            audit = self._emit(command, CommandStatus.FAILED, str(exc))
+            audit = self._emit(
+                command,
+                CommandStatus.FAILED,
+                str(exc),
+                policy_warnings=policy_warnings,
+            )
             return CommandResult(
                 command_id=command.command_id,
                 status=CommandStatus.FAILED,
                 operation=command.operation,
                 message=f"Execution failed: {exc}",
-                warnings=_audit_warnings(audit),
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
         except _UNEXPECTED_HANDLER_FAILURE as exc:
             # An untyped exception escaped the handler — almost
@@ -347,13 +375,18 @@ class MutationExecutor:
             # so the silent-fallback audit treats it as a guard
             # rather than a broad swallow.
             log.exception("handler_failed_unexpected", error_type=type(exc).__name__)
-            audit = self._emit(command, CommandStatus.FAILED, str(exc))
+            audit = self._emit(
+                command,
+                CommandStatus.FAILED,
+                str(exc),
+                policy_warnings=policy_warnings,
+            )
             return CommandResult(
                 command_id=command.command_id,
                 status=CommandStatus.FAILED,
                 operation=command.operation,
                 message=f"Execution failed: {exc}",
-                warnings=_audit_warnings(audit),
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
 
         # Stage 5: Emit Event
@@ -494,12 +527,20 @@ class MutationExecutor:
         *,
         reason: str,
         message: str,
+        policy_warnings: list[str] | None = None,
     ) -> str | None:
         """Emit a uniform :attr:`EventType.MUTATION_REJECTED` event.
 
         Called from every rejection stage (``validate`` / ``policy_violation``
         / ``idempotency_replay``) so the audit trail is symmetric — one event
         per rejection, ``reason`` discriminates the stage.
+
+        ``policy_warnings`` is forwarded by every caller downstream of
+        Stage 2 — see the rule stated there. Stage 1 (``validate``) is the
+        one caller that passes nothing, because it runs before the gate.
+        The key stays absent from the payload when the list is empty, so a
+        deployment that has declared no policies emits a byte-identical
+        event to the pre-gate world.
 
         Returns whatever :meth:`_emit_event` returns — ``None`` when the
         event landed, a warning string when it did not.
@@ -510,6 +551,7 @@ class MutationExecutor:
             CommandStatus.REJECTED,
             message,
             reason=reason,
+            policy_warnings=policy_warnings,
         )
 
     def _emit_event(
@@ -570,10 +612,12 @@ class MutationExecutor:
         }
         if reason is not None:
             payload["reason"] = reason
-        # Added only when a policy actually fired non-blockingly. Keeping
-        # the key absent otherwise means a deployment with no policies
-        # emits a byte-identical payload to the pre-gate world, which is
-        # what makes the default posture verifiably transparent.
+        # Added only when a policy actually fired -- non-blockingly on
+        # the SUCCESS path, or ahead of the blocking rule on the
+        # ``policy_violation`` rejection path. Keeping the key absent
+        # otherwise means a deployment with no policies emits a
+        # byte-identical payload to the pre-gate world, which is what
+        # makes the default posture verifiably transparent.
         if policy_warnings:
             payload["policy_warnings"] = policy_warnings
         try:

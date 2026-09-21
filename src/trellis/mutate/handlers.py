@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
+from trellis.core.document_write import put_document
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import NotFoundError, StoreError, ValidationError
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
@@ -113,10 +115,18 @@ class EvidenceIngestHandler:
             source_system=str(metadata.get("source_system") or ""),
             doc_id=doc_id,
         )
-        self._registry.knowledge.document_store.put(
+        # Through the seam even though both embed modes below rebuild the
+        # whole row: ``run_embed_on_ingest`` is gated on
+        # ``TRELLIS_ENABLE_EMBED_ON_INGEST``, so on a deployment with that
+        # flag off the ``"soft"`` arm mirrors nothing at all — and an
+        # evidence write may be metadata-only (``preserve_updated_at``),
+        # where there is no embed to piggyback on in either mode.
+        put_document(
+            self._registry.knowledge.document_store,
+            resolve_vector_store(self._registry),
             doc_id,
             content,
-            metadata=metadata,
+            metadata,
             preserve_updated_at=preserve_updated_at,
         )
 
@@ -1150,7 +1160,14 @@ def _sync_vector_lifecycle(
     item_id: str,
     lifecycle: dict[str, Any],
 ) -> None:
-    """Mirror a lifecycle stamp onto the item's vector row.
+    """Stamp a lifecycle record onto a vector row that has no document write.
+
+    **Repair only.** The writers that stamp a document and its row together
+    (``_archive``, ``_restore``) go through
+    :func:`~trellis.core.document_write.put_document`, which mirrors the bag
+    it just wrote — so the mirror cannot be the step a future edit forgets.
+    What is left here is ``_resync_archived``: a row that diverged *before*
+    that seam existed, repaired with no document write to mirror off.
 
     **A vector row's metadata is a snapshot taken at embed time**, and the
     semantic strategy builds its :class:`~trellis.schemas.pack.PackItem`
@@ -1475,10 +1492,14 @@ class RetentionPruneHandler:
             # predicate, so an archived document's bump moves the
             # ``newest_item_at`` its path reports to the read hook's staleness
             # gate immediately.
-            store.put(
-                candidate.item_id, doc["content"], metadata, preserve_updated_at=True
+            put_document(
+                store,
+                resolve_vector_store(self._registry),
+                candidate.item_id,
+                doc["content"],
+                metadata,
+                preserve_updated_at=True,
             )
-            _sync_vector_lifecycle(self._registry, candidate.item_id, lifecycle)
             return True
 
         graph = self._registry.knowledge.graph_store
@@ -1620,8 +1641,14 @@ class RetentionRestoreHandler:
             # the writers that actually move a node's ``updated_at`` are the
             # ordinary ones (``entity.update``, extraction upserts), which no
             # kwarg here would ever have been passed on.
-            doc_store.put(item_id, doc["content"], metadata, preserve_updated_at=True)
-            _sync_vector_lifecycle(self._registry, item_id, current)
+            put_document(
+                doc_store,
+                resolve_vector_store(self._registry),
+                item_id,
+                doc["content"],
+                metadata,
+                preserve_updated_at=True,
+            )
             return True
 
         graph = self._registry.knowledge.graph_store

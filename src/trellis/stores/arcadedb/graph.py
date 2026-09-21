@@ -22,6 +22,7 @@ missing. See ``docs/design/adr-arcadedb-blessed-substrate.md``
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -46,6 +47,14 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 _REGISTRY_MIGRATIONS_KEY = f"{__name__}:provenance_migrations"
+
+#: A record the winning transaction replaced out from under this one.
+#: ArcadeDB surfaces it as ``Neo.DatabaseError.General.UnknownError``
+#: naming the RID, which is the same generic bucket unrelated failures
+#: land in — so the message is the only discriminator available, and the
+#: RID shape is what makes it specific. Measured 2026-09-11 against
+#: ``arcadedata/arcadedb:26.8.1``, the image ``live-infra.yml`` pins.
+_STALE_RECORD_RE = re.compile(r"Record #\d+:\d+ not found")
 
 
 #: ArcadeDB schema-typed properties for the edge provenance columns
@@ -91,6 +100,41 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
     creates the target ArcadeDB database via the HTTP admin endpoint
     before any Bolt session opens.
     """
+
+    def _is_alias_write_contention(self, exc: Exception) -> bool:
+        """Widen the base predicate over ArcadeDB's generic error channel.
+
+        ArcadeDB detects a duplicate claim key only **at commit**, and it
+        reports both halves of a lost race through codes that say nothing
+        about concurrency: the duplicate arrives as
+        ``Neo.ClientError.Transaction.TransactionNotFound`` and a record
+        the winner replaced arrives as
+        ``Neo.DatabaseError.General.UnknownError``. Both carry
+        ``gql_status`` 50N42, the generic bucket, and
+        ``Neo4jError.is_retryable()`` is ``False`` for both — so the
+        driver's managed-transaction retry never re-runs either, and no
+        code-based check can tell them from a fatal error.
+
+        Retrying is safe because a failed transaction is rolled back
+        whole: the re-run re-reads committed state and reaches the same
+        answer a serialized execution would have. The attempt bound in
+        the base class is what keeps a genuinely fatal error from
+        spinning.
+
+        **A third concurrency shape exists and deliberately is not
+        matched here.** A page-slot collision on the same record arrives
+        as ``Neo.TransientError.Transaction.DeadlockDetected`` ("Slot
+        rebase not possible on page ... Please retry the operation"),
+        and unlike the two above it is *retryable*, so the driver's own
+        managed retry already re-runs it with backoff. Measured over 120
+        live stale-owner races, outcomes are identical with this
+        predicate and with it stubbed to ``False`` — adding that code
+        here would duplicate the driver's retry, not extend coverage.
+        """
+        if super()._is_alias_write_contention(exc):
+            return True
+        message = str(getattr(exc, "message", "") or exc)
+        return _STALE_RECORD_RE.search(message) is not None
 
     @classmethod
     def prepare_registry_params(  # noqa: PLR0912, PLR0915
