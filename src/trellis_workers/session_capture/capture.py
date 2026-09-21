@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from trellis.core.hashing import content_hash
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.ingest_corpus.models import SyncRecord
 from trellis.ingest_corpus.sync import sync_records
 from trellis.mcp.reconcile import (
@@ -249,7 +250,10 @@ def run_capture(
         # successor does not exist — nor, for a candidate superseded by a
         # later candidate of the same sweep, does the target (#407).
         reconcile_pass.apply_supersessions(
-            registry.knowledge.document_store, written, report
+            registry.knowledge.document_store,
+            written,
+            report,
+            vector_store=resolve_vector_store(registry),
         )
         _emit_training_pairs(registry, written, distill_model_id)
         watermark.save()
