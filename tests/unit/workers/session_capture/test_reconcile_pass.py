@@ -365,7 +365,10 @@ class TestApplySupersessions:
         report = CaptureReport(transcripts_root="/nowhere")
 
         reconcile_pass.apply_supersessions(
-            docs, [_candidate("new-doc", supersedes="gone-doc")], report
+            docs,
+            [_candidate("new-doc", supersedes="gone-doc")],
+            report,
+            vector_store=None,
         )
 
         assert report.supersessions_failed == 1
@@ -400,7 +403,10 @@ class TestApplySupersessions:
         report = CaptureReport(transcripts_root="/nowhere")
 
         reconcile_pass.apply_supersessions(
-            docs, [_candidate("never-written", supersedes="old-doc")], report
+            docs,
+            [_candidate("never-written", supersedes="old-doc")],
+            report,
+            vector_store=None,
         )
 
         assert report.supersessions_failed == 1
@@ -413,7 +419,9 @@ class TestApplySupersessions:
         docs = SQLiteDocumentStore(tmp_path / "docs.db")
         report = CaptureReport(transcripts_root="/nowhere")
 
-        reconcile_pass.apply_supersessions(docs, [_candidate("plain-add")], report)
+        reconcile_pass.apply_supersessions(
+            docs, [_candidate("plain-add")], report, vector_store=None
+        )
 
         assert report.supersessions_failed == 0
         assert report.warnings == []
