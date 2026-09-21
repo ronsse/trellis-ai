@@ -43,7 +43,7 @@ dependencies = [
     # the moment the `mcp` bound was widened to `<3.0` — so a dependabot PR
     # titled "update mcp requirement" was a two-library major upgrade.
     # The two bounds move together, in one reviewed change, or not at all.
-    "fastmcp>=2.0,<4.0",
+    "fastmcp>=2.0,<5.0",
     # Declared because `trellis.mcp.server` imports `mcp.shared.exceptions`
     # and `mcp.types` **directly**. It arrived only through fastmcp's
     # transitive graph, and `fastmcp-slim` constrains `mcp<2.0` only under
