@@ -426,6 +426,11 @@ components:
         status:
           title: Status
           type: string
+        warnings:
+          items:
+            type: string
+          title: Warnings
+          type: array
       required:
       - status
       - command_id

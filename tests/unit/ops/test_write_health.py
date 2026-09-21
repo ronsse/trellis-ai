@@ -948,3 +948,212 @@ class TestNormalizeLoc:
     )
     def test_indices_collapse(self, loc: str, expected: str) -> None:
         assert normalize_loc(loc) == expected
+
+
+class TestStrayCitationsOnTheHealthSurface:
+    """Citing is not joining, and the gap between them is #574.
+
+    ``pack_attribution_rate`` answers "did the caller name any item?". It
+    is satisfied by a citation the learning join then drops, so on the
+    reference deployment it reads 69/74 while 14 of the 699 ids those
+    callers named reached nothing. The stray block sits beside it and
+    measures the second question.
+    """
+
+    @staticmethod
+    def _emit_pack(event_log: EventLog, *, pack_id: str, served: list[str]) -> None:
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "injected_item_ids": served,
+                "injected_items": [{"item_id": i} for i in served],
+            },
+        )
+
+    def test_stray_block_is_computed_beside_the_citation_rate(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        self._emit_pack(event_log, pack_id="p1", served=["trace:a", "doc:b"])
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            "mcp:record_feedback",
+            payload={
+                "pack_id": "p1",
+                "helpful_item_ids": ["trace:a"],
+                "unhelpful_item_ids": ["entity:doc:b", "ghost"],
+            },
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.cited_ids == 3
+        assert report.stray_cited_ids == 2
+        assert report.stray_citation_rate == pytest.approx(round(2 / 3, 4))
+        assert report.packs_with_stray_citations == 1
+        assert report.stray_citations_by_namespace == {"entity": 1, "(none)": 1}
+        assert report.stray_citations_by_shape == {"prefix_added": 1, "foreign": 1}
+
+    def test_pack_attribution_rate_cannot_see_a_stray(self, tmp_path: Path) -> None:
+        """Why a new field was needed rather than a stricter old one.
+
+        Two deployments, identical on every pre-existing field: one whose
+        caller cited what it was served, one whose caller cited nothing the
+        pack carried. ``pack_attribution_rate`` is 1.0 for both — the loss
+        is invisible to it by construction, so tightening it would have
+        redefined a metric DoD-3 reads rather than measured a new fact.
+        """
+        reports = []
+        for name, cited in (("clean", ["trace:a"]), ("all-stray", ["ghost"])):
+            event_log = SQLiteEventLog(tmp_path / f"{name}.db")
+            self._emit_pack(event_log, pack_id="p1", served=["trace:a"])
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                "mcp:record_feedback",
+                payload={"pack_id": "p1", "helpful_item_ids": cited},
+            )
+            reports.append(summarize_serve_attribution(event_log, days=1))
+
+        clean, all_stray = reports
+        for report in reports:
+            assert report.pack_targeted_feedback == 1
+            assert report.pack_targeted_attributed == 1
+            assert report.pack_attribution_rate == pytest.approx(1.0)
+            assert report.attribution_rate == pytest.approx(1.0)
+        # Only the new block separates them.
+        assert clean.stray_cited_ids == 0
+        assert clean.stray_citation_rate == pytest.approx(0.0)
+        assert all_stray.stray_cited_ids == 1
+        assert all_stray.stray_citation_rate == pytest.approx(1.0)
+
+    def test_a_pack_outside_the_window_is_skipped_whole(self, tmp_path: Path) -> None:
+        """An unresolvable pack is missing evidence, not a stray.
+
+        The feedback scan and the pack scan have the same window but not
+        the same population — a pack assembled before it, or lost to the
+        scan limit, resolves to nothing. Counting its citations would make
+        the stray rate rise as *coverage* falls, which is a metric wired to
+        the wrong quantity.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            "mcp:record_feedback",
+            payload={"pack_id": "gone", "helpful_item_ids": ["trace:a", "trace:b"]},
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.cited_ids == 0
+        assert report.stray_cited_ids == 0
+        assert report.stray_citation_rate == pytest.approx(0.0)
+        assert report.packs_with_stray_citations == 0
+        # The pre-existing surface still counts it, correctly: the caller
+        # did name a pack and did cite items.
+        assert report.pack_targeted_feedback == 1
+        assert report.pack_attribution_rate == pytest.approx(1.0)
+
+    def test_sectioned_pack_is_not_reported_as_a_total_loss(
+        self, tmp_path: Path
+    ) -> None:
+        """``build_sectioned`` writes neither served-item key.
+
+        Its citations resolve to an empty served set, which means "no
+        record of what was served" and never "served nothing" — the
+        difference between one unmeasurable pack and a 100% stray rate on a
+        surface that is working.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            entity_id="p-sectioned",
+            entity_type="sectioned_pack",
+            payload={"sections": 2},
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            "mcp:record_feedback",
+            payload={"pack_id": "p-sectioned", "helpful_item_ids": ["trace:a"]},
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.cited_ids == 0
+        assert report.stray_cited_ids == 0
+        assert report.stray_citation_rate == pytest.approx(0.0)
+
+    @pytest.mark.parametrize(
+        ("payload", "shape"),
+        [
+            ({"injected_item_ids": ["trace:a"]}, "ids-only"),
+            ({"injected_items": [{"item_id": "trace:a"}]}, "rows-only"),
+            (
+                {
+                    "injected_item_ids": ["trace:a"],
+                    "injected_items": [{"item_id": "trace:a"}],
+                },
+                "both",
+            ),
+        ],
+    )
+    def test_both_served_item_keys_are_honoured(
+        self, tmp_path: Path, payload: dict, shape: str
+    ) -> None:
+        """The surface reads served membership through the canonical reader.
+
+        Production writes both keys and they have never disagreed — 219 of
+        219 flat packs, measured 2026-09-16 — so a surface reading only one
+        of them is correct today and silently wrong the day a writer stops
+        filling it. What is pinned is that the choice is not made here.
+        """
+        event_log = SQLiteEventLog(tmp_path / f"{shape}.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            entity_id="p1",
+            entity_type="pack",
+            payload=payload,
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            "mcp:record_feedback",
+            payload={"pack_id": "p1", "helpful_item_ids": ["trace:a", "ghost"]},
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.cited_ids == 2
+        assert report.stray_cited_ids == 1
+        assert report.stray_citations_by_shape == {"foreign": 1}
+
+    def test_the_unit_is_per_citation_event_not_per_distinct_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Two graders naming the same bad id is two lost verdicts.
+
+        ``PackValueReport.cited_ids_not_served`` counts per (pack, distinct
+        id) and this counts per (event, id); they agree at 14 on the
+        reference deployment only because its one double-graded pack
+        carries no stray. Pinning the unit here stops that coincidence from
+        being read as a shared definition.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        self._emit_pack(event_log, pack_id="p1", served=["trace:a"])
+        for _ in range(2):
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                "mcp:record_feedback",
+                payload={"pack_id": "p1", "helpful_item_ids": ["ghost"]},
+            )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.cited_ids == 2
+        assert report.stray_cited_ids == 2
+        assert report.stray_citations_by_shape == {"foreign": 2}
+        # One pack, graded twice.
+        assert report.packs_with_stray_citations == 1

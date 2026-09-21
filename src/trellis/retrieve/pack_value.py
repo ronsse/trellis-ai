@@ -110,7 +110,6 @@ what "joins to a pack" means.
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -120,7 +119,15 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
-from trellis.feedback.attribution import payload_pack_id
+from trellis.feedback.attribution import (
+    NO_NAMESPACE,
+    STRAY_PREFIX_ADDED,
+    STRAY_PREFIX_DROPPED,
+    item_namespace,
+    payload_pack_id,
+    served_item_ids,
+    stray_shape,
+)
 from trellis.learning.pack_observations import join_pack_feedback_with_coverage
 from trellis.retrieve.token_pricing import estimate_dollars, resolve_pricing
 from trellis.stores.base.event_log import (
@@ -153,44 +160,12 @@ SUPPRESSED_NO_JUDGED_TOKENS = "no_judged_tokens"
 _DEFAULT_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 
 
-#: Fallback key for an id that carries no namespace prefix — a bare ULID
-#: written by ``save_memory`` / document ingest. Spelled the same as the
-#: other axes' unknown bucket so a reader meets one convention.
-NO_NAMESPACE = "(none)"
-
-#: A leading ``<namespace>:`` on a pack item id. Anchored lowercase so an
-#: uppercase Crockford ULID (``01KZDAAG...``) cannot match, and bounded so
-#: a pathological id cannot mint a 200-character axis key. Only the FIRST
-#: segment is taken, which is what makes ``artifact:https://example/x`` and
-#: ``conversation:claude-ai:abc#chunk-0`` land in ``artifact`` and
-#: ``conversation`` rather than in a bucket of one.
-_NAMESPACE_RE = re.compile(r"^([a-z][a-z0-9_-]{0,31}):")
-
-
-def item_namespace(item_id: str) -> str:
-    """The namespace prefix an item id carries, or :data:`NO_NAMESPACE`.
-
-    **Why this axis exists.** ``by_item_type`` reads
-    ``PackItem.item_type``, and every row the graph strategy produces
-    carries the same one — ``"entity"``. So that axis cannot separate a
-    name-only stub minted from a trace (``artifact:src/foo.py``, whose
-    excerpt *is* the path) from a real curated entity, which is precisely
-    the distinction issue #298 is about. Measured on the reference
-    deployment those three populations differ by more than an order of
-    magnitude in citation rate while sharing one ``item_type``, so the
-    existing axis reported their average and nothing else.
-
-    The namespace is read off the id rather than off any stored field
-    because it is the one discriminator that is already present on every
-    item, in the event log, retroactively — no backfill, no new write
-    path, and it prices windows that closed before this function existed.
-
-    It is a *description of the id*, not a classification of the content:
-    an id with no prefix is reported as :data:`NO_NAMESPACE`, never
-    guessed at.
-    """
-    match = _NAMESPACE_RE.match(item_id)
-    return match.group(1) if match else NO_NAMESPACE
+# ``NO_NAMESPACE`` and ``item_namespace`` moved to
+# :mod:`trellis.feedback.attribution` (#574) so the learning join and the
+# health surface can partition stray citations with the same vocabulary;
+# both sit below ``retrieve`` in the import graph. They are re-exported
+# from here, where the ``by_item_namespace`` axis introduced them, and
+# ``__all__`` at the foot of this module still names both.
 
 
 class ValueBreakdown(TrellisModel):
@@ -322,10 +297,25 @@ class PackValueReport(TrellisModel):
     scan: ScanCoverage = Field(default_factory=ScanCoverage)
 
     # -- Citation hygiene ----------------------------------------------
-    #: Ids a caller cited that the pack did not serve. These silently
-    #: deflate the numerator, so they are surfaced rather than dropped:
-    #: on the reference corpus every instance was an agent prefixing an
-    #: item type onto the id (``entity:trace:X`` for a served ``trace:X``).
+    #: Ids a caller cited that the pack did not serve — verdicts the
+    #: learning join has nowhere to put, so they are surfaced rather
+    #: than dropped. Counted per **(pack, distinct cited id)** after
+    #: unioning a pack's graders, which is what makes it a property of
+    #: the delivery; ``analyze health`` counts the same strays per
+    #: *(feedback event, cited id)*, so on a pack graded twice the two
+    #: surfaces can differ. They do not today (14 and 14 on the
+    #: reference corpus, measured 2026-09-16): the one double-graded
+    #: pack carries no stray.
+    #:
+    #: Mechanism, re-measured 2026-09-16 over all 699 citations: **13 of
+    #: 14 name an id the same pack DID serve**, under a different
+    #: namespace prefix — 9 with one added (``entity:trace:X`` for a
+    #: served ``trace:X``) and 4 with one dropped (``af366b3f2378948d``
+    #: for a served ``capture:claude-code:af366b3f2378948d``). Only the
+    #: remaining 1 named something the pack never carried. The earlier
+    #: wording here described the first 9 and missed the mirror case.
+    #: See :func:`trellis.feedback.attribution.stray_shape`; the shapes
+    #: are counted, never joined on.
     cited_ids_not_served: int = 0
 
     # -- Dollars --------------------------------------------------------
@@ -478,6 +468,7 @@ def summarize_pack_value(
     by_family = tally["by_family"]
     distinct_helpful = tally["distinct_helpful"]
     cited_not_served = tally["cited_not_served"]
+    cited_not_served_shapes = tally["cited_not_served_shapes"]
 
     attributed_packs = len(attributed_ids)
     injected = totals["injected"]
@@ -563,6 +554,7 @@ def summarize_pack_value(
             attributed_packs=attributed_packs,
             sectioned=sectioned,
             cited_not_served=cited_not_served,
+            cited_not_served_shapes=cited_not_served_shapes,
             unjudged=unjudged,
             injected=injected,
             judged=judged,
@@ -684,6 +676,7 @@ def _accumulate(
     by_family: dict[str, ValueBreakdown] = {}
     distinct_helpful: set[str] = set()
     cited_not_served = 0
+    stray_shapes: dict[str, int] = {}
 
     for pack_id in attributed_ids:
         helpful = helpful_by_pack.get(pack_id, set())
@@ -692,7 +685,13 @@ def _accumulate(
         family_cell = by_family.setdefault(family, ValueBreakdown(key=family))
         family_cell.attributed_packs += 1
 
-        served: set[str] = set()
+        # The canonical reader, not the token loop's own population:
+        # ``injected_item_ids`` is the membership list the learning join
+        # reads, and a pack where the two disagree must not be scored as
+        # though it served the smaller of them. They have never disagreed
+        # on this deployment (219 of 219 flat packs, measured 2026-09-16)
+        # — this is a guard against drift, not a live fix.
+        served = served_item_ids(flat_packs[pack_id])
         charged = _charged_tokens(flat_packs[pack_id])
         for raw in flat_packs[pack_id].get("injected_items") or []:
             if not isinstance(raw, Mapping):
@@ -700,7 +699,6 @@ def _accumulate(
             item_id = raw.get("item_id")
             if not isinstance(item_id, str) or not item_id:
                 continue
-            served.add(item_id)
             raw_tokens = raw.get("estimated_tokens")
             fallback = int(raw_tokens) if isinstance(raw_tokens, int | float) else 0
             tokens = charged.get(item_id, fallback)
@@ -734,7 +732,11 @@ def _accumulate(
             elif verdict == "unhelpful":
                 totals["unhelpful"] += tokens
 
-        cited_not_served += len((helpful | unhelpful) - served)
+        strays = (helpful | unhelpful) - served
+        cited_not_served += len(strays)
+        for stray in strays:
+            shape = stray_shape(stray, served)
+            stray_shapes[shape] = stray_shapes.get(shape, 0) + 1
 
     return {
         "totals": totals,
@@ -744,6 +746,7 @@ def _accumulate(
         "by_family": by_family,
         "distinct_helpful": distinct_helpful,
         "cited_not_served": cited_not_served,
+        "cited_not_served_shapes": stray_shapes,
     }
 
 
@@ -842,6 +845,7 @@ def _build_notes(
     attributed_packs: int,
     sectioned: int,
     cited_not_served: int,
+    cited_not_served_shapes: Mapping[str, int],
     unjudged: int,
     injected: int,
     judged: int,
@@ -892,10 +896,14 @@ def _build_notes(
             "no injected_items[], so they carry no per-item rows to attribute."
         )
     if cited_not_served:
+        near = cited_not_served_shapes.get(
+            STRAY_PREFIX_ADDED, 0
+        ) + cited_not_served_shapes.get(STRAY_PREFIX_DROPPED, 0)
         notes.append(
-            f"{cited_not_served} cited id(s) were not served by the pack they "
-            "cited; these deflate the numerator and usually mean a malformed "
-            "item id."
+            f"{cited_not_served} cited id(s) were not served by the pack that "
+            f"cited them, so their verdicts reached nothing; {near} of those "
+            "name an id the pack DID serve, under a different namespace "
+            "prefix."
         )
     if not response["with_pack_id"]:
         notes.append(

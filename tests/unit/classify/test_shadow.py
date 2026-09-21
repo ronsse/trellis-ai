@@ -41,6 +41,7 @@ from trellis.schemas.memory_op import JudgedOpType, MemoryOpJudgedPayload
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
+from trellis.stores.sqlite.vector import SQLiteVectorStore
 
 
 class FakeClassifier:
@@ -90,6 +91,13 @@ class FakeClassifier:
 @pytest.fixture
 def document_store(tmp_path: Path):
     store = SQLiteDocumentStore(tmp_path / "docs.db")
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def vector_store(tmp_path: Path):
+    store = SQLiteVectorStore(tmp_path / "vectors.db")
     yield store
     store.close()
 
@@ -165,6 +173,7 @@ class TestShadowIsInvisibleToRetrieval:
                 {"domain": ["todoist"], "content_type": ["reference"]}
             ),
             document_store=document_store,
+            vector_store=None,
         )
         assert outcome.written is True
 
@@ -186,6 +195,7 @@ class TestShadowIsInvisibleToRetrieval:
             "d1",
             classifier=FakeClassifier({"domain": ["data"]}),
             document_store=document_store,
+            vector_store=None,
         )
         meta = document_store.get("d1")["metadata"]
         for key in PROTECTED_LIVE_KEYS:
@@ -218,6 +228,7 @@ class TestShadowIsInvisibleToRetrieval:
                 }
             ),
             document_store=document_store,
+            vector_store=None,
         )
         # Confirm the shadow record really is on the row we are about to serve.
         assert SHADOW_TAGS_KEY in document_store.get("d1")["metadata"]
@@ -260,6 +271,7 @@ class TestShadowIsInvisibleToRetrieval:
         shadow_classify_stale(
             classifier=FakeClassifier({"domain": ["x"], "content_type": ["notes"]}),
             document_store=document_store,
+            vector_store=None,
         )
         after = document_store.get("aged")
 
@@ -289,6 +301,7 @@ class TestShadowIsInvisibleToRetrieval:
             "d1",
             classifier=FakeClassifier({"domain": ["infrastructure"]}),
             document_store=document_store,
+            vector_store=None,
         )
         # Scoped to a domain the *shadow* claims: the document still passes
         # only via the default-pass rule for its empty live domain, exactly as
@@ -329,6 +342,7 @@ class TestShadowRecord:
             "d1",
             classifier=FakeClassifier({"content_type": ["reference"]}),
             document_store=document_store,
+            vector_store=None,
         )
         assert outcome.shadow is not None
         assert outcome.shadow["content_type"] == "reference"
@@ -341,6 +355,7 @@ class TestShadowRecord:
             "d1",
             classifier=FakeClassifier({"domain": ["x"]}, confidence=0.75),
             document_store=document_store,
+            vector_store=None,
             model_id="hermes3:8b",
         )
         record = ShadowTags.model_validate(
@@ -370,6 +385,7 @@ class TestShadowRecord:
                 }
             ),
             document_store=document_store,
+            vector_store=None,
         )
         record = ShadowTags.model_validate(
             document_store.get("d1")["metadata"][SHADOW_TAGS_KEY]
@@ -395,6 +411,7 @@ class TestShadowRecord:
                 {"_auto_importance": ["0.8"], "_auto_summary": ["a summary"]}
             ),
             document_store=document_store,
+            vector_store=None,
             event_log=event_log,
         )
         assert outcome.written is False
@@ -411,9 +428,13 @@ class TestShadowRecord:
         """No record written means the next pass tries again, as it should."""
         _seed(document_store, "d1", "content", metadata={})
         empty = FakeClassifier({"_auto_summary": ["s"]})
-        shadow_classify_stale(classifier=empty, document_store=document_store)
+        shadow_classify_stale(
+            classifier=empty, document_store=document_store, vector_store=None
+        )
         assert len(empty.calls) == 1
-        shadow_classify_stale(classifier=empty, document_store=document_store)
+        shadow_classify_stale(
+            classifier=empty, document_store=document_store, vector_store=None
+        )
         assert len(empty.calls) == 2, "a no-signal document is not marked judged"
 
     def test_dry_run_persists_nothing(
@@ -424,6 +445,7 @@ class TestShadowRecord:
             "d1",
             classifier=FakeClassifier({"domain": ["x"]}),
             document_store=document_store,
+            vector_store=None,
             event_log=event_log,
             dry_run=True,
         )
@@ -437,6 +459,7 @@ class TestShadowRecord:
             "nope",
             classifier=FakeClassifier({"domain": ["x"]}),
             document_store=document_store,
+            vector_store=None,
         )
         assert outcome.written is False
         assert outcome.shadow is None
@@ -462,6 +485,7 @@ class TestJudgedEvent:
                 }
             ),
             document_store=document_store,
+            vector_store=None,
             event_log=event_log,
             model_id="hermes3:8b",
         )
@@ -491,6 +515,7 @@ class TestJudgedEvent:
                 {"domain": ["yellowstone-national-park"], "content_type": ["journal"]}
             ),
             document_store=document_store,
+            vector_store=None,
             event_log=event_log,
         )
         raw = json.dumps(
@@ -509,6 +534,7 @@ class TestJudgedEvent:
             "d1",
             classifier=FakeClassifier({}),
             document_store=document_store,
+            vector_store=None,
             event_log=event_log,
         )
         assert outcome.written is False
@@ -530,6 +556,7 @@ class TestJudgedEvent:
             "d1",
             classifier=FakeClassifier({"domain": ["x"]}),
             document_store=document_store,
+            vector_store=None,
             event_log=BrokenLog(),  # type: ignore[arg-type]
         )
         assert outcome.written is True
@@ -550,6 +577,7 @@ class TestBatchPass:
         result = shadow_classify_stale(
             classifier=FakeClassifier({"domain": ["x"]}),
             document_store=document_store,
+            vector_store=None,
         )
         assert result.scanned == 3
         assert result.written == 3
@@ -565,11 +593,13 @@ class TestBatchPass:
         """
         _seed(document_store, "d1", "content", metadata={})
         classifier = FakeClassifier({"domain": ["x"]})
-        shadow_classify_stale(classifier=classifier, document_store=document_store)
+        shadow_classify_stale(
+            classifier=classifier, document_store=document_store, vector_store=None
+        )
         assert len(classifier.calls) == 1
 
         result = shadow_classify_stale(
-            classifier=classifier, document_store=document_store
+            classifier=classifier, document_store=document_store, vector_store=None
         )
         assert result.written == 0
         assert result.skipped_fresh == 1
@@ -587,6 +617,7 @@ class TestBatchPass:
         result = shadow_classify_stale(
             classifier=FakeClassifier({"domain": ["fresh"]}),
             document_store=document_store,
+            vector_store=None,
             max_age_days=30,
         )
         assert result.written == 1
@@ -600,6 +631,7 @@ class TestBatchPass:
         result = shadow_classify_stale(
             classifier=FakeClassifier({"domain": ["x"]}),
             document_store=document_store,
+            vector_store=None,
         )
         assert result.written == 1
 
@@ -608,6 +640,7 @@ class TestBatchPass:
         result = shadow_classify_stale(
             classifier=FakeClassifier({"domain": ["x"]}),
             document_store=document_store,
+            vector_store=None,
         )
         assert result.skipped_missing_content == 1
         assert result.written == 0
@@ -637,6 +670,7 @@ class TestBatchPass:
         result = shadow_classify_stale(
             classifier=FlakyClassifier({"domain": ["x"]}),
             document_store=document_store,
+            vector_store=None,
         )
         assert result.errors == 1
         assert result.written == 2
@@ -648,6 +682,7 @@ class TestBatchPass:
         result = shadow_classify_stale(
             classifier=FakeClassifier({"domain": ["x"]}),
             document_store=document_store,
+            vector_store=None,
             limit=2,
             page_size=1,
         )
@@ -661,6 +696,7 @@ class TestBatchPass:
         result = shadow_classify_stale(
             classifier=FakeClassifier({"domain": ["x"]}),
             document_store=document_store,
+            vector_store=None,
             dry_run=True,
         )
         assert result.written == 1
@@ -912,6 +948,7 @@ class TestVocabularySeam:
             "d1",
             classifier=FakeClassifier(self._real_llm_facet_tags()),
             document_store=document_store,
+            vector_store=None,
             event_log=event_log,
             model_id="hermes3:8b",
         )
@@ -1032,6 +1069,7 @@ class TestShadowSurvivesAConcurrentWrite:
             "d1",
             classifier=RacingClassifier(concurrent_write, tags=self._TAGS),
             document_store=document_store,
+            vector_store=None,
         )
 
         assert outcome.written is True
@@ -1064,6 +1102,7 @@ class TestShadowSurvivesAConcurrentWrite:
             "d1",
             classifier=RacingClassifier(concurrent_tag_write, tags=self._TAGS),
             document_store=document_store,
+            vector_store=None,
         )
 
         live = document_store.get("d1")["metadata"]["content_tags"]
@@ -1079,6 +1118,7 @@ class TestShadowSurvivesAConcurrentWrite:
                 lambda: document_store.put("d1", "rewritten", {}), tags=self._TAGS
             ),
             document_store=document_store,
+            vector_store=None,
         )
         assert outcome.stale_snapshot is True
 
@@ -1088,6 +1128,7 @@ class TestShadowSurvivesAConcurrentWrite:
                 lambda: document_store.put("d2", "rewritten", {}), tags=self._TAGS
             ),
             document_store=document_store,
+            vector_store=None,
         )
         assert result.stale_snapshot == 1
         assert result.written == 1
@@ -1101,13 +1142,16 @@ class TestShadowSurvivesAConcurrentWrite:
             "d1",
             classifier=FakeClassifier(self._TAGS),
             document_store=document_store,
+            vector_store=None,
         )
         assert outcome.written is True
         assert outcome.stale_snapshot is False
 
         _seed(document_store, "d2", "body")
         result = shadow_classify_stale(
-            classifier=FakeClassifier(self._TAGS), document_store=document_store
+            classifier=FakeClassifier(self._TAGS),
+            document_store=document_store,
+            vector_store=None,
         )
         assert result.stale_snapshot == 0
 
@@ -1128,6 +1172,7 @@ class TestShadowSurvivesAConcurrentWrite:
                 lambda: document_store.delete("d1"), tags=self._TAGS
             ),
             document_store=document_store,
+            vector_store=None,
             event_log=event_log,
         )
 
@@ -1159,5 +1204,114 @@ class TestShadowSurvivesAConcurrentWrite:
             "d1",
             classifier=FakeClassifier(self._TAGS),
             document_store=document_store,
+            vector_store=None,
         )
         assert document_store.get("d1")["updated_at"] == before
+
+
+# ---------------------------------------------------------------------------
+# The write goes through the document/vector seam (#360)
+# ---------------------------------------------------------------------------
+
+
+class TestShadowWriteMirrorsThroughTheSeam:
+    """What a shadow write does to the vector row, and what it must not.
+
+    The store API has no partial update, so ``_write_shadow`` re-reads the
+    row and puts the **whole** metadata bag back. That makes the shadow pass
+    an ordinary document write, and #360 routes every one of those through
+    :func:`~trellis.core.document_write.put_document`. Both halves of what
+    that means are worth pinning, because they pull in opposite directions.
+    """
+
+    _TAGS: ClassVar[dict[str, list[str]]] = {
+        "domain": ["warehouse"],
+        "content_type": ["reference"],
+    }
+
+    def test_a_diverged_vector_row_is_repaired_by_a_shadow_pass(
+        self, document_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> None:
+        """The seam mirrors the live keys the bag carries, not the shadow key.
+
+        This is #338's divergence — a vector row holding the metadata it was
+        embedded with, which a later document write never reached. The shadow
+        pass writes no live key at all; it repairs the row anyway, because
+        what goes through the seam is the whole bag.
+        """
+        live = {"signal_quality": "noise", "domain": ["warehouse"]}
+        _seed(
+            document_store,
+            "d1",
+            "dbt models run nightly in the warehouse",
+            metadata={"content_tags": live, "auto_importance": 0.42},
+        )
+        # The row as it was embedded, before the noise tag was applied.
+        vector_store.upsert(
+            "d1",
+            [0.1, 0.2, 0.3],
+            {
+                "doc_id": "d1",
+                "content_tags": {"signal_quality": "standard"},
+                "auto_importance": 0.9,
+            },
+        )
+
+        outcome = shadow_classify_item(
+            "d1",
+            classifier=FakeClassifier(self._TAGS),
+            document_store=document_store,
+            vector_store=vector_store,
+        )
+
+        assert outcome.written is True
+        row_metadata = vector_store.get("d1")["metadata"]
+        assert row_metadata["content_tags"] == live
+        assert row_metadata["auto_importance"] == 0.42
+
+    def test_the_shadow_key_never_reaches_the_vector_row(
+        self, document_store: SQLiteDocumentStore, vector_store: SQLiteVectorStore
+    ) -> None:
+        """The leak the seam would open if the mirror copied the bag wholesale.
+
+        ``SemanticSearch`` builds its ``PackItem`` from the vector row's
+        metadata snapshot rather than from the document, so a shadow value on
+        that row is a shadow value one strip away from a served pack — the
+        same shape as #338 aimed the other way. The mirror is keyed on
+        :data:`~trellis.core.vector_metadata.MIRRORED_METADATA_KEYS`, so the
+        guarantee is structural rather than a second strip step.
+        """
+        _seed(document_store, "d1", "dbt models run nightly", metadata={})
+        vector_store.upsert("d1", [0.1, 0.2, 0.3], {"doc_id": "d1"})
+
+        shadow_classify_item(
+            "d1",
+            classifier=FakeClassifier(self._TAGS),
+            document_store=document_store,
+            vector_store=vector_store,
+        )
+
+        assert SHADOW_TAGS_KEY in document_store.get("d1")["metadata"]
+        assert SHADOW_TAGS_KEY not in vector_store.get("d1")["metadata"]
+
+    def test_a_deployment_without_a_vector_store_still_shadows(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """``None`` is a supported value, which is why it must be passed.
+
+        The document store is the authority; a deployment with no vector
+        store must still be able to accrue the shadow corpus. A *default* of
+        ``None`` is what this rules out, not the value itself — it would make
+        "this deployment has none" and "the caller forgot" the same call site.
+        """
+        _seed(document_store, "d1", "dbt models run nightly", metadata={})
+
+        outcome = shadow_classify_item(
+            "d1",
+            classifier=FakeClassifier(self._TAGS),
+            document_store=document_store,
+            vector_store=None,
+        )
+
+        assert outcome.written is True
+        assert SHADOW_TAGS_KEY in document_store.get("d1")["metadata"]

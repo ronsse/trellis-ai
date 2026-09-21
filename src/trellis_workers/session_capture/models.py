@@ -21,10 +21,33 @@ class ToolCall:
     and tool *outputs* (``op read`` results, env dumps) are deliberately
     excluded from the digest: only the tool name and whether its result
     errored survive parsing, so no raw tool payload can reach the distiller.
+
+    ``is_error`` is set by :meth:`SessionDigest.mark_tool_result`, which
+    joins a ``tool_result`` block back to the ``tool_use`` it answers on
+    ``tool_use_id``. It was declared and documented here from the start and
+    **written by nothing** until #306: the flag was read off the result and
+    folded straight into the session-level :attr:`SessionDigest.has_error`,
+    so per-call attribution was parsed and then discarded. Measured on the
+    live corpus at the time: 1,397 errored results across 308 of 451
+    sessions, all of it reaching the judge as one boolean.
     """
 
     name: str
     is_error: bool = False
+
+
+@dataclass(frozen=True)
+class ToolUseRollup:
+    """How often one tool was called in a session, and how often it errored.
+
+    The unit the distiller prompt renders. Deliberately counts and nothing
+    else — a rollup carries no argument, no path, no output, so it inherits
+    :class:`ToolCall`'s guarantee rather than reopening it.
+    """
+
+    name: str
+    calls: int
+    errors: int = 0
 
 
 #: Turn roles, used as the ``salient_text`` speaker labels.
@@ -69,6 +92,14 @@ class SessionDigest:
     #: ``user_texts`` / ``assistant_texts`` are role-filtered views of this.
     turns: list[Turn] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
+
+    #: ``tool_use_id`` -> the call it identifies, for the ``tool_result``
+    #: join. Parse-time scaffolding, not part of the digest's contract: it
+    #: is excluded from ``repr`` and ``==`` so a digest still compares by
+    #: the facts it carries.
+    _calls_by_use_id: dict[str, ToolCall] = field(
+        default_factory=dict, repr=False, compare=False
+    )
     has_error: bool = False
     has_correction: bool = False
     #: ``True`` when every recovered turn came from sub-agent records — a
@@ -80,6 +111,61 @@ class SessionDigest:
     def add_turn(self, role: str, text: str, *, sidechain: bool = False) -> None:
         """Append one turn, preserving transcript order."""
         self.turns.append(Turn(role=role, text=text, sidechain=sidechain))
+
+    def record_tool_use(self, name: str, use_id: str | None = None) -> None:
+        """Append one ``tool_use``, indexed by ``use_id`` when it has one.
+
+        The index is what lets :meth:`mark_tool_result` attribute a failure
+        to the call it answers. A call with no usable id is still recorded —
+        it just cannot be marked, which is the honest outcome rather than a
+        dropped call.
+        """
+        call = ToolCall(name=name)
+        self.tool_calls.append(call)
+        if use_id:
+            self._calls_by_use_id[use_id] = call
+
+    def mark_tool_result(self, use_id: str | None, *, errored: bool) -> None:
+        """Attribute one ``tool_result`` back to its ``tool_use``.
+
+        Only failures are recorded, because only failures are asked for: a
+        rollup reports calls and errors, and "not errored" is the difference.
+
+        An unresolvable ``use_id`` — absent, or answering a call this file
+        never held because a compaction boundary or a truncated write cut it
+        away — marks nothing and is **not** treated as an error in the
+        parse. What it must not do is narrow :attr:`has_error`, which is set
+        by the caller on *any* errored result whether or not this join
+        resolves. Routing an existing session-level gate through a new join
+        is how a fix quietly removes coverage, so the two are kept
+        independent and
+        ``tests/unit/workers/session_capture/test_transcripts.py`` pins it.
+        """
+        if not errored:
+            return
+        call = self._calls_by_use_id.get(use_id or "")
+        if call is not None:
+            call.is_error = True
+
+    @property
+    def tool_rollup(self) -> list[ToolUseRollup]:
+        """Per-tool call and error counts, busiest first.
+
+        Ordered by calls descending then name ascending, so the same digest
+        always renders the same string — the prompt is an LLM input and a
+        set's iteration order would make two identical sessions two
+        different requests.
+        """
+        calls: dict[str, int] = {}
+        errors: dict[str, int] = {}
+        for call in self.tool_calls:
+            calls[call.name] = calls.get(call.name, 0) + 1
+            if call.is_error:
+                errors[call.name] = errors.get(call.name, 0) + 1
+        return [
+            ToolUseRollup(name=name, calls=count, errors=errors.get(name, 0))
+            for name, count in sorted(calls.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
 
     def resolve_thread(self) -> None:
         """Decide which turns are *this transcript's* conversation.
