@@ -78,10 +78,14 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.document_write import put_document
+from trellis.core.vector_metadata import VectorSyncOutcome
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from trellis.stores.base.document import DocumentStore
+    from trellis.stores.base.vector import VectorStore
 
 logger = structlog.get_logger(__name__)
 
@@ -105,10 +109,16 @@ class DerivedMetadataWrite:
     #: passed no ``snapshot_content`` to compare against.
     content_changed: bool = False
     #: The metadata bag as written — the merge result, not the caller's
-    #: updates. ``None`` when nothing was written. Callers that mirror the
-    #: write elsewhere (``sync_vector_metadata``) must forward *this*, not
-    #: the snapshot bag they started from.
+    #: updates. ``None`` when nothing was written. The vector mirror is no
+    #: longer the caller's job (it happens inside, off this same bag), so
+    #: this is telemetry rather than the input to a second write — but a
+    #: caller reporting what landed still wants the merge result, never the
+    #: snapshot bag it started from.
     metadata: dict[str, Any] | None = None
+    #: What the vector mirror did, from the same
+    #: :func:`~trellis.core.document_write.put_document` call that wrote the
+    #: row. ``None`` when nothing was written.
+    mirror: VectorSyncOutcome | None = None
 
 
 def apply_derived_metadata(
@@ -116,6 +126,7 @@ def apply_derived_metadata(
     doc_id: str,
     build_updates: Callable[[dict[str, Any]], Mapping[str, Any]],
     *,
+    vector_store: VectorStore | None,
     snapshot_content: str | None = None,
 ) -> DerivedMetadataWrite:
     """Merge derived metadata onto a row's **current** content and metadata.
@@ -169,10 +180,13 @@ def apply_derived_metadata(
         )
 
     merged = {**metadata, **build_updates(metadata)}
-    document_store.put(doc_id, content, merged, preserve_updated_at=True)
+    write = put_document(
+        document_store, vector_store, doc_id, content, merged, preserve_updated_at=True
+    )
     return DerivedMetadataWrite(
         doc_id=doc_id,
         written=True,
         content_changed=content_changed,
         metadata=merged,
+        mirror=write.mirror,
     )
