@@ -305,3 +305,54 @@ replaces the bullet with something derived from the workflow files instead of tr
 into prose. Once it has landed, keep-`main` becomes correct, because `main`'s bullet is
 then #583's derived one. The policy was right about the mechanism and wrong about when it
 starts applying.
+
+## 9. The drain halted on a flake, and the halt could not have cleared
+
+At `f7247d95` (the #587 merge) `live-infra` on `main` went red and `drain.sh`
+stopped with `exit 9`, one PR (#583) unmerged. The failure:
+
+```
+FAILED tests/unit/stores/contracts/test_arcadedb_graph_contract.py::
+       TestArcadeDBGraphContract::test_bind_alias_serializes_concurrent_stale_owner_replacement
+  neo4j.exceptions.DatabaseError: {neo4j_code: Neo.DatabaseError.General.UnknownError}
+  {message: Error executing Cypher command:
+      MATCH (a:Alias {source_system: $src, raw_id: $rid})
+      WHERE a.valid_to IS NULL SET a.valid_to = $now}
+  {gql_status: 50N42}
+1 failed, 856 passed, 1 skipped in 114.74s
+```
+
+### 9.1 It is a flake, and the evidence is structural rather than statistical
+
+| Question | Answer |
+|---|---|
+| Does main's **current tip** pass? | `7b5845ef` — **success**, 857 passed. It *contains* `f7247d95`, so a regression there would reproduce. |
+| Did #587 touch the failing area? | No. Its five files are `mcp/server.py`, `mutate/executor.py` and three tests. Nothing ArcadeDB, nothing alias, nothing graph. |
+| Has it happened before this drain? | Yes — 2 failures in 40 `live-infra` runs on `main`, and the other (run `34289032492`) predates the drain entirely. |
+| Same defect both times? | Same *family*, different test: the other was `test_bind_alias_if_absent_is_atomic_for_concurrent_contenders`. Both are alias-race tests on the same error channel. |
+
+The mechanism is documented in the code that fails. `ArcadeDBGraphStore._is_alias_write_contention`
+widens the retry predicate over `Neo.DatabaseError.General.UnknownError`, and its
+own comment states why that is hard: the code is *the generic bucket unrelated
+failures land in — so the message is the only discriminator available*. The
+predicate therefore keys on a **message regex**, `Record #\d+:\d+ not found`. Any
+stale-record wording ArcadeDB emits that the regex does not match escapes the
+retry envelope and surfaces as a fatal error. That is a residual gap in a
+message-shaped guard, not a regression, and it is not in scope for a merge pass.
+
+### 9.2 The halt condition had the #461 defect — a banner that cannot clear
+
+`drain.sh` asked *"is there any failed run in main's last 40?"*. That is
+window-scoped, so the first flake pins it permanently: every subsequent round
+re-reads the same historical failure and halts again, no matter how many green
+commits land on top. `CLAUDE.md` records exactly this shape for the capture-health
+banner (#461) — **a banner must be able to clear** — and the same defect was sitting
+in the tool I wrote to watch for it.
+
+The check now resolves `git ls-remote origin main` and asks whether **that sha**
+has a failed run. This is self-correcting in the direction that matters: a real
+regression is inherited by every subsequent tip and keeps halting, while a flake
+is superseded by the next green merge. The weaker property — a tip whose runs have
+not concluded yet reads as non-failing — is deliberate, because the primary gate is
+per-PR (10/10 SUCCESS on a branch updated to current `main`) and the main-push run
+is a backstop, not the gate.
