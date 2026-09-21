@@ -17,6 +17,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from trellis.errors import BackendNotInstalledError
+from trellis.llm.routing import LLMConsumer, LLMRoutingError
+from trellis.stores.registry import StoreRegistry
 from trellis_workers.session_capture import sweep as capture_sweep
 from trellis_workers.session_capture.models import CaptureReport
 
@@ -88,6 +90,35 @@ class TestBuildJudgeClient:
             capture_sweep.build_judge_client(registry)
         assert "openai" in str(exc.value)
         assert "llm-openai" in str(exc.value)
+
+    def test_the_judge_is_built_for_the_session_capture_consumer(
+        self, registry
+    ) -> None:
+        capture_sweep.build_judge_client(registry)
+        registry.build_llm_client.assert_called_once_with(
+            consumer=LLMConsumer.SESSION_CAPTURE
+        )
+
+    def test_a_malformed_route_is_unavailable_and_names_the_setting(
+        self, tmp_path
+    ) -> None:
+        """A routing defect fails the sweep like any unbuildable judge.
+
+        Built through a real registry so the error is the resolver's own,
+        and the operator reads which YAML key to fix.
+        """
+        registry = StoreRegistry(
+            stores_dir=tmp_path,
+            llm_config={
+                "provider": "openai",
+                "api_key_env": "OPENAI_API_KEY",
+                "routes": {"session_capture": "deep"},
+            },
+        )
+        with pytest.raises(capture_sweep.CaptureJudgeUnavailableError) as exc:
+            capture_sweep.build_judge_client(registry)
+        assert isinstance(exc.value.__cause__, LLMRoutingError)
+        assert "llm.routes.session_capture names tier 'deep'" in str(exc.value)
 
 
 class TestJudgeUnavailableSessions:

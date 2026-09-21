@@ -1251,6 +1251,10 @@ Show what memory already holds about specific files — the shell-callable surfa
 
 A **single-segment** stored value matches by equality only. `README.md` / `TODO.md` sit at the root of the vault and of every repo, so treating a bare basename as a suffix would answer a read of one project's file with another's notes.
 
+**Two keys are matched, and each entry says which one hit** (#549). `source_path` is a self-description — *this is that file*. A trace summary's is `trace/<id>`, a namespace rather than a repo path, so no path rule could ever reach the records of work done *on* a file; `metadata.files_touched` — the repo paths a trace's tool calls demonstrably modified — is therefore matched too, by the same rule per member. Every document entry carries `matched_via` (`"source_path"` | `"files_touched"`), unconditionally and on both branches, and `source_path` wins when a document satisfies both. The text renderer annotates a `files_touched` hit as *record of changing this file*; parse the key, not the sentence.
+
+Only the attested key is read. `files_touched` is the evidence-only half of #308's deterministic override, so a model's *claim* about what it edited lives under `files_touched_unverified` and is deliberately never matched — a file join is where an unattested claim would do the most damage.
+
 ```bash
 trellis retrieve file-context <path> [<path>...] [--include-unconfirmed] [--format text|json|jsonl] [--quiet]
 ```
@@ -1280,7 +1284,8 @@ Batch the paths into one call — the lookup scans the document store once per c
           "title": "Pack builder notes",
           "excerpt": "Gotcha: the two-stage budget truncates before scoring.",
           "created_at": "2026-08-01T09:12:00+00:00",
-          "updated_at": "2026-08-14T10:00:00+00:00"
+          "updated_at": "2026-08-14T10:00:00+00:00",
+          "matched_via": "source_path"
         }
       ],
       "entities": [
@@ -1326,6 +1331,22 @@ trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--ma
 | `--format` | No | `text` | Output format |
 
 **`--include-chunks` was removed by #410, not inverted.** #396 classified this command as a whole-row surface *because* it bypassed `PackBuilder`; on a pack surface the `<parent>#chunk-N` row is the retrievable unit and its excerpt is what the token budget prices, so suppressing chunks here would make the preview diverge from the agent-facing path in the opposite direction. `retrieve search` keeps the flag and its default.
+
+**What `--quiet` actually prints, measured ([#494](https://github.com/ronsse/trellis-ai/issues/494)).** One `item_id` per line for every item in the pack — and since #410 that population is the *pack's*, not the document store's. Before #410 this command called `DocumentStore.search(..., include_chunks=False)` and `--quiet` printed whole-document ids only. The shape did not change and the contents did. Replayed over the 85 distinct intents this deployment has assembled packs for, with the shipped `build_pack_builder` wiring and the command's own defaults (4,250 lines, every pack saturating `--max-items 50`, all three axes running on all 85):
+
+| Property | Measured |
+|---|---|
+| `item_type` | `vector` 42.7%, `document` 37.9%, `entity` 19.5% |
+| `<parent>#chunk-N` fragments | **18.5%** of lines, in **75 of 85 packs** (median 20% of a pack, max 46%) |
+| Resolves in the document store | 80.5% |
+| Resolves in the knowledge graph | 19.5% |
+| Resolves nowhere | 1 line of 4,250 |
+
+**The stream is two id namespaces interleaved, and no prefix rule separates them.** `item_type` is not a namespace label — `vector` is the semantic axis's name for its own rows, and all 1,813 of them resolve in the *document* store. What actually splits is document-vs-graph, and the two prefix vocabularies overlap: document ids ran `capture:` 522, `conversation:` 424, bare 113, `corpus:` 14, `kb:` 1, while graph ids ran bare 7 and `trace:` 7. A bare id can be either. The consumers disagree about whether that matters: MCP `get_items` is type-agnostic and resolves ids against the document store, the graph and the trace store in one call, while REST is type-split (`GET /api/v1/documents/{doc_id:path}` vs `GET /api/v1/entities/{entity_id:path}`) and needs the caller to know which. **No CLI command consumes a document id at all** — an AST sweep of every `typer` command parameter in `src/trellis_cli/` finds `trace_id`, `entity_id`/`source_id`/`target_id` (entity or node, never a document), archived `item_id` from the `RETENTION_PRUNED` payload, plus `key_id` / `policy_id` / `proposal_id` / `candidate_id` / `component_id`, and nothing that takes a `doc_id`. The only command that can consume a `--quiet` line is `trellis retrieve entity`, which takes exactly the 19.5% entity minority.
+
+**A chunk id is not URL-safe, and the failure is silent.** `#` appears in 18.5% of lines and is a URL fragment delimiter, so an unencoded id pasted into `GET /api/v1/documents/…` is truncated at the `#` by the *client* before the request leaves. Verified against this deployment: the raw form returned **HTTP 200 with the parent document** — a different document, reported as success — and only `%23` returned the chunk. Percent-encode the id, or use MCP `get_items`, which takes ids as JSON values and never routes them through a URL. `:` appears in 78.9% of lines and is safe in a path segment; `/` and whitespace appear in none.
+
+**`--quiet` means a different population on `retrieve search`.** Same flag, same one-id-per-line shape, and `search` excludes `<parent>#chunk-N` rows by pushing the exclusion into the store — so its line count refills with whole documents rather than shrinking. Pipelines that consume both surfaces cannot assume one id vocabulary.
 
 **The semantic axis is reported, not assumed.** `build_strategies` adds it only when an embedder resolves, and drops it with an `info` log line the CLI's `WARNING` default never prints. The `axes` block says which of four things happened:
 
@@ -1383,6 +1404,10 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
 > with `items` a flat list of **doc-id strings**. `items` is now a list of
 > **pack-item objects**; scripts reading ids want `[i["item_id"] for i in items]`,
 > or `--quiet` without `--format json`, which still prints one id per line.
+> **`--quiet`'s shape survived that change and its population did not** — the
+> ids are now the pack's items, so chunk fragments and entity ids appear where
+> only whole-document ids used to. See *What `--quiet` actually prints* above
+> before treating an existing pipeline as unaffected.
 
 > **`--format json` is safe on its own** — the Rich mangling described under
 > `retrieve search` above is fixed ([#403](https://github.com/ronsse/trellis-ai/issues/403)),
@@ -1696,6 +1721,36 @@ at `--model local` → $0.
 ```json
 {"period_days": 7, "overhead_events": 28, "overhead_tokens": 34800, "model": "claude-opus", "price_per_mtok": 5.0, "price_source": "model_table", "overhead_dollars": 0.174, "by_operation": [{"operation": "get_context", "layer": "mcp", "calls": 20, "tokens": 30000, "dollars": 0.15}], "estimator": "estimate_4_chars_per_token"}
 ```
+
+### `trellis analyze judged-outcomes`
+
+Read-only join from each judged memory operation to what followed it.
+`MEMORY_OP_JUDGED` records the system's own decision (a classification label, a
+distillation `keep` or `discard`); this follows its `subject_ref.ref_id` into the
+packs that later served that memory (`PACK_ASSEMBLED.injected_items[]`) and the
+per-item verdicts graders gave those packs (`FEEDBACK_RECORDED`).
+
+```bash
+trellis analyze judged-outcomes [--days N] [--limit N] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--days` | `30` | Days of history to analyze, for all three event types |
+| `--limit` | `5000` | Max events scanned per event type |
+
+Each judged row lands on one rung — `never_served`, `served_ungraded`,
+`graded_uncited`, `cited_unhelpful`, `cited_helpful`, or `unservable` for a
+subject no pack can serve (a distillation `discard` refs a session) — reported
+per `op_type` × `decision`. Only servings at or after the judgment count; the
+`*_any_order` fields drop that constraint. A document subject also matches its
+own `<id>#chunk-N` servings, while a chunk subject matches only itself.
+
+The **Phase 1 gate** asks for more than 500 graded rows per 30 days, where graded
+means joined to an outcome. `gate_verdict` is decided on rows cited after their
+judgment; `gate_readings` lists every looser reading, so `fails_strict_reading`
+means a looser count would have passed. When a scan truncates, rows older than
+the evidence start are dropped and rates use the covered window.
 
 ### `trellis analyze domains`
 
@@ -2137,7 +2192,7 @@ Start with `trellis-mcp`. 16 tools returning token-budgeted markdown — 10 core
 | `get_items` | `item_ids`, `pack_id?`, `max_tokens?` | Markdown bodies for known ids (max 50), resolved against the document store, the graph, then the trace store. Items over budget are omitted whole with their ids listed for a follow-up call — never truncated; unknown ids are listed as not found. Emits `PACK_ITEMS_FETCHED` with the served ids; pass the `pack_id` that surfaced them to keep the fetch attributable. |
 | `record_feedback` | `trace_id?`, `pack_id?`, `success?`, `rating?`, `notes?`, `helpful_item_ids?`, `unhelpful_item_ids?`, `followed_advisory_ids?` | Confirmation |
 | `search` | `query`, `limit?`, `max_tokens?`, `index?` | Markdown search results |
-| `get_file_context` | `paths`, `include_unconfirmed?`, `max_tokens?` | Markdown context per file path (#307): documents whose `metadata.source_path` names the path (exact, or a `/`-boundary suffix match so absolute paths find stored relpaths) plus graph entities doc-linked to them. Every item carries store timestamps and each path a `Newest memory` line so a client can staleness-gate against the file's mtime. Unconfirmed extraction mints are excluded unless `include_unconfirmed=true` (#301). |
+| `get_file_context` | `paths`, `include_unconfirmed?`, `max_tokens?` | Markdown context per file path (#307): documents that name the path — as their own `metadata.source_path` (exact, or a `/`-boundary suffix match so absolute paths find stored relpaths) **or** as a member of `metadata.files_touched`, the repo paths a trace's tool calls demonstrably modified (#549) — plus graph entities doc-linked to them. Each document reports `matched_via`, and a `files_touched` hit renders annotated: a record of *changing* the file is a different claim from the file's own documentation. Every item carries store timestamps and each path a `Newest memory` line so a client can staleness-gate against the file's mtime. Unconfirmed extraction mints are excluded unless `include_unconfirmed=true` (#301). |
 
 **Sectioned-context tools (deprecated aliases — #262)**
 

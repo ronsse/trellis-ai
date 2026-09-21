@@ -642,6 +642,98 @@ llm:
 
 **Fallback behavior worth knowing.** If both `api_key_env` and `api_key` are set and the referenced env var is **unset**, the literal `api_key` value is used as a fallback. This is deliberate — it lets operators set a safe default in config while allowing per-shell override via env — but it can surprise someone debugging "why is my staging key being used?" Set `api_key_env` alone (no literal) if you want env-only resolution with a hard failure when the env var is missing.
 
+### Routing a consumer to its own tier
+
+One `llm:` block means every LLM caller shares one provider, one model and one
+bill. `llm.tiers` names alternative blocks and `llm.routes` assigns a **consumer**
+to one of them, so reconciliation can run on a thinking model while session
+capture runs on something cheap:
+
+```yaml
+llm:
+  provider: openai
+  api_key_env: OPENAI_API_KEY
+  base_url: http://localhost:4000/v1   # a router in front of several models
+  model: bulk
+
+  tiers:
+    deep:
+      model: deep                      # inherits provider/base_url/key above
+    local:
+      provider: openai                 # OpenAI-compatible, different endpoint
+      base_url: http://localhost:11434/v1
+      api_key: ollama                  # its own credential unit (see below)
+      model: hermes3:8b
+
+  routes:
+    reconcile: deep
+    precedent_mining: deep
+    session_capture: local
+    classify_shadow: local
+```
+
+The consumers are `memory_extraction`, `session_capture`, `classify_shadow`,
+`enrichment`, `precedent_mining` and `reconcile` — `LLMConsumer` in
+[`llm/routing.py`](../../src/trellis/llm/routing.py). A consumer with no route
+builds from the parent block exactly as it did before tiers existed, so adding
+`tiers:`/`routes:` to a working config changes nothing until a route names a
+consumer.
+
+Four rules decide what a routed consumer actually gets, and each of them exists
+because the alternative fails silently:
+
+- **`provider`, `base_url` and `model` are taken from the tier when it sets them,
+  and from the parent when it does not.** That is what makes a one-line tier
+  (`deep: {model: deep}`) useful against a router.
+- **Credentials move as a unit.** If the tier body carries *any* credential key
+  (`api_key_env`, `api_key`), the tier supplies **all** of them and the parent's
+  are not consulted; if it carries none, the parent's are used whole. A tier
+  cannot inherit `api_key_env` from the parent and override `api_key` itself —
+  that mixture resolves to whichever the parent's fallback chain picks, which is
+  the "why is my staging key being used?" surprise one layer deeper.
+- **A tier that changes `provider` must set its own `base_url`.** Inheriting the
+  parent's endpoint under a different provider is a validation error rather than
+  a request posted to the wrong API.
+- **A routed consumer never falls back to the parent.** If its tier cannot build
+  a client, the caller gets `None` and a `llm_client_routed_tier_unbuildable`
+  warning naming the tier. Falling back would run the expensive consumer on the
+  cheap block and report success.
+
+`validate_llm_routing` checks the **whole** block on every resolve, not just the
+route being asked for, so a typo in a route nobody has exercised yet surfaces on
+the first build rather than the first use. A malformed block raises
+`LLMRoutingError`, which is a `ConfigError`: every CLI command exits
+`EXIT_STORE` (5) on it, on both `--format` arms.
+
+**`TRELLIS_RECONCILE_MODEL` does not select the reconcile model.** It is a label
+written into the `MEMORY_OP_JUDGED` payload and nothing else — `configured_model_id()`
+feeds the event, not the client. The model the reconcile judge actually calls
+comes from `llm.routes.reconcile` (or the parent block when unrouted). The two
+can disagree, and until a route exists the label is the only thing that ever
+looked like a model selector, which is why this reads as a correction rather than
+a note.
+
+### Verification via `trellis admin llm-routes`
+
+`trellis admin llm-routes` resolves all six consumers **without building a
+client** — no key is read, no network call is made — and says where each one's
+credential would come from:
+
+```
+$ trellis admin llm-routes
+
+                                  LLM routes
+ Consumer          Tier       Provider  Model        Base URL                  Key
+ memory_extraction (parent)   openai    bulk         http://localhost:4000/v1  env (OPENAI_API_KEY)
+ session_capture   local      openai    hermes3:8b   http://localhost:11434/v1 literal
+ reconcile         deep       openai    deep         http://localhost:4000/v1  env (OPENAI_API_KEY)
+```
+
+`credential_source` is `env`, `literal` or `none`; the key itself is never
+printed, and any `user:password@` part of a `base_url` is masked — a URL is the
+one other field a credential can hide in. Exit code is `EXIT_OK` when the block
+resolves and `EXIT_STORE` when it does not, on either format.
+
 ### Verification via `trellis admin check-extractors`
 
 The CLI ships a readiness probe that reports whether the extractor pipeline will actually run:
@@ -676,6 +768,19 @@ Exit codes are CI-friendly:
 
 Use `--format json` for machine-readable output (same schema, plus a `warnings` array with severity/signal/message).
 
+The probe resolves `memory_extraction`'s **route**, not the parent block, so the
+`provider=` / `model=` it reports are the ones the extractor will really call and
+a routed consumer names its tier. Two consequences follow from the routing rules
+above and are worth reading off the report rather than rediscovering:
+
+- The `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` env fallback is reported as usable
+  **only when `memory_extraction` is unrouted**. A route is an operator choosing
+  a model; falling back to whatever `OPENAI_API_KEY` points at would run a
+  different one and call it ready.
+- A malformed `llm.tiers` / `llm.routes` block is reported as the finding, naming
+  the setting, instead of raising a traceback — a readiness probe that dies on
+  the configuration it exists to check is the least useful failure available.
+
 ### Graceful degradation
 
 Without the feature flag, `save_memory` behaves identically to the pre-8A version: the document is stored, `MEMORY_STORED` is emitted, and control returns to the caller. No extractor is built, no LLM call is made, no entities or mentions are produced. The only way to accidentally incur LLM cost from `save_memory` is to explicitly opt in via the env var.
@@ -687,12 +792,23 @@ When writing tests that exercise the extraction path, **inject a fake LLM by mon
 ```python
 def test_save_memory_runs_extractor(registry, monkeypatch):
     fake = FakeLLMClient(canned_response=...)
-    monkeypatch.setattr(registry, "build_llm_client", lambda: fake)
+    monkeypatch.setattr(registry, "build_llm_client", lambda *, consumer=None: fake)
     monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
     # ... invoke save_memory, assert on resulting graph state
 ```
 
 Instance-level patching is the pattern Step 8B's new MCP tests use. It keeps the substitution scoped to the single `StoreRegistry` under test and does not leak into other tests sharing the class.
+
+**The fake must accept `consumer=`.** Every call site passes it — keyword-only,
+so `lambda: fake` raises `TypeError` rather than returning the fake, and a caller
+that swallows build failures turns that into a silent skip. Accepting and
+ignoring it is fine for a test that does not care which tier it is standing in
+for; assert on it when the test is about routing. `tests/unit/test_llm_consumer_rule.py`
+pins the other half by AST over `src/` — every `build_llm_client(...)` there names
+an `LLMConsumer` member, because the `None` default means a forgotten `consumer=`
+builds from the parent block and is indistinguishable from a pre-tier deployment:
+nothing raises, nothing logs, and `trellis admin llm-routes` keeps printing a
+route that reaches no code.
 
 ---
 

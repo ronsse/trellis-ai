@@ -44,38 +44,60 @@ def test_live_infra_selects_unwired_postgres_store_suites() -> None:
     assert ".[dev,cloud,neo4j]" in shlex.split(install["run"])
 
 
-def test_live_infra_store_targets_are_named_one_at_a_time() -> None:
+def test_live_infra_does_not_sweep_the_stores_directory() -> None:
     """``tests/unit/stores/`` is enrolled per path, never swept.
 
-    Naming the directory enrols every suite in it against containers
-    nobody chose them for, and that directory has already produced an
-    instance: ``test_neo4j_vector.py`` issues AuraDB-grade ``SEARCH ...
-    IN (VECTOR INDEX ...)`` that this job's self-hosted Neo4j cannot
-    parse (#356). Naming a file individually *is* the review, which is
-    the whole property — not the status of any one file.
+    Stated as the property rather than as the roster that used to stand
+    here, because this assertion has now rotted twice in opposite
+    directions and neither failure was a bad roster -- both were the
+    idea that a roster belongs here at all.
 
-    That distinction was learned twice. This asserted an exact
-    four-file roster until #579, and the roster rotted the moment a
-    legitimately unwired file was added. #579's first replacement then
-    pinned "``test_neo4j_vector.py`` is never collected" — which is the
-    same mistake one layer in, because the capability-probe work on
-    #356 enrols exactly that file the moment it lands, and an
-    assertion that a *fix* must not happen is worse than a roster.
-    What is left is the invariant neither of those was: the directory
-    itself is never a target, and the rule is not vacuous because
-    something under it must be.
+    It first asserted an exact four-file set. That is a proxy for *"do
+    not sweep the directory"*, and a proxy that fails when a file is
+    legitimately **added**: four suites that pass against this job's own
+    container images ran in no workflow at all, and wiring them in broke
+    this assertion while satisfying its intent. #579's first replacement
+    then pinned *"``test_neo4j_vector.py`` is never collected"* -- the
+    same mistake one layer in, because an assertion that a *fix* must
+    not happen is worse than a roster, and #356 landed exactly that fix.
+
+    So that second clause is retired, not weakened. It held only while
+    the suite's four ``SEARCH ... IN (VECTOR INDEX ...)`` cases had no
+    capability gate, and the message it failed with said so: *give them
+    the probe (#356) before naming this file here*. #356 did.
+    Re-measured against ``neo4j:2025.12``, the image this workflow
+    starts, that suite now runs 24 passed / 4 skipped where it was
+    4 failed / 23 never executed by any workflow.
+
+    What is left is the invariant neither version was: the directory
+    itself is never a target, and something under it always is. Naming a
+    file individually *is* the review -- that is the whole property, and
+    it says nothing about the status of any one file. An addition
+    therefore costs an edit to the workflow, not to this test.
+
+    Three sibling rules carry the parts that do need to track files, all
+    of them derived rather than declared:
+    :file:`tests/unit/test_neo4j_vector_live_infra_rule.py` pins the
+    selection above *and* the two conditions that make it safe -- every
+    ``SEARCH``-issuing test carries the gate, and the two suites sharing
+    one Neo4j resolve to one vector index name;
+    :file:`tests/unit/test_arcadedb_live_infra_rule.py` scans for the
+    ArcadeDB marker and fails when a marked file is not selected here;
+    and :file:`tests/unit/test_ci_coverage_rule.py` covers the
+    complementary direction, a file that runs nowhere with no recorded
+    reason. None of the four asserts a roster; together they pin one.
     """
     test_step = _step("Run live + contract suites against the containers")
     targets = _pytest_targets(test_step["run"])
     store_dir = Path("tests/unit/stores")
 
     assert store_dir not in targets, (
-        "live-infra must name store paths individually; sweeping "
-        f"{store_dir}/ enrols suites nobody ran against these containers"
+        "live-infra sweeps all of tests/unit/stores/, which enrols suites "
+        "nobody has run against these containers; name each path instead"
     )
-    named = sorted(str(t) for t in targets if store_dir in t.parents)
+    named = sorted(str(target) for target in targets if store_dir in target.parents)
     assert len(named) >= 2, (
         f"expected live-infra to name store paths under {store_dir}/ "
-        f"individually, found {named} — a target list that names none "
+        f"individually, found {named} -- a target list that names none "
         "would satisfy the sweep check vacuously"
     )
