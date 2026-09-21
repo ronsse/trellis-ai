@@ -215,3 +215,63 @@ That main-push run is the semantic-conflict checkpoint, and the stop condition i
 `main` goes red, halt the drain**. Across all nineteen merges it never did — zero failures
 in 60 runs. The gap this leaves is honest and unchanged: a PR green on an older base can
 still merge, and only the checkpoint catches it, *after* the fact.
+
+## 8. The seven `CLAUDE.md` PRs: what they actually disagree about
+
+§6 left open "whether the seven `CLAUDE.md` PRs' content is still *correct* after #583
+rewrites the block — only that they conflict." Measured 2026-09-21. They are not seven
+opinions about one fact.
+
+### 8.1 Three wire, four describe
+
+| PR | Changes `live-infra.yml`? | Adds a derived rule? | Other content |
+|---|---|---|---|
+| #583 | yes (8 files) | `test_ci_coverage_rule.py` (**new**, 1640 lines) | — |
+| #589 | yes (ArcadeDB vector) | edits `test_arcadedb_live_infra_rule.py` | a real `ArcadeDBVectorContract` |
+| #552 | yes (Neo4j vector, behind a capability probe) | `test_neo4j_vector_live_infra_rule.py` (new) | conftest + e2e |
+| #578 | no | `test_ci_coverage_rule.py` (**new**, 1054 lines) | `swarm-handoff.md` +66 |
+| #595 | no | no | `ROADMAP.md` +146 |
+| #601 | no | no | `PRD.md` +21, `autonomous-backlog.md` +39 |
+| #564 | no | no | `swarm-handoff.md` +18 |
+| #572 | no | no | none — `CLAUDE.md` only |
+
+### 8.2 The five counts are not contradictory. They are five populations.
+
+Each prose PR replaces the "Nowhere at all" bullet with a different residual. The numbers
+look like a disagreement about a measurement; they are not. They reconcile exactly:
+
+| PR | Count | Population it counted |
+|---|---:|---|
+| #601 | 27 | ArcadeDB store suites (8 + 17) + 2 `slow` SQLite — what `live-infra.yml` does not *name by path* |
+| #572 | 95 | backend-marked unit tests: 70 `neo4j` + 25 `arcadedb` |
+| #564 | 97 | = 95 + the two `slow` SQLite cases — everything unwired under `tests/unit/stores/` |
+| #583 | 99 | the eight files it *wires*: 68 store + 31 `live`-marked integration |
+| #595 | 140 | = 97 + 43 — everything that runs on no leg anywhere, every marker |
+
+95 ⊂ 97 ⊂ 140 exactly. #583's 99 is 140 less the 27 Neo4j-vector cases #356 blocks and 14
+it does not wire. #601's 27 is 140 less everything Neo4j and every integration file.
+
+**So the authors did not measure badly. The sentence asks for a number without declaring a
+population, and five careful people picked five different ones.** Two of them say so in
+their own prose — #601: "Re-derive this bullet rather than editing its numbers"; #564:
+"Every number in this bullet has been wrong at least once." That is five independent
+confirmations of #583's thesis, arrived at without coordination, which is stronger evidence
+for the derived rule than #583's own argument for it.
+
+### 8.3 #583 and #578 cannot both merge
+
+Both add `tests/unit/test_ci_coverage_rule.py` as a **new file** — 1640 lines against 1054.
+Whichever lands first makes the other an add/add conflict over the whole file. This is the
+one pair the round-5 policy ("keep `main`'s version of the contested bullet, take the
+incoming PR's changes everywhere else") cannot resolve: the collision is a thousand-line
+test, not a prose hunk, and picking a survivor is a re-classification rather than a merge
+mechanic — the #575 shape. **#583 merges (it carries the wiring and §4 already ranks it
+early); #578 is held for its author** with this measurement attached.
+
+### 8.4 Disposition
+
+Merge the three wiring PRs, then the prose PRs under the keep-`main` policy — which
+preserves each one's unique non-contested content (#595's ROADMAP, #601's PRD +
+backlog, #564's swarm-handoff, #572's separate correction to the `live-infra.yml`
+bullet) and installs **none** of the five counts. The bullet is then re-derived once,
+from post-merge state, in a single corrective PR.
