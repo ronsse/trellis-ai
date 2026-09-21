@@ -5,7 +5,10 @@ is the governed decision to turn it into an active
 :class:`ParameterSet`. This module runs the decision pipeline:
 
 1. **Validate** — the proposal exists and is still eligible
-   (``status == "pending" or "canary"``, not terminal).
+   (``status == "pending" or "canary"``, not terminal), and its scope
+   is not one of :data:`~trellis.mutate.immutable_core.GOVERNING_KEYS`
+   — the parameters that gate *another* learning loop, which no tuner
+   may retune and which ``force=True`` does not unlock.
 2. **Policy gate** — :class:`PromotionPolicy` check.  Rejects
    proposals that don't meet the minimum sample size or whose
    effect size against the active baseline is too small.
@@ -33,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.mutate.immutable_core import governing_key_refusal
 from trellis.schemas.parameters import ParameterProposal, ParameterSet
 from trellis.stores.base.event_log import EventLog, EventType
 
@@ -157,6 +161,57 @@ def _compute_effect_size(
     return max_delta, has_non_numeric
 
 
+def _reject(
+    *,
+    proposal_id: str,
+    proposal: ParameterProposal,
+    reason: str,
+    effect: float | None,
+    baseline_values: dict[str, Any] | None,
+    tuner_state: TunerStateStore,
+    event_log: EventLog,
+    source: str,
+) -> PromotionResult:
+    """Mark a proposal rejected, emit the audit event, and shape the result.
+
+    The one refusal constructor for :func:`promote_proposal`'s two gates
+    — the immutable core and :class:`PromotionPolicy` — so the audit
+    payload and the returned ``PromotionResult`` cannot drift between
+    them. The payload is byte-identical to the one the policy branch
+    emitted before this helper existed, ``effect_size`` included: a
+    governing-key refusal passes ``None`` for it, which is the key the
+    policy branch already wrote whenever the effect was incomputable.
+
+    :func:`reject_proposal` deliberately does **not** route through here.
+    Its payload carries ``manual: True`` and no ``effect_size`` at all,
+    and folding it in would silently add a key to an audit event that
+    already ships.
+    """
+    tuner_state.update_status(proposal_id, "rejected", notes=reason)
+    event_log.emit(
+        EventType.TUNER_PROPOSAL_REJECTED,
+        source=source,
+        entity_id=proposal_id,
+        entity_type="parameter_proposal",
+        payload={
+            "proposal_id": proposal_id,
+            "scope": list(proposal.scope.key()),
+            "proposed_values": dict(proposal.proposed_values),
+            "sample_size": proposal.sample_size,
+            "effect_size": effect,
+            "reason": reason,
+        },
+    )
+    logger.info("tuner.promotion.rejected", proposal_id=proposal_id, reason=reason)
+    return PromotionResult(
+        proposal_id=proposal_id,
+        status="rejected",
+        reason=reason,
+        effect_size=effect,
+        baseline_values=baseline_values,
+    )
+
+
 def promote_proposal(
     proposal_id: str,
     *,
@@ -204,6 +259,26 @@ def promote_proposal(
             reason=f"proposal_already_{proposal.status}",
         )
 
+    # The immutable core, above the ``force`` branch on purpose: ``force``
+    # is documented as skipping *the policy gate*, and a flag that also
+    # lifts the one constraint separating a self-tuning loop from a loop
+    # that tunes its own stop would make the constraint advisory. No
+    # baseline is resolved first — no value of the effect size could
+    # change this decision, and reading the store to decorate a refusal
+    # is how a refusal comes to depend on store state.
+    governing = governing_key_refusal(proposal.scope.component_id)
+    if governing is not None:
+        return _reject(
+            proposal_id=proposal_id,
+            proposal=proposal,
+            reason=governing,
+            effect=None,
+            baseline_values=None,
+            tuner_state=tuner_state,
+            event_log=event_log,
+            source=source,
+        )
+
     baseline_snapshot = parameter_store.resolve(proposal.scope)
     baseline_values = baseline_snapshot.values if baseline_snapshot else None
 
@@ -220,37 +295,15 @@ def promote_proposal(
             has_non_numeric=has_non_numeric,
         )
         if gate_result is not None:
-            # Policy rejection — update proposal status and emit event.
-            tuner_state.update_status(
-                proposal_id,
-                "rejected",
-                notes=gate_result,
-            )
-            event_log.emit(
-                EventType.TUNER_PROPOSAL_REJECTED,
-                source=source,
-                entity_id=proposal_id,
-                entity_type="parameter_proposal",
-                payload={
-                    "proposal_id": proposal_id,
-                    "scope": list(proposal.scope.key()),
-                    "proposed_values": dict(proposal.proposed_values),
-                    "sample_size": proposal.sample_size,
-                    "effect_size": effect,
-                    "reason": gate_result,
-                },
-            )
-            logger.info(
-                "tuner.promotion.rejected",
+            return _reject(
                 proposal_id=proposal_id,
+                proposal=proposal,
                 reason=gate_result,
-            )
-            return PromotionResult(
-                proposal_id=proposal_id,
-                status="rejected",
-                reason=gate_result,
-                effect_size=effect,
+                effect=effect,
                 baseline_values=baseline_values,
+                tuner_state=tuner_state,
+                event_log=event_log,
+                source=source,
             )
 
     # Execute: merge the proposed values onto the baseline so partial
@@ -353,6 +406,22 @@ def preview_promotion(
             proposal_id=proposal_id,
             status="skipped",
             reason=f"proposal_already_{proposal.status}",
+            proposed_values=dict(proposal.proposed_values),
+            baseline_values={},
+            sample_size=proposal.sample_size,
+        )
+
+    # Mirrors :func:`promote_proposal`'s immutable-core refusal, above the
+    # ``force`` branch and above the baseline resolve, so the dry-run
+    # cannot report a promotion the commit will refuse. A preview that
+    # disagrees with its commit is the format/exit-parity failure (#437)
+    # wearing different clothes.
+    governing = governing_key_refusal(proposal.scope.component_id)
+    if governing is not None:
+        return PromotionPreview(
+            proposal_id=proposal_id,
+            status="rejected",
+            reason=governing,
             proposed_values=dict(proposal.proposed_values),
             baseline_values={},
             sample_size=proposal.sample_size,
