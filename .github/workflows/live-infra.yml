@@ -252,8 +252,9 @@ jobs:
         # live_api_server suites 28 passed in 51.86s together. Read a
         # suite's skip condition, not its docstring.
         #
-        # tests/unit/stores/test_neo4j_vector.py is the fifth, and it was
-        # last out because it was blocked twice over, not once.
+        # tests/unit/stores/test_neo4j_vector.py is the fifth of those
+        # store suites, and it was last out because it was blocked twice
+        # over, not once.
         #
         # First, four of its five TestQuery cases issue the AuraDB-grade
         # `SEARCH ... IN (VECTOR INDEX ...)` clause, which the neo4j:2025.12

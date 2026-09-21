@@ -307,7 +307,7 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   `cli/test_subprocess_serve.py` (needs no live infrastructure at all and passes in 2.4s
   on a bare checkout — dark purely because of `live` + `slow` markers, a marker defect
   rather than a CI capability gap).
-- **`test_neo4j_vector.py` was the third, and what it cost to wire is the point.** It was
+- **`test_neo4j_vector.py` was that ninth, and what it cost to wire is the point.** It was
   blocked twice over and only one blocker was the obvious one. Four of its five
   `TestQuery` cases issue AuraDB-grade `SEARCH ... IN (VECTOR INDEX ...)`, which
   `neo4j:2025.12` rejects at parse time (`Invalid input 'SEARCH'`);
