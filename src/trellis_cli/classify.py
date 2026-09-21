@@ -256,11 +256,15 @@ def _require_llm_facet_classifier() -> Classifier:
 
     Shadow mode is opt-in but must be loud on misuse: an operator running the
     pass without an LLM configured gets an actionable error naming the missing
-    config block, not a run that silently shadows nothing.
+    config block, not a run that silently shadows nothing. The client is built
+    for :attr:`~trellis.llm.routing.LLMConsumer.CLASSIFY_SHADOW`, so
+    ``llm.routes.classify_shadow`` picks its tier; a malformed routing block
+    propagates to the CLI boundary as the ``ConfigError`` it is.
     """
     from trellis.classify.classifiers.llm import (  # noqa: PLC0415
         build_llm_facet_classifier,
     )
+    from trellis.llm.routing import LLMConsumer  # noqa: PLC0415
     from trellis.stores.registry import (  # noqa: PLC0415
         BackendNotInstalledError,
     )
@@ -270,7 +274,7 @@ def _require_llm_facet_classifier() -> Classifier:
 
     registry = _get_registry()
     try:
-        llm = registry.build_llm_client()
+        llm = registry.build_llm_client(consumer=LLMConsumer.CLASSIFY_SHADOW)
     except BackendNotInstalledError as exc:
         console.print(
             f"[red]classify shadow requires an LLM SDK that is not installed: "
@@ -345,6 +349,7 @@ def shadow(
     result = shadow_classify_stale(
         classifier=classifier,
         document_store=registry.knowledge.document_store,
+        vector_store=resolve_vector_store(registry),
         # Dry runs stay audit-silent: a MEMORY_OP_JUDGED event claims a
         # judgement that was not persisted.
         event_log=None if dry_run else registry.operational.event_log,

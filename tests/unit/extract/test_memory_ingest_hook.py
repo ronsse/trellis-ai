@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.extract.memory_ingest_hook import (
     MEMORY_EXTRACTION_FLAG,
@@ -16,6 +17,7 @@ from trellis.extract.memory_ingest_hook import (
     memory_extraction_env_enabled,
     run_memory_extraction,
 )
+from trellis.llm.routing import LLMConsumer
 from trellis.llm.types import LLMResponse, TokenUsage
 from trellis.schemas.extraction import (
     EntityDraft,
@@ -107,6 +109,40 @@ class TestBuildMemoryExtractor:
         reg.build_llm_client.return_value = MagicMock()
         extractor = build_memory_extractor(reg, opt_in=True)
         assert extractor is not None
+
+    def test_the_client_is_built_for_the_memory_extraction_consumer(self, monkeypatch):
+        monkeypatch.setenv(MEMORY_EXTRACTION_FLAG, "1")
+        reg = MagicMock()
+        reg.build_llm_client.return_value = None
+        build_memory_extractor(reg, opt_in=True)
+        reg.build_llm_client.assert_called_once_with(
+            consumer=LLMConsumer.MEMORY_EXTRACTION
+        )
+
+    def test_a_malformed_route_skips_extraction_and_names_the_setting(
+        self, monkeypatch, tmp_path
+    ):
+        """A config defect logs its YAML path at error level, with no traceback.
+
+        The generic ``except Exception`` beside it would also return None, so
+        the log line is what separates "your config is wrong" from a crash.
+        """
+        monkeypatch.setenv(MEMORY_EXTRACTION_FLAG, "1")
+        reg = StoreRegistry(
+            stores_dir=tmp_path,
+            llm_config={
+                "provider": "openai",
+                "api_key_env": "OPENAI_API_KEY",
+                "routes": {"memory_extraction": "deep"},
+            },
+        )
+        with capture_logs() as logs:
+            assert build_memory_extractor(reg, opt_in=True) is None
+        (event,) = [e for e in logs if e["event"].startswith("memory_extractor")]
+        assert event["event"] == "memory_extractor_llm_routing_invalid"
+        assert event["log_level"] == "error"
+        assert event["setting"] == "llm.routes.memory_extraction"
+        assert "exc_info" not in event
 
 
 class TestRunMemoryExtraction:
@@ -322,7 +358,7 @@ class TestSkipDisciplineOnTheWire:
     def test_ingest_hook_transmits_skip_discipline(self, registry, monkeypatch):
         monkeypatch.setenv(MEMORY_EXTRACTION_FLAG, "1")
         llm = _CapturingLLM()
-        monkeypatch.setattr(registry, "build_llm_client", lambda: llm)
+        monkeypatch.setattr(registry, "build_llm_client", lambda *, consumer: llm)
 
         extractor = build_memory_extractor(registry, opt_in=True)
         assert extractor is not None

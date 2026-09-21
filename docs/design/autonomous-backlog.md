@@ -686,14 +686,87 @@ implementation gate. Spec: [`adr-query-history-promotion.md`](./adr-query-histor
 
 ## Wave 5 — capture density
 
-**E1 — [#306](https://github.com/ronsse/trellis-ai/issues/306) observer-agent capture via local model.** `class: panel`
-Extends #255 session auto-capture from session-level to tool-level density using
-hermes3:8b as observer (free, private — `DETERMINISTIC > LOCAL > FRONTIER`). Drafts
-route through the governed pipeline and the memory-path draft policy.
-**Precondition:** #255's own defect history is instructive — it shipped in July and did
-not actually run until August because of blocked turn ordering and a context-window
-coupling where Ollama ignores `num_ctx` and hermes fabricates. Verify the observer
-produces non-fabricated output on a held-out transcript *before* wiring it to writes.
+**E1 — [#306](https://github.com/ronsse/trellis-ai/issues/306) observer-agent capture via local model.** ~~`class: panel`~~ — **the observer was measured and refused; the density it was for shipped deterministically.** `feat/306-tool-use-density`
+
+The item proposed a second local model (hermes3:8b) watching every tool use, to lift
+#255 capture from session-level to tool-level density. Its own precondition — verify the
+observer does not fabricate before wiring it to writes — was never reached, because a
+cheaper question came first: **what does the existing parse already see and throw away?**
+
+Measured over the 451 real sessions of the local corpus, the answer is *almost all of
+it*. `parse_session` observes **56,030 tool calls** and hands the judge
+`sorted({call.name for call in digest.tool_calls})` — a median **66 calls compressed to
+3 names** (median 22×, mean 27×). It observes **1,398 errored calls across 308
+sessions** and folds them into one session-level boolean, `has_error`, which the
+free-text backstop pushes true on **426 of 451 sessions (94.5%)** — so the flag the
+prompt spends a line on is close to a constant. And the name axis carries less than it
+looks: `Bash` is **83.4%** of all calls and appears in **447 of 451** sessions, while
+**80 sessions (17.7%)** render the single word `Bash` as the complete record of their
+work.
+
+So the observer would have been a second LLM paying for signal the deterministic parse
+already held. `docs/PRD.md` §6's ladder — `DETERMINISTIC > LOCAL > FRONTIER` — is the
+issue's own citation, and it points the other way once the compression is measured. What
+shipped instead is a **per-tool rollup** (`name xN (M errored)`, busiest first, ties
+alphabetical) on the existing judge prompt: no second model, no new `llm:` enablement,
+no new write path, and the error signal attributed to the tool that produced it. The
+rollup's content is *volume and failure density*, not tool variety — with `Bash` at
+83.4% of calls, "how much work and how much of it failed" is what the names were hiding.
+
+Four things worth carrying forward.
+
+- **The prompt budget fails closed, so density trades against coverage silently.**
+  `_prompt_exceeds_window` does not trim an over-budget prompt — it refuses to judge the
+  session, which is then captured *not at all*. The rollup is therefore **charged
+  against** `_MAX_SALIENT_CHARS`, not added to it. Replayed over all 451 sessions: **0**
+  overflow only with the rollup, the median prompt *shrinks* by 34 chars, and the worst
+  case falls from 10,618 to 9,835 of the 11,584 chars the default window allows (84.9%).
+  **The headroom is what makes this safe today; the charge is what keeps it safe when
+  `_MAX_SALIENT_CHARS` is next raised.**
+- **Charge the whole line, label included.** The first cut charged the rollup and not
+  the 30 chars its longer label added, which put **267** sessions over their old prompt
+  size where the arithmetic predicted **79**. It was found only by re-measuring a figure
+  the docstring already asserted — an invariant that holds for part of a line is the
+  kind that quietly stops holding.
+- **Do not route an existing gate through a new join.** `has_error` is now attributed
+  per tool through `tool_use_id`, but it stays set on *any* errored result whether or
+  not that join resolves. On today's corpus the join never fails — 0 of 1,398 errored
+  results lack an id and 0 fail to resolve — so this is a defensive choice rather than a
+  fix for observed loss, and the test that pins it (`test_has_error_survives_an_
+  unjoinable_result`) is therefore synthetic on purpose. The reason to keep it is the
+  direction of the trade: a saturated boolean is a poor signal, an intermittently absent
+  one is a worse bug.
+- **[#447](https://github.com/ronsse/trellis-ai/issues/447)'s uniform-fixture trap was
+  reproduced here, by someone who had just read #447.** The ordering test used
+  `Bash x3, Grep x1`, which cannot distinguish count-ordering from name-ordering because
+  `Bash` sorts first under both. That mutant survived the full suite. Fixed with
+  `Write x3, Bash x1` plus an explicit tie-break case. Every new behaviour carries a
+  mutant; all **8** are killed, including the half-charge above.
+
+One measurement trap for the next reader: `elide_text`'s marker rides *on top of* the
+cap by documented contract, so a budget assertion has to exclude it. The honest form of
+"charged, not added" is a comparison between a tool-heavy and a tool-light session, not
+an arithmetic identity against the constant — the identity version fails against correct
+code, and weakening it to "cap + slack" would have made it pass against anything.
+
+**The A/B says it changes nothing, and that is the reported result.** Both prompts were
+run through the real judge — hermes3:8b at `temperature=0`, 60 sessions sampled
+deterministically, both arms through the shipped `parse_candidates`, varying only the
+tool line. Old produced **148** candidates, new **152**; 16 sessions yielded more, 14
+fewer, 30 identical — a two-sided sign test at **p = 0.86**. Mean confidence 0.965 →
+0.960. Sessions producing *any* candidate went **49 → 46**, i.e. slightly the wrong way.
+Sessions carrying a `failure`-signal memory went 13 → 15, well inside the same noise.
+`non_derivable` was 2 and 1, near-zero in both arms.
+
+So the case for the change is **not** a capture-quality gain; there is no evidence of
+one. It is that the loss is real and one-directional, that closing it is deterministic
+and yields a *smaller* prompt, and that the thing it replaces is a second local LLM
+proposed to recover signal the parse already held. Two caveats stated rather than
+buried: n=60 can only detect a large effect, and the arm tested charged the rollup but
+not its label (42 chars of conversation on capped sessions), a difference far too small
+to move a null this flat. If a more capable judge is wired later — the Kimi tiering the
+owner wants for the heavier decisions — the signal is then already on the prompt; that
+is a prediction, not a result.
 
 **E2 — Capture-coverage measurement.** ~~`class: panel`~~ — ✅ **DONE and MERGED** as `627536f` ([PR #372](https://github.com/ronsse/trellis-ai/pull/372), 2026-08-28).
 [#332](https://github.com/ronsse/trellis-ai/issues/332) fixed the sidechain rule that

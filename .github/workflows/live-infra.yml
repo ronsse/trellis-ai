@@ -54,7 +54,6 @@ name: Live infrastructure tests
 
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
@@ -167,6 +166,23 @@ jobs:
 
       - name: Run live + contract suites against the containers
         env:
+          # Written on every run, uploaded only when the job fails (the two
+          # steps below). `junit_logging=all` is the half that matters: it
+          # puts each test's captured stdout/stderr/log inside its own
+          # <testcase>, so a flake's own output survives next to its failure
+          # instead of being interleaved with 900+ other tests. The per-test
+          # `time` attribute is the other half — #556 asks whether an
+          # ArcadeDB contender flake exhausts the Bolt driver's *time*
+          # budget (`max_transaction_retry_time`, 30s by default) rather
+          # than an attempt budget, and a duration answers that where the
+          # re-raised client exception does not.
+          #
+          # It rides PYTEST_ADDOPTS rather than the `run:` command line
+          # below deliberately: three open PRs (#552, #583, #589) each
+          # rewrite that command and the comment block above it, and a
+          # fourth editing the same region would conflict with all of them
+          # for no behavioural difference.
+          PYTEST_ADDOPTS: --junitxml=ci-evidence/junit.xml -o junit_logging=all
           TRELLIS_TEST_NEO4J_URI: bolt://localhost:7687
           TRELLIS_TEST_NEO4J_USER: neo4j
           TRELLIS_TEST_NEO4J_PASSWORD: trellistestpw
@@ -202,18 +218,134 @@ jobs:
         # half of the pgvector surface. It is NOT covered by the contracts
         # directory.
         #
-        # The two Postgres store suites are named explicitly because tests.yml
-        # deselects their backend marker even in its all-extras leg. Do not
-        # widen this to all of tests/unit/stores/: that would also select
-        # test_neo4j_vector.py, whose AuraDB-grade `SEARCH ... IN (VECTOR
-        # INDEX ...)` cases cannot run against this job's self-hosted Neo4j
-        # container. The capability-probe follow-up remains tracked in #356.
+        # Every other store suite is named explicitly because tests.yml
+        # deselects their backend markers even in its all-extras leg, so a
+        # file that is not listed here executes in no workflow at all. Four
+        # were in exactly that state and are now named: both ArcadeDB store
+        # suites (the *blessed* graph + vector substrate — the #351 shape one
+        # directory over from the contract it fixed) plus the Neo4j graph and
+        # connectivity suites. That is 68 tests that had never run in CI.
+        #
+        # They were added on measurement, not on the assumption that they
+        # would pass. Run 2026-09-12 against containers started from this
+        # file's own images — arcadedata/arcadedb:26.8.1 and neo4j:2025.12:
+        # test_arcadedb_graph 8 passed, test_arcadedb_vector 17 passed,
+        # test_neo4j_graph 39 passed, test_neo4j_connectivity_live 4 passed.
+        #
+        # The live integration suites were run-nowhere for the same reason
+        # and are now named too: test_migrate_graph_live.py plus the three
+        # that build on the live_api_server fixture (api/test_live_smoke.py,
+        # sdk/test_live_client.py, sdk/test_live_async_client.py). Their
+        # module docstrings say they need a managed Neon + AuraDB
+        # deployment, and that is what kept them out of this list. It is not
+        # what the code requires: live_api_server spawns its own uvicorn on
+        # a free port and its only skip condition is
+        # ``if not NEO4J_URI or not PG_DSN`` — both set in the env block
+        # above. Measured 2026-09-12 against the same two containers:
+        # test_migrate_graph_live 3 passed in 0.50s, and the three
+        # live_api_server suites 28 passed in 51.86s together. Read a
+        # suite's skip condition, not its docstring.
+        #
+        # Order is not load-bearing here, but adjacency is. Neo4j allows one
+        # vector index per (label, property): a second CREATE under a
+        # different name returns success and the index never exists, so the
+        # loser's 30s ONLINE wait times out on whichever suite asks second.
+        # test_neo4j_e2e.py and live_api_server both provision
+        # ``trellis_node_embeddings`` — the same name, hence a no-op
+        # IF NOT EXISTS and no collision. tests/unit/stores/test_neo4j_vector.py
+        # provisions ``trellis_test_node_embeddings`` on the same
+        # (:Node, embedding) pair, which is a second and independent reason
+        # it cannot simply be swept in: measured here, running it first
+        # turned all 28 live_api_server tests into VectorIndexNotOnlineError
+        # at 30s each (848s of red), and dropping its index turned the same
+        # 28 green in 52s.
+        #
+        # Still do not widen this to all of tests/unit/stores/. The one file
+        # that remains excluded is test_neo4j_vector.py, and the exclusion is
+        # a re-measured fact rather than an inherited note: on the same
+        # neo4j:2025.12 container 23 of its tests pass and its four
+        # TestQuery cases fail with `Invalid input 'SEARCH'`, because the
+        # AuraDB-grade `SEARCH ... IN (VECTOR INDEX ...)` clause is absent
+        # from self-hosted Neo4j. tests/integration/conftest.py already has
+        # the capability probe that would let those four self-skip; giving
+        # this suite the same probe is #356. Note what wiring it *without*
+        # the probe would buy — a red job — and what wiring it *with* the
+        # probe would buy: four silently skipped tests wearing the
+        # appearance of coverage.
+        #
+        # Two integration files stay out, and neither is a capability gap.
+        # api/test_smoke_parity.py is the pytest mirror of deploy/smoke.sh:
+        # it probes an already-deployed orchestrator at TRELLIS_BASE_URL and
+        # skips the whole module when nothing answers /healthz there. This
+        # job starts stores, not a server, so naming it would buy nine
+        # silent skips. cli/test_subprocess_serve.py needs no live infra at
+        # all — it passes in 2.4s on a bare checkout — and is unwired only
+        # because it carries live + slow markers that tests.yml deselects.
+        # Wiring it here would paper over that rather than fix it.
+        #
+        # tests/unit/test_ci_coverage_rule.py derives which test files
+        # execute in no workflow leg and fails when one appears without a
+        # recorded reason, so this list cannot silently fall behind the
+        # directory again.
         run: |
           pytest \
             tests/integration/test_neo4j_e2e.py \
+            tests/integration/test_migrate_graph_live.py \
+            tests/integration/api/test_live_smoke.py \
+            tests/integration/sdk/ \
             tests/integration/loops/ \
             tests/unit/stores/contracts/ \
             tests/unit/stores/test_pgvector.py \
             tests/unit/stores/test_postgres_stores.py \
             tests/unit/stores/test_api_key_store.py \
+            tests/unit/stores/test_arcadedb_graph.py \
+            tests/unit/stores/test_arcadedb_vector.py \
+            tests/unit/stores/test_neo4j_graph.py \
+            tests/unit/stores/test_neo4j_connectivity_live.py \
             -v
+
+      # A failure here is usually a race against a real server, and the job
+      # log only ever holds the *client's* half of it — the driver's
+      # re-raised exception, with nothing to ask what the server was doing.
+      # The service containers are destroyed with the job, so a log not
+      # pulled here does not exist anywhere afterwards. That is how #556's
+      # ArcadeDB flake ended up filed as a hypothesis rather than a
+      # diagnosis.
+      #
+      # Note what is deliberately NOT re-captured: the pytest output itself.
+      # That is already complete and durable in the job log —
+      # `gh run view <id> --log-failed` returns the FAILURES section, the
+      # full traceback and the captured stdout (verified against run
+      # 35065856544, which caught this flake's sibling). Copying it into an
+      # artifact would be duplication wearing the word "evidence".
+      - name: Capture service-container logs
+        if: failure()
+        run: |
+          mkdir -p ci-evidence
+          capture() {
+            name="$1"
+            cid="$2"
+            if [ -z "$cid" ]; then
+              echo "no container id for service '$name'" > "ci-evidence/$name-server.log"
+              return
+            fi
+            docker logs "$cid" > "ci-evidence/$name-server.log" 2>&1 \
+              || echo "docker logs failed for '$name' ($cid)" >> "ci-evidence/$name-server.log"
+          }
+          capture arcadedb "${{ job.services.arcadedb.id }}"
+          capture neo4j "${{ job.services.neo4j.id }}"
+          capture postgres "${{ job.services.postgres.id }}"
+          ls -l ci-evidence
+
+      # Failure-only, so a green run uploads nothing and costs nothing; the
+      # flake-rate denominator is the run count, which is free from the run
+      # list. 30 days rather than the 90-day default: this is diagnostic
+      # material for an open flake, not a record anyone audits later.
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-infra-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-evidence/
+          retention-days: 30
+          if-no-files-found: warn

@@ -46,7 +46,12 @@ import structlog
 from pydantic import BaseModel, Field, ValidationError
 
 from trellis.core.base import TrellisModel
-from trellis.feedback.attribution import payload_is_attributed, payload_pack_id
+from trellis.feedback.attribution import (
+    StrayCitationTally,
+    payload_is_attributed,
+    payload_pack_id,
+    served_item_ids,
+)
 from trellis.ops.capture_coverage import (
     CaptureCoverageReport,
     summarize_capture_coverage,
@@ -640,6 +645,18 @@ class ServeAttributionReport(TrellisModel):
     ``feedback_events``: DoD-3 thresholds and the nightly roadmap driver
     read it, and a metric that improves because its denominator was
     quietly narrowed is the failure this decomposition exists to expose.
+
+    **Citing is not joining, and the ``stray_*`` block is the gap between
+    them** (#574). ``pack_attribution_rate`` counts a caller who cited
+    *something*; it says nothing about whether the ids reached the pack's
+    membership list. On the reference deployment 14 of 699 citations
+    (2.0%) named an id the pack never served, concentrated in 6 packs —
+    one of which lost 6 of its 15 — and every one of those verdicts was
+    dropped by the learning join in silence. The block sits **beside**
+    ``pack_attribution_rate`` and does not touch it: the older number
+    keeps meaning exactly what it has always meant, because a metric that
+    starts measuring something new under the same name is the failure
+    this report already exists to expose once.
     """
 
     packs: int = 0
@@ -660,6 +677,33 @@ class ServeAttributionReport(TrellisModel):
     pack_attribution_rate: float = 0.0
     #: Feedback naming no pack. Structurally unjoinable, legitimately so.
     untargeted_feedback: int = 0
+
+    # -- Stray citations (#574) ----------------------------------------
+    #: Cited ids on feedback that joined to a pack whose served set is
+    #: known. The denominator for ``stray_citation_rate`` — *not* every
+    #: cited id in the window, because a pack with no recorded membership
+    #: (a sectioned pack, or one outside the scan) cannot contribute a
+    #: stray and must not dilute the rate. Counted per **(feedback event,
+    #: cited id)** pair; ``analyze value``'s ``cited_ids_not_served``
+    #: counts the same strays per (pack, distinct id), so on a pack graded
+    #: twice the two can differ.
+    cited_ids: int = 0
+    #: Of those, the ids the pack never served — verdicts the learning
+    #: join has nowhere to put, and drops without a word.
+    stray_cited_ids: int = 0
+    #: ``stray_cited_ids / cited_ids``. Zero on an empty window reads as
+    #: "no evidence", not "no strays"; read it beside ``cited_ids``.
+    stray_citation_rate: float = 0.0
+    #: Packs contributing at least one stray. The loss concentrates, so
+    #: the count of affected packs says more than the rate does.
+    packs_with_stray_citations: int = 0
+    #: Strays by the namespace prefix on the cited id.
+    stray_citations_by_namespace: dict[str, int] = Field(default_factory=dict)
+    #: Strays by :func:`~trellis.feedback.attribution.stray_shape` — how
+    #: the id relates to what the pack *did* serve. This is the partition
+    #: that says whether a loss is a caller-side id-spelling defect or a
+    #: verdict on something the pack genuinely never carried.
+    stray_citations_by_shape: dict[str, int] = Field(default_factory=dict)
     #: Whether retrieval *availability* was measured for this window. Always
     #: ``False`` — and that is the point (#365). See
     #: :data:`RETRIEVAL_AVAILABILITY_ASSUMPTION`.
@@ -832,6 +876,7 @@ def summarize_serve_attribution(
     since = datetime.now(tz=UTC) - timedelta(days=days)
 
     packs = packs_with_items = 0
+    served_by_pack: dict[str, set[str]] = {}
     pack_scan = scan_events(
         event_log, event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
     )
@@ -839,9 +884,18 @@ def summarize_serve_attribution(
         packs += 1
         if event.payload.get("injected_items"):
             packs_with_items += 1
+        # ``entity_id`` is the pack id at both emit sites in
+        # ``PackBuilder`` — the same key ``join_pack_feedback`` uses, and
+        # the one verified against production (73 of 73 distinct feedback
+        # pack_ids matched, 2026-09-16). The payload carries no
+        # ``pack_id`` key at all, so joining on that would silently yield
+        # nothing.
+        if event.entity_id:
+            served_by_pack[event.entity_id] = served_item_ids(event.payload)
 
     feedback = attributed = 0
     pack_targeted = pack_targeted_attributed = 0
+    strays = StrayCitationTally()
     feedback_scan = scan_events(
         event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
     )
@@ -853,10 +907,16 @@ def summarize_serve_attribution(
         is_attributed = payload_is_attributed(event.payload)
         if is_attributed:
             attributed += 1
-        if payload_pack_id(event.payload):
+        pack_id = payload_pack_id(event.payload)
+        if pack_id:
             pack_targeted += 1
             if is_attributed:
                 pack_targeted_attributed += 1
+            # A pack absent from ``served_by_pack``, or one with no
+            # recorded membership, is skipped whole by ``add`` — it can
+            # never contribute a stray, so letting its citations into the
+            # denominator would report a rate that falls as coverage falls.
+            strays.add(event.payload, served_by_pack.get(pack_id, ()), pack_id=pack_id)
 
     return ServeAttributionReport(
         packs=packs,
@@ -871,6 +931,12 @@ def summarize_serve_attribution(
             round(pack_targeted_attributed / pack_targeted, 4) if pack_targeted else 0.0
         ),
         untargeted_feedback=feedback - pack_targeted,
+        cited_ids=strays.cited,
+        stray_cited_ids=strays.stray,
+        stray_citation_rate=strays.stray_rate,
+        packs_with_stray_citations=len(strays.packs_with_stray),
+        stray_citations_by_namespace=dict(strays.by_namespace),
+        stray_citations_by_shape=dict(strays.by_shape),
         retrieval_availability_note=(
             RETRIEVAL_AVAILABILITY_ASSUMPTION if feedback - pack_targeted else ""
         ),
