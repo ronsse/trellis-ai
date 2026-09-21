@@ -426,6 +426,115 @@ class TestValue:
         )
 
 
+class TestJudgedOutcomes:
+    """``trellis analyze judged-outcomes`` — what followed each judged operation."""
+
+    @staticmethod
+    def _seed_cited_row(
+        registry: StoreRegistry, *, decision: str = "reference"
+    ) -> None:
+        # Emitted in the order production writes them: the judgment, then the
+        # pack that served the memory, then the grader's citation.
+        event_log = registry.operational.event_log
+        event_log.emit(
+            EventType.MEMORY_OP_JUDGED,
+            source="test",
+            entity_id="doc1",
+            payload={
+                "op_type": "classification",
+                "model_id": "test-model",
+                "input_digest": {"hash": "0123abcd", "length": 42, "source_refs": []},
+                "decision": decision,
+                "confidence": 0.9,
+                "subject_ref": {"ref_type": "doc", "ref_id": "doc1"},
+            },
+        )
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="jpack",
+            entity_type="pack",
+            payload={
+                "injected_items": [
+                    {
+                        "item_id": "doc1#chunk-0",
+                        "item_type": "document",
+                        "estimated_tokens": 100,
+                        "rank": 0,
+                    }
+                ]
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mcp",
+            entity_id="jpack",
+            payload={
+                "pack_id": "jpack",
+                "helpful_item_ids": ["doc1#chunk-0"],
+                "unhelpful_item_ids": [],
+                "rating": 0.9,
+                "success": True,
+            },
+        )
+
+    def test_empty_log_json(self) -> None:
+        result = runner.invoke(app, ["analyze", "judged-outcomes", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["totals"]["judged"] == 0
+        assert data["gate_verdict"] == "fails_every_reading"
+        assert data["gate_threshold"] == 500
+
+    def test_a_cited_row_json(self, temp_stores: StoreRegistry) -> None:
+        self._seed_cited_row(temp_stores)
+        result = runner.invoke(app, ["analyze", "judged-outcomes", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["totals"]["cited_helpful"] == 1
+        assert data["gate_readings"][0] == {
+            "reading": "cited_rows",
+            "count": 1,
+            "per_30d": 1.0,
+            "passes": False,
+        }
+        [cell] = data["cells"]
+        assert (cell["op_type"], cell["decision"]) == ("classification", "reference")
+
+    def test_text_names_the_gate_and_the_cell(self, temp_stores: StoreRegistry) -> None:
+        self._seed_cited_row(temp_stores)
+        result = runner.invoke(app, ["analyze", "judged-outcomes"])
+        assert result.exit_code == 0
+        rendered = plain(result.stdout)
+        assert "Phase 1 gate: fails_every_reading" in rendered
+        assert "classification / reference: judged 1" in rendered
+        assert "cited helpful 1" in rendered
+
+    def test_text_on_an_empty_log_says_so(self) -> None:
+        result = runner.invoke(app, ["analyze", "judged-outcomes"])
+        assert result.exit_code == 0
+        assert "No judged memory operations" in plain(result.stdout)
+
+    def test_a_bracketed_decision_survives_rich_markup(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``decision`` is free text from a model, so it must not parse as markup."""
+        force_colour(monkeypatch, analyze)
+        self._seed_cited_row(temp_stores, decision="[staging]")
+        result = runner.invoke(app, ["analyze", "judged-outcomes"])
+        assert result.exit_code == 0
+        rendered = assert_coloured(result.stdout)
+        assert "classification / [staging]" in rendered
+
+    def test_exit_code_does_not_depend_on_format(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_cited_row(temp_stores)
+        text = runner.invoke(app, ["analyze", "judged-outcomes"])
+        machine = runner.invoke(app, ["analyze", "judged-outcomes", "--format", "json"])
+        assert text.exit_code == machine.exit_code == 0
+
+
 class TestAdvisoryEffectiveness:
     def test_empty_events(self) -> None:
         result = runner.invoke(app, ["analyze", "advisory-effectiveness"])
@@ -1318,6 +1427,24 @@ class TestTruncationReachesTheOperator:
         result = runner.invoke(app, ["analyze", "cost", "--days", "30"])
         assert result.exit_code == 0
         assert "TRUNCATED" in result.stdout
+
+    def test_judged_outcomes_prints_the_truncation_note(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._flood(temp_stores, EventType.PACK_ASSEMBLED, 4)
+        capped = runner.invoke(
+            app, ["analyze", "judged-outcomes", "--days", "30", "--limit", "3"]
+        )
+        # ``--limit 4`` would still read as capped: a scan that fills its
+        # limit cannot tell whether a fifth event existed.
+        uncapped = runner.invoke(
+            app, ["analyze", "judged-outcomes", "--days", "30", "--limit", "5"]
+        )
+        assert capped.exit_code == uncapped.exit_code == 0
+        assert "TRUNCATED" in plain(capped.stdout)
+        assert "evidence covers" in plain(capped.stdout)
+        assert "TRUNCATED" not in plain(uncapped.stdout)
+        assert "evidence covers" not in plain(uncapped.stdout)
 
     def test_limit_option_raises_the_cap(self, temp_stores: StoreRegistry) -> None:
         """The lever the note now tells the operator to reach for."""

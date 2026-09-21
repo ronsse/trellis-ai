@@ -5,13 +5,31 @@ defines the shared semantics every ``VectorStore`` backend must
 honour. Backend-specific test files subclass
 :class:`VectorStoreContractTests` and provide a ``store`` fixture.
 
-**Scope deviation:** ``Neo4jVectorStore`` (shape #2 — embeddings as
-optional properties on the graph store's ``:Node`` rows) is NOT covered
-by this contract. Its ``upsert`` requires the underlying node to
-already exist as a current version; the rest of the backends create
-storage independently. The shape #2 contract lives in the per-backend
-file ``test_neo4j_vector.py`` and is exercised against a real Neo4j
-instance via ``TRELLIS_TEST_NEO4J_URI``.
+**Shape #2 backends declare a storage prerequisite, they do not get a
+weaker contract.** An independent backend (sqlite, pgvector) creates
+its own row on ``upsert``. A shape #2 backend — embeddings as optional
+properties on the graph store's ``:Node`` rows — cannot: its ``upsert``
+requires the node to already exist as a current version, because the
+*graph* store owns that row's lifecycle. That is the backend behaving
+correctly, not a divergence in vector semantics, so the contract states
+the prerequisite rather than excluding the backend:
+:meth:`VectorStoreContractTests.provision_storage` is a no-op here and
+is overridden by a shape #2 subclass to create the backing row.
+
+Read that as a *prerequisite declaration, not a relaxation*. No
+assertion is weakened, no test is skipped, and every independent
+backend runs byte-identical bodies because the hook does nothing for
+them. ``test_provisioning_alone_stores_no_vector`` is what keeps it
+honest: it pins that provisioning writes no vector, so an override
+cannot quietly do the store's job and make the rest of the suite
+vacuous.
+
+``ArcadeDBVectorStore`` is covered on those terms
+(``test_arcadedb_vector_contract.py``). ``Neo4jVectorStore`` is the
+same shape and could be brought under the same hook, but no subclass
+exists yet — its coverage is still the per-backend file
+``test_neo4j_vector.py``, exercised against a real Neo4j instance via
+``TRELLIS_TEST_NEO4J_URI`` (#356 blocks widening that one).
 
 Subclass shape::
 
@@ -48,7 +66,42 @@ def _vec(x: float, y: float, z: float) -> list[float]:
 
 
 class VectorStoreContractTests:
-    """Contract tests every independent ``VectorStore`` backend must pass."""
+    """Contract tests every ``VectorStore`` backend must pass."""
+
+    # ------------------------------------------------------------------
+    # Storage prerequisite — the one thing a backend may require first
+    # ------------------------------------------------------------------
+
+    def provision_storage(self, store: VectorStore, *item_ids: str) -> None:
+        """Create whatever the backend needs to exist before ``upsert``.
+
+        Default: nothing, which is correct for every backend that owns
+        its own rows. A shape #2 backend overrides this to create the
+        backing graph node, because there the *graph* store owns that
+        row's lifecycle and the vector store only attaches a property
+        to it.
+
+        This exists so a shape #2 backend can run the **same
+        assertions**, not weaker ones. An override must create storage
+        and nothing else — writing a vector here would make most of
+        this suite pass without the store under test doing anything,
+        which ``test_provisioning_alone_stores_no_vector`` rejects.
+        """
+
+    def test_provisioning_alone_stores_no_vector(self, store: VectorStore) -> None:
+        """Provisioning must not stand in for an ``upsert``.
+
+        Trivially true for a backend whose hook is a no-op. For a shape
+        #2 backend this is the load-bearing case: it proves the
+        override creates the backing row and leaves the embedding to
+        the store under test, so every other assertion in this suite is
+        still measuring ``upsert``.
+        """
+        self.provision_storage(store, "a", "b")
+
+        assert store.count() == 0
+        assert store.get("a") is None
+        assert store.query(_vec(1, 0, 0), top_k=10) == []
 
     # ------------------------------------------------------------------
     # Empty store
@@ -71,6 +124,7 @@ class VectorStoreContractTests:
     # ------------------------------------------------------------------
 
     def test_upsert_then_get_roundtrips_vector(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(0.1, 0.2, 0.3), metadata={"kind": "doc"})
         result = store.get("a")
         assert result is not None
@@ -85,12 +139,14 @@ class VectorStoreContractTests:
     def test_upsert_with_no_metadata_yields_empty_dict(
         self, store: VectorStore
     ) -> None:
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0))
         result = store.get("a")
         assert result is not None
         assert result["metadata"] == {}
 
     def test_upsert_replace_overwrites_metadata(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0), metadata={"v": 1})
         store.upsert("a", _vec(1, 0, 0), metadata={"v": 2})
         result = store.get("a")
@@ -98,6 +154,7 @@ class VectorStoreContractTests:
         assert result["metadata"] == {"v": 2}
 
     def test_upsert_replace_overwrites_vector(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0))
         store.upsert("a", _vec(0, 1, 0))
         result = store.get("a")
@@ -106,6 +163,7 @@ class VectorStoreContractTests:
             assert abs(got - want) < 1e-5
 
     def test_upsert_replace_keeps_count_at_one(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0))
         store.upsert("a", _vec(0, 1, 0))
         assert store.count() == 1
@@ -126,6 +184,7 @@ class VectorStoreContractTests:
         Pinned here rather than per backend so every current and future
         backend inherits it.
         """
+        self.provision_storage(store, "a")
         original = _vec(0.1, 0.2, 0.3)
         store.upsert("a", original, metadata={"content_tags": {"q": "standard"}})
         row = store.get("a")
@@ -148,6 +207,7 @@ class VectorStoreContractTests:
         retrievable, or the sync would silently un-index everything it
         repaired.
         """
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0), metadata={"v": 1})
         row = store.get("a")
         assert row is not None
@@ -162,6 +222,7 @@ class VectorStoreContractTests:
     # ------------------------------------------------------------------
 
     def test_metadata_roundtrips_str_int_float_bool(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         meta = {"name": "auth", "tier": 1, "weight": 0.5, "active": True}
         store.upsert("a", _vec(1, 0, 0), metadata=meta)
         result = store.get("a")
@@ -169,6 +230,7 @@ class VectorStoreContractTests:
         assert result["metadata"] == meta
 
     def test_metadata_roundtrips_nested_structures(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         meta = {"tags": ["a", "b"], "nested": {"x": 1}}
         store.upsert("a", _vec(1, 0, 0), metadata=meta)
         result = store.get("a")
@@ -180,21 +242,25 @@ class VectorStoreContractTests:
     # ------------------------------------------------------------------
 
     def test_delete_existing_returns_true(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0))
         assert store.delete("a") is True
 
     def test_delete_removes_from_get(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0))
         store.delete("a")
         assert store.get("a") is None
 
     def test_count_decreases_after_delete(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a", "b")
         store.upsert("a", _vec(1, 0, 0))
         store.upsert("b", _vec(0, 1, 0))
         store.delete("a")
         assert store.count() == 1
 
     def test_count_tracks_multiple_upserts(self, store: VectorStore) -> None:
+        self.provision_storage(store, "v0", "v1", "v2")
         for i, v in enumerate([_vec(1, 0, 0), _vec(0, 1, 0), _vec(0, 0, 1)]):
             store.upsert(f"v{i}", v)
         assert store.count() == 3
@@ -204,6 +270,7 @@ class VectorStoreContractTests:
     # ------------------------------------------------------------------
 
     def test_query_orders_by_similarity_descending(self, store: VectorStore) -> None:
+        self.provision_storage(store, "right", "up", "near_right")
         store.upsert("right", _vec(1, 0, 0))
         store.upsert("up", _vec(0, 1, 0))
         store.upsert("near_right", _vec(0.9, 0.1, 0))
@@ -215,6 +282,7 @@ class VectorStoreContractTests:
 
     def test_query_self_match_is_top(self, store: VectorStore) -> None:
         # Cosine similarity with self should be the maximum result.
+        self.provision_storage(store, "a", "b", "c")
         store.upsert("a", _vec(1, 0, 0))
         store.upsert("b", _vec(0, 1, 0))
         store.upsert("c", _vec(0, 0, 1))
@@ -222,18 +290,21 @@ class VectorStoreContractTests:
         assert results[0]["item_id"] == "a"
 
     def test_query_top_k_caps_results(self, store: VectorStore) -> None:
+        self.provision_storage(store, "v0", "v1", "v2", "v3", "v4")
         for i in range(5):
             store.upsert(f"v{i}", _vec(float(i + 1), 0, 0))
         results = store.query(_vec(1, 0, 0), top_k=2)
         assert len(results) == 2
 
     def test_query_returns_metadata(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0), metadata={"kind": "doc"})
         results = store.query(_vec(1, 0, 0), top_k=1)
         assert len(results) == 1
         assert results[0]["metadata"] == {"kind": "doc"}
 
     def test_query_result_shape(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0), metadata={"k": "v"})
         results = store.query(_vec(1, 0, 0), top_k=1)
         assert len(results) == 1
@@ -248,6 +319,7 @@ class VectorStoreContractTests:
     # ------------------------------------------------------------------
 
     def test_query_filter_by_str_metadata(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a", "b")
         store.upsert("a", _vec(1, 0, 0), metadata={"kind": "doc"})
         store.upsert("b", _vec(0.9, 0.1, 0), metadata={"kind": "code"})
         results = store.query(_vec(1, 0, 0), top_k=10, filters={"kind": "code"})
@@ -255,6 +327,7 @@ class VectorStoreContractTests:
         assert results[0]["item_id"] == "b"
 
     def test_query_filter_by_int_metadata(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a", "b")
         store.upsert("a", _vec(1, 0, 0), metadata={"tier": 1})
         store.upsert("b", _vec(0.9, 0.1, 0), metadata={"tier": 2})
         results = store.query(_vec(1, 0, 0), top_k=10, filters={"tier": 2})
@@ -262,6 +335,7 @@ class VectorStoreContractTests:
         assert results[0]["item_id"] == "b"
 
     def test_query_filter_with_multiple_keys_is_and(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a", "b")
         store.upsert("a", _vec(1, 0, 0), metadata={"kind": "doc", "team": "platform"})
         store.upsert("b", _vec(0.9, 0.1, 0), metadata={"kind": "doc", "team": "growth"})
         results = store.query(
@@ -272,7 +346,30 @@ class VectorStoreContractTests:
         assert len(results) == 1
         assert results[0]["item_id"] == "a"
 
+    def test_query_filter_returns_matches_ranked_below_non_matches(
+        self, store: VectorStore
+    ) -> None:
+        """A filter selects from the corpus, not from the top_k window.
+
+        Backends that filter in SQL get this for free. A backend that
+        filters client-side has to over-fetch, and the failure it is
+        guarding against is invisible on a corpus where everything
+        matches: here the three nearest neighbours are all excluded, so
+        a store that fetched only ``top_k`` candidates and then filtered
+        would return nothing at all.
+        """
+        self.provision_storage(store, "near1", "near2", "near3", "wanted")
+        store.upsert("near1", _vec(1, 0, 0), {"kind": "other"})
+        store.upsert("near2", _vec(0.9, 0.1, 0), {"kind": "other"})
+        store.upsert("near3", _vec(0.8, 0.2, 0), {"kind": "other"})
+        store.upsert("wanted", _vec(0, 1, 0), {"kind": "wanted"})
+
+        results = store.query(_vec(1, 0, 0), top_k=1, filters={"kind": "wanted"})
+
+        assert [r["item_id"] for r in results] == ["wanted"]
+
     def test_query_filter_no_match_returns_empty(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0), metadata={"kind": "doc"})
         results = store.query(_vec(1, 0, 0), top_k=10, filters={"kind": "nothing"})
         assert results == []
@@ -282,6 +379,7 @@ class VectorStoreContractTests:
     ) -> None:
         # Filter key not present on any item -> no item satisfies the
         # filter -> empty list.
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0), metadata={"kind": "doc"})
         results = store.query(_vec(1, 0, 0), top_k=10, filters={"absent_key": "x"})
         assert results == []
@@ -291,6 +389,7 @@ class VectorStoreContractTests:
     # ------------------------------------------------------------------
 
     def test_upsert_bulk_writes_all_rows(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a", "b", "c")
         store.upsert_bulk(
             [
                 {"item_id": "a", "vector": _vec(1, 0, 0)},
@@ -308,6 +407,7 @@ class VectorStoreContractTests:
         assert store.count() == 0
 
     def test_upsert_bulk_round_trips_metadata(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         store.upsert_bulk(
             [
                 {
@@ -322,6 +422,7 @@ class VectorStoreContractTests:
         assert item["metadata"] == {"kind": "doc", "tier": 1}
 
     def test_upsert_bulk_replaces_existing_row(self, store: VectorStore) -> None:
+        self.provision_storage(store, "a")
         store.upsert("a", _vec(1, 0, 0), metadata={"v": 1})
         store.upsert_bulk(
             [{"item_id": "a", "vector": _vec(0, 1, 0), "metadata": {"v": 2}}]
@@ -334,6 +435,7 @@ class VectorStoreContractTests:
     def test_upsert_bulk_rejects_missing_required_keys(
         self, store: VectorStore
     ) -> None:
+        self.provision_storage(store, "a")
         with pytest.raises(ValueError, match="vector"):
             store.upsert_bulk([{"item_id": "a"}])
 
@@ -341,6 +443,7 @@ class VectorStoreContractTests:
             store.upsert_bulk([{"vector": _vec(1, 0, 0)}])
 
     def test_upsert_bulk_results_visible_to_query(self, store: VectorStore) -> None:
+        self.provision_storage(store, "right", "up")
         store.upsert_bulk(
             [
                 {"item_id": "right", "vector": _vec(1, 0, 0)},
@@ -355,6 +458,7 @@ class VectorStoreContractTests:
         """Within-batch duplicate ``item_id`` rejected — last-write-wins
         is non-deterministic across backends (e.g. Neo4j UNWIND ordering),
         so the contract requires de-dup before the call."""
+        self.provision_storage(store, "dup")
         before = store.count()
         with pytest.raises(ValueError, match=r"upsert_bulk\[1\].*duplicate"):
             store.upsert_bulk(
@@ -402,6 +506,7 @@ class VectorStoreContractTests:
         constant fails against the other kind of backend, and the pinned
         constant fails against SQLite alone.
         """
+        self.provision_storage(store, "narrow", "wide")
         declared = store.dimensions
         wider = [*_vec(1, 0, 0), 0.5]
 
@@ -440,6 +545,7 @@ class VectorStoreContractTests:
         that report a function of timing. It also must not need the
         store to be non-empty to have an answer.
         """
+        self.provision_storage(store, "a", "b")
         before = store.dimensions
         store.upsert("a", _vec(1, 0, 0))
         assert store.dimensions == before
@@ -455,6 +561,7 @@ class VectorStoreContractTests:
         actually empties the store and leaves it usable, and that a
         backend which declines really declines rather than half-running.
         """
+        self.provision_storage(store, "a", "b")
         store.upsert("a", _vec(1, 0, 0))
         assert store.count() == 1
 

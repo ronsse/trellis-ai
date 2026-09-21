@@ -23,10 +23,14 @@ Claude Code writes one JSONL file per session under
 * **``tool_result`` content arrays** — a tool result's ``content`` may be a
   bare string *or* a list of typed blocks. Either way it is raw tool output
   (``op read`` results, env dumps) and is **never** copied into the digest;
-  only its ``is_error`` flag survives.
+  only its ``is_error`` flag and its ``tool_use_id`` survive. The id is an
+  opaque correlation handle, and it is read for one reason: it attributes
+  the failure to the call that produced it, which is the difference between
+  "this session errored" and "``Bash`` errored 38 times out of 412" (#306).
 
 The output is a :class:`~trellis_workers.session_capture.models.SessionDigest`
-that carries only natural-language turns, tool *names*, and structural signals.
+that carries only natural-language turns, tool *names* with per-call error
+flags, and structural signals.
 """
 
 from __future__ import annotations
@@ -44,7 +48,6 @@ from trellis_workers.session_capture.models import (
     ROLE_ASSISTANT,
     ROLE_USER,
     SessionDigest,
-    ToolCall,
 )
 
 if TYPE_CHECKING:
@@ -147,22 +150,29 @@ def _extract_text(content: Any) -> list[str]:
     return texts
 
 
-def _tool_result_errored(content: Any) -> bool:
-    """Whether a user message carries a ``tool_result`` block flagged errored.
+def _errored_result_ids(content: Any) -> list[str | None]:
+    """``tool_use_id``s of every errored ``tool_result`` in a user message.
 
-    Only the boolean ``is_error`` flag is read — the result ``content`` (raw
-    tool output) is never touched.
+    One entry per errored result, so the count is the number of failures and
+    not the number of distinct tools. ``None`` marks an errored result whose
+    id is absent or unusable — it still counts as a failure, it just cannot
+    be attributed to a call.
+
+    Only the boolean ``is_error`` flag and the id are read — the result
+    ``content`` (raw tool output) is never touched.
     """
     if not isinstance(content, list):
-        return False
+        return []
+    ids: list[str | None] = []
     for block in content:
         if (
             isinstance(block, dict)
             and block.get("type") == "tool_result"
             and bool(block.get("is_error"))
         ):
-            return True
-    return False
+            use_id = block.get("tool_use_id")
+            ids.append(use_id if isinstance(use_id, str) and use_id else None)
+    return ids
 
 
 def _add_turns(
@@ -174,12 +184,20 @@ def _add_turns(
 
 
 def _collect_tool_names(digest: SessionDigest, content: Any) -> None:
-    """Record tool *names* from an assistant message. Never their inputs."""
+    """Record tool *names* from an assistant message. Never their inputs.
+
+    The block's ``id`` rides along so the ``tool_result`` answering this
+    call can be attributed back to it. An id is an opaque correlation
+    handle, not payload.
+    """
     for block in content if isinstance(content, list) else []:
         if isinstance(block, dict) and block.get("type") == "tool_use":
             name = block.get("name")
             if isinstance(name, str) and name:
-                digest.tool_calls.append(ToolCall(name=name))
+                use_id = block.get("id")
+                digest.record_tool_use(
+                    name, use_id if isinstance(use_id, str) else None
+                )
 
 
 def _handle_record(record: dict[str, Any], digest: SessionDigest) -> None:
@@ -203,8 +221,15 @@ def _handle_record(record: dict[str, Any], digest: SessionDigest) -> None:
 
     if record_type == _TYPE_USER:
         _add_turns(digest, ROLE_USER, content, sidechain=sidechain)
-        if _tool_result_errored(content):
+        errored_ids = _errored_result_ids(content)
+        if errored_ids:
+            # Unconditional, and deliberately not derived from the join
+            # below: an errored result whose call this file never held
+            # still means the session hit an error. See
+            # :meth:`SessionDigest.mark_tool_result`.
             digest.has_error = True
+        for use_id in errored_ids:
+            digest.mark_tool_result(use_id, errored=True)
     elif record_type == _TYPE_ASSISTANT:
         _add_turns(digest, ROLE_ASSISTANT, content, sidechain=sidechain)
         _collect_tool_names(digest, content)

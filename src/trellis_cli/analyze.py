@@ -13,6 +13,15 @@ from rich.markup import escape
 from rich.table import Table
 
 from trellis.analyze.domains import analyze_domains
+from trellis.analyze.graph_shape import (
+    DegreeDistribution,
+    DocumentLinkage,
+    GraphShapeReport,
+    IsolationReport,
+    NameCollisions,
+    ReferentCoverage,
+    analyze_graph_shape,
+)
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import StoreWriteRefusedError
 from trellis.extract.telemetry import analyze_extractor_fallbacks
@@ -84,6 +93,12 @@ console = build_console()
 # Display thresholds for rate coloring
 _RATE_GREEN = 0.7
 _RATE_YELLOW = 0.4
+
+# Graph-shape display: how many isolated-type rows to print, and the share
+# at which an isolated type reads as a vocabulary that is not being linked
+# at all rather than one with a few loose ends.
+_GRAPH_ISOLATION_ROWS = 12
+_GRAPH_ISOLATED_RED = 0.5
 
 # Extractor-fallback display thresholds (inverted — high rate = bad)
 _FALLBACK_RATE_RED = 0.5
@@ -1077,6 +1092,121 @@ def value(
 
     for note in report.notes:
         console.print(f"  [dim]note: {note}[/dim]")
+
+
+@analyze_app.command("judged-outcomes")
+def judged_outcomes(
+    days: int = typer.Option(30, help="Days of history to analyze"),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan per event type. Raise it when the report says "
+            "TRUNCATED; the newest events are kept and rates use the window "
+            "the evidence actually covers."
+        ),
+    ),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
+) -> None:
+    """What followed each judged memory operation: served, graded, cited.
+
+    Joins MEMORY_OP_JUDGED.subject_ref.ref_id to the packs that later served
+    that memory (PACK_ASSEMBLED.injected_items[], where a document subject
+    also matches its own chunks) and to the verdicts graders gave those packs
+    (FEEDBACK_RECORDED), per op_type x decision.
+
+    The Phase 1 gate reads graded rows per 30 days, where graded means joined
+    to an outcome rather than merely emitted. It is decided on rows cited
+    after their judgment, and every looser reading is printed beside it.
+    Read-only.
+    """
+    from trellis.learning.judged_outcomes import (  # noqa: PLC0415
+        summarize_judged_outcomes,
+    )
+
+    event_log = get_event_log()
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.judged_outcomes",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = summarize_judged_outcomes(event_log, days=days, limit=limit)
+        if _meta_record.enabled and report.totals.judged > 0:
+            _meta_record.produced_finding(
+                f"judged-outcomes-report-d{days}",
+                finding_type="JudgedOutcomesReport",
+            )
+
+    if output_format == "json":
+        emit_json(report.model_dump())
+        return
+
+    console.print(f"[bold]Judged-Operation Outcomes[/bold] (last {days} days)")
+    if report.scan.truncated:
+        console.print(
+            f"  [yellow]window[/yellow] evidence covers "
+            f"{report.effective_window_days:g} of {days} days"
+        )
+    totals = report.totals
+    console.print(
+        f"  {totals.judged} judged row(s) over {totals.distinct_subjects} "
+        f"subject(s); {report.flat_packs}/{report.packs} packs attributable, "
+        f"{report.attributed_packs} graded per item"
+    )
+    if not totals.judged:
+        console.print("  [dim]No judged memory operations in the window.[/dim]")
+
+    per_30d = "n/a" if report.gate_number is None else f"{report.gate_number:g}"
+    style = "green" if report.gate_verdict == "passes" else "yellow"
+    console.print()
+    console.print(
+        f"  [bold]Phase 1 gate: [{style}]{escape(report.gate_verdict)}"
+        f"[/{style}][/bold] — {per_30d} {escape(report.gate_reading)} per 30 "
+        f"days against > {report.gate_threshold}"
+    )
+    for reading in report.gate_readings[1:]:
+        rate = "n/a" if reading.per_30d is None else f"{reading.per_30d:g}"
+        mark = "passes" if reading.passes else "below"
+        console.print(
+            f"    [dim]{escape(reading.reading)}: {reading.count} "
+            f"({rate}/30d, {mark})[/dim]"
+        )
+
+    for title, cells in (("By op type", report.by_op_type), ("By cell", report.cells)):
+        if not cells:
+            continue
+        console.print()
+        console.print(f"  [bold]{title}[/bold]")
+        for cell in cells:
+            label = (
+                cell.op_type
+                if cell.decision == "(all)"
+                else f"{cell.op_type} / {cell.decision}"
+            )
+            console.print(
+                f"    {escape(label)}: judged {cell.judged}, "
+                f"never served {cell.never_served}, "
+                f"served {cell.served}, graded {cell.graded}, "
+                f"cited helpful {cell.cited_helpful}, "
+                f"cited unhelpful {cell.cited_unhelpful}"
+                + (f", unservable {cell.unservable}" if cell.unservable else "")
+            )
+
+    if report.stray_citations:
+        console.print()
+        console.print(
+            f"  {report.stray_citations} citation(s) named an id their pack "
+            f"never served; {report.stray_citations_matching_judged} would "
+            "have matched a judged subject"
+        )
+
+    for note in report.notes:
+        console.print(f"  [dim]note: {escape(note)}[/dim]")
 
 
 @analyze_app.command("cost")
@@ -2368,6 +2498,249 @@ def domains(
             rate_cell,
         )
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Graph shape (K2 — the base rates an actuator has to quote before it exists)
+# ---------------------------------------------------------------------------
+
+
+def _print_graph_types(report: GraphShapeReport) -> None:
+    """Canonical type buckets, and the splits the alias map does not cover."""
+    table = Table(title="Node types (bucketed through the alias map)")
+    table.add_column("Canonical", style="cyan")
+    table.add_column("Nodes", justify="right")
+    table.add_column("Share", justify="right")
+    table.add_column("Raw spellings")
+    for bucket in report.type_buckets:
+        raws = ", ".join(
+            f"{raw}({count})" if raw != bucket.canonical else raw
+            for raw, count in bucket.raw_types.items()
+        )
+        table.add_row(
+            bucket.canonical,
+            str(bucket.total),
+            f"{bucket.share:.1%}",
+            escape(raws) if len(bucket.raw_types) > 1 else "[dim]—[/dim]",
+        )
+    console.print(table)
+
+    if not report.uncovered_splits:
+        console.print(
+            "[dim]  No uncovered splits: every raw type that shares a bucket"
+            " once lowercased landed in that bucket.[/dim]"
+        )
+        return
+    console.print()
+    console.print(
+        "[yellow]Uncovered splits[/yellow] — raw types that share a canonical"
+        " bucket once lowercased, but landed in different ones."
+    )
+    console.print(
+        "[dim]  ENTITY_TYPE_ALIASES is keyed on lowercase legacy names, so a"
+        " PascalCase spelling misses the alias and becomes its own type. The"
+        " halves need not differ only in case.[/dim]"
+    )
+    for split in report.uncovered_splits:
+        halves = ", ".join(
+            f"{canonical}={count}" for canonical, count in split.buckets.items()
+        )
+        raws = ", ".join(f"{raw}({n})" for raw, n in split.raw_types.items())
+        console.print(
+            f"    {escape(raws)} -> {escape(halves)} "
+            f"({split.nodes} nodes, {split.share:.1%})"
+        )
+
+
+def _print_graph_collisions(collisions: NameCollisions) -> None:
+    """Name collisions on both keys, and the gap between them.
+
+    Both counts are printed because the difference *is* an answer: it is how
+    many cross-type collisions the alias map already resolves. #594 inferred
+    that number from two adjacent result sets and got it wrong.
+    """
+    console.print(
+        f"[bold]Name collisions[/bold] — {collisions.distinct_names} distinct"
+        f" names over {collisions.named_nodes} named nodes"
+    )
+    console.print(
+        f"  {collisions.canonical} span more than one canonical type; "
+        f"{collisions.raw_type} span more than one raw type "
+        f"({collisions.explained_by_alias_map} resolved by the alias map)"
+    )
+    console.print(
+        f"  {collisions.same_type_duplicates} names are carried by several"
+        " nodes that agree on the type"
+    )
+    if not collisions.groups:
+        return
+    console.print(
+        f"[dim]  showing {collisions.groups_listed} of {collisions.canonical}[/dim]"
+    )
+    for group in collisions.groups:
+        types = ", ".join(f"{name}={n}" for name, n in group.canonical_types.items())
+        console.print(f"    {escape(group.name)}: {escape(types)}")
+
+
+def _print_graph_degree(degree: DegreeDistribution) -> None:
+    """The degree distribution, with the hubs named.
+
+    The hubs are named because an unlabelled max-degree number invites the
+    #594 reading — that a hub is a defect. An Agent carrying one
+    ``wasAssociatedWith`` edge per activity it ran is the PROV-O shape
+    working, and only the node's type and name make that visible.
+    """
+    console.print(
+        f"[bold]Degree[/bold] over {degree.nodes} nodes / {degree.edges} edges: "
+        f"min {degree.degree_min}, p50 {degree.degree_p50}, "
+        f"p90 {degree.degree_p90}, p99 {degree.degree_p99}, "
+        f"max {degree.degree_max}, mean {degree.mean:.2f}"
+    )
+    buckets = "  ".join(
+        f"{label}:{count}" for label, count in degree.histogram.items() if count
+    )
+    console.print(f"  {buckets}")
+    if degree.dangling_endpoints:
+        console.print(
+            f"  [yellow]{degree.dangling_endpoints} edge endpoints[/yellow] name"
+            " a node the read did not return"
+        )
+    for hub in degree.top_hubs:
+        label = hub.name or hub.node_id
+        console.print(
+            f"    {hub.degree:>4}  {escape(label)} [dim]({hub.canonical_type})[/dim]"
+        )
+
+
+def _print_graph_isolation(isolation: IsolationReport) -> None:
+    """Degree-zero share overall and for the types that carry it."""
+    console.print(
+        f"[bold]Isolated[/bold] (degree 0): {isolation.isolated}/{isolation.nodes} "
+        f"({isolation.share:.1%})"
+    )
+    offenders = [row for row in isolation.by_type if row.isolated]
+    for row in offenders[:_GRAPH_ISOLATION_ROWS]:
+        style = "red" if row.share >= _GRAPH_ISOLATED_RED else "yellow"
+        console.print(
+            f"    [{style}]{row.isolated:>4}/{row.total:<5}[/{style}] "
+            f"{row.canonical} ({row.share:.0%})"
+        )
+    if len(offenders) > _GRAPH_ISOLATION_ROWS:
+        console.print(
+            f"[dim]    ... {len(offenders) - _GRAPH_ISOLATION_ROWS} more types"
+            " with isolated nodes[/dim]"
+        )
+
+
+def _print_graph_referents(referents: ReferentCoverage) -> None:
+    """External-referent coverage, with the unread mechanism named.
+
+    The two measures are printed on their own lines and never added
+    together: they overlap, and a node can satisfy both.
+    """
+    console.print(
+        f"[bold]External referents[/bold]: {referents.any_referent}/"
+        f"{referents.nodes} nodes ({referents.any_share:.1%}) point outside"
+        " Trellis"
+    )
+    console.print(
+        f"    {referents.well_known:>4} by well-known dataset property "
+        f"({referents.well_known_share:.1%})"
+    )
+    console.print(
+        f"    {referents.locator_shape:>4} by locator-shaped value "
+        f"({referents.locator_share:.1%})"
+    )
+    if referents.by_property:
+        keys = ", ".join(
+            f"{key}({count})" for key, count in referents.by_property.items()
+        )
+        console.print(f"    keys: {escape(keys)}")
+    console.print(
+        "[dim]    entity_aliases not read: get_aliases is keyed by entity_id,"
+        " so reading it here would be one query per node. Absence of alias"
+        " evidence above is not evidence of absent aliases.[/dim]"
+    )
+
+
+def _print_graph_documents(documents: DocumentLinkage) -> None:
+    """The graph-to-memory join — what makes this a provenance map at all."""
+    console.print(
+        f"[bold]Document linkage[/bold]: {documents.linked}/{documents.nodes} "
+        f"nodes ({documents.share:.1%}) carry document_ids; "
+        f"{documents.total_links} links, max {documents.max_per_node} per node"
+    )
+    buckets = "  ".join(
+        f"{label}:{count}" for label, count in documents.histogram.items() if count
+    )
+    console.print(f"    {buckets}")
+    if documents.by_type:
+        top = ", ".join(
+            f"{name}({count})" for name, count in list(documents.by_type.items())[:8]
+        )
+        console.print(f"    linked types: {escape(top)}")
+
+
+@analyze_app.command("graph-shape")
+def graph_shape(
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Report the shape of the graph: one read pass, no per-node queries.
+
+    The graph is the one plane with no instrument, so every proposal to
+    reshape it has been argued from a hand-written probe that ran once and
+    was then quoted in prose. This is that probe as a command: type buckets
+    and the case splits the alias map does not cover, cross-type name
+    collisions counted on both the raw and canonical keys, the degree
+    distribution with its hubs named, isolated share per type, external
+    referent coverage, and document linkage.
+
+    These are the base rates. An actuator that proposes to reshape the graph
+    past some threshold states its trigger in this report's terms, and states
+    what fraction of nodes its rule would fire on, *before* it is built.
+
+    Read-only: two counts and two queries, no ``get_edges``, no meta-Activity
+    node, no events. Exits ``EXIT_STORE`` when the read raced a writer and
+    came back at its limit, because every rate in a truncated report was
+    computed over the newest rows rather than the graph.
+    """
+    report = analyze_graph_shape(get_graph_store())
+
+    if output_format == "json":
+        emit_json(report.model_dump(mode="json"))
+    else:
+        console.print(
+            f"[bold]Graph Shape[/bold] — {report.nodes} nodes, {report.edges} edges"
+        )
+        roles = ", ".join(f"{name}={n}" for name, n in report.node_roles.items())
+        console.print(f"  roles: {escape(roles)}")
+        if report.scan.truncated:
+            console.print(f"  [red]truncated[/red] {report.scan.note}")
+        console.print()
+        _print_graph_types(report)
+        console.print()
+        _print_graph_collisions(report.collisions)
+        console.print()
+        _print_graph_degree(report.degree)
+        console.print()
+        _print_graph_isolation(report.isolation)
+        console.print()
+        _print_graph_referents(report.referents)
+        console.print()
+        _print_graph_documents(report.documents)
+        if report.edge_types:
+            console.print()
+            edges = ", ".join(
+                f"{name}({count})"
+                for name, count in list(report.edge_types.items())[:12]
+            )
+            console.print(f"[bold]Edge kinds[/bold]: {escape(edges)}")
+
+    # Below the format branch, deliberately (#437): a truncated census is the
+    # same fact on both surfaces, and an exit reachable from one arm only is
+    # how the machine surface ends up reporting success for a failed read.
+    if report.status == "truncated":
+        raise typer.Exit(EXIT_STORE)
 
 
 # ---------------------------------------------------------------------------

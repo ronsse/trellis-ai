@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
+from trellis.llm.routing import LLMConsumer, resolve_llm_route
 from trellis_cli.admin import admin_app
+from trellis_cli.exit_codes import EXIT_STORE
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -140,15 +143,25 @@ def _make_registry(
     llm_client=_SENTINEL_LLM_CLIENT,
     provider: str | None = "openai",
     model: str | None = "gpt-4o-mini",
+    llm_config: dict | None = None,
 ):
     """Construct a mock StoreRegistry for check-extractors tests.
 
     ``llm_client=None`` simulates a non-configurable LLM. Anything
     non-``None`` (the default sentinel) simulates a buildable client.
+    ``llm_config`` replaces the ``provider``/``model`` pair with a whole
+    ``llm:`` block. Routes resolve through the real
+    :func:`~trellis.llm.routing.resolve_llm_route`, so a malformed block
+    raises exactly as :meth:`StoreRegistry.llm_route` would.
     """
     reg = MagicMock()
     reg.build_llm_client.return_value = llm_client
-    reg._llm_config = {"provider": provider, "model": model}
+    reg._llm_config = (
+        {"provider": provider, "model": model} if llm_config is None else llm_config
+    )
+    reg.llm_route.side_effect = lambda consumer=None: resolve_llm_route(
+        reg._llm_config, consumer
+    )
     reg.graph_store = MagicMock()
     return reg
 
@@ -257,6 +270,221 @@ class TestCheckExtractorsWarn:
         data = json.loads(result.stdout.strip())
         assert data["status"] == "warn"
         assert any(w["signal"] == "env_fallback_only" for w in data["warnings"])
+
+
+# The extractor pinned to a litellm tier: same parent block the tests above
+# use, plus a tier that moves the endpoint and names its own credential.
+_ROUTED_LLM = {
+    "provider": "openai",
+    "api_key_env": "OPENAI_API_KEY",
+    "model": "gpt-4o-mini",
+    "tiers": {
+        "deep": {
+            "base_url": "http://localhost:4000/v1",
+            "api_key_env": "LITELLM_API_KEY",
+            "model": "deep",
+        }
+    },
+    "routes": {"memory_extraction": "deep"},
+}
+
+
+def _without_routes(config: dict) -> dict:
+    return {key: value for key, value in config.items() if key != "routes"}
+
+
+def _check_extractors_json(monkeypatch) -> tuple[int, dict]:
+    result = runner.invoke(admin_app, ["check-extractors", "--format", "json"])
+    return result.exit_code, json.loads(result.stdout.strip())
+
+
+class TestCheckExtractorsRouting:
+    """The report reads the extractor's *route*, not the parent block."""
+
+    @patch("trellis_cli.admin._get_registry")
+    def test_routed_extractor_reports_its_tier_model_and_consumer(
+        self, mock_get_reg, monkeypatch
+    ):
+        reg = _make_registry(llm_config=_ROUTED_LLM)
+        mock_get_reg.return_value = reg
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        exit_code, data = _check_extractors_json(monkeypatch)
+        assert exit_code == 0
+        assert data["status"] == "ready"
+        assert data["llm_client"]["tier"] == "deep"
+        assert data["llm_client"]["model"] == "deep"
+        assert data["llm_client"]["provider"] == "openai"
+        assert data["llm_client"]["env_fallback_applies"] is False
+        reg.build_llm_client.assert_called_once_with(
+            consumer=LLMConsumer.MEMORY_EXTRACTION
+        )
+
+    @patch("trellis_cli.admin._get_registry")
+    def test_unrouted_extractor_reports_no_tier(self, mock_get_reg, monkeypatch):
+        mock_get_reg.return_value = _make_registry(
+            llm_config=_without_routes(_ROUTED_LLM)
+        )
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        exit_code, data = _check_extractors_json(monkeypatch)
+        assert exit_code == 0
+        assert data["llm_client"]["tier"] is None
+        assert data["llm_client"]["model"] == "gpt-4o-mini"
+        assert data["llm_client"]["env_fallback_applies"] is True
+
+    @pytest.mark.parametrize(
+        ("config", "status", "signal", "llm_dependency"),
+        [
+            (_ROUTED_LLM, "blocked", "routed_tier_unbuildable", False),
+            (_without_routes(_ROUTED_LLM), "warn", "env_fallback_only", True),
+        ],
+        ids=["routed", "unrouted"],
+    )
+    @patch("trellis_cli.admin._get_registry")
+    def test_an_env_key_rescues_only_an_unrouted_extractor(
+        self, mock_get_reg, monkeypatch, config, status, signal, llm_dependency
+    ):
+        """Same env key, same unbuildable client; only the route differs.
+
+        MCP's ``_build_llm_client`` never falls back to ``OPENAI_API_KEY`` for
+        a routed consumer, so counting the key as a fallback there would
+        report WARN for an extractor that will silently skip.
+        """
+        mock_get_reg.return_value = _make_registry(llm_client=None, llm_config=config)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        exit_code, data = _check_extractors_json(monkeypatch)
+        assert exit_code == 1
+        assert data["status"] == status
+        assert data["llm_client"]["env_fallback_available"] is True
+        assert data["dependencies"]["llm_client"] is llm_dependency
+        assert [w["signal"] for w in data["warnings"]] == [signal]
+
+    @pytest.mark.parametrize("flag", ["1", None], ids=["flag-set", "flag-unset"])
+    @patch("trellis_cli.admin._get_registry")
+    def test_malformed_routing_blocks_whatever_the_flag(
+        self, mock_get_reg, monkeypatch, flag
+    ):
+        reg = _make_registry(
+            llm_config={**_ROUTED_LLM, "routes": {"memory_extraction": "missing"}}
+        )
+        mock_get_reg.return_value = reg
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        if flag is None:
+            monkeypatch.delenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", raising=False)
+        else:
+            monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", flag)
+        exit_code, data = _check_extractors_json(monkeypatch)
+        assert exit_code == 1
+        assert data["status"] == "blocked"
+        assert [w["signal"] for w in data["warnings"]] == ["llm_routing_invalid"]
+        assert data["warnings"][0]["message"].startswith(
+            "llm.routes.memory_extraction: "
+        )
+        assert data["llm_client"]["tier"] is None
+        assert data["llm_client"]["env_fallback_applies"] is False
+        assert data["dependencies"]["llm_client"] is False
+        reg.build_llm_client.assert_not_called()
+
+    @patch("trellis_cli.admin._get_registry")
+    def test_text_names_the_tier_and_the_unused_env_key(
+        self, mock_get_reg, monkeypatch
+    ):
+        mock_get_reg.return_value = _make_registry(llm_config=_ROUTED_LLM)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        result = runner.invoke(admin_app, ["check-extractors"])
+        assert result.exit_code == 0
+        assert "tier=deep" in result.stdout
+        assert "but unused" in result.stdout
+
+    @patch("trellis_cli.admin._get_registry")
+    def test_text_escapes_a_tier_name_that_reads_as_markup(
+        self, mock_get_reg, monkeypatch
+    ):
+        """``[/]`` is a closing tag with nothing to close: unescaped, Rich raises."""
+        mock_get_reg.return_value = _make_registry(
+            llm_config={**_ROUTED_LLM, "routes": {"memory_extraction": "[/]"}}
+        )
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        result = runner.invoke(admin_app, ["check-extractors"])
+        assert result.exit_code == 1, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "'[/]'" in result.stdout
+
+
+class TestLlmRoutes:
+    """``trellis admin llm-routes`` — the read-only view of ``llm.routes``."""
+
+    @patch("trellis_cli.admin._get_registry")
+    def test_json_lists_every_consumer_with_its_route(self, mock_get_reg, monkeypatch):
+        mock_get_reg.return_value = _make_registry(llm_config=_ROUTED_LLM)
+        monkeypatch.setenv("LITELLM_API_KEY", "sk-litellm-value")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        result = runner.invoke(admin_app, ["llm-routes", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["status"] == "ok"
+        assert data["error"] is None
+        rows = {row["consumer"]: row for row in data["routes"]}
+        assert list(rows) == [member.value for member in LLMConsumer]
+        routed = rows["memory_extraction"]
+        assert routed["tier"] == "deep"
+        assert routed["model"] == "deep"
+        assert routed["base_url"] == "http://localhost:4000/v1"
+        assert routed["api_key_env"] == "LITELLM_API_KEY"
+        assert routed["credential_source"] == "env"
+        unrouted = rows["enrichment"]
+        assert unrouted["tier"] is None
+        assert unrouted["model"] == "gpt-4o-mini"
+        assert unrouted["api_key_env"] == "OPENAI_API_KEY"
+        assert unrouted["credential_source"] is None
+        assert "sk-litellm-value" not in result.stdout
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    @patch("trellis_cli.admin._get_registry")
+    def test_a_literal_key_is_named_as_a_source_and_never_printed(
+        self, mock_get_reg, monkeypatch, output_format
+    ):
+        mock_get_reg.return_value = _make_registry(
+            llm_config={"provider": "openai", "api_key": "sk-literal-value"}
+        )
+        result = runner.invoke(admin_app, ["llm-routes", "--format", output_format])
+        assert result.exit_code == 0, result.output
+        assert "sk-literal-value" not in result.stdout
+        assert "literal" in result.stdout
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    @patch("trellis_cli.admin._get_registry")
+    def test_a_malformed_block_exits_store_on_either_format(
+        self, mock_get_reg, monkeypatch, output_format
+    ):
+        mock_get_reg.return_value = _make_registry(
+            llm_config={**_ROUTED_LLM, "routes": {"memory_extraction": "missing"}}
+        )
+        result = runner.invoke(app, ["admin", "llm-routes", "--format", output_format])
+        assert result.exit_code == EXIT_STORE, result.output
+        assert "llm.routes.memory_extraction" in result.stdout
+        if output_format == "json":
+            data = json.loads(result.stdout)
+            assert data["status"] == "error"
+            assert data["routes"] == []
+            assert data["error"]["setting"] == "llm.routes.memory_extraction"
+
+    @patch("trellis_cli.admin._get_registry")
+    def test_text_escapes_a_tier_name_that_reads_as_markup(
+        self, mock_get_reg, monkeypatch
+    ):
+        mock_get_reg.return_value = _make_registry(
+            llm_config={
+                "provider": "openai",
+                "api_key_env": "OPENAI_API_KEY",
+                "tiers": {"[/]": {"model": "m"}},
+                "routes": {"memory_extraction": "[/]"},
+            }
+        )
+        result = runner.invoke(admin_app, ["llm-routes"])
+        assert result.exit_code == 0, result.output
+        assert "[/]" in result.stdout
 
 
 # ---------------------------------------------------------------------------

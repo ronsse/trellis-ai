@@ -65,9 +65,21 @@ def _wipe_neo4j() -> None:
     The vector index is NOT dropped between tests: AuraDB provisions
     vector indexes asynchronously, so an immediate query after a fresh
     ``CREATE`` can race ahead of materialisation and fail with "no
-    such vector schema index". Sharing the unit-suite's index
-    (``INTEGRATION_VECTOR_INDEX``) at pinned dimensions makes
-    ``CREATE ... IF NOT EXISTS`` a true no-op across runs.
+    such vector schema index". Sharing one index at pinned dimensions
+    makes ``CREATE ... IF NOT EXISTS`` a true no-op across runs.
+
+    That sharing claim described an intent rather than the code until
+    #356: ``tests/unit/stores/test_neo4j_vector.py`` passed
+    ``index_name="trellis_test_node_embeddings"``, so the two suites named
+    *different* indexes on the same ``(:Node, embedding)`` pair. Harmless
+    while they never met a single Neo4j — and #356 puts both in one
+    ``live-infra.yml`` pytest invocation against one container, where the
+    second ``CREATE`` is rejected **silently** (measured on
+    ``neo4j:2025.12``: success returned, index absent from ``SHOW
+    INDEXES``, then a 30s ``VectorIndexNotOnlineError`` per test). The unit
+    suite now takes the store's production default, which is this constant.
+    ``tests/unit/test_neo4j_vector_live_infra_rule.py`` fails if they
+    diverge again.
     """
     from neo4j import GraphDatabase
 
@@ -160,51 +172,6 @@ def _await_neo4j_indexes(timeout_seconds: int = 60) -> None:
     try:
         with driver.session(database=DATABASE) as session:
             session.run("CALL db.awaitIndexes($t)", t=timeout_seconds).consume()
-    finally:
-        driver.close()
-
-
-@pytest.fixture(scope="session")
-def neo4j_vector_search_supported() -> bool:
-    """Whether the connected Neo4j can run the vector store's ``SEARCH`` query.
-
-    :class:`Neo4jVectorStore.query` uses the Cypher ``SEARCH ... VECTOR INDEX``
-    clause. AuraDB supports it; a self-hosted Docker instance (community *or*
-    enterprise, through at least 2025.12) does not — it raises
-    ``51N26 'not supported in this version'`` — and a Cypher-5-default server
-    rejects the keyword at parse time (``Invalid input 'SEARCH'``). The probe
-    mirrors the production query exactly (no ``CYPHER 25`` prefix) against a
-    throwaway index name, so it is a faithful "can the real query run here?"
-    check: an index-resolution error means SEARCH is available, while a
-    feature/parse error means it is not. Vector-search tests skip when this is
-    ``False`` so the containerized live-infra CI stays green and hermetic.
-    """
-    if not URI:
-        return False
-    from neo4j import GraphDatabase
-
-    probe = (
-        "MATCH (n:Node) SEARCH n IN ( VECTOR INDEX __vs_probe__ "
-        "FOR [0.0] LIMIT 1 ) SCORE AS s RETURN n LIMIT 0"
-    )
-    driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
-    try:
-        with driver.session(database=DATABASE) as session:
-            try:
-                session.run(probe).consume()
-            except Exception as exc:
-                # Classify any driver/Cypher failure: a feature/parse error
-                # means SEARCH is unavailable here; anything else (e.g. a
-                # missing-index error) means it is available.
-                msg = str(exc)
-                unsupported = (
-                    "51N26" in msg
-                    or "not available in this implementation" in msg
-                    or "Invalid input 'SEARCH'" in msg
-                )
-                return not unsupported
-            else:
-                return True
     finally:
         driver.close()
 
