@@ -190,7 +190,7 @@ def test_worker_curate_cycle_end_to_end(tmp_path: Path) -> None:
         # nothing re-embedded.
         assert [round(v, 3) for v in noisy_row["vector"]] == [0.1, 0.2, 0.3]
         # The row's own excerpt survived: `sync_vector_metadata` mirrors
-        # only SYNCED_METADATA_KEYS, never the whole document bag.
+        # only MIRRORED_METADATA_KEYS, never the whole document bag.
         assert noisy_row["metadata"]["content"] == "noisy content nobody uses"
 
         # --- Advisory half ran (generation + fitness, no crash). ---

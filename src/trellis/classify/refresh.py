@@ -45,7 +45,7 @@ import structlog
 from trellis.classify.importance import compute_importance
 from trellis.classify.pipeline import ClassifierPipeline
 from trellis.classify.protocol import ClassificationContext
-from trellis.core.vector_metadata import sync_vector_metadata
+from trellis.core.document_write import put_document
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
@@ -146,7 +146,7 @@ def reclassify_item(
         vector_store: Optional — when provided, the refreshed
             ``content_tags`` / ``auto_importance`` are mirrored onto the
             item's vector row by
-            :func:`~trellis.core.vector_metadata.sync_vector_metadata`. A
+            :func:`~trellis.core.document_write.put_document`. A
             vector row's metadata is an embed-time snapshot, so without this
             a backfill's tags are invisible to
             :class:`~trellis.retrieve.strategies.SemanticSearch` until
@@ -255,12 +255,22 @@ def reclassify_item(
     # over an untagged corpus rewrites every document and flattens recency
     # ordering across the whole store — the same failure ``classify.shadow``
     # documents, at the same scale.
-    document_store.put(item_id, content, metadata, preserve_updated_at=True)
     # A vector row's metadata is an embed-time snapshot, so a tag write that
     # stops at the document store is invisible to the semantic axis (#338).
-    # Mirrored after the authoritative write, metadata-only: nothing is
-    # re-embedded, and a document that was never embedded is a no-op.
-    vector_synced = sync_vector_metadata(vector_store, item_id, metadata)
+    # ``put_document`` writes both planes from one bag, metadata-only:
+    # nothing is re-embedded, and a document that was never embedded is a
+    # no-op.
+    vector_synced = (
+        put_document(
+            document_store,
+            vector_store,
+            item_id,
+            content,
+            metadata,
+            preserve_updated_at=True,
+        ).mirror
+        == "synced"
+    )
     logger.info(
         "tags_refreshed",
         item_id=item_id,

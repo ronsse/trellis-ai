@@ -426,6 +426,115 @@ class TestValue:
         )
 
 
+class TestJudgedOutcomes:
+    """``trellis analyze judged-outcomes`` — what followed each judged operation."""
+
+    @staticmethod
+    def _seed_cited_row(
+        registry: StoreRegistry, *, decision: str = "reference"
+    ) -> None:
+        # Emitted in the order production writes them: the judgment, then the
+        # pack that served the memory, then the grader's citation.
+        event_log = registry.operational.event_log
+        event_log.emit(
+            EventType.MEMORY_OP_JUDGED,
+            source="test",
+            entity_id="doc1",
+            payload={
+                "op_type": "classification",
+                "model_id": "test-model",
+                "input_digest": {"hash": "0123abcd", "length": 42, "source_refs": []},
+                "decision": decision,
+                "confidence": 0.9,
+                "subject_ref": {"ref_type": "doc", "ref_id": "doc1"},
+            },
+        )
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="jpack",
+            entity_type="pack",
+            payload={
+                "injected_items": [
+                    {
+                        "item_id": "doc1#chunk-0",
+                        "item_type": "document",
+                        "estimated_tokens": 100,
+                        "rank": 0,
+                    }
+                ]
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mcp",
+            entity_id="jpack",
+            payload={
+                "pack_id": "jpack",
+                "helpful_item_ids": ["doc1#chunk-0"],
+                "unhelpful_item_ids": [],
+                "rating": 0.9,
+                "success": True,
+            },
+        )
+
+    def test_empty_log_json(self) -> None:
+        result = runner.invoke(app, ["analyze", "judged-outcomes", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["totals"]["judged"] == 0
+        assert data["gate_verdict"] == "fails_every_reading"
+        assert data["gate_threshold"] == 500
+
+    def test_a_cited_row_json(self, temp_stores: StoreRegistry) -> None:
+        self._seed_cited_row(temp_stores)
+        result = runner.invoke(app, ["analyze", "judged-outcomes", "--format", "json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["totals"]["cited_helpful"] == 1
+        assert data["gate_readings"][0] == {
+            "reading": "cited_rows",
+            "count": 1,
+            "per_30d": 1.0,
+            "passes": False,
+        }
+        [cell] = data["cells"]
+        assert (cell["op_type"], cell["decision"]) == ("classification", "reference")
+
+    def test_text_names_the_gate_and_the_cell(self, temp_stores: StoreRegistry) -> None:
+        self._seed_cited_row(temp_stores)
+        result = runner.invoke(app, ["analyze", "judged-outcomes"])
+        assert result.exit_code == 0
+        rendered = plain(result.stdout)
+        assert "Phase 1 gate: fails_every_reading" in rendered
+        assert "classification / reference: judged 1" in rendered
+        assert "cited helpful 1" in rendered
+
+    def test_text_on_an_empty_log_says_so(self) -> None:
+        result = runner.invoke(app, ["analyze", "judged-outcomes"])
+        assert result.exit_code == 0
+        assert "No judged memory operations" in plain(result.stdout)
+
+    def test_a_bracketed_decision_survives_rich_markup(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``decision`` is free text from a model, so it must not parse as markup."""
+        force_colour(monkeypatch, analyze)
+        self._seed_cited_row(temp_stores, decision="[staging]")
+        result = runner.invoke(app, ["analyze", "judged-outcomes"])
+        assert result.exit_code == 0
+        rendered = assert_coloured(result.stdout)
+        assert "classification / [staging]" in rendered
+
+    def test_exit_code_does_not_depend_on_format(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_cited_row(temp_stores)
+        text = runner.invoke(app, ["analyze", "judged-outcomes"])
+        machine = runner.invoke(app, ["analyze", "judged-outcomes", "--format", "json"])
+        assert text.exit_code == machine.exit_code == 0
+
+
 class TestAdvisoryEffectiveness:
     def test_empty_events(self) -> None:
         result = runner.invoke(app, ["analyze", "advisory-effectiveness"])
@@ -1319,6 +1428,24 @@ class TestTruncationReachesTheOperator:
         assert result.exit_code == 0
         assert "TRUNCATED" in result.stdout
 
+    def test_judged_outcomes_prints_the_truncation_note(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._flood(temp_stores, EventType.PACK_ASSEMBLED, 4)
+        capped = runner.invoke(
+            app, ["analyze", "judged-outcomes", "--days", "30", "--limit", "3"]
+        )
+        # ``--limit 4`` would still read as capped: a scan that fills its
+        # limit cannot tell whether a fifth event existed.
+        uncapped = runner.invoke(
+            app, ["analyze", "judged-outcomes", "--days", "30", "--limit", "5"]
+        )
+        assert capped.exit_code == uncapped.exit_code == 0
+        assert "TRUNCATED" in plain(capped.stdout)
+        assert "evidence covers" in plain(capped.stdout)
+        assert "TRUNCATED" not in plain(uncapped.stdout)
+        assert "evidence covers" not in plain(uncapped.stdout)
+
     def test_limit_option_raises_the_cap(self, temp_stores: StoreRegistry) -> None:
         """The lever the note now tells the operator to reach for."""
         self._flood(temp_stores, EventType.PACK_ASSEMBLED, 5001)
@@ -1508,3 +1635,80 @@ class TestAdvisoryCommandsOnAStaleStore:
         payload = json.loads(json_run.stdout.strip())
         assert payload["status"] == "refused"
         assert payload["code"] == "STALE_STORE_WRITE"
+
+
+class TestAnalyzeHealthStraySection:
+    """#574 reaches the operator surface, in both output formats.
+
+    The measurement only pays for itself if someone reads it. The stray
+    block renders directly under the citation rate it qualifies, because
+    a reader who sees ``69/74 cited (93%)`` has no reason to suspect that
+    some of those verdicts reached nothing.
+    """
+
+    def _seed(self, registry: StoreRegistry, *, cited: list[str]) -> None:
+        event_log = registry.operational.event_log
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="pack_1",
+            entity_type="pack",
+            payload={
+                "injected_item_ids": ["trace:a", "doc:b"],
+                "injected_items": [{"item_id": "trace:a"}, {"item_id": "doc:b"}],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mcp:record_feedback",
+            payload={"pack_id": "pack_1", "helpful_item_ids": cited},
+        )
+
+    def test_text_names_the_count_the_rate_and_the_shapes(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed(temp_stores, cited=["trace:a", "entity:doc:b", "ghost"])
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = plain(result.stdout)
+        assert "stray 2/3 cited ids (66.7%) were never served" in out
+        assert "across 1 pack(s)" in out
+        # The shape partition is the actionable half: an operator who sees
+        # ``prefix_added`` knows to fix a caller's id spelling, not
+        # retrieval.
+        assert "1 prefix_added" in out
+        assert "1 foreign" in out
+
+    def test_nothing_is_printed_when_every_cited_id_was_served(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """A line that always prints is one that stops being read."""
+        self._seed(temp_stores, cited=["trace:a", "doc:b"])
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = plain(result.stdout)
+        assert "stray" not in out
+        # The surface it qualifies is still there, so this is an absent
+        # caveat rather than an absent section.
+        assert "of which pack-targeted:" in out
+
+    def test_json_carries_every_stray_field(self, temp_stores: StoreRegistry) -> None:
+        self._seed(temp_stores, cited=["trace:a", "entity:doc:b", "ghost"])
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        serve = json.loads(result.stdout)["serve"]
+        assert serve["cited_ids"] == 3
+        assert serve["stray_cited_ids"] == 2
+        assert serve["stray_citation_rate"] == pytest.approx(round(2 / 3, 4))
+        assert serve["packs_with_stray_citations"] == 1
+        assert serve["stray_citations_by_namespace"] == {"entity": 1, "(none)": 1}
+        assert serve["stray_citations_by_shape"] == {"prefix_added": 1, "foreign": 1}
+        # The pre-existing rate is reported unchanged beside it: the caller
+        # did cite, which is exactly why one number cannot carry both facts.
+        assert serve["pack_attribution_rate"] == pytest.approx(1.0)

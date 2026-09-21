@@ -40,6 +40,8 @@ from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
+from trellis.core.document_write import put_document
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.core.write_config import (
     MINHASH_SEED_MAX_DOCS_ENV,
     WriteBehaviourConfig,
@@ -52,6 +54,7 @@ from trellis.feedback.attribution import lookup_pack_item_ids
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import feedback_log_dir
 from trellis.feedback.recording import record_feedback as record_pack_feedback
+from trellis.llm.routing import LLMConsumer, LLMRoutingError
 from trellis.logging import configure_stderr_logging
 from trellis.mcp.auth import (
     TRANSPORT_HTTP,
@@ -350,7 +353,7 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
             build_save_memory_extractor,
         )
 
-        llm_client = _build_llm_client(registry)
+        llm_client = _build_llm_client(registry, LLMConsumer.MEMORY_EXTRACTION)
         if llm_client is None:
             logger.info("memory_extractor_skipped_no_llm_client")
             return None
@@ -374,28 +377,52 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
     return _memory_extractor
 
 
-def _build_llm_client(registry: StoreRegistry) -> Any:
-    """Construct an LLMClient, preferring the registry config over env vars.
+def _build_llm_client(registry: StoreRegistry, consumer: LLMConsumer) -> Any:
+    """Construct ``consumer``'s LLMClient, preferring the registry config over env vars.
 
-    First tries ``registry.build_llm_client()`` (driven by the ``llm:``
-    block in ``~/.trellis/config.yaml``). If that returns ``None`` — either
-    because no config is present or the configured provider couldn't be
-    instantiated — falls back to the env-var path in
+    First tries ``registry.build_llm_client(consumer=...)`` (driven by the
+    ``llm:`` block in ``~/.trellis/config.yaml``). If that returns ``None`` —
+    either because no config is present or the configured provider couldn't
+    be instantiated — falls back to the env-var path in
     :func:`_build_llm_client_from_env`. Returns ``None`` when neither
     source yields a client.
+
+    The env-var fallback is skipped when ``llm.routes`` pins ``consumer`` to
+    a tier, and when ``llm.tiers`` / ``llm.routes`` is malformed: in both
+    cases the operator chose a model for this consumer, and
+    ``OPENAI_API_KEY`` would silently run it on a different one.
     """
     try:
-        client = registry.build_llm_client()
+        route = registry.llm_route(consumer)
+    except LLMRoutingError as exc:
+        logger.error(  # noqa: TRY400 — a config defect; the setting is the fix
+            "llm_routing_invalid",
+            consumer=consumer.value,
+            setting=exc.setting,
+            error=str(exc),
+        )
+        return None
+    try:
+        client = registry.build_llm_client(consumer=consumer)
     except Exception:
         # GRACEFUL-DEGRADATION: registry config is the preferred source
         # but the env-var path below is an explicit, documented fallback
         # for deployments without a populated ``llm:`` block. Logged at
         # exception level so config drift is visible in stderr.
-        logger.exception("llm_client_registry_failed")
+        logger.exception("llm_client_registry_failed", consumer=consumer.value)
         client = None
     if client is not None:
-        logger.debug("llm_client_from_registry")
+        logger.debug(
+            "llm_client_from_registry", consumer=consumer.value, tier=route.tier
+        )
         return client
+    if route.routed:
+        logger.warning(
+            "llm_client_routed_tier_unbuildable",
+            consumer=consumer.value,
+            tier=route.tier,
+        )
+        return None
 
     client = _build_llm_client_from_env()
     if client is not None:
@@ -1717,7 +1744,7 @@ def _compute_reconcile_outcome(
     """
     model_id = configured_model_id()
     try:
-        client = _build_llm_client(registry)
+        client = _build_llm_client(registry, LLMConsumer.RECONCILE)
     except Exception:
         # A misconfigured / uninstalled provider must not fail a capture —
         # the memory is saved as a plain ADD, marked for a later sweep.
@@ -1853,8 +1880,12 @@ def _commit_reconcile_verdict(
         stored_id, stored_meta = _store_new_memory(
             registry, executor, document_store, doc_id, content, meta
         )
+        vector_store = resolve_vector_store(registry)
         if mark_document_superseded(
-            document_store, old_doc_id=candidate.doc_id, new_doc_id=stored_id
+            document_store,
+            old_doc_id=candidate.doc_id,
+            new_doc_id=stored_id,
+            vector_store=vector_store,
         ):
             return stored_id, stored_meta, outcome
         # The target vanished between the under-lock re-verify and this write
@@ -1865,7 +1896,14 @@ def _commit_reconcile_verdict(
         # ``preserve_updated_at`` (#397).
         meta = {k: v for k, v in stored_meta.items() if k != SUPERSEDES_DOC_KEY}
         meta[RECONCILIATION_KEY] = MARKER_STALE
-        document_store.put(stored_id, content, metadata=meta, preserve_updated_at=True)
+        put_document(
+            document_store,
+            vector_store,
+            stored_id,
+            content,
+            meta,
+            preserve_updated_at=True,
+        )
         return stored_id, meta, _downgraded_to_stale(outcome)
     # ADD
     meta = {**metadata, RECONCILIATION_KEY: ReconcileDecision.ADD.value}
