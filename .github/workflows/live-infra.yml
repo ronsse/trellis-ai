@@ -288,6 +288,29 @@ jobs:
         # this order, from a fresh container: 29 passed, 5 skipped across
         # this suite and test_neo4j_e2e.py together.
         #
+        # tests/integration/test_recommended_config.py was the last added,
+        # and it is the marker lesson rather than the capability one. It
+        # carries an arcadedb marker but lives outside contracts/, and this
+        # job names paths -- so nothing selected it, and its blessed-shape
+        # test, which validates the shipped recommended config end-to-end
+        # against a real ArcadeDB, had never run in CI. Both ArcadeDB store
+        # suites above were dark for exactly this reason too.
+        #
+        # Naming it lights up both of its live nodes, not just the arcadedb
+        # one: the neo4j node's docstring claims a managed AuraDB, but its
+        # real guard is TRELLIS_TEST_NEO4J_URI, which the env block above
+        # sets. It provisions a vector index, which is the hazard the
+        # paragraph above measured at 848s of red -- and it is safe only
+        # because it resolves index_name from the integration conftest's
+        # INTEGRATION_VECTOR_INDEX at matching dimensions, so it reuses the
+        # one (:Node, embedding) index instead of asking for a second.
+        #
+        # That set is derived, not declared:
+        # tests/unit/test_arcadedb_live_infra_rule.py scans the tree for the
+        # marker by AST and fails when a marked file is not selected here,
+        # so the next one cannot arrive silently unwired. It carries its own
+        # vacuity guard, because a scan that finds nothing would pass.
+        #
         # Two integration files stay out, and neither is a capability gap.
         # api/test_smoke_parity.py is the pytest mirror of deploy/smoke.sh:
         # it probes an already-deployed orchestrator at TRELLIS_BASE_URL and
@@ -299,10 +322,12 @@ jobs:
         # Wiring it here would paper over that rather than fix it.
         #
         # Still do not widen this to all of tests/unit/stores/. Paths here
-        # are reviewed one at a time, and
-        # tests/unit/test_postgres_live_infra_rule.py pins this exact set so
-        # a sweep fails rather than quietly enrolling a suite nobody checked
-        # against these containers. tests/unit/test_ci_coverage_rule.py
+        # are reviewed one at a time, and naming a file individually *is*
+        # the review. tests/unit/test_postgres_live_infra_rule.py pins that
+        # property -- the directory is never a target and something under it
+        # always is -- deliberately not the exact set, which it asserted
+        # until the set legitimately grew and the roster rotted rather than
+        # the rule catching anything. tests/unit/test_ci_coverage_rule.py
         # derives which test files execute in no workflow leg and fails when
         # one appears without a recorded reason, so this list cannot
         # silently fall behind the directory again.
@@ -310,6 +335,7 @@ jobs:
           pytest \
             tests/integration/test_neo4j_e2e.py \
             tests/integration/test_migrate_graph_live.py \
+            tests/integration/test_recommended_config.py \
             tests/integration/api/test_live_smoke.py \
             tests/integration/sdk/ \
             tests/integration/loops/ \
