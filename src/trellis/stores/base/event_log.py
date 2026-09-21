@@ -225,6 +225,46 @@ class EventType(StrEnum):
     #: ``docs/design/plan-memory-lifecycle.md`` §0.1.
     MEMORY_OP_JUDGED = "memory_op.judged"
 
+    #: Emitted when a reconciliation *fails closed* — the judge was
+    #: unavailable, timed out, raised, or answered unusably — and
+    #: ``save_memory`` fell back to an unconditional ADD.
+    #:
+    #: It is the companion of :attr:`MEMORY_OP_JUDGED`, not a variant of
+    #: it, and the split is deliberate: a fallback ADD is *not* a training
+    #: pair (no model judged, so there is no ``(input, decision)`` to
+    #: label), and the judged stream is read as one — so folding a
+    #: degradation into it would poison that stream's denominator. The
+    #: suppression was already correct; what was missing is that it left
+    #: **nothing** behind, so "the judge was never consulted" and "the
+    #: judge failed every time" were byte-identical in the event log.
+    #: That is the #514 gap: four of the five fail-closed LLM fallbacks
+    #: are countable (``sessions_judge_malformed`` for distillation,
+    #: :attr:`EXTRACTION_FAILED` for the miner, the enrichment service and
+    #: the LLM extractor) and this one was not.
+    #:
+    #: Payload schema (all keys always present):
+    #: ``{reason, judge_failure, model_id, decision, subject_ref_type,
+    #: subject_ref_id}``. ``reason`` is a
+    #: :class:`~trellis.mcp.reconcile.ReconcileFallbackReason` value —
+    #: a closed vocabulary, so a group-by over it is exhaustive.
+    #: ``judge_failure`` is the boolean an operator actually wants:
+    #: ``reason in JUDGE_FAILURE_REASONS``, i.e. false for the one
+    #: reason that is a *correctly handled* race
+    #: (``stale_recheck``) rather than a degradation — the same split
+    #: ``sessions_skipped_empty`` / ``sessions_sampled_out`` draws for
+    #: capture (#332). ``decision`` is the fallback verdict (always
+    #: ``"add"`` today) and is carried rather than assumed so a later
+    #: fallback policy is visible in the record instead of in the reader.
+    #: ``subject_ref_*`` point at the memory the reconciliation was
+    #: about, matching :attr:`MEMORY_OP_JUDGED`'s join key.
+    #:
+    #: Digests and refs only — never memory content or model prose, the
+    #: same rule the judged event follows, and for the same reason: the
+    #: event log has a different access and retention profile than the
+    #: document store. Fail-soft: a broken event log must not turn a
+    #: degraded reconciliation into a failed write.
+    RECONCILE_DEGRADED = "reconcile.degraded"
+
     # Empirical-observation ingestion — see adr-observation-entity-type.md
     # and Item 1 Phase 1 of plan-self-improvement-program.md. Emitted by
     # the ObservationHandler / MeasurementHandler when a new Observation

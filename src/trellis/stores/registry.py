@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -28,6 +28,7 @@ from trellis.stores.base import (
 
 if TYPE_CHECKING:
     from trellis.llm.protocol import EmbedderClient, LLMClient
+    from trellis.llm.routing import LLMConsumer, LLMRoute
 
 logger = structlog.get_logger(__name__)
 
@@ -470,7 +471,7 @@ def _mask_api_key(api_key: str | None) -> str:
     return f"***{api_key[-4:]}"
 
 
-def _resolve_api_key(cfg: dict[str, Any]) -> str | None:
+def _resolve_api_key(cfg: Mapping[str, Any]) -> str | None:
     """Resolve an API key from a config block.
 
     Prefers ``api_key_env`` (name of an environment variable to read) over
@@ -1541,8 +1542,26 @@ class StoreRegistry:
 
         return effective_domain_aspects(self._classify_config)
 
-    def build_llm_client(self) -> LLMClient | None:
-        """Construct an ``LLMClient`` from the ``llm:`` config block, if present.
+    def llm_route(self, consumer: LLMConsumer | str | None = None) -> LLMRoute:
+        """Resolve the ``llm:`` configuration ``consumer`` builds its client from.
+
+        The read-only half of :meth:`build_llm_client`, for diagnostics that
+        must say which tier, provider and model a consumer will use without
+        building anything (``trellis admin llm-routes``). See
+        :mod:`trellis.llm.routing` for the tier and route rules.
+
+        Raises:
+            LLMRoutingError: ``llm.tiers`` or ``llm.routes`` is malformed.
+            ValueError: ``consumer`` is not an :class:`LLMConsumer` name.
+        """
+        from trellis.llm.routing import resolve_llm_route  # noqa: PLC0415
+
+        return resolve_llm_route(self._llm_config, consumer)
+
+    def build_llm_client(
+        self, *, consumer: LLMConsumer | str | None = None
+    ) -> LLMClient | None:
+        """Construct an ``LLMClient`` for ``consumer`` from the ``llm:`` config block.
 
         Reads the ``llm:`` section of ``config.yaml``::
 
@@ -1552,6 +1571,18 @@ class StoreRegistry:
               # api_key: sk-...             # OR literal (discouraged)
               model: gpt-4o-mini
               base_url: https://...       # optional
+              tiers:                      # optional named variants
+                deep: {model: gpt-5}
+              routes:                     # optional consumer -> tier
+                reconcile: deep
+
+        Every in-repo caller names its :class:`LLMConsumer`; a consumer with
+        no route (and ``consumer=None``) builds from the parent block exactly
+        as before tiers existed. A routed consumer builds from its tier and
+        never falls back to the parent: if the tier cannot build, the answer
+        is ``None``. ``consumer`` is keyword-only so the rule in
+        ``tests/unit/test_llm_consumer_rule.py`` reads it off every call
+        exactly; a positional consumer would be a spelling it cannot see.
 
         ``api_key_env`` is preferred over ``api_key`` so secrets stay out of
         the config file. Returns ``None`` when the config is absent,
@@ -1561,23 +1592,31 @@ class StoreRegistry:
         but its optional SDK extra (``llm-openai`` / ``llm-anthropic``)
         is not installed, so an operator who set ``provider: openai``
         without ``pip install trellis-ai[llm-openai]`` sees an explicit
-        error instead of silently getting no LLM client. Provider SDK
-        imports are deferred to inside this method so core stays
-        dependency-free.
+        error instead of silently getting no LLM client. Raises
+        :class:`~trellis.llm.routing.LLMRoutingError` when ``llm.tiers`` or
+        ``llm.routes`` is malformed. Provider SDK imports are deferred to
+        inside this method so core stays dependency-free.
         """
-        cfg = self._llm_config
+        route = self.llm_route(consumer)
+        return self._build_llm_client_from_route(route)
+
+    def _build_llm_client_from_route(self, route: LLMRoute) -> LLMClient | None:
+        """Build a client from one resolved route; ``None`` when it cannot."""
+        consumer = None if route.consumer is None else route.consumer.value
+        log = logger.bind(consumer=consumer, tier=route.tier)
+        cfg = route.block
         if not cfg:
-            logger.debug("llm_client_not_configured")
+            log.debug("llm_client_not_configured")
             return None
 
         provider = cfg.get("provider")
         if not provider:
-            logger.debug("llm_client_provider_missing")
+            log.debug("llm_client_provider_missing")
             return None
 
         api_key = _resolve_api_key(cfg)
         if not api_key:
-            logger.debug("llm_client_api_key_unresolved", provider=provider)
+            log.debug("llm_client_api_key_unresolved", provider=provider)
             return None
 
         base_url = cfg.get("base_url")
@@ -1652,11 +1691,11 @@ class StoreRegistry:
                 model=model,
             )
             if built is None:
-                logger.debug("llm_client_unknown_provider", provider=provider)
+                log.debug("llm_client_unknown_provider", provider=provider)
                 return None
             chosen_model = model  # plugin owns its default
 
-        logger.info(
+        log.info(
             "llm_client_built",
             provider=provider,
             model=chosen_model,

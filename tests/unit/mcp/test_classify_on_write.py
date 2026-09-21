@@ -173,7 +173,9 @@ class TestReconcileTierClassifyOnWrite:
         # No near match -> _save_memory_reconciled stores directly, no verdict.
         _enable(monkeypatch)
         monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
-        monkeypatch.setattr(server_mod, "_build_llm_client", lambda _registry: None)
+        monkeypatch.setattr(
+            server_mod, "_build_llm_client", lambda _registry, _consumer: None
+        )
 
         doc_id = _doc_id(save_memory(_INFRA))
         meta = _stored_metadata(temp_registry, doc_id)
@@ -189,7 +191,9 @@ class TestReconcileTierClassifyOnWrite:
         _enable(monkeypatch)
         save_memory(_INFRA)
         monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
-        monkeypatch.setattr(server_mod, "_build_llm_client", lambda _registry: None)
+        monkeypatch.setattr(
+            server_mod, "_build_llm_client", lambda _registry, _consumer: None
+        )
 
         doc_id = _doc_id(save_memory(_INFRA_NEAR))
         meta = _stored_metadata(temp_registry, doc_id)
@@ -206,7 +210,9 @@ class TestReconcileTierClassifyOnWrite:
         _enable(monkeypatch)
         save_memory(_INFRA)
         monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
-        monkeypatch.setattr(server_mod, "_build_llm_client", lambda _registry: None)
+        monkeypatch.setattr(
+            server_mod, "_build_llm_client", lambda _registry, _consumer: None
+        )
 
         caller_tags = {"domain": ["backend"], "signal_quality": "high"}
         doc_id = _doc_id(
@@ -221,7 +227,9 @@ class TestReconcileTierClassifyOnWrite:
     ) -> None:
         _enable(monkeypatch)
         monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
-        monkeypatch.setattr(server_mod, "_build_llm_client", lambda _registry: None)
+        monkeypatch.setattr(
+            server_mod, "_build_llm_client", lambda _registry, _consumer: None
+        )
         monkeypatch.setattr(ingest_mod, "_ingest_classifier", _BoomPipeline())
 
         result = save_memory(_INFRA)
@@ -233,7 +241,9 @@ class TestReconcileTierClassifyOnWrite:
     ) -> None:
         _disable(monkeypatch)
         monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
-        monkeypatch.setattr(server_mod, "_build_llm_client", lambda _registry: None)
+        monkeypatch.setattr(
+            server_mod, "_build_llm_client", lambda _registry, _consumer: None
+        )
 
         doc_id = _doc_id(save_memory(_INFRA))
         assert "content_tags" not in _stored_metadata(temp_registry, doc_id)
