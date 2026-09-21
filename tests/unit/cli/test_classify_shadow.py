@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import typer
+import yaml
 from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
@@ -24,11 +26,14 @@ from trellis.learning.tag_evolution import (
     PARAM_COMPONENT_ID,
     RECOMMENDED_SEED_VALUES,
 )
+from trellis.llm.routing import LLMConsumer
 from trellis.schemas.classification import SHADOW_TAGS_KEY, ShadowTags
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.base.event_log import EventType
 from trellis_cli.admin import admin_app
 from trellis_cli.classify import classify_app
+from trellis_cli.exit_codes import EXIT_STORE
+from trellis_cli.main import app
 from trellis_cli.stores import _get_registry, _reset_registry
 
 runner = CliRunner()
@@ -105,6 +110,52 @@ class TestShadowCommand:
         result = runner.invoke(classify_app, ["shadow"])
         assert result.exit_code == 0, result.output
         assert "2 document(s) were written" in plain(result.output)
+
+    def test_the_classifier_is_built_for_the_classify_shadow_consumer(
+        self, cli_env, monkeypatch
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from trellis_cli import classify as classify_cli
+
+        registry = MagicMock()
+        registry.build_llm_client.return_value = None
+        monkeypatch.setattr(classify_cli, "_get_registry", lambda: registry)
+        with pytest.raises(typer.Exit):
+            classify_cli._require_llm_facet_classifier()
+        registry.build_llm_client.assert_called_once_with(
+            consumer=LLMConsumer.CLASSIFY_SHADOW
+        )
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_a_malformed_route_exits_store_on_either_format(
+        self, cli_env, tmp_path, fmt
+    ) -> None:
+        """A routing defect is a config error at the root boundary, not exit 1.
+
+        Runs through ``trellis_cli.main:app`` because the boundary that maps
+        ``ConfigError`` to ``EXIT_STORE`` lives there, not on ``classify_app``.
+        """
+        config_path = tmp_path / "config" / "config.yaml"
+        config = yaml.safe_load(config_path.read_text()) or {}
+        config["llm"] = {
+            "provider": "openai",
+            "api_key_env": "OPENAI_API_KEY",
+            "routes": {"classify_shadow": "deep"},
+        }
+        config_path.write_text(yaml.safe_dump(config))
+        _reset_registry()
+
+        result = runner.invoke(app, ["classify", "shadow", "--format", fmt])
+
+        assert result.exit_code == EXIT_STORE, result.output
+        if fmt == "json":
+            payload = json.loads(result.output.strip().splitlines()[-1])
+            assert payload["status"] == "error"
+            assert payload["error_type"] == "LLMRoutingError"
+            assert payload["setting"] == "llm.routes.classify_shadow"
+        else:
+            assert "(defined: none)" in plain(result.output)
 
 
 class TestShadowReportCommand:

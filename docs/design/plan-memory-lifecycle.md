@@ -48,10 +48,27 @@ Three consequences:
    "deterministic," check which motivation applies before defending it.
 2. **The system generates its own curriculum.** Every judged memory operation has the
    shape of a training example: (input context, decision, downstream outcome via
-   feedback attribution). Log them from day one — extraction verdicts, reconciliation
-   ADD/UPDATE/SUPERSEDE/NOOP calls, distillation summaries, each joined later to
-   whether the resulting memory proved useful. Training the local memory model is
-   years off; its dataset accrues now or never.
+   feedback attribution). Log them from day one, one `MEMORY_OP_JUDGED` row per
+   judgement, across every member of `JudgedOpType` — the enum is the roster, because
+   an enumeration repeated in prose rots (this sentence named three of the five for a
+   release, omitting curation and classification — while the paragraph directly above
+   it names curation).
+   Each is joined later to whether the resulting memory proved useful. Training the
+   local memory model is years off; its dataset accrues now or never.
+
+   **Log the decision, including its refusals — not the artifact.** "Distillation
+   summaries" is what this sentence said until 2026-09-12, and the emitter written
+   against it iterated the *written* memories and passed the literal `keep`: 869 of
+   869 production rows, 46.5% of the whole judged stream, carrying a label that was a
+   constant by construction and therefore zero discriminative signal. The negative
+   class was sitting one branch away — the worthiness gate's own `durable` /
+   `actionable` verdict, 15 refusals against 620 writes over 16 sweeps — and was
+   dropped because the emitter looked at the output rather than at the judgement.
+   Deterministic floors and guardrails (a secret scan, an injection guard) are
+   deliberately **not** logged as refusals: they are this repo's rules, not the
+   model's opinion, and labelling them `discard` would teach a future judge that
+   secret-bearing memories are unworthy. **Before adding an emitter, check its
+   `decision` can return more than one answer on the path that actually runs.**
 3. **Design ceiling on judgment.** No judged stage may be *designed* to require
    frontier-scale reasoning. If a stage only works with a heavy model, the stage is
    mis-factored — split it until an 8B-class model (or the deterministic tier) can

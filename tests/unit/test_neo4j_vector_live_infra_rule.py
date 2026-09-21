@@ -1,8 +1,8 @@
 """The Neo4j vector suite runs in live-infra CI, and its SEARCH cases are gated.
 
 Those two facts hold each other up. ``tests/unit/stores/test_neo4j_vector.py``
-is named in ``.github/workflows/live-infra.yml`` — 23 tests that no workflow
-had ever executed — and that is only safe because the four cases issuing the
+is named in ``.github/workflows/live-infra.yml`` — 24 of its 28 tests that no
+workflow had ever executed — and that is only safe because the four cases issuing the
 AuraDB-grade ``SEARCH ... IN (VECTOR INDEX ...)`` clause skip themselves on the
 ``neo4j:2025.12`` container the job provisions.
 
@@ -109,7 +109,7 @@ def _query_calling_tests(source: str) -> dict[str, set[str]]:
 
 
 def test_live_infra_selects_the_neo4j_vector_suite() -> None:
-    """The 23 ungated tests in that file are the point of #356."""
+    """The 24 ungated tests in that file are the point of #356."""
     tokens = shlex.split(_live_test_step()["run"].replace("\\\n", " "))
     targets = {token.rstrip("/") for token in tokens if token.startswith("tests/")}
 

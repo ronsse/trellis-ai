@@ -44,18 +44,37 @@ def test_live_infra_selects_unwired_postgres_store_suites() -> None:
     assert ".[dev,cloud,neo4j]" in shlex.split(install["run"])
 
 
-def test_live_infra_store_targets_are_named_one_at_a_time() -> None:
+def test_live_infra_does_not_sweep_the_stores_directory() -> None:
     """``tests/unit/stores/`` is enrolled per path, never swept.
 
-    A sweep would enrol suites nobody has run against these containers, and
-    the directory has already produced one instance of exactly that:
-    ``test_neo4j_vector.py``, whose ``SEARCH ... IN (VECTOR INDEX ...)`` cases
-    the self-hosted ``neo4j:2025.12`` service rejects at parse time. It is in
-    the set now because #356 gave those four cases a capability gate — the
-    condition on that entry, and the reason it is safe, is pinned separately
-    by ``tests/unit/test_neo4j_vector_live_infra_rule.py``. Adding a sixth
-    path means editing this set, which is the review this rule exists to
-    force.
+    Stated as the property rather than as the roster that used to stand
+    here. The exact set of four targets this asserted was a proxy for
+    *"don't sweep the directory, because ``test_neo4j_vector.py`` cannot
+    run against a self-hosted Neo4j"* — and a proxy that fails when a
+    file is legitimately **added**. It did: four suites that pass against
+    this job's own container images executed in no workflow at all, and
+    wiring them in broke this assertion while satisfying its intent. The
+    roster is not reinstated here for that reason; a sweep still fails,
+    and an addition still costs an edit to the workflow rather than to
+    this test.
+
+    The second half of the old property — *"``test_neo4j_vector.py`` must
+    stay unselected"* — is retired, not weakened. It held only while its
+    four ``SEARCH ... IN (VECTOR INDEX ...)`` cases had no capability
+    gate, and the message it failed with said so: *give them the probe
+    (#356) before naming this file here*. #356 did. Re-measured against
+    ``neo4j:2025.12``, the image this workflow starts, the suite now runs
+    24 passed / 4 skipped where it was 4 failed / 23 never executed by
+    any workflow. What replaced the negative assertion is
+    :file:`tests/unit/test_neo4j_vector_live_infra_rule.py`, which pins
+    the selection *and* the condition that makes it safe — that every
+    ``SEARCH``-issuing test carries the gate, and that the two suites
+    sharing one Neo4j resolve to one vector index name.
+
+    The complementary direction — a file that runs nowhere and has no
+    recorded reason — is
+    :file:`tests/unit/test_ci_coverage_rule.py`. None of the three
+    asserts a roster; together they pin one.
     """
     test_step = _step("Run live + contract suites against the containers")
     store_targets = {
@@ -64,10 +83,8 @@ def test_live_infra_store_targets_are_named_one_at_a_time() -> None:
         if target.parts[:3] == ("tests", "unit", "stores")
     }
 
-    assert store_targets == {
-        Path("tests/unit/stores/contracts"),
-        Path("tests/unit/stores/test_neo4j_vector.py"),
-        Path("tests/unit/stores/test_pgvector.py"),
-        Path("tests/unit/stores/test_postgres_stores.py"),
-        Path("tests/unit/stores/test_api_key_store.py"),
-    }
+    assert Path("tests/unit/stores") not in store_targets, (
+        "live-infra sweeps all of tests/unit/stores/, which enrols suites "
+        "nobody has run against these containers; name each path instead"
+    )
+    assert store_targets, "live-infra selects no tests/unit/stores/ target at all"
