@@ -307,3 +307,131 @@ class TestIngestOpenLineage:
             app, ["ingest", "openlineage", "/nonexistent/events.json"]
         )
         assert result.exit_code == 1
+
+
+class TestIngestDbtManifestClassifies:
+    """dbt description documents are tagged on write (#568, first half).
+
+    They were written outside both ingest hooks, so they carried no
+    ``content_tags`` at all and the keyword axis — the one measured worst on
+    this deployment — was the only one that could reach them. These pin the
+    deterministic, no-cost half. Embedding is still deliberately absent, so
+    there is nothing here asserting a vector row.
+    """
+
+    @staticmethod
+    def _ingest(tmp_path: Path) -> list[dict]:
+        """Run the command and return the ``dbt:`` documents it persisted."""
+        runner.invoke(app, ["admin", "init"])
+        f = tmp_path / "manifest.json"
+        f.write_text(json.dumps(_SAMPLE_DBT_MANIFEST))
+        result = runner.invoke(
+            app, ["ingest", "dbt-manifest", str(f), "--format", "json"]
+        )
+        assert result.exit_code == 0, result.stdout
+        assert json.loads(result.stdout.strip())["documents"] == 2
+
+        from trellis_cli.stores import get_document_store
+
+        docs = [
+            d
+            for d in get_document_store().list_documents(limit=100)
+            if d["doc_id"].startswith("dbt:")
+        ]
+        assert len(docs) == 2, [d["doc_id"] for d in docs]
+        return docs
+
+    def test_descriptions_carry_tags_when_enabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_ENABLE_CLASSIFY_ON_INGEST", "1")
+        for doc in self._ingest(tmp_path):
+            tags = doc["metadata"]["content_tags"]
+            # The affinities are the point: TierMapper reads an explicit
+            # retrieval_affinity *before* falling back to heuristics, so this
+            # is what makes a dbt description routable in a sectioned pack.
+            assert set(tags["retrieval_affinity"]) == {
+                "technical_pattern",
+                "reference",
+            }, doc["doc_id"]
+            assert "auto_importance" in doc["metadata"]
+            # Every writer of auto_importance must also stamp (#417 / the
+            # importance-freshness ADR); an unstamped score raises in scoring.
+            assert tags["importance_scored_at"]
+
+    def test_domain_is_never_auto_assigned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``domain`` is the one facet that hard-excludes on mismatch.
+
+        The deterministic classifiers *do* have an opinion here — the source
+        map sends ``dbt`` to ``data-pipeline`` — and ``classify_for_ingest``
+        drops it. Writing it would narrow these rows to domain-scoped queries
+        naming that exact value, which is the #282 shape that made 36
+        production documents invisible.
+        """
+        monkeypatch.setenv("TRELLIS_ENABLE_CLASSIFY_ON_INGEST", "1")
+        for doc in self._ingest(tmp_path):
+            assert doc["metadata"]["content_tags"]["domain"] == []
+
+    def test_tagged_rows_still_answer_a_domain_scoped_query(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tagging must not cost these rows the one axis that reaches them."""
+        monkeypatch.setenv("TRELLIS_ENABLE_CLASSIFY_ON_INGEST", "1")
+        self._ingest(tmp_path)
+
+        from trellis_cli.stores import get_document_store
+
+        hits = get_document_store().search(
+            "orders",
+            limit=10,
+            filters={"content_tags": {"domain": {"in": ["engineering"]}}},
+        )
+        assert {h["doc_id"] for h in hits if h["doc_id"].startswith("dbt:")}
+
+    def test_no_tags_when_flag_is_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Flag off is byte-identical to the behaviour this replaced."""
+        monkeypatch.delenv("TRELLIS_ENABLE_CLASSIFY_ON_INGEST", raising=False)
+        for doc in self._ingest(tmp_path):
+            assert "content_tags" not in doc["metadata"]
+            assert "auto_importance" not in doc["metadata"]
+
+    def test_source_system_is_written_either_way(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``source_system`` is a row fact, not a classification artefact.
+
+        It is the declared ``DocumentMetadata`` field the ad-hoc ``source``
+        key was standing in for, and ``PACK_ASSEMBLED.injected_items[]``
+        reads it as ``domain_system``. Additive — ``source`` stays.
+        """
+        monkeypatch.delenv("TRELLIS_ENABLE_CLASSIFY_ON_INGEST", raising=False)
+        for doc in self._ingest(tmp_path):
+            assert doc["metadata"]["source_system"] == "dbt"
+            assert doc["metadata"]["source"] == "dbt"
+
+    def test_a_broken_classifier_does_not_fail_the_ingest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-soft is the property, not an implementation detail.
+
+        The documents are the command's output; a tagging error must degrade
+        to an untagged write rather than lose them.
+        """
+        monkeypatch.setenv("TRELLIS_ENABLE_CLASSIFY_ON_INGEST", "1")
+        calls = []
+
+        def _boom() -> object:
+            calls.append(1)
+            msg = "classifier exploded"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("trellis.classify.ingest.get_ingest_classifier", _boom)
+        for doc in self._ingest(tmp_path):
+            assert "content_tags" not in doc["metadata"]
+        # Without this the test passes against a source that never calls the
+        # seam at all, which is the state it was written to replace.
+        assert len(calls) == 2
