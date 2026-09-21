@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import structlog
 
@@ -69,6 +69,13 @@ _INDEX_MODE = "index_mode"
 #: packs carry both, with identical membership; measured 2026-09-16). A
 #: sectioned pack carries neither.
 _INJECTED_ITEMS = "injected_items"
+
+#: Payload keys holding the pack's own learning-scope axes. ``PackBuilder``
+#: derives ``intent_family`` through
+#: :func:`~trellis.learning.scoring.normalize_intent_family` and carries
+#: ``domain`` from the request, so the pack is where both acquire a value.
+_INTENT_FAMILY = "intent_family"
+_DOMAIN = "domain"
 
 #: The payload keys through which a grader names a *pack item*.
 #: ``followed_advisory_ids`` is deliberately absent: an advisory is an
@@ -272,6 +279,144 @@ def _pack_payload(event_log: EventLog, pack_id: str) -> dict[str, Any] | None:
 def _served_item_ids(payload: Mapping[str, Any]) -> list[str]:
     """``injected_item_ids``, de-duplicated in served order."""
     return _clean_ids(payload.get(_INJECTED_ITEM_IDS))
+
+
+def lookup_pack_items_by_strategy(
+    event_log: EventLog, pack_id: str
+) -> dict[str, list[str]]:
+    """Return ``{strategy_source: [item_id, ...]}`` for ``pack_id``.
+
+    Reads ``PACK_ASSEMBLED.payload['injected_items']`` — the per-item rows,
+    not the flat id list — because only those carry ``strategy_source``, the
+    short name the serving strategy stamped on each item it returned.
+
+    **This is the denominator an agent cannot supply.** A ``PackFeedback``
+    names what the caller *cited*; only the pack knows what it was *shown*,
+    and only the pack knows which strategy showed it. Together they turn one
+    pack-level grade into a per-strategy ``items_referenced / items_served``,
+    which is the shape :class:`~trellis.learning.tuners.rule_tuner.TuningRule`
+    matches on.
+
+    Fails soft exactly as :func:`lookup_pack_item_ids` does, and for the same
+    reason: an unknown pack, a sectioned pack (which emits no
+    ``injected_items`` at all), a pack older than the payload key, or a store
+    outage each yield ``{}``. A caller must read ``{}`` as *"no per-strategy
+    breakdown is available"* and never as *"no strategy served anything"* —
+    emitting a measured zero off that distinction is the
+    :data:`~trellis.schemas.outcome.OutcomeEvent` failure #557 found.
+
+    Rows with no usable ``strategy_source`` are **dropped**, not bucketed
+    under a placeholder: an item whose serving strategy is unrecorded must
+    not inflate any strategy's denominator. Returned as the raw source names
+    the pack wrote — mapping those onto a ``component_id`` is the caller's
+    decision and lives in
+    :data:`~trellis.schemas.outcome.COMPONENT_ID_BY_SOURCE_STRATEGY`.
+
+    Args:
+        event_log: Operational event log holding ``PACK_ASSEMBLED``.
+        pack_id: The pack to look up. Blank input short-circuits to ``{}``.
+
+    Returns:
+        Served item ids grouped by ``strategy_source``, in served order,
+        de-duplicated within each group.
+    """
+    raw = (_pack_payload(event_log, pack_id) or {}).get(_INJECTED_ITEMS)
+    if not isinstance(raw, list):
+        return {}
+
+    by_strategy: dict[str, list[str]] = {}
+    seen: dict[str, set[str]] = {}
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        item_id = row.get("item_id")
+        strategy = row.get("strategy_source")
+        if not isinstance(item_id, str) or not item_id:
+            continue
+        if not isinstance(strategy, str) or not strategy.strip():
+            continue
+        key = strategy.strip()
+        bucket = by_strategy.setdefault(key, [])
+        marks = seen.setdefault(key, set())
+        if item_id in marks:
+            continue
+        marks.add(item_id)
+        bucket.append(item_id)
+    return by_strategy
+
+
+class PackScope(NamedTuple):
+    """The learning-scope axes a pack recorded about itself.
+
+    Two of the four axes of a
+    :class:`~trellis.schemas.outcome.ParameterScope`, read back off the
+    pack that the feedback is grading.
+    """
+
+    domain: str | None
+    """The pack's request domain, or ``None`` when it carried none."""
+
+    intent_family: str | None
+    """The family ``PackBuilder`` normalized the request intent into, or
+    ``None`` when the pack recorded none."""
+
+
+#: A pack that recorded neither axis — also what an unknown pack resolves to.
+EMPTY_PACK_SCOPE = PackScope(domain=None, intent_family=None)
+
+
+def lookup_pack_scope(event_log: EventLog, pack_id: str) -> PackScope:
+    """Return the ``(domain, intent_family)`` the pack recorded for itself.
+
+    **This is the other half of what an agent cannot supply.**
+    :meth:`~trellis.feedback.models.PackFeedback.from_agent_signal` takes
+    neither axis and ``PackFeedback`` has no ``domain`` field at all, so on
+    every agent-facing surface both arrive empty — measured across 30 days on
+    the reference deployment, ``intent_family`` was empty on **72 of 72**
+    feedback events while the packs they graded carried **7** distinct
+    families, and ``domain`` was empty on all 72 against **8** distinct pack
+    values (#560). An ``OutcomeEvent`` built from the feedback alone therefore
+    keys every row into one global cell per component, which is narrower
+    information than the pack already wrote down.
+
+    The pack is the authoritative source: ``PackBuilder`` derives
+    ``intent_family`` via
+    :func:`~trellis.learning.scoring.normalize_intent_family` and stamps both
+    onto ``PACK_ASSEMBLED``. Three other consumers —
+    ``learning.pack_observations``, ``retrieve.pack_value`` and
+    ``retrieve.metrics_timeseries`` — each independently built this same
+    fallback at their own join; this is that read, once, for the outcome
+    bridge.
+
+    Values are returned **verbatim**, normalized only by stripping and by
+    mapping blank to ``None``. A pack that recorded no domain is not the same
+    as one whose domain is the empty string, and inventing a placeholder
+    family here would create a cell that no ``PackBuilder`` ever emits.
+
+    Fails soft exactly as the other lookups here do: an unknown pack, an
+    event-log outage, or a pack payload predating either key resolves to
+    :data:`EMPTY_PACK_SCOPE`, which leaves the axes at the ``None`` they
+    would have had anyway.
+    """
+    payload = _pack_payload(event_log, pack_id)
+    if not payload:
+        return EMPTY_PACK_SCOPE
+    return PackScope(
+        domain=_clean_axis(payload.get(_DOMAIN)),
+        intent_family=_clean_axis(payload.get(_INTENT_FAMILY)),
+    )
+
+
+def _clean_axis(raw: object) -> str | None:
+    """A scope axis as a non-blank string, or ``None``.
+
+    Blank and non-string both resolve to ``None`` — an axis is a cell key,
+    and a key of ``""`` is a *distinct* cell from "unscoped" that nothing
+    else in the loop produces.
+    """
+    if not isinstance(raw, str):
+        return None
+    return raw.strip() or None
 
 
 def payload_is_attributed(payload: dict[str, object]) -> bool:

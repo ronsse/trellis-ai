@@ -125,6 +125,12 @@ def _make_tuner(
         tuner_state,
         tuner_name="rule_tuner",
         rules=(_LOW_SUCCESS_RULE,),
+        # These tests pin auto-promotion behaviour, not the read window,
+        # and several seed at a fixed calendar date so the arithmetic in
+        # their assertions stays readable.  A wide window keeps them
+        # deterministic instead of coupling them to wall-clock drift —
+        # the window itself is tested in test_rule_tuner_run.py.
+        window_days=3650,
     )
 
 

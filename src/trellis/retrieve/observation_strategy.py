@@ -66,6 +66,7 @@ from trellis.retrieve.strategies import (
     _apply_recency_decay,
     _resolve_param,
 )
+from trellis.schemas.outcome import OBSERVATION_SEARCH_COMPONENT_ID
 from trellis.schemas.pack import PackItem
 from trellis.schemas.well_known import (
     HAS_MEASUREMENT,
@@ -85,7 +86,7 @@ logger = structlog.get_logger(__name__)
 #: Component id used when resolving ``ParameterRegistry`` overrides. Mirrors
 #: the per-strategy scope convention in
 #: :mod:`trellis.retrieve.strategies` so per-domain tuning stays isolated.
-_OBSERVATION_COMPONENT = "retrieve.strategies.ObservationSearch"
+_OBSERVATION_COMPONENT = OBSERVATION_SEARCH_COMPONENT_ID
 
 #: Default minimum confidence for surfaced observations.  ``None`` keeps the
 #: door open — observations without a ``confidence`` property are not

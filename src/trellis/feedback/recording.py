@@ -10,7 +10,17 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from trellis.feedback.attribution import (
+    EMPTY_PACK_SCOPE,
+    PackScope,
+    lookup_pack_items_by_strategy,
+    lookup_pack_scope,
+)
 from trellis.feedback.models import PackFeedback
+from trellis.schemas.outcome import (
+    COMPONENT_ID_BY_SOURCE_STRATEGY,
+    PACK_BUILDER_COMPONENT_ID,
+)
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
@@ -21,8 +31,10 @@ logger = structlog.get_logger(__name__)
 
 #: Default component id used when bridging PackFeedback into an OutcomeEvent.
 #: Callers can override per-call via the ``component_id`` kwarg on
-#: :func:`record_feedback`.
-_DEFAULT_COMPONENT_ID = "retrieve.pack_builder.PackBuilder"
+#: :func:`record_feedback`.  It names the *pack builder* because a
+#: ``PackFeedback`` grades a pack; the per-strategy fan-out below stamps the
+#: strategies' own ids alongside it.
+_DEFAULT_COMPONENT_ID = PACK_BUILDER_COMPONENT_ID
 
 #: Default ``source`` stamped on the emitted ``FEEDBACK_RECORDED`` event.
 #: Overridable per-call so agent-facing surfaces keep their provenance.
@@ -67,6 +79,15 @@ class FeedbackRecordResult:
     event_log_error: Exception | None = None
     outcome_error: Exception | None = None
     event_log_skipped_as_duplicate: bool = False
+    strategy_outcomes_emitted: int = 0
+    """How many per-strategy ``OutcomeEvent`` rows the fan-out wrote.
+
+    ``0`` on a pack-targeted call means the fan-out found nothing to
+    attribute — no ``event_log`` to look the pack up in, a pack with no
+    ``injected_items``, or no served strategy this build can map. It is
+    deliberately a *count* and not a bool: the pack-level row is emitted
+    either way, so there is no single yes/no this could answer.
+    """
 
     @property
     def event_log_in_sync(self) -> bool:
@@ -108,6 +129,108 @@ def _feedback_id_in_event_log(event_log: EventLog, feedback_id: str) -> bool:
         payload_filters={"feedback_id": feedback_id},
     )
     return bool(events)
+
+
+@dataclass(frozen=True)
+class BridgedOutcomes:
+    """What one :func:`bridge_feedback_to_outcomes` call wrote.
+
+    ``error`` is the exception the bridge caught, if any; the bridge
+    fails soft, so a caller reads this rather than catching.
+    """
+
+    pack_outcome_emitted: bool = False
+    strategy_outcomes_emitted: int = 0
+    error: Exception | None = None
+
+
+def bridge_feedback_to_outcomes(
+    feedback: PackFeedback,
+    *,
+    outcome_store: OutcomeStore,
+    pack_id: str | None = None,
+    event_log: EventLog | None = None,
+    component_id: str = _DEFAULT_COMPONENT_ID,
+) -> BridgedOutcomes:
+    """Emit the :class:`OutcomeEvent` rows a feedback signal implies.
+
+    The one bridge from ``PackFeedback`` into the ops tier: a pack-level
+    row stamped with ``component_id``, plus the per-strategy fan-out
+    when the pack's ``PACK_ASSEMBLED`` event can be read back.
+    :func:`record_feedback` calls it on the live path and
+    :mod:`trellis.feedback.backfill` calls it when replaying history, so
+    a replayed row and a live one are produced by the same code rather
+    than by two implementations that agree until they don't.
+
+    Fails soft, exactly as the live path it was extracted from: any
+    exception is caught, logged, and returned on
+    :attr:`BridgedOutcomes.error`.  The JSONL append is the durability
+    guarantee on that path and the event log is the durability
+    guarantee on the replay path, so neither wants an exception here.
+
+    **Not idempotent**, and deliberately so — see :func:`record_feedback`.
+    A replayed ``feedback_id`` re-emits every row, inflating the strategy
+    rows in the same proportion as the pack row.  A caller replaying
+    history supplies its own de-duplication; the backfill keys on
+    ``(feedback_id, component_id)``, which is unique because both
+    emitters stamp ``metadata["feedback_id"]`` and
+    ``COMPONENT_ID_BY_SOURCE_STRATEGY`` is injective.
+
+    Args:
+        feedback: The feedback signal to bridge.
+        outcome_store: Store receiving the rows.  Swapping in a
+            collecting store is what makes the backfill's dry run run
+            the real bridge instead of a model of it.
+        pack_id: Pack the feedback grades.  Without one the fan-out has
+            no ``PACK_ASSEMBLED`` event to read and emits nothing, which
+            is the trace-level feedback case.
+        event_log: Log holding that ``PACK_ASSEMBLED`` event.  Supplies
+            both the per-strategy item map and the scope axes.
+        component_id: Component id for the pack-level row.  Defaults to
+            the PackBuilder.
+
+    Returns:
+        :class:`BridgedOutcomes` reporting the pack-level row, the
+        fan-out count, and any captured error.
+    """
+    try:
+        # Resolved once, for both emitters: they must agree about which
+        # cell a pack's outcomes belong to, and the axes come from the
+        # pack rather than the feedback (#560 — see ``_resolve_scope``).
+        scope = _resolve_scope(feedback, pack_id=pack_id, event_log=event_log)
+        _emit_outcome(
+            feedback,
+            outcome_store=outcome_store,
+            pack_id=pack_id,
+            component_id=component_id,
+            scope=scope,
+        )
+        # Emitted *after* the pack-level row and reported separately:
+        # the fan-out is an additional signal, and a partial fan-out
+        # must not make ``pack_outcome_emitted`` read False for a row
+        # that is already in the store.
+        strategy_outcomes_emitted = _emit_strategy_outcomes(
+            feedback,
+            outcome_store=outcome_store,
+            pack_id=pack_id,
+            event_log=event_log,
+            scope=scope,
+        )
+    # GRACEFUL-DEGRADATION: the caller's own sink is durable; this
+    # bridge is best-effort. Failure surfaces via BridgedOutcomes.error.
+    # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
+    except Exception as exc:
+        logger.exception(
+            "feedback_outcome_emit_failed",
+            run_id=feedback.run_id,
+            pack_id=pack_id,
+            feedback_id=feedback.feedback_id,
+        )
+        return BridgedOutcomes(error=exc)
+    return BridgedOutcomes(
+        pack_outcome_emitted=True,
+        strategy_outcomes_emitted=strategy_outcomes_emitted,
+    )
 
 
 def record_feedback(
@@ -226,27 +349,18 @@ def record_feedback(
 
     outcome_emitted = False
     outcome_error: Exception | None = None
+    strategy_outcomes_emitted = 0
     if outcome_store is not None:
-        try:
-            _emit_outcome(
-                feedback,
-                outcome_store=outcome_store,
-                pack_id=pack_id,
-                component_id=component_id,
-            )
-            outcome_emitted = True
-        # GRACEFUL-DEGRADATION: JSONL append is durable; OutcomeStore
-        # bridge is best-effort. Failure surfaces via
-        # FeedbackRecordResult.outcome_error.
-        # TODO(c2-phase5): add metrics.telemetry_failures counter (structlog-only).
-        except Exception as exc:
-            outcome_error = exc
-            logger.exception(
-                "feedback_outcome_emit_failed",
-                run_id=feedback.run_id,
-                pack_id=pack_id,
-                feedback_id=feedback.feedback_id,
-            )
+        bridged = bridge_feedback_to_outcomes(
+            feedback,
+            outcome_store=outcome_store,
+            pack_id=pack_id,
+            event_log=event_log,
+            component_id=component_id,
+        )
+        outcome_emitted = bridged.pack_outcome_emitted
+        strategy_outcomes_emitted = bridged.strategy_outcomes_emitted
+        outcome_error = bridged.error
 
     logger.debug(
         "feedback_recorded",
@@ -259,6 +373,7 @@ def record_feedback(
         event_log_emitted=event_log_emitted,
         event_log_skipped_as_duplicate=event_log_skipped_as_duplicate,
         outcome_emitted=outcome_emitted,
+        strategy_outcomes_emitted=strategy_outcomes_emitted,
     )
     return FeedbackRecordResult(
         log_path=log_path,
@@ -268,6 +383,7 @@ def record_feedback(
         event_log_error=event_log_error,
         outcome_error=outcome_error,
         event_log_skipped_as_duplicate=event_log_skipped_as_duplicate,
+        strategy_outcomes_emitted=strategy_outcomes_emitted,
     )
 
 
@@ -384,16 +500,73 @@ def _parse_timestamp(raw: str) -> datetime | None:
         return None
 
 
+def _resolve_scope(
+    feedback: PackFeedback,
+    *,
+    pack_id: str | None,
+    event_log: EventLog | None,
+) -> PackScope:
+    """Resolve the ``(domain, intent_family)`` an outcome row is keyed on.
+
+    **Feedback first, pack as the fallback** — the same precedence
+    :func:`~trellis.learning.pack_observations.build_learning_observations_from_event_log`
+    applies, deliberately, because two joins of the same two events
+    disagreeing about which cell a pack belongs to is worse than either
+    ordering. The feedback is the closest witness to the run that consumed
+    the pack; the pack is what knows the axes when the feedback does not.
+
+    Today the fallback carries every row. ``PackFeedback`` has no ``domain``
+    field at all, and
+    :meth:`~trellis.feedback.models.PackFeedback.from_agent_signal` takes no
+    ``intent_family``, so on both agent-facing surfaces the feedback side is
+    empty by construction and the pack supplies both (#560). A caller that
+    builds a ``PackFeedback`` directly can still set ``intent_family`` and
+    have it win, which is why this is a precedence rule and not a plain read
+    of the pack.
+
+    Fails soft to :data:`~trellis.feedback.attribution.EMPTY_PACK_SCOPE`,
+    which is the ``None``/``None`` the axes held before this existed — so a
+    missing event log or an unknown pack degrades to the old behaviour rather
+    than to an error or a guessed cell.
+
+    This reads the same ``PACK_ASSEMBLED`` event
+    :func:`~trellis.feedback.attribution.lookup_pack_items_by_strategy` reads
+    a moment later, so a pack-targeted call costs two ``limit=1`` lookups on
+    one indexed key. Left unfused deliberately: both lookups answer one
+    question from a pack id, which is the shape every reader in
+    :mod:`trellis.feedback.attribution` has, and threading a payload dict
+    through the emitters to save an indexed read on a path that runs a few
+    times a day buys nothing.
+    """
+    from_feedback = feedback.intent_family.strip() or None
+    if event_log is None or not pack_id:
+        return PackScope(domain=None, intent_family=from_feedback)
+
+    from_pack = lookup_pack_scope(event_log, pack_id)
+    return PackScope(
+        domain=from_pack.domain,
+        intent_family=from_feedback or from_pack.intent_family,
+    )
+
+
 def _emit_outcome(
     feedback: PackFeedback,
     *,
     outcome_store: OutcomeStore,
     pack_id: str | None,
     component_id: str,
+    scope: PackScope = EMPTY_PACK_SCOPE,
 ) -> None:
-    """Bridge a :class:`PackFeedback` into an :class:`OutcomeEvent`."""
-    # Imports deferred to avoid importing ops/schemas in the hot path
-    # for callers that never pass an outcome_store.
+    """Bridge a :class:`PackFeedback` into an :class:`OutcomeEvent`.
+
+    ``scope`` carries the learning axes the row is keyed on; it defaults to
+    the unscoped cell so a caller that has no pack to resolve them from gets
+    exactly the behaviour this bridge had before #560.
+    """
+    # Import deferred to avoid importing ops in the hot path for callers
+    # that never pass an outcome_store.  (``trellis.schemas`` is already
+    # resident by way of ``trellis.feedback.models``, so it costs nothing
+    # to name a schema constant at module scope.)
     from trellis.ops import record_outcome  # noqa: PLC0415
 
     occurred_at = _parse_timestamp(feedback.timestamp_utc)
@@ -422,7 +595,8 @@ def _emit_outcome(
         component_id=component_id,
         success=success,
         latency_ms=0.0,
-        intent_family=feedback.intent_family or None,
+        domain=scope.domain,
+        intent_family=scope.intent_family,
         phase=feedback.phase or None,
         agent_id=feedback.agent_id,
         run_id=feedback.run_id,
@@ -432,6 +606,126 @@ def _emit_outcome(
         occurred_at=occurred_at,
         metadata=metadata,
     )
+
+
+def _emit_strategy_outcomes(
+    feedback: PackFeedback,
+    *,
+    outcome_store: OutcomeStore,
+    pack_id: str | None,
+    event_log: EventLog | None,
+    scope: PackScope = EMPTY_PACK_SCOPE,
+) -> int:
+    """Fan one pack grade out into one :class:`OutcomeEvent` per strategy.
+
+    **Why this exists.** Every rule in
+    :data:`~trellis.learning.tuners.rule_tuner.DEFAULT_RULES` targets a
+    *strategy* (``retrieve.strategies.KeywordSearch`` and friends), because
+    that is the scope ``SearchStrategy._resolve_param`` reads a tuned
+    parameter back under. The bridge above
+    stamps the *pack builder*. So until now the two halves of the learning
+    loop addressed different components and could never meet (#557 D2) — the
+    tuner saw only ``retrieve.pack_builder.PackBuilder`` cells and every
+    shipped rule waited on an id nothing emitted.
+
+    **What each side supplies.** The agent's ``PackFeedback`` is the
+    numerator: the ids it found helpful. It cannot supply the denominator —
+    ``from_agent_signal`` leaves ``items_served`` empty on purpose, because
+    an agent cites what helped and does not enumerate what it was shown.
+    The *pack* knows what it was shown and, per item, which strategy showed
+    it. Joining them gives each strategy a real
+    ``items_referenced / items_served``, which is what
+    ``reference_rate`` means.
+
+    **``success`` is the pack's bit, repeated — not a per-strategy
+    measurement.** :class:`~trellis.schemas.outcome.ComponentOutcome`
+    requires a ``success: bool`` and the only value in hand is the one grade
+    the agent gave the whole pack; a typical pack contains every strategy,
+    so crediting each contributor with it makes their success rates
+    near-identical by construction (measured over 30 days on the reference
+    deployment: 0.189 / 0.191 / 0.192 across semantic / keyword / graph).
+    Read ``success_rate`` on these rows as a property of the *packs* a
+    strategy appeared in, never as a comparison between strategies. The
+    separating signal on these rows is ``reference_rate``.
+
+    Fails soft as a whole and per row: the pack-level outcome is already in
+    the store by the time this runs, and a lookup that comes back empty
+    yields no rows rather than a guessed one. A ``strategy_source`` this
+    build cannot map is **dropped**, never bucketed under some other
+    component — an unattributable serving must not inflate a denominator
+    that decides a parameter change.
+
+    Idempotency is inherited, not added: the pack-level bridge re-emits on a
+    replayed ``feedback_id`` (only the ``FEEDBACK_RECORDED`` emit is
+    de-duplicated), and so does this. A replay inflates the strategy rows in
+    the same proportion as the pack row.
+
+    **Every row lands in the same learning cell as the pack-level row.**
+    ``scope`` is resolved once by the caller and passed to both bridges, so a
+    strategy's ``reference_rate`` and the pack ``reference_rate`` it was
+    derived from are always comparable rather than sitting in cells that a
+    tuner aggregates apart (#560).
+
+    Returns:
+        Number of per-strategy rows emitted. ``0`` whenever there is no
+        event log, no pack, no ``injected_items``, or nothing mappable.
+    """
+    if event_log is None or not pack_id:
+        return 0
+
+    # Imports deferred for the same reason the pack-level bridge defers
+    # them: ``trellis.ops`` must stay out of the import path of callers
+    # that never pass an outcome_store.
+    from trellis.ops import record_outcome  # noqa: PLC0415
+
+    served_by_strategy = lookup_pack_items_by_strategy(event_log, pack_id)
+    if not served_by_strategy:
+        return 0
+
+    cited = set(feedback.items_referenced)
+    occurred_at = _parse_timestamp(feedback.timestamp_utc)
+    emitted = 0
+
+    for strategy_source, served_ids in served_by_strategy.items():
+        component_id = COMPONENT_ID_BY_SOURCE_STRATEGY.get(strategy_source)
+        if component_id is None:
+            logger.debug(
+                "feedback_strategy_outcome_unmapped",
+                strategy_source=strategy_source,
+                pack_id=pack_id,
+                feedback_id=feedback.feedback_id,
+            )
+            continue
+        record_outcome(
+            outcome_store,
+            component_id=component_id,
+            # The pack's bit, credited to each contributor — see docstring.
+            success=feedback.succeeded,
+            latency_ms=0.0,
+            # The same cell as the pack-level row, so a per-strategy rate and
+            # the pack rate it was derived from are comparable.
+            domain=scope.domain,
+            intent_family=scope.intent_family,
+            phase=feedback.phase or None,
+            agent_id=feedback.agent_id,
+            run_id=feedback.run_id,
+            pack_id=pack_id,
+            items_served=len(served_ids),
+            items_referenced=sum(1 for item_id in served_ids if item_id in cited),
+            occurred_at=occurred_at,
+            metadata={
+                "pack_outcome": feedback.outcome,
+                "feedback_id": feedback.feedback_id,
+                "strategy_source": strategy_source,
+                # Marks the row as derived from a pack grade rather than
+                # measured at the strategy itself, so a consumer can tell
+                # the two apart if a strategy ever reports for itself.
+                "fanned_out_from": PACK_BUILDER_COMPONENT_ID,
+            },
+        )
+        emitted += 1
+
+    return emitted
 
 
 def load_feedback_log(log_dir: Path | str) -> list[PackFeedback]:

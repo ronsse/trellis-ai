@@ -73,6 +73,54 @@ PHASES: Final[tuple[str, ...]] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Component-id vocabulary — the ``component_id`` axis of an OutcomeEvent.
+#
+# ``component_id`` is a *join key* between three sites that are written
+# independently and never import each other: the component that resolves its
+# parameters under the id (``retrieve.strategies``), the tuning rule that
+# targets the id (``learning.tuners.rule_tuner.DEFAULT_RULES``), and the
+# feedback bridge that stamps the id onto an emitted outcome
+# (``feedback.recording``).  Spelled inline at each site, they drift — the
+# same failure :data:`trellis.schemas.memory_op.REF_TYPE_DOCUMENT` exists to
+# prevent, and the one #557 found live: the bridge stamped the PackBuilder
+# while every shipped rule targeted a strategy, so the two halves of the
+# learning loop could not meet.  They live here, beside the other axis
+# vocabularies, because ``schemas`` is the one package all three import.
+# ---------------------------------------------------------------------------
+
+PACK_BUILDER_COMPONENT_ID: Final = "retrieve.pack_builder.PackBuilder"
+KEYWORD_SEARCH_COMPONENT_ID: Final = "retrieve.strategies.KeywordSearch"
+SEMANTIC_SEARCH_COMPONENT_ID: Final = "retrieve.strategies.SemanticSearch"
+GRAPH_SEARCH_COMPONENT_ID: Final = "retrieve.strategies.GraphSearch"
+OBSERVATION_SEARCH_COMPONENT_ID: Final = "retrieve.strategies.ObservationSearch"
+RRF_RERANKER_COMPONENT_ID: Final = "retrieve.rerankers.RRFReranker"
+MMR_RERANKER_COMPONENT_ID: Final = "retrieve.rerankers.MMRReranker"
+
+#: Maps a served item's ``strategy_source`` — the short name a strategy
+#: writes onto every item it returns, carried through to
+#: ``PACK_ASSEMBLED.injected_items[].strategy_source`` — to the
+#: ``component_id`` that strategy reads its parameters under.
+#:
+#: This is what lets a pack's per-item record be re-expressed as
+#: per-component outcomes: the pack knows *which strategy served each item*,
+#: so it supplies the denominator (``items_served``) that an agent's citation
+#: signal cannot.  A ``strategy_source`` with no entry here is **dropped**
+#: rather than guessed at — an unattributable serving must not inflate some
+#: other component's denominator.
+#:
+#: Rerankers are deliberately absent.  A reranker reorders every candidate
+#: and serves none of them under its own name, so no item ever carries its
+#: ``strategy_source``; a rule targeting one cannot be reached by this map,
+#: and pretending otherwise would manufacture the attribution.
+COMPONENT_ID_BY_SOURCE_STRATEGY: Final[dict[str, str]] = {
+    "keyword": KEYWORD_SEARCH_COMPONENT_ID,
+    "semantic": SEMANTIC_SEARCH_COMPONENT_ID,
+    "graph": GRAPH_SEARCH_COMPONENT_ID,
+    "observation": OBSERVATION_SEARCH_COMPONENT_ID,
+}
+
+
 class ComponentOutcome(VersionedModel):
     """The call-level result recorded alongside an OutcomeEvent.
 
