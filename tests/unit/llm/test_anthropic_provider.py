@@ -357,6 +357,77 @@ class TestExtractUsageEdgeCases:
         assert usage == TokenUsage()
 
 
+class TestExtractUsageCacheCounters:
+    """The measurement #515 asks for: cache tokens beside the total, never in it."""
+
+    def test_cache_counters_mapped(self) -> None:
+        obj = SimpleNamespace(
+            input_tokens=100,
+            output_tokens=50,
+            cache_creation_input_tokens=1_024,
+            cache_read_input_tokens=2_048,
+        )
+        usage = _extract_usage(obj)
+        assert usage is not None
+        assert usage.cache_creation_input_tokens == 1_024
+        assert usage.cache_read_input_tokens == 2_048
+
+    def test_total_tokens_excludes_both_cache_counters(self) -> None:
+        # The load-bearing assertion. Anthropic's ``input_tokens`` already
+        # excludes cached tokens, so summing them in would make enabling
+        # prompt caching *raise* total_tokens while lowering the bill --
+        # and would hide the very number the field was added to expose.
+        obj = SimpleNamespace(
+            input_tokens=10,
+            output_tokens=5,
+            cache_creation_input_tokens=8_888,
+            cache_read_input_tokens=9_999,
+        )
+        usage = _extract_usage(obj)
+        assert usage is not None
+        assert usage.prompt_tokens == 10
+        assert usage.total_tokens == 15
+
+    def test_absent_counters_stay_none(self) -> None:
+        # An older SDK/API version omits these entirely. Reporting that as
+        # zero would be indistinguishable from a cache that never hits.
+        usage = _extract_usage(SimpleNamespace(input_tokens=100, output_tokens=50))
+        assert usage is not None
+        assert usage.cache_creation_input_tokens is None
+        assert usage.cache_read_input_tokens is None
+
+    def test_reported_zero_is_preserved_as_zero(self) -> None:
+        # A caching-capable response that hit nothing. This is the shape
+        # that detects a silent invalidator, so it must not collapse to
+        # ``None`` the way the ``or 0`` idiom on the other fields would
+        # have collapsed it to 0.
+        obj = SimpleNamespace(
+            input_tokens=100,
+            output_tokens=50,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        usage = _extract_usage(obj)
+        assert usage is not None
+        assert usage.cache_creation_input_tokens == 0
+        assert usage.cache_read_input_tokens == 0
+
+    def test_null_counters_read_as_absent(self) -> None:
+        # Some SDK versions type these as ``int | None`` and send ``null``
+        # when caching was not requested. The wire cannot separate that
+        # from an omitted field, and both mean "no number reported".
+        obj = SimpleNamespace(
+            input_tokens=100,
+            output_tokens=50,
+            cache_creation_input_tokens=None,
+            cache_read_input_tokens=None,
+        )
+        usage = _extract_usage(obj)
+        assert usage is not None
+        assert usage.cache_creation_input_tokens is None
+        assert usage.cache_read_input_tokens is None
+
+
 # -- Sanity: module exposes the documented surface -------------------------
 
 

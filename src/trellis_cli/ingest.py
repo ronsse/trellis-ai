@@ -6,15 +6,18 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import typer
 from rich.markup import escape
 
+from trellis.classify.ingest import classify_metadata_on_write
+from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import (
     sanitize_error_message,
     sanitized_error_payload,
 )
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
@@ -34,7 +37,7 @@ from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.ingest_conversations import ingest_conversations
 from trellis_cli.ingest_corpus import ingest_corpus
 from trellis_cli.output import build_console, emit_json
-from trellis_cli.stores import _get_registry, get_document_store
+from trellis_cli.stores import _get_registry
 
 ingest_app = typer.Typer(no_args_is_help=True)
 console = build_console()
@@ -182,11 +185,13 @@ def ingest_evidence(
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # Persist to document store
-    store = get_document_store()
-    store.put(
-        doc_id=evidence.evidence_id,
-        content=evidence.content or "",
-        metadata={
+    registry = _get_registry()
+    put_document(
+        registry.knowledge.document_store,
+        resolve_vector_store(registry),
+        evidence.evidence_id,
+        evidence.content or "",
+        {
             "evidence_type": evidence.evidence_type,
             "source_origin": evidence.source_origin,
         },
@@ -297,20 +302,51 @@ def ingest_dbt_manifest(
 
     # Index descriptions into the document store (dbt-specific side-channel
     # that used to live inside the worker's load() override).
+    #
+    # Tagged through the same seam the MCP / REST single-document writes use
+    # (#568, first half): deterministic, inline, flag-gated on
+    # ``TRELLIS_ENABLE_CLASSIFY_ON_INGEST`` and fail-soft, so the worst case
+    # is an untagged write rather than a failed ingest. ``source_system`` is
+    # what makes it worth doing at all and is written here for that reason:
+    # ``SourceSystemClassifier`` maps ``"dbt"`` onto the ``technical_pattern``
+    # / ``reference`` affinities that ``TierMapper`` reads *before* falling
+    # back to heuristics, and without that key the deterministic pipeline has
+    # almost nothing to say about a one-line model description — measured on
+    # four representative descriptions, dropping it leaves ``retrieval_affinity``
+    # empty and every other persisted facet unchanged. It is additive: the
+    # pre-existing ``"source"`` key stays, and ``source_system`` is the
+    # declared ``DocumentMetadata`` field the ad-hoc one was standing in for.
+    # The seam reads it off the mapping by documented default, so the key on
+    # the row and the key the classifiers see cannot drift apart.
+    #
+    # Embedding is the *other* half of #568 and is deliberately still not done
+    # here — it would start charging this command for embeddings, which is a
+    # cost decision its callers have not opted into.
     doc_store = registry.knowledge.document_store
+    vector_store = resolve_vector_store(registry)
     doc_count = 0
     for entity in result.entities:
         desc = entity.properties.get("description", "")
         if desc:
-            doc_store.put(
-                doc_id=f"dbt:{entity.entity_id}",
-                content=desc,
-                metadata={
-                    "source": "dbt",
-                    "node_type": entity.entity_type,
-                    "name": entity.properties.get("name", entity.name),
-                    "unique_id": entity.entity_id,
-                },
+            # Through `put_document` so the document and its vector row
+            # cannot diverge (#360), and through `classify_metadata_on_write`
+            # so the row lands tagged like every other single-document write.
+            # `source_system` is what makes that worth doing: without it the
+            # classifiers have nothing to key on and the call is a near-no-op.
+            doc_id = f"dbt:{entity.entity_id}"
+            metadata: dict[str, Any] = {
+                "source": "dbt",
+                "source_system": "dbt",
+                "node_type": entity.entity_type,
+                "name": entity.properties.get("name", entity.name),
+                "unique_id": entity.entity_id,
+            }
+            put_document(
+                doc_store,
+                vector_store,
+                doc_id,
+                desc,
+                classify_metadata_on_write(metadata, desc, doc_id=doc_id),
             )
             doc_count += 1
 

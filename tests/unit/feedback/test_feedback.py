@@ -321,6 +321,90 @@ class TestComputeItemEffectiveness:
 
 
 # ---------------------------------------------------------------------------
+# The third verdict (#550)
+# ---------------------------------------------------------------------------
+
+
+class TestIgnoredItemIds:
+    """``ignored_item_ids`` — read and not used, distinct from unhelpful.
+
+    Every hop the field has to survive is pinned here, because the
+    failure it is exposed to is silent: a key that is dropped somewhere
+    between the caller and the replayed event does not raise, it just
+    stops being in the record.
+    """
+
+    def _make(self, **kwargs) -> PackFeedback:
+        return PackFeedback(
+            run_id="run-1",
+            phase="GENERATE",
+            intent="generate_sql",
+            outcome="success",
+            items_served=["a", "b", "c"],
+            **kwargs,
+        )
+
+    def test_defaults_to_empty(self):
+        assert self._make().ignored_item_ids == []
+
+    def test_from_agent_signal_threads_the_verdict(self):
+        fb = PackFeedback.from_agent_signal(
+            run_id="run-1",
+            rating=0.5,
+            helpful_item_ids=["a"],
+            unhelpful_item_ids=["b"],
+            ignored_item_ids=["c"],
+        )
+        assert fb.ignored_item_ids == ["c"]
+        # The three verdicts stay separate — an ignored id must not leak
+        # into the two the learning join grades on.
+        assert fb.items_referenced == ["a"]
+        assert fb.unhelpful_item_ids == ["b"]
+
+    def test_from_agent_signal_defaults_to_empty(self):
+        fb = PackFeedback.from_agent_signal(run_id="run-1", helpful_item_ids=["a"])
+        assert fb.ignored_item_ids == []
+
+    def test_event_payload_carries_it_when_populated(self):
+        payload = self._make(ignored_item_ids=["c"]).to_event_payload()
+        assert payload["ignored_item_ids"] == ["c"]
+
+    def test_event_payload_omits_it_when_empty(self):
+        """Absent is not the same claim as ``[]``.
+
+        An absent key means the caller's build had no third verdict to
+        give; an empty list would assert they considered every item and
+        ignored none. Emitting one for the other would manufacture a
+        signal, which is what this whole change exists to avoid.
+        """
+        assert "ignored_item_ids" not in self._make().to_event_payload()
+
+    def test_survives_the_jsonl_round_trip(self, tmp_path: Path):
+        """``recording`` rebuilds rows from an explicit key roster.
+
+        An unlisted key is dropped on replay with no error — so a field
+        that round-trips in memory can still be lost by
+        ``trellis admin reconcile-feedback``.
+        """
+        record_feedback(self._make(ignored_item_ids=["c"]), log_dir=tmp_path)
+
+        loaded = load_feedback_log(tmp_path)
+
+        assert [fb.ignored_item_ids for fb in loaded] == [["c"]]
+
+    def test_absent_from_an_older_row_loads_as_empty(self, tmp_path: Path):
+        """Rows written before the field existed must still parse."""
+        (tmp_path / "pack_feedback.jsonl").write_text(
+            '{"run_id": "run-1", "phase": "p", "intent": "i", '
+            '"outcome": "success", "items_served": ["a"]}\n'
+        )
+
+        loaded = load_feedback_log(tmp_path)
+
+        assert [fb.ignored_item_ids for fb in loaded] == [[]]
+
+
+# ---------------------------------------------------------------------------
 # Event-log bridge (PackFeedback.to_event_payload + record_feedback event_log)
 # ---------------------------------------------------------------------------
 

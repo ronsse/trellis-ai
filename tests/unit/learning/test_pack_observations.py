@@ -20,7 +20,9 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
+from tests.structlog_isolation import clear_cached_logger_proxies
 from tests.unit.learning._registry_fixture import build_seeded_registry
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import record_feedback
@@ -100,6 +102,7 @@ def _record(
     items_referenced: list[str],
     outcome: str,
     phase: str = "GENERATE",
+    unhelpful_item_ids: list[str] | None = None,
 ) -> None:
     feedback = PackFeedback(
         run_id=run_id,
@@ -109,6 +112,7 @@ def _record(
         items_served=items_served,
         items_referenced=items_referenced,
         intent_family=intent_family,
+        unhelpful_item_ids=list(unhelpful_item_ids or []),
     )
     record_feedback(
         feedback,
@@ -687,3 +691,256 @@ class TestRealPackBuilderAttribution:
         promotion_log = registry.operational.event_log
         assert len(list_precedents(promotion_log, domain="platform")) == 1
         assert list_precedents(promotion_log, domain="dbt") == []
+
+
+# ---------------------------------------------------------------------------
+# Stray citations (#574)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def evicted_logger_cache():
+    """Make ``capture_logs`` able to see this module's logger.
+
+    ``configure_stderr_logging`` memoises a *bound* logger onto every live
+    ``BoundLoggerLazyProxy``, and that cache is not evicted by
+    ``structlog.configure`` — so a proxy first used under a CLI invocation
+    keeps that invocation's level and stream forever. The failure it
+    produces is the worst shape available: green in isolation, red only in
+    a full-suite run, presenting as a capture that returns zero events.
+    Cleared on both sides so this module neither inherits nor exports it.
+    """
+    clear_cached_logger_proxies()
+    yield
+    clear_cached_logger_proxies()
+
+
+def _emit_sectioned_pack_assembled(
+    event_log: SQLiteEventLog, *, pack_id: str, intent: str
+) -> None:
+    """A sectioned pack's telemetry, which carries no served-item record.
+
+    ``build_sectioned`` emits neither ``injected_item_ids`` nor
+    ``injected_items`` — the payload shape at ``pack_builder.py`` line 1225.
+    """
+    event_log.emit(
+        EventType.PACK_ASSEMBLED,
+        source="test",
+        entity_id=pack_id,
+        entity_type="sectioned_pack",
+        payload={"intent": intent, "sections": 2},
+    )
+
+
+class TestStrayCitationLogging:
+    """A cited id no pack served reaches nothing, and that must be said.
+
+    The join builds item rows from ``injected_items`` alone, so a verdict
+    naming anything outside that list is dropped — measured at 14 of 699
+    citations on the reference deployment, invisible for the whole life of
+    the join because the only observable was a ``debug`` line no shipped
+    log configuration prints.
+    """
+
+    LINE = "learning_join_dropped_stray_citations"
+
+    def test_stray_citations_logged_at_warning_with_both_partitions(
+        self, event_log, tmp_path: Path, evicted_logger_cache
+    ) -> None:
+        """The level is half the assertion.
+
+        ``debug`` fires under no shipped log configuration — the CLI pins
+        ``WARNING`` and the MCP server filters lower — so a line that
+        carried every count below and sat at ``debug`` would satisfy each
+        other assertion here while remaining exactly as invisible as the
+        silence it replaced.
+        """
+        _emit_pack_assembled(
+            event_log,
+            pack_id="pack-stray",
+            domain="platform",
+            intent="ship the thing",
+            items=[
+                {"item_id": "trace:kept", "item_type": "activity"},
+                {"item_id": "doc:runbook", "item_type": "document"},
+            ],
+        )
+        _record(
+            event_log,
+            tmp_path,
+            pack_id="pack-stray",
+            run_id="run-stray",
+            intent="ship the thing",
+            intent_family="deploy",
+            items_served=["trace:kept", "doc:runbook"],
+            items_referenced=["trace:kept"],
+            unhelpful_item_ids=["entity:trace:kept", "ghost"],
+            outcome="success",
+        )
+
+        with capture_logs() as logs:
+            clear_cached_logger_proxies()
+            build_learning_observations_from_event_log(event_log)
+
+        lines = [e for e in logs if e["event"] == self.LINE]
+        assert len(lines) == 1
+        line = lines[0]
+        assert line["log_level"] == "warning"
+        assert line["strays"] == 2
+        assert line["cited"] == 3
+        assert line["stray_rate"] == round(2 / 3, 4)
+        assert line["packs_with_stray"] == 1
+        assert line["packs_cited"] == 1
+        # ``entity:trace:kept`` is the served ``trace:kept`` with one extra
+        # segment on the front; ``ghost`` has no variant among the served
+        # ids, which is the only shape that is evidence the grader named
+        # something this pack genuinely never carried.
+        assert line["by_shape"] == {"prefix_added": 1, "foreign": 1}
+        assert line["by_namespace"] == {"entity": 1, "(none)": 1}
+
+    def test_a_clean_pack_counts_toward_cited_but_not_toward_stray(
+        self, event_log, tmp_path: Path, evicted_logger_cache
+    ) -> None:
+        """The two pack counters are a rate, so they have to be able to differ.
+
+        With one graded pack in the window they agree whatever the code
+        does, which is the fixture shape that lets ``packs_with_stray``
+        quietly become ``packs_cited`` — an operator then reads every
+        graded pack as damaged.
+        """
+        for pack_id, cited in (
+            ("pack-clean", ["trace:kept"]),
+            ("pack-stray", ["trace:kept", "ghost"]),
+        ):
+            _emit_pack_assembled(
+                event_log,
+                pack_id=pack_id,
+                domain="platform",
+                intent="ship the thing",
+                items=[{"item_id": "trace:kept", "item_type": "activity"}],
+            )
+            _record(
+                event_log,
+                tmp_path,
+                pack_id=pack_id,
+                run_id=f"run-{pack_id}",
+                intent="ship the thing",
+                intent_family="deploy",
+                items_served=["trace:kept"],
+                items_referenced=cited,
+                outcome="success",
+            )
+
+        with capture_logs() as logs:
+            clear_cached_logger_proxies()
+            build_learning_observations_from_event_log(event_log)
+
+        line = next(e for e in logs if e["event"] == self.LINE)
+        assert line["packs_cited"] == 2
+        assert line["packs_with_stray"] == 1
+        assert line["cited"] == 3
+        assert line["strays"] == 1
+        assert line["stray_rate"] == round(1 / 3, 4)
+
+    def test_no_line_when_every_cited_id_was_served(
+        self, event_log, tmp_path: Path, evicted_logger_cache
+    ) -> None:
+        """A healthy join stays silent.
+
+        A warning that fires on every run is one an operator learns to
+        skip, which would cost exactly the visibility this line buys.
+        """
+        _emit_pack_assembled(
+            event_log,
+            pack_id="pack-clean",
+            domain="platform",
+            intent="ship the thing",
+            items=[{"item_id": "trace:kept", "item_type": "activity"}],
+        )
+        _record(
+            event_log,
+            tmp_path,
+            pack_id="pack-clean",
+            run_id="run-clean",
+            intent="ship the thing",
+            intent_family="deploy",
+            items_served=["trace:kept"],
+            items_referenced=["trace:kept"],
+            outcome="success",
+        )
+
+        with capture_logs() as logs:
+            clear_cached_logger_proxies()
+            observations = build_learning_observations_from_event_log(event_log)
+
+        assert [e for e in logs if e["event"] == self.LINE] == []
+        assert len(observations) == 1
+
+    def test_stray_citation_synthesizes_no_item_row(
+        self, event_log, tmp_path: Path
+    ) -> None:
+        """Counting the loss must not become repairing it.
+
+        The remedy for a stray is a count and a log line. Minting a row for
+        an id the pack cannot be shown to have served would put a fabricated
+        serving into the promotion candidate set, which is the one thing
+        this bridge must never do.
+        """
+        _emit_pack_assembled(
+            event_log,
+            pack_id="pack-stray",
+            domain="platform",
+            intent="ship the thing",
+            items=[{"item_id": "trace:kept", "item_type": "activity"}],
+        )
+        _record(
+            event_log,
+            tmp_path,
+            pack_id="pack-stray",
+            run_id="run-stray",
+            intent="ship the thing",
+            intent_family="deploy",
+            items_served=["trace:kept"],
+            items_referenced=["trace:kept", "ghost"],
+            outcome="success",
+        )
+
+        observations = build_learning_observations_from_event_log(event_log)
+
+        assert len(observations) == 1
+        assert [i["item_id"] for i in observations[0]["items"]] == ["trace:kept"]
+
+    def test_pack_with_no_served_record_is_skipped_whole(
+        self, event_log, tmp_path: Path, evicted_logger_cache
+    ) -> None:
+        """An empty served set means "no record", never "served nothing".
+
+        A sectioned pack carries neither served-item key, so every id cited
+        against it would otherwise register as a stray and report a 100%
+        loss on a surface that is working — the sort of false alarm that
+        makes the real 2% unreadable.
+        """
+        _emit_sectioned_pack_assembled(
+            event_log, pack_id="pack-sectioned", intent="ship the thing"
+        )
+        _record(
+            event_log,
+            tmp_path,
+            pack_id="pack-sectioned",
+            run_id="run-sectioned",
+            intent="ship the thing",
+            intent_family="deploy",
+            items_served=[],
+            items_referenced=["trace:kept", "ghost"],
+            outcome="success",
+        )
+
+        with capture_logs() as logs:
+            clear_cached_logger_proxies()
+            observations = build_learning_observations_from_event_log(event_log)
+
+        assert [e for e in logs if e["event"] == self.LINE] == []
+        # The observation is still produced — the pack is joinable, it just
+        # carries no per-item rows for the promotion loop to read.
+        assert len(observations) == 1
+        assert observations[0]["items"] == []

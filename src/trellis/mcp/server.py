@@ -40,6 +40,8 @@ from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
+from trellis.core.document_write import put_document
+from trellis.core.vector_metadata import resolve_vector_store
 from trellis.core.write_config import (
     MINHASH_SEED_MAX_DOCS_ENV,
     WriteBehaviourConfig,
@@ -48,10 +50,14 @@ from trellis.core.write_provenance import get_write_provenance
 from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.extract.memory_ingest_hook import run_memory_extraction
 from trellis.extract.trace_ingest_hook import run_trace_extraction
-from trellis.feedback.attribution import lookup_pack_item_ids
+from trellis.feedback.attribution import (
+    lookup_pack_bodied_item_ids,
+    lookup_pack_item_ids,
+)
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import feedback_log_dir
 from trellis.feedback.recording import record_feedback as record_pack_feedback
+from trellis.llm.routing import LLMConsumer, LLMRoutingError
 from trellis.logging import configure_stderr_logging
 from trellis.mcp.auth import (
     TRANSPORT_HTTP,
@@ -72,8 +78,10 @@ from trellis.mcp.reconcile import (
     UPDATES_DOC_KEY,
     ReconcileCandidate,
     ReconcileDecision,
+    ReconcileFallbackReason,
     ReconcileOutcome,
     configured_model_id,
+    emit_reconcile_degraded,
     emit_reconcile_verdict,
     judge_reconcile,
     mark_document_superseded,
@@ -351,7 +359,7 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
             build_save_memory_extractor,
         )
 
-        llm_client = _build_llm_client(registry)
+        llm_client = _build_llm_client(registry, LLMConsumer.MEMORY_EXTRACTION)
         if llm_client is None:
             logger.info("memory_extractor_skipped_no_llm_client")
             return None
@@ -375,28 +383,52 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
     return _memory_extractor
 
 
-def _build_llm_client(registry: StoreRegistry) -> Any:
-    """Construct an LLMClient, preferring the registry config over env vars.
+def _build_llm_client(registry: StoreRegistry, consumer: LLMConsumer) -> Any:
+    """Construct ``consumer``'s LLMClient, preferring the registry config over env vars.
 
-    First tries ``registry.build_llm_client()`` (driven by the ``llm:``
-    block in ``~/.trellis/config.yaml``). If that returns ``None`` — either
-    because no config is present or the configured provider couldn't be
-    instantiated — falls back to the env-var path in
+    First tries ``registry.build_llm_client(consumer=...)`` (driven by the
+    ``llm:`` block in ``~/.trellis/config.yaml``). If that returns ``None`` —
+    either because no config is present or the configured provider couldn't
+    be instantiated — falls back to the env-var path in
     :func:`_build_llm_client_from_env`. Returns ``None`` when neither
     source yields a client.
+
+    The env-var fallback is skipped when ``llm.routes`` pins ``consumer`` to
+    a tier, and when ``llm.tiers`` / ``llm.routes`` is malformed: in both
+    cases the operator chose a model for this consumer, and
+    ``OPENAI_API_KEY`` would silently run it on a different one.
     """
     try:
-        client = registry.build_llm_client()
+        route = registry.llm_route(consumer)
+    except LLMRoutingError as exc:
+        logger.error(  # noqa: TRY400 — a config defect; the setting is the fix
+            "llm_routing_invalid",
+            consumer=consumer.value,
+            setting=exc.setting,
+            error=str(exc),
+        )
+        return None
+    try:
+        client = registry.build_llm_client(consumer=consumer)
     except Exception:
         # GRACEFUL-DEGRADATION: registry config is the preferred source
         # but the env-var path below is an explicit, documented fallback
         # for deployments without a populated ``llm:`` block. Logged at
         # exception level so config drift is visible in stderr.
-        logger.exception("llm_client_registry_failed")
+        logger.exception("llm_client_registry_failed", consumer=consumer.value)
         client = None
     if client is not None:
-        logger.debug("llm_client_from_registry")
+        logger.debug(
+            "llm_client_from_registry", consumer=consumer.value, tier=route.tier
+        )
         return client
+    if route.routed:
+        logger.warning(
+            "llm_client_routed_tier_unbuildable",
+            consumer=consumer.value,
+            tier=route.tier,
+        )
+        return None
 
     client = _build_llm_client_from_env()
     if client is not None:
@@ -1640,17 +1672,25 @@ def _store_new_memory(
     )
     try:
         result = executor.execute(command)
+    # The arm named the Stage 5 audit emit because that was the only thing
+    # that could escape ``execute`` (#551). It no longer can — the emit is
+    # guarded and degrades onto ``CommandResult.warnings`` — so the one
+    # cause this message used to name is now the one cause it cannot have.
+    # Whatever still escapes is a bug in the pipeline, not an emit, and is
+    # reported as itself. ``evidence_ingest`` is this function's existing
+    # stage name rather than a second word for the same place (#325/#326).
     except Exception as exc:
         logger.exception(
-            "memory_mutation_event_emission_failed",
+            "memory_governed_write_failed",
             doc_id=command.target_id,
         )
         _raise_internal(
-            f"MUTATION_EXECUTED event emit failed: {exc}",
+            f"governed memory write failed: {exc}",
             cause=exc,
             data={
-                "stage": "mutation_executed_emit",
+                "stage": "evidence_ingest",
                 "doc_id": command.target_id,
+                "error_class": type(exc).__name__,
             },
         )
     if result.status is not CommandStatus.SUCCESS or result.created_id is None:
@@ -1707,7 +1747,7 @@ def _compute_reconcile_outcome(
     """
     model_id = configured_model_id()
     try:
-        client = _build_llm_client(registry)
+        client = _build_llm_client(registry, LLMConsumer.RECONCILE)
     except Exception:
         # A misconfigured / uninstalled provider must not fail a capture —
         # the memory is saved as a plain ADD, marked for a later sweep.
@@ -1720,7 +1760,7 @@ def _compute_reconcile_outcome(
             confidence=0.0,
             model_id=model_id,
             fallback=True,
-            fallback_reason="model_unavailable",
+            fallback_reason=ReconcileFallbackReason.MODEL_UNAVAILABLE,
         )
     return judge_reconcile(
         client,
@@ -1782,7 +1822,7 @@ def _reverify_candidate(
             confidence=outcome.confidence,
             model_id=outcome.model_id,
             fallback=True,
-            fallback_reason="stale_recheck",
+            fallback_reason=ReconcileFallbackReason.STALE_RECHECK,
         )
     return outcome
 
@@ -1812,7 +1852,7 @@ def _commit_reconcile_verdict(
     if outcome.fallback:
         marker = (
             MARKER_STALE
-            if outcome.fallback_reason == "stale_recheck"
+            if outcome.fallback_reason is ReconcileFallbackReason.STALE_RECHECK
             else MARKER_SKIPPED
         )
         meta = {**metadata, RECONCILIATION_KEY: marker}
@@ -1843,8 +1883,12 @@ def _commit_reconcile_verdict(
         stored_id, stored_meta = _store_new_memory(
             registry, executor, document_store, doc_id, content, meta
         )
+        vector_store = resolve_vector_store(registry)
         if mark_document_superseded(
-            document_store, old_doc_id=candidate.doc_id, new_doc_id=stored_id
+            document_store,
+            old_doc_id=candidate.doc_id,
+            new_doc_id=stored_id,
+            vector_store=vector_store,
         ):
             return stored_id, stored_meta, outcome
         # The target vanished between the under-lock re-verify and this write
@@ -1855,7 +1899,14 @@ def _commit_reconcile_verdict(
         # ``preserve_updated_at`` (#397).
         meta = {k: v for k, v in stored_meta.items() if k != SUPERSEDES_DOC_KEY}
         meta[RECONCILIATION_KEY] = MARKER_STALE
-        document_store.put(stored_id, content, metadata=meta, preserve_updated_at=True)
+        put_document(
+            document_store,
+            vector_store,
+            stored_id,
+            content,
+            meta,
+            preserve_updated_at=True,
+        )
         return stored_id, meta, _downgraded_to_stale(outcome)
     # ADD
     meta = {**metadata, RECONCILIATION_KEY: ReconcileDecision.ADD.value}
@@ -1878,7 +1929,7 @@ def _downgraded_to_stale(outcome: ReconcileOutcome) -> ReconcileOutcome:
         confidence=outcome.confidence,
         model_id=outcome.model_id,
         fallback=True,
-        fallback_reason="stale_recheck",
+        fallback_reason=ReconcileFallbackReason.STALE_RECHECK,
     )
 
 
@@ -1968,7 +2019,7 @@ def _save_memory_reconciled(
             confidence=0.0,
             model_id=configured_model_id(),
             fallback=True,
-            fallback_reason="judge_error",
+            fallback_reason=ReconcileFallbackReason.JUDGE_ERROR,
         )
 
     # -- Phase C: re-verify + commit under the lock --------------------------
@@ -1992,16 +2043,27 @@ def _save_memory_reconciled(
 
     # -- Emit + enrich outside the lock --------------------------------------
     # A genuine model verdict (not a fallback / stale downgrade) is a training
-    # pair: emit MEMORY_OP_JUDGED. Fallback ADDs judged nothing, so no event.
+    # pair: emit MEMORY_OP_JUDGED. Fallback ADDs judged nothing, so they are
+    # kept out of that stream — and emit RECONCILE_DEGRADED instead, so the
+    # fallback leaves a countable trace rather than a log line nothing reads
+    # (#514). Every fallback route funnels through this one branch, which is
+    # why the emit lives here and not at each of the four mint sites.
+    subject_type, subject_id = _reconcile_subject(
+        outcome.decision, candidate, stored_id
+    )
     if not outcome.fallback:
-        subject_type, subject_id = _reconcile_subject(
-            outcome.decision, candidate, stored_id
-        )
         emit_reconcile_verdict(
             registry.operational.event_log,
             outcome=outcome,
             new_content=content,
             candidate=candidate,
+            subject_ref_type=subject_type,
+            subject_ref_id=subject_id,
+        )
+    else:
+        emit_reconcile_degraded(
+            registry.operational.event_log,
+            outcome=outcome,
             subject_ref_type=subject_type,
             subject_ref_id=subject_id,
         )
@@ -2312,7 +2374,9 @@ def get_file_context(
 _MAX_CITABLE_IDS_IN_ERROR = 60
 
 
-def _require_pack_attribution(registry: StoreRegistry, pack_id: str) -> None:
+def _require_pack_attribution(
+    registry: StoreRegistry, pack_id: str, *, ignored_count: int = 0
+) -> None:
     """Reject an uncited pack-targeted feedback call, when configured to.
 
     Off by default — see
@@ -2332,6 +2396,15 @@ def _require_pack_attribution(registry: StoreRegistry, pack_id: str) -> None:
     caller can *choose* among them; which of them helped is a judgement
     only the caller holds, and synthesising it would manufacture exactly
     the signal this whole change exists to measure honestly.
+
+    ``ignored_count`` is not a citation and does not satisfy this gate —
+    it only changes what the refusal *says*. The trigger deliberately
+    stays the three keys
+    :func:`~trellis.feedback.attribution.payload_is_attributed` reads, so
+    the boundary and the health report cannot disagree about what
+    "attributed" means; an ignored-only call is honest, complete and
+    still joins to nothing, and telling the caller that is more use than
+    a message claiming they cited nothing.
     """
     if not WriteBehaviourConfig.from_env().require_pack_attribution:
         return
@@ -2341,25 +2414,40 @@ def _require_pack_attribution(registry: StoreRegistry, pack_id: str) -> None:
         logger.debug("pack_attribution_not_enforceable", pack_id=pack_id)
         return
 
+    if ignored_count:
+        detail = (
+            f"{ignored_count} item(s) marked ignored, which records that they "
+            "were not used but contributes no rows to the learning join"
+        )
+        remedy = (
+            "name at least one id in helpful_item_ids, or in unhelpful_item_ids "
+            "if the pack was actively misleading"
+        )
+    else:
+        detail = "none cited"
+        remedy = (
+            "Put the ids that helped in helpful_item_ids; if none did, put the "
+            "ones that were noise in unhelpful_item_ids"
+        )
+
     _record_boundary_rejection(
         tool="record_feedback",
         rejections=[
             {
                 "kind": "missing",
                 "loc": "helpful_item_ids|unhelpful_item_ids",
-                "msg": f"pack {pack_id} served {len(item_ids)} item(s), none cited",
+                "msg": f"pack {pack_id} served {len(item_ids)} item(s), {detail}",
             }
         ],
         hints=[
             "cite the item_ids that helped in helpful_item_ids",
             "a pack that missed is cited in unhelpful_item_ids, not left blank",
+            "ignored_item_ids records non-use and does not stand in for either",
         ],
     )
     _raise_invalid_params(
         f"feedback on pack {pack_id} must cite at least one item — it served "
-        f"{len(item_ids)} and uncited pack feedback joins to nothing. Put the "
-        "ids that helped in helpful_item_ids; if none did, put the ones that "
-        "were noise in unhelpful_item_ids.",
+        f"{len(item_ids)} and {detail}. {remedy}.",
         data={
             "pack_id": pack_id,
             "item_ids": item_ids[:_MAX_CITABLE_IDS_IN_ERROR],
@@ -2367,6 +2455,84 @@ def _require_pack_attribution(registry: StoreRegistry, pack_id: str) -> None:
                 "helpful_item_ids",
                 "unhelpful_item_ids",
                 "followed_advisory_ids",
+            ],
+        },
+    )
+
+
+def _require_bodied_attribution(
+    registry: StoreRegistry, pack_id: str, *, judged: set[str]
+) -> None:
+    """Reject a pack-targeted call that leaves a bodied item unjudged.
+
+    Off by default — see
+    :data:`trellis.core.write_config.REQUIRE_BODIED_ATTRIBUTION_FLAG`,
+    which carries the measurement behind both the denominator and the
+    cost of the ask.
+
+    The question is coverage, not joinability: every item the pack put an
+    *excerpt* in front of the caller should come back in one of
+    ``helpful_item_ids`` / ``unhelpful_item_ids`` / ``ignored_item_ids``.
+    A followed advisory is not a pack item and cannot discharge an item's
+    verdict, so it is absent from that list.
+
+    Pointers are outside the ask by construction. A one-line pointer
+    names an item and withholds its body, so a caller has no basis for a
+    verdict beyond the label — and the two populations behave nothing
+    alike: bodied items draw a verdict at twice the rate and a *helpful*
+    verdict at six times it. :func:`lookup_pack_bodied_item_ids` is the
+    one place that boundary is read.
+
+    Fails **open** wherever the bodied set is unknown — an unresolvable
+    pack, a sectioned pack, an index pack, an outage, or a disclosure
+    record whose shape this build does not recognise. Refusing a caller
+    for not judging an item they were never shown is the expensive
+    mistake, and a gate that cannot be computed must not be enforced.
+    """
+    if not WriteBehaviourConfig.from_env().require_bodied_attribution:
+        return
+
+    bodied = lookup_pack_bodied_item_ids(registry.operational.event_log, pack_id)
+    if not bodied:
+        logger.debug("bodied_attribution_not_enforceable", pack_id=pack_id)
+        return
+
+    unjudged = [item_id for item_id in bodied if item_id not in judged]
+    if not unjudged:
+        return
+
+    _record_boundary_rejection(
+        tool="record_feedback",
+        rejections=[
+            {
+                "kind": "missing",
+                "loc": "helpful_item_ids|unhelpful_item_ids|ignored_item_ids",
+                "msg": (
+                    f"pack {pack_id} showed {len(bodied)} item(s) with an "
+                    f"excerpt, {len(unjudged)} carry no verdict"
+                ),
+            }
+        ],
+        hints=[
+            "every item shown with an excerpt takes one of the three verdicts",
+            "ignored_item_ids is the honest answer for one you did not use",
+            "items served as one-line pointers are not part of this requirement",
+        ],
+    )
+    _raise_invalid_params(
+        f"feedback on pack {pack_id} must judge every item it showed with an "
+        f"excerpt — {len(unjudged)} of {len(bodied)} carry no verdict. Put each "
+        "remaining id in helpful_item_ids, unhelpful_item_ids, or "
+        "ignored_item_ids; 'ignored' is the honest answer for one you did not "
+        "use. Items served as one-line pointers are not being asked about.",
+        data={
+            "pack_id": pack_id,
+            "item_ids": unjudged[:_MAX_CITABLE_IDS_IN_ERROR],
+            "bodied_item_count": len(bodied),
+            "fields": [
+                "helpful_item_ids",
+                "unhelpful_item_ids",
+                "ignored_item_ids",
             ],
         },
     )
@@ -2382,6 +2548,7 @@ def record_feedback(
     helpful_item_ids: list[str] | None = None,
     unhelpful_item_ids: list[str] | None = None,
     followed_advisory_ids: list[str] | None = None,
+    ignored_item_ids: list[str] | None = None,
 ) -> str:
     """Record outcome feedback on a trace or context pack.
 
@@ -2400,6 +2567,11 @@ def record_feedback(
     * ``helpful_item_ids`` — item_ids (shown in backticks in the pack)
       that actually helped the task succeed.
     * ``unhelpful_item_ids`` — items that were noise or misleading.
+    * ``ignored_item_ids`` — items you read and did not use. Not a
+      complaint: an item can be sound, on-topic and simply not what this
+      task needed. It is the honest answer for most of a pack, and the
+      one verdict you can give without inventing a judgement you do not
+      hold.
     * ``followed_advisory_ids`` — advisory_ids (shown in backticks in the
       Advisories section) that you followed.
 
@@ -2416,7 +2588,16 @@ def record_feedback(
     the two. Deployments can require this (``TRELLIS_REQUIRE_PACK_ATTRIBUTION``);
     where they do, an uncited pack-targeted call is rejected and the
     rejection carries the ids the pack served so the retry is a choice
-    among them.
+    among them. ``ignored_item_ids`` does **not** satisfy that
+    requirement — it records non-use, which is real information, but it
+    contributes no rows to the learning join, so a call citing only
+    ignored ids is still rejected where attribution is required.
+
+    A second, separate requirement (``TRELLIS_REQUIRE_BODIED_ATTRIBUTION``,
+    off by default) asks for a verdict on every item the pack showed you
+    with an *excerpt*, in any of the three item fields. Items served as
+    one-line pointers are excluded: you were shown a label, not a body,
+    so there is nothing to judge.
 
     ``trace_id`` is still accepted for trace-level feedback when no pack
     is involved — grading work that no pack informed is a legitimate,
@@ -2437,6 +2618,9 @@ def record_feedback(
         helpful_item_ids: IDs of pack items that were actually useful.
         unhelpful_item_ids: IDs of pack items that were noise.
         followed_advisory_ids: IDs of advisories the agent followed.
+        ignored_item_ids: IDs of pack items you read and did not use.
+            Distinct from ``unhelpful_item_ids``, which claims the item
+            was noise or misleading.
     """
     has_trace = bool(trace_id and trace_id.strip())
     has_pack = bool(pack_id and pack_id.strip())
@@ -2479,10 +2663,27 @@ def record_feedback(
             data={"setting": "stores_dir"},
         )
 
-    if has_pack and not (
-        helpful_item_ids or unhelpful_item_ids or followed_advisory_ids
-    ):
-        _require_pack_attribution(registry, pack_id.strip())
+    if has_pack:
+        # Bodied coverage first: its message names the specific ids still
+        # owed, so when both gates would fire the caller gets the more
+        # informative refusal. The second gate's trigger is unchanged —
+        # ``ignored_item_ids`` is deliberately absent from it, so it
+        # stays the same predicate ``payload_is_attributed`` applies.
+        _require_bodied_attribution(
+            registry,
+            pack_id.strip(),
+            judged={
+                *(helpful_item_ids or ()),
+                *(unhelpful_item_ids or ()),
+                *(ignored_item_ids or ()),
+            },
+        )
+        if not (helpful_item_ids or unhelpful_item_ids or followed_advisory_ids):
+            _require_pack_attribution(
+                registry,
+                pack_id.strip(),
+                ignored_count=len(ignored_item_ids or ()),
+            )
 
     # Shared with the REST pack-feedback route so the two agent-facing
     # surfaces agree on what identical inputs mean — including deriving
@@ -2495,6 +2696,7 @@ def record_feedback(
         helpful_item_ids=helpful_item_ids or (),
         unhelpful_item_ids=unhelpful_item_ids or (),
         followed_advisory_ids=followed_advisory_ids or (),
+        ignored_item_ids=ignored_item_ids or (),
         pack_id=pack_id if has_pack else None,
         trace_id=trace_id if has_trace else None,
         notes=notes,
@@ -2509,6 +2711,7 @@ def record_feedback(
         feedback,
         log_dir=feedback_log_dir(stores_dir),
         event_log=registry.operational.event_log,
+        outcome_store=registry.operational.outcome_store,
         pack_id=pack_id if has_pack else None,
         source="mcp",
         entity_id=None if has_pack else trace_id,

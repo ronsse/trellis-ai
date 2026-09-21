@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   schedule:
     # Weekly Monday 06:00 UTC — catches advisories that landed since the
     # last push without waiting for new code activity.

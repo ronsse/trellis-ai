@@ -5,19 +5,25 @@ from __future__ import annotations
 import contextlib
 import inspect
 import json
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import structlog
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
+from structlog.testing import capture_logs
 
 import trellis.mcp.server as server_mod
+from tests.structlog_isolation import clear_cached_logger_proxies
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.hashing import content_hash
 from trellis.core.write_config import MINHASH_SEED_MAX_DOCS_ENV
 from trellis.errors import StoreError
+from trellis.llm.routing import LLMConsumer
 from trellis.mcp.server import MUTATION_FAILED, RESOURCE_NOT_FOUND
 from trellis.mcp.server import (
     get_context as _get_context,
@@ -1327,7 +1333,7 @@ class TestSaveMemoryExtractionFeatureFlag:
         monkeypatch.setattr(
             temp_registry,
             "build_llm_client",
-            lambda: registry_llm_instance,
+            lambda *, consumer: registry_llm_instance,
         )
 
         # Sentinel: if env path is consulted, this blows up loudly.
@@ -1346,6 +1352,238 @@ class TestSaveMemoryExtractionFeatureFlag:
         assert server_mod._memory_extractor is not None
         # The registry-sourced client handled the extraction call.
         assert call_count["registry_llm"] == 1
+
+    def test_the_extractor_client_is_built_for_memory_extraction(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        temp_registry: StoreRegistry,
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        seen: list[LLMConsumer] = []
+
+        def _record(_registry: Any, consumer: LLMConsumer) -> None:
+            seen.append(consumer)
+
+        monkeypatch.setattr(server_mod, "_build_llm_client", _record)
+        assert server_mod._get_memory_extractor(temp_registry) is None
+        assert seen == [LLMConsumer.MEMORY_EXTRACTION]
+
+
+# ---------------------------------------------------------------------------
+# _build_llm_client — per-consumer routing (llm.tiers / llm.routes)
+# ---------------------------------------------------------------------------
+
+_PARENT_KEY_ENV = "TRELLIS_TEST_PARENT_KEY"
+_TIER_KEY_ENV = "TRELLIS_TEST_TIER_KEY"
+
+_ROUTED_LLM = {
+    "provider": "openai",
+    "base_url": "http://localhost:11434/v1",
+    "api_key_env": _PARENT_KEY_ENV,
+    "model": "hermes3:8b",
+    "tiers": {
+        "deep": {
+            "base_url": "http://localhost:4000/v1",
+            "api_key_env": _TIER_KEY_ENV,
+            "model": "deep",
+        }
+    },
+    "routes": {"reconcile": "deep"},
+}
+
+
+class TestBuildLlmClientRouting:
+    """The env-var fallback is for consumers nobody routed, and only for them.
+
+    ``OPENAI_API_KEY`` answering for a consumer the operator pinned to a tier
+    would run it on a model nobody chose, so a routed consumer that cannot be
+    built — and every consumer under a malformed routing block — gets None.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_PARENT_KEY_ENV, "sk-parent-0001")
+        monkeypatch.setenv(_TIER_KEY_ENV, "sk-tier-0002")
+
+    @pytest.fixture
+    def logs(self) -> Iterator[list[dict[str, Any]]]:
+        """Capture every level, so an asserted ``log_level`` can fail.
+
+        ``capture_logs`` replaces processors and leaves ``wrapper_class``
+        alone, and the package's autouse ``_suppress_structlog`` filters below
+        CRITICAL — so without lifting it nothing is captured at all, and with
+        it lifted a demotion to ``debug`` would still be captured (#395).
+
+        Reconfiguring is **not sufficient on its own**, and the difference is
+        invisible in an isolated run: ``server.py``'s module-level logger is a
+        lazy proxy that memoises its bind on first use, so once any earlier
+        test in the session has logged through it, neither ``configure`` nor
+        ``capture_logs`` reaches it and this fixture captures nothing. Evicting
+        the proxy caches — :func:`clear_cached_logger_proxies`, the repo's one
+        copy of that rationale — is what makes the capture order-independent.
+        Teardown evicts again so the next test does not inherit a bind
+        memoised against ``capture_logs``'s processors.
+        """
+        prior = structlog.get_config()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.NOTSET)
+        )
+        try:
+            with capture_logs() as captured:
+                clear_cached_logger_proxies()
+                yield captured
+        finally:
+            structlog.configure(**prior)
+            clear_cached_logger_proxies()
+
+    @pytest.fixture
+    def built(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+        """Record every provider client the registry constructs."""
+        calls: list[dict[str, Any]] = []
+
+        class _Recorder:
+            def __init__(self, **kwargs: Any) -> None:
+                calls.append(kwargs)
+
+        monkeypatch.setattr("trellis.llm.providers.openai.OpenAIClient", _Recorder)
+        return calls
+
+    @pytest.fixture
+    def env_clients(self, monkeypatch: pytest.MonkeyPatch) -> list[object]:
+        """Replace the env-var path; each call appends the client it returns."""
+        clients: list[object] = []
+
+        def _from_env() -> object:
+            clients.append(object())
+            return clients[-1]
+
+        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", _from_env)
+        return clients
+
+    @staticmethod
+    def _registry(tmp_path: Path, llm: dict[str, Any]) -> StoreRegistry:
+        return StoreRegistry(stores_dir=tmp_path / "routing", llm_config=llm)
+
+    @pytest.mark.parametrize(
+        ("consumer", "expected"),
+        [
+            (
+                LLMConsumer.RECONCILE,
+                {
+                    "api_key": "sk-tier-0002",
+                    "base_url": "http://localhost:4000/v1",
+                    "default_model": "deep",
+                },
+            ),
+            (
+                LLMConsumer.MEMORY_EXTRACTION,
+                {
+                    "api_key": "sk-parent-0001",
+                    "base_url": "http://localhost:11434/v1",
+                    "default_model": "hermes3:8b",
+                },
+            ),
+        ],
+    )
+    def test_each_consumer_builds_from_its_own_block(
+        self,
+        tmp_path: Path,
+        built: list[dict[str, Any]],
+        env_clients: list[object],
+        consumer: LLMConsumer,
+        expected: dict[str, Any],
+    ) -> None:
+        client = server_mod._build_llm_client(
+            self._registry(tmp_path, _ROUTED_LLM), consumer
+        )
+        assert client is not None
+        assert built == [expected]
+        assert env_clients == []
+
+    def test_an_unbuildable_routed_consumer_never_reaches_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        built: list[dict[str, Any]],
+        env_clients: list[object],
+        logs: list[dict[str, Any]],
+    ) -> None:
+        monkeypatch.delenv(_TIER_KEY_ENV)
+        registry = self._registry(tmp_path, _ROUTED_LLM)
+        client = server_mod._build_llm_client(registry, LLMConsumer.RECONCILE)
+        assert client is None
+        assert built == []
+        assert env_clients == []
+        (warning,) = [
+            e for e in logs if e["event"] == "llm_client_routed_tier_unbuildable"
+        ]
+        assert warning["log_level"] == "warning"
+        assert (warning["consumer"], warning["tier"]) == ("reconcile", "deep")
+
+    def test_an_unbuildable_unrouted_consumer_still_falls_back_to_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        built: list[dict[str, Any]],
+        env_clients: list[object],
+    ) -> None:
+        """The documented fallback survives for a consumer nobody routed."""
+        monkeypatch.delenv(_PARENT_KEY_ENV)
+        registry = self._registry(tmp_path, _ROUTED_LLM)
+        client = server_mod._build_llm_client(registry, LLMConsumer.MEMORY_EXTRACTION)
+        assert built == []
+        assert env_clients == [client]
+
+    @pytest.mark.parametrize(
+        "consumer", [LLMConsumer.MEMORY_EXTRACTION, LLMConsumer.RECONCILE]
+    )
+    def test_a_malformed_routing_block_never_reaches_env(
+        self,
+        tmp_path: Path,
+        built: list[dict[str, Any]],
+        env_clients: list[object],
+        logs: list[dict[str, Any]],
+        consumer: LLMConsumer,
+    ) -> None:
+        """One bad route disables every consumer, routed or not, loudly."""
+        malformed = {
+            "provider": "openai",
+            "api_key_env": _PARENT_KEY_ENV,
+            "routes": {"reconcile": "deep"},
+        }
+        registry = self._registry(tmp_path, malformed)
+        client = server_mod._build_llm_client(registry, consumer)
+        assert client is None
+        assert built == []
+        assert env_clients == []
+        (error,) = [e for e in logs if e["event"] == "llm_routing_invalid"]
+        assert error["log_level"] == "error"
+        assert error["consumer"] == consumer.value
+        assert error["setting"] == "llm.routes.reconcile"
+        assert "exc_info" not in error
+
+    @pytest.mark.parametrize(
+        ("consumer", "reaches_env"),
+        [(LLMConsumer.RECONCILE, False), (LLMConsumer.MEMORY_EXTRACTION, True)],
+    )
+    def test_a_registry_build_failure_reaches_env_only_when_unrouted(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        env_clients: list[object],
+        consumer: LLMConsumer,
+        reaches_env: bool,
+    ) -> None:
+        registry = self._registry(tmp_path, _ROUTED_LLM)
+
+        def _boom(*, consumer: LLMConsumer) -> None:
+            msg = "provider SDK exploded"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(registry, "build_llm_client", _boom)
+        client = server_mod._build_llm_client(registry, consumer)
+        assert env_clients == ([client] if reaches_env else [])
+        assert (client is None) is not reaches_env
 
 
 # ---------------------------------------------------------------------------
@@ -2393,8 +2631,17 @@ class TestStructuredErrorContract:
         temp_registry: StoreRegistry,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """An event-log emit failure inside ``save_memory`` raises with
-        the original exception chained — used to be a silent debug log."""
+        """An event-log outage inside ``save_memory`` raises with the
+        original exception chained — used to be a silent debug log.
+
+        It surfaces at the ``MEMORY_STORED`` emit, which is this tool's own
+        documented acceptance record and a hard requirement. Before #551 it
+        surfaced one emit earlier, at the executor's Stage 5 audit event,
+        because that was the first ``emit`` a total outage reached and
+        nothing guarded it — so this test passed while reading the *audit*
+        failure, not the tool's. The guard moved the boundary; it did not
+        make the outage quiet.
+        """
         boom = RuntimeError("fake event-log outage")
 
         def _boom(*args: object, **kwargs: object) -> None:
@@ -2406,9 +2653,87 @@ class TestStructuredErrorContract:
             save_memory("unique memory content for emission failure test")
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
-        assert "MUTATION_EXECUTED" in err.error.message
+        assert "MEMORY_STORED" in err.error.message
         assert err.error.data is not None
-        assert err.error.data["stage"] == "mutation_executed_emit"
+        assert err.error.data["stage"] == "memory_stored_emit"
+        assert excinfo.value.__cause__ is boom
+
+    def test_save_memory_survives_an_audit_emit_outage_and_says_nothing_false(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#551 at the surface that motivated it, with only Stage 5 dark.
+
+        The document is committed before Stage 5 runs, so failing the call
+        would report a completed write as a failure and leave no audit
+        record of either. The write now stands, the tool's own required
+        ``MEMORY_STORED`` record is written, and the missing audit event is
+        missing *and nothing claims otherwise* — the trade the guard makes,
+        pinned here rather than implied.
+        """
+        event_log = temp_registry.operational.event_log
+        real_emit = event_log.emit
+        boom = StoreError("audit log is down")
+
+        def _fail_only_the_audit_event(
+            event_type: EventType, *args: object, **kwargs: object
+        ) -> object:
+            if event_type is EventType.MUTATION_EXECUTED:
+                raise boom
+            return real_emit(event_type, *args, **kwargs)
+
+        monkeypatch.setattr(event_log, "emit", _fail_only_the_audit_event)
+
+        result = save_memory("memory written while the audit log is down")
+
+        assert result.startswith("Memory saved: ")
+        stored_id = result.removeprefix("Memory saved: ").strip()
+        assert temp_registry.knowledge.document_store.get(stored_id) is not None
+        assert [
+            event
+            for event in event_log.get_events(
+                event_type=EventType.MEMORY_STORED, limit=50
+            )
+            if event.entity_id == stored_id
+        ], "the tool's own acceptance record is not what the guard covers"
+        assert not [
+            event
+            for event in event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED, limit=50
+            )
+            if event.entity_id == stored_id
+        ], "the audit event really is absent — that is the degradation"
+
+    def test_save_memory_governed_write_failure_chains_cause(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Whatever still escapes ``execute`` is reported as itself.
+
+        The arm used to attribute every escape to the Stage 5 emit, which
+        was ~true only because the emit was the sole thing that could get
+        out. Now that it cannot, an unqualified attribution would be wrong
+        every single time, so the message names the write, not a stage it
+        cannot have failed at.
+        """
+        boom = RuntimeError("pipeline blew up before any emit")
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise boom
+
+        monkeypatch.setattr(server_mod.MutationExecutor, "execute", _boom)
+
+        with pytest.raises(McpError) as excinfo:
+            save_memory("unique content for a non-emit pipeline failure")
+        err = excinfo.value
+        assert err.error.code == INTERNAL_ERROR
+        assert "governed memory write failed" in err.error.message
+        assert "MUTATION_EXECUTED" not in err.error.message
+        assert err.error.data is not None
+        assert err.error.data["stage"] == "evidence_ingest"
+        assert err.error.data["error_class"] == "RuntimeError"
         assert excinfo.value.__cause__ is boom
 
     def test_save_memory_minhash_init_failure_chains_cause(
