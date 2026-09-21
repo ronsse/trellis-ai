@@ -1733,23 +1733,27 @@
         }
 
         // -- Helpers --
-        async function fetchJSON(path) {
-            const headers = {};
-            const key = getApiKey();
-            if (key) headers['X-API-Key'] = key;
-            const res = await fetch(API + path, { headers });
+        // One place for "the API answered, and the answer was: not you".
+        // fetchJSON and postJSON carried a byte-identical copy of this, which
+        // is exactly how a status code ends up handled in one and forgotten in
+        // the other.
+        //
+        // A 401 means no key, or a key the API rejected. A 403 means the key is
+        // VALID but under-scoped — without a branch for it, it fell through to
+        // the generic `!res.ok` throw, so a read-scoped key rendered an opaque
+        // error and never surfaced the key prompt, the one control that can fix
+        // it. Most of this UI is served by the admin router (/stats, /health,
+        // /metrics, /effectiveness, /learning, /proposals), so an under-scoped
+        // key is a normal mistake, not an exotic one.
+        //
+        // The thrown messages are load-bearing: the dashboard's catch matches
+        // /^40[13]\b/ to tell an auth refusal from a connectivity failure.
+        async function throwIfAuthRefused(res, key) {
             if (res.status === 401) {
                 showKeyBanner(key ? 'Stored API key was rejected — enter a valid key.'
                                   : 'This API requires a key — enter one to continue.');
                 throw new Error('401 Unauthorized (API key required)');
             }
-            // A 403 means the key is VALID but under-scoped. Without this branch
-            // it fell through to the generic `!res.ok` throw, so a read-scoped
-            // key rendered an opaque error and never surfaced the key prompt —
-            // the one control that can fix it. Most of this UI is served by the
-            // admin router (/stats, /health, /metrics, /effectiveness,
-            // /learning, /proposals), so an under-scoped key is a normal
-            // mistake, not an exotic one.
             if (res.status === 403) {
                 let detail = '';
                 try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
@@ -1757,6 +1761,14 @@
                               + '. This UI needs an admin-scoped key.');
                 throw new Error('403 Forbidden (' + (detail || 'insufficient scope') + ')');
             }
+        }
+
+        async function fetchJSON(path) {
+            const headers = {};
+            const key = getApiKey();
+            if (key) headers['X-API-Key'] = key;
+            const res = await fetch(API + path, { headers });
+            await throwIfAuthRefused(res, key);
             if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
             return res.json();
         }
@@ -1770,25 +1782,7 @@
                 headers,
                 body: body === undefined ? undefined : JSON.stringify(body)
             });
-            if (res.status === 401) {
-                showKeyBanner(key ? 'Stored API key was rejected — enter a valid key.'
-                                  : 'This API requires a key — enter one to continue.');
-                throw new Error('401 Unauthorized (API key required)');
-            }
-            // A 403 means the key is VALID but under-scoped. Without this branch
-            // it fell through to the generic `!res.ok` throw, so a read-scoped
-            // key rendered an opaque error and never surfaced the key prompt —
-            // the one control that can fix it. Most of this UI is served by the
-            // admin router (/stats, /health, /metrics, /effectiveness,
-            // /learning, /proposals), so an under-scoped key is a normal
-            // mistake, not an exotic one.
-            if (res.status === 403) {
-                let detail = '';
-                try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
-                showKeyBanner('Key accepted but not permitted: ' + (detail || 'insufficient scope')
-                              + '. This UI needs an admin-scoped key.');
-                throw new Error('403 Forbidden (' + (detail || 'insufficient scope') + ')');
-            }
+            await throwIfAuthRefused(res, key);
             if (!res.ok) {
                 let detail = `${res.status} ${res.statusText}`;
                 try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
