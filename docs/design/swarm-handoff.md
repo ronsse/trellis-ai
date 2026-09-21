@@ -8,7 +8,7 @@
 > [`implementation-roadmap.md`](./implementation-roadmap.md) (program-level guidance where
 > it governs an item — **not** the live source for every open issue's requirements).
 >
-> Last updated 2026-09-12. **This file carries mechanism, not status** — no `main` pin, no
+> Last updated 2026-09-21. **This file carries mechanism, not status** — no `main` pin, no
 > merged-PR roster, no issue count. §1 names the command that answers each of those, because
 > every time one was written down here it was wrong within days.
 
