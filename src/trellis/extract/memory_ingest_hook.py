@@ -35,6 +35,7 @@ import structlog
 
 from trellis.core.write_config import MEMORY_EXTRACTION_FLAG, WriteBehaviourConfig
 from trellis.extract.entity_resolution import build_name_alias_resolver
+from trellis.llm.routing import LLMConsumer, LLMRoutingError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -82,7 +83,15 @@ def build_memory_extractor(registry: StoreRegistry, *, opt_in: bool) -> Any | No
     if not opt_in or not memory_extraction_env_enabled():
         return None
     try:
-        llm_client = registry.build_llm_client()
+        llm_client = registry.build_llm_client(consumer=LLMConsumer.MEMORY_EXTRACTION)
+    except LLMRoutingError as exc:
+        # A config defect, not a crash: name the YAML path, skip the traceback.
+        logger.error(  # noqa: TRY400
+            "memory_extractor_llm_routing_invalid",
+            setting=exc.setting,
+            error=str(exc),
+        )
+        return None
     except Exception:
         logger.exception("memory_extractor_llm_build_failed")
         return None

@@ -183,6 +183,20 @@ def _extract_text(resp: Any) -> str:
     return "".join(parts)
 
 
+def _cache_count(usage: Any, name: str) -> int | None:
+    """Read one Anthropic cache counter, preserving absence as ``None``.
+
+    Unlike ``input_tokens`` / ``output_tokens`` above, these are **not**
+    coerced through ``or 0``: ``0`` and "not reported" are different facts
+    here (see :class:`~trellis.llm.types.TokenUsage`), and the ``or 0``
+    idiom collapses them. An older SDK or API version that omits the field
+    — or sends it as ``null`` — yields ``None``; the wire cannot separate
+    those two and both mean the response carried no number.
+    """
+    value = getattr(usage, name, None)
+    return None if value is None else int(value)
+
+
 def _extract_usage(usage: Any) -> TokenUsage | None:
     """Map an Anthropic usage object to ``TokenUsage``."""
     if usage is None:
@@ -192,5 +206,11 @@ def _extract_usage(usage: Any) -> TokenUsage | None:
     return TokenUsage(
         prompt_tokens=int(input_tokens),
         completion_tokens=int(output_tokens),
+        # Anthropic's ``input_tokens`` already EXCLUDES both cache
+        # counters, so this sum is the uncached, standard-rate half of the
+        # call and nothing else. Adding a cache read here is the one edit
+        # that would make this measurement worse than not having it.
         total_tokens=int(input_tokens) + int(output_tokens),
+        cache_creation_input_tokens=_cache_count(usage, "cache_creation_input_tokens"),
+        cache_read_input_tokens=_cache_count(usage, "cache_read_input_tokens"),
     )
