@@ -292,27 +292,40 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   was filed about), plus `test_migrate_graph_live.py` and the three `live_api_server`
   suites (31). All eight are now named in `live-infra.yml`, each added after being run
   against containers started from that file's own images rather than on the assumption it
-  would pass.
+  would pass. A ninth followed: `tests/unit/stores/test_neo4j_vector.py`, below.
 - **Coverage is a join of two facts, which is why a roster here rots.** A test file runs
   only if some leg's `pytest` invocation selects its path **and** that leg's
   `TRELLIS_TEST_*` env includes every gating marker on at least one of its nodes. Naming
   the path is not enough, and neither is setting the flag.
   `tests/unit/test_ci_coverage_rule.py` computes that join over every workflow and fails
   when a file lands outside it without a reason, so this paragraph can no longer be the
-  thing that tracks it. **Three files are outside it today**, each with a measured reason
+  thing that tracks it. **Two files are outside it today**, each with a measured reason
   in that module: `api/test_smoke_parity.py` (the pytest mirror of `deploy/smoke.sh` —
   it probes an already-deployed orchestrator and would buy nine silent skips here),
   `cli/test_subprocess_serve.py` (needs no live infrastructure at all and passes in 2.4s
   on a bare checkout — dark purely because of `live` + `slow` markers, a marker defect
-  rather than a CI capability gap), and `tests/unit/stores/test_neo4j_vector.py`.
-  That last one is why sweeping all of `tests/unit/stores/` in still does not work:
-  re-measured 2026-09-12 against `neo4j:2025.12`, 23 of its 27 tests pass and the four
-  `TestQuery` cases fail `Invalid input 'SEARCH'` ([#356](https://github.com/ronsse/trellis-ai/issues/356)
-  would let them self-skip, buying four silent skips wearing the appearance of coverage).
-  It also provisions a *second* vector index on the same `(:Node, embedding)` pair the
-  `live_api_server` suites use, and Neo4j keeps one index per pair — measured here,
-  running it first turned all 28 of those tests into a 30s `VectorIndexNotOnlineError`
-  apiece.
+  rather than a CI capability gap).
+- **`test_neo4j_vector.py` was the third, and what it cost to wire is the point.** It was
+  blocked twice over and only one blocker was the obvious one. Four of its five
+  `TestQuery` cases issue AuraDB-grade `SEARCH ... IN (VECTOR INDEX ...)`, which
+  `neo4j:2025.12` rejects at parse time (`Invalid input 'SEARCH'`);
+  [#356](https://github.com/ronsse/trellis-ai/issues/356) ported the e2e suite's
+  capability probe up into `tests/conftest.py` so those four self-skip. The objection this
+  bullet used to record — that the probe buys "four silent skips wearing the appearance of
+  coverage" — had the arithmetic backwards: the file is 28 tests, so gating four is what
+  lets the other **24 run for the first time in any workflow**, and the gate is per-test
+  rather than on the class precisely so `test_query_dimension_mismatch_raises`, which
+  validates client-side and never reaches Cypher, keeps running. The second blocker was
+  shared state: Neo4j holds exactly one vector index per `(label, property)`, so this
+  suite's *second* index on the `(:Node, embedding)` pair the `live_api_server` suites use
+  was discarded with no error and no warning, and it was the *other* suite that then died
+  30s later on a timeout naming an index `SHOW INDEXES` does not list — measured, all 28
+  of those tests at 30s apiece. It now takes the store's production-default name, the one
+  the e2e conftest already pinned. **Still do not sweep `tests/unit/stores/` in.** Both
+  hazards a sweep meets are silent ones, so files are added a reviewed path at a time:
+  `tests/unit/test_postgres_live_infra_rule.py` fails on a sweep, and
+  `tests/unit/test_neo4j_vector_live_infra_rule.py` pins the gate coverage and the shared
+  index name that make this one entry safe.
 
 Note the shape of the #345 defect, because it is the one this repo keeps producing: the
 pgvector contract had *never executed anywhere*, because its fixture called `_conn` as an

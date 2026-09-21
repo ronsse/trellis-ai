@@ -109,10 +109,16 @@ jobs:
 
       # Neo4j 2025.12 (community) — the version the shape #2 vector store
       # documents for self-hosted use. Community runs the full graph + SCD-2
-      # suite. The one Cypher SEARCH vector-search test self-skips here: that
-      # clause is an AuraDB-grade feature absent from self-hosted Docker
-      # (community AND enterprise raise 51N26), so the e2e fixture probes for
-      # it and skips when unavailable. NEO4J_AUTH sets the initial password so
+      # suite. The five Cypher SEARCH vector-search tests self-skip here: that
+      # clause is AuraDB-grade and absent from self-hosted Docker, so a
+      # session-scoped probe in tests/conftest.py runs the real query shape
+      # once and skips them when it fails. The reason it fails is version-
+      # dependent and this image is the milder case — a server that resolves
+      # the clause raises 51N26 "not supported", while THIS one defaults to
+      # Cypher 5 and rejects the keyword at parse time (`Invalid input
+      # 'SEARCH'`), which is why the probe classifies on both. #356 moved that
+      # probe up from the integration conftest so the unit suite shares it.
+      # NEO4J_AUTH sets the initial password so
       # there's no forced first-login change. The credentials are a literal
       # throwaway pair: the container is reachable only on the runner's
       # loopback, so there is nothing to keep secret.
@@ -246,32 +252,41 @@ jobs:
         # live_api_server suites 28 passed in 51.86s together. Read a
         # suite's skip condition, not its docstring.
         #
-        # Order is not load-bearing here, but adjacency is. Neo4j allows one
-        # vector index per (label, property): a second CREATE under a
-        # different name returns success and the index never exists, so the
-        # loser's 30s ONLINE wait times out on whichever suite asks second.
-        # test_neo4j_e2e.py and live_api_server both provision
-        # ``trellis_node_embeddings`` — the same name, hence a no-op
-        # IF NOT EXISTS and no collision. tests/unit/stores/test_neo4j_vector.py
-        # provisions ``trellis_test_node_embeddings`` on the same
-        # (:Node, embedding) pair, which is a second and independent reason
-        # it cannot simply be swept in: measured here, running it first
-        # turned all 28 live_api_server tests into VectorIndexNotOnlineError
-        # at 30s each (848s of red), and dropping its index turned the same
-        # 28 green in 52s.
+        # tests/unit/stores/test_neo4j_vector.py is the fifth, and it was
+        # last out because it was blocked twice over, not once.
         #
-        # Still do not widen this to all of tests/unit/stores/. The one file
-        # that remains excluded is test_neo4j_vector.py, and the exclusion is
-        # a re-measured fact rather than an inherited note: on the same
-        # neo4j:2025.12 container 23 of its tests pass and its four
-        # TestQuery cases fail with `Invalid input 'SEARCH'`, because the
-        # AuraDB-grade `SEARCH ... IN (VECTOR INDEX ...)` clause is absent
-        # from self-hosted Neo4j. tests/integration/conftest.py already has
-        # the capability probe that would let those four self-skip; giving
-        # this suite the same probe is #356. Note what wiring it *without*
-        # the probe would buy — a red job — and what wiring it *with* the
-        # probe would buy: four silently skipped tests wearing the
-        # appearance of coverage.
+        # First, four of its five TestQuery cases issue the AuraDB-grade
+        # `SEARCH ... IN (VECTOR INDEX ...)` clause, which the neo4j:2025.12
+        # container above rejects at parse time (`Invalid input 'SEARCH'`).
+        # Those four now take the `require_neo4j_vector_search` gate in
+        # tests/conftest.py, which runs the real query shape once per session
+        # and skips them when it fails. The gate is per-test and deliberately
+        # not on the class: test_query_dimension_mismatch_raises validates
+        # client-side and never reaches Cypher, so it keeps running here.
+        # Measured against this exact image, the file runs 24 passed /
+        # 4 skipped where it was previously 4 failed / 23 never executed by
+        # any workflow. The 24 are the point — deleting the four would have
+        # bought the same green with none of the coverage, and gating the
+        # whole class would have thrown away a test that passes.
+        #
+        # Second, the index name. Neo4j allows one vector index per (label,
+        # property): a second CREATE under a different name returns success
+        # and the index never exists, so the loser's 30s ONLINE wait times
+        # out on whichever suite asks second. test_neo4j_e2e.py and
+        # live_api_server both provision ``trellis_node_embeddings``; this
+        # suite provisioned ``trellis_test_node_embeddings`` on the same
+        # (:Node, embedding) pair, which was an independent reason it could
+        # not simply be swept in — measured, running it first turned all 28
+        # live_api_server tests into VectorIndexNotOnlineError at 30s each
+        # (848s of red), and dropping its index turned the same 28 green in
+        # 52s. It now takes the store's production-default name, the one the
+        # e2e conftest already pinned, which makes the second
+        # `CREATE ... IF NOT EXISTS` a true no-op; per-test node wipes are
+        # what isolate the data. That is also why order is no longer
+        # load-bearing in this list. tests/unit/test_neo4j_vector_live_infra_rule.py
+        # fails if the two names diverge again. Measured on this image, in
+        # this order, from a fresh container: 29 passed, 5 skipped across
+        # this suite and test_neo4j_e2e.py together.
         #
         # Two integration files stay out, and neither is a capability gap.
         # api/test_smoke_parity.py is the pytest mirror of deploy/smoke.sh:
@@ -283,10 +298,14 @@ jobs:
         # because it carries live + slow markers that tests.yml deselects.
         # Wiring it here would paper over that rather than fix it.
         #
-        # tests/unit/test_ci_coverage_rule.py derives which test files
-        # execute in no workflow leg and fails when one appears without a
-        # recorded reason, so this list cannot silently fall behind the
-        # directory again.
+        # Still do not widen this to all of tests/unit/stores/. Paths here
+        # are reviewed one at a time, and
+        # tests/unit/test_postgres_live_infra_rule.py pins this exact set so
+        # a sweep fails rather than quietly enrolling a suite nobody checked
+        # against these containers. tests/unit/test_ci_coverage_rule.py
+        # derives which test files execute in no workflow leg and fails when
+        # one appears without a recorded reason, so this list cannot
+        # silently fall behind the directory again.
         run: |
           pytest \
             tests/integration/test_neo4j_e2e.py \
@@ -295,6 +314,7 @@ jobs:
             tests/integration/sdk/ \
             tests/integration/loops/ \
             tests/unit/stores/contracts/ \
+            tests/unit/stores/test_neo4j_vector.py \
             tests/unit/stores/test_pgvector.py \
             tests/unit/stores/test_postgres_stores.py \
             tests/unit/stores/test_api_key_store.py \
