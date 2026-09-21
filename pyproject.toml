@@ -37,7 +37,7 @@ dependencies = [
     # The upper bound is what actually holds the fastmcp major. It was
     # unbounded, and the major was held *by the `mcp` bound below* — a
     # constraint on a different package — because fastmcp declares `mcp`
-    # itself: 3.4.7 wants `mcp>=1.24,<3.0`, 4.0.5 wants `mcp>=2.0,<3.0`.
+    # itself: 3.4.7 wants `mcp>=1.24,<2.0`, 4.0.5 wants `mcp>=2.0,<3.0`.
     # Measured on #542: a clean `uv pip install -e ".[dev,all]"` resolved
     # fastmcp 3.4.7 + mcp 1.29.1 as written, and fastmcp 4.0.5 + mcp 2.2.0
     # the moment the `mcp` bound was widened to `<3.0` — so a dependabot PR
@@ -61,7 +61,7 @@ dependencies = [
     # and `tests/` sit on the old attribute shape -- shimming the import
     # alone leaves `tests/unit/mcp` at 66 failed / 406 passed.
     # The floor matches what fastmcp-slim itself requires.
-    "mcp>=1.24,<3.0",
+    "mcp>=1.24,<2.0",
     "fastapi>=0.115",
     # Both are imported directly (`starlette` in `trellis_api/app.py`,
     # `middleware.py` and `trellis/testing/inmemory.py`; `anyio.to_thread` in
