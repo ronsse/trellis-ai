@@ -59,6 +59,7 @@ from trellis.mcp.server import (
     search as _search,
 )
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.schemas.well_known import APPLIES_TO, CONCEPT, SOFTWARE_APPLICATION
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -449,6 +450,218 @@ class TestSaveKnowledge:
         result = save_knowledge("orphan", relates_to="nonexistent_id")
         assert "Warning" in result
         assert "edge not created" in result
+
+    # -- linking by name and by domain (K1) ---------------------------------
+
+    @staticmethod
+    def _out_edges(registry: StoreRegistry, node_id: str) -> list[dict[str, Any]]:
+        return registry.knowledge.graph_store.get_edges(node_id, direction="outgoing")
+
+    def test_links_to_a_tool_by_its_name(self, temp_registry: StoreRegistry) -> None:
+        temp_registry.knowledge.graph_store.upsert_node(
+            "tool:mcp-trellis-search",
+            SOFTWARE_APPLICATION,
+            {"name": "mcp__trellis__search"},
+        )
+
+        result = save_knowledge("search gotcha", relates_to="mcp__trellis__search")
+        node_id = self._node_id_from_result(result)
+
+        assert (
+            "Resolved relates_to 'mcp__trellis__search' -> tool:mcp-trellis-search"
+            in result
+        )
+        assert "Edge created" in result
+        edges = self._out_edges(temp_registry, node_id)
+        assert [(e["target_id"], e["edge_type"]) for e in edges] == [
+            ("tool:mcp-trellis-search", "entity_related_to")
+        ]
+
+    def test_an_exact_id_links_without_a_resolution_line(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.graph_store.upsert_node(
+            "tool:bash", SOFTWARE_APPLICATION, {"name": "Bash"}
+        )
+        result = save_knowledge("bash note", relates_to="tool:bash")
+        assert "Edge created" in result
+        assert "Resolved relates_to" not in result
+
+    def test_an_ambiguous_name_links_nothing_and_lists_candidates(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        graph = temp_registry.knowledge.graph_store
+        graph.upsert_node("domain:deploy", CONCEPT, {"name": "deploy"})
+        graph.upsert_node("tool:deploy", SOFTWARE_APPLICATION, {"name": "deploy"})
+
+        result = save_knowledge("deploy note", relates_to="deploy")
+        node_id = self._node_id_from_result(result)
+
+        assert "names 2 nodes" in result
+        assert "domain:deploy" in result
+        assert "tool:deploy" in result
+        assert "edge not created" in result
+        assert self._out_edges(temp_registry, node_id) == []
+
+    def test_an_unknown_name_links_nothing(self, temp_registry: StoreRegistry) -> None:
+        result = save_knowledge("lonely", relates_to="no such node")
+        node_id = self._node_id_from_result(result)
+        assert "Warning: target entity not found: no such node" in result
+        assert self._out_edges(temp_registry, node_id) == []
+
+    def test_a_note_never_resolves_to_itself(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        # entity.create binds the note's own name alias before linking runs,
+        # so without self-exclusion "docker" would name the note itself. The
+        # tool is spelled differently on purpose: an exact-name twin makes
+        # the alias contested, and then there is no self-alias to exclude.
+        temp_registry.knowledge.graph_store.upsert_node(
+            "tool:docker", SOFTWARE_APPLICATION, {"name": "Docker"}
+        )
+
+        result = save_knowledge("docker", relates_to="docker")
+        node_id = self._node_id_from_result(result)
+
+        bound = temp_registry.knowledge.graph_store.resolve_alias("name", "docker")
+        assert bound is not None
+        assert bound["entity_id"] == node_id
+        assert "names 2 nodes" not in result
+        edges = self._out_edges(temp_registry, node_id)
+        assert [e["target_id"] for e in edges] == ["tool:docker"]
+
+    def test_self_reference_alone_is_not_found(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        result = save_knowledge("hermes", relates_to="hermes")
+        node_id = self._node_id_from_result(result)
+        bound = temp_registry.knowledge.graph_store.resolve_alias("name", "hermes")
+        assert bound is not None
+        assert bound["entity_id"] == node_id
+        assert "target entity not found" in result
+        assert self._out_edges(temp_registry, node_id) == []
+
+    def test_domain_property_links_the_existing_domain_node(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.graph_store.upsert_node(
+            "domain:trellis-ai", CONCEPT, {"name": "trellis-ai"}
+        )
+
+        result = save_knowledge("retrieval gotcha", properties={"domain": "Trellis AI"})
+        node_id = self._node_id_from_result(result)
+
+        assert f"--[{APPLIES_TO}]--> domain:trellis-ai" in result
+        edges = self._out_edges(temp_registry, node_id)
+        assert len(edges) == 1
+        assert edges[0]["target_id"] == "domain:trellis-ai"
+        assert edges[0]["edge_type"] == APPLIES_TO
+        assert edges[0]["properties"]["derived_from"] == "properties.domain"
+
+    def test_a_domain_with_no_node_is_reported_and_never_minted(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        result = save_knowledge("stray", properties={"domain": "nowhere"})
+        node_id = self._node_id_from_result(result)
+
+        assert "Note: domain 'nowhere' has no domain node" in result
+        graph = temp_registry.knowledge.graph_store
+        assert graph.get_node("domain:nowhere") is None
+        assert graph.count_nodes() == 1
+        assert self._out_edges(temp_registry, node_id) == []
+
+    def test_a_domain_list_links_each_existing_node(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        graph = temp_registry.knowledge.graph_store
+        graph.upsert_node("domain:trellis", CONCEPT, {"name": "trellis"})
+        graph.upsert_node("domain:infra", CONCEPT, {"name": "infra"})
+
+        result = save_knowledge(
+            "cross-cutting", properties={"domain": ["trellis", "infra", "absent"]}
+        )
+        node_id = self._node_id_from_result(result)
+
+        targets = sorted(
+            e["target_id"] for e in self._out_edges(temp_registry, node_id)
+        )
+        assert targets == ["domain:infra", "domain:trellis"]
+        assert "Note: domain 'absent' has no domain node" in result
+
+    def test_relates_to_and_domain_naming_one_link_create_one_edge(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        # The store absorbs a second LINK_CREATE for the same triple by
+        # re-versioning the edge, so an edge count cannot see it. What it
+        # would do is relabel the edge the caller asked for as derived from
+        # the domain property, and a revert of derived links would then
+        # remove it.
+        temp_registry.knowledge.graph_store.upsert_node(
+            "domain:trellis", CONCEPT, {"name": "trellis"}
+        )
+
+        result = save_knowledge(
+            "note",
+            properties={"domain": "trellis"},
+            relates_to="trellis",
+            edge_kind=APPLIES_TO,
+        )
+        node_id = self._node_id_from_result(result)
+
+        edges = self._out_edges(temp_registry, node_id)
+        assert [(e["target_id"], e["edge_type"]) for e in edges] == [
+            ("domain:trellis", APPLIES_TO)
+        ]
+        assert "derived_from" not in (edges[0]["properties"] or {})
+        assert "Domain link:" not in result
+        events = temp_registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_EXECUTED
+        )
+        operations = [e.payload["operation"] for e in events]
+        assert operations.count("link.create") == 1
+
+    def test_links_are_governed_and_attributed(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        graph = temp_registry.knowledge.graph_store
+        graph.upsert_node("domain:trellis", CONCEPT, {"name": "trellis"})
+        graph.upsert_node("tool:bash", SOFTWARE_APPLICATION, {"name": "Bash"})
+
+        save_knowledge("note", properties={"domain": "trellis"}, relates_to="Bash")
+
+        events = temp_registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_EXECUTED
+        )
+        links = [e for e in events if e.payload["operation"] == "link.create"]
+        assert len(links) == 2
+        assert {e.payload["requested_by"] for e in links} == {"mcp:save_knowledge"}
+
+    def test_a_denied_link_is_reported_and_the_note_kept(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        graph = temp_registry.knowledge.graph_store
+        graph.upsert_node("domain:trellis", CONCEPT, {"name": "trellis"})
+        graph.upsert_node("tool:bash", SOFTWARE_APPLICATION, {"name": "Bash"})
+        policy = Policy(
+            policy_type="mutation",
+            scope=PolicyScope(level="global", value=None),
+            rules=[PolicyRule(operation="link.create", action="deny")],
+            enforcement="enforce",
+        )
+        (temp_registry.stores_dir / "policies.json").write_text(
+            json.dumps({"policies": [policy.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+
+        result = save_knowledge(
+            "note", properties={"domain": "trellis"}, relates_to="Bash"
+        )
+        node_id = self._node_id_from_result(result)
+
+        assert "Warning: edge not created:" in result
+        assert "Warning: domain link to domain:trellis not created:" in result
+        assert graph.get_node(node_id) is not None
+        assert self._out_edges(temp_registry, node_id) == []
 
     @staticmethod
     def _node_id_from_result(result: str) -> str:

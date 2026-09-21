@@ -68,6 +68,7 @@ from trellis.mcp.auth import (
     set_auth_enforced,
     trellis_scope,
 )
+from trellis.mcp.knowledge_links import link_knowledge_node
 from trellis.mcp.reconcile import (
     LIFECYCLE_KEY,
     MARKER_SKIPPED,
@@ -1347,8 +1348,14 @@ def save_knowledge(
         name: Entity name.
         entity_type: Type (e.g., "concept", "person", "system").
             Default: "concept".
-        properties: Optional additional properties.
-        relates_to: Optional entity ID to create a relationship to.
+        properties: Optional additional properties. A ``domain`` string (or
+            list of strings) also links the entity ``appliesTo`` each
+            existing ``domain:`` node it names; a domain with no node is
+            reported, never created.
+        relates_to: Optional entity to create a relationship to — a node id,
+            or a name such as a tool, domain, agent, team or artifact name.
+            A name linking to more than one node creates no edge and lists
+            the candidates.
         edge_kind: Relationship type if relates_to is set.
             Default: "entity_related_to".
         content: Optional evidence prose. When given without ``evidence_ref``,
@@ -1419,36 +1426,19 @@ def save_knowledge(
     if content_ignored:
         result += "\nWarning: content ignored — evidence_ref takes precedence"
 
-    if relates_to:
-        if registry.knowledge.graph_store.get_node(relates_to) is None:
-            # Entity already created — surface a warning string in the
-            # response rather than raising, since the create succeeded.
-            # Callers that want strict link semantics should call
-            # ``execute_mutation`` with ``LINK_CREATE`` directly.
-            result += (
-                f"\nWarning: target entity not found: {relates_to} — edge not created"
-            )
-        else:
-            link_result = executor.execute(
-                Command(
-                    operation=Operation.LINK_CREATE,
-                    args={
-                        "source_id": node_id,
-                        "target_id": relates_to,
-                        "edge_kind": edge_kind,
-                    },
-                    requested_by="mcp:save_knowledge",
-                )
-            )
-            if link_result.status == CommandStatus.SUCCESS:
-                result += (
-                    f"\nEdge created: {link_result.created_id} "
-                    f"--[{edge_kind}]--> {relates_to}"
-                )
-            else:
-                result += f"\nWarning: edge not created: {link_result.message}"
-
-    return result
+    if node_id is None:
+        return result
+    # Entity already created — link failures come back as response lines,
+    # never as a raise. See trellis.mcp.knowledge_links.
+    link_lines = link_knowledge_node(
+        executor,
+        registry.knowledge.graph_store,
+        node_id=node_id,
+        properties=props,
+        relates_to=relates_to,
+        edge_kind=edge_kind,
+    )
+    return "\n".join([result, *link_lines])
 
 
 # ---------------------------------------------------------------------------
