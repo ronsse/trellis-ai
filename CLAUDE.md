@@ -280,16 +280,39 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   it had a green 56-case Postgres contract run on its PR and reported it as unverified.
   Re-read `.github/workflows/live-infra.yml`'s `on:` block rather than trusting this
   sentence.
-- **Nowhere at all:** the ArcadeDB graph contract (`test_arcadedb_graph_contract.py`).
-  ArcadeDB is the *blessed* graph + vector substrate and its contract has no service
-  container in any workflow ([#351](https://github.com/ronsse/trellis-ai/issues/351)).
-  The 59 Postgres-marked tests under `tests/unit/stores/` outside `contracts/` are still
-  deselected: the all-extras leg supplies their imports but no database, while
-  `live-infra.yml` names paths rather than markers. Sweeping that whole directory into the
-  live job does not work yet:
-  `test_neo4j_vector.py::TestQuery` issues AuraDB-only Cypher that self-hosted
-  `neo4j:2025.12` cannot parse, and unlike the e2e suite it has no capability probe
-  ([#356](https://github.com/ronsse/trellis-ai/issues/356)).
+- **Nowhere at all — and this bullet has been wrong in both directions.** It claimed the
+  ArcadeDB graph contract runs nowhere ([#351](https://github.com/ronsse/trellis-ai/issues/351)).
+  It does: `live-infra.yml` has had an `arcadedb` service container and the
+  `TRELLIS_TEST_ARCADEDB` env since before that sentence was last edited, and it runs
+  `test_arcadedb_graph_contract.py` through the `contracts/` directory — which is how
+  [#570](https://github.com/ronsse/trellis-ai/issues/570)'s alias-claim race was caught at
+  all. Meanwhile **99 tests across eight files really did execute in no workflow leg**, and
+  the bullet named none of them: both ArcadeDB store suites, the Neo4j graph and
+  connectivity suites (68 tests — the #351 shape one directory over from the contract it
+  was filed about), plus `test_migrate_graph_live.py` and the three `live_api_server`
+  suites (31). All eight are now named in `live-infra.yml`, each added after being run
+  against containers started from that file's own images rather than on the assumption it
+  would pass.
+- **Coverage is a join of two facts, which is why a roster here rots.** A test file runs
+  only if some leg's `pytest` invocation selects its path **and** that leg's
+  `TRELLIS_TEST_*` env includes every gating marker on at least one of its nodes. Naming
+  the path is not enough, and neither is setting the flag.
+  `tests/unit/test_ci_coverage_rule.py` computes that join over every workflow and fails
+  when a file lands outside it without a reason, so this paragraph can no longer be the
+  thing that tracks it. **Three files are outside it today**, each with a measured reason
+  in that module: `api/test_smoke_parity.py` (the pytest mirror of `deploy/smoke.sh` —
+  it probes an already-deployed orchestrator and would buy nine silent skips here),
+  `cli/test_subprocess_serve.py` (needs no live infrastructure at all and passes in 2.4s
+  on a bare checkout — dark purely because of `live` + `slow` markers, a marker defect
+  rather than a CI capability gap), and `tests/unit/stores/test_neo4j_vector.py`.
+  That last one is why sweeping all of `tests/unit/stores/` in still does not work:
+  re-measured 2026-09-12 against `neo4j:2025.12`, 23 of its 27 tests pass and the four
+  `TestQuery` cases fail `Invalid input 'SEARCH'` ([#356](https://github.com/ronsse/trellis-ai/issues/356)
+  would let them self-skip, buying four silent skips wearing the appearance of coverage).
+  It also provisions a *second* vector index on the same `(:Node, embedding)` pair the
+  `live_api_server` suites use, and Neo4j keeps one index per pair — measured here,
+  running it first turned all 28 of those tests into a 30s `VectorIndexNotOnlineError`
+  apiece.
 
 Note the shape of the #345 defect, because it is the one this repo keeps producing: the
 pgvector contract had *never executed anywhere*, because its fixture called `_conn` as an
