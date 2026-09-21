@@ -22,7 +22,7 @@ from trellis.classify.ingest import (
     CLASSIFY_ON_INGEST_FLAG,
 )
 from trellis.core.vector_metadata import (
-    SYNCED_METADATA_KEYS,
+    MIRRORED_METADATA_KEYS,
     vector_metadata_diverges,
 )
 from trellis.ingest_corpus.models import (
@@ -983,7 +983,7 @@ def test_classify_keys_are_covered_by_the_mirror() -> None:
 
     `_write_chunks` propagates ``CLASSIFY_METADATA_KEYS`` to chunk documents
     and mirrors with ``sync_vector_metadata``'s **default** key set,
-    ``SYNCED_METADATA_KEYS``. The two are equal today, and the docstring
+    ``MIRRORED_METADATA_KEYS``. The two are equal today, and the docstring
     said so — but ``CLASSIFY_METADATA_KEYS``' own comment anticipates
     growth ("adding a facet here cannot silently stop propagating"). Add a
     third key there and the chunk document gets it while the vector row
@@ -993,12 +993,12 @@ def test_classify_keys_are_covered_by_the_mirror() -> None:
     Containment, not equality, is the real dependency — the mirror may
     legitimately carry keys the classify layer does not write. Fixing a
     failure here by passing ``keys=CLASSIFY_METADATA_KEYS`` would be the
-    wrong repair: ``SYNCED_METADATA_KEYS`` is deliberately narrow about what
+    wrong repair: ``MIRRORED_METADATA_KEYS`` is deliberately narrow about what
     a vector row may receive, and coupling it to the classify layer subverts
     that. Widen the mirror's key set deliberately, or say why the new facet
     is document-only.
     """
-    assert set(CLASSIFY_METADATA_KEYS) <= set(SYNCED_METADATA_KEYS)
+    assert set(CLASSIFY_METADATA_KEYS) <= set(MIRRORED_METADATA_KEYS)
 
 
 class TestVectorMirrorIsObservable:

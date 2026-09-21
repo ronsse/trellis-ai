@@ -14,7 +14,7 @@ no ``signal_quality`` at all and 17 still read ``"standard"``.
 divergence, by re-embedding the whole corpus — one paid embedding call per
 document to correct metadata that is sitting in the document store for free.
 This command calls no embedder, needs none configured, and rewrites only
-:data:`~trellis.core.vector_metadata.SYNCED_METADATA_KEYS`; the existing
+:data:`~trellis.core.vector_metadata.MIRRORED_METADATA_KEYS`; the existing
 embedding is carried through untouched.
 
 Idempotent by construction: a row already in agreement is not rewritten, so
@@ -32,7 +32,7 @@ import structlog
 import typer
 
 from trellis.core.vector_metadata import (
-    SYNCED_METADATA_KEYS,
+    MIRRORED_METADATA_KEYS,
     sync_vector_metadata,
     vector_metadata_diverges,
 )
@@ -133,7 +133,7 @@ def run_resync_vector_metadata(
         "repaired": repaired,
         "no_vector_row": missing_row,
         "errors": errors,
-        "keys": list(SYNCED_METADATA_KEYS),
+        "keys": list(MIRRORED_METADATA_KEYS),
         "dry_run": dry_run,
     }
     logger.info("resync_vector_metadata_completed", **summary)
