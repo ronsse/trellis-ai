@@ -1508,3 +1508,80 @@ class TestAdvisoryCommandsOnAStaleStore:
         payload = json.loads(json_run.stdout.strip())
         assert payload["status"] == "refused"
         assert payload["code"] == "STALE_STORE_WRITE"
+
+
+class TestAnalyzeHealthStraySection:
+    """#574 reaches the operator surface, in both output formats.
+
+    The measurement only pays for itself if someone reads it. The stray
+    block renders directly under the citation rate it qualifies, because
+    a reader who sees ``69/74 cited (93%)`` has no reason to suspect that
+    some of those verdicts reached nothing.
+    """
+
+    def _seed(self, registry: StoreRegistry, *, cited: list[str]) -> None:
+        event_log = registry.operational.event_log
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="pack_1",
+            entity_type="pack",
+            payload={
+                "injected_item_ids": ["trace:a", "doc:b"],
+                "injected_items": [{"item_id": "trace:a"}, {"item_id": "doc:b"}],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mcp:record_feedback",
+            payload={"pack_id": "pack_1", "helpful_item_ids": cited},
+        )
+
+    def test_text_names_the_count_the_rate_and_the_shapes(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed(temp_stores, cited=["trace:a", "entity:doc:b", "ghost"])
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = plain(result.stdout)
+        assert "stray 2/3 cited ids (66.7%) were never served" in out
+        assert "across 1 pack(s)" in out
+        # The shape partition is the actionable half: an operator who sees
+        # ``prefix_added`` knows to fix a caller's id spelling, not
+        # retrieval.
+        assert "1 prefix_added" in out
+        assert "1 foreign" in out
+
+    def test_nothing_is_printed_when_every_cited_id_was_served(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """A line that always prints is one that stops being read."""
+        self._seed(temp_stores, cited=["trace:a", "doc:b"])
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = plain(result.stdout)
+        assert "stray" not in out
+        # The surface it qualifies is still there, so this is an absent
+        # caveat rather than an absent section.
+        assert "of which pack-targeted:" in out
+
+    def test_json_carries_every_stray_field(self, temp_stores: StoreRegistry) -> None:
+        self._seed(temp_stores, cited=["trace:a", "entity:doc:b", "ghost"])
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        serve = json.loads(result.stdout)["serve"]
+        assert serve["cited_ids"] == 3
+        assert serve["stray_cited_ids"] == 2
+        assert serve["stray_citation_rate"] == pytest.approx(round(2 / 3, 4))
+        assert serve["packs_with_stray_citations"] == 1
+        assert serve["stray_citations_by_namespace"] == {"entity": 1, "(none)": 1}
+        assert serve["stray_citations_by_shape"] == {"prefix_added": 1, "foreign": 1}
+        # The pre-existing rate is reported unchanged beside it: the caller
+        # did cite, which is exactly why one number cannot carry both facts.
+        assert serve["pack_attribution_rate"] == pytest.approx(1.0)
