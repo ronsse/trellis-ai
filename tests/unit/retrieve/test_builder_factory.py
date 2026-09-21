@@ -24,11 +24,19 @@ from tests.ast_rules import (
     construction_names,
 )
 from trellis.retrieve.builder_factory import (
+    GRAPH_SEEDING_ENV,
     SEMANTIC_AXIS_NOTES,
     build_pack_builder,
     describe_axes,
 )
 from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.strategies import (
+    GRAPH_SELECTION_RECENCY_WINDOW,
+    GRAPH_SELECTION_SEEDED,
+    GraphSearch,
+    NamespaceSeedExtractor,
+    build_strategies,
+)
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.stores.advisory_source import ADVISORY_FILENAME
 from trellis.stores.advisory_store import AdvisoryStore
@@ -242,6 +250,133 @@ _ALLOWED_CONSTRUCTION_SITES = frozenset({"trellis/retrieve/builder_factory.py"})
 #: the floor is deliberately loose enough to survive ordinary churn and
 #: tight enough that dropping a package fails here.
 _MIN_SRC_MODULES = 300
+
+
+class TestGraphSeedingWiring:
+    """Where seeding is turned on, and where it deliberately is not (#375).
+
+    The graph axis is ``ORDER BY created_at DESC LIMIT n`` unless something
+    gives it seeds, so this wiring is the difference between an axis that
+    consults the intent and one that cannot. It lives *here* and not in
+    ``build_strategies`` — that default stays ``None``, because the refusal
+    recorded against it (#371) was about a different extractor measured at
+    0 seeds on 37/37 real intents, and collapsing the two would re-open a
+    settled question on taste.
+    """
+
+    @staticmethod
+    def _registry(tmp_path: Path) -> StoreRegistry:
+        return TestBuildPackBuilder._registry(tmp_path)
+
+    @staticmethod
+    def _graph_axis(builder: PackBuilder) -> GraphSearch:
+        # Private access on purpose: whether an extractor was wired is not
+        # part of the builder's public surface, and the behavioural tests
+        # at the bottom of this class are what pin the consequence.
+        axes = [s for s in builder._strategies if isinstance(s, GraphSearch)]
+        assert len(axes) == 1
+        return axes[0]
+
+    def test_seeding_is_on_by_default(self, tmp_path: Path) -> None:
+        builder = build_pack_builder(self._registry(tmp_path), surface="test")
+        extractor = self._graph_axis(builder)._seed_extractor
+        assert isinstance(extractor, NamespaceSeedExtractor)
+
+    def test_build_strategies_still_defaults_to_no_extractor(
+        self, tmp_path: Path
+    ) -> None:
+        """The split is the point, so it is asserted as a split.
+
+        Same registry, two constructions: the factory seeds and the
+        strategy builder does not. A change that "tidied" this by moving
+        the default down would silently overturn #371.
+        """
+        registry = self._registry(tmp_path)
+        strategies = build_strategies(registry)
+        axes = [s for s in strategies if isinstance(s, GraphSearch)]
+        assert axes[0]._seed_extractor is None
+        assert (
+            self._graph_axis(
+                build_pack_builder(registry, surface="test")
+            )._seed_extractor
+            is not None
+        )
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", "OFF", " false "])
+    def test_the_kill_switch_turns_it_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv(GRAPH_SEEDING_ENV, value)
+        builder = build_pack_builder(self._registry(tmp_path), surface="test")
+        assert self._graph_axis(builder)._seed_extractor is None
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", ""])
+    def test_recognised_on_values_and_an_empty_value_leave_it_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv(GRAPH_SEEDING_ENV, value)
+        builder = build_pack_builder(self._registry(tmp_path), surface="test")
+        assert self._graph_axis(builder)._seed_extractor is not None
+
+    def test_an_unrecognised_value_keeps_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A typo'd kill switch must not read as a disable.
+
+        Failing the other way would let an operator who wrote ``disabled``
+        believe they had turned seeding off while it kept running. The
+        module logs a warning for exactly this case.
+        """
+        monkeypatch.setenv(GRAPH_SEEDING_ENV, "disabled")
+        builder = build_pack_builder(self._registry(tmp_path), surface="test")
+        assert self._graph_axis(builder)._seed_extractor is not None
+
+    def test_an_intent_naming_a_real_entity_takes_the_seeded_branch(
+        self, tmp_path: Path
+    ) -> None:
+        """End to end, against a real graph store rather than a stub.
+
+        The extractor rests on ``get_subgraph(ids, depth=0)`` returning
+        exactly the live seed nodes — contract-pinned on every backend, but
+        pinned here too, because a stub that answers the way the contract
+        says proves nothing about the store the factory actually wires.
+        """
+        registry = self._registry(tmp_path)
+        graph = registry.knowledge.graph_store
+        graph.upsert_node("domain:fincore", "domain", {"name": "fincore"})
+        graph.upsert_node(
+            "act:1",
+            "activity",
+            {"name": "reconcile the fincore ledger", "description": "x" * 60},
+        )
+        graph.upsert_edge("domain:fincore", "act:1", "relates_to")
+
+        pack = build_pack_builder(registry, surface="test").build(
+            "what happened in fincore"
+        )
+
+        graph_items = [i for i in pack.items if "graph_selection" in (i.metadata or {})]
+        assert graph_items
+        assert {i.metadata["graph_selection"] for i in graph_items} == {
+            GRAPH_SELECTION_SEEDED
+        }
+
+    def test_an_intent_naming_nothing_still_gets_the_recency_window(
+        self, tmp_path: Path
+    ) -> None:
+        """Seeding is additive: a miss costs the caller nothing it had."""
+        registry = self._registry(tmp_path)
+        registry.knowledge.graph_store.upsert_node(
+            "act:1", "activity", {"name": "some unrelated activity", "desc": "y" * 60}
+        )
+
+        pack = build_pack_builder(registry, surface="test").build("zzzz qqqq")
+
+        graph_items = [i for i in pack.items if "graph_selection" in (i.metadata or {})]
+        assert graph_items
+        assert {i.metadata["graph_selection"] for i in graph_items} == {
+            GRAPH_SELECTION_RECENCY_WINDOW
+        }
 
 
 def _src_root() -> Path:
