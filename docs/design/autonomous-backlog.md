@@ -74,7 +74,8 @@ Every item is tagged with who decides when a fork appears mid-item.
 > [`docs/issues/reviews/2026-09-04/README.md`](../issues/reviews/2026-09-04/README.md),
 > [`manifest.json`](../issues/reviews/2026-09-04/manifest.json), per-issue `#NNN.md`
 > briefs, and optional [`plans/`](../issues/reviews/2026-09-04/plans/) for seven issues
-> (#256, #264, #342, #360, #369, #439, #514). **Do not copy the 40 briefs here;** read
+> (#256, #264, #342, #360, #369, #439, #514 — of which **#342, #369 and #439 are now
+> closed**, 2026-09-20). **Do not copy the 40 briefs here;** read
 > the corpus for measured evidence and close criteria, then confirm status on GitHub and
 > the roadmap before dispatching.
 >
@@ -85,16 +86,18 @@ Every item is tagged with who decides when a fork appears mid-item.
 > refuted. For live state and requirements, **the GitHub issue wins**; the corpus supplies
 > measured evidence only.
 
-**Snapshot:** **40 open** on GitHub as of the 2026-09-04 review. The count stays 40 until
-close/duplicate mutations actually land — the configured automation token currently lacks
-GitHub **Issues write** permission, so corpus disposition actions (e.g. closing
-[#525](https://github.com/ronsse/trellis-ai/issues/525) / [#364](https://github.com/ronsse/trellis-ai/issues/364))
-cannot be applied from agents until that is restored.
+**Snapshot:** **44 open** on `1ef5c9c`, **2026-09-20**
+(`gh issue list --repo ronsse/trellis-ai --state open --limit 400 --json number | jq length`).
+Re-derive it rather than reading this line; a count with no command behind it is how §5 of
+the PRD went stale for two months.
 
-| Issue | Corpus verdict | Agent note |
-|---|---|---|
-| [#525](https://github.com/ronsse/trellis-ai/issues/525) | `duplicate` | **Closure-ready** — duplicate of #526; do not dispatch |
-| [#364](https://github.com/ronsse/trellis-ai/issues/364) | `stale-fixed` | **Closure-ready** — PR #389; do not dispatch |
+> The 2026-09-04 snapshot read **40 open** and predicted "the count stays 40 until
+> close/duplicate mutations actually land", blaming an automation token without GitHub
+> **Issues write**. **That prediction was falsified in both directions.** The closures it
+> said could not happen did happen — [#525](https://github.com/ronsse/trellis-ai/issues/525) and [#364](https://github.com/ronsse/trellis-ai/issues/364) are both closed —
+> and the count still rose, to 44, because new issues were filed faster than old ones were
+> closed. A backlog total is a *net* of two flows; predicting it from one of them is a
+> category error, and the prediction is not repeated here.
 
 PR [#527](https://github.com/ronsse/trellis-ai/pull/527) **selectively transcribed** the
 seven implementation plans and unique review evidence into `docs/issues/reviews/2026-09-04/`.
@@ -109,7 +112,8 @@ owner-approved deletion** after confirming no archival retention is desired.
 
 **Wave D (program plan order): [#360](https://github.com/ronsse/trellis-ai/issues/360) PR1 →
 [#256](https://github.com/ronsse/trellis-ai/issues/256) staged seam.** Also parallel when
-disjoint: **#369**, **#439**, **#342**, **#514**.
+disjoint: **#514**. (**#369**, **#439** and **#342** were listed here and are now closed —
+verified 2026-09-20; #369's work merged as `1ef5c9c`.)
 
 **#256 dispatch — operator override (2026-09-04, this program only):** live `keystone`
 label normally means **human authorship only**. Operator instruction on 2026-09-04
@@ -123,29 +127,28 @@ Owner review and the adversarial merge gate ([swarm-handoff §4.1](./swarm-hando
   adjacency, not a manifest dependency).
 - **Serialize #360 PR2 with #264 PR-A** — extraction/MCP overlap on `save_memory`.
 
-**Batch 2 — CI / stores** (hard dependency **#351 → #356** per manifest; no issue
-dependency between #526 and #350):
+**Batch 2 — CI / stores.** Three of its four items are closed as of **2026-09-20**, and the
+batch's one hard dependency has therefore been discharged: **#356 is unblocked.**
 
-| Issue | Verdict | Note |
+| Issue | State 2026-09-20 | Note |
 |---|---|---|
-| [#526](https://github.com/ronsse/trellis-ai/issues/526) | `valid-now` | May parallelize with #350 if territories/workflows disjoint after recheck |
-| [#351](https://github.com/ronsse/trellis-ai/issues/351) | `valid-now` | **Before #356** (manifest dependency) |
-| [#356](https://github.com/ronsse/trellis-ai/issues/356) | `valid-now` | After #351 |
-| [#350](https://github.com/ronsse/trellis-ai/issues/350) | `valid-now` | May parallelize with #526 if disjoint |
+| [#356](https://github.com/ronsse/trellis-ai/issues/356) | **open** | The whole live remainder of this batch. Its blocker #351 is closed, so the manifest's `#351 → #356` dependency no longer gates it |
+| [#526](https://github.com/ronsse/trellis-ai/issues/526) | closed | — |
+| [#351](https://github.com/ronsse/trellis-ai/issues/351) | closed | ArcadeDB graph contract got a service container in #543 |
+| [#350](https://github.com/ronsse/trellis-ai/issues/350) | closed | — |
 
-**Workflow-collision scheduling (optional):** #526, #351, and #356 share CI workflow
-territory — coordinate merges when touching the same files; this is **not** a serial
-issue dependency.
+The workflow-collision note that stood here (#526/#351/#356 sharing CI territory) is moot
+with two of the three closed; #356 now has that territory to itself.
 
 **Other valid-now / valid-slice items** (dispatch when Batch 1–2 are full or territories
 allow; full roster in manifest + roadmap):
 
 | Issue | Verdict | Note |
 |---|---|---|
-| [#522](https://github.com/ronsse/trellis-ai/issues/522) | `valid-now` | Rich operator-output renders outside #492 handle rule |
-| [#523](https://github.com/ronsse/trellis-ai/issues/523) | `valid-now` | `sanitize_error_message` suppresses boundary test messages on long `--basetemp` |
 | [#494](https://github.com/ronsse/trellis-ai/issues/494) | `valid-now` | Document `retrieve pack --quiet` id population |
 | [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | **Measurement slice only** — map Anthropic cache token fields into `TokenUsage`; defer `cache_control` until benefit measured |
+
+*#522 and #523 stood in this table and are closed as of 2026-09-20.*
 
 All other open items: verdict and wave in
 [`manifest.json`](../issues/reviews/2026-09-04/manifest.json); live requirements and
@@ -182,9 +185,19 @@ status on each **GitHub issue**; roadmap sections only where they govern that it
 > [#459](https://github.com/ronsse/trellis-ai/issues/459)) and most Lane G review-gate
 > items landed before the 2026-09-04 corpus — verify issue state on GitHub before acting.
 > For current work, use [Current queue — 2026-09-04](#current-queue--2026-09-04) above.
+>
+> ⚠️ **The lane letters below are a different namespace from the `A1`–`F3` item codes in
+> Waves 1–5, and they collide.** "Lane A" is the file-store guard family (#448, #459,
+> #471); items **A1–A4** are Wave 1 measurement work (#260, #336, #338, #345) — **disjoint
+> sets**. Same for C (#348/#362/#363/#364 vs #194/#256/#264/#360/#413) and F (#474–#478 vs
+> Wave 1b, which cites no issues at all). Lane B and B1–B3 share exactly **one** issue of
+> nine and four (#298), which is the worst case: close enough to look like the same thing.
+> Bare codes travel — `CLAUDE.md` cites `C1`, `C2`, `B2`, `A4`, `E2` — so a reader who
+> resolves one against the wrong scheme lands on unrelated work with no error. Measured
+> 2026-09-20; the letters are left as-is because this section is frozen record.
 
-Re-derived from the **37 open issues** on 2026-09-03 (superseded; the corpus now tracks
-**40**). Roughly a third were swarm-ready, a third needed a design call, and a third were
+Re-derived from the **37 open issues** on 2026-09-03 (superseded: 40 on 2026-09-04, **44** on
+2026-09-20). Roughly a third were swarm-ready, a third needed a design call, and a third were
 operator-gated. **Lane G** was added 2026-09-04 for the cluster filed since — most of it
 by adversarial gate reviews of the PRs the other lanes produced.
 

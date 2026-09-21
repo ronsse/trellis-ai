@@ -343,5 +343,9 @@ database without the extension every pooled connection fails and `pool.wait()` r
 
 ## Product docs
 
+- `docs/ROADMAP.md` — a **router**, not a roadmap of its own: which of the five planning
+  documents is authoritative for what, and the Now / Next / Later gates stated as
+  acceptance checks rather than as an item list. Carries no queue and no Done section on
+  purpose — the queue is the tracker and the open PRs, which no file in this repo can see.
 - `docs/PRD.md` — product thesis, adopter profiles, component disposition
 - `docs/design/implementation-roadmap.md` — authoritative single-page roadmap; §3.H is the Productionization milestone (the 2026-07-11 edit-set has been applied into it and removed)
