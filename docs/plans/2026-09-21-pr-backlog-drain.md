@@ -35,8 +35,12 @@ rebase. Only **#571** touches any file #555 changed, and #571 is the known dupli
 
 ## 2. The `CLAUDE.md` contention is order-independent
 
-Eight PRs edit the same block (#552, #564, #572, #578, #583, #589, #595, #601). All 28
-pairs conflict.
+**Ten** PRs touch `CLAUDE.md`, not eight. Eight edit the same contended block (#552,
+#564, #572, #578, #583, #589, #595, #601) and all 28 pairs conflict. Two more — #575 and
+#581 — touch the file incidentally, at unrelated lines. The eight-PR figure counted the
+*contention*; the ten-PR figure is what a file-level `gh pr view --json files` returns,
+and the gap is why a "which PRs touch CLAUDE.md" query and a "which PRs conflict" query
+disagree. Both are right about different questions.
 
 Measured, and it refutes the obvious plan:
 
@@ -45,9 +49,15 @@ Measured, and it refutes the obvious plan:
   #552, #601 and #589 as first-mover: 7 of 7 every time.
 
 So there is no ordering that avoids this, and **merging #583 first does not collapse the
-others into no-ops** — a plausible guess that measurement refutes. Each conflict is a
-single hunk. Budget seven trivial resolutions, in whatever order is convenient, and do not
-spend effort optimizing the sequence.
+others into no-ops** — a plausible guess that measurement refutes.
+
+> **"Each conflict is a single hunk. Budget seven trivial resolutions" was wrong**, and
+> the drain refuted it. Four of the conflicts that actually materialised were genuine
+> semantic collisions in *code*, not one-hunk prose edits: #587 (12 blocks), #573 (4),
+> #598 (2), #590 (2). In every one of the four, neither `--ours` nor `--theirs` was
+> correct — the answer was a **union**, because two PRs had independently added a
+> different thing to the same signature. A hunk count measures textual overlap; it does
+> not predict whether a resolution is mechanical. Do not budget from it.
 
 #583 still belongs early, on unrelated grounds: it replaces the hand-maintained "what CI
 actually covers" roster with a rule derived from the workflow files, so the block stops
@@ -141,3 +151,67 @@ the update and the merge.
   exists.
 - `delete_branch_on_merge` is `false`, so nothing auto-retargets a stacked PR when its
   parent merges. Each child must be retargeted by hand.
+
+## 7. What the drain found — recorded 2026-09-21, mid-execution
+
+Nineteen PRs merged under one discipline: update-branch, wait for 10/10 SUCCESS with
+`MERGEABLE/CLEAN`, squash. No PR merged red. Four findings the plan did not predict.
+
+### 7.1 The drain invalidated one of its own members (#575)
+
+#575 (`fix(retrieve): derived rows carry their source clock, with a roster`) went from
+inherited-red to **genuinely** red, and the cause was the drain. Its 761-line roster
+enumerates every document write seam — `MIN_WRITE_SEAMS = 27`, with per-disposition
+floors. On the post-drain tree the scan finds **13**, `primary_write` falls to **0**
+against a floor of 5, and 14 roster keys match no site.
+
+Nothing is broken. Main consolidated every direct `document_store.put` into the single
+`put_document` seam in `core/document_write.py` (#553 / #569 / #590 — three PRs merged in
+this drain). The 14 "missing" sites all now route through it, and `put_document` threads
+`preserve_updated_at`, which is the clock-preservation mechanism #575 exists to guarantee.
+The invariant survived; the seam moved.
+
+**This is not a roster refresh and must not be done as one.** The roster's dispositions
+(`primary_write`, `in_place_reput`, `derived_propagates`, …) describe what the *caller*
+intends, and after consolidation that intent sits upstream of the seam the scan finds — so
+the scan itself has to change (follow `put_document(` call sites rather than `.put(`), and
+every one of the 14 keys has to be re-classified against the new seam. The file's own
+doctrine forbids the shortcut: a rotted roster "gets 'repaired' by renumbering — which is
+indistinguishable from re-classifying." Rewriting 14 keys from `doc_store.put` to
+`put_document` *is* re-classifying. **Held for the author, with the measurement above.**
+
+### 7.2 Two PRs were complementary halves of one fix (#568)
+
+#569 (merged) fixed the `put_document` half of #568 and left a comment saying the classify
+half was "a separate defect, deliberately not fixed here". #590 *is* that half. Merging
+either alone leaves #568 half-fixed, and nothing in either PR's description says so — the
+link existed only in a code comment on one side. The comment was deleted in the
+resolution, because the merge falsifies its first clause; this is the recorded
+"a docstring narrating a defect is past tense" shape, caught at merge time.
+
+### 7.3 `mergeStateStatus` cannot distinguish pending from failing
+
+`UNSTABLE` means "mergeable, checks not all SUCCESS" — and a *pending* check produces it
+just as a failing one does. A rollup filter that keys on `.conclusion` alone reads every
+in-progress check as a failure: in one sweep it reported 5 failing checks on a PR that had
+zero. Key on `.status` (`QUEUED` / `IN_PROGRESS` / `COMPLETED`) and treat only
+`FAILURE` / `TIMED_OUT` / `CANCELLED` as red. `MERGEABLE`/`UNKNOWN` is a *third* state —
+GitHub recomputing after a base change — and is never safe to merge on.
+
+### 7.4 The real constraint is runner concurrency, not conflicts
+
+Every merge to `main` fires six workflow runs, and every `update-branch` fires ten checks.
+Nineteen merges plus fifteen in-flight PRs put ~130 jobs in one queue behind a ~7-minute
+`live-infra`. §5's worry was the operator dropping the discipline; the actual pressure to
+drop it comes from the queue, because the update → green → merge cycle stops being minutes
+and starts being hours. **Batch update-branch is the thing to avoid** — updating all eight
+remaining `CLAUDE.md` PRs at once would queue eighty checks to merge one.
+
+### 7.5 The checkpoint that replaced re-updating everything
+
+Re-updating every open branch after each merge is O(n²) and never converges. All six
+workflows also run on **push to `main`**, so each merge already retests the merged result.
+That main-push run is the semantic-conflict checkpoint, and the stop condition is: **if
+`main` goes red, halt the drain**. Across all nineteen merges it never did — zero failures
+in 60 runs. The gap this leaves is honest and unchanged: a PR green on an older base can
+still merge, and only the checkpoint catches it, *after* the fact.
