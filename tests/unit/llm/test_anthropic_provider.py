@@ -6,6 +6,7 @@ Tests inject a mock async client via the ``client=`` kwarg, so the real
 
 from __future__ import annotations
 
+import ast
 import inspect
 import pathlib
 import sys
@@ -681,3 +682,130 @@ class TestStrictFakeMatchesTheRealSdk:
         assert not any(
             p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
         )
+
+
+# -- Tests: the response shape, measured against the real SDK ---------------
+
+
+#: Attributes the adapter reads off each response object, hand-read from
+#: ``anthropic.py`` at the time of writing.  These are floors for the derived
+#: scan below, not the rosters the assertions run on — a roster that is merely
+#: declared rots, and this repo has shipped that failure more than once.
+HAND_READ_RESPONSE_READS = {
+    "usage": 4,  # input/output tokens + the two cache counters
+    "resp": 3,  # content, model, usage
+    "block": 2,  # type, text
+}
+
+
+def _adapter_reads(subject: str) -> set[str]:
+    """Attribute names the shipped adapter reads off ``subject``.
+
+    Derived from the source rather than hand-listed, so a field added to the
+    adapter tomorrow is pinned against the real SDK without anyone
+    remembering to extend a list here.  Collects three spellings, because the
+    adapter uses all three: ``getattr(subject, "name", default)``, a direct
+    ``subject.name``, and ``_cache_count(subject, "name")`` — the last one
+    matters because ``_cache_count``'s own ``getattr`` takes a *parameter*,
+    so the literal only ever appears at the call site.
+    """
+    tree = ast.parse(pathlib.Path(anthropic_provider.__file__).read_text())
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            value = node.value
+            if isinstance(value, ast.Name) and value.id == subject:
+                names.add(node.attr)
+            continue
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in {"getattr", "_cache_count"} or len(node.args) < 2:
+            continue
+        target, attr = node.args[0], node.args[1]
+        if (
+            isinstance(target, ast.Name)
+            and target.id == subject
+            and isinstance(attr, ast.Constant)
+            and isinstance(attr.value, str)
+        ):
+            names.add(attr.value)
+    return names
+
+
+class TestResponseShapeMatchesTheRealSdk:
+    """The request side is pinned against the real SDK by
+    :class:`TestStrictFakeMatchesTheRealSdk`; the response side was not, and
+    the asymmetry is load-bearing.
+
+    Every read in ``_extract_text`` / ``_extract_usage`` / ``_cache_count``
+    goes through ``getattr`` with a default, so a renamed or nested SDK field
+    does not raise — it yields ``""`` or ``None`` forever.  For the two cache
+    counters that is worse than a crash: #515 makes
+    ``cache_read_input_tokens`` staying flat *the* detector for a silent
+    cache invalidator, and a vanished field reports exactly the same number
+    as a cache that is simply off.  That is a measurement wired to a
+    constant, which is the failure this repo keeps producing.
+
+    Skips honestly when the extra is absent rather than reporting a constant
+    of its own.  CI's ``dev,all`` leg installs it.
+    """
+
+    @staticmethod
+    def _model_fields(qualname: str) -> set[str]:
+        anthropic = pytest.importorskip(
+            "anthropic", reason="[llm-anthropic] extra not installed"
+        )
+        model = getattr(anthropic.types, qualname)
+        return set(model.model_fields)
+
+    @pytest.mark.parametrize(
+        ("subject", "sdk_model"),
+        [("usage", "Usage"), ("resp", "Message"), ("block", "TextBlock")],
+    )
+    def test_every_attribute_the_adapter_reads_exists_on_the_real_model(
+        self, subject: str, sdk_model: str
+    ) -> None:
+        reads = _adapter_reads(subject)
+        floor = HAND_READ_RESPONSE_READS[subject]
+        assert len(reads) >= floor, (
+            f"scan found {len(reads)} reads off {subject!r}, below the "
+            f"hand-read floor of {floor} — the scan stopped matching the "
+            "source rather than the source getting smaller"
+        )
+        missing = reads - self._model_fields(sdk_model)
+        assert not missing, (
+            f"adapter reads {sorted(missing)} off {subject!r}, which "
+            f"anthropic.types.{sdk_model} does not define — every read is a "
+            "getattr with a default, so these do not raise, they silently "
+            "return the default"
+        )
+
+    def test_both_cache_counters_are_named_fields_on_the_real_usage(self) -> None:
+        """#515 step 2's detector rests on exactly these two spellings."""
+        fields = self._model_fields("Usage")
+        for name in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+            assert name in fields, (
+                f"anthropic.types.Usage has no {name!r} — _cache_count would "
+                "read None for every call, and a cache that is off and a "
+                "field that is gone become indistinguishable"
+            )
+
+    def test_the_scan_finds_the_cache_counters_at_their_call_sites(self) -> None:
+        """Guards the ``_cache_count`` arm specifically: its own ``getattr``
+        takes a parameter, so dropping this arm would silently stop pinning
+        the two names the class above exists to protect."""
+        assert {
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        } <= _adapter_reads("usage")
+
+    def test_model_fields_membership_discriminates(self) -> None:
+        """Vacuity guard: the assertion above is only evidence if a name the
+        SDK lacks would actually fail it."""
+        assert "cache_read_input_tokens_v2" not in self._model_fields("Usage")
+
+    def test_scan_discriminates_the_subject(self) -> None:
+        """Vacuity guard: a scan that returned everything regardless of
+        subject would satisfy every assertion above."""
+        assert _adapter_reads("usage") != _adapter_reads("block")
+        assert not _adapter_reads("a_name_the_adapter_never_binds")
