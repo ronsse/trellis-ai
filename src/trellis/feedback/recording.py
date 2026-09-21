@@ -397,7 +397,13 @@ def _emit_outcome(
     from trellis.ops import record_outcome  # noqa: PLC0415
 
     occurred_at = _parse_timestamp(feedback.timestamp_utc)
-    items_served = len(feedback.items_served)
+    # ``from_agent_signal`` leaves ``items_served`` empty on purpose: an
+    # agent cites what helped, it does not enumerate what it was shown.
+    # Passing ``len([]) == 0`` would clear ``OutcomeEvent``'s
+    # ``is not None`` guard and report a *measured* denominator of zero,
+    # which the aggregator cannot tell from a real one. ``None`` is the
+    # honest value — "this surface did not report a serving count".
+    items_served = len(feedback.items_served) or None
     items_referenced = len(feedback.items_referenced)
     success = feedback.succeeded
 
