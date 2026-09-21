@@ -6,11 +6,12 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import typer
 from rich.markup import escape
 
+from trellis.classify.ingest import classify_metadata_on_write
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import (
     sanitize_error_message,
@@ -301,29 +302,51 @@ def ingest_dbt_manifest(
 
     # Index descriptions into the document store (dbt-specific side-channel
     # that used to live inside the worker's load() override).
+    #
+    # Tagged through the same seam the MCP / REST single-document writes use
+    # (#568, first half): deterministic, inline, flag-gated on
+    # ``TRELLIS_ENABLE_CLASSIFY_ON_INGEST`` and fail-soft, so the worst case
+    # is an untagged write rather than a failed ingest. ``source_system`` is
+    # what makes it worth doing at all and is written here for that reason:
+    # ``SourceSystemClassifier`` maps ``"dbt"`` onto the ``technical_pattern``
+    # / ``reference`` affinities that ``TierMapper`` reads *before* falling
+    # back to heuristics, and without that key the deterministic pipeline has
+    # almost nothing to say about a one-line model description — measured on
+    # four representative descriptions, dropping it leaves ``retrieval_affinity``
+    # empty and every other persisted facet unchanged. It is additive: the
+    # pre-existing ``"source"`` key stays, and ``source_system`` is the
+    # declared ``DocumentMetadata`` field the ad-hoc one was standing in for.
+    # The seam reads it off the mapping by documented default, so the key on
+    # the row and the key the classifiers see cannot drift apart.
+    #
+    # Embedding is the *other* half of #568 and is deliberately still not done
+    # here — it would start charging this command for embeddings, which is a
+    # cost decision its callers have not opted into.
     doc_store = registry.knowledge.document_store
     vector_store = resolve_vector_store(registry)
     doc_count = 0
     for entity in result.entities:
         desc = entity.properties.get("description", "")
         if desc:
-            # Through the seam for uniformity, not because it repairs this
-            # path: nothing embeds or classifies a `dbt:` document, so the
-            # mirror reads "absent" every time and these descriptions stay
-            # unreachable by semantic search and untagged. That is a
-            # separate defect (#568), deliberately not fixed here — adding
-            # an embed would start charging this command for embeddings.
+            # Through `put_document` so the document and its vector row
+            # cannot diverge (#360), and through `classify_metadata_on_write`
+            # so the row lands tagged like every other single-document write.
+            # `source_system` is what makes that worth doing: without it the
+            # classifiers have nothing to key on and the call is a near-no-op.
+            doc_id = f"dbt:{entity.entity_id}"
+            metadata: dict[str, Any] = {
+                "source": "dbt",
+                "source_system": "dbt",
+                "node_type": entity.entity_type,
+                "name": entity.properties.get("name", entity.name),
+                "unique_id": entity.entity_id,
+            }
             put_document(
                 doc_store,
                 vector_store,
-                f"dbt:{entity.entity_id}",
+                doc_id,
                 desc,
-                {
-                    "source": "dbt",
-                    "node_type": entity.entity_type,
-                    "name": entity.properties.get("name", entity.name),
-                    "unique_id": entity.entity_id,
-                },
+                classify_metadata_on_write(metadata, desc, doc_id=doc_id),
             )
             doc_count += 1
 

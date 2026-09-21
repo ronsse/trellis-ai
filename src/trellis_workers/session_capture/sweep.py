@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from trellis.llm.routing import LLMConsumer
 from trellis.stores.registry import StoreRegistry
 from trellis_workers.session_capture.capture import (
     DEFAULT_SAMPLE_DENOMINATOR,
@@ -116,7 +117,7 @@ def build_judge_client(registry: StoreRegistry) -> LLMClient:
             registry has no ``llm:`` configuration at all.
     """
     try:
-        client = registry.build_llm_client()
+        client = registry.build_llm_client(consumer=LLMConsumer.SESSION_CAPTURE)
     except Exception as exc:
         msg = f"could not build the distillation judge: {exc}. {JUDGE_REMEDIATION}"
         raise CaptureJudgeUnavailableError(msg) from exc

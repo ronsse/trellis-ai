@@ -110,7 +110,9 @@ def outcomes_cmd(
             str(agg.count),
             f"{agg.success_rate:.1%}",
             f"{agg.mean_latency_ms:.1f}",
-            f"{agg.reference_rate:.1%}",
+            # ``None`` means no sample reported a serving count, which is
+            # the same "unknown" the optional scope columns render as "-".
+            "-" if agg.reference_rate is None else f"{agg.reference_rate:.1%}",
         )
     console.print(table)
 

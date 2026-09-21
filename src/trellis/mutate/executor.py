@@ -29,6 +29,22 @@ logger = structlog.get_logger()
 
 DEFAULT_IDEMPOTENCY_CACHE_SIZE = 10_000
 
+#: Stable prefix of the warning a :class:`CommandResult` carries when the
+#: command's audit event could not be written. The prefix is the part
+#: consumers may match on; the rest of the string is operator prose and is
+#: free to change.
+AUDIT_EMIT_FAILED_MARKER = "audit_event_not_recorded"
+
+#: The full warning. Built from the marker so the two cannot drift apart.
+#: Deliberately neutral about what the command did — it is appended to
+#: SUCCESS, FAILED, REJECTED and DUPLICATE results alike, and on three of
+#: those nothing was written to any store.
+_AUDIT_EMIT_FAILED_TEMPLATE = (
+    AUDIT_EMIT_FAILED_MARKER + ": the {event_type} event for this command "
+    "could not be written to the event log ({error_type}: {error}). The "
+    "outcome this result reports stands; only its audit record is missing."
+)
+
 # Exception classes the executor treats as "unexpected handler panic".
 # The catch is intentionally enumerated rather than bare ``Exception``
 # so the silent-fallback audit (``scripts/audit_silent_fallbacks.py``)
@@ -50,6 +66,26 @@ _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
     LookupError,
     ArithmeticError,
 )
+
+# Exception classes the audit-emit guard in ``_emit_event`` catches. Same
+# enumerate-don't-bare-except discipline as the tuple above, and for the same
+# reason: a broad ``except Exception`` here would be flagged by the
+# silent-fallback audit, and correctly — the guard does not swallow the
+# failure, it converts it into a warning on the result plus a traceback in
+# operator logs. ``StoreError`` is what a well-behaved backend raises; the
+# panic tuple covers a backend that does not, because an event log that
+# raises ``ConnectionError`` instead must not be the difference between a
+# degraded result and an aborted batch.
+_AUDIT_EMIT_FAILURE: tuple[type[BaseException], ...] = (
+    StoreError,
+    TrellisError,
+    *_UNEXPECTED_HANDLER_FAILURE,
+)
+
+
+def _audit_warnings(audit_warning: str | None) -> list[str]:
+    """The warning list contributed by one audit emit — empty when it landed."""
+    return [] if audit_warning is None else [audit_warning]
 
 
 class PolicyGate(Protocol):
@@ -146,12 +182,13 @@ class MutationExecutor:
         if not valid:
             message = f"Validation failed: {'; '.join(errors)}"
             log.warning("validation_failed", errors=errors)
-            self._emit_rejection(command, reason="validate", message=message)
+            audit = self._emit_rejection(command, reason="validate", message=message)
             return CommandResult(
                 command_id=command.command_id,
                 status=CommandStatus.FAILED,
                 operation=command.operation,
                 message=message,
+                warnings=_audit_warnings(audit),
             )
 
         # Stage 2: Policy Check
@@ -182,7 +219,7 @@ class MutationExecutor:
             allowed, message, policy_warnings = self._policy_gate.check(command)
             if not allowed:
                 log.warning("policy_rejected", message=message)
-                self._emit_rejection(
+                audit = self._emit_rejection(
                     command,
                     reason="policy_violation",
                     message=message,
@@ -193,7 +230,7 @@ class MutationExecutor:
                     status=CommandStatus.REJECTED,
                     operation=command.operation,
                     message=message,
-                    warnings=policy_warnings,
+                    warnings=[*policy_warnings, *_audit_warnings(audit)],
                 )
 
         # Stage 3: Idempotency Check
@@ -223,7 +260,7 @@ class MutationExecutor:
             # if the handler didn't supply one via ValidationError.code).
             log.warning("handler_rejected", errors=exc.errors)
             reason = exc.code if exc.code != "VALIDATION_ERROR" else "handler_validate"
-            self._emit_rejection(
+            audit = self._emit_rejection(
                 command,
                 reason=reason,
                 message=str(exc),
@@ -234,7 +271,7 @@ class MutationExecutor:
                 status=CommandStatus.REJECTED,
                 operation=command.operation,
                 message=str(exc),
-                warnings=policy_warnings,
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
         except PolicyViolationError as exc:
             # Handlers may evaluate row-level policies that the gate
@@ -244,7 +281,7 @@ class MutationExecutor:
             # shape from Stage 2 so consumers reading the EventLog
             # don't have to special-case where the policy fired.
             log.warning("handler_policy_rejected", policy_id=exc.policy_id)
-            self._emit_rejection(
+            audit = self._emit_rejection(
                 command,
                 reason="policy_violation",
                 message=str(exc),
@@ -255,7 +292,7 @@ class MutationExecutor:
                 status=CommandStatus.REJECTED,
                 operation=command.operation,
                 message=str(exc),
-                warnings=policy_warnings,
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
         except IdempotencyError as exc:
             # Handler-level duplicate detection (e.g., a downstream
@@ -263,7 +300,7 @@ class MutationExecutor:
             # missed because of an LRU eviction). Surface as DUPLICATE
             # so callers branch the same way as a Stage-3 hit.
             log.info("handler_idempotency_replay", key=exc.idempotency_key)
-            self._emit_rejection(
+            audit = self._emit_rejection(
                 command,
                 reason="idempotency_replay",
                 message=str(exc),
@@ -274,7 +311,7 @@ class MutationExecutor:
                 status=CommandStatus.DUPLICATE,
                 operation=command.operation,
                 message=str(exc),
-                warnings=policy_warnings,
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
         except (StoreError, TrellisError) as exc:
             # Typed Trellis failures other than the rejection set
@@ -293,7 +330,7 @@ class MutationExecutor:
                 error_code=getattr(exc, "code", None),
                 store=store_name,
             )
-            self._emit(
+            audit = self._emit(
                 command,
                 CommandStatus.FAILED,
                 str(exc),
@@ -304,7 +341,7 @@ class MutationExecutor:
                 status=CommandStatus.FAILED,
                 operation=command.operation,
                 message=f"Execution failed: {exc}",
-                warnings=policy_warnings,
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
         except _UNEXPECTED_HANDLER_FAILURE as exc:
             # An untyped exception escaped the handler — almost
@@ -324,7 +361,7 @@ class MutationExecutor:
             # so the silent-fallback audit treats it as a guard
             # rather than a broad swallow.
             log.exception("handler_failed_unexpected", error_type=type(exc).__name__)
-            self._emit(
+            audit = self._emit(
                 command,
                 CommandStatus.FAILED,
                 str(exc),
@@ -335,11 +372,23 @@ class MutationExecutor:
                 status=CommandStatus.FAILED,
                 operation=command.operation,
                 message=f"Execution failed: {exc}",
-                warnings=policy_warnings,
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
 
         # Stage 5: Emit Event
-        self._emit(
+        #
+        # The one emit that runs after a committed write. It is guarded at
+        # the seam (see ``_emit_event``) rather than here, but this is the
+        # site where an unguarded raise would have been a lie rather than
+        # merely a nuisance: the handler's write is durable by now, so
+        # letting the exception past this point reports a committed mutation
+        # as a failure. The status below stays SUCCESS for that reason — the
+        # write happened — and the missing audit event is stated in
+        # ``warnings`` instead of being encoded as a failure or a fourth
+        # ``CommandStatus`` (which every caller branching on "not SUCCESS"
+        # would read as "the write did not happen", reproducing the defect
+        # one layer up).
+        audit = self._emit(
             command,
             CommandStatus.SUCCESS,
             message,
@@ -354,7 +403,7 @@ class MutationExecutor:
             target_id=command.target_id,
             created_id=created_id,
             message=message,
-            warnings=policy_warnings,
+            warnings=[*policy_warnings, *_audit_warnings(audit)],
         )
 
     def execute_batch(self, batch: CommandBatch) -> list[CommandResult]:
@@ -435,19 +484,22 @@ class MutationExecutor:
         message: str,
         *,
         policy_warnings: list[str] | None = None,
-    ) -> None:
+    ) -> str | None:
         """Emit a SUCCESS or FAILED event to the event log if available.
 
         Rejection paths (validate / policy / idempotency) emit through
         :meth:`_emit_rejection` instead so every rejection event carries a
         ``reason`` field naming the stage that rejected the command.
+
+        Returns whatever :meth:`_emit_event` returns — ``None`` when the
+        event landed, a warning string when it did not.
         """
         event_type = (
             EventType.MUTATION_EXECUTED
             if status == CommandStatus.SUCCESS
             else EventType.MUTATION_REJECTED
         )
-        self._emit_event(
+        return self._emit_event(
             event_type,
             command,
             status,
@@ -478,7 +530,7 @@ class MutationExecutor:
             self._seen_idempotency_keys.move_to_end(command.idempotency_key)
             message = f"Duplicate command: {command.idempotency_key}"
             log.info("duplicate_command", key=command.idempotency_key)
-            self._emit_rejection(
+            audit = self._emit_rejection(
                 command,
                 reason="idempotency_replay",
                 message=message,
@@ -489,7 +541,7 @@ class MutationExecutor:
                 status=CommandStatus.DUPLICATE,
                 operation=command.operation,
                 message=message,
-                warnings=policy_warnings,
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
 
         # Check persisted events for cross-restart deduplication
@@ -499,7 +551,7 @@ class MutationExecutor:
             self._record_idempotency_key(command.idempotency_key)
             message = f"Duplicate command (persisted): {command.idempotency_key}"
             log.info("duplicate_command_persisted", key=command.idempotency_key)
-            self._emit_rejection(
+            audit = self._emit_rejection(
                 command,
                 reason="idempotency_replay",
                 message=message,
@@ -510,7 +562,7 @@ class MutationExecutor:
                 status=CommandStatus.DUPLICATE,
                 operation=command.operation,
                 message=message,
-                warnings=policy_warnings,
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
 
         self._record_idempotency_key(command.idempotency_key)
@@ -523,7 +575,7 @@ class MutationExecutor:
         reason: str,
         message: str,
         policy_warnings: list[str] | None = None,
-    ) -> None:
+    ) -> str | None:
         """Emit a uniform :attr:`EventType.MUTATION_REJECTED` event.
 
         Called from every rejection stage (``immutable_core`` / ``validate``
@@ -537,8 +589,11 @@ class MutationExecutor:
         The key stays absent from the payload when the list is empty, so a
         deployment that has declared no policies emits a byte-identical
         event to the pre-gate world.
+
+        Returns whatever :meth:`_emit_event` returns — ``None`` when the
+        event landed, a warning string when it did not.
         """
-        self._emit_event(
+        return self._emit_event(
             EventType.MUTATION_REJECTED,
             command,
             CommandStatus.REJECTED,
@@ -556,10 +611,45 @@ class MutationExecutor:
         *,
         reason: str | None = None,
         policy_warnings: list[str] | None = None,
-    ) -> None:
-        """Build the payload and emit a single executor event."""
+    ) -> str | None:
+        """Build the payload and emit a single executor event.
+
+        Returns ``None`` when the event was written, and a warning string
+        naming the missing event when the write raised.
+
+        **Emitting the audit event can never change what the pipeline
+        reports.** That is the whole invariant, and it is stated here rather
+        than at any one caller because the failure mode differs by stage
+        while the rule does not. At Stage 5 an unguarded raise propagates
+        *past* a committed handler write, so the caller is told the mutation
+        failed when the store change is durable — a result that contradicts
+        the state of the database, and the defect #551 was opened for. At the
+        Stage 1-4 rejection and failure sites the reported outcome is already
+        the bad news, and nothing was committed, so a raise tells no lie
+        about the store; what it does instead is escape ``execute`` entirely
+        and abort the surrounding ``execute_batch``, which is exactly what
+        the Stage 4 comments promise will not happen under
+        ``CONTINUE_ON_ERROR``. Guarding only Stage 5 would leave a dead event
+        log degrading a *successful* command gracefully while taking the
+        batch down on a *failed* one, so the guard sits at the single seam
+        every stage already routes through.
+
+        The failure is never swallowed: it is logged with a traceback at
+        ``error`` (``TRELLIS_LOG_LEVEL`` defaults to ``WARNING``, so anything
+        lower is a no-op on the CLI — #425) and stated on the returned
+        :class:`CommandResult` under :data:`AUDIT_EMIT_FAILED_MARKER`.
+
+        Measured before it was written: over the 3,655 governed mutations
+        this deployment has executed since 2026-07-06, zero Stage 5 emits
+        have failed. The event log and the handler's own semantic event are
+        two independent calls, so an unpaired semantic event is the in-band
+        fingerprint of a Stage 5 failure, and there are none — every
+        semantic total pairs exactly, ordinally, with its operation's
+        ``MUTATION_EXECUTED`` count. The defect is latent, and the fix is
+        sized for that: a guard and a warning, not an outbox.
+        """
         if self._event_log is None:
-            return
+            return None
         payload: dict[str, object] = {
             "command_id": command.command_id,
             "operation": command.operation,
@@ -578,10 +668,25 @@ class MutationExecutor:
         # makes the default posture verifiably transparent.
         if policy_warnings:
             payload["policy_warnings"] = policy_warnings
-        self._event_log.emit(
-            event_type,
-            "mutation_executor",
-            entity_id=command.target_id,
-            entity_type=command.target_type,
-            payload=payload,
-        )
+        try:
+            self._event_log.emit(
+                event_type,
+                "mutation_executor",
+                entity_id=command.target_id,
+                entity_type=command.target_type,
+                payload=payload,
+            )
+        except _AUDIT_EMIT_FAILURE as exc:
+            logger.exception(
+                "audit_emit_failed",
+                command_id=command.command_id,
+                operation=command.operation,
+                event_type=event_type,
+                error_type=type(exc).__name__,
+            )
+            return _AUDIT_EMIT_FAILED_TEMPLATE.format(
+                event_type=event_type,
+                error_type=type(exc).__name__,
+                error=exc,
+            )
+        return None
