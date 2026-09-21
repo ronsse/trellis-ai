@@ -2418,8 +2418,17 @@ class TestStructuredErrorContract:
         temp_registry: StoreRegistry,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """An event-log emit failure inside ``save_memory`` raises with
-        the original exception chained — used to be a silent debug log."""
+        """An event-log outage inside ``save_memory`` raises with the
+        original exception chained — used to be a silent debug log.
+
+        It surfaces at the ``MEMORY_STORED`` emit, which is this tool's own
+        documented acceptance record and a hard requirement. Before #551 it
+        surfaced one emit earlier, at the executor's Stage 5 audit event,
+        because that was the first ``emit`` a total outage reached and
+        nothing guarded it — so this test passed while reading the *audit*
+        failure, not the tool's. The guard moved the boundary; it did not
+        make the outage quiet.
+        """
         boom = RuntimeError("fake event-log outage")
 
         def _boom(*args: object, **kwargs: object) -> None:
@@ -2431,9 +2440,87 @@ class TestStructuredErrorContract:
             save_memory("unique memory content for emission failure test")
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
-        assert "MUTATION_EXECUTED" in err.error.message
+        assert "MEMORY_STORED" in err.error.message
         assert err.error.data is not None
-        assert err.error.data["stage"] == "mutation_executed_emit"
+        assert err.error.data["stage"] == "memory_stored_emit"
+        assert excinfo.value.__cause__ is boom
+
+    def test_save_memory_survives_an_audit_emit_outage_and_says_nothing_false(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#551 at the surface that motivated it, with only Stage 5 dark.
+
+        The document is committed before Stage 5 runs, so failing the call
+        would report a completed write as a failure and leave no audit
+        record of either. The write now stands, the tool's own required
+        ``MEMORY_STORED`` record is written, and the missing audit event is
+        missing *and nothing claims otherwise* — the trade the guard makes,
+        pinned here rather than implied.
+        """
+        event_log = temp_registry.operational.event_log
+        real_emit = event_log.emit
+        boom = StoreError("audit log is down")
+
+        def _fail_only_the_audit_event(
+            event_type: EventType, *args: object, **kwargs: object
+        ) -> object:
+            if event_type is EventType.MUTATION_EXECUTED:
+                raise boom
+            return real_emit(event_type, *args, **kwargs)
+
+        monkeypatch.setattr(event_log, "emit", _fail_only_the_audit_event)
+
+        result = save_memory("memory written while the audit log is down")
+
+        assert result.startswith("Memory saved: ")
+        stored_id = result.removeprefix("Memory saved: ").strip()
+        assert temp_registry.knowledge.document_store.get(stored_id) is not None
+        assert [
+            event
+            for event in event_log.get_events(
+                event_type=EventType.MEMORY_STORED, limit=50
+            )
+            if event.entity_id == stored_id
+        ], "the tool's own acceptance record is not what the guard covers"
+        assert not [
+            event
+            for event in event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED, limit=50
+            )
+            if event.entity_id == stored_id
+        ], "the audit event really is absent — that is the degradation"
+
+    def test_save_memory_governed_write_failure_chains_cause(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Whatever still escapes ``execute`` is reported as itself.
+
+        The arm used to attribute every escape to the Stage 5 emit, which
+        was ~true only because the emit was the sole thing that could get
+        out. Now that it cannot, an unqualified attribution would be wrong
+        every single time, so the message names the write, not a stage it
+        cannot have failed at.
+        """
+        boom = RuntimeError("pipeline blew up before any emit")
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise boom
+
+        monkeypatch.setattr(server_mod.MutationExecutor, "execute", _boom)
+
+        with pytest.raises(McpError) as excinfo:
+            save_memory("unique content for a non-emit pipeline failure")
+        err = excinfo.value
+        assert err.error.code == INTERNAL_ERROR
+        assert "governed memory write failed" in err.error.message
+        assert "MUTATION_EXECUTED" not in err.error.message
+        assert err.error.data is not None
+        assert err.error.data["stage"] == "evidence_ingest"
+        assert err.error.data["error_class"] == "RuntimeError"
         assert excinfo.value.__cause__ is boom
 
     def test_save_memory_minhash_init_failure_chains_cause(
