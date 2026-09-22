@@ -29,6 +29,7 @@ from trellis.mutate.commands import (
     CommandStatus,
     Operation,
 )
+from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.schemas.evidence import Evidence
 from trellis.schemas.extraction import ExtractionResult
 from trellis.schemas.trace import Trace
@@ -254,6 +255,90 @@ def _execute_batch(
     return nodes, edges
 
 
+def _index_dbt_descriptions(
+    registry: StoreRegistry,
+    result: ExtractionResult,
+) -> tuple[int, int | None]:
+    """Index dbt model descriptions into the document store.
+
+    A dbt-specific side-channel that used to live inside the worker's
+    ``load()`` override. Returns ``(documents_written, embedded)``, where
+    ``embedded`` is ``None`` when ``TRELLIS_ENABLE_EMBED_ON_INGEST`` is off —
+    which is the default, and is not a fault.
+
+    Tagged through the same seam the MCP / REST single-document writes use
+    (#568, first half): deterministic, inline, flag-gated on
+    ``TRELLIS_ENABLE_CLASSIFY_ON_INGEST`` and fail-soft, so the worst case is
+    an untagged write rather than a failed ingest. ``source_system`` is what
+    makes it worth doing at all and is written for that reason:
+    ``SourceSystemClassifier`` maps ``"dbt"`` onto the ``technical_pattern`` /
+    ``reference`` affinities that ``TierMapper`` reads *before* falling back
+    to heuristics, and without that key the deterministic pipeline has almost
+    nothing to say about a one-line model description — measured on four
+    representative descriptions, dropping it leaves ``retrieval_affinity``
+    empty and every other persisted facet unchanged. It is additive: the
+    pre-existing ``"source"`` key stays, and ``source_system`` is the declared
+    ``DocumentMetadata`` field the ad-hoc one was standing in for. The seam
+    reads it off the mapping by documented default, so the key on the row and
+    the key the classifiers see cannot drift apart.
+
+    Embedding is the *other* half of #568, and the answer is to stop making
+    this the one ingest path that decides for itself. Every other one calls
+    ``run_embed_on_ingest``, which is gated on
+    ``TRELLIS_ENABLE_EMBED_ON_INGEST`` and defaults **off** — so the cost
+    objection this code used to record ("it would start charging this command
+    for embeddings, which is a cost decision its callers have not opted
+    into") is answered by the flag rather than by the call site, and
+    answering it here made dbt the single ingest surface that ignores the knob
+    governing exactly this decision. Routing through the hook *removes* a
+    special case; it does not create one.
+
+    Whether short, templated model descriptions belong on the semantic axis
+    at all is a real question and is deliberately **not** answered here: it is
+    unanswerable without a corpus (the reference deployment has ingested zero
+    dbt documents, measured 2026-09-22), and if an adopter's answer is no, the
+    lever is their flag. What is not defensible is the axis being unreachable
+    by construction — ``KeywordSearch`` is the worst-measured axis on this
+    deployment (``useful_token_fraction`` 0.0241 against the semantic axis's
+    0.1069), so keyword-only is close to unreachable.
+    """
+    doc_store = registry.knowledge.document_store
+    vector_store = resolve_vector_store(registry)
+    doc_count = 0
+    embedded_count = 0
+    embed_ran = False
+    for entity in result.entities:
+        desc = entity.properties.get("description", "")
+        if not desc:
+            continue
+        # Through ``put_document`` so the document and its vector row cannot
+        # diverge (#360).
+        doc_id = f"dbt:{entity.entity_id}"
+        metadata: dict[str, Any] = {
+            "source": "dbt",
+            "source_system": "dbt",
+            "node_type": entity.entity_type,
+            "name": entity.properties.get("name", entity.name),
+            "unique_id": entity.entity_id,
+        }
+        written_metadata = classify_metadata_on_write(metadata, desc, doc_id=doc_id)
+        put_document(doc_store, vector_store, doc_id, desc, written_metadata)
+        doc_count += 1
+        # The same bag that was written, not one re-selected afterwards
+        # (#360), and *after* the seam — the reference shape is
+        # ``ingest_corpus.sync``. Fail-soft inside the hook: a broken embedder
+        # never fails the ingest, and ``None`` means the flag is off rather
+        # than that anything went wrong.
+        outcome = run_embed_on_ingest(
+            registry, doc_id, desc, written_metadata, source="cli:dbt-manifest"
+        )
+        if outcome is not None:
+            embed_ran = True
+            if outcome.get("embedded"):
+                embedded_count += 1
+    return doc_count, (embedded_count if embed_ran else None)
+
+
 @ingest_app.command("dbt-manifest")
 def ingest_dbt_manifest(
     manifest_path: str = typer.Argument(
@@ -300,57 +385,18 @@ def ingest_dbt_manifest(
             console.print(f"[red]dbt ingest failed: {exc}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
-    # Index descriptions into the document store (dbt-specific side-channel
-    # that used to live inside the worker's load() override).
-    #
-    # Tagged through the same seam the MCP / REST single-document writes use
-    # (#568, first half): deterministic, inline, flag-gated on
-    # ``TRELLIS_ENABLE_CLASSIFY_ON_INGEST`` and fail-soft, so the worst case
-    # is an untagged write rather than a failed ingest. ``source_system`` is
-    # what makes it worth doing at all and is written here for that reason:
-    # ``SourceSystemClassifier`` maps ``"dbt"`` onto the ``technical_pattern``
-    # / ``reference`` affinities that ``TierMapper`` reads *before* falling
-    # back to heuristics, and without that key the deterministic pipeline has
-    # almost nothing to say about a one-line model description — measured on
-    # four representative descriptions, dropping it leaves ``retrieval_affinity``
-    # empty and every other persisted facet unchanged. It is additive: the
-    # pre-existing ``"source"`` key stays, and ``source_system`` is the
-    # declared ``DocumentMetadata`` field the ad-hoc one was standing in for.
-    # The seam reads it off the mapping by documented default, so the key on
-    # the row and the key the classifiers see cannot drift apart.
-    #
-    # Embedding is the *other* half of #568 and is deliberately still not done
-    # here — it would start charging this command for embeddings, which is a
-    # cost decision its callers have not opted into.
-    doc_store = registry.knowledge.document_store
-    vector_store = resolve_vector_store(registry)
-    doc_count = 0
-    for entity in result.entities:
-        desc = entity.properties.get("description", "")
-        if desc:
-            # Through `put_document` so the document and its vector row
-            # cannot diverge (#360), and through `classify_metadata_on_write`
-            # so the row lands tagged like every other single-document write.
-            # `source_system` is what makes that worth doing: without it the
-            # classifiers have nothing to key on and the call is a near-no-op.
-            doc_id = f"dbt:{entity.entity_id}"
-            metadata: dict[str, Any] = {
-                "source": "dbt",
-                "source_system": "dbt",
-                "node_type": entity.entity_type,
-                "name": entity.properties.get("name", entity.name),
-                "unique_id": entity.entity_id,
-            }
-            put_document(
-                doc_store,
-                vector_store,
-                doc_id,
-                desc,
-                classify_metadata_on_write(metadata, desc, doc_id=doc_id),
-            )
-            doc_count += 1
+    doc_count, embedded = _index_dbt_descriptions(registry, result)
 
-    counts = {"nodes": nodes, "edges": edges, "documents": doc_count}
+    # Reported, not absorbed (#410): "embedded 0 of 12" and "the embed never
+    # ran" call for completely different actions, and a bare count cannot tell
+    # them apart. ``embedded`` is ``None`` when the flag is off, which is the
+    # default and is not a fault.
+    counts: dict[str, Any] = {
+        "nodes": nodes,
+        "edges": edges,
+        "documents": doc_count,
+        "embedded": embedded,
+    }
     if output_format == "json":
         emit_json({"status": "ingested", **counts})
     else:
@@ -358,6 +404,10 @@ def ingest_dbt_manifest(
         console.print(f"  Nodes: {counts['nodes']}")
         console.print(f"  Edges: {counts['edges']}")
         console.print(f"  Documents: {counts['documents']}")
+        if embedded is not None:
+            console.print(f"  Embedded: {embedded}")
+        elif doc_count:
+            console.print("  Embedded: not run (TRELLIS_ENABLE_EMBED_ON_INGEST is off)")
 
 
 @ingest_app.command("openlineage")

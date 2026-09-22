@@ -22,6 +22,31 @@ def _temp_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
 
 
+#: Dotted paths handed to ``TRELLIS_EMBEDDING_FN`` by the embed tests below.
+#: Resolution is ``importlib``-based, and this file is imported under its own
+#: dotted name, so the stubs below and the ones the registry calls are the same
+#: objects — which is what makes ``_EMBED_CALLS`` readable from a test.
+_EMBED_FN_PATH = "tests.unit.cli.test_ingest._fake_embed"
+_BROKEN_EMBED_FN_PATH = "tests.unit.cli.test_ingest._broken_embed"
+
+#: Every text the stub embedders were handed, so a test can assert the hook
+#: was reached rather than inferring it from an absent side effect.
+_EMBED_CALLS: list[str] = []
+
+
+def _fake_embed(text: str) -> list[float]:
+    """Deterministic 3-dim embedding for the dbt ingest tests."""
+    _EMBED_CALLS.append(text)
+    return [1.0, 0.0, float(len(text) % 7)]
+
+
+def _broken_embed(text: str) -> list[float]:
+    """An embedder that is reachable and then fails."""
+    _EMBED_CALLS.append(text)
+    msg = "embedder exploded"
+    raise RuntimeError(msg)
+
+
 def _trace_json() -> str:
     return json.dumps(
         {
@@ -315,8 +340,11 @@ class TestIngestDbtManifestClassifies:
     They were written outside both ingest hooks, so they carried no
     ``content_tags`` at all and the keyword axis — the one measured worst on
     this deployment — was the only one that could reach them. These pin the
-    deterministic, no-cost half. Embedding is still deliberately absent, so
-    there is nothing here asserting a vector row.
+    deterministic, no-cost half; the embed half is
+    :class:`TestIngestDbtManifestEmbeds`, and the two are separate because
+    the flags are: ``TRELLIS_ENABLE_CLASSIFY_ON_INGEST`` and
+    ``TRELLIS_ENABLE_EMBED_ON_INGEST`` are read independently, so a
+    deployment can run either, both or neither.
     """
 
     @staticmethod
@@ -435,3 +463,148 @@ class TestIngestDbtManifestClassifies:
         # Without this the test passes against a source that never calls the
         # seam at all, which is the state it was written to replace.
         assert len(calls) == 2
+
+
+class TestIngestDbtManifestEmbeds:
+    """dbt description documents reach the semantic axis (#568, second half).
+
+    The first half tagged them; they were still keyword-only, because this
+    was the one ingest surface that decided about embedding for itself
+    instead of calling ``run_embed_on_ingest``. Its recorded reason was cost
+    — "a cost decision its callers have not opted into" — which is exactly
+    what ``TRELLIS_ENABLE_EMBED_ON_INGEST`` is for, and answering it at the
+    call site made dbt the one surface that ignored the knob.
+
+    So the property under test is *routing*, not embedding: the flag decides,
+    and the flag defaults off. What is deliberately **not** asserted anywhere
+    here is that dbt descriptions are worth embedding — that is unanswerable
+    without a corpus and is the adopter's call via their own flag.
+    """
+
+    @staticmethod
+    def _ingest(tmp_path: Path) -> tuple[dict, list[dict]]:
+        """Run the command; return its JSON payload and the ``dbt:`` rows."""
+        _EMBED_CALLS.clear()
+        runner.invoke(app, ["admin", "init"])
+        f = tmp_path / "manifest.json"
+        f.write_text(json.dumps(_SAMPLE_DBT_MANIFEST))
+        result = runner.invoke(
+            app, ["ingest", "dbt-manifest", str(f), "--format", "json"]
+        )
+        assert result.exit_code == 0, result.stdout
+        payload = json.loads(result.stdout.strip())
+        # The documents are the command's contract and no embed outcome may
+        # cost them one; every case below re-asserts it.
+        assert payload["documents"] == 2, payload
+
+        from trellis_cli.stores import _get_registry
+
+        vectors = [
+            row
+            for row in (
+                _get_registry().knowledge.vector_store.get(f"dbt:{uid}")
+                for uid in ("model.p.stg_orders", "source.p.raw.orders")
+            )
+            if row is not None
+        ]
+        return payload, vectors
+
+    def test_no_vector_rows_when_flag_is_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Flag off is byte-identical to the behaviour this replaced.
+
+        The embedder is *configured* here on purpose: the flag has to be
+        what decides, not the absence of an embedder, or the default would
+        be an accident of deployment rather than a choice.
+        """
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+        monkeypatch.delenv("TRELLIS_ENABLE_EMBED_ON_INGEST", raising=False)
+        payload, vectors = self._ingest(tmp_path)
+        assert vectors == []
+        assert _EMBED_CALLS == []
+        # ``None``, not ``0``: "the embed never ran" and "it ran and embedded
+        # nothing" call for completely different actions (#410).
+        assert payload["embedded"] is None
+
+    def test_descriptions_are_embedded_when_flag_is_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        payload, vectors = self._ingest(tmp_path)
+        assert payload["embedded"] == 2
+        assert len(vectors) == 2
+        # The descriptions themselves, not the ids: a row embedded off the
+        # wrong text is retrievable and wrong, which no count can show.
+        assert sorted(_EMBED_CALLS) == ["Raw orders table", "Staged orders"]
+
+    def test_a_broken_embedder_does_not_fail_the_ingest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fail-soft, and distinguishable from the flag being off.
+
+        This is what makes ``None`` vs ``0`` load-bearing rather than
+        cosmetic: both leave zero vector rows behind, and only the payload
+        says whether anything tried.
+        """
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _BROKEN_EMBED_FN_PATH)
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        payload, vectors = self._ingest(tmp_path)
+        assert vectors == []
+        assert payload["embedded"] == 0
+        # Both documents were attempted — without this the case is satisfied
+        # by a source that gives up after the first failure, which would lose
+        # the second document's row for a reason unrelated to it.
+        assert len(_EMBED_CALLS) == 2
+
+    def test_vector_row_carries_the_bag_that_was_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#360: the same bag reaches both planes, not one re-selected after.
+
+        ``SemanticSearch`` builds its ``PackItem`` from this snapshot rather
+        than from the document row, so a tag that reached only the document
+        store is invisible to the axis this change exists to open (#338).
+        """
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        monkeypatch.setenv("TRELLIS_ENABLE_CLASSIFY_ON_INGEST", "1")
+        _, vectors = self._ingest(tmp_path)
+
+        from trellis_cli.stores import get_document_store
+
+        docs = {
+            d["doc_id"]: d
+            for d in get_document_store().list_documents(limit=100)
+            if d["doc_id"].startswith("dbt:")
+        }
+        assert len(vectors) == 2
+        for row in vectors:
+            meta = row["metadata"]
+            doc_meta = docs[meta["doc_id"]]["metadata"]
+            assert meta["source_system"] == "dbt"
+            assert meta["content_tags"] == doc_meta["content_tags"]
+            assert meta["auto_importance"] == doc_meta["auto_importance"]
+            # The excerpt is cut here, at embed time, because this is the
+            # last point that still holds the full text (#310).
+            assert meta["content"] == docs[meta["doc_id"]]["content"]
+
+    def test_text_output_distinguishes_not_run_from_a_count(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The operator surface must not report the default as a zero."""
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+        runner.invoke(app, ["admin", "init"])
+        f = tmp_path / "manifest.json"
+        f.write_text(json.dumps(_SAMPLE_DBT_MANIFEST))
+
+        monkeypatch.delenv("TRELLIS_ENABLE_EMBED_ON_INGEST", raising=False)
+        off = runner.invoke(app, ["ingest", "dbt-manifest", str(f)])
+        assert off.exit_code == 0, off.stdout
+        assert "TRELLIS_ENABLE_EMBED_ON_INGEST" in off.stdout
+
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        on = runner.invoke(app, ["ingest", "dbt-manifest", str(f)])
+        assert on.exit_code == 0, on.stdout
+        assert "Embedded: 2" in on.stdout

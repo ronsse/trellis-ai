@@ -203,7 +203,7 @@ This command does **not** require the `TRELLIS_ENABLE_TRACE_EXTRACTION` flag —
 
 By default document ingestion is write-only to the DocumentStore — the document is retrievable by keyword FTS but invisible to `SemanticSearch`, because nothing embeds it. Set `TRELLIS_ENABLE_EMBED_ON_INGEST=1` (also accepts `true`/`yes`/`on`) to turn on a **post-ingest** embedding stage that runs the stored content through the registry's configured `embedding_fn` and upserts a vector keyed by the document's `doc_id`.
 
-The flag applies identically across the three document-ingest paths: the REST `POST /api/v1/documents`, the REST `POST /api/v1/evidence`, and the MCP `save_memory` tool. It requires an `embeddings:` block in `config.yaml` (or `TRELLIS_EMBEDDING_FN`) *and* a configured vector store — when either is missing the hook logs a warning and no-ops. Embedding always runs *after* the document is durably stored and is fully fail-soft: a broken or unreachable embedder is logged and swallowed, never failing the ingest.
+The flag applies identically across every document-ingest path: the corpus / conversation / session-capture seam (parents *and* chunks), MCP `save_memory`, `trellis ingest dbt-manifest` (#568), and the governed `evidence.ingest` command — which is what the REST `POST /api/v1/documents`, the REST `POST /api/v1/evidence` and the evidence document MCP `save_knowledge` creates all submit. That is the same set of surfaces `TRELLIS_ENABLE_CLASSIFY_ON_INGEST` covers, and the one document-writing ingest command outside both is `trellis ingest evidence` (see "Document → content tags" below). The two flags are nonetheless read independently, so a deployment can run either, both or neither. It requires an `embeddings:` block in `config.yaml` (or `TRELLIS_EMBEDDING_FN`) *and* a configured vector store — when either is missing the hook logs a warning and no-ops. Embedding always runs *after* the document is durably stored and is fully fail-soft: a broken or unreachable embedder is logged and swallowed, never failing the ingest.
 
 The vector row's metadata carries a `content` excerpt (500 chars — what `SemanticSearch` renders as the pack excerpt), the document metadata, `doc_id`, and a `created_at` recency stamp.
 
@@ -341,7 +341,7 @@ strict and never reports `status: ok` when alias maintenance fails.
 
 By default document ingestion writes no retrieval-shaping tags — the document is retrievable, but `PackBuilder`'s `tag_filters`, the `signal_quality="noise"` exclusion and the tag-derived importance boost have nothing to work with. Set `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (also accepts `true`/`yes`/`on`) to turn on **classify-on-write**: an inline, deterministic pass (structural + keyword-domain + source-system classifiers, no LLM, microseconds) that stamps `metadata.content_tags` and `metadata.auto_importance` as the document is written.
 
-One flag, five write seams:
+One flag, six write seams:
 
 | Surface | Seam |
 |---------|------|
@@ -350,10 +350,11 @@ One flag, five write seams:
 | MCP `save_knowledge` | the evidence document it auto-creates (`mutate.evidence.ensure_evidence_document`) |
 | REST `POST /api/v1/documents` | before the store put |
 | REST `POST /api/v1/evidence` | before the store put |
+| `trellis ingest dbt-manifest` | each model/source description, before the store put (#590) — one call per description, so it takes the single-document seam's guarantees rather than the bulk one's |
 
-The four single-document seams call one helper, `trellis.classify.ingest.classify_metadata_on_write`, so the persisted tag shape does not drift: flag-gated (off returns the caller's metadata untouched), fill-if-absent (existing `content_tags` — an earlier write, or the LLM enrichment pass — are never clobbered), fail-soft on *any* error including a `metadata` that is not a mapping, no auto-`domain` (see below), and a no-op on empty or whitespace-only content, matching the embed-on-ingest skip. The bulk seam calls the same `classify_for_ingest` core inline and shares the flag gate, fill-if-absent and no-auto-`domain`; it has neither the empty-content skip nor the non-mapping guard, because it classifies against metadata already merged with the stored document's.
+The five single-document seams call one helper, `trellis.classify.ingest.classify_metadata_on_write`, so the persisted tag shape does not drift: flag-gated (off returns the caller's metadata untouched), fill-if-absent (existing `content_tags` — an earlier write, or the LLM enrichment pass — are never clobbered), fail-soft on *any* error including a `metadata` that is not a mapping, no auto-`domain` (see below), and a no-op on empty or whitespace-only content, matching the embed-on-ingest skip. The bulk seam calls the same `classify_for_ingest` core inline and shares the flag gate, fill-if-absent and no-auto-`domain`; it has neither the empty-content skip nor the non-mapping guard, because it classifies against metadata already merged with the stored document's.
 
-**Not covered.** `trellis ingest evidence` and `trellis ingest dbt-manifest` put documents straight to the store with no classify hook, so they stay untagged whatever the flag says. `trellis classify backfill` is the fix for them, exactly as for pre-flag rows.
+**Not covered.** `trellis ingest evidence` puts its document straight to the store with no classify hook and no embed, so it stays untagged and keyword-only whatever either flag says. Note the asymmetry with its own REST twin: `POST /api/v1/evidence` submits the governed `evidence.ingest` command and is covered by both flags, while the CLI command of the same name bypasses it. `trellis classify backfill` and `trellis admin reindex-vectors` are the fixes for it, exactly as for pre-flag rows. (`trellis ingest dbt-manifest` was in this paragraph until #590 tagged it and #568 routed it through the embed hook.)
 
 One deliberate omission: the classifier-derived **`domain` facet is dropped** before persisting. `domain` is the only facet that *hard-excludes* a document from a domain-scoped query on mismatch, and the deterministic keyword / source-system classifiers will confidently assign a code-flavoured domain to personal content. The operator-set scalar `metadata['domain']` (the `--domain` flag) is a separate key and is untouched. Every facet that *is* persisted only shapes ranking, sectioning, or noise exclusion — a wrong value degrades ranking at worst, it never hides content.
 
@@ -636,12 +637,14 @@ Import a dbt manifest into the knowledge graph.
 trellis ingest dbt-manifest <manifest-path> [--format text|json]
 ```
 
-Creates entities for models, seeds, snapshots, sources, and tests. Creates `depends_on` edges from the manifest's dependency graph. Indexes descriptions into the document store.
+Creates entities for models, seeds, snapshots, sources, and tests. Creates `depends_on` edges from the manifest's dependency graph. Indexes every non-empty model/source description into the document store, tagged when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (#590) and embedded when `TRELLIS_ENABLE_EMBED_ON_INGEST=1` (#568) — both flag-gated, both fail-soft, so the worst case is an untagged or keyword-only document rather than a failed ingest.
+
+`embedded` is `null` when the embed flag is off, which is the default and is not a fault: a count cannot distinguish "embedded 0 of 12" from "the embed never ran", and those call for completely different actions (#410). The text arm prints the flag name instead of a number in that case.
 
 **JSON output:**
 
 ```json
-{"status": "ok", "nodes_created": 12, "edges_created": 8}
+{"status": "ingested", "nodes": 12, "edges": 8, "documents": 9, "embedded": 9}
 ```
 
 ### `trellis ingest openlineage`
@@ -652,12 +655,12 @@ Import OpenLineage events into the knowledge graph.
 trellis ingest openlineage <events-path> [--format text|json]
 ```
 
-Reads a JSON array or newline-delimited JSON file of OpenLineage events. Creates dataset and job entities with `reads_from` and `writes_to` edges.
+Reads a JSON array or newline-delimited JSON file of OpenLineage events. Creates dataset and job entities with `reads_from` and `writes_to` edges. Writes no documents, so neither ingest flag applies.
 
 **JSON output:**
 
 ```json
-{"status": "ok", "nodes_created": 6, "edges_created": 4}
+{"status": "ingested", "nodes": 6, "edges": 4}
 ```
 
 ---

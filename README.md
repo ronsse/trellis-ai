@@ -356,7 +356,7 @@ trellis admin migrate-graph \
 | `search` | Combined doc (keyword + semantic) + graph search as markdown |
 | `execute_mutation` | Governed mutation escape hatch (validate → policy → execute → audit) |
 
-Retrieval tools accept `max_tokens` (default 2000). With `TRELLIS_ENABLE_EMBED_ON_INGEST=1` and an embedder configured, documents saved via `save_memory`, `POST /documents`, or `POST /evidence` become semantically retrievable immediately; backfill existing documents with `trellis admin reindex-vectors`.
+Retrieval tools accept `max_tokens` (default 2000). With `TRELLIS_ENABLE_EMBED_ON_INGEST=1` and an embedder configured, documents saved via `save_memory`, `save_knowledge`, `POST /documents`, `POST /evidence`, `trellis ingest corpus` / `conversations` or `trellis ingest dbt-manifest` become semantically retrievable immediately; backfill existing documents with `trellis admin reindex-vectors`.
 
 **Python SDK** — dual-mode (`import trellis_sdk`). Same API, flip `base_url` to go from in-process to HTTP.
 
