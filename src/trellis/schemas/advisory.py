@@ -94,7 +94,15 @@ class Advisory(TimestampedModel, VersionedModel):
     message: str  # Human/agent-readable suggestion
     evidence: AdvisoryEvidence
     scope: str  # domain, intent pattern, or entity type
-    entity_id: str | None = None  # for ENTITY advisories
+    #: The item this advisory is *about*, when it is about one. Set on
+    #: **both** item-scoped categories — ENTITY and ANTI_PATTERN — and it
+    #: is this field, not the category, that
+    #: ``PackBuilder._attach_advisory_provenance`` keys on to stamp
+    #: ``injected_advisory_ids``. Reading it as ENTITY-only is what got
+    #: #503 filed against a premise the store contradicts: every stored
+    #: ANTI_PATTERN row carries one. APPROACH / SCOPE / QUERY are
+    #: pack-scoped and leave it None.
+    entity_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     status: AdvisoryStatus = AdvisoryStatus.ACTIVE
     suppressed_at: datetime | None = None
