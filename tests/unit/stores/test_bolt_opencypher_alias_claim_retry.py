@@ -53,12 +53,22 @@ NEO4J_MESSAGE = (
 )
 
 # The *other* shape ArcadeDB produces for the same lost race: a record
-# the winning transaction replaced out from under this one. Captured
-# 2026-09-11 from a live two-thread race against
-# ``arcadedata/arcadedb:26.8.1``. The code is
-# ``Neo.DatabaseError.General.UnknownError`` — the generic bucket — so
-# the RID shape in the message is the only thing that makes it specific.
-ARCADEDB_STALE_RECORD_MESSAGE = "Record #5:0 not found"
+# the winning transaction replaced out from under this one. It arrives
+# on ``Neo.DatabaseError.General.UnknownError``, the generic bucket, and
+# it carries **no cause text**: ArcadeDB serializes only the outer
+# ``CommandExecutionException``'s own message across Bolt, so the
+# ``Caused by:`` frame naming the RID never leaves the server log.
+#
+# This constant read ``"Record #5:0 not found"`` until #556, described
+# as captured from a live race. It was not — that string is what the
+# *server log* shows — and the fiction is what kept a dead
+# message-shaped branch looking covered for a release. The predicate now
+# reads the code, and the live subject for all of this is
+# ``test_arcadedb_graph.py::TestAliasContentionClassification``, which
+# provokes every shape against a real server instead of naming one here.
+ARCADEDB_GENERIC_BUCKET_MESSAGE = (
+    "Error executing Cypher command: MERGE (c:AliasClaim {claim_key: $claim_key})"
+)
 
 
 class _FakeNeo4jError(Exception):
@@ -76,7 +86,7 @@ def _contention(message: str = ARCADEDB_MESSAGE) -> _FakeNeo4jError:
 
 def _stale_record() -> _FakeNeo4jError:
     return _FakeNeo4jError(
-        ARCADEDB_STALE_RECORD_MESSAGE, "Neo.DatabaseError.General.UnknownError"
+        ARCADEDB_GENERIC_BUCKET_MESSAGE, "Neo.DatabaseError.General.UnknownError"
     )
 
 
@@ -272,12 +282,20 @@ class TestArcadeDBWidensOverItsGenericErrorChannel:
     ArcadeDB reports the *other* half of a lost race — a record the
     winning transaction replaced — as
     ``Neo.DatabaseError.General.UnknownError``, the same generic bucket
-    that unrelated failures land in. Widening the shared predicate to
-    cover it would make a **Neo4j** deployment retry a genuine
-    "record not found", which is fatal there and will never clear.
+    that engine-side evaluation faults land in. Widening the *shared*
+    predicate to cover that code would make a **Neo4j** deployment retry
+    a genuine engine fault, which is fatal there and will never clear.
+
+    These are the seam's unit-level properties. The behaviour they
+    describe is measured against a real server in
+    ``test_arcadedb_graph.py::TestAliasContentionClassification``; this
+    class exists so the seam cannot be dissolved without a failure in a
+    suite that runs on every pull request, because the live one does
+    not.
     """
 
-    def test_recognizes_the_stale_record_message_arcadedb_actually_sends(self) -> None:
+    def test_recognizes_the_generic_bucket_a_stale_record_arrives_on(self) -> None:
+        """Matched by code, because no cause text crosses the wire."""
         store = _make_arcadedb_store()
         assert store._is_alias_write_contention(_stale_record()) is True
 
@@ -299,9 +317,16 @@ class TestArcadeDBWidensOverItsGenericErrorChannel:
     @pytest.mark.parametrize(
         "message",
         [
-            # The generic bucket carries unrelated failures too. Without
-            # the RID shape there is nothing to tell them apart, so a
-            # looser match retries failures that are genuinely fatal.
+            # Every one of these is read as contention, whatever it
+            # says. That is the cost #556 accepted, asserted so it is
+            # recorded rather than discovered: the bucket carries
+            # engine-side evaluation faults too, and no text
+            # distinguishes them, because ArcadeDB serializes only the
+            # outer exception's own message across Bolt.
+            #
+            # These cases asserted ``False`` until #556, on a regex over
+            # a message the client never receives. That made the branch
+            # look both covered and precise while it was neither.
             "Record not found",
             "Schema 'Node' not found",
             "Record #abc:def not found",
@@ -309,9 +334,33 @@ class TestArcadeDBWidensOverItsGenericErrorChannel:
             "",
         ],
     )
-    def test_rejects_the_rest_of_the_generic_bucket(self, message: str) -> None:
+    def test_the_whole_generic_bucket_is_read_as_contention(self, message: str) -> None:
         store = _make_arcadedb_store()
         exc = _FakeNeo4jError(message, "Neo.DatabaseError.General.UnknownError")
+        assert store._is_alias_write_contention(exc) is True
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            # What bounds the imprecision above: ArcadeDB gives every
+            # *statement*-level fault its own code, so none of them
+            # reaches the branch. Measured 2026-09-22 against
+            # ``arcadedata/arcadedb:26.8.1``, the image
+            # ``live-infra.yml`` pins — each of these is provoked from a
+            # real server in the live suite named in the class
+            # docstring.
+            #
+            # This is the half that keeps the override a classification:
+            # without it ``_is_alias_write_contention`` could be
+            # ``return True`` and every other case here would pass.
+            "Neo.ClientError.Statement.SyntaxError",
+            "Neo.ClientError.Statement.ParameterMissing",
+            "Neo.ClientError.Statement.ArithmeticError",
+        ],
+    )
+    def test_statement_faults_are_not_read_as_contention(self, code: str) -> None:
+        store = _make_arcadedb_store()
+        exc = _FakeNeo4jError("Record #5:0 not found", code)
         assert store._is_alias_write_contention(exc) is False
 
     def test_a_stale_record_is_retried_end_to_end(self) -> None:

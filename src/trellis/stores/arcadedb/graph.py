@@ -22,7 +22,6 @@ missing. See ``docs/design/adr-arcadedb-blessed-substrate.md``
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -48,13 +47,15 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 _REGISTRY_MIGRATIONS_KEY = f"{__name__}:provenance_migrations"
 
-#: A record the winning transaction replaced out from under this one.
-#: ArcadeDB surfaces it as ``Neo.DatabaseError.General.UnknownError``
-#: naming the RID, which is the same generic bucket unrelated failures
-#: land in — so the message is the only discriminator available, and the
-#: RID shape is what makes it specific. Measured 2026-09-11 against
-#: ``arcadedata/arcadedb:26.8.1``, the image ``live-infra.yml`` pins.
-_STALE_RECORD_RE = re.compile(r"Record #\d+:\d+ not found")
+#: ArcadeDB's generic engine-fault bucket, and the only channel a record
+#: the winning transaction replaced ever arrives on. The message is *not*
+#: a usable discriminator: ArcadeDB serializes only the outer
+#: ``CommandExecutionException``'s own text across Bolt, so the
+#: ``Caused by:`` frame naming the RID never reaches the client and what
+#: arrives is ``Error executing Cypher command: <the cypher>``. See
+#: :meth:`ArcadeDBGraphStore._is_alias_write_contention` for what else
+#: shares this code and why that is affordable here.
+_GENERIC_ENGINE_ERROR_CODE = "Neo.DatabaseError.General.UnknownError"
 
 
 #: ArcadeDB schema-typed properties for the edge provenance columns
@@ -105,15 +106,14 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         """Widen the base predicate over ArcadeDB's generic error channel.
 
         ArcadeDB detects a duplicate claim key only **at commit**, and it
-        reports both halves of a lost race through codes that say nothing
-        about concurrency: the duplicate arrives as
-        ``Neo.ClientError.Transaction.TransactionNotFound`` and a record
-        the winner replaced arrives as
-        ``Neo.DatabaseError.General.UnknownError``. Both carry
-        ``gql_status`` 50N42, the generic bucket, and
-        ``Neo4jError.is_retryable()`` is ``False`` for both — so the
-        driver's managed-transaction retry never re-runs either, and no
-        code-based check can tell them from a fatal error.
+        reports the two halves of a lost race on two different channels.
+        The duplicate arrives as
+        ``Neo.ClientError.Transaction.TransactionNotFound`` carrying
+        ``Duplicated key [...] found on index ...``, which the base
+        class's identity match reads — so that half needs nothing here.
+        A record the winner replaced arrives on the generic
+        :data:`_GENERIC_ENGINE_ERROR_CODE` bucket, and **that** is the
+        half this override exists for.
 
         Retrying is safe because a failed transaction is rolled back
         whole: the re-run re-reads committed state and reaches the same
@@ -121,20 +121,55 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         the base class is what keeps a genuinely fatal error from
         spinning.
 
+        **This matches on the code because the message does not survive
+        the wire** (#556). The predecessor matched ``Record #N:M not
+        found`` in the message, which is what ArcadeDB writes to its
+        *server log*; across Bolt only the outer
+        ``CommandExecutionException``'s own text is serialized, so the
+        ``Caused by:`` frame naming the RID is dropped and the client
+        sees ``Error executing Cypher command: <the cypher>``. That
+        regex therefore had no live subject — 310 live races against
+        ``arcadedata/arcadedb:26.8.1`` (the image ``live-infra.yml``
+        pins) invoked this predicate **zero** times, and the CI artifact
+        from the one observed flake shows the RID text present in the
+        server log and absent from the client message. Its only passing
+        subject was a hand-built unit fixture, which is how a dead
+        branch shipped looking covered.
+
+        **What else shares the code, measured over Bolt against that
+        same image.** A syntax error and an unknown function arrive as
+        ``Neo.ClientError.Statement.SyntaxError``; a missing parameter
+        as ``...Statement.ParameterMissing``; a division by zero as
+        ``...Statement.ArithmeticError``. None of them reach this
+        branch. What does share the bucket is an engine-side *runtime
+        evaluation* fault — a type error in an expression, say. That is
+        the imprecision being accepted, and it is affordable because
+        this predicate has exactly one call site
+        (:meth:`~trellis.stores.bolt_opencypher.graph.BoltOpenCypherGraphStore._execute_alias_write`),
+        whose Cypher is a fixed literal in this package parameterized
+        with typed strings built by its own callers: an evaluation fault
+        there is a code bug that surfaces identically after three
+        attempts, not a data-dependent condition, so the cost is 3x
+        latency on a path that is already broken.
+
+        ``gql_status`` is deliberately **not** part of the check. Every
+        shape above reports 50N42, the syntax errors included, so it
+        discriminates nothing — it reads like a narrowing and is not one.
+
         **A third concurrency shape exists and deliberately is not
         matched here.** A page-slot collision on the same record arrives
         as ``Neo.TransientError.Transaction.DeadlockDetected`` ("Slot
         rebase not possible on page ... Please retry the operation"),
         and unlike the two above it is *retryable*, so the driver's own
-        managed retry already re-runs it with backoff. Measured over 120
-        live stale-owner races, outcomes are identical with this
-        predicate and with it stubbed to ``False`` — adding that code
-        here would duplicate the driver's retry, not extend coverage.
+        managed retry already re-runs it with backoff. It is also the
+        *common* outcome of a contended alias write — all 250 hydrated
+        server errors in the instrumented race run were this one — which
+        is why the stale-record shape is a rare tail rather than the
+        thing a race reproduces on demand.
         """
         if super()._is_alias_write_contention(exc):
             return True
-        message = str(getattr(exc, "message", "") or exc)
-        return _STALE_RECORD_RE.search(message) is not None
+        return getattr(exc, "code", None) == _GENERIC_ENGINE_ERROR_CODE
 
     @classmethod
     def prepare_registry_params(  # noqa: PLR0912, PLR0915
