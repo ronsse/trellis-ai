@@ -255,3 +255,141 @@ class TestArcadeDBEdgeProvenance:
                 )
         finally:
             registry.close()
+
+
+class TestAliasContentionClassification:
+    """Pin how real ArcadeDB faults reach the client, and how we read them.
+
+    #556: the predecessor of this check matched ``Record #N:M not found``
+    in the exception *message*, and that text never crosses Bolt — so the
+    branch was dead while looking covered, because its only passing
+    subject was a hand-built exception in a unit test. **Every error in
+    this class is produced by the server**, over the real driver, against
+    the real schema. Nothing here constructs a ``Neo4jError``.
+
+    The negative cases are the load-bearing half: without them
+    :meth:`ArcadeDBGraphStore._is_alias_write_contention` could be
+    ``return True`` and the positive cases would still pass.
+    """
+
+    @staticmethod
+    def _capture(store, cypher, *, in_transaction, **params):
+        """Run ``cypher`` and hand back the error the server produced."""
+        from neo4j.exceptions import Neo4jError
+
+        with store._driver.session(database=store._database) as session:
+            try:
+                if in_transaction:
+                    session.execute_write(lambda tx: tx.run(cypher, **params).consume())
+                else:
+                    session.run(cypher, **params).consume()
+            except Neo4jError as exc:
+                return exc
+        pytest.fail(f"expected {cypher!r} to fail, it succeeded")
+
+    def _seed_claim(self, store, claim_key):
+        with store._driver.session(database=store._database) as session:
+            session.run("MERGE (c:AliasClaim {claim_key: $k})", k=claim_key).consume()
+
+    # -- the duplicate half: base identity match, live subject ----------
+
+    def test_transactional_duplicate_carries_its_cause(self, graph_store):
+        """A claim duplicate at commit still names the constraint.
+
+        This is what the base class's identity match reads, so the
+        ArcadeDB override is not responsible for this half.
+        """
+        self._seed_claim(graph_store, "dup-cause")
+        exc = self._capture(
+            graph_store,
+            "CREATE (c:AliasClaim {claim_key: $k})",
+            in_transaction=True,
+            k="dup-cause",
+        )
+        assert "duplicated key" in str(exc).lower(), (
+            "the constraint's identity is what the portable predicate "
+            f"matches on; got {exc!s}"
+        )
+        assert graph_store._is_alias_write_contention(exc)
+
+    # -- the erasure that killed the regex ------------------------------
+
+    def test_autocommit_duplicate_loses_its_cause_to_the_generic_bucket(
+        self, graph_store
+    ):
+        """The same fault, without its cause, on the generic code.
+
+        ArcadeDB serializes only the outer exception's own text across
+        Bolt. Provoking *one* fault two ways shows the drop directly:
+        at commit the cause arrives, in autocommit it does not and the
+        code degrades to the generic bucket. That is the path a
+        stale-record replacement takes, which is why matching on the
+        message could never work and this override matches on the code.
+
+        If ArcadeDB ever forwards the cause chain, this test fails — and
+        a message-shaped check becomes available again.
+        """
+        from trellis.stores.arcadedb.graph import _GENERIC_ENGINE_ERROR_CODE
+
+        self._seed_claim(graph_store, "dup-erased")
+        exc = self._capture(
+            graph_store,
+            "CREATE (c:AliasClaim {claim_key: $k})",
+            in_transaction=False,
+            k="dup-erased",
+        )
+        assert exc.code == _GENERIC_ENGINE_ERROR_CODE
+        assert "duplicated key" not in str(exc).lower(), (
+            f"cause chain unexpectedly survived the Bolt boundary — got {exc!s}"
+        )
+        assert "Record #" not in str(exc), (
+            "the RID the retired regex matched is still absent; if this "
+            "fires, revisit the message-shaped check #556 removed"
+        )
+        assert graph_store._is_alias_write_contention(exc)
+
+    # -- the imprecision, stated rather than hidden ---------------------
+
+    def test_generic_engine_fault_is_read_as_contention(self, graph_store):
+        """An evaluation fault shares the bucket, and does retry 3x.
+
+        Accepted deliberately: this predicate is reachable only from
+        ``_execute_alias_write``, whose Cypher is a fixed literal with
+        typed string parameters, so an evaluation fault there is a code
+        bug that surfaces identically after three attempts. Asserted so
+        the cost is recorded rather than discovered.
+        """
+        exc = self._capture(
+            graph_store, "RETURN 'abc' + {a: 1} * 3", in_transaction=False
+        )
+        assert graph_store._is_alias_write_contention(exc)
+
+    # -- negative controls ----------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("label", "cypher"),
+        [
+            ("syntax", "THIS IS NOT CYPHER AT ALL"),
+            ("near-miss syntax", "MATCH (n) RETRUN n"),
+            ("unknown function", "RETURN nosuchfunction(1)"),
+            ("arithmetic", "RETURN 1/0"),
+        ],
+    )
+    def test_statement_faults_are_not_read_as_contention(
+        self, graph_store, label, cypher
+    ):
+        """These carry their own codes, so retrying them would be wrong.
+
+        Together with the positive cases these are what make the check
+        a classification rather than an unconditional retry.
+        """
+        exc = self._capture(graph_store, cypher, in_transaction=False)
+        assert not graph_store._is_alias_write_contention(exc), (
+            f"{label} fault would now be retried 3x: code={exc.code} msg={exc!s}"
+        )
+
+    def test_missing_parameter_is_not_read_as_contention(self, graph_store):
+        exc = self._capture(
+            graph_store, "MATCH (n {x: $nope}) RETURN n", in_transaction=False
+        )
+        assert not graph_store._is_alias_write_contention(exc)
