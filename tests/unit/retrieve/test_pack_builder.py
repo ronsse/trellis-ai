@@ -708,8 +708,10 @@ def _make_advisory(
     entity_id: str | None = None,
     advisory_id: str | None = None,
     sample_size: int = 10,
+    fitness_scored_at: datetime | None = None,
 ) -> Advisory:
     kwargs: dict[str, object] = {
+        "fitness_scored_at": fitness_scored_at,
         "category": category,
         "confidence": confidence,
         "message": f"Test advisory ({category.value})",
@@ -1058,6 +1060,233 @@ class TestAdvisoryCapTelemetry:
         payload = self._pack_payload(log)
         assert payload["advisories_matched"] == 3
         assert len(payload["advisory_ids"]) == 3
+
+
+class TestAdvisoryExploreSlot:
+    """One of the capped slots is reserved for unreachable advisories (#502).
+
+    The cap is self-reinforcing without it. Selection reads ``confidence``;
+    only ``run_advisory_fitness_loop`` moves ``confidence``; and that loop
+    scores an advisory only after ``min_presentations`` presentations
+    counted from the *served* set. Below the cut there are no
+    presentations, so there is no score, so the confidence never moves, so
+    the row stays below the cut. #392 made it permanent rather than merely
+    likely by making the order total.
+    """
+
+    STALE = datetime(2026, 1, 1, tzinfo=UTC)
+
+    @staticmethod
+    def _fresh() -> datetime:
+        return datetime.now(tz=UTC) - timedelta(days=1)
+
+    def _store(self, tmp_path: Path, rows: list[Advisory]) -> AdvisoryStore:
+        store = AdvisoryStore(tmp_path / "adv.json")
+        for advisory in rows:
+            store.put(advisory)
+        return store
+
+    def _scored_ladder(self, n: int, *, stale_ids: set[str]) -> list[Advisory]:
+        """``n`` ranked advisories, all scored, some scored long ago."""
+        return [
+            _make_advisory(
+                scope="global",
+                confidence=round(0.9 - i * 0.05, 4),
+                advisory_id=f"adv-{i:02d}",
+                fitness_scored_at=(
+                    self.STALE if f"adv-{i:02d}" in stale_ids else self._fresh()
+                ),
+            )
+            for i in range(n)
+        ]
+
+    def test_stale_withheld_advisory_reaches_the_pack(self, tmp_path: Path) -> None:
+        """The defect, stated directly: rank 6 is served because it is frozen.
+
+        Ranks 1-5 were scored yesterday; rank 6 last in January. Without a
+        reserved slot rank 6 can never be served, so it can never be
+        scored, so its confidence can never move.
+        """
+        store = self._store(tmp_path, self._scored_ladder(12, stale_ids={"adv-05"}))
+
+        pack = PackBuilder(advisory_store=store).build("q")
+
+        assert "adv-05" in _served_ids(pack)
+
+    def test_the_slot_does_not_widen_the_cap(self, tmp_path: Path) -> None:
+        """Reserved *within* the cap, so #392's token budget is unchanged."""
+        store = self._store(tmp_path, self._scored_ladder(12, stale_ids={"adv-05"}))
+
+        pack = PackBuilder(advisory_store=store).build("q")
+
+        assert len(pack.advisories) == PackBuilder._ADVISORY_MAX_COUNT
+
+    def test_the_slot_displaces_only_the_weakest_exploited_row(
+        self, tmp_path: Path
+    ) -> None:
+        """Ranks 1-4 are never given up to exploration."""
+        store = self._store(tmp_path, self._scored_ladder(12, stale_ids={"adv-05"}))
+
+        pack = PackBuilder(advisory_store=store).build("q")
+
+        assert _served_ids(pack) == [
+            "adv-00",
+            "adv-01",
+            "adv-02",
+            "adv-03",
+            "adv-05",
+        ]
+
+    def test_no_slot_is_spent_when_every_withheld_row_is_fresh(
+        self, tmp_path: Path
+    ) -> None:
+        """Self-extinguishing: on a healthy store the pre-#502 set is served.
+
+        This is the equivalence half — the change must cost nothing when
+        the fitness loop is reaching everything.
+        """
+        store = self._store(tmp_path, self._scored_ladder(12, stale_ids=set()))
+
+        pack = PackBuilder(advisory_store=store).build("q")
+
+        cap = PackBuilder._ADVISORY_MAX_COUNT
+        assert _served_ids(pack) == [f"adv-{i:02d}" for i in range(cap)]
+
+    def test_scoring_the_explored_row_hands_the_slot_to_the_next_one(
+        self, tmp_path: Path
+    ) -> None:
+        """The rotation advances with no new state.
+
+        Same ladder, except the row the slot served has since been scored.
+        The slot must move on rather than hold a row that is no longer
+        starved.
+        """
+        store = self._store(
+            tmp_path, self._scored_ladder(12, stale_ids={"adv-05", "adv-06"})
+        )
+        first = _served_ids(PackBuilder(advisory_store=store).build("q"))
+
+        scored = self._store(
+            tmp_path / "next", self._scored_ladder(12, stale_ids={"adv-06"})
+        )
+        second = _served_ids(PackBuilder(advisory_store=scored).build("q"))
+
+        assert "adv-05" in first
+        assert "adv-06" not in first
+        assert "adv-06" in second
+        assert "adv-05" not in second
+
+    def test_a_never_scored_advisory_is_explorable(self, tmp_path: Path) -> None:
+        """The case that matters most going forward.
+
+        Every advisory the generator mints starts with no fitness stamp. A
+        new one whose confidence lands below the cut would otherwise be
+        frozen at birth, never served and never scored.
+        """
+        rows = self._scored_ladder(12, stale_ids=set())
+        rows.append(
+            _make_advisory(
+                scope="global",
+                confidence=0.30,
+                advisory_id="newborn",
+                fitness_scored_at=None,
+            )
+        )
+        store = self._store(tmp_path, rows)
+
+        pack = PackBuilder(advisory_store=store).build("q")
+
+        assert "newborn" in _served_ids(pack)
+
+    def test_absent_stamp_is_not_a_sufficient_key_on_a_scored_store(
+        self, tmp_path: Path
+    ) -> None:
+        """Pins *why* the key is staleness and not ``is None`` (#502).
+
+        A store that has run uncapped has scored nearly everything — the
+        reference deployment had 120 of 127 scored, and only 4 of the 63
+        rows below the cut unscored. An ``is None`` key selects nothing
+        there, so the slot would sit idle on exactly the deployment that
+        needs it. This test fails if the key is narrowed back.
+        """
+        rows = self._scored_ladder(12, stale_ids={"adv-07"})
+        assert all(r.fitness_scored_at is not None for r in rows)
+
+        pack = PackBuilder(advisory_store=self._store(tmp_path, rows)).build("q")
+
+        assert "adv-07" in _served_ids(pack)
+
+    def test_a_tie_at_the_cut_is_still_ordered_totally(self, tmp_path: Path) -> None:
+        """#392's property survives: same rows in, same rows out.
+
+        Production's cut lands on a three-way tie at 0.442 across ranks
+        4-6, which is why the tail is frozen by ``advisory_id`` alone.
+        """
+        tied = [
+            _make_advisory(
+                advisory_id=f"tied-{i}",
+                confidence=0.5,
+                sample_size=10,
+                fitness_scored_at=self.STALE,
+            )
+            for i in range(9)
+        ]
+        forward = self._store(tmp_path / "f", tied)
+        backward = self._store(tmp_path / "b", list(reversed(tied)))
+
+        assert _served_ids(PackBuilder(advisory_store=forward).build("q")) == (
+            _served_ids(PackBuilder(advisory_store=backward).build("q"))
+        )
+
+    def test_flat_payload_names_the_explored_ids(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path, self._scored_ladder(12, stale_ids={"adv-05"}))
+        log = SQLiteEventLog(tmp_path / "events.db")
+
+        PackBuilder(advisory_store=store, event_log=log).build("q")
+
+        payload = log.get_events(event_type=EventType.PACK_ASSEMBLED)[0].payload
+        assert payload["advisories_explored"] == ["adv-05"]
+
+    def test_sectioned_payload_names_the_explored_ids(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path, self._scored_ladder(12, stale_ids={"adv-05"}))
+        log = SQLiteEventLog(tmp_path / "events.db")
+
+        s = _make_strategy("kw", [_item("d1", 0.9)])
+        PackBuilder(
+            strategies=[s], advisory_store=store, event_log=log
+        ).build_sectioned("q", sections=[SectionRequest(name="all")])
+
+        payload = log.get_events(event_type=EventType.PACK_ASSEMBLED)[0].payload
+        assert payload["advisories_explored"] == ["adv-05"]
+
+    def test_payload_carries_an_empty_list_when_nothing_was_explored(
+        self, tmp_path: Path
+    ) -> None:
+        """Emitted unconditionally.
+
+        "Exploration ran and found nothing starved" must be
+        distinguishable from a build that has no slot at all — the same
+        commitment ``advisories_matched`` makes about the cap, and the one
+        that would have dated this build from its own served record.
+        """
+        store = self._store(tmp_path, self._scored_ladder(12, stale_ids=set()))
+        log = SQLiteEventLog(tmp_path / "events.db")
+
+        PackBuilder(advisory_store=store, event_log=log).build("q")
+
+        payload = log.get_events(event_type=EventType.PACK_ASSEMBLED)[0].payload
+        assert payload["advisories_explored"] == []
+
+    def test_a_below_cap_store_spends_no_slot(self, tmp_path: Path) -> None:
+        """Nothing is withheld, so there is nothing to explore."""
+        store = self._store(tmp_path, self._scored_ladder(3, stale_ids={"adv-02"}))
+        log = SQLiteEventLog(tmp_path / "events.db")
+
+        pack = PackBuilder(advisory_store=store, event_log=log).build("q")
+
+        assert _served_ids(pack) == ["adv-00", "adv-01", "adv-02"]
+        payload = log.get_events(event_type=EventType.PACK_ASSEMBLED)[0].payload
+        assert payload["advisories_explored"] == []
 
 
 # ---------------------------------------------------------------------------
