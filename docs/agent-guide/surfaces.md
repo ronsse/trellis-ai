@@ -82,11 +82,14 @@ documents embed on ingest when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`
 
 Retrieval-shaping **content tags** (`domain`, `content_type`, `scope`,
 `signal_quality`) are written when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1`
-— on five write seams, not just bulk ingest: `save_memory`, the evidence
+— on six write seams, not just bulk ingest: `save_memory`, the evidence
 document `save_knowledge` creates, `POST /documents`, `POST /evidence`,
-and the corpus / conversation / session-capture seam. `trellis classify
-backfill` covers everything else (see [operations.md](operations.md) —
-"Document → content tags" for the seam list and its exclusions).
+`trellis ingest dbt-manifest`, and the corpus / conversation /
+session-capture seam. The embed flag above covers exactly the same six;
+`trellis ingest evidence` is the one document-writing ingest command
+outside both. `trellis classify backfill` covers everything else (see
+[operations.md](operations.md) — "Document → content tags" for the seam
+list and its exclusions).
 
 ## Why three surfaces?
 
