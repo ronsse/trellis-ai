@@ -818,7 +818,9 @@ class PackBuilder:
         # Capped at :attr:`_ADVISORY_MAX_COUNT` (#392); provenance is
         # stamped from the *served* set, because an advisory the caller
         # never saw cannot have influenced anything it did.
-        advisories, advisories_matched = self._select_advisories(domain)
+        advisories, advisories_matched, advisories_explored = self._select_advisories(
+            domain
+        )
         selected = self._attach_advisory_provenance(selected, advisories)
 
         # What this build removed and did not serve (#404). Computed from
@@ -861,6 +863,7 @@ class PackBuilder:
                 withholding=withholding.as_telemetry(),
                 index_mode=index_mode,
                 advisories_matched=advisories_matched,
+                advisories_explored=advisories_explored,
             )
 
         return pack
@@ -1140,7 +1143,9 @@ class PackBuilder:
                 )
             )
 
-        advisories, advisories_matched = self._select_advisories(domain)
+        advisories, advisories_matched, advisories_explored = self._select_advisories(
+            domain
+        )
 
         # Stamp per-item advisory provenance across all sections
         # (Unit C1, foundation for D1 axis C semantic tightening).
@@ -1178,6 +1183,7 @@ class PackBuilder:
                 content_floor=floor_result.as_telemetry(),
                 withholding=withholding.as_telemetry(),
                 advisories_matched=advisories_matched,
+                advisories_explored=advisories_explored,
             )
 
         return sectioned_pack
@@ -1192,6 +1198,7 @@ class PackBuilder:
         content_floor: dict[str, Any] | None = None,
         withholding: dict[str, Any] | None = None,
         advisories_matched: int | None = None,
+        advisories_explored: list[str] | None = None,
     ) -> None:
         """Emit telemetry event for a sectioned pack.
 
@@ -1267,6 +1274,11 @@ class PackBuilder:
                     if advisories_matched is None
                     else advisories_matched
                 ),
+                # Which of the served advisories rode the explore slot
+                # (#502). Emitted unconditionally, so "exploration is
+                # running and found nothing to explore" is
+                # distinguishable from a build that has no slot at all.
+                "advisories_explored": list(advisories_explored or []),
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
                 "semantic_dedup_rejected": semantic_dedup_rejected_count,
@@ -1354,6 +1366,7 @@ class PackBuilder:
         withholding: dict[str, Any] | None = None,
         index_mode: bool = False,
         advisories_matched: int | None = None,
+        advisories_explored: list[str] | None = None,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
 
@@ -1511,6 +1524,11 @@ class PackBuilder:
                     if advisories_matched is None
                     else advisories_matched
                 ),
+                # Which of the served advisories rode the explore slot
+                # (#502). Emitted unconditionally, so "exploration is
+                # running and found nothing to explore" is
+                # distinguishable from a build that has no slot at all.
+                "advisories_explored": list(advisories_explored or []),
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
                 "semantic_dedup_rejected": sum(
@@ -1685,6 +1703,20 @@ class PackBuilder:
     #: :meth:`_select_advisories` for the measurement behind the number.
     _ADVISORY_MAX_COUNT = 5
 
+    #: How many of :attr:`_ADVISORY_MAX_COUNT` are reserved for advisories
+    #: the fitness loop can no longer reach (#502). Reserved *within* the
+    #: cap, never added to it, so #392's measured token budget is
+    #: unchanged: five advisories still ride the pack.
+    _ADVISORY_EXPLORE_SLOTS = 1
+
+    #: An advisory whose fitness stamp is older than this (or absent) can
+    #: no longer be re-scored, so it is eligible for the explore slot.
+    #: Matches ``run_advisory_fitness_loop``'s default 30-day event
+    #: window: presentations outside that window are invisible to the
+    #: loop, so a row withheld for longer can never reach
+    #: ``min_presentations`` no matter how long it waits.
+    _ADVISORY_EXPLORE_STALE_DAYS = 30
+
     def _get_matching_advisories(self, domain: str | None) -> list[Any]:
         """Retrieve advisories matching the pack's domain scope.
 
@@ -1713,14 +1745,43 @@ class PackBuilder:
             logger.exception("advisory_retrieval_failed")
             return []
 
-    def _select_advisories(self, domain: str | None) -> tuple[list[Any], int]:
+    def _select_advisories(
+        self, domain: str | None
+    ) -> tuple[list[Any], int, list[str]]:
         """Rank the matching advisories and cut them to the delivery cap.
 
-        Returns ``(served, matched)`` — the advisories that ride the pack
-        and how many matched before the cap, so the difference is a
-        property of the served record (``PACK_ASSEMBLED.payload
+        Returns ``(served, matched, explored)`` — the advisories that ride
+        the pack, how many matched before the cap, and the ids among the
+        served that took the explore slot. The first two make the cap's
+        effect a property of the served record (``PACK_ASSEMBLED.payload
         ["advisories_matched"]``) rather than an inference about which
-        build was deployed.
+        build was deployed; the third does the same for the slot.
+
+        **The cap is self-reinforcing without a reserved slot** (#502).
+        Selection reads ``confidence``; ``confidence`` is only ever moved
+        by ``run_advisory_fitness_loop``; and that loop scores an advisory
+        only after ``min_presentations`` presentations, counted from
+        ``PACK_ASSEMBLED.advisory_ids`` — the *served* set. So an advisory
+        below the cut is never served, therefore never presented,
+        therefore never scored, therefore never moves, therefore stays
+        below the cut. #392 made that permanent rather than merely likely:
+        the total ordering it added to stop a coin flip means the same
+        rows win every time, and on the reference deployment the cut lands
+        on a **three-way tie at 0.442** across ranks 4-6, so rank 6 is
+        withheld forever on ``advisory_id`` ordering alone.
+
+        One slot is reserved *within* the cap, never added to it, so the
+        token budget below is unchanged. The slot is **self-extinguishing**
+        — a row leaves the explore pool as soon as the loop scores it —
+        and needs no new state and no write on the read path.
+
+        Why the slot holds one row rather than rotating: the loop needs
+        ``min_presentations`` (3) presentations *inside its 30-day event
+        window*, and the reference deployment assembles ~3.2 packs/day
+        (~96 per window). Round-robin over 63 withheld rows yields ~1.5
+        presentations each per window — below the threshold, forever, so
+        the slot would be decorative. Holding it until the row is scored
+        costs 3 packs (~1 day) per row and drains that pool in ~59 days.
 
         **Why a cap at all, and why five** (#392). Nothing between the
         generator and the pack bounded this set. Three of the generator's
@@ -1766,14 +1827,69 @@ class PackBuilder:
         finding since #394.
         """
         matching = self._get_matching_advisories(domain)
-        matching.sort(
-            key=lambda a: (
-                -a.confidence,
-                -a.evidence.sample_size,
-                a.advisory_id,
-            )
+        matching.sort(key=self._advisory_rank)
+        cap = self._ADVISORY_MAX_COUNT
+        if len(matching) <= cap:
+            return matching, len(matching), []
+
+        slots = self._ADVISORY_EXPLORE_SLOTS
+        exploit = matching[: cap - slots]
+        tail = matching[cap - slots :]
+
+        now = datetime.now(tz=UTC)
+        explore = [a for a in tail if self._advisory_is_explorable(a, now=now)][:slots]
+
+        served = [*exploit, *explore]
+        # Backfill from the tail in rank order when the explore pool is
+        # short. With an empty pool this restores the pre-#502 top-``cap``
+        # exactly, so the slot costs nothing on a store whose advisories
+        # are all being scored.
+        if len(served) < cap:
+            chosen = {a.advisory_id for a in served}
+            for candidate in tail:
+                if candidate.advisory_id in chosen:
+                    continue
+                served.append(candidate)
+                chosen.add(candidate.advisory_id)
+                if len(served) == cap:
+                    break
+
+        served.sort(key=self._advisory_rank)
+        return served, len(matching), [a.advisory_id for a in explore]
+
+    @staticmethod
+    def _advisory_rank(advisory: Any) -> tuple[float, int, str]:
+        """Total order over advisories: confidence, evidence, then id."""
+        return (
+            -advisory.confidence,
+            -advisory.evidence.sample_size,
+            advisory.advisory_id,
         )
-        return matching[: self._ADVISORY_MAX_COUNT], len(matching)
+
+    @classmethod
+    def _advisory_is_explorable(cls, advisory: Any, *, now: datetime) -> bool:
+        """Is this advisory one the fitness loop can no longer reach?
+
+        True when it has never been scored, or was last scored longer ago
+        than the loop's event window. Both cases mean the same thing: the
+        presentations it would need are either absent or have aged out, so
+        its confidence is frozen wherever it happens to sit.
+
+        Reading the *stamp* rather than ``fitness_scored_at is None`` is
+        the load-bearing choice (#502). On a store that has run uncapped,
+        every row carries a fresh stamp — the reference deployment had
+        **120 of 127** scored, and only **4** of the 63 rows below the cap
+        unscored — so an ``is None`` key selects almost nothing, drains to
+        empty after one pass and never refills. Staleness refills on its
+        own: a withheld row's stamp ages past the window, and a row the
+        slot has served is re-scored and drops back out.
+        """
+        stamp = getattr(advisory, "fitness_scored_at", None)
+        if stamp is None:
+            return True
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        return bool((now - stamp).days > cls._ADVISORY_EXPLORE_STALE_DAYS)
 
     @staticmethod
     def _attach_advisory_provenance(
