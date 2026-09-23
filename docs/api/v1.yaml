@@ -1761,6 +1761,11 @@ components:
           additionalProperties: true
           title: Proposed Values
           type: object
+        reachable:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Reachable
         sample_size:
           default: 0
           title: Sample Size
@@ -1776,6 +1781,11 @@ components:
         tuner:
           title: Tuner
           type: string
+        unreachable_reasons:
+          items:
+            type: string
+          title: Unreachable Reasons
+          type: array
       required:
       - proposal_id
       - tuner
@@ -3555,7 +3565,11 @@ paths:
 
         with the resolved baseline values (what the proposal is measured
 
-        against).'
+        against) and with whether the proposal can be read back at all --
+
+        a scope no reader queries is approvable and inert, so the reason
+
+        travels with the row rather than living only in a tuner log line.'
       operationId: list_pending_proposals_api_v1_proposals_get
       parameters:
       - description: Max proposals to return

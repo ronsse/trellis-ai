@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.learning.tuners import DEFAULT_RULES, RuleTuner, TuningRule
 from trellis.ops import record_outcome
@@ -37,6 +39,17 @@ _TEST_RULE = TuningRule(
     proposed_value=15.0,
 )
 
+#: The same rule aimed at a component no module reads a parameter for.
+#: ``screen_proposals`` records such a proposal as *unchecked* rather than
+#: refusing it — ``component_id`` is an open string and ``ParameterRegistry``
+#: is a public facade, so absence from a scan of ``src/`` is not absence of a
+#: reader.  Used by the tests below that need all four scope axes populated,
+#: which a rostered component cannot give them: the reachability screen
+#: refuses any cell carrying an axis its reader never supplies.
+_UNCHECKED_RULE = replace(
+    _TEST_RULE, target_component_id="tests.tuner.unrostered_component"
+)
+
 
 def _seed_outcomes(
     outcome_store: SQLiteOutcomeStore,
@@ -45,9 +58,26 @@ def _seed_outcomes(
     failures: int,
     domain: str = "orders",
     component_id: str = "retrieve.strategies.KeywordSearch",
+    intent_family: str | None = None,
     base_time: datetime | None = None,
 ) -> None:
-    """Record ``successes`` + ``failures`` outcomes at strictly-increasing times."""
+    """Record ``successes`` + ``failures`` outcomes at strictly-increasing times.
+
+    ``intent_family`` defaults to ``None`` so the cell this seeds is
+    *reachable*: ``retrieve.strategies.KeywordSearch`` is read at
+    ``(component_id, domain)``, so a snapshot written at an
+    ``intent_family`` is one ``ParameterStore.resolve`` can never return and
+    :func:`~trellis.ops.parameter_reachability.screen_proposals` refuses it
+    at emit.  It used to default to ``"plan"``, which is why every test below
+    that asserts a proposal was persisted needs the default to be ``None``.
+
+    That is not a weakened fixture, it is the corrected one — the tests here
+    are about cursor advancement, idempotency, window bounds and id
+    determinism, none of which are claims about reachability.  Pass
+    ``intent_family=`` explicitly to exercise the refusal; the tests that do
+    are grouped at the end of this module so the change above cannot quietly
+    delete the coverage of the screen.
+    """
     base = base_time or datetime.now(UTC)
     for i in range(successes):
         record_outcome(
@@ -56,7 +86,7 @@ def _seed_outcomes(
             success=True,
             latency_ms=10.0,
             domain=domain,
-            intent_family="plan",
+            intent_family=intent_family,
             occurred_at=base + timedelta(seconds=i),
         )
     for i in range(failures):
@@ -66,7 +96,7 @@ def _seed_outcomes(
             success=False,
             latency_ms=10.0,
             domain=domain,
-            intent_family="plan",
+            intent_family=intent_family,
             occurred_at=base + timedelta(seconds=successes + i),
         )
 
@@ -349,18 +379,31 @@ def test_proposals_carry_deterministic_ids(stores):
 
 
 def test_scope_key_roundtrip_via_parameter_proposal(stores):
-    """The proposal's scope survives the put/get roundtrip intact."""
-    outcome_store, state = stores
-    _seed_outcomes(outcome_store, successes=0, failures=5, domain="xyz")
+    """The proposal's scope survives the put/get roundtrip intact.
 
-    tuner = RuleTuner(outcome_store, state, rules=[_TEST_RULE])
+    Run against an unrostered component, because a *populated*
+    ``intent_family`` is the interesting half of this round-trip and no
+    rostered component can carry one past the reachability screen.  A
+    ``None`` round-trips trivially and would pin almost nothing.
+    """
+    outcome_store, state = stores
+    _seed_outcomes(
+        outcome_store,
+        successes=0,
+        failures=5,
+        domain="xyz",
+        component_id="tests.tuner.unrostered_component",
+        intent_family="plan",
+    )
+
+    tuner = RuleTuner(outcome_store, state, rules=[_UNCHECKED_RULE])
     first = tuner.run()
     proposal_id = first[0].proposal_id
 
     fetched = state.get_proposal(proposal_id)
     assert isinstance(fetched, ParameterProposal)
     assert fetched.scope.key() == (
-        "retrieve.strategies.KeywordSearch",
+        "tests.tuner.unrostered_component",
         "xyz",
         "plan",
         None,
@@ -368,15 +411,172 @@ def test_scope_key_roundtrip_via_parameter_proposal(stores):
 
 
 def test_proposal_targets_correct_parameter_scope(stores):
+    """Every axis of the aggregate's cell reaches the proposal's scope."""
     outcome_store, state = stores
-    _seed_outcomes(outcome_store, successes=0, failures=5, domain="foo")
+    _seed_outcomes(
+        outcome_store,
+        successes=0,
+        failures=5,
+        domain="foo",
+        component_id="tests.tuner.unrostered_component",
+        intent_family="plan",
+    )
 
-    tuner = RuleTuner(outcome_store, state, rules=[_TEST_RULE])
+    tuner = RuleTuner(outcome_store, state, rules=[_UNCHECKED_RULE])
     result = tuner.run()
     # Full scope should be preserved.
     scope = result[0].scope
     assert isinstance(scope, ParameterScope)
-    assert scope.component_id == "retrieve.strategies.KeywordSearch"
+    assert scope.component_id == "tests.tuner.unrostered_component"
     assert scope.domain == "foo"
     assert scope.intent_family == "plan"
     assert scope.tool_name is None
+
+
+def test_reachable_scope_is_carried_verbatim(stores):
+    """A rostered component keeps the axes it *can* resolve.
+
+    The two tests above moved to an unrostered component to keep a
+    populated ``intent_family``; this one holds the other half, so
+    "the scope is the aggregate's cell" is still pinned for a real
+    component and not only for a synthetic one.
+    """
+    outcome_store, state = stores
+    _seed_outcomes(outcome_store, successes=0, failures=5, domain="foo")
+
+    tuner = RuleTuner(outcome_store, state, rules=[_TEST_RULE])
+    scope = tuner.run()[0].scope
+    assert scope.key() == ("retrieve.strategies.KeywordSearch", "foo", None, None)
+
+
+# ---------------------------------------------------------------------------
+# Reachability screening (#617)
+# ---------------------------------------------------------------------------
+#
+# ``_seed_outcomes`` defaults to a reachable cell so the orchestration tests
+# above test orchestration.  These are the tests that hold the other side of
+# that default, so the change cannot quietly delete the screen's coverage.
+
+
+def test_unreachable_cell_is_refused_at_emit(stores):
+    """A proposal that cannot alter behaviour is never surfaced.
+
+    The cell carries an ``intent_family``; the reader of
+    ``retrieve.strategies.KeywordSearch`` resolves at
+    ``(component_id, domain)`` and leaves ``intent_family`` ``None`` in all
+    five candidates ``ParameterStore.resolve`` builds, so a snapshot written
+    here is one no read can ever match.  Approving it would be approving
+    nothing — which is worse than proposing nothing, because it costs a
+    human's judgement and returns a parameter change that silently does not
+    happen.
+    """
+    outcome_store, state = stores
+    _seed_outcomes(outcome_store, successes=0, failures=5, intent_family="plan")
+
+    tuner = RuleTuner(outcome_store, state, rules=[_TEST_RULE])
+
+    assert tuner.run() == []
+    # Refused at emit, not persisted-then-hidden: nothing reaches the store,
+    # so nothing reaches the CLI or REST approval surfaces either.
+    assert state.list_proposals() == []
+
+
+def test_refusal_names_the_axis_the_reader_never_supplies(stores):
+    """The refusal is loud and says *why*, at ``warning``.
+
+    ``TRELLIS_LOG_LEVEL`` defaults to ``WARNING`` and the CLI pins it there,
+    so a ``debug`` line here would be a decision taken with no observable
+    record on any shipped configuration — the failure #404 catalogues one
+    layer up.
+    """
+    outcome_store, state = stores
+    _seed_outcomes(outcome_store, successes=0, failures=5, intent_family="plan")
+
+    tuner = RuleTuner(outcome_store, state, rules=[_TEST_RULE])
+    with capture_logs() as logs:
+        tuner.run()
+
+    refusals = [e for e in logs if e["event"] == "rule_tuner.proposal_unreachable"]
+    assert len(refusals) == 1
+    refusal = refusals[0]
+    assert refusal["log_level"] == "warning"
+    assert refusal["component_id"] == "retrieve.strategies.KeywordSearch"
+    assert refusal["reason_kinds"] == ["unsupplied_axis"]
+    # The axis, the reader and the mechanism — enough to act on without
+    # reading the screening module.
+    assert "intent_family" in refusal["reason"]
+    assert "trellis.retrieve.strategies" in refusal["reason"]
+
+
+def test_run_complete_counts_what_it_refused(stores):
+    """A tuner that emits nothing must not look like a tuner with no signal.
+
+    On the reference deployment 160 of 161 cells carry an axis no reader
+    supplies, so this counter is the difference between "the rule found
+    nothing" and "the rule fired and every proposal was unreachable".  They
+    call for completely different fixes.
+    """
+    outcome_store, state = stores
+    _seed_outcomes(outcome_store, successes=0, failures=5, intent_family="plan")
+
+    tuner = RuleTuner(outcome_store, state, rules=[_TEST_RULE])
+    with capture_logs() as logs:
+        tuner.run()
+
+    complete = next(e for e in logs if e["event"] == "rule_tuner.run_complete")
+    assert complete["proposals_proposed"] == 1
+    assert complete["proposals_persisted"] == 0
+    assert complete["proposals_refused_unreachable"] == 1
+    assert complete["proposals_unchecked_component"] == 0
+
+
+def test_reachable_and_unreachable_cells_partition_in_one_pass(stores):
+    """One pass, two cells: the screen is per-proposal, not per-run."""
+    outcome_store, state = stores
+    now = datetime.now(UTC)
+    _seed_outcomes(
+        outcome_store, successes=0, failures=5, domain="reachable", base_time=now
+    )
+    _seed_outcomes(
+        outcome_store,
+        successes=0,
+        failures=5,
+        domain="gated",
+        intent_family="plan",
+        base_time=now + timedelta(minutes=1),
+    )
+
+    tuner = RuleTuner(outcome_store, state, rules=[_TEST_RULE])
+    result = tuner.run()
+
+    assert [p.scope.domain for p in result] == ["reachable"]
+    assert [p.scope.domain for p in state.list_proposals()] == ["reachable"]
+
+
+def test_unrostered_component_is_proposed_not_refused(stores):
+    """Unknown component, no claim — the demotion-gate posture.
+
+    ``component_id`` is an open string and ``ParameterRegistry`` is a public
+    facade, so a component missing from the read-point roster may simply have
+    a reader this repo cannot see.  Refusing on *absence of evidence* would
+    make the roster a gate on every out-of-tree component, which is the
+    failure direction that costs: it silently stops a real tuning loop.  The
+    proposal is served and counted separately instead.
+    """
+    outcome_store, state = stores
+    _seed_outcomes(
+        outcome_store,
+        successes=0,
+        failures=5,
+        component_id="tests.tuner.unrostered_component",
+        intent_family="plan",
+    )
+
+    tuner = RuleTuner(outcome_store, state, rules=[_UNCHECKED_RULE])
+    with capture_logs() as logs:
+        result = tuner.run()
+
+    assert len(result) == 1
+    complete = next(e for e in logs if e["event"] == "rule_tuner.run_complete")
+    assert complete["proposals_unchecked_component"] == 1
+    assert complete["proposals_refused_unreachable"] == 0

@@ -33,6 +33,10 @@ from trellis.learning.tuners import (
     preview_promotion,
     promote_proposal,
 )
+from trellis.ops.parameter_reachability import (
+    READ_POINTS,
+    reachability_reasons,
+)
 from trellis.schemas.parameters import ParameterScope
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import (
@@ -134,7 +138,18 @@ def proposals_cmd(
     proposals = store.list_proposals(tuner=tuner, status=status, limit=limit)
 
     if output_format == "json":
-        emit_json([p.model_dump(mode="json") for p in proposals])
+        emit_json(
+            [
+                {
+                    **p.model_dump(mode="json"),
+                    # Enriched, not stored: the machine surface has to carry
+                    # the same fact the table now shows, or an approval
+                    # script re-creates exactly the blindness this fixes.
+                    "reachability": _reachability_block(p),
+                }
+                for p in proposals
+            ]
+        )
         return
 
     console.print(
@@ -151,20 +166,51 @@ def proposals_cmd(
     table.add_column("tuner")
     table.add_column("status")
     table.add_column("component_id")
+    # All four axes, because the scope mismatch this surface exists to make
+    # approvable is *in* the two that used to be omitted: a proposal at an
+    # intent_family no reader queries rendered identically to one at a scope
+    # that resolves.
     table.add_column("domain")
+    table.add_column("intent_family")
+    table.add_column("tool_name")
+    table.add_column("reachable")
     table.add_column("proposed_values")
     table.add_column("sample_size", justify="right")
     for p in proposals:
+        reasons = reachability_reasons(p.scope, tuple(p.proposed_values))
+        if p.scope.component_id not in READ_POINTS:
+            reachable = "[dim]?[/dim]"
+        elif reasons:
+            reachable = "[red]no[/red]"
+        else:
+            reachable = "[green]yes[/green]"
         table.add_row(
             escape(p.proposal_id[:18] + "…"),
             p.tuner,
             p.status,
             escape(p.scope.component_id),
-            p.scope.domain or "-",
+            escape(p.scope.domain or "-"),
+            escape(p.scope.intent_family or "-"),
+            escape(p.scope.tool_name or "-"),
+            reachable,
             json.dumps(p.proposed_values),
             str(p.sample_size),
         )
     console.print(table)
+    # The verdict alone is a flag; the reason is what an operator acts on.
+    # Printed below the table rather than in a cell so a long explanation
+    # cannot wrap the whole row into illegibility.
+    for p in proposals:
+        for reason in reachability_reasons(p.scope, tuple(p.proposed_values)):
+            console.print(
+                f"  [red]unreachable[/red] {escape(p.proposal_id[:18])}…  "
+                f"{escape(reason.detail)}"
+            )
+    if any(p.scope.component_id not in READ_POINTS for p in proposals):
+        console.print(
+            "  [dim]?[/dim] = component has no in-tree parameter reader; "
+            "reachability not checked."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +411,33 @@ def promote_cmd(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _reachability_block(proposal: Any) -> dict[str, Any]:
+    """Serialise one proposal's reachability verdict for ``--format json``.
+
+    ``checked`` is reported separately from ``reachable`` because an
+    unknown ``component_id`` is *no claim*, not a pass: ``component_id``
+    is an open string and ``ParameterRegistry`` is a public facade, so a
+    component absent from the in-tree scan may still have a reader
+    outside ``src/``.  Collapsing that to ``reachable: true`` would let
+    the surface assert something it cannot know.
+    """
+    reasons = reachability_reasons(proposal.scope, tuple(proposal.proposed_values))
+    checked = proposal.scope.component_id in READ_POINTS
+    return {
+        "checked": checked,
+        "reachable": (not reasons) if checked else None,
+        "reasons": [
+            {
+                "kind": r.kind,
+                "axis": r.axis,
+                "key": r.key,
+                "detail": r.detail,
+            }
+            for r in reasons
+        ],
+    }
 
 
 def _agg_to_dict(agg: Any) -> dict[str, Any]:

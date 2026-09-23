@@ -498,6 +498,15 @@ class TunerProposalSummary(WireModel):
     baseline_values: dict[str, Any] = Field(default_factory=dict)
     sample_size: int = 0
     effect_size: float | None = None
+    #: Whether a snapshot written at this scope could ever be read back by
+    #: the component it targets.  ``None`` means *not checked* — the
+    #: component has no in-tree parameter reader to reason about — which is
+    #: a different fact from ``True`` and calls for a different action.
+    reachable: bool | None = None
+    #: One sentence per reason the proposal is inert, empty when reachable.
+    #: This is the approval surface, so the reason travels with the row an
+    #: operator is judging rather than living only in a log line.
+    unreachable_reasons: list[str] = Field(default_factory=list)
 
 
 class TunerProposalListResponse(WireModel):
