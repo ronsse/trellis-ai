@@ -6,11 +6,11 @@ The Postgres section mirrors the gating in ``test_postgres_stores.py``:
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 
 import pytest
 
+from tests.pg_scratch import configured_dsn, require_scratch_database
 from trellis.errors import StoreError
 from trellis.stores.base.api_key import ApiKeyRecord
 from trellis.stores.sqlite.api_key import SQLiteApiKeyStore
@@ -117,7 +117,7 @@ class TestSQLiteApiKeyStore:
 # Postgres (env-gated, mirrors test_postgres_stores.py)
 # ======================================================================
 
-PG_DSN = os.environ.get("TRELLIS_TEST_PG_DSN")
+PG_DSN = configured_dsn() or None
 
 
 @pytest.mark.postgres
@@ -127,6 +127,7 @@ class TestPostgresApiKeyStore:
     def _setup(self) -> None:
         psycopg = pytest.importorskip("psycopg")
         assert PG_DSN is not None
+        require_scratch_database(PG_DSN)
         conn = psycopg.connect(PG_DSN, autocommit=True)
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS trellis_api_keys CASCADE")

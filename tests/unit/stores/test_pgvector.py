@@ -5,14 +5,14 @@ Skipped unless ``TRELLIS_TEST_PG_DSN`` is set and psycopg/pgvector are importabl
 
 from __future__ import annotations
 
-import os
-
 import pytest
+
+from tests.pg_scratch import configured_dsn, scratch_dsn
 
 psycopg = pytest.importorskip("psycopg")
 pytest.importorskip("pgvector")
 
-DSN = os.environ.get("TRELLIS_TEST_PG_DSN", "")
+DSN = configured_dsn()
 
 pytestmark = [
     pytest.mark.postgres,
@@ -26,7 +26,7 @@ def store():
     """Create a PgVectorStore and ensure a clean table for each test."""
     from trellis.stores.pgvector.store import PgVectorStore
 
-    s = PgVectorStore(dsn=DSN, dimensions=3)
+    s = PgVectorStore(dsn=scratch_dsn(), dimensions=3)
     # Truncate between tests for isolation. ``_conn`` is the pooled-
     # connection *context manager* inherited from ``PostgresStoreBase``,
     # not a connection object, and it commits on block exit.
@@ -132,7 +132,7 @@ class TestDimMismatchFailsFast:
 
         # The fixture constructed at dim=3; constructing again at dim=3
         # is a no-op against the existing column and must not raise.
-        s2 = PgVectorStore(dsn=DSN, dimensions=3)
+        s2 = PgVectorStore(dsn=scratch_dsn(), dimensions=3)
         try:
             assert s2._dimensions == 3
         finally:
