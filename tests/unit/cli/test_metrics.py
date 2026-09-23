@@ -12,7 +12,11 @@ from typer.testing import CliRunner
 
 from trellis.ops import record_outcome
 from trellis.schemas.outcome import GRAPH_SEARCH_COMPONENT_ID
-from trellis.schemas.parameters import ParameterScope, ParameterSet
+from trellis.schemas.parameters import (
+    ParameterProposal,
+    ParameterScope,
+    ParameterSet,
+)
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.outcome import SQLiteOutcomeStore
 from trellis.stores.sqlite.parameter import SQLiteParameterStore
@@ -91,6 +95,7 @@ def _seed_uncited_graph_outcomes(
     n: int = 10,
     served_each: int = 5,
     referenced_total: int = 1,
+    intent_family: str | None = None,
 ) -> None:
     """Seed a cell the shipped rule actually fires on.
 
@@ -106,6 +111,18 @@ def _seed_uncited_graph_outcomes(
     ``50`` servings clears ``min_items_served=20``, ``10`` rows clears
     ``min_sample_size=3``, and a reference rate of ``1/50 = 0.02`` sits
     under the ``0.07`` threshold.
+
+    It carries **no** ``intent_family``, and that is a calibration term
+    like the three above rather than an omission.  ``GraphSearch`` reads
+    its parameters at ``(component_id, domain)``, so a snapshot written
+    at an ``intent_family`` is one ``ParameterStore.resolve`` can never
+    return; since #617 the tuner screens that at emit and the cell would
+    yield no proposal at all.  It used to pass ``intent_family="plan"``,
+    which is the *second* time this fixture has been shaped for a world
+    the tuner had moved on from — so the refusal path gets its own test
+    at the bottom of this module rather than being left implicit in a
+    seeder nobody re-reads.  Pass ``intent_family=`` to seed the refused
+    cell on purpose; that is what those tests do.
     """
     base = datetime.now(UTC) - timedelta(hours=1)
     for i in range(n):
@@ -117,7 +134,7 @@ def _seed_uncited_graph_outcomes(
             success=i % 5 == 0,
             latency_ms=12.0,
             domain="orders",
-            intent_family="plan",
+            intent_family=intent_family,
             items_served=served_each,
             items_referenced=1 if i < referenced_total else 0,
             occurred_at=base + timedelta(seconds=i),
@@ -311,3 +328,114 @@ def test_metrics_promote_missing_proposal(cli_env):
     payload = json.loads(result.stdout)
     assert payload["status"] == "skipped"
     assert payload["reason"] == "proposal_not_found"
+
+
+# ---------------------------------------------------------------------------
+# reachability (#617)
+# ---------------------------------------------------------------------------
+
+
+def test_tune_persists_nothing_for_an_unreachable_cell(cli_env):
+    """The same cell, one axis different, yields no proposal at all.
+
+    ``test_metrics_tune_emits_proposals`` above seeds the identical cell
+    without an ``intent_family`` and gets one proposal, so this pins the
+    screen and not some other property of the fixture.  The refusal is at
+    *emit*: nothing reaches the store to be approved later.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"], intent_family="plan")
+
+    result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["proposals_persisted"] == 0
+    assert payload["proposals"] == []
+    assert cli_env["tuner_state"].list_proposals() == []
+
+
+def test_proposals_json_carries_the_reachability_verdict(cli_env):
+    """A stored proposal is screened at render too, not only at emit.
+
+    The store outlives the screen: a row written by a build from before
+    #617, or by a tuner that does not screen, is still approvable from
+    this surface — so the verdict is computed here rather than read back
+    off the row.  Written directly for that reason; the tuner itself can
+    no longer produce one.
+    """
+    cli_env["tuner_state"].put_proposal(
+        ParameterProposal(
+            scope=ParameterScope(
+                component_id=GRAPH_SEARCH_COMPONENT_ID,
+                domain="orders",
+                intent_family="plan",
+            ),
+            proposed_values={"domain_match_boost": 1.4},
+            tuner="legacy_tuner",
+        )
+    )
+
+    result = runner.invoke(app, ["metrics", "proposals", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    [row] = json.loads(result.stdout)
+    assert row["reachability"]["checked"] is True
+    assert row["reachability"]["reachable"] is False
+    assert [r["axis"] for r in row["reachability"]["reasons"]] == ["intent_family"]
+    assert row["reachability"]["reasons"][0]["kind"] == "unsupplied_axis"
+
+
+def test_proposals_json_reports_no_claim_for_an_unrostered_component(cli_env):
+    """``checked: false`` is not ``reachable: false``.
+
+    ``component_id`` is an open string and ``ParameterRegistry`` is a
+    public facade, so a component absent from a scan of ``src/`` may
+    still have a reader out of tree.  An approval script that read the
+    two as the same thing would suppress a working tuning loop it cannot
+    see, which is why the JSON carries both keys.
+    """
+    cli_env["tuner_state"].put_proposal(
+        ParameterProposal(
+            scope=ParameterScope(
+                component_id="tests.cli.unrostered_component",
+                intent_family="plan",
+            ),
+            proposed_values={"some_key": 1.0},
+            tuner="legacy_tuner",
+        )
+    )
+
+    result = runner.invoke(app, ["metrics", "proposals", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    [row] = json.loads(result.stdout)
+    assert row["reachability"]["checked"] is False
+    assert row["reachability"]["reachable"] is None
+    assert row["reachability"]["reasons"] == []
+
+
+def test_proposals_text_prints_the_reason_below_the_table(cli_env):
+    """The human surface is where approval happens, so it carries the why.
+
+    Asserted on ``ParameterStore.resolve``, which appears only in a
+    reason detail — the four scope columns render their own headers, so
+    asserting on ``intent_family`` would pass against a table that
+    printed no reason at all.
+    """
+    cli_env["tuner_state"].put_proposal(
+        ParameterProposal(
+            scope=ParameterScope(
+                component_id=GRAPH_SEARCH_COMPONENT_ID,
+                domain="orders",
+                intent_family="plan",
+            ),
+            proposed_values={"domain_match_boost": 1.4},
+            tuner="legacy_tuner",
+        )
+    )
+
+    result = runner.invoke(app, ["metrics", "proposals"])
+
+    assert result.exit_code == 0, result.output
+    assert "unreachable" in result.output
+    assert "ParameterStore.resolve" in result.output

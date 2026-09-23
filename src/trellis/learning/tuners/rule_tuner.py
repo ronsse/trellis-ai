@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from trellis.ops.parameter_reachability import screen_proposals
 from trellis.schemas.outcome import (
     GRAPH_SEARCH_COMPONENT_ID,
     OutcomeEvent,
@@ -376,10 +377,24 @@ def apply_rules(
 #: the axis is uniformly weakly-cited rather than weakly-cited in
 #: particular cells, so a per-cell rule is the wrong instrument for it.
 #:
+#: The surviving rule is **currently screened out on the reference
+#: deployment**, and that is the honest state rather than a regression.
+#: Its one firing cell is domainless, and ``domain_match_boost`` is
+#: applied only under ``if request_domain and ...`` — so the proposal
+#: resolves and multiplies nothing.  :func:`screen_proposals` refuses it
+#: with that reason, which is why ``run`` logs each refusal at
+#: ``warning`` and counts it in ``run_complete``: the rule was already a
+#: no-op there, it merely looked busy, and the count is what keeps the
+#: difference visible.  Note the direction the fix must not take —
+#: widening the scope to manufacture reachability would produce a
+#: proposal that lands and changes behaviour off a cell that never
+#: justified it.  See :mod:`trellis.ops.parameter_reachability`.
+#:
 #: Replace / extend via the ``rules`` argument on :class:`RuleTuner`.
 #: A new default rule needs the same thing these thresholds have: a
 #: measured base rate to be relative to, and a floor on the statistic's
-#: own denominator.
+#: own denominator — plus a target the reader can actually reach, which
+#: is now checked rather than assumed.
 DEFAULT_RULES: Final[tuple[TuningRule, ...]] = (
     TuningRule(
         name="graph_low_reference_rate_tighten_domain_boost",
@@ -568,9 +583,31 @@ class RuleTuner:
         aggregates = aggregate_outcomes(outcomes)
         proposals = apply_rules(aggregates, self._rules, tuner=self._tuner_name)
 
+        # Reachability is screened *after* the rules run and reported
+        # separately, never folded into ``apply_rules``.  A screen that
+        # removes most of what a rule proposes is a fact about the rule,
+        # and collapsing the two would hide it — the same split
+        # ``EffectivenessReport`` keeps between ``noise_candidates`` and
+        # ``demotion_screen.admitted``.
+        screen = screen_proposals(proposals)
+        for refusal in screen.refused:
+            # ``warning``, not ``debug``: TRELLIS_LOG_LEVEL defaults to
+            # WARNING and the CLI pins it there, so anything lower is a
+            # no-op on the surface an operator actually watches.
+            logger.warning(
+                "rule_tuner.proposal_unreachable",
+                tuner=self._tuner_name,
+                proposal_id=refusal.proposal.proposal_id,
+                component_id=refusal.proposal.scope.component_id,
+                scope=refusal.proposal.scope.key(),
+                keys=sorted(refusal.proposal.proposed_values),
+                reason_kinds=sorted({r.kind for r in refusal.reasons}),
+                reason=refusal.summary(),
+            )
+
         persisted: list[ParameterProposal] = []
         skipped_terminal = 0
-        for proposal in proposals:
+        for proposal in screen.servable():
             existing = self._state.get_proposal(proposal.proposal_id)
             if existing is not None and existing.status in _TERMINAL_STATUSES:
                 skipped_terminal += 1
@@ -590,8 +627,11 @@ class RuleTuner:
             tuner=self._tuner_name,
             outcomes_scanned=len(outcomes),
             aggregates=len(aggregates),
+            proposals_proposed=len(proposals),
             proposals_persisted=len(persisted),
             proposals_skipped_terminal=skipped_terminal,
+            proposals_refused_unreachable=len(screen.refused),
+            proposals_unchecked_component=len(screen.unchecked),
             cursor=latest.isoformat(),
         )
         return persisted

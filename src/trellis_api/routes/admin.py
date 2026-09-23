@@ -35,6 +35,10 @@ from trellis.learning.tuners import (
     reject_proposal,
 )
 from trellis.mutate import build_curate_executor
+from trellis.ops.parameter_reachability import (
+    READ_POINTS,
+    reachability_reasons,
+)
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import (
     analyze_effectiveness,
@@ -751,7 +755,9 @@ def list_pending_proposals(
     proposal so the operator can judge each one. Mirrors the read in
     ``trellis metrics proposals --status pending`` but enriches each row
     with the resolved baseline values (what the proposal is measured
-    against).
+    against) and with whether the proposal can be read back at all --
+    a scope no reader queries is approvable and inert, so the reason
+    travels with the row rather than living only in a tuner log line.
     """
     registry = get_registry()
     tuner_state = registry.operational.tuner_state_store
@@ -762,8 +768,12 @@ def list_pending_proposals(
     for p in proposals:
         baseline = params.resolve(p.scope)
         baseline_values = dict(baseline.values) if baseline else {}
+        checked = p.scope.component_id in READ_POINTS
+        reasons = reachability_reasons(p.scope, tuple(p.proposed_values))
         rows.append(
             TunerProposalSummary(
+                reachable=(not reasons) if checked else None,
+                unreachable_reasons=[r.detail for r in reasons],
                 proposal_id=p.proposal_id,
                 tuner=p.tuner,
                 status=p.status,
