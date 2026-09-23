@@ -1766,9 +1766,16 @@ class PackBuilder:
         therefore never scored, therefore never moves, therefore stays
         below the cut. #392 made that permanent rather than merely likely:
         the total ordering it added to stop a coin flip means the same
-        rows win every time, and on the reference deployment the cut lands
-        on a **three-way tie at 0.442** across ranks 4-6, so rank 6 is
-        withheld forever on ``advisory_id`` ordering alone.
+        rows win every time, and on 2026-09-21 the reference deployment's
+        cut landed on a **three-way tie at 0.442** across ranks 4-6, so
+        rank 6 was withheld forever on ``advisory_id`` ordering alone.
+        The value moved and the shape did not: on 2026-09-23 the cut
+        lands inside a three-way tie at **0.559** across the same ranks
+        4-6. Two snapshots two days apart, two different confidences,
+        the same tie straddling the same cut — which is better evidence
+        for the total order than either snapshot alone, since a tie at
+        the cut is evidently the normal state of this store rather than
+        one unlucky reading.
 
         One slot is reserved *within* the cap, never added to it, so the
         token budget below is unchanged. The slot is **self-extinguishing**
@@ -1777,11 +1784,27 @@ class PackBuilder:
 
         Why the slot holds one row rather than rotating: the loop needs
         ``min_presentations`` (3) presentations *inside its 30-day event
-        window*, and the reference deployment assembles ~3.2 packs/day
-        (~96 per window). Round-robin over 63 withheld rows yields ~1.5
+        window*, and when #615 landed on 2026-09-21 the reference
+        deployment assembled ~3.2 packs/day (~96 per window).
+        Round-robin over the 63 rows withheld then yields ~1.5
         presentations each per window — below the threshold, forever, so
         the slot would be decorative. Holding it until the row is scored
-        costs 3 packs (~1 day) per row and drains that pool in ~59 days.
+        costs 3 packs per row and cycles that pool in ~59 days.
+
+        **Re-measured 2026-09-23 — two days later — and the margin is no
+        longer comfortable.** ~3.2/day was an *all-time* average and
+        still is
+        (250 packs over the 79 days from 2026-07-07, 3.16/day), but
+        assembly is bursty: the trailing 30 days run 7.50/day, the
+        trailing 14 run 11.86/day and the trailing 7 run 3.71/day — a
+        3.2x swing between adjacent weeks. The argument has to hold at
+        the *top* of that range, and it does, but barely: 124 withheld
+        rows at 11.86/day is 356 packs per window, 2.87 presentations
+        each, ~4% under the threshold rather than the 2x under it was
+        written with. Full-cycle time is roughly unchanged (~50 days),
+        both of its inputs having about doubled. If the trailing rate
+        settles above ~12.4 packs/day a rotating slot starts to clear
+        ``min_presentations`` and this paragraph stops being true.
 
         **Why a cap at all, and why five** (#392). Nothing between the
         generator and the pack bounded this set. Three of the generator's
@@ -1805,13 +1828,51 @@ class PackBuilder:
         * **Information.** Those 44 rows carried **3 distinct subjects**
           (the ``semantic`` / ``graph`` / ``keyword`` strategies) and 26
           distinct message strings that differ only in their numbers. All
-          56 rows carry **7** distinct subjects. Five sits above the
+          56 rows carried **7** distinct subjects. Five sat above the
           deliverable population of a healthy, deduplicated store and far
           below the failure mode.
-        * **Ranking.** Confidence stops separating almost immediately:
-          rank 1 is 0.229 and ranks 2-16 are *all* 0.206. Past the top few
-          the order carries no signal, so extra rows buy tokens and no
-          information.
+        * **Ranking.** Confidence stopped separating almost immediately:
+          rank 1 was 0.229 and ranks 2-16 were *all* 0.206. Past the top
+          few the order carried no signal, so extra rows bought tokens
+          and no information.
+
+        **Two of those three have moved since, and in opposite
+        directions** (re-measured 2026-09-23; 129 rows, 126 of them
+        matching an undomained pack).
+
+        *Cost* is untouched and cannot rot: per-advisory render cost is a
+        property of the formatter, not of the store, so five is still
+        ~191 tokens and ~9.6% of a default pack.
+
+        *Information* has **inverted as an argument for five while
+        confirming the argument for a cap.** The bullet above predicted
+        that the three analyses keying on an unbounded subject would grow
+        with the corpus; 20 days later they have, and the bounded one has
+        not. ``approach`` is still exactly **3** distinct subjects across
+        44 rows — unchanged — while ``anti_pattern`` is 33 across 41,
+        ``entity`` 30 across 30 and ``query`` 14 across 14: **80 distinct
+        subjects over 129 rows**, up from 7 over 56. So the prediction
+        held, which is why the cap exists; but "five sits above the
+        deliverable population" no longer does — five now covers ~6% of
+        the distinct subjects rather than most of them, and what it
+        withholds is no longer near-duplicate phrasings of one finding.
+
+        *Ranking* is **false as written**. Confidence separates across
+        the whole cap window now: rank 1 is 0.562, ranks 4-6 are 0.559,
+        rank 7 is 0.541, rank 8 is 0.475, and there are 41 distinct
+        confidences across the store. The big ties survive but have
+        migrated to the *bottom* (40 rows at 0.001, 16 at 0.051), where
+        no cap reaches them. Ordering therefore carries real signal
+        inside the cap today, so this bullet no longer supports five —
+        though note it does not argue for a *larger* five either, since
+        the cut still lands inside a tie (see above) and the Cost bound
+        is the binding one regardless.
+
+        Net: the cap is still right and **five is now held up by Cost
+        alone**. That is a thinner footing than #392 shipped with, and
+        the open question it raises — which advisories are worth a pack's
+        tokens once the population is 80 subjects wide rather than 7 — is
+        tracked on #503, not answered here.
 
         The cut is therefore applied **at assembly**, not at render. The
         REST DTO is the surface actually bleeding tokens today, and
@@ -1820,11 +1881,14 @@ class PackBuilder:
         about what the pack contains.
 
         Ordering is made total on purpose. ``AdvisoryStore.list`` sorts by
-        confidence descending only, and 15 live rows tie at 0.206 — a cap
-        over that is a coin flip between runs. The tiebreak prefers the
-        larger ``sample_size`` (more evidence behind the same confidence)
-        and settles the remainder on ``advisory_id``, which is stable per
-        finding since #394.
+        confidence descending only, and on 2026-09-03 15 live rows tied
+        at 0.206 — a cap over that is a coin flip between runs. The
+        tiebreak prefers the larger ``sample_size`` (more evidence behind
+        the same confidence) and settles the remainder on
+        ``advisory_id``, which is stable per finding since #394. That
+        particular tie is gone (0 rows at 0.206 on 2026-09-23) and the
+        need for the tiebreak is not: the cut still lands inside one, and
+        the ties are now larger, just lower down.
         """
         matching = self._get_matching_advisories(domain)
         matching.sort(key=self._advisory_rank)
@@ -1877,12 +1941,21 @@ class PackBuilder:
 
         Reading the *stamp* rather than ``fitness_scored_at is None`` is
         the load-bearing choice (#502). On a store that has run uncapped,
-        every row carries a fresh stamp — the reference deployment had
-        **120 of 127** scored, and only **4** of the 63 rows below the cap
-        unscored — so an ``is None`` key selects almost nothing, drains to
-        empty after one pass and never refills. Staleness refills on its
-        own: a withheld row's stamp ages past the window, and a row the
-        slot has served is re-scored and drops back out.
+        every row carries a fresh stamp — on 2026-09-21 the reference
+        deployment had **120 of 127** scored, and only **4** of the 63
+        rows below the cap unscored — so an ``is None`` key selects
+        almost nothing, drains to empty after one pass and never refills.
+        Staleness refills on its own: a withheld row's stamp ages past
+        the window, and a row the slot has served is re-scored and drops
+        back out.
+
+        Alone among the numbers in this module, that one has held:
+        re-measured 2026-09-23 the store is **124 of 129** scored, with
+        all **5** unscored rows below the cap. It is also the shape that
+        makes the pool *refill* rather than drain — the count went up,
+        not down, over the two days — so the ``is None`` reading would
+        still be selecting from a pool of 5 against a withheld set of
+        124.
         """
         stamp = getattr(advisory, "fitness_scored_at", None)
         if stamp is None:

@@ -90,8 +90,10 @@ This is the guard #423 landed on
 :class:`~trellis.stores.policy_store.PolicyStore`, ported here because that
 change generalised its *analysis* one store further than its *fix*:
 ``policies.json`` does not exist on the reference deployment, while
-``advisories.json`` is 51 KB of live rows rewritten by the nightly cron
-(#438). Both guards being present in both stores is what made #426's
+``advisories.json`` was 51 KB of live rows rewritten by the nightly cron
+(#438) — 135 KB across 129 rows when re-measured on 2026-09-23, so the
+asymmetry the port rested on has widened rather than closed. Both
+guards being present in both stores is what made #426's
 extraction safe to take: a base pulled out a release earlier would have
 frozen a half-guarded one.
 
