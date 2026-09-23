@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import structlog
 
+from tests.pg_scratch import require_scratch_database
 from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
@@ -125,6 +126,12 @@ def _truncate_postgres(store: object, tables: list[str], *, cascade: bool) -> No
     that needs one. ``_conn()`` checks out a connection from the pool
     and auto-commits on exit, so no explicit commit here.
     """
+    # Cached per DSN, so on the live suites — which check before building
+    # the registry — this costs nothing. It is here anyway because this is
+    # the function that actually destroys, and a future caller reaching it
+    # without the earlier check should still meet the guard.
+    require_scratch_database(store._dsn)  # type: ignore[attr-defined]
+
     suffix = " CASCADE" if cascade else ""
     sql = f"TRUNCATE {', '.join(tables)} RESTART IDENTITY{suffix}"
     with store._conn() as conn, conn.cursor() as cur:  # type: ignore[attr-defined]

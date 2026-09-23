@@ -5,17 +5,16 @@ Skipped unless ``TRELLIS_TEST_PG_DSN`` is set and psycopg is importable.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 pytest.importorskip("psycopg")
 
+from tests.pg_scratch import configured_dsn, scratch_dsn
 from tests.unit.stores.contracts.graph_store_contract import (
     GraphStoreContractTests,
 )
 
-DSN = os.environ.get("TRELLIS_TEST_PG_DSN", "")
+DSN = configured_dsn()
 
 pytestmark = [
     pytest.mark.postgres,
@@ -28,7 +27,7 @@ class TestPostgresGraphContract(GraphStoreContractTests):
     def store(self):
         from trellis.stores.postgres.graph import PostgresGraphStore
 
-        s = PostgresGraphStore(dsn=DSN)
+        s = PostgresGraphStore(dsn=scratch_dsn())
         # Each contract test starts from an empty graph.
         with s._conn() as conn, conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE nodes, edges, entity_aliases")

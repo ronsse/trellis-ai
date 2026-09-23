@@ -36,12 +36,13 @@ import httpx
 import pytest
 
 import trellis
+from tests.pg_scratch import configured_dsn, require_scratch_database
 
 NEO4J_URI = os.environ.get("TRELLIS_TEST_NEO4J_URI", "")
 NEO4J_USER = os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.environ.get("TRELLIS_TEST_NEO4J_PASSWORD", "")
 NEO4J_DATABASE = os.environ.get("TRELLIS_TEST_NEO4J_DATABASE", "neo4j")
-PG_DSN = os.environ.get("TRELLIS_TEST_PG_DSN", "")
+PG_DSN = configured_dsn()
 
 # Use the production-default vector index name. AuraDB allows only one
 # vector index per (label, property), so a `_test`-suffixed name would
@@ -124,6 +125,14 @@ def wipe_live_state_for_config(config_dir: Path, env: dict[str, str]) -> None:
     """
     from tests.integration._live_wipe import wipe_live_state
     from trellis.stores.registry import StoreRegistry
+
+    # Before the registry, not after: ``from_config_dir`` runs every
+    # store's ``_init_schema``, so a fresh scratch database stops being
+    # empty the moment the registry is built — and "empty" is what the
+    # guard reads to claim it. Checking here is what lets a brand-new CI
+    # container pass on its first run, and what refuses a populated
+    # database before a single table is created in it.
+    require_scratch_database(PG_DSN)
 
     # Restore the env so plane-aware DSN resolution sees the test DSNs.
     saved = {k: os.environ.get(k) for k in env}

@@ -9,13 +9,13 @@ All tests are marked with ``@pytest.mark.postgres`` for easy selection.
 
 from __future__ import annotations
 
-import os
-
 import pytest
+
+from tests.pg_scratch import configured_dsn, require_scratch_database
 
 psycopg = pytest.importorskip("psycopg")
 
-PG_DSN = os.environ.get("TRELLIS_TEST_PG_DSN")
+PG_DSN = configured_dsn() or None
 pytestmark = [
     pytest.mark.postgres,
     pytest.mark.skipif(PG_DSN is None, reason="TRELLIS_TEST_PG_DSN not set"),
@@ -23,7 +23,13 @@ pytestmark = [
 
 
 def _clean_tables(dsn: str) -> None:
-    """Drop test tables so each test starts fresh."""
+    """Drop test tables so each test starts fresh.
+
+    ``DROP ... CASCADE`` on six tables is the widest blast radius in the
+    suite, so the scratch-database check comes first — before the
+    connection, let alone the drop.
+    """
+    require_scratch_database(dsn)
     conn = psycopg.connect(dsn, autocommit=True)
     with conn.cursor() as cur:
         for table in (
