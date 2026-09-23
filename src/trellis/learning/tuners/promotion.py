@@ -64,12 +64,19 @@ class PromotionPolicy:
             Proposals from cells with fewer samples are rejected
             regardless of effect magnitude.
         min_effect_size: Lower bound on the absolute relative delta
-            ``abs(proposed - baseline) / max(abs(baseline), epsilon)``.
-            Only applied to numeric values when a baseline exists.
-        allow_no_baseline: When ``True`` (default) a proposal with no
-            active snapshot for its scope can still promote — this is
-            the bootstrap case. When ``False`` the cell must have at
-            least one prior snapshot.
+            ``abs(proposed - baseline) / max(abs(baseline), epsilon)``,
+            taken as the max over the proposed keys **that carry a
+            numeric baseline**. Keys the baseline does not carry are
+            not comparable at any threshold, so they neither satisfy
+            this floor nor exempt the keys beside them from it; they
+            are reported as :attr:`EffectSize.unbaselined_keys` and
+            governed by ``allow_no_baseline``.
+        allow_no_baseline: When ``True`` (default) a proposal the
+            baseline cannot be compared against can still promote —
+            the bootstrap case. This covers both shapes: no active
+            snapshot for the scope at all, and a snapshot that carries
+            none of the proposed keys. When ``False`` the cell must
+            have a prior snapshot carrying at least one proposed key.
         allow_non_numeric: When ``True`` (default) a proposal setting
             a non-numeric value (``str`` / ``bool``) skips the
             ``min_effect_size`` check. Numeric baselines always
@@ -116,22 +123,68 @@ class PromotionPreview:
     sample_size: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class EffectSize:
+    """What the effect-size gate could, and could not, compare.
+
+    Separating the two is the point. The previous encoding folded them
+    into one ``float`` by assigning ``inf`` for a key the baseline did
+    not carry, which cost three distinct things:
+
+    * ``inf`` is **not representable in the audit log**. Payloads are
+      ``json.dumps``'d into a ``JSONB`` column, and Postgres rejects the
+      resulting ``Infinity`` literal outright (``invalid input syntax
+      for type json``). Since ``parameter_store.put`` and the tuner-state
+      update both run *before* the emit, a promotion carrying an unseen
+      key applied the parameter, recorded ``status="promoted"``, raised
+      at the caller and wrote **no** ``parameters.updated`` audit row.
+      Every first promotion for a scope has that shape, so on the blessed
+      cloud backend the actuator could not complete a single clean
+      promotion.
+    * ``inf`` was **assigned**, not maxed, so one unseen key laundered
+      every other key in the same proposal past ``min_effect_size``.
+    * The guard that tried to contain it — ``effect != float("inf") and
+      effect < min_effect_size`` — was dead code: ``inf < x`` is already
+      ``False`` for every finite ``x``.
+
+    Args:
+        comparable_max: Max relative delta over the numeric keys that
+            **have** a numeric baseline, or ``None`` when no key does.
+            This is the only value the ``min_effect_size`` floor reads,
+            and the only one that reaches ``effect_size`` on the wire.
+        unbaselined_keys: Numeric keys the baseline does not carry, in
+            proposal order. These are not comparable at any threshold;
+            reporting them is what turns the bootstrap allowance into a
+            visible decision rather than an artifact of the encoding.
+        has_non_numeric: A ``str`` / ``bool`` key differs from baseline.
+    """
+
+    comparable_max: float | None
+    unbaselined_keys: tuple[str, ...]
+    has_non_numeric: bool
+
+
 def _compute_effect_size(
     proposed: dict[str, Any], baseline: dict[str, Any] | None
-) -> tuple[float | None, bool]:
-    """Return ``(effect_size, has_non_numeric)`` for the proposed change.
+) -> EffectSize:
+    """Return the comparable effect and the keys that had nothing to compare.
 
-    Effect size is the max relative delta across all numeric keys in
-    the proposal:
+    Effect size is the max relative delta across the numeric keys that
+    carry a numeric baseline:
 
         max over k of abs(proposed[k] - baseline[k]) / max(abs(baseline[k]), eps)
 
-    Non-numeric values (strings, booleans) count as "differs" but do
-    not contribute to the numeric effect; caller decides whether to
-    allow them through based on :attr:`PromotionPolicy.allow_non_numeric`.
+    A key the baseline does not carry contributes to
+    :attr:`EffectSize.unbaselined_keys` instead of to the maximum — it has
+    no relative delta, and pretending it has an infinite one is what let a
+    0.4% move on a mature key ride along beside it. Non-numeric values
+    (strings, booleans) count as "differs" but do not contribute to the
+    numeric effect; the caller decides whether to allow them through based
+    on :attr:`PromotionPolicy.allow_non_numeric`.
     """
     eps = 1e-9
     max_delta: float | None = None
+    unbaselined: list[str] = []
     has_non_numeric = False
 
     for key, proposed_value in proposed.items():
@@ -145,8 +198,9 @@ def _compute_effect_size(
                 has_non_numeric = True
             continue
         if baseline_value is None:
-            # No baseline for this key — treat as infinite relative change.
-            max_delta = float("inf")
+            # Nothing to compare against — record the key, do not invent
+            # a magnitude for it.
+            unbaselined.append(key)
             continue
         try:
             p = float(proposed_value)
@@ -158,7 +212,11 @@ def _compute_effect_size(
         if max_delta is None or delta > max_delta:
             max_delta = delta
 
-    return max_delta, has_non_numeric
+    return EffectSize(
+        comparable_max=max_delta,
+        unbaselined_keys=tuple(unbaselined),
+        has_non_numeric=has_non_numeric,
+    )
 
 
 def _reject(
@@ -166,7 +224,7 @@ def _reject(
     proposal_id: str,
     proposal: ParameterProposal,
     reason: str,
-    effect: float | None,
+    effect: EffectSize | None,
     baseline_values: dict[str, Any] | None,
     tuner_state: TunerStateStore,
     event_log: EventLog,
@@ -198,7 +256,8 @@ def _reject(
             "scope": list(proposal.scope.key()),
             "proposed_values": dict(proposal.proposed_values),
             "sample_size": proposal.sample_size,
-            "effect_size": effect,
+            "effect_size": effect.comparable_max if effect else None,
+            "uncomparable_keys": list(effect.unbaselined_keys) if effect else [],
             "reason": reason,
         },
     )
@@ -207,7 +266,7 @@ def _reject(
         proposal_id=proposal_id,
         status="rejected",
         reason=reason,
-        effect_size=effect,
+        effect_size=effect.comparable_max if effect else None,
         baseline_values=baseline_values,
     )
 
@@ -282,9 +341,7 @@ def promote_proposal(
     baseline_snapshot = parameter_store.resolve(proposal.scope)
     baseline_values = baseline_snapshot.values if baseline_snapshot else None
 
-    effect, has_non_numeric = _compute_effect_size(
-        proposal.proposed_values, baseline_values
-    )
+    effect = _compute_effect_size(proposal.proposed_values, baseline_values)
 
     if not force:
         gate_result = _apply_policy(
@@ -292,7 +349,6 @@ def promote_proposal(
             policy=effective_policy,
             baseline_values=baseline_values,
             effect=effect,
-            has_non_numeric=has_non_numeric,
         )
         if gate_result is not None:
             return _reject(
@@ -345,7 +401,8 @@ def promote_proposal(
             "scope": list(proposal.scope.key()),
             "proposed_values": dict(proposal.proposed_values),
             "baseline_values": dict(baseline_values or {}),
-            "effect_size": effect,
+            "effect_size": effect.comparable_max,
+            "uncomparable_keys": list(effect.unbaselined_keys),
             "sample_size": proposal.sample_size,
             "tuner": proposal.tuner,
             "force": force,
@@ -355,7 +412,7 @@ def promote_proposal(
         "tuner.promotion.accepted",
         proposal_id=proposal_id,
         params_version=stored.params_version,
-        effect_size=effect,
+        effect_size=effect.comparable_max,
         force=force,
     )
 
@@ -364,7 +421,7 @@ def promote_proposal(
         status="promoted",
         reason="ok",
         params_version=stored.params_version,
-        effect_size=effect,
+        effect_size=effect.comparable_max,
         baseline_values=baseline_values,
     )
 
@@ -430,9 +487,7 @@ def preview_promotion(
     baseline_snapshot = parameter_store.resolve(proposal.scope)
     baseline_values = baseline_snapshot.values if baseline_snapshot else None
 
-    effect, has_non_numeric = _compute_effect_size(
-        proposal.proposed_values, baseline_values
-    )
+    effect = _compute_effect_size(proposal.proposed_values, baseline_values)
     reason = (
         None
         if force
@@ -441,7 +496,6 @@ def preview_promotion(
             policy=effective_policy,
             baseline_values=baseline_values,
             effect=effect,
-            has_non_numeric=has_non_numeric,
         )
     )
     predicted_status = "rejected" if reason else "promoted"
@@ -451,7 +505,7 @@ def preview_promotion(
         reason=reason or "ok",
         proposed_values=dict(proposal.proposed_values),
         baseline_values=dict(baseline_values or {}),
-        effect_size=effect,
+        effect_size=effect.comparable_max,
         sample_size=proposal.sample_size,
     )
 
@@ -528,8 +582,7 @@ def _apply_policy(  # noqa: PLR0911 — gate is a straight-line decision tree; e
     proposal: ParameterProposal,
     policy: PromotionPolicy,
     baseline_values: dict[str, Any] | None,
-    effect: float | None,
-    has_non_numeric: bool,
+    effect: EffectSize,
 ) -> str | None:
     """Run the gate; return a rejection reason, or ``None`` on pass."""
     if proposal.sample_size < policy.min_sample_size:
@@ -538,8 +591,11 @@ def _apply_policy(  # noqa: PLR0911 — gate is a straight-line decision tree; e
             f"min_sample_size={policy.min_sample_size}"
         )
 
+    comparable = effect.comparable_max
+    unbaselined = effect.unbaselined_keys
+
     # Non-numeric change (string/bool).  Pass through when allowed.
-    if has_non_numeric and effect is None:
+    if effect.has_non_numeric and comparable is None and not unbaselined:
         if not policy.allow_non_numeric:
             return "non_numeric_change_disallowed"
         return None
@@ -550,10 +606,26 @@ def _apply_policy(  # noqa: PLR0911 — gate is a straight-line decision tree; e
             return None
         return "no_baseline_snapshot_for_scope"
 
-    # Effect size defined and finite: compare to min.
-    if effect is None:
+    if comparable is None:
+        if unbaselined:
+            # The scope has a snapshot, but it carries none of the proposed
+            # keys — a per-key bootstrap. Distinct from "proposed equals
+            # baseline", which would describe a wholly new proposal as a
+            # no-op.
+            if policy.allow_no_baseline:
+                return None
+            return "no_baseline_for_proposed_keys=" + ",".join(unbaselined)
         # All proposed values matched baseline exactly — nothing to do.
         return "zero_effect_proposed_equals_baseline"
-    if effect != float("inf") and effect < policy.min_effect_size:
-        return f"effect_size={effect:.4f} < min_effect_size={policy.min_effect_size}"
+
+    if comparable < policy.min_effect_size:
+        reason = (
+            f"effect_size={comparable:.4f} < min_effect_size={policy.min_effect_size}"
+        )
+        if unbaselined:
+            # Name them: the floor was applied over a strict subset of the
+            # proposal, and an operator reading the rejection is entitled
+            # to know which keys it could not weigh.
+            reason += " (uncomparable keys: " + ",".join(unbaselined) + ")"
+        return reason
     return None

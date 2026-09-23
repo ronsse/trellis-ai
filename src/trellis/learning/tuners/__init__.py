@@ -17,6 +17,7 @@ from trellis.learning.tuners.auto_promote import (
     run_auto_promotion,
 )
 from trellis.learning.tuners.promotion import (
+    EffectSize,
     PromotionPolicy,
     PromotionPreview,
     PromotionResult,
@@ -47,6 +48,7 @@ __all__ = [
     "AutoPromoteOutcome",
     "AutoPromotePolicy",
     "AutoPromoteReport",
+    "EffectSize",
     "PostPromotionPolicy",
     "PostPromotionReport",
     "PromotionPolicy",

@@ -395,19 +395,16 @@ def _evaluate(
 
     baseline = parameter_store.resolve(proposal.scope)
     baseline_values = baseline.values if baseline else None
-    effect, has_non_numeric = _compute_effect_size(
-        proposal.proposed_values, baseline_values
-    )
+    effect = _compute_effect_size(proposal.proposed_values, baseline_values)
     rejection = _apply_policy(
         proposal=proposal,
         policy=policy.to_promotion_policy(),
         baseline_values=baseline_values,
         effect=effect,
-        has_non_numeric=has_non_numeric,
     )
     if rejection is not None:
-        return False, rejection, effect
-    return True, "passes_auto_gate", effect
+        return False, rejection, effect.comparable_max
+    return True, "passes_auto_gate", effect.comparable_max
 
 
 def _promote_and_monitor(

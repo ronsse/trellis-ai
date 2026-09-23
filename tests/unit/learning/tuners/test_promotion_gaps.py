@@ -26,7 +26,11 @@ from trellis.learning.tuners import (
     PromotionPolicy,
     promote_proposal,
 )
-from trellis.learning.tuners.promotion import _apply_policy, _compute_effect_size
+from trellis.learning.tuners.promotion import (
+    EffectSize,
+    _apply_policy,
+    _compute_effect_size,
+)
 from trellis.schemas.parameters import ParameterProposal, ParameterScope, ParameterSet
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -74,12 +78,13 @@ def test_compute_effect_size_bool_baseline_marks_non_numeric():
     that the existing string test does not exercise (str and bool take
     different code paths).
     """
-    effect, has_non_numeric = _compute_effect_size(
+    effect = _compute_effect_size(
         proposed={"strict_mode": True},
         baseline={"strict_mode": False},
     )
-    assert effect is None
-    assert has_non_numeric is True
+    assert effect.comparable_max is None
+    assert effect.unbaselined_keys == ()
+    assert effect.has_non_numeric is True
 
 
 def test_compute_effect_size_uncoercible_value_is_skipped():
@@ -89,12 +94,13 @@ def test_compute_effect_size_uncoercible_value_is_skipped():
     other numeric keys in the proposal the loop yields ``effect=None``
     and ``has_non_numeric=False``.
     """
-    effect, has_non_numeric = _compute_effect_size(
+    effect = _compute_effect_size(
         proposed={"weights": [1, 2, 3]},  # list isn't bool/str/None/numeric
         baseline={"weights": [4, 5, 6]},
     )
-    assert effect is None
-    assert has_non_numeric is False
+    assert effect.comparable_max is None
+    assert effect.unbaselined_keys == ()
+    assert effect.has_non_numeric is False
 
 
 # ---------------------------------------------------------------------------
@@ -149,8 +155,9 @@ def test_apply_policy_returns_zero_effect_when_proposal_is_empty():
         proposal=proposal,
         policy=PromotionPolicy(),
         baseline_values={"recency_half_life_days": 30.0},
-        effect=None,
-        has_non_numeric=False,
+        effect=EffectSize(
+            comparable_max=None, unbaselined_keys=(), has_non_numeric=False
+        ),
     )
     assert reason == "zero_effect_proposed_equals_baseline"
 
