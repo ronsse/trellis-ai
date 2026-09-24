@@ -1248,12 +1248,13 @@ class StoreRegistry:
         without code changes. Pass ``True`` / ``False`` explicitly to
         override the env var.
 
-        Connectivity checks for *other* lazily-connecting backends (S3
-        boto client, psycopg pools that defer connect) are not
-        implemented here — Neo4j is the blessed graph backend so it
-        gets the explicit check; the others connect on first use and
-        surface errors there. Add a similar wrapper in this method
-        when a deployment incident motivates it.
+        The explicit check covers backends whose registry hook caches a
+        driver in ``RegistryContext.shared`` under a ``(uri, user)`` key
+        (see :meth:`_check_bolt_connectivity` — today the Neo4j stores
+        and the ArcadeDB graph store). Other lazily-connecting backends
+        (S3 boto client, psycopg pools that defer connect) connect on
+        first use and surface errors there. Add a similar wrapper in
+        this method when a deployment incident motivates it.
         """
         targets: list[str] = (
             list(store_types) if store_types is not None else list(_PLANE_OF.keys())
@@ -1806,7 +1807,7 @@ class StoreRegistry:
         Failures in any single ``close()`` are logged and skipped so a
         misbehaving backend cannot block cleanup of the rest.
 
-        Stores are closed first; for Neo4j stores with an injected
+        Stores are closed first; for Bolt stores with an injected
         driver, ``close()`` is a no-op and the driver is closed by the
         registry afterwards. This avoids racing the registry's shutdown
         sweep with a store's individual ``close()`` call.

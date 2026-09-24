@@ -94,6 +94,86 @@ Rationale: a plugin silently taking over the `sqlite` backend would
 be very difficult to debug.  Making the override explicit is worth
 the small papercut of needing to set an env var.
 
+### Registry preparation hook (store plugins)
+
+*Added 2026-09-24; the hook shipped in #537 (2026-09-04, issue #256).*
+
+A store backend that needs setup the registry would otherwise have to
+know about — env-var fallbacks, one client shared by several store
+types, a migration run once per server, a closer at shutdown — does it
+in an optional classmethod on the store class:
+
+```python
+@classmethod
+def prepare_registry_params(
+    cls, ctx: RegistryContext, store_type: str, params: dict[str, Any]
+) -> dict[str, Any]: ...
+```
+
+The Protocol is `trellis.stores.base.registry.RegistryPreparable`, but
+nothing needs to subclass or register it: `StoreRegistry._instantiate`
+looks the method up with `getattr` and calls it when it is callable.
+It runs when that store type is first built (first access, or
+`validate()`), after the registry has applied its own defaults
+(`db_path` for `sqlite`, `root_dir` for `local`, `dsn` for
+`postgres`/`pgvector`), and the registry then constructs the store as
+`cls(**returned)`. `params` is the store type's config block without
+its `backend` key. **The return value is the complete constructor
+kwargs**: a hook that builds a fresh dict and forgets to carry `params`
+through silently disconnects the store from its config. An exception
+raised here propagates like any construction failure; under
+`validate()` it lands in the aggregated `RegistryValidationError`.
+
+`RegistryContext` (frozen dataclass, same module) carries four
+things, and a hook should need nothing else from the registry:
+
+| Field | What it is | Use it for |
+|---|---|---|
+| `env` | Read-only snapshot of `os.environ`, taken when the context is built (once per store instantiation) | Env-var fallbacks — read these instead of `os.environ` |
+| `shared` | One plain `dict` per registry instance, the same object for every store that registry builds | Resources several store types share (the built-in Bolt backends keep one driver per `(uri, user)` here). **Namespace keys by module path**, e.g. `f"{__name__}:drivers"` — independently installed plugins share this dict |
+| `register_closer` | Appends a zero-argument callable | Releasing what you put in `shared`. Register once, when you create the resource — not on a cache hit |
+| `emit_warning` | Logs `store_registry_backend_warning` at `warning`, tagged with `store_type` and `backend` | Degraded-but-working setup an operator should see |
+
+`StoreRegistry.close()` closes every cached store first, then runs the
+closers in registration order (a failing closer is logged and skipped),
+then clears both the closer list and `shared` — so a closer runs once
+even when `close()` is called twice. A store holding a resource the
+registry injected should therefore make its own `close()` a no-op for
+it, as the built-in Bolt stores do for an injected driver.
+
+**The pre-flight connectivity convention is duck-typed, and opt-in by
+shape.** `validate(check_connectivity=True)` (or
+`TRELLIS_VALIDATE_CONNECTIVITY`) walks every `dict` value in `shared`
+and calls `verify_connectivity()` on each entry whose key is a
+2-tuple of strings `(uri, user)` and whose value has that method,
+reporting a failure as `bolt-driver:<uri>`. Nothing in that walk names
+a backend. A plugin that caches its client under that shape gets
+pre-flight connectivity checking for free; one that does not gets
+none, and nothing warns that it was skipped. The built-in Bolt
+backends are the worked example:
+`trellis.stores.bolt_opencypher.base.registry_driver_cache` returns
+such a map, and `trellis.stores.neo4j.base.prepare_neo4j_registry_params`
+is a complete hook in about forty lines.
+
+The reference *plugin* is synthetic:
+`tests/unit/plugins/test_registry_prepare_hook.py::test_plugin_hook_shares_context_and_registers_closer`
+loads a store class through a faked `trellis.stores.graph` /
+`trellis.stores.vector` entry point and asserts the shared state, the
+env snapshot and the run-once closer.
+
+What this does and does not make true today. Neo4j and ArcadeDB use
+the hook, but they are still `_BUILTIN_BACKENDS` rows, not entry
+points — `pyproject.toml` declares no `trellis.stores.*` entry points.
+What the hook buys is that `src/trellis/stores/registry.py` imports
+none of `trellis.stores.{neo4j,arcadedb,bolt_opencypher}` and compares
+no value against either backend name, which
+`tests/unit/test_registry_plugin_boundary_rule.py` derives by AST and
+fails on a reintroduction. One name-keyed table remains outside that
+rule's sight: the pre-flight URI-scheme check (`_BACKEND_URI_RULES`,
+covering `postgres`, `pgvector` and `neo4j`) is a dict keyed by backend
+name, so a plugin cannot contribute a URI rule without editing
+`registry.py`.
+
 ### ABI stability
 
 Plugins conform to the Protocol / ABC contracts in `trellis.*`.  We
