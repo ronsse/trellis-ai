@@ -36,7 +36,9 @@ from trellis.extract.base import ExtractorTier
 from trellis.extract.prompts import ENTITY_EXTRACTION_V1, PromptTemplate, render
 from trellis.extract.telemetry import (
     ExtractionFailureError,
+    ParseSalvageKind,
     emit_extraction_failure,
+    emit_parse_salvaged,
 )
 from trellis.llm.json_response import JSONParseOutcome, parse_json_response
 from trellis.schemas.enums import NodeRole
@@ -148,11 +150,11 @@ class LLMExtractor:
         tokens = response.usage.total_tokens if response.usage else 0
 
         # Hashes for telemetry clustering are computed lazily inside the
-        # failure branches below: SHA-256 of the rendered prompt groups
-        # failures by template + injected vars; SHA-256 of the input text
-        # groups by source shape. Hash cost is only paid when extraction
-        # fails — happy path skips it entirely.
-        parsed, parse_exc = _parse_json_with_exception(response.content)
+        # failure and salvage branches below: SHA-256 of the rendered prompt
+        # groups events by template + injected vars; SHA-256 of the input
+        # text groups by source shape. Hash cost is only paid when the
+        # response was not a clean JSON object — the happy path skips it.
+        parsed, parse_exc, salvage_kind = _parse_json_with_exception(response.content)
         if parsed is None:
             emit_extraction_failure(
                 event_log=self._event_log,
@@ -191,6 +193,23 @@ class LLMExtractor:
                 msg,
                 failure_kind="parse_error",
                 extractor_id=self.__class__.__name__,
+            )
+
+        # Counted at the parse, not after draft validation: this records a
+        # response whose JSON had to be rescued (#514). A rescued value that
+        # then fails validation reports that failure through its own event
+        # below, so the two counts answer different questions.
+        if salvage_kind is not None:
+            emit_parse_salvaged(
+                event_log=self._event_log,
+                extractor_id=self.__class__.__name__,
+                extractor_tier="llm",
+                salvage_kind=salvage_kind,
+                source_hint=source_hint,
+                prompt_hash=_prompt_hash(messages),
+                source_excerpt_hash=content_hash(text) if text else None,
+                model=response.model or self._model,
+                raw_length=len(response.content),
             )
 
         try:
@@ -309,7 +328,7 @@ def _parse_input(raw_input: Any) -> tuple[str, str | None]:
 
 def _parse_json_with_exception(
     content: str,
-) -> tuple[dict[str, Any] | None, Exception | None]:
+) -> tuple[dict[str, Any] | None, Exception | None, ParseSalvageKind | None]:
     """Recover a JSON object from realistic LLM output.
 
     Strategy:
@@ -319,29 +338,36 @@ def _parse_json_with_exception(
 
     A bare JSON array is lifted into ``{"entities": [...], "edges": []}``
     since some prompts may coax that shape out of stubborn models.
-    Returns ``(parsed, None)`` on success and ``(None, last_exc)`` on
-    failure. The exception lets :func:`emit_extraction_failure` record a
-    meaningful ``error_class`` / ``error_excerpt``. Empty / blank input
-    returns ``(None, None)``.
+    Returns ``(parsed, None, salvage_kind)`` on success and
+    ``(None, last_exc, None)`` on failure. The exception lets
+    :func:`emit_extraction_failure` record a meaningful ``error_class`` /
+    ``error_excerpt``. ``salvage_kind`` is ``None`` when the (fence-stripped)
+    response parsed as an object outright, ``"brace_span"`` when step 3
+    rescued it and ``"list_lift"`` when a bare array was lifted; the caller
+    counts it via :func:`emit_parse_salvaged`. The two cannot both fire:
+    the step-3 slice starts at ``{``, so it never yields a list. Empty /
+    blank input returns ``(None, None, None)``.
     """
     if not content or not content.strip():
-        return None, None
+        return None, None, None
 
     parsed = parse_json_response(content)
     data = parsed.value
     last_exc: Exception | None = None
+    spanned = False
     if parsed.outcome is JSONParseOutcome.MALFORMED:
         last_exc = json.JSONDecodeError(parsed.error or "invalid JSON", content, 0)
         start = content.find("{")
         end = content.rfind("}")
         if start != -1 and end > start:
             data, last_exc = _try_json_loads_with_exc(content[start : end + 1])
+            spanned = True
 
     if isinstance(data, dict):
-        return data, None
+        return data, None, ("brace_span" if spanned else None)
     if isinstance(data, list):
-        return {"entities": data, "edges": []}, None
-    return None, last_exc
+        return {"entities": data, "edges": []}, None, "list_lift"
+    return None, last_exc, None
 
 
 def _try_json_loads_with_exc(text: str) -> tuple[Any | None, Exception | None]:

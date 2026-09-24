@@ -706,10 +706,14 @@ _EXTRACT_SHAPES = [
         id="prose-wrapped",
     ),
     pytest.param(_SALVAGE_LIST, "list_lift", False, id="bare-list"),
-    pytest.param(f"```json\n{_SALVAGE_LIST}\n```", "list_lift", False, id="fenced-list"),
+    pytest.param(
+        f"```json\n{_SALVAGE_LIST}\n```", "list_lift", False, id="fenced-list"
+    ),
     pytest.param("[]", "list_lift", False, id="empty-list"),
     pytest.param("SENTINEL_PREFACE not json at all", None, True, id="no-braces"),
-    pytest.param("SENTINEL_PREFACE {entities: bad} tail", None, True, id="broken-braces"),
+    pytest.param(
+        "SENTINEL_PREFACE {entities: bad} tail", None, True, id="broken-braces"
+    ),
     pytest.param("", None, True, id="empty"),
 ]
 

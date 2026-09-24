@@ -308,6 +308,26 @@ class EventType(StrEnum):
     #: error_excerpt, correlation_id}``. ``error_excerpt`` is bounded at
     #: 200 chars and redacted of common PII patterns (email, UUID, SSN).
     EXTRACTION_FAILED = "extraction.failed"
+    #: Emitted by :func:`~trellis.extract.telemetry.emit_parse_salvaged`
+    #: when an LLM response that was *not* the requested JSON object was
+    #: rescued by a salvage heuristic and parsed anyway (#514). Two sites
+    #: salvage: the enrichment service's brace regex (``brace_regex``) and
+    #: :class:`~trellis.extract.llm.LLMExtractor`'s first-``{``-to-last-``}``
+    #: slice (``brace_span``) plus its bare-list lift (``list_lift``).
+    #: Stripping one code fence is the clean path and is not counted.
+    #: Without this event :attr:`EXTRACTION_FAILED` is only a floor on how
+    #: often a model misses the format: a response the salvage caught
+    #: recorded nothing at all.
+    #:
+    #: Deliberately **not** a ``failure_kind``: failure analyzers group
+    #: :attr:`EXTRACTION_FAILED` by kind, and a rescued parse counted
+    #: there would inflate every failure rate. Unsampled, because a
+    #: sampler would turn the count back into a floor. Payload schema
+    #: (all keys always present): ``{extractor_id, extractor_tier,
+    #: salvage_kind, source_hint, prompt_hash, source_excerpt_hash, model,
+    #: raw_length}`` — digests and a length only, never response text.
+    #: Fail-soft: a broken event log must not fail a parse that succeeded.
+    EXTRACTION_PARSE_SALVAGED = "extraction.parse_salvaged"
 
     #: Emitted by the well-known promotion loop
     #: (:mod:`trellis.learning.schema_evolution`) when an open-string

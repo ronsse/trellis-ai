@@ -520,7 +520,9 @@ class TestEnrichmentFailureTelemetry:
         assert result.failure_kind == "parse_error"
         # A salvage attempt that failed is a failure, never a salvage (#514).
         assert result.parse_salvaged is False
-        assert event_log.get_events(event_type=EventType.EXTRACTION_PARSE_SALVAGED) == []
+        assert (
+            event_log.get_events(event_type=EventType.EXTRACTION_PARSE_SALVAGED) == []
+        )
 
         events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
         assert len(events) == 1
@@ -904,9 +906,9 @@ class TestParseSalvageCount:
         assert clean.parse_salvaged is False
         assert rescued.parse_salvaged is True
         assert rescued.auto_tags == ["sentinel-tag-alpha", "beta"]
-        assert {k: v for k, v in _comparable(rescued).items() if k not in transport} == {
-            k: v for k, v in _comparable(clean).items() if k not in transport
-        }
+        assert {
+            k: v for k, v in _comparable(rescued).items() if k not in transport
+        } == {k: v for k, v in _comparable(clean).items() if k not in transport}
 
     @pytest.mark.parametrize(
         "response",
@@ -927,7 +929,10 @@ class TestParseSalvageCount:
         )
         assert with_log.parse_salvaged is True
         assert _comparable(with_log) == _comparable(without_log)
-        assert len(event_log.get_events(event_type=EventType.EXTRACTION_PARSE_SALVAGED)) == 1
+        assert (
+            len(event_log.get_events(event_type=EventType.EXTRACTION_PARSE_SALVAGED))
+            == 1
+        )
 
     async def test_broken_event_log_does_not_fail_a_salvaged_parse(self) -> None:
         """Fail-soft: the count must never turn a rescued parse into a failure."""

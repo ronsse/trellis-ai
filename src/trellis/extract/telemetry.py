@@ -12,7 +12,11 @@ Two distinct surfaces share this module by design:
   :class:`~trellis.extract.llm.LLMExtractor` and
   ``trellis_workers.learning.miner.PrecedentMiner._parse_candidates``.
   Callers emit-then-raise; the dispatcher is the one legitimate degrader.
-  See ``docs/design/adr-extraction-failure-telemetry.md``.
+  See ``docs/design/adr-extraction-failure-telemetry.md``. Its writer-side
+  sibling :func:`emit_parse_salvaged` counts the other outcome of the same
+  parse — a response that was not the requested JSON object but was
+  rescued by a salvage heuristic (#514) — so ``EXTRACTION_FAILED`` is no
+  longer the only record of a model missing the format.
 
 Two fallback signals are tracked by the analyzers today:
 
@@ -358,6 +362,70 @@ def emit_extraction_failure(
 
     if emit_full:
         _SAMPLER.set_last_event_id(cluster_key, event.event_id)
+
+
+#: How a malformed response was rescued. ``brace_regex`` is the enrichment
+#: service's greedy ``\{.*\}`` search; ``brace_span`` is
+#: :class:`~trellis.extract.llm.LLMExtractor`'s first-``{``-to-last-``}``
+#: slice; ``list_lift`` is the same extractor wrapping a bare JSON array
+#: as ``{"entities": [...], "edges": []}``.
+ParseSalvageKind = Literal["brace_regex", "brace_span", "list_lift"]
+
+
+def emit_parse_salvaged(
+    *,
+    event_log: EventLog | None,
+    extractor_id: str,
+    extractor_tier: ExtractionTier,
+    salvage_kind: ParseSalvageKind,
+    raw_length: int,
+    source_hint: str | None = None,
+    prompt_hash: str | None = None,
+    source_excerpt_hash: str | None = None,
+    model: str | None = None,
+) -> None:
+    """Emit an ``EXTRACTION_PARSE_SALVAGED`` event for one rescued parse.
+
+    Call it only after the salvage produced a value the caller goes on to
+    use — never on the clean-parse path and never on a failure path, which
+    reports through :func:`emit_extraction_failure`. A no-op when
+    ``event_log`` is ``None``.
+
+    Two things differ from :func:`emit_extraction_failure` on purpose.
+    There is **no sampler**: this event exists to be counted, and a
+    per-cluster cap would make the count a floor again, which is the
+    defect it closes. And there is **no excerpt**: the payload carries
+    digests and ``raw_length`` only, because the rescued text is model
+    output about user content and the event log has a different access
+    and retention profile than the store that holds the content.
+    """
+    if event_log is None:
+        return
+
+    payload: dict[str, object] = {
+        "extractor_id": extractor_id,
+        "extractor_tier": extractor_tier,
+        "salvage_kind": salvage_kind,
+        "source_hint": source_hint,
+        "prompt_hash": prompt_hash,
+        "source_excerpt_hash": source_excerpt_hash,
+        "model": model,
+        "raw_length": raw_length,
+    }
+    try:
+        event_log.emit(
+            EventType.EXTRACTION_PARSE_SALVAGED,
+            source="extraction_failure_helper",
+            payload=payload,
+        )
+    # GRACEFUL-DEGRADATION: the parse already succeeded; a broken event
+    # log must not turn a counted success into a failed extraction.
+    except Exception:
+        logger.exception(
+            "parse_salvaged_emit_failed",
+            extractor_id=extractor_id,
+            salvage_kind=salvage_kind,
+        )
 
 
 _FALLBACK_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
@@ -730,9 +798,11 @@ __all__ = [
     "ExtractionTier",
     "ExtractionValidationReport",
     "ExtractorFallbackReport",
+    "ParseSalvageKind",
     "SourceFallbackStats",
     "SourceValidationStats",
     "analyze_extraction_validation",
     "analyze_extractor_fallbacks",
     "emit_extraction_failure",
+    "emit_parse_salvaged",
 ]
