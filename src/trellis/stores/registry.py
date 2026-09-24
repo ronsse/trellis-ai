@@ -1244,15 +1244,18 @@ class StoreRegistry:
 
         Default (``check_connectivity=None``): respect the
         ``TRELLIS_VALIDATE_CONNECTIVITY`` env var (truthy values
-        ``1`` / ``true`` / ``yes`` enable). Off otherwise. The env-var
+        ``1`` / ``true`` / ``yes`` / ``on`` enable). Off otherwise. The env-var
         path lets dev keep fast restarts while production turns it on
         without code changes. Pass ``True`` / ``False`` explicitly to
         override the env var.
 
         The explicit check covers backends whose registry hook caches a
         driver in ``RegistryContext.shared`` under a ``(uri, user)`` key
-        (see :meth:`_check_bolt_connectivity` — today the Neo4j stores
-        and the ArcadeDB graph store). Other lazily-connecting backends
+        (see :meth:`_check_bolt_connectivity`; the built-in Bolt stores
+        cache theirs through
+        ``bolt_opencypher.base.registry_driver_cache``, and a hook that
+        caches nothing — the ArcadeDB vector store, which speaks HTTP —
+        is not checked). Other lazily-connecting backends
         (S3 boto client, psycopg pools that defer connect) connect on
         first use and surface errors there. Add a similar wrapper in
         this method when a deployment incident motivates it.

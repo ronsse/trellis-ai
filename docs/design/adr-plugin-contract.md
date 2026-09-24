@@ -153,7 +153,7 @@ none, and nothing warns that it was skipped. The built-in Bolt
 backends are the worked example:
 `trellis.stores.bolt_opencypher.base.registry_driver_cache` returns
 such a map, and `trellis.stores.neo4j.base.prepare_neo4j_registry_params`
-is a complete hook in about forty lines.
+is a complete hook — short enough to read whole before writing one.
 
 The reference *plugin* is synthetic:
 `tests/unit/plugins/test_registry_prepare_hook.py::test_plugin_hook_shares_context_and_registers_closer`
