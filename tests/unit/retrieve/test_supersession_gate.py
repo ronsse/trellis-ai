@@ -161,9 +161,9 @@ class TestTheLoserIsWithheldWhenItsSuccessorIsPresent:
             0
         ].payload
         assert payload["withholding"]["withheld_item_ids"] == ["old"]
-        assert [
-            (r["item_id"], r["reason"]) for r in payload["rejected_items"]
-        ] == [("old", SUPERSEDED)]
+        assert [(r["item_id"], r["reason"]) for r in payload["rejected_items"]] == [
+            ("old", SUPERSEDED)
+        ]
 
     def test_successor_absent_the_loser_is_served(self) -> None:
         """T2 — the pairwise half. The build-level twin of
@@ -278,6 +278,16 @@ class TestAMalformedStampNeverHides:
             assert sorted(_served(pack)) == ["new", "old", "u"], metadata
             assert _summary(pack)["total"] == 0, metadata
 
+    def test_a_self_reference_is_malformed_not_a_contradiction(self) -> None:
+        """A record naming itself is served by either reading — a one-node
+        loop is a cycle, and cycles are kept — so what separates "malformed"
+        from "contradiction" is the operator signal: a self-reference must
+        not raise the cycle warning, which asserts two memories disagree."""
+        with capture_logs() as logs:
+            pack = self._pack(_stamp("old"))
+        assert sorted(_served(pack)) == ["new", "old", "u"]
+        assert [e for e in logs if e["event"] == "supersession_cycle_kept"] == []
+
     def test_the_well_formed_control_is_withheld(self) -> None:
         """The same fixture with a well-formed stamp, so the cases above are
         served because they are malformed and not because the fixture can
@@ -306,7 +316,10 @@ class TestChainsAndCycles:
 
         assert sorted(_served(pack)) == ["c", "u"]
         # Order of rows follows the pool, so the served record is stable.
-        assert _rows(pack) == [("a", SUPERSEDED, "keyword"), ("b", SUPERSEDED, "keyword")]
+        assert _rows(pack) == [
+            ("a", SUPERSEDED, "keyword"),
+            ("b", SUPERSEDED, "keyword"),
+        ]
         assert _summary(pack)["by_reason"] == {SUPERSEDED: 2}
 
     def test_a_chain_whose_head_is_absent_serves_its_newest_present_link(
@@ -441,9 +454,7 @@ class TestAttributionAndRows:
         both = _item(
             "old",
             0.90,
-            metadata={
-                LIFECYCLE_KEY: {"state": ARCHIVED_STATE, "superseded_by": "new"}
-            },
+            metadata={LIFECYCLE_KEY: {"state": ARCHIVED_STATE, "superseded_by": "new"}},
         )
         stamped_elsewhere = _loser("old", "new", 0.85, axis="semantic")
         builder = PackBuilder(
