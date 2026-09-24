@@ -134,13 +134,6 @@ DELIBERATELY_UNWIRED: dict[Path, str] = {
         "Measured 2026-09-12 against a running instance: 8 of 9 pass, the "
         "ninth needs write credentials."
     ),
-    Path("integration/cli/test_subprocess_serve.py"): (
-        "needs no live infrastructure at all — measured 2026-09-12, it "
-        "passes in 2.4s on a bare checkout. It is dark because it carries "
-        "live + slow markers that tests.yml deselects, which is a marker "
-        "defect rather than a CI capability gap; wiring it into live-infra "
-        "would paper over that instead of fixing it."
-    ),
 }
 
 #: Shared contract suites no executed module subclasses, each with why.
@@ -156,12 +149,15 @@ DELIBERATELY_UNWIRED: dict[Path, str] = {
 #: **It is empty, and that is a claim rather than a placeholder.** All
 #: six suites have a subclass that runs on every pull request, which has
 #: only been true since #543 gave the ArcadeDB graph contract a service
-#: container. The remaining gap cannot be written here: `ArcadeDBVectorStore`
-#: has no `VectorStoreContractTests` subclass *at all* (#579), so the
-#: suite is reached — by sqlite and pgvector — while the blessed vector
-#: substrate is unchecked. An absent subclass is invisible to a rule
-#: about the subclasses that exist, which is why #579 is an issue and
-#: not an entry.
+#: container. The gap that remains cannot be written here, and the one
+#: before it could not either: `ArcadeDBVectorStore` had no
+#: `VectorStoreContractTests` subclass *at all* until #589 (#579), so the
+#: suite was reached — by sqlite and pgvector — while the blessed vector
+#: substrate went unchecked, and nothing in this module could say so.
+#: `Neo4jVectorStore` is in that state now: the vector suite has no
+#: subclass for it. An absent subclass is invisible to a rule about the
+#: subclasses that exist, which is why such a gap is an issue and not an
+#: entry.
 DELIBERATELY_UNSUBCLASSED: dict[Path, str] = {}
 
 _TRUTHY = {"1", "true", "yes", "on"}
