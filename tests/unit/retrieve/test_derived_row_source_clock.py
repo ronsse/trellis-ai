@@ -63,10 +63,14 @@ the half that was never a roster: the producers are **called**, and the bag
 is **read**. A declared propagation that does not happen is exactly the
 failure #461 found one layer over, so these assert behaviour, not prose.
 
-The clock *disposition* of a ``put_document`` caller is no longer guarded by
-anything, and that is a real gap rather than a solved problem — see #463's
-follow-up. It wants a rule written against the new single seam, not a
-resurrection of the old per-site one.
+The clock *disposition* of a ``put_document`` caller is now forced at the
+seam rather than rostered per site: ``preserve_updated_at`` is keyword-only
+with no default, so every caller declares one
+(``tests/unit/core/test_put_document_signature.py``). That makes a caller
+decide; it does not check the decision, which is left to each caller's own
+recency test where one exists (the ones built on ``tests/document_recency.py``).
+Note the clocks differ: that keyword governs the row's ``updated_at``
+*column*; this module pins the *metadata-bag* clock a derived row carries.
 """
 
 from __future__ import annotations

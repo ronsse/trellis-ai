@@ -114,7 +114,7 @@ def put_document(
     content: str,
     metadata: dict[str, Any],
     *,
-    preserve_updated_at: bool = False,
+    preserve_updated_at: bool,
 ) -> DocumentWriteResult:
     """Write a document row and mirror it onto the vector row.
 
@@ -144,10 +144,23 @@ def put_document(
             row), so a partial bag would strip keys it never meant to
             touch. Passing the same object to both planes is what makes
             that precondition structural instead of documented.
-        preserve_updated_at: Forwarded to the document store. ``True`` on a
-            metadata-only write, so a tag refresh does not re-stamp the row
-            to the sweep's own clock and hand ``KeywordSearch``'s recency
-            decay a false age (#406).
+        preserve_updated_at: Forwarded to the document store, and
+            **required**: the caller states whose clock the row carries,
+            because only the caller knows whether its content changed.
+
+            * ``True`` — the row keeps its existing ``updated_at``. Right for
+              a metadata-only write (a tag, a lifecycle stamp, derived
+              metadata), so a refresh does not re-stamp the row to the
+              sweep's own clock and hand ``KeywordSearch``'s recency decay a
+              false age (#406, #417).
+            * ``False`` — the row is stamped with this write's time. Right
+              when the content is new. On insert the choice is moot: a new
+              row's ``updated_at`` is its creation time.
+
+            Deliberately keyword-only with no default: a default answered the
+            question for every caller that never asked it. The signature
+            forces a declaration; it cannot check that the declaration is
+            right, which is left to each caller's own recency test.
 
     Returns:
         A :class:`DocumentWriteResult`. Never raises for a mirror failure;
