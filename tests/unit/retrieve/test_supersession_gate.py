@@ -446,6 +446,29 @@ class TestTheSectionedPath:
         assert sorted(_served_sectioned(pack)) == ["old", "u-doc", "u-ent"]
         assert _summary(pack)["total"] == 0
 
+    def test_sectioned_withholds_a_stale_unstamped_copy_too(self) -> None:
+        """The sectioned twin of the #338 shape above, and the one test that
+        pins the gate's *position* on this path: moved after ``_deduplicate``
+        it sees only the higher-scored unstamped copy, finds no stamp, and
+        serves the loser beside its successor. Every other sectioned test
+        stays green under that move."""
+        builder = PackBuilder(
+            strategies=[
+                _strategy("keyword", [_loser("old", "new", 0.70), _item("new", 0.6)]),
+                _strategy(
+                    "semantic",
+                    [
+                        _item("old", 0.90, axis="semantic"),
+                        _item("u-ent", 0.3, axis="semantic", item_type="entity"),
+                    ],
+                ),
+            ]
+        )
+        pack = builder.build_sectioned("deploy checklist", sections=[_SECTION])
+
+        assert sorted(_served_sectioned(pack)) == ["new", "u-ent"]
+        assert _summary(pack)["by_reason"] == {SUPERSEDED: 1}
+
 
 class TestAttributionAndRows:
     def test_an_archived_loser_is_attributed_to_archived(self) -> None:
