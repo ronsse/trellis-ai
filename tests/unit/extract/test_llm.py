@@ -684,7 +684,16 @@ _SALVAGE_OBJECT = json.dumps(
             {"entity_type": "p", "name": "SentinelEntityName", "confidence": 0.8},
             {"entity_type": "p", "name": "Second", "confidence": 0.7},
         ],
-        "edges": [],
+        # Non-empty so a salvage path that rebuilt or dropped part of the
+        # object could not pass the equality test by coincidence.
+        "edges": [
+            {
+                "source_id": "sentinelentityname",
+                "target_id": "second",
+                "edge_kind": "relates",
+                "confidence": 0.6,
+            }
+        ],
     }
 )
 _SALVAGE_LIST = json.dumps(
