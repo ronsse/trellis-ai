@@ -213,11 +213,11 @@ jobs:
         # ABC semantics against every configured backend — that's where
         # cross-backend drift (e.g. issue #195 edge re-ingest) surfaces.
         # GraphStoreContractTests covers Postgres + Neo4j + ArcadeDB here;
-        # VectorStoreContractTests covers pgvector, which is the production
-        # vector backend and whose contract had never executed anywhere
-        # before #345 — its fixture predated the connection-pool refactor
-        # (#84) and called ``_conn`` as an attribute rather than the
-        # context-manager method it became.
+        # VectorStoreContractTests covers pgvector + ArcadeDB + Neo4j.
+        # pgvector's contract had never executed anywhere before #345 — its
+        # fixture predated the connection-pool refactor (#84) and called
+        # ``_conn`` as an attribute rather than the context-manager method
+        # it became.
         #
         # tests/unit/stores/test_pgvector.py is named explicitly because it
         # carried the same dead fixture as the contract file and is the other
@@ -288,6 +288,13 @@ jobs:
         # fails if the two names diverge again. Measured on this image, in
         # this order, from a fresh container: 29 passed, 5 skipped across
         # this suite and test_neo4j_e2e.py together.
+        #
+        # contracts/test_neo4j_vector_contract.py rides the contracts/
+        # directory above into this same invocation, so both hazards apply
+        # to it and both are handled the same way: its SEARCH-issuing
+        # contract cases (15 of 40) take the same gate by name and skip
+        # here, the other 25 run; and it takes the same default index name
+        # at the same 3 dims. The rule module above pins both.
         #
         # tests/integration/test_recommended_config.py was the last added,
         # and it is the marker lesson rather than the capability one. It

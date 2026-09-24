@@ -179,7 +179,7 @@ The current [`test_graph_store.py`](../../tests/unit/stores/test_graph_store.py)
 | `tests/unit/stores/contracts/test_sqlite_vector_contract.py` | **Landed** | 21 lines |
 | `tests/unit/stores/contracts/test_pgvector_contract.py` (env-gated) | **Landed** | 39 lines |
 | `tests/unit/stores/contracts/test_lancedb_vector_contract.py` (skipped if lancedb absent) | **Landed** | 28 lines |
-| Neo4j vector contract (shape #2) | **Excluded by design** | covered in `test_neo4j_vector.py` instead — see deviation below |
+| Neo4j vector contract (shape #2) | **Landed** (was excluded by design — superseded, see §3.5) | `tests/unit/stores/contracts/test_neo4j_vector_contract.py` |
 | Expanded `GraphStoreContractTests` — node-role validation, document_ids, history compaction, alias time-travel, `as_of` for subgraph / query / edges | Pending | ~250 lines (estimate) |
 | Update `CLAUDE.md` and the plugin-contract ADR to point new backends at the contract suite | Pending | ~30 lines |
 
@@ -192,6 +192,8 @@ The current [`test_graph_store.py`](../../tests/unit/stores/test_graph_store.py)
 `Neo4jVectorStore` is **excluded by design** from `VectorStoreContractTests`. Shape #2 (per [`adr-graph-ontology.md`](./adr-graph-ontology.md) — embeddings as optional properties on the graph store's `:Node` rows) makes its `upsert(item_id, vector)` require the underlying node to already exist as a current version. The contract assumes vector backends create storage independently; shape #2 is a deliberate cross-store optimization that violates that assumption.
 
 The shape #2 contract — including the "missing node raises", "delete strips embedding but keeps node", "historical versions excluded by `valid_to IS NULL` filter" tests — lives in [`tests/unit/stores/test_neo4j_vector.py`](../../tests/unit/stores/test_neo4j_vector.py) and runs against a real Neo4j instance via `TRELLIS_TEST_NEO4J_URI`. This is the right home for them: shape #2 *is* the contract for that backend.
+
+**Superseded.** The exclusion conflated a storage *prerequisite* with a semantic difference. #579 gave the contract a `provision_storage` hook — a default no-op a shape-#2 subclass overrides to create the backing node — and brought `ArcadeDBVectorStore` under it with no weakened assertion. `Neo4jVectorStore` now has the same subclass, [`test_neo4j_vector_contract.py`](../../tests/unit/stores/contracts/test_neo4j_vector_contract.py), with no change to the store. The shape-#2-specific cases above stay in `test_neo4j_vector.py`, where they are additive rather than a substitute.
 
 The expansion items above land as follow-ups when their gaps are felt (e.g., when the next graph backend lands and forces a contract violation).
 
