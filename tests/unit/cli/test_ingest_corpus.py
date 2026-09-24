@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,8 @@ class TestIngestCorpusHelp:
         extensions = supported_extensions()
         assert extensions
         for ext in extensions:
-            assert ext in text, f"{ext!r} missing from ingest corpus --help"
+            # Whole token: ".mdx" in the help must not satisfy ".md".
+            token = rf"(?<!\w){re.escape(ext)}(?!\w)"
+            assert re.search(token, text), f"{ext!r} missing from corpus --help"
         assert "unsupported" in text
         assert "trellis ingest conversations" in text
