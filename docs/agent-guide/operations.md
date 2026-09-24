@@ -534,9 +534,11 @@ trellis ingest evidence /tmp/evidence.json --format json
 
 ### `trellis ingest corpus`
 
-Sync a directory of files (a notes vault, a folder of transcripts) into
-the document store, idempotently. See
-[`adr-corpus-ingestion.md`](../design/adr-corpus-ingestion.md).
+Sync a directory of `.md`/`.markdown` files (e.g. a notes vault) into
+the document store, idempotently. Any other file is reported as
+`skipped_unsupported`, never converted — format conversion (PDF, audio,
+per-tool exports) is the client's pre-step, per the normalization
+boundary in [`adr-corpus-ingestion.md`](../design/adr-corpus-ingestion.md) §8.
 
 ```bash
 trellis ingest corpus <path> [--source-system corpus] [--domain X] \
