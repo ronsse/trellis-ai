@@ -454,7 +454,14 @@ def _apply_record(
     # document that has just *become* chunked keeps the whole-document
     # vector row written by an earlier unchunked run, and nothing here
     # re-embeds it (#567).
-    put_document(doc_store, vector_store, outcome.doc_id, text, metadata)
+    put_document(
+        doc_store,
+        vector_store,
+        outcome.doc_id,
+        text,
+        metadata,
+        preserve_updated_at=False,
+    )
     outcome.chunks_written = _write_chunks(
         registry,
         parent_doc_id=outcome.doc_id,

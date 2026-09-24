@@ -1557,3 +1557,31 @@ class TestChunkRefreshPreservesRecency:
         after = store.get(last)
         assert after["content_hash"] != before[chunk_count - 1]["content_hash"]
         assert after["updated_at"] == t1.isoformat()
+
+    def test_the_edited_parent_itself_bumps_updated_at(
+        self, registry, vault, monkeypatch
+    ):
+        """Fails against ``preserve_updated_at=True`` at ``_apply_record``.
+
+        The parent's write is the one site in this module whose flag is a
+        constant, and the constant is ``False`` because ``_apply_record`` runs
+        only for ``new`` / ``update`` / ``move`` — a ``skip`` returns before
+        it, so every put it makes carries changed bytes. #630 makes the seam
+        require that constant to be written down; this is the half the
+        signature cannot check, that the value written is the right one.
+        Before this test, flipping it to ``True`` survived the full suite: the
+        two tests above read the *chunk* rows, and an edited parent frozen at
+        its first-ingest stamp is exactly the ageing defect #406 fixed for
+        chunks, one row up.
+        """
+        parent_id, _chunk_count, _before, t0, t1 = (
+            self._sync_then_tag_parent_and_edit_the_tail(registry, vault, monkeypatch)
+        )
+        store = registry.knowledge.document_store
+
+        after = store.get(parent_id)
+        # The parent row holds the edited bytes, so this put was an update...
+        assert after["content"].endswith(" tail.")
+        # ...and an update of the content must move the row's own clock.
+        assert after["updated_at"] == t1.isoformat()
+        assert after["updated_at"] != t0.isoformat()

@@ -196,6 +196,7 @@ def ingest_evidence(
             "evidence_type": evidence.evidence_type,
             "source_origin": evidence.source_origin,
         },
+        preserve_updated_at=False,
     )
 
     if output_format == "json":
@@ -322,7 +323,14 @@ def _index_dbt_descriptions(
             "unique_id": entity.entity_id,
         }
         written_metadata = classify_metadata_on_write(metadata, desc, doc_id=doc_id)
-        put_document(doc_store, vector_store, doc_id, desc, written_metadata)
+        put_document(
+            doc_store,
+            vector_store,
+            doc_id,
+            desc,
+            written_metadata,
+            preserve_updated_at=False,
+        )
         doc_count += 1
         # The same bag that was written, not one re-selected afterwards
         # (#360), and *after* the seam — the reference shape is
