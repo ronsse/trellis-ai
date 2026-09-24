@@ -91,7 +91,7 @@ LOC re-derived on `1ef5c9c` **2026-09-20** with `find <dir> -name '*.py' -exec c
   - **No tag-vocab phases 2/3/5 pre-building** — partner-gated (roadmap §D); only the #194 enforcement slice is pulled forward, and that needs owner sign-off (§8).
   - **No autonomous coding-agent spawn** (Item 7 Cohort 2) without the ADR amendment it's gated on.
   - **No prompt library / Jinja2** — three prompts on `str.format` is below the complexity threshold (`adr-llm-client-abstraction.md` §Phase 4).
-  - **No audio transcription in core** — external pre-step (`adr-corpus-ingestion.md`).
+  - **No format conversion in core** (audio, PDF, per-tool exports) — external pre-step (`adr-corpus-ingestion.md` §8).
   - **No enterprise-graph bridge implementation** (#220 is accepted design only) until the pilot resumes.
 
 ## 7. Success criteria
