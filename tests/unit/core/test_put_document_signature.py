@@ -17,8 +17,8 @@ a ``TypeError`` at runtime and a missing-argument error under mypy.
 What this does **not** check is that a declaration is *correct* — no static
 rule can tell a content write from a metadata-only one. That half is left to
 each caller's own behavioural test where one exists: the #397/#406 recency
-tests built on ``tests/document_recency.py`` re-put a row and compare its
-``updated_at``.
+tests (most built on ``tests/document_recency.py``) re-put a row and
+compare its ``updated_at``.
 """
 
 from __future__ import annotations

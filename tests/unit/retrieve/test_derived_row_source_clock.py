@@ -68,7 +68,8 @@ seam rather than rostered per site: ``preserve_updated_at`` is keyword-only
 with no default, so every caller declares one
 (``tests/unit/core/test_put_document_signature.py``). That makes a caller
 decide; it does not check the decision, which is left to each caller's own
-recency test where one exists (the ones built on ``tests/document_recency.py``).
+recency test where one exists (the #397/#406 ones, most built on
+``tests/document_recency.py``).
 Note the clocks differ: that keyword governs the row's ``updated_at``
 *column*; this module pins the *metadata-bag* clock a derived row carries.
 """
