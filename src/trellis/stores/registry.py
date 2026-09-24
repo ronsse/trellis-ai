@@ -1232,9 +1232,10 @@ class StoreRegistry:
         Connectivity checks
         -------------------
 
-        When ``check_connectivity=True``, additionally performs a Bolt
-        round-trip per cached Bolt driver via
-        :func:`trellis.stores.bolt_opencypher.base.verify_connectivity`.
+        When ``check_connectivity=True``, additionally calls
+        ``verify_connectivity()`` on every driver a registry hook cached
+        in ``RegistryContext.shared`` (for the Bolt backends, one Bolt
+        round-trip per driver).
         Failures (``ServiceUnavailable``, ``AuthError``, etc.) are
         added to the same aggregate so the operator sees both config
         errors and unreachable-backend errors in one shot.
@@ -1243,17 +1244,21 @@ class StoreRegistry:
 
         Default (``check_connectivity=None``): respect the
         ``TRELLIS_VALIDATE_CONNECTIVITY`` env var (truthy values
-        ``1`` / ``true`` / ``yes`` enable). Off otherwise. The env-var
+        ``1`` / ``true`` / ``yes`` / ``on`` enable). Off otherwise. The env-var
         path lets dev keep fast restarts while production turns it on
         without code changes. Pass ``True`` / ``False`` explicitly to
         override the env var.
 
-        Connectivity checks for *other* lazily-connecting backends (S3
-        boto client, psycopg pools that defer connect) are not
-        implemented here — Neo4j is the blessed graph backend so it
-        gets the explicit check; the others connect on first use and
-        surface errors there. Add a similar wrapper in this method
-        when a deployment incident motivates it.
+        The explicit check covers backends whose registry hook caches a
+        driver in ``RegistryContext.shared`` under a ``(uri, user)`` key
+        (see :meth:`_check_bolt_connectivity`; the built-in Bolt stores
+        cache theirs through
+        ``bolt_opencypher.base.registry_driver_cache``, and a hook that
+        caches nothing — the ArcadeDB vector store, which speaks HTTP —
+        is not checked). Other lazily-connecting backends
+        (S3 boto client, psycopg pools that defer connect) connect on
+        first use and surface errors there. Add a similar wrapper in
+        this method when a deployment incident motivates it.
         """
         targets: list[str] = (
             list(store_types) if store_types is not None else list(_PLANE_OF.keys())
@@ -1806,7 +1811,7 @@ class StoreRegistry:
         Failures in any single ``close()`` are logged and skipped so a
         misbehaving backend cannot block cleanup of the rest.
 
-        Stores are closed first; for Neo4j stores with an injected
+        Stores are closed first; for Bolt stores with an injected
         driver, ``close()`` is a no-op and the driver is closed by the
         registry afterwards. This avoids racing the registry's shutdown
         sweep with a store's individual ``close()`` call.

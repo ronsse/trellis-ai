@@ -336,7 +336,7 @@ exists. Ask `gh issue list --state open`; it is authoritative and costs one call
 **Batch 1 — early parallel** (disjoint territories; recheck before dispatch):
 
 **Wave D (program plan order): [#360](https://github.com/ronsse/trellis-ai/issues/360) PR1 →
-[#256](https://github.com/ronsse/trellis-ai/issues/256) staged seam.** Also parallel when
+[#256](https://github.com/ronsse/trellis-ai/issues/256) staged seam.** *(#256 staged seam: **shipped as [#537](https://github.com/ronsse/trellis-ai/pull/537), 2026-09-04** — not open work; see the note below.)* Also parallel when
 disjoint: **#369**, **#439**, **#342**, **#514**.
 
 **#256 dispatch — operator override (2026-09-04, this program only):** live `keystone`
@@ -345,6 +345,8 @@ explicitly authorized **this plan's Wave D #256 staged seam** for swarm executio
 `consensus_authorizes` — **not** a general keystone-label override. Scope limited to
 **reversible in-repo PR1**; excludes publishing, external package release, and credentials.
 Owner review and the adversarial merge gate (§4.1) still apply.
+
+**Status (2026-09-24): the override above is spent.** It authorized one PR and #537 was that PR (`RegistryContext` + `prepare_registry_params`, Bolt setup moved onto the store classes, a synthetic entry-point plugin test, and `tests/unit/test_registry_plugin_boundary_rule.py`); the contract is now in [`adr-plugin-contract.md` § Registry preparation hook](./adr-plugin-contract.md#registry-preparation-hook-store-plugins). The paragraph stays as the authorization record. What remains of #256 — extracting a separate distribution and publishing it — is **owner-only** per the owner's 2026-09-09 comment on the issue (publishing is never an agent's call, §2), so do not dispatch it.
 
 - **#264 PR-A** after or parallel with Batch 1 if no file collision; **#264 PR-B**
   **after #514** when `generate_call_sites` exists.
