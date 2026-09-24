@@ -168,11 +168,14 @@ What the hook buys is that `src/trellis/stores/registry.py` imports
 none of `trellis.stores.{neo4j,arcadedb,bolt_opencypher}` and compares
 no value against either backend name, which
 `tests/unit/test_registry_plugin_boundary_rule.py` derives by AST and
-fails on a reintroduction. One name-keyed table remains outside that
-rule's sight: the pre-flight URI-scheme check (`_BACKEND_URI_RULES`,
-covering `postgres`, `pgvector` and `neo4j`) is a dict keyed by backend
-name, so a plugin cannot contribute a URI rule without editing
-`registry.py`.
+fails on a reintroduction. That rule reads imports and comparisons,
+not dict keys, and besides `_BUILTIN_BACKENDS` two name-keyed tables
+remain: `_EXTRA_FOR_BACKEND` (the extra named in
+`BackendNotInstalledError` — a plugin backend absent from it just gets
+the error without that hint) and the pre-flight URI-scheme check
+`_BACKEND_URI_RULES` (covering `postgres`, `pgvector` and `neo4j`).
+The second is a real limit: a plugin cannot contribute a URI rule
+without editing `registry.py`.
 
 ### ABI stability
 

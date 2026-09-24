@@ -1232,9 +1232,10 @@ class StoreRegistry:
         Connectivity checks
         -------------------
 
-        When ``check_connectivity=True``, additionally performs a Bolt
-        round-trip per cached Bolt driver via
-        :func:`trellis.stores.bolt_opencypher.base.verify_connectivity`.
+        When ``check_connectivity=True``, additionally calls
+        ``verify_connectivity()`` on every driver a registry hook cached
+        in ``RegistryContext.shared`` (for the Bolt backends, one Bolt
+        round-trip per driver).
         Failures (``ServiceUnavailable``, ``AuthError``, etc.) are
         added to the same aggregate so the operator sees both config
         errors and unreachable-backend errors in one shot.
