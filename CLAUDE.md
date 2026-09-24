@@ -204,7 +204,7 @@ Raw sources → `EntityDraft`/`EdgeDraft` records routed through `MutationExecut
 
 ### LLM Client Abstraction (`src/trellis/llm/`)
 
-Provider-agnostic protocols: `LLMClient`, `EmbedderClient`. Reference implementations for OpenAI / Anthropic live in `trellis.llm.providers` behind `[llm-openai]` / `[llm-anthropic]` optional extras so core stays dependency-free. See [`docs/design/adr-llm-client-abstraction.md`](docs/design/adr-llm-client-abstraction.md).
+Provider-agnostic protocols: `LLMClient`, `EmbedderClient`. Reference implementations for OpenAI / Anthropic live in `trellis.llm.providers` behind `[llm-openai]` / `[llm-anthropic]` optional extras so core stays dependency-free. See [`docs/design/adr-llm-client-abstraction.md`](docs/design/adr-llm-client-abstraction.md). A response that is not the requested JSON object but is rescued by a salvage heuristic (the enrichment brace regex, or `LLMExtractor`'s brace slice and list lift) emits `extraction.parse_salvaged`, which carries digests and lengths only, is unsampled, and is deliberately not a `failure_kind`. Without it `extraction.failed` was only a floor on how often a model misses the format (#514, [ADR §2.4](docs/design/adr-extraction-failure-telemetry.md)).
 
 ### Feedback path — EventLog authoritative, JSONL audit log
 

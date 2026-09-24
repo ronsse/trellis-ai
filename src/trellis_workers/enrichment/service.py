@@ -14,7 +14,11 @@ from pydantic import Field
 from trellis.core.base import TrellisModel
 from trellis.core.elision import elide_text
 from trellis.core.hashing import content_hash
-from trellis.extract.telemetry import ExtractionFailureKind, emit_extraction_failure
+from trellis.extract.telemetry import (
+    ExtractionFailureKind,
+    emit_extraction_failure,
+    emit_parse_salvaged,
+)
 from trellis.llm import LLMClient, LLMResponse, Message, TokenUsage
 from trellis.llm.json_response import (
     JSONParseOutcome,
@@ -77,6 +81,12 @@ class EnrichmentResult(TrellisModel):
     #: Actual response model when reported, otherwise the configured client
     #: default. ``None`` on failures where no model identity can be proven.
     judging_model_id: str | None = None
+    #: ``True`` when the response was not a JSON object and the brace
+    #: regex in ``_parse_response`` rescued one from it (#514). Stripping
+    #: one code fence is the clean path and leaves this ``False``. Read by
+    #: ``enrich`` to emit ``EXTRACTION_PARSE_SALVAGED``; nothing else
+    #: about the result depends on it.
+    parse_salvaged: bool = False
 
 
 ENRICHMENT_SYSTEM_PROMPT = """\
@@ -161,7 +171,10 @@ class EnrichmentService:
         # 2. batch_enrich() — gather-collector exceptions that bubble past
         #    per-item handling emit EXTRACTION_FAILED with
         #    failure_kind="batch_collector_error".
-        # When None, emit_extraction_failure is a no-op (optional-event-log
+        # 3. enrich() — a response the brace regex rescued emits
+        #    EXTRACTION_PARSE_SALVAGED (#514), so the failure count above
+        #    is not the only record of a model missing the format.
+        # When None, both emitters are no-ops (optional-event-log
         # pattern: no wiring → no event).
         self._event_log = event_log
 
@@ -239,6 +252,17 @@ class EnrichmentService:
             result = self._parse_response(response.content)
             result.raw_response = response.content
             result.usage = response.usage
+            if result.parse_salvaged:
+                emit_parse_salvaged(
+                    event_log=self._event_log,
+                    extractor_id="EnrichmentService",
+                    extractor_tier="llm",
+                    salvage_kind="brace_regex",
+                    source_hint="enrichment",
+                    source_excerpt_hash=content_hash(content) if content else None,
+                    model=_non_empty_model_id(response.model) or self.judging_model_id,
+                    raw_length=len(response.content),
+                )
             if result.success:
                 model_id = _non_empty_model_id(response.model) or self.judging_model_id
                 if model_id is None:
@@ -386,6 +410,7 @@ class EnrichmentService:
         """Parse LLM JSON response."""
         parse_result = parse_json_response(response)
         data: Any = parse_result.value
+        salvaged = False
         if parse_result.outcome is JSONParseOutcome.MALFORMED:
             text = strip_code_fence(response)
             e = json.JSONDecodeError(
@@ -395,6 +420,7 @@ class EnrichmentService:
             if match:
                 try:
                     data = json.loads(match.group())
+                    salvaged = True
                 except json.JSONDecodeError as inner_exc:
                     # GRACEFUL-DEGRADATION: enrichment failure stays in
                     # the EnrichmentResult contract (callers handle
@@ -474,6 +500,7 @@ class EnrichmentService:
             auto_importance=min(max(importance, 0.0), 1.0),
             tag_confidence=_confidence("tag_confidence"),
             class_confidence=_confidence("class_confidence"),
+            parse_salvaged=salvaged,
         )
 
 

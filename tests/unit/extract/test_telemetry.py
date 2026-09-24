@@ -493,3 +493,84 @@ class TestEmitExtractionFailure:
                 _load_sample_cap()
         finally:
             os.environ.pop("EXTRACTION_FAILURE_SAMPLE_CAP", None)
+
+
+class TestEmitParseSalvaged:
+    """Tests for :func:`emit_parse_salvaged` — the #514 salvage count."""
+
+    def test_every_salvage_is_counted_even_past_the_failure_sample_cap(
+        self, event_log, monkeypatch
+    ) -> None:
+        """No sampler: a capped count would be a floor, the defect #514 closes."""
+        from trellis.extract.telemetry import emit_parse_salvaged
+
+        monkeypatch.delenv("EXTRACTION_FAILURE_NO_SAMPLE", raising=False)
+        monkeypatch.setenv("EXTRACTION_FAILURE_SAMPLE_CAP", "2")
+        kinds = ["brace_span", "list_lift", "brace_span", "brace_regex", "list_lift"]
+        for i, kind in enumerate(kinds):
+            emit_parse_salvaged(
+                event_log=event_log,
+                extractor_id="LLMExtractor",
+                extractor_tier="llm",
+                salvage_kind=kind,  # type: ignore[arg-type]
+                source_hint="freetext",
+                prompt_hash="same-cluster",
+                source_excerpt_hash=f"seh-{i}",
+                model="m-1",
+                raw_length=100 + i,
+            )
+        events = event_log.get_events(event_type=EventType.EXTRACTION_PARSE_SALVAGED)
+        assert sorted(e.payload["raw_length"] for e in events) == [
+            100,
+            101,
+            102,
+            103,
+            104,
+        ]
+        assert sorted(e.payload["salvage_kind"] for e in events) == sorted(kinds)
+        assert all(
+            set(e.payload)
+            == {
+                "extractor_id",
+                "extractor_tier",
+                "salvage_kind",
+                "source_hint",
+                "prompt_hash",
+                "source_excerpt_hash",
+                "model",
+                "raw_length",
+            }
+            for e in events
+        )
+        assert event_log.get_events(event_type=EventType.EXTRACTION_FAILED) == []
+
+    def test_unwired_event_log_is_a_noop(self) -> None:
+        from trellis.extract.telemetry import emit_parse_salvaged
+
+        emit_parse_salvaged(
+            event_log=None,
+            extractor_id="LLMExtractor",
+            extractor_tier="llm",
+            salvage_kind="brace_span",
+            raw_length=3,
+        )
+
+    def test_a_broken_event_log_is_swallowed(self) -> None:
+        from trellis.extract.telemetry import emit_parse_salvaged
+
+        calls: list[object] = []
+
+        class ExplodingLog:
+            def emit(self, *args, **kwargs):
+                calls.append(args)
+                msg = "event log down"
+                raise RuntimeError(msg)
+
+        emit_parse_salvaged(
+            event_log=ExplodingLog(),  # type: ignore[arg-type]
+            extractor_id="LLMExtractor",
+            extractor_tier="llm",
+            salvage_kind="list_lift",
+            raw_length=3,
+        )
+        assert calls == [(EventType.EXTRACTION_PARSE_SALVAGED,)]

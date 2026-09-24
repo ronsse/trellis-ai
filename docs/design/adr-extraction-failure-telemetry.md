@@ -94,6 +94,19 @@ Extraction failures can be high-frequency (one model upgrade can fire 10K events
 
 The sampling cap is `EXTRACTION_FAILURE_SAMPLE_CAP` env var (default 10). Operators with tight cost budgets can set it lower.
 
+### 2.4 A salvaged parse is counted, not failed (#514)
+
+Two sites rescue a response that is not the requested JSON object: the enrichment service's brace regex, and `LLMExtractor`'s first-`{`-to-last-`}` slice plus its bare-list lift. Until #514 a rescue recorded nothing, so `extraction.failed` was only a floor on how often a model misses the format. Each rescue that yields a usable value now emits `extraction.parse_salvaged` via `emit_parse_salvaged`, with `salvage_kind` set to `brace_regex`, `brace_span` or `list_lift`. Stripping a single code fence counts as the clean path and emits nothing.
+
+The design choices are deliberate:
+
+- **Not a `failure_kind`.** Failure analyzers group `extraction.failed` by kind, so counting a success there would inflate every failure rate.
+- **No excerpt.** The payload carries only digests, `raw_length` and the model name.
+- **Unsampled.** A sampler would turn the count back into a floor.
+- **Fail-soft.** A broken event log must not fail a parse that succeeded.
+
+The event fires at the parse. A rescued value that later fails draft validation also reports that failure through its own `extraction.failed`.
+
 ## 3. Consequences
 
 ### 3.1 What changes for callers
