@@ -25,11 +25,14 @@ cannot quietly do the store's job and make the rest of the suite
 vacuous.
 
 ``ArcadeDBVectorStore`` is covered on those terms
-(``test_arcadedb_vector_contract.py``). ``Neo4jVectorStore`` is the
-same shape and could be brought under the same hook, but no subclass
-exists yet — its coverage is still the per-backend file
-``test_neo4j_vector.py``, exercised against a real Neo4j instance via
-``TRELLIS_TEST_NEO4J_URI`` (#356 blocks widening that one).
+(``test_arcadedb_vector_contract.py``), and so is ``Neo4jVectorStore``
+(``test_neo4j_vector_contract.py``) — with one difference that is about
+the CI container rather than the contract: the cases that reach its
+Cypher 25 ``SEARCH`` clause take the ``require_neo4j_vector_search``
+capability gate by name and skip on a Neo4j that cannot parse it, while
+the rest run. The roster of gated names is pinned against this module
+by ``tests/unit/test_neo4j_vector_live_infra_rule.py``, so a case added
+here that calls ``query`` fails that rule rather than live-infra.
 
 Subclass shape::
 

@@ -66,9 +66,11 @@ class ArcadeDBVectorStore(VectorStore):
     Construction does not take a Bolt driver — the vector store talks
     SQL, not Cypher. It does take the same ``http_url`` /
     ``user`` / ``password`` / ``database`` tuple that
-    :class:`ArcadeDBGraphStore` uses on its HTTP admin path, so the
-    registry can wire them together via a shared
-    ``arcadedb-{http_url}-{user}-{database}`` cache.
+    :class:`ArcadeDBGraphStore` uses on its HTTP admin path, resolved
+    from the same ``TRELLIS_ARCADEDB_*`` env fallbacks by
+    :meth:`prepare_registry_params`. Nothing is cached in
+    ``RegistryContext.shared`` for this store: there is no driver to
+    share, and :meth:`close` releases nothing.
     """
 
     @classmethod

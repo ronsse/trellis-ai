@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from trellis.ingest_corpus.handlers import supported_extensions
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -120,3 +122,23 @@ class TestIngestCorpus:
         result = runner.invoke(app, ["ingest", "corpus", str(vault)])
         assert result.exit_code == 0
         assert "new=1" in plain(result.stdout)
+
+
+class TestIngestCorpusHelp:
+    """``--help`` states the input contract (ADR §8, #257)."""
+
+    def test_help_states_input_contract(self) -> None:
+        result = runner.invoke(app, ["ingest", "corpus", "--help"])
+        assert result.exit_code == 0
+        # Whitespace-normalised so a phrase Rich wraps still matches.
+        text = " ".join(plain(result.stdout).split())
+        # Read from the registry, not typed here: registering a handler
+        # without stating its extension in the help fails this test.
+        extensions = supported_extensions()
+        assert extensions
+        for ext in extensions:
+            # Whole token: ".mdx" in the help must not satisfy ".md".
+            token = rf"(?<!\w){re.escape(ext)}(?!\w)"
+            assert re.search(token, text), f"{ext!r} missing from corpus --help"
+        assert "unsupported" in text
+        assert "trellis ingest conversations" in text

@@ -154,10 +154,11 @@ DELIBERATELY_UNWIRED: dict[Path, str] = {
 #: `VectorStoreContractTests` subclass *at all* until #589 (#579), so the
 #: suite was reached — by sqlite and pgvector — while the blessed vector
 #: substrate went unchecked, and nothing in this module could say so.
-#: `Neo4jVectorStore` is in that state now: the vector suite has no
-#: subclass for it. An absent subclass is invisible to a rule about the
-#: subclasses that exist, which is why such a gap is an issue and not an
-#: entry.
+#: `Neo4jVectorStore` was the last backend in that state and now has one
+#: too (`test_neo4j_vector_contract.py`), so every shipped vector backend
+#: runs the vector suite. An absent
+#: subclass is invisible to a rule about the subclasses that exist, which
+#: is why such a gap is an issue and not an entry.
 DELIBERATELY_UNSUBCLASSED: dict[Path, str] = {}
 
 _TRUTHY = {"1", "true", "yes", "on"}

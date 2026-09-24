@@ -414,13 +414,19 @@ def mark_document_superseded(
     The failure is perfectly inverted — the operation exists to demote the old
     document and its side effect promotes it.
 
-    That matters here and not merely in principle, because nothing filters this
-    state out. ``retrieve.lifecycle.is_archived`` tests ``state == "archived"``
-    and ``"superseded"`` is a different state, so a superseded document stays
-    servable — deliberately. ``docs/design/plan-memory-lifecycle.md`` §4 pins
-    the design as "SCD-2 supersede + **recency-wins-at-retrieval**, with the
-    losing version retrievable on demand", which makes the loser's recency rank
-    the whole mechanism rather than an incidental score.
+    That matters here and not merely in principle, because no *per-item* gate
+    filters this state out. ``retrieve.lifecycle.is_archived`` tests
+    ``state == "archived"`` and ``"superseded"`` is a different state, so a
+    superseded document stays servable — deliberately.
+    ``docs/design/plan-memory-lifecycle.md`` §4 pins the design as "SCD-2
+    supersede + **recency-wins-at-retrieval**, with the losing version
+    retrievable on demand", which makes the loser's recency rank the whole
+    mechanism rather than an incidental score. The one exclusion is §4's
+    *pairwise* half (#613): when the successor this stamp names is in the same
+    candidate pool, ``PackBuilder`` withholds the loser (reason
+    ``superseded``, via ``retrieve.lifecycle.partition_superseded``) so a pack
+    never serves both sides. With the successor absent, this rank still
+    decides.
 
     **The `preserve_updated_at` flag is scoped to the keyword axis, and only
     that — but not for the reason #411 gave.** That docstring said no writer
