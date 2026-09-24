@@ -518,6 +518,9 @@ class TestEnrichmentFailureTelemetry:
         assert "Invalid JSON" in result.error
         # B1: structured failure_kind mirrors the emitted event slug.
         assert result.failure_kind == "parse_error"
+        # A salvage attempt that failed is a failure, never a salvage (#514).
+        assert result.parse_salvaged is False
+        assert event_log.get_events(event_type=EventType.EXTRACTION_PARSE_SALVAGED) == []
 
         events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
         assert len(events) == 1
@@ -783,3 +786,163 @@ class TestBatchEnrichCollectorTelemetry:
             log.close()
         finally:
             reset_extraction_failure_state()
+
+
+# ---------------------------------------------------------------------------
+# Parse-salvage count (#514): a response rescued by the brace regex is
+# counted, so ``extraction.failed`` stops being a floor with no ceiling.
+# ---------------------------------------------------------------------------
+
+#: Synthetic payload carrying sentinels, so a payload that leaked any part of
+#: the response (prose wrapper *or* the parsed memory content) is detectable.
+_SALVAGE_BODY = json.dumps(
+    {
+        "tags": ["sentinel-tag-alpha", "beta"],
+        "class": "research",
+        "summary": "SENTINEL_SUMMARY_TEXT",
+        "importance": 0.6,
+        "tag_confidence": 0.4,
+        "class_confidence": 0.3,
+    }
+)
+_SALVAGE_SENTINELS = ("SENTINEL_PREFACE", "sentinel-tag-alpha", "SENTINEL_SUMMARY")
+
+#: Mixed shapes, deliberately not a population of one. ``salvaged`` is the
+#: expected ``salvage_kind`` (``None`` = must not be counted); ``failed`` is
+#: whether the response is unrecoverable and must emit ``extraction.failed``.
+_ENRICHMENT_SHAPES = [
+    pytest.param(_SALVAGE_BODY, None, False, id="clean"),
+    pytest.param(f"```json\n{_SALVAGE_BODY}\n```", None, False, id="fenced"),
+    pytest.param(
+        f"SENTINEL_PREFACE here you go:\n{_SALVAGE_BODY}\nHope that helps.",
+        "brace_regex",
+        False,
+        id="prose-wrapped",
+    ),
+    pytest.param(
+        f"```json\n{_SALVAGE_BODY}\n```\nSENTINEL_PREFACE trailing note",
+        "brace_regex",
+        False,
+        id="fence-then-prose",
+    ),
+    pytest.param("SENTINEL_PREFACE no json here", None, True, id="no-braces"),
+    pytest.param(
+        "SENTINEL_PREFACE {tags: bad, no_quotes: true} tail",
+        None,
+        True,
+        id="broken-braces",
+    ),
+]
+
+
+def _comparable(result: EnrichmentResult) -> dict[str, Any]:
+    """Result fields that are a function of the response, not the clock."""
+    return result.model_dump(exclude={"importance_scored_at"})
+
+
+class TestParseSalvageCount:
+    @pytest.mark.parametrize(("response", "salvaged", "failed"), _ENRICHMENT_SHAPES)
+    async def test_only_a_successful_salvage_is_counted(
+        self,
+        event_log: SQLiteEventLog,
+        response: str,
+        salvaged: str | None,
+        failed: bool,
+    ) -> None:
+        from trellis.core.hashing import content_hash
+
+        content = f"source document for {len(response)}"
+        service = EnrichmentService(llm=_make_llm(response), event_log=event_log)
+        result = await service.enrich(content=content)
+
+        assert result.success is (not failed)
+        assert result.parse_salvaged is (salvaged is not None)
+
+        salvage_events = event_log.get_events(
+            event_type=EventType.EXTRACTION_PARSE_SALVAGED
+        )
+        failed_events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
+        assert len(failed_events) == (1 if failed else 0)
+        if salvaged is None:
+            assert salvage_events == []
+            return
+
+        assert len(salvage_events) == 1
+        payload = salvage_events[0].payload
+        assert payload == {
+            "extractor_id": "EnrichmentService",
+            "extractor_tier": "llm",
+            "salvage_kind": salvaged,
+            "source_hint": "enrichment",
+            "prompt_hash": None,
+            "source_excerpt_hash": content_hash(content),
+            "model": "test-model",
+            "raw_length": len(response),
+        }
+        # Digests and lengths only: nothing of the response reaches the log.
+        serialized = json.dumps(payload)
+        for sentinel in _SALVAGE_SENTINELS:
+            assert sentinel not in serialized
+
+    async def test_salvage_changes_nothing_about_the_parse(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        """Counting is observation only: the rescued result is the clean one.
+
+        The same body served clean, and served wrapped in prose, must yield the
+        same enrichment apart from the two fields that describe the transport.
+        """
+        wrapped = f"SENTINEL_PREFACE here you go:\n{_SALVAGE_BODY}\nDone."
+        clean = await EnrichmentService(llm=_make_llm(_SALVAGE_BODY)).enrich(
+            content="c"
+        )
+        rescued = await EnrichmentService(
+            llm=_make_llm(wrapped), event_log=event_log
+        ).enrich(content="c")
+
+        transport = {"raw_response", "parse_salvaged"}
+        assert clean.parse_salvaged is False
+        assert rescued.parse_salvaged is True
+        assert rescued.auto_tags == ["sentinel-tag-alpha", "beta"]
+        assert {k: v for k, v in _comparable(rescued).items() if k not in transport} == {
+            k: v for k, v in _comparable(clean).items() if k not in transport
+        }
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            f"SENTINEL_PREFACE here you go:\n{_SALVAGE_BODY}\nDone.",
+            f"```json\n{_SALVAGE_BODY}\n```\ntrailing",
+        ],
+        ids=["prose-wrapped", "fence-then-prose"],
+    )
+    async def test_event_log_wiring_does_not_change_the_result(
+        self, event_log: SQLiteEventLog, response: str
+    ) -> None:
+        with_log = await EnrichmentService(
+            llm=_make_llm(response), event_log=event_log
+        ).enrich(content="c")
+        without_log = await EnrichmentService(llm=_make_llm(response)).enrich(
+            content="c"
+        )
+        assert with_log.parse_salvaged is True
+        assert _comparable(with_log) == _comparable(without_log)
+        assert len(event_log.get_events(event_type=EventType.EXTRACTION_PARSE_SALVAGED)) == 1
+
+    async def test_broken_event_log_does_not_fail_a_salvaged_parse(self) -> None:
+        """Fail-soft: the count must never turn a rescued parse into a failure."""
+
+        class ExplodingLog:
+            def emit(self, *_args: Any, **_kwargs: Any) -> Any:
+                msg = "event log down"
+                raise RuntimeError(msg)
+
+        response = f"SENTINEL_PREFACE:\n{_SALVAGE_BODY}\nDone."
+        service = EnrichmentService(
+            llm=_make_llm(response),
+            event_log=ExplodingLog(),  # type: ignore[arg-type]
+        )
+        result = await service.enrich(content="c")
+        assert result.success is True
+        assert result.parse_salvaged is True
+        assert result.auto_class == "research"

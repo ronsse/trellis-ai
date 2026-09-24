@@ -670,3 +670,172 @@ class TestExtractionFailureTelemetry:
         finally:
             os.environ.pop("EXTRACTION_FAILURE_NO_SAMPLE", None)
             reset_extraction_failure_state()
+
+
+# ---------------------------------------------------------------------------
+# Parse-salvage count (#514): the brace-span slice and the bare-list lift both
+# rescue a response that is not the requested object. Each rescue is counted,
+# so ``extraction.failed`` stops being a floor with nothing above it.
+# ---------------------------------------------------------------------------
+
+_SALVAGE_OBJECT = json.dumps(
+    {
+        "entities": [
+            {"entity_type": "p", "name": "SentinelEntityName", "confidence": 0.8},
+            {"entity_type": "p", "name": "Second", "confidence": 0.7},
+        ],
+        "edges": [],
+    }
+)
+_SALVAGE_LIST = json.dumps(
+    [{"entity_type": "p", "name": "SentinelEntityName", "confidence": 0.9}]
+)
+_SALVAGE_SENTINELS = ("SENTINEL_PREFACE", "SentinelEntityName")
+
+#: Mixed shapes, deliberately not a population of one: ``salvaged`` is the
+#: expected ``salvage_kind`` (``None`` = must not be counted) and ``failed``
+#: whether the response is unrecoverable and must raise + emit
+#: ``extraction.failed`` instead.
+_EXTRACT_SHAPES = [
+    pytest.param(_SALVAGE_OBJECT, None, False, id="clean"),
+    pytest.param(f"```json\n{_SALVAGE_OBJECT}\n```", None, False, id="fenced"),
+    pytest.param(
+        f"SENTINEL_PREFACE here you go: {_SALVAGE_OBJECT} done",
+        "brace_span",
+        False,
+        id="prose-wrapped",
+    ),
+    pytest.param(_SALVAGE_LIST, "list_lift", False, id="bare-list"),
+    pytest.param(f"```json\n{_SALVAGE_LIST}\n```", "list_lift", False, id="fenced-list"),
+    pytest.param("[]", "list_lift", False, id="empty-list"),
+    pytest.param("SENTINEL_PREFACE not json at all", None, True, id="no-braces"),
+    pytest.param("SENTINEL_PREFACE {entities: bad} tail", None, True, id="broken-braces"),
+    pytest.param("", None, True, id="empty"),
+]
+
+
+@pytest.fixture
+def salvage_event_log(tmp_path, monkeypatch):
+    from trellis.extract.telemetry import reset_extraction_failure_state
+    from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+    reset_extraction_failure_state()
+    monkeypatch.setenv("EXTRACTION_FAILURE_NO_SAMPLE", "1")
+    log = SQLiteEventLog(tmp_path / "events.db")
+    yield log
+    log.close()
+    reset_extraction_failure_state()
+
+
+def _comparable_result(result) -> dict:
+    """Result fields that are a function of the response, not the clock."""
+    return result.model_dump(exclude={"provenance": {"extracted_at"}})
+
+
+class TestParseSalvageCount:
+    @pytest.mark.parametrize(("response", "salvaged", "failed"), _EXTRACT_SHAPES)
+    async def test_only_a_successful_salvage_is_counted(
+        self,
+        salvage_event_log,
+        response: str,
+        salvaged: str | None,
+        failed: bool,
+    ) -> None:
+        from trellis.core.hashing import content_hash
+        from trellis.extract.llm import _prompt_hash
+        from trellis.extract.telemetry import ExtractionFailureError
+        from trellis.stores.base.event_log import EventType
+
+        fake = FakeLLMClient(response_text=response)
+        ext = LLMExtractor(llm_client=fake, event_log=salvage_event_log, model="m-1")
+        source = f"input text {len(response)}"
+        if failed:
+            with pytest.raises(ExtractionFailureError):
+                await ext.extract(source, source_hint="freetext")
+        else:
+            await ext.extract(source, source_hint="freetext")
+
+        salvage_events = salvage_event_log.get_events(
+            event_type=EventType.EXTRACTION_PARSE_SALVAGED
+        )
+        failed_events = salvage_event_log.get_events(
+            event_type=EventType.EXTRACTION_FAILED
+        )
+        assert len(failed_events) == (1 if failed else 0)
+        if salvaged is None:
+            assert salvage_events == []
+            return
+
+        assert len(salvage_events) == 1
+        payload = salvage_events[0].payload
+        assert payload == {
+            "extractor_id": "LLMExtractor",
+            "extractor_tier": "llm",
+            "salvage_kind": salvaged,
+            "source_hint": "freetext",
+            "prompt_hash": _prompt_hash(fake.calls[0]["messages"]),
+            "source_excerpt_hash": content_hash(source),
+            "model": "m-1",
+            "raw_length": len(response),
+        }
+        serialized = json.dumps(payload)
+        for sentinel in _SALVAGE_SENTINELS:
+            assert sentinel not in serialized
+
+    @pytest.mark.parametrize(
+        ("rescued", "clean"),
+        [
+            pytest.param(
+                f"SENTINEL_PREFACE here you go: {_SALVAGE_OBJECT} done",
+                _SALVAGE_OBJECT,
+                id="brace-span",
+            ),
+            pytest.param(
+                _SALVAGE_LIST,
+                json.dumps({"entities": json.loads(_SALVAGE_LIST), "edges": []}),
+                id="list-lift",
+            ),
+        ],
+    )
+    async def test_salvage_changes_nothing_about_the_parse(
+        self, salvage_event_log, rescued: str, clean: str
+    ) -> None:
+        """Counting is observation only.
+
+        A rescued response yields exactly what its clean equivalent yields, and
+        wiring an event log changes nothing about the result either.
+        """
+        from trellis.stores.base.event_log import EventType
+
+        from_clean = await LLMExtractor(llm_client=FakeLLMClient(clean)).extract("x")
+        rescued_logged = await LLMExtractor(
+            llm_client=FakeLLMClient(rescued), event_log=salvage_event_log
+        ).extract("x")
+        rescued_unlogged = await LLMExtractor(
+            llm_client=FakeLLMClient(rescued)
+        ).extract("x")
+
+        assert rescued_logged.entities
+        assert _comparable_result(rescued_logged) == _comparable_result(from_clean)
+        assert _comparable_result(rescued_unlogged) == _comparable_result(from_clean)
+        assert (
+            len(
+                salvage_event_log.get_events(
+                    event_type=EventType.EXTRACTION_PARSE_SALVAGED
+                )
+            )
+            == 1
+        )
+
+    async def test_broken_event_log_does_not_fail_a_salvaged_parse(self) -> None:
+        class ExplodingLog:
+            def emit(self, *_args, **_kwargs):
+                msg = "event log down"
+                raise RuntimeError(msg)
+
+        ext = LLMExtractor(
+            llm_client=FakeLLMClient(f"prose {_SALVAGE_OBJECT} prose"),
+            event_log=ExplodingLog(),
+        )
+        result = await ext.extract("x")
+        assert [e.name for e in result.entities] == ["SentinelEntityName", "Second"]
