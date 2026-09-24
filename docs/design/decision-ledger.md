@@ -428,9 +428,11 @@ floor of 5 both became structurally unreachable, so the only way to make the tes
 to lower the floors it divides by — the #457 shape the test itself was written to warn
 about. The three-producer finding above is unaffected (it is a fact about the tree, not
 about the scan), and `tests/unit/core/test_document_write_rule.py` now enforces the routing
-half. **What is left unguarded is the clock disposition of a `put_document` caller** — a
-real gap, wanting a rule written against the new single seam rather than a resurrection of
-the per-site one.
+half. **What was left unguarded was the clock disposition of a `put_document` caller**, and
+the seam now forces it: `preserve_updated_at` is keyword-only with no default, so every
+caller declares one (`tests/unit/core/test_put_document_signature.py`). Whether each
+declaration is *correct* is not statically checked; that is left to each caller's own
+behavioural test, where one exists.
 
 ### T-7 · `trellis retrieve pack --quiet` keeps its post-#410 population; the gap was the doc, not the flag
 

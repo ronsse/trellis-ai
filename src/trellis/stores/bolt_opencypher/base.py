@@ -154,10 +154,10 @@ def verify_connectivity(driver: Driver) -> None:
 
     Wraps ``Driver.verify_connectivity()`` — the official driver builtin
     that probes the server with a ``RESET`` and raises if the
-    connection can't be established. Used by
-    :meth:`StoreRegistry.validate` when ``check_connectivity=True`` so
-    operators see "backend unreachable" at startup rather than as an
-    opaque Bolt error on the first request.
+    connection can't be established. :meth:`StoreRegistry.validate`
+    does not call this helper — ``registry.py`` must not import Bolt
+    modules (#537) — but calls the same ``Driver.verify_connectivity()``
+    directly on each cached driver when ``check_connectivity=True``.
 
     Raises whatever the driver raises (``ServiceUnavailable``,
     ``AuthError``, etc.) — caller is expected to wrap the failure into

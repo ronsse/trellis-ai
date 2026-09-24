@@ -69,6 +69,7 @@ class TestTheDocumentPlaneIsAuthoritative:
             "d1",
             "body",
             {"content_tags": {"signal_quality": "noise"}},
+            preserve_updated_at=False,
         )
 
         assert result.mirror == "failed"
@@ -92,6 +93,7 @@ class TestTheDocumentPlaneIsAuthoritative:
                 "d1",
                 "body",
                 {"content_tags": {"signal_quality": "noise"}},
+                preserve_updated_at=False,
             )
 
         events = [entry["event"] for entry in logs]
@@ -125,6 +127,7 @@ class TestTheDocumentPlaneIsAuthoritative:
                 "d1",
                 "body",
                 {},
+                preserve_updated_at=False,
             )
 
 
@@ -144,7 +147,9 @@ class TestTheMirrorIsBidirectional:
             {"doc_id": "d1", "content_tags": {"signal_quality": "noise"}},
         )
 
-        result = put_document(document_store, vector_store, "d1", "body", {})
+        result = put_document(
+            document_store, vector_store, "d1", "body", {}, preserve_updated_at=False
+        )
 
         assert result.mirror == "synced"
         assert "content_tags" not in vector_store.get("d1")["metadata"]
@@ -166,7 +171,9 @@ class TestTheMirrorIsBidirectional:
             LIFECYCLE_KEY: "archived",
         }
 
-        put_document(document_store, vector_store, "d1", "body", bag)
+        put_document(
+            document_store, vector_store, "d1", "body", bag, preserve_updated_at=False
+        )
 
         row = vector_store.get("d1")["metadata"]
         assert row["content_tags"] == bag["content_tags"]
@@ -193,6 +200,7 @@ class TestTheMirrorIsBidirectional:
             "d1",
             "body",
             {"auto_importance": 0.42, "source_path": "/notes/a.md"},
+            preserve_updated_at=False,
         )
 
         row = vector_store.get("d1")["metadata"]
@@ -206,7 +214,7 @@ class TestTheOutcomeDistinguishesItsNoOps:
         self, document_store: SQLiteDocumentStore
     ) -> None:
         assert put_document(
-            document_store, None, "d1", "body", {}
+            document_store, None, "d1", "body", {}, preserve_updated_at=False
         ) == DocumentWriteResult(doc_id="d1", mirror="no_store")
 
     def test_a_document_that_was_never_embedded(
@@ -218,7 +226,7 @@ class TestTheOutcomeDistinguishesItsNoOps:
         as divergence would make the signal fire on most of a corpus.
         """
         assert put_document(
-            document_store, vector_store, "d1", "body", {}
+            document_store, vector_store, "d1", "body", {}, preserve_updated_at=False
         ) == DocumentWriteResult(doc_id="d1", mirror="absent")
 
     def test_a_row_that_already_agrees_is_not_rewritten(
@@ -241,9 +249,10 @@ class TestTheOutcomeDistinguishesItsNoOps:
             original(*a, **k),
         )[1]
 
-        assert put_document(document_store, vector_store, "d1", "body", bag).mirror == (
-            "unchanged"
+        result = put_document(
+            document_store, vector_store, "d1", "body", bag, preserve_updated_at=False
         )
+        assert result.mirror == "unchanged"
         assert upserts == []
 
 
@@ -257,7 +266,9 @@ class TestPreserveUpdatedAtIsForwarded:
         ``KeywordSearch``'s recency decay the sweep's own clock as the
         document's age.
         """
-        put_document(document_store, vector_store, "d1", "body", {})
+        put_document(
+            document_store, vector_store, "d1", "body", {}, preserve_updated_at=False
+        )
         before = document_store.get("d1")["updated_at"]
 
         put_document(
@@ -270,5 +281,12 @@ class TestPreserveUpdatedAtIsForwarded:
         )
         assert document_store.get("d1")["updated_at"] == before
 
-        put_document(document_store, vector_store, "d1", "revised body", {})
+        put_document(
+            document_store,
+            vector_store,
+            "d1",
+            "revised body",
+            {},
+            preserve_updated_at=False,
+        )
         assert document_store.get("d1")["updated_at"] != before

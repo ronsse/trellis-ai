@@ -23,6 +23,14 @@ returned, the index never appears in ``SHOW INDEXES``, and every test then dies
 30s later in ``wait_for_vector_index_online``. Nothing raises at the point of
 the mistake, so the only durable guard is to pin that both suites resolve to the
 same name.
+
+The contract subclass ``tests/unit/stores/contracts/test_neo4j_vector_contract.py``
+is under both rules too. It rides the ``contracts/`` directory selection into
+the same invocation, so it must resolve to the same index name; and because its
+bodies are inherited from ``VectorStoreContractTests`` it cannot take the gate
+in their signatures, so it gates by a hand-read roster of names —
+``SEARCH_ISSUING_TESTS`` — which is pinned here, both directions, against the
+same AST scan run over the contract.
 """
 
 from __future__ import annotations
@@ -35,11 +43,20 @@ from typing import Any
 import pytest
 import yaml
 
+from tests.ast_rules import name_of
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "live-infra.yml"
 SUITE = REPO_ROOT / "tests" / "unit" / "stores" / "test_neo4j_vector.py"
 STORE_SOURCE = REPO_ROOT / "src" / "trellis" / "stores" / "neo4j" / "vector.py"
 INTEGRATION_CONFTEST = REPO_ROOT / "tests" / "integration" / "conftest.py"
+CONTRACTS_DIR = REPO_ROOT / "tests" / "unit" / "stores" / "contracts"
+#: The shared vector contract, whose inherited bodies the subclass below runs.
+CONTRACT = CONTRACTS_DIR / "vector_store_contract.py"
+#: ``Neo4jVectorStore``'s subclass of that contract. It cannot put the gate in
+#: the inherited signatures, so it names the gated cases in a module constant.
+CONTRACT_SUBCLASS = CONTRACTS_DIR / "test_neo4j_vector_contract.py"
+CONTRACT_ROSTER_CONSTANT = "SEARCH_ISSUING_TESTS"
 
 #: The e2e suite this file now shares a container with. Named as a path rather
 #: than inferred, because it is the *premise* of the index-name rule below: if
@@ -73,6 +90,21 @@ UNGATED_QUERY_TESTS = {
         "of Neo4jVectorStore.query, before any Cypher is built or sent"
     ),
 }
+
+
+#: Contract cases that call :data:`QUERY_METHOD` and are deliberately *not* in
+#: the subclass's roster, each with the reason. Same both-directions rule as
+#: :data:`UNGATED_QUERY_TESTS`: a query caller is rostered or named here.
+CONTRACT_UNGATED_QUERY_TESTS = {
+    "test_reset_storage_matches_supports_reset": (
+        "it queries only after a successful reset_storage(); Neo4jVectorStore "
+        "does not implement one, so the case takes the NotImplementedError "
+        "branch and returns before any Cypher is built or sent"
+    ),
+}
+
+#: The method whose absence on the store is the premise of the exemption above.
+RESET_METHOD = "reset_storage"
 
 
 def _live_test_step() -> dict[str, Any]:
@@ -134,6 +166,131 @@ def test_the_exemptions_are_still_query_callers() -> None:
     assert set(UNGATED_QUERY_TESTS) <= set(callers), (
         f"UNGATED_QUERY_TESTS names tests that no longer call "
         f".{QUERY_METHOD}(): {sorted(set(UNGATED_QUERY_TESTS) - set(callers))}"
+    )
+
+
+def _contract_roster(source: str) -> set[str]:
+    """The subclass's hand-read :data:`CONTRACT_ROSTER_CONSTANT`, read as text.
+
+    Read rather than imported: the subclass module ``importorskip``s the
+    ``neo4j`` driver, and this rule has to hold in the default suite.
+    """
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
+        if CONTRACT_ROSTER_CONSTANT in targets:
+            return {
+                sub.value
+                for sub in ast.walk(node.value)
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+            }
+    msg = f"{CONTRACT_ROSTER_CONSTANT} not found in {CONTRACT_SUBCLASS.name}"
+    raise AssertionError(msg)
+
+
+def test_every_search_issuing_contract_case_is_rostered() -> None:
+    """The contract's query callers and the subclass's roster, both directions.
+
+    The subclass gates by name, so the two failures are opposite and both
+    silent until live-infra runs: a new contract case that calls ``query``
+    and is missing from the roster goes red there on ``Invalid input
+    'SEARCH'``; a rostered name that no longer calls ``query`` (or no longer
+    exists) skips a case that would have passed, which is coverage lost with
+    nothing reporting it.
+    """
+    callers = set(_query_calling_tests(CONTRACT.read_text(encoding="utf-8")))
+    roster = _contract_roster(CONTRACT_SUBCLASS.read_text(encoding="utf-8"))
+    expected = callers - set(CONTRACT_UNGATED_QUERY_TESTS)
+
+    missing = sorted(expected - roster)
+    stale = sorted(roster - expected)
+    assert not missing, (
+        f"contract cases calling .{QUERY_METHOD}() that "
+        f"{CONTRACT_SUBCLASS.name} does not gate: {missing}. Add each to "
+        f"{CONTRACT_ROSTER_CONSTANT}, or name it in "
+        f"CONTRACT_UNGATED_QUERY_TESTS with its reason."
+    )
+    assert not stale, (
+        f"{CONTRACT_ROSTER_CONSTANT} gates cases that do not call "
+        f".{QUERY_METHOD}() (or are exempted here): {stale}. A gated case "
+        f"that needs no gate is a passing test skipped on every run."
+    )
+
+
+def test_the_contract_subclass_requests_the_gate() -> None:
+    """The roster only matters if something hands its names to the gate.
+
+    A roster pinned perfectly against the contract is still inert if the
+    fixture reading it stops calling ``getfixturevalue`` on the gate — every
+    SEARCH case then runs ungated and live-infra goes red. Read as a call,
+    not as a string, so a docstring naming the gate does not satisfy it.
+    """
+    tree = ast.parse(CONTRACT_SUBCLASS.read_text(encoding="utf-8"))
+    requests = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and name_of(node.func) == "getfixturevalue"
+        and any(
+            isinstance(arg, ast.Constant) and arg.value == GATE for arg in node.args
+        )
+    ]
+    roster_reads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Compare)
+        and any(
+            isinstance(sub, ast.Name) and sub.id == CONTRACT_ROSTER_CONSTANT
+            for sub in ast.walk(node)
+        )
+    ]
+
+    assert requests, (
+        f"{CONTRACT_SUBCLASS.name} never calls getfixturevalue({GATE!r}), so "
+        f"{CONTRACT_ROSTER_CONSTANT} gates nothing."
+    )
+    assert roster_reads, (
+        f"{CONTRACT_SUBCLASS.name} never tests a name against "
+        f"{CONTRACT_ROSTER_CONSTANT}, so the gate is not selected by it."
+    )
+
+
+def test_the_contract_exemptions_are_still_query_callers() -> None:
+    callers = _query_calling_tests(CONTRACT.read_text(encoding="utf-8"))
+
+    assert set(CONTRACT_UNGATED_QUERY_TESTS) <= set(callers), (
+        f"CONTRACT_UNGATED_QUERY_TESTS names contract cases that no longer "
+        f"call .{QUERY_METHOD}(): "
+        f"{sorted(set(CONTRACT_UNGATED_QUERY_TESTS) - set(callers))}"
+    )
+
+
+def test_the_reset_exemption_premise_holds() -> None:
+    """The reset case is ungated only because the store has no reset.
+
+    If ``Neo4jVectorStore`` ever implements ``reset_storage``, the contract
+    case takes its other branch and queries — so the exemption has to be
+    re-read, not left standing. Read as text for the same reason as above.
+    """
+    source = STORE_SOURCE.read_text(encoding="utf-8")
+    [cls] = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ClassDef) and node.name == VECTOR_STORE_CLASS
+    ]
+    methods = {
+        item.name
+        for item in cls.body
+        if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+    assert QUERY_METHOD in methods, "the class scan found the wrong class"
+    assert RESET_METHOD not in methods, (
+        f"{VECTOR_STORE_CLASS} now defines {RESET_METHOD}(), so "
+        f"test_reset_storage_matches_supports_reset reaches .{QUERY_METHOD}() "
+        f"on this backend. Move it into {CONTRACT_ROSTER_CONSTANT} and drop "
+        f"its CONTRACT_UNGATED_QUERY_TESTS entry."
     )
 
 
@@ -281,7 +438,11 @@ def test_live_infra_runs_both_neo4j_vector_suites_in_one_invocation() -> None:
     tokens = shlex.split(_live_test_step()["run"].replace("\\\n", " "))
     targets = {token.rstrip("/") for token in tokens if token.startswith("tests/")}
 
-    assert {"tests/unit/stores/test_neo4j_vector.py", E2E_SUITE_PATH} <= targets
+    assert {
+        "tests/unit/stores/test_neo4j_vector.py",
+        "tests/unit/stores/contracts",
+        E2E_SUITE_PATH,
+    } <= targets
 
 
 def test_both_suites_resolve_to_one_vector_index_name() -> None:
@@ -296,20 +457,23 @@ def test_both_suites_resolve_to_one_vector_index_name() -> None:
     back against one container.
     """
     default = _store_default_index_name(STORE_SOURCE.read_text(encoding="utf-8"))
-    unit_names = _constructed_index_names(SUITE.read_text(encoding="utf-8"), default)
     integration_name = _integration_index_name(
         INTEGRATION_CONFTEST.read_text(encoding="utf-8")
     )
-
-    assert unit_names, f"no {VECTOR_STORE_CLASS}(...) call found in {SUITE}"
     assert integration_name is not None
-    assert set(unit_names) == {integration_name}, (
-        f"{SUITE.name} provisions {sorted(set(unit_names))} while "
-        f"{INTEGRATION_CONFTEST.parent.name}/{INTEGRATION_CONFTEST.name} pins "
-        f"{integration_name!r}. Both run against one Neo4j in live-infra, which "
-        f"holds one vector index per (label, property) — the second CREATE is "
-        f"accepted and discarded without an error."
-    )
+
+    for suite in (SUITE, CONTRACT_SUBCLASS):
+        unit_names = _constructed_index_names(
+            suite.read_text(encoding="utf-8"), default
+        )
+        assert unit_names, f"no {VECTOR_STORE_CLASS}(...) call found in {suite}"
+        assert set(unit_names) == {integration_name}, (
+            f"{suite.name} provisions {sorted(set(unit_names))} while "
+            f"{INTEGRATION_CONFTEST.parent.name}/{INTEGRATION_CONFTEST.name} "
+            f"pins {integration_name!r}. All run against one Neo4j in "
+            f"live-infra, which holds one vector index per (label, property) "
+            f"— the second CREATE is accepted and discarded without an error."
+        )
 
 
 def test_the_store_default_is_readable_and_is_a_real_name() -> None:

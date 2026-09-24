@@ -1277,7 +1277,12 @@ def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
     evidence_items = _build_evidence()
     for ev in evidence_items:
         put_document(
-            doc_store, vector_store, ev.evidence_id, ev.content or "", ev.metadata
+            doc_store,
+            vector_store,
+            ev.evidence_id,
+            ev.content or "",
+            ev.metadata,
+            preserve_updated_at=False,
         )
         # Also link evidence to entities in graph
         for att in ev.attached_to:
@@ -1292,7 +1297,9 @@ def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
     # 5. Documents (searchable)
     docs = _build_documents()
     for doc_id, content, meta in docs:
-        put_document(doc_store, vector_store, doc_id, content, meta)
+        put_document(
+            doc_store, vector_store, doc_id, content, meta, preserve_updated_at=False
+        )
     console.print(f"  [green]+[/green] {len(docs)} documents")
 
     # 6. Precedents → graph nodes + edges
