@@ -312,15 +312,15 @@ jobs:
         # so the next one cannot arrive silently unwired. It carries its own
         # vacuity guard, because a scan that finds nothing would pass.
         #
-        # Two integration files stay out, and neither is a capability gap.
+        # One integration file stays out, and it is not a capability gap.
         # api/test_smoke_parity.py is the pytest mirror of deploy/smoke.sh:
         # it probes an already-deployed orchestrator at TRELLIS_BASE_URL and
         # skips the whole module when nothing answers /healthz there. This
         # job starts stores, not a server, so naming it would buy nine
-        # silent skips. cli/test_subprocess_serve.py needs no live infra at
-        # all — it passes in 2.4s on a bare checkout — and is unwired only
-        # because it carries live + slow markers that tests.yml deselects.
-        # Wiring it here would paper over that rather than fix it.
+        # silent skips. (cli/test_subprocess_serve.py used to be the second:
+        # it needs no live infra and was dark only because of live + slow
+        # markers. It lost the markers and runs under tests.yml instead of
+        # being wired here.)
         #
         # Still do not widen this to all of tests/unit/stores/. Paths here
         # are reviewed one at a time, and naming a file individually *is*

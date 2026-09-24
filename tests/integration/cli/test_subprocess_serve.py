@@ -9,7 +9,12 @@ points, structlog config wiring at startup, ``--config-dir`` plumbing.
 
 Skipped when ``trellis`` isn't on ``PATH``. Runs against the same
 SQLite tmp_path layout as the rest of the CLI suite, so no live infra
-needed.
+needed — and so, like its sibling ``test_subprocess_smoke.py``, it
+carries no opt-in marker. It used to carry ``live`` + ``slow``, which
+the default ``addopts`` deselect, so it ran in no CI leg at all even
+though it needs nothing CI lacks and boots in ~2-3s.
+``tests/unit/test_ci_coverage_rule.py`` fails if a marker that
+deselects it on every leg comes back without a stated reason.
 """
 
 from __future__ import annotations
@@ -20,12 +25,6 @@ import time
 from pathlib import Path
 
 import httpx
-import pytest
-
-pytestmark = [
-    pytest.mark.live,
-    pytest.mark.slow,
-]
 
 _HEALTHZ_TIMEOUT_SECONDS = 30.0
 _HEALTHZ_POLL_INTERVAL_SECONDS = 0.25
