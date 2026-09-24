@@ -7,9 +7,11 @@ exactly "the file changed" (ADR §4) and "show me the whole note" stays
 faithful. What a handler extracts (frontmatter, wikilinks, speaker
 turns) lands in document metadata.
 
-Delivery order per ADR §2: markdown first; plaintext/transcript and PDF
-(``handlers/pdf.py``, optional extra) are follow-up phases. Audio never
-enters core — transcription is an external pre-step.
+The registry is bounded by ADR §8 (#257): Trellis ingests normalized
+documents, and format conversion (PDF, audio, per-tool exports) is the
+client's pre-step, so those formats get no handler here. A ``.txt``
+plaintext handler (ADR §7 phase 3) is the one follow-up still open.
+A file with no handler is reported as unsupported, never converted.
 """
 
 from __future__ import annotations
