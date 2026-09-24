@@ -45,7 +45,12 @@ from trellis.retrieve.excerpts import (
     apply_content_floor,
 )
 from trellis.retrieve.formatters import format_index_line
-from trellis.retrieve.lifecycle import ARCHIVED_REJECTION_REASON, partition_archived
+from trellis.retrieve.lifecycle import (
+    ARCHIVED_REJECTION_REASON,
+    SUPERSEDED_REJECTION_REASON,
+    partition_archived,
+    partition_superseded,
+)
 from trellis.retrieve.noise import (
     NOISE_REJECTION_REASON,
     partition_by_signal_quality,
@@ -695,6 +700,13 @@ class PackBuilder:
         # Promote metadata["source_strategy"] → strategy_source field
         all_items = self._promote_strategy_source(all_items)
 
+        # Never serve both sides of a declared supersession (#613). Over the
+        # whole pool, not per strategy: the successor may be on another axis.
+        # Before dedup, so rows are per (strategy, item) like every gate, and
+        # after the promote above, so each row carries its item's axis.
+        all_items, superseded = partition_superseded(all_items)
+        rejected.extend(self._reject(superseded, SUPERSEDED_REJECTION_REASON))
+
         # Deduplicate by item_id (keep highest relevance_score)
         deduped, dedup_rejected = self._deduplicate_tracked(all_items)
         rejected.extend(dedup_rejected)
@@ -965,6 +977,10 @@ class PackBuilder:
             len(self._strategies),
             pack_kind="sectioned pack",
         )
+
+        # 1a. Pairwise supersession gate (#613) — see build().
+        all_items, superseded = partition_superseded(all_items)
+        rejected.extend(self._reject(superseded, SUPERSEDED_REJECTION_REASON))
 
         # 2. Deduplicate
         deduped = self._deduplicate(all_items)
