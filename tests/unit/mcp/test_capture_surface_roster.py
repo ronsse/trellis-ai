@@ -78,6 +78,7 @@ from typing import NamedTuple
 import pytest
 
 import trellis.mcp.server as server_mod
+from tests.ast_rules import is_call_to
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.mutate.policy_source import POLICY_GATE_SURFACE
 from trellis.ops.capture_health import (
@@ -299,30 +300,17 @@ def _unclassified(source: str) -> set[str]:
     }
 
 
-def _calls_named(node: ast.AST, name: str) -> bool:
-    """Is ``node`` a call to ``name``, written bare *or* through a module?
-
-    Both spellings, because both reach the same function and only one of
-    them used to be seen. ``from ... import record_write_rejection`` is what
-    the two producers in the tree happen to use today, but
-    ``write_health.record_write_rejection(...)`` is at least as idiomatic —
-    and it escaped the sweep completely: a new module calling it that way
-    left all 22 tests green while raising a banner under a label no roster
-    had ever classified. Matching on the trailing name over-collects at
-    worst (a same-named method on an unrelated object), and over-collecting
-    costs a spurious classification while under-collecting costs an
-    unwatched write surface.
-    """
-    if not isinstance(node, ast.Call):
-        return False
-    func = node.func
-    if isinstance(func, ast.Name):
-        return func.id == name
-    return isinstance(func, ast.Attribute) and func.attr == name
-
-
 def _modules_calling(name: str, root: Path) -> set[str]:
     """Every module under ``root`` containing a call to ``name``.
+
+    A call counts written bare *or* through a module, because
+    :func:`~tests.ast_rules.is_call_to` matches the trailing name.
+    ``write_health.record_write_rejection(...)`` once escaped this sweep
+    entirely — a new module calling the emitter that way left every test
+    here green — which ``test_an_attribute_style_call_is_a_producer_too``
+    now pins. Over-collecting (a same-named method on an unrelated object)
+    costs a spurious classification; under-collecting costs an unwatched
+    write surface.
 
     Paths are ``root``-relative posix strings so the roster below reads as
     source paths rather than as machine-local absolutes.
@@ -333,7 +321,7 @@ def _modules_calling(name: str, root: Path) -> set[str]:
         if name not in source:  # cheap pre-filter; the AST decides
             continue
         for node in ast.walk(ast.parse(source)):
-            if _calls_named(node, name):
+            if is_call_to(node, name):
                 found.add(path.relative_to(root).as_posix())
                 break
     return found
@@ -364,7 +352,7 @@ def _emitter_calls_outside_the_wrapper(source: str) -> list[int]:
     return [
         node.lineno
         for node in ast.walk(tree)
-        if _calls_named(node, EMITTER) and not (start <= node.lineno <= end)
+        if is_call_to(node, EMITTER) and not (start <= node.lineno <= end)
     ]
 
 
@@ -631,7 +619,7 @@ class TestNoUnwatchedRejectionProducer:
         inside = [
             node.lineno
             for node in ast.walk(ast.parse(SERVER_SOURCE))
-            if _calls_named(node, EMITTER)
+            if is_call_to(node, EMITTER)
         ]
         assert inside, (
             f"{MCP_WRAPPER_MODULE} calls {EMITTER} nowhere at all; the "
@@ -641,7 +629,7 @@ class TestNoUnwatchedRejectionProducer:
     def test_an_attribute_style_call_is_a_producer_too(self, tmp_path: Path) -> None:
         """``write_health.record_write_rejection(...)`` counts, not just the bare name.
 
-        Verified by injection: before :func:`_calls_named` matched the
+        Verified by injection: before the sweep's call predicate matched the
         attribute spelling, a new module calling the emitter through its
         module object left every test in this file green.
         """
