@@ -852,3 +852,49 @@ class TestParseSalvageCount:
         )
         result = await ext.extract("x")
         assert [e.name for e in result.entities] == ["SentinelEntityName", "Second"]
+
+    async def test_counted_at_the_parse_not_after_draft_validation(
+        self, salvage_event_log
+    ) -> None:
+        """A rescued response that then fails validation is still counted.
+
+        The salvage event records that the JSON needed rescuing; the
+        validation failure reports through ``extraction.failed``. Moving the
+        salvage emit below ``_to_drafts`` makes the first count disappear
+        exactly when the second fires, so the two would stop answering
+        different questions. ``_to_drafts`` skips malformed entries on its
+        own, so the ``ValidationError`` is forced the way
+        ``test_validation_error_emits_validation_kind`` forces it.
+        """
+        from unittest.mock import patch
+
+        from pydantic import ValidationError
+
+        from trellis.extract.telemetry import ExtractionFailureError
+        from trellis.stores.base.event_log import EventType
+
+        ext = LLMExtractor(
+            llm_client=FakeLLMClient(f"prose {_SALVAGE_OBJECT} prose"),
+            event_log=salvage_event_log,
+        )
+        validation_exc = ValidationError.from_exception_data(
+            "EntityDraft",
+            [{"type": "string_type", "loc": ("name",), "input": 42}],
+        )
+        with (
+            patch("trellis.extract.llm._to_drafts", side_effect=validation_exc),
+            pytest.raises(ExtractionFailureError) as excinfo,
+        ):
+            await ext.extract("x")
+
+        assert excinfo.value.failure_kind == "validation_error"
+        salvage_events = salvage_event_log.get_events(
+            event_type=EventType.EXTRACTION_PARSE_SALVAGED
+        )
+        failed_events = salvage_event_log.get_events(
+            event_type=EventType.EXTRACTION_FAILED
+        )
+        assert [e.payload["salvage_kind"] for e in salvage_events] == ["brace_span"]
+        assert [e.payload["failure_kind"] for e in failed_events] == [
+            "validation_error"
+        ]
