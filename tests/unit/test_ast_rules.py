@@ -248,12 +248,12 @@ class TestNameOf:
         assert not disagreements, disagreements[:10]
 
     def test_agrees_with_the_isinstance_spelling_across_src(self) -> None:
-        """``test_capture_surface_roster``'s ``_calls_named``, same check.
+        """The predicate ``test_capture_surface_roster`` retired, same check.
 
-        That module is deliberately unconverted — it is the most delicate
-        enforcement file in the repo and its diff belongs in its own PR —
-        so this pins the equivalence now, and the conversion when it comes
-        needs no re-derivation.
+        ``old`` is that module's former ``_calls_named``, kept verbatim. It
+        was pinned here before the module adopted :func:`is_call_to`, so the
+        conversion needed no re-derivation; it stays so a later edit to
+        :func:`is_call_to` cannot silently drift from what that roster saw.
         """
 
         def old(node: ast.AST, name: str) -> bool:
