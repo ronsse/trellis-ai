@@ -160,7 +160,8 @@ def put_document(
             Deliberately keyword-only with no default: a default answered the
             question for every caller that never asked it. The signature
             forces a declaration; it cannot check that the declaration is
-            right, which is left to each caller's own recency test.
+            right, which is left to the caller's own recency test where one
+            exists.
 
     Returns:
         A :class:`DocumentWriteResult`. Never raises for a mirror failure;
