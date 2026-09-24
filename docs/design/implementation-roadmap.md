@@ -5,7 +5,7 @@
 
 > **Picking up evaluation work?** The eval harness and all planned scenarios are built — see [`../plans/2026-06-17-step3-assessment.md`](../plans/2026-06-17-step3-assessment.md) for what each scenario substantiates (its §6 evidence rules are authoritative). [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) is the historical plan they grew from.
 >
-> **Picking up the memory-layer / corpus work?** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) is **Superseded**: the owner decided importers-into-Trellis instead of an external layer. The live design is [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md) — **phases 1–2 are landed** (`trellis ingest corpus`, §G below); phase 4 (`--extract`) is landed (§G.3); phase 3's `.txt` plaintext handler is the one remaining follow-up; phase 5 (PDF) was struck by the ADR's §8 normalization boundary (#257).
+> **Picking up the memory-layer / corpus work?** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) is **Superseded**: the owner decided importers-into-Trellis instead of an external layer. The live design is [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md) — **phases 1–2 are landed** (`trellis ingest corpus`, §G below); phase 4 (`--extract`) is landed (§G.3); phase 5 (PDF) was struck by the ADR's §8 normalization boundary (#257), under which phase 3's `.txt` plaintext handler reads as the one remaining follow-up.
 >
 > **Picking up Phase F (inner agent loop)?** TODO.md "Phase F" is the staged program (F1 harness ≈ 1500–2000 LOC; F5 gated on 30 days of F4 signal). The F6 eval scenario is already implemented with reference drivers at the F1–F5 plug-in seam (`eval/scenarios/skill_loop_convergence/` — in the `trellis-evals` repo since the 2026-07-12 split).
 
@@ -327,7 +327,7 @@ Both `ingest corpus` and `ingest conversations` accept `--extract`, **double-gat
 
 #### G.4 — normalized-input handlers only (ADR §7 phase 3; §8 boundary)
 
-**Scope:** `.txt` plaintext/transcript file handler, strictly by observed dogfood need. **Closed by ADR §8 ([#257](https://github.com/ronsse/trellis-ai/issues/257)):** PDF, audio and per-tool export formats — format conversion is the client's pre-step; a file with no handler is reported as `skipped_unsupported`, never handled in core.
+**Scope:** normalized-input handlers only — read by ADR §8 as the `.txt` plaintext/transcript file handler, strictly by observed dogfood need. **Closed by ADR §8 ([#257](https://github.com/ronsse/trellis-ai/issues/257)):** PDF, audio and per-tool export formats — format conversion is the client's pre-step; a file with no handler is reported as `skipped_unsupported`, never handled in core.
 
 ⛔ **Retrieval-side chunk rollup is REFUSED ON MEASUREMENT — it is no longer in scope here.** The ADR §3 flags group-by-`parent_doc_id` in `PackBuilder` as a planned follow-up; [#384](https://github.com/ronsse/trellis-ai/pull/384) (`d821094`, 2026-08-27) measured it and rejected it. **Do not re-propose without new evidence.** The reasoning — and what shipped instead (the *instrument*, `retrieve/concentration.py`, not a fix) — is in `CLAUDE.md` § "Repeat-source concentration — measured, and the rollup refused"; the reopen condition is stated there and is the thinness of the cited-helpful evidence (two attributed groups), not taste. The item's *second* half was a separate, live display defect and shipped: the documents list view default-filters chunk rows ([#385](https://github.com/ronsse/trellis-ai/issues/385), `bf113be`), extended to the other whole-document surfaces by [#396](https://github.com/ronsse/trellis-ai/issues/396) (`0e5ed75`).
 
@@ -381,7 +381,7 @@ whichever gate below has fired — don't invent work from this table.
 | Vector-contract drift | C.1 vector DSL | contract suite shows backend drift, or a plugin author asks |
 | Infra access | E.4 AWS ECS+RDS dry-run | sandbox account available |
 | Deliberate scheduling | Phase F waves F1–F5 (TODO.md) · #248 organic-generation corpus tuning | owner schedules them |
-| Dogfood signal | Corpus-ingestion follow-ups §G.4 (`.txt` plaintext handler only — PDF struck by ADR §8, #257). **The chunk rollup is no longer on this list — [#384](https://github.com/ronsse/trellis-ai/pull/384) measured it and refused it; see §G.4** | owner ingests the real vault and judges retrieval via Memory Explorer |
+| Dogfood signal | Corpus-ingestion follow-ups §G.4 (normalized-input handlers only — PDF struck by ADR §8, #257). **The chunk rollup is no longer on this list — [#384](https://github.com/ronsse/trellis-ai/pull/384) measured it and refused it; see §G.4** | owner ingests the real vault and judges retrieval via Memory Explorer |
 
 ---
 

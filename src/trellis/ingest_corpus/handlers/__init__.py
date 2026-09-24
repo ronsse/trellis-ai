@@ -9,8 +9,8 @@ turns) lands in document metadata.
 
 The registry is bounded by ADR §8 (#257): Trellis ingests normalized
 documents, and format conversion (PDF, audio, per-tool exports) is the
-client's pre-step, so those formats get no handler here. A ``.txt``
-plaintext handler (ADR §7 phase 3) is the one follow-up still open.
+client's pre-step, so those formats get no handler here. ADR §8 reads
+a ``.txt`` plaintext handler (§7 phase 3) as the one follow-up open.
 A file with no handler is reported as unsupported, never converted.
 """
 
