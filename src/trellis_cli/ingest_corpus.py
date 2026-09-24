@@ -87,7 +87,13 @@ def ingest_corpus(
         "text", "--format", help="Output format: text or json"
     ),
 ) -> None:
-    """Sync a corpus directory into the document store, idempotently."""
+    """Sync a corpus directory into the document store, idempotently.
+
+    Input contract: normalized text. Files ending .md or .markdown are
+    ingested; every other file is reported as unsupported and skipped.
+    Convert other formats (PDF, audio, per-tool exports) first. A Claude
+    conversation export (JSON) goes through `trellis ingest conversations`.
+    """
     root = Path(path)
     if not root.exists():
         if output_format == "json":

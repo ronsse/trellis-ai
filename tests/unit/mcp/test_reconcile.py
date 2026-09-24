@@ -1037,7 +1037,10 @@ class TestSupersedePreservesRecency:
         the §4 commitment, but it lives in another module as the absence of a
         branch, so nothing would fail if someone added ``exclude_superseded``
         beside ``exclude_archived``: the rationale would die and both tests
-        above would keep passing.
+        above would keep passing. Its build-level twin is
+        ``tests/unit/retrieve/test_supersession_gate.py``, which serves a loser
+        whose successor is absent — the pairwise gate (#613) excludes only when
+        both sides are in the pool.
         """
         from trellis.retrieve.lifecycle import is_archived
 

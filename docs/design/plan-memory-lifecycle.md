@@ -179,7 +179,7 @@ delete almost never.**
   rather than being deleted.
 - **Contradiction = SCD-2 supersede + recency-wins-at-retrieval**, with the losing
   version retrievable on demand. Never serve both sides of a contradiction in one
-  pack (a pack-assembly invariant, cheap to enforce at build time).
+  pack (a pack-assembly invariant, cheap to enforce at build time; built in #613).
 
 ## 5. Retrieval & injection cadence — "is it used on every call?"
 
