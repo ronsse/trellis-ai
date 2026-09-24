@@ -1,6 +1,7 @@
 # ADR: Corpus Ingestion — importers into Trellis
 
 **Status:** Accepted — §7 phases 1–2 implemented 2026-07-11 (`trellis ingest corpus`, `src/trellis/ingest_corpus/`); phases 3–5 are incremental follow-ups
+**Amended:** 2026-09-24 ([#257](https://github.com/ronsse/trellis-ai/issues/257)) — §8 records the normalization boundary; §7 phase 5 (PDF) is struck, so of the Status line's phases 3–5 only 3 and 4 remain (4 landed as roadmap §G.3)
 **Date:** 2026-07-08
 **Deciders:** Trellis core
 **Supersedes:** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) (external Memory Layer — see §6)
@@ -66,11 +67,12 @@ trellis ingest corpus <path> [--source-system obsidian] [--domain X] \
      graph writes in the reader — extraction is a separate pass, §5).
   2. **Plaintext / transcript** — `.txt` and simple speaker-labelled
      transcripts; speaker turns preserved verbatim, no diarization.
-  3. **PDF** — later phase, behind an optional extra (text extraction only).
+  3. ~~**PDF** — later phase, behind an optional extra (text extraction only).~~
+     Struck by §8 (#257): PDF text extraction is a client pre-step.
   4. **Audio — explicitly out of scope for core.** Transcription
      (e.g. Whisper on the deployment host) is an external pre-step whose
-     output enters through the transcript handler. Core never gains an
-     audio dependency.
+     output enters as normalized text. Core never gains an audio
+     dependency. This is the precedent §8 generalizes.
 - Per repo convention: `--format json` machine output, `--dry-run` prints
   the would-be plan (files, chunk counts, skips) without writing.
 - Handlers are pure (`Path -> list[CorpusDocument]` dataclasses); all
@@ -182,8 +184,45 @@ curation stage that ADR had to invent.
 | 2. Idempotent re-sync | same + `trellis/core/hashing` reuse | second run over unchanged tree = 0 writes; edited file re-puts + re-embeds; moved file detected via `get_by_hash`; `--prune` removes vanished docs; tests cover all four |
 | 3. Embed + transcript handler | embed hook wiring, `.txt`/transcript handler | chunks semantically retrievable via `search` on a live deployment (skynet vault dogfood) |
 | 4. `--extract` pass | wiring to `build_save_memory_extractor` | flag-gated extraction produces governed entity/edge drafts from a sample vault |
-| 5. PDF handler (optional extra) | `ingest_corpus/handlers/pdf.py` | text-PDF ingests; scanned PDFs rejected with a clear error |
+| ~~5. PDF handler (optional extra)~~ — struck by §8 (#257) | ~~`ingest_corpus/handlers/pdf.py`~~ | — |
 
 **Size:** phases 1–2 ≈ one focused session; 3–5 incremental.
 **Gating signal:** skynet dogfood — ingest the owner's real notes vault and
 measure retrieval quality via the Memory Explorer packs view.
+
+## 8. Normalization boundary (amendment, 2026-09-24, #257)
+
+**Owner decision 2026-07-12**
+([#257](https://github.com/ronsse/trellis-ai/issues/257)), generalizing
+the audio precedent in §2 item 4 into a stated boundary: **Trellis
+ingests normalized documents — markdown/text (`trellis ingest corpus`)
+and conversation JSON (`trellis ingest conversations`). Format conversion
+is the client's pre-step.**
+
+**Why.** Without a stated boundary every client's exotic format becomes
+core code — PDF, transcripts, per-tool exports — which is the handler
+ratchet roadmap §G.4 had been scoping. This is scope discipline codified
+before the bloat arrives, not a response to bloat already present. The
+evaluation program moved out to the `trellis-evals` repo the same day
+under the same principle: operator and client concerns live client-side.
+The boundary is already applied — #255's Claude Code session auto-capture
+keeps its transcript reader in `trellis_workers.session_capture` and
+enters core through the existing document-ingest APIs
+([`session-auto-capture.md`](../agent-guide/session-auto-capture.md)).
+
+**Consequences.**
+- The §G.4 handler ratchet is closed: PDF (§7 phase 5, struck above),
+  audio and per-tool export formats get no core handler.
+- The issue names "transcripts" among the closed formats while admitting
+  "markdown/text". This amendment reads that as per-tool transcript
+  *formats* being client-side (the #255 case) and a plain `.txt` file as
+  normalized text, so §7 phase 3's plaintext handler reads as the one
+  normalized-input handler still open. That is a reading of the issue,
+  not a separate owner statement; phase 3 stays gated on observed
+  dogfood need, as before.
+- Zero code removed: the handler registry
+  ([`handlers/__init__.py`](../../src/trellis/ingest_corpus/handlers/__init__.py))
+  is unchanged and holds the markdown handler only. A file with no
+  handler is reported as unsupported (`skipped_unsupported` in the run
+  report), never converted. `trellis ingest corpus --help` states this
+  contract.

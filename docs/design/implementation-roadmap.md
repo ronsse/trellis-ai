@@ -1,11 +1,11 @@
 # Implementation Roadmap
 
-**Last updated:** 2026-08-31 (the August measurement + hardening wave — ~55 merges, digested in §1 "The August 2026 wave"; C1 wired the policy gate, and the §G.4 chunk rollup was **measured and refused**. 2026-08-02: classification + retrieval hardening #278–#281. 2026-07-15: Productionization milestone §3.H added, roadmap reconciled. 2026-07-14: dogfood defect wave — retrieval defects #254/#262 + the auto-capture keystone #255 + #258/#259/#260/#263 landed. 2026-07-11: corpus §G.1 + conversation capture; `trellis analyze cost`; MCP-over-HTTP #252)
+**Last updated:** 2026-09-24 (#257: the ingest normalization boundary recorded as [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md) §8, and §G.4 re-scoped to normalized-input handlers only. 2026-08-31: the August measurement + hardening wave — ~55 merges, digested in §1 "The August 2026 wave"; C1 wired the policy gate, and the §G.4 chunk rollup was **measured and refused**. 2026-08-02: classification + retrieval hardening #278–#281. 2026-07-15: Productionization milestone §3.H added, roadmap reconciled. 2026-07-14: dogfood defect wave — retrieval defects #254/#262 + the auto-capture keystone #255 + #258/#259/#260/#263 landed. 2026-07-11: corpus §G.1 + conversation capture; `trellis analyze cost`; MCP-over-HTTP #252)
 **Purpose:** Single-page hand-off for any agent (fresh or returning) picking up Trellis implementation work. Self-contained. Read this top-to-bottom before touching code.
 
 > **Picking up evaluation work?** The eval harness and all planned scenarios are built — see [`../plans/2026-06-17-step3-assessment.md`](../plans/2026-06-17-step3-assessment.md) for what each scenario substantiates (its §6 evidence rules are authoritative). [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) is the historical plan they grew from.
 >
-> **Picking up the memory-layer / corpus work?** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) is **Superseded**: the owner decided importers-into-Trellis instead of an external layer. The live design is [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md) — **phases 1–2 are landed** (`trellis ingest corpus`, §G below); transcript/`--extract`/PDF handlers (phases 3–5) are incremental follow-ups.
+> **Picking up the memory-layer / corpus work?** [`adr-memory-layer-interop.md`](./adr-memory-layer-interop.md) is **Superseded**: the owner decided importers-into-Trellis instead of an external layer. The live design is [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md) — **phases 1–2 are landed** (`trellis ingest corpus`, §G below); phase 4 (`--extract`) is landed (§G.3); phase 3's `.txt` plaintext handler is the one remaining follow-up; phase 5 (PDF) was struck by the ADR's §8 normalization boundary (#257).
 >
 > **Picking up Phase F (inner agent loop)?** TODO.md "Phase F" is the staged program (F1 harness ≈ 1500–2000 LOC; F5 gated on 30 days of F4 signal). The F6 eval scenario is already implemented with reference drivers at the F1–F5 plug-in seam (`eval/scenarios/skill_loop_convergence/` — in the `trellis-evals` repo since the 2026-07-12 split).
 
@@ -325,9 +325,9 @@ embedding already makes conversations retrievable.
 
 Both `ingest corpus` and `ingest conversations` accept `--extract`, **double-gated** with `TRELLIS_ENABLE_MEMORY_EXTRACTION` (per-run LLM-cost decision). When on + an LLM client is configured, each new/changed document's prose is mined for entity/edge drafts via the same `build_save_memory_extractor` pipeline the MCP `save_memory` path uses (deterministic alias-match + LLM residue), routed through the governed `MutationExecutor`; the run report gains `entities_extracted` / `edges_extracted`. Fully fail-soft. Shared, non-MCP hook `src/trellis/extract/memory_ingest_hook.py` (mirrors `run_embed_on_ingest`) so the CLI path and the MCP path build the *same* extractor and can't drift. ~~Carries the known O(n) alias-resolver caveat (capped 2000 nodes), flagged for an indexed lookup before large graphs.~~ **Caveat closed 2026-08-02 by [#289](https://github.com/ronsse/trellis-ai/issues/289)** (`a889c85`): both write paths now share [`entity_resolution.build_name_alias_resolver`](../../src/trellis/extract/entity_resolution.py) — an indexed `entity_aliases` lookup first, the bounded scan only to bootstrap, and the unambiguous result minted back so the next lookup is a single indexed row read. What remains is *not* the O(n) caveat but a cap-boundary defect: past `DEFAULT_NAME_SCAN_LIMIT` the scan sees only the newest window, so an older entity reports a clean "no match" and minting stops permanently — tracked as B3′ in [`autonomous-backlog.md`](./autonomous-backlog.md), with the measured growth trajectory. 12 tests.
 
-#### G.4 — remaining follow-up phases (ADR §7 phases 3–5)
+#### G.4 — normalized-input handlers only (ADR §7 phase 3; §8 boundary)
 
-**Scope:** transcript/plaintext file handler; PDF handler behind an optional extra. Audio stays out of core (external transcription pre-step).
+**Scope:** `.txt` plaintext/transcript file handler, strictly by observed dogfood need. **Closed by ADR §8 ([#257](https://github.com/ronsse/trellis-ai/issues/257)):** PDF, audio and per-tool export formats — format conversion is the client's pre-step; a file with no handler is reported as `skipped_unsupported`, never handled in core.
 
 ⛔ **Retrieval-side chunk rollup is REFUSED ON MEASUREMENT — it is no longer in scope here.** The ADR §3 flags group-by-`parent_doc_id` in `PackBuilder` as a planned follow-up; [#384](https://github.com/ronsse/trellis-ai/pull/384) (`d821094`, 2026-08-27) measured it and rejected it. **Do not re-propose without new evidence.** The reasoning — and what shipped instead (the *instrument*, `retrieve/concentration.py`, not a fix) — is in `CLAUDE.md` § "Repeat-source concentration — measured, and the rollup refused"; the reopen condition is stated there and is the thinness of the cited-helpful evidence (two attributed groups), not taste. The item's *second* half was a separate, live display defect and shipped: the documents list view default-filters chunk rows ([#385](https://github.com/ronsse/trellis-ai/issues/385), `bf113be`), extended to the other whole-document surfaces by [#396](https://github.com/ronsse/trellis-ai/issues/396) (`0e5ed75`).
 
@@ -358,7 +358,7 @@ Implementable and fixture-testable now (`blocked:owner-decision`); the consumer-
 
 - [ ] **#208** (`owner-only`, `blocked:signal`) — pilot-infra blockage (ArcadeDB secret + expired AWS SSO), not a trellis-ai code defect. Acceptance: re-homed to the consumer-kg repo or closed with a disposition comment.
 
-**Adjacent (on the deployer-#2 path, tracked on the cross-repo Productionization project):** #256 (Bolt→plugin extraction, `keystone`/`ready` — independent of #194), #257 (ingest-normalization ADR, `owner-only`), #264 (log judged operations as training examples, `mechanical`/`ready`). Deployment-side gates — rebuild `trellis-api`, `:8420` LAN-lockdown, backup mirror, the `llm:` block that lets `worker enrich`/`mine-precedents` fire — live in the private skynet-hub repo's M1.
+**Adjacent (on the deployer-#2 path, tracked on the cross-repo Productionization project):** #256 (Bolt→plugin extraction, `keystone`/`ready` — independent of #194), #257 (ingest-normalization boundary — owner decision 2026-07-12, recorded as ADR §8 in [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md)), #264 (log judged operations as training examples, `mechanical`/`ready`). Deployment-side gates — rebuild `trellis-api`, `:8420` LAN-lockdown, backup mirror, the `llm:` block that lets `worker enrich`/`mine-precedents` fire — live in the private skynet-hub repo's M1.
 
 ---
 
@@ -381,7 +381,7 @@ whichever gate below has fired — don't invent work from this table.
 | Vector-contract drift | C.1 vector DSL | contract suite shows backend drift, or a plugin author asks |
 | Infra access | E.4 AWS ECS+RDS dry-run | sandbox account available |
 | Deliberate scheduling | Phase F waves F1–F5 (TODO.md) · #248 organic-generation corpus tuning | owner schedules them |
-| Dogfood signal | Corpus-ingestion follow-ups §G.4 (transcript / PDF handlers). **The chunk rollup is no longer on this list — [#384](https://github.com/ronsse/trellis-ai/pull/384) measured it and refused it; see §G.4** | owner ingests the real vault and judges retrieval via Memory Explorer |
+| Dogfood signal | Corpus-ingestion follow-ups §G.4 (`.txt` plaintext handler only — PDF struck by ADR §8, #257). **The chunk rollup is no longer on this list — [#384](https://github.com/ronsse/trellis-ai/pull/384) measured it and refused it; see §G.4** | owner ingests the real vault and judges retrieval via Memory Explorer |
 
 ---
 
