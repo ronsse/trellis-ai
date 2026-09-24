@@ -297,3 +297,32 @@ def test_the_projection_is_the_callable_the_routes_import() -> None:
         )
     )
     assert response.warnings == ["Policy warning (pol-warn): unusual write"]
+
+
+def test_the_projection_carries_each_results_own_command_id() -> None:
+    """``command_id`` survives the projection, per result, not as a constant.
+
+    It is the only key a REST caller has to attribute a response to the
+    command it submitted, and before this test the one value-level check
+    above built its ``CommandResult`` with ``"cmd_1"`` and asserted only
+    ``warnings`` -- so a projection writing any constant into
+    ``command_id`` passed every test in the suite. Two results with
+    distinct ids, and statuses that differ too, so no single literal can
+    satisfy both.
+    """
+    from trellis.mutate import CommandResult, CommandStatus
+
+    results = [
+        CommandResult(
+            status=CommandStatus.SUCCESS,
+            command_id="cid-wire-a",
+            operation="entity.create",
+        ),
+        CommandResult(
+            status=CommandStatus.REJECTED,
+            command_id="cid-wire-b",
+            operation="link.remove",
+        ),
+    ]
+    responses = [command_response(r) for r in results]
+    assert [r.command_id for r in responses] == ["cid-wire-a", "cid-wire-b"]
