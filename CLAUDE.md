@@ -303,12 +303,11 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   the path is not enough, and neither is setting the flag.
   `tests/unit/test_ci_coverage_rule.py` computes that join over every workflow and fails
   when a file lands outside it without a reason, so this paragraph can no longer be the
-  thing that tracks it. **Two files are outside it today**, each with a measured reason
-  in that module: `api/test_smoke_parity.py` (the pytest mirror of `deploy/smoke.sh` —
-  it probes an already-deployed orchestrator and would buy nine silent skips here),
-  `cli/test_subprocess_serve.py` (needs no live infrastructure at all and passes in 2.4s
-  on a bare checkout — dark purely because of `live` + `slow` markers, a marker defect
-  rather than a CI capability gap).
+  thing that tracks it. **One file is outside it today**, with a measured reason in that
+  module: `api/test_smoke_parity.py` (the pytest mirror of `deploy/smoke.sh` — it probes
+  an already-deployed orchestrator and would buy nine silent skips here). A second,
+  `cli/test_subprocess_serve.py`, needed no live infrastructure and was dark purely
+  because of `live` + `slow` markers; the markers are gone and it runs on every PR.
 - **`test_neo4j_vector.py` was that ninth, and what it cost to wire is the point.** It was
   blocked twice over and only one blocker was the obvious one. Four of its five
   `TestQuery` cases issue AuraDB-grade `SEARCH ... IN (VECTOR INDEX ...)`, which
