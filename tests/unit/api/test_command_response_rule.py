@@ -308,7 +308,11 @@ def test_the_projection_carries_each_results_own_command_id() -> None:
     ``warnings`` -- so a projection writing any constant into
     ``command_id`` passed every test in the suite. Two results with
     distinct ids, and statuses that differ too, so no single literal can
-    satisfy both.
+    satisfy both. The success result also carries a ``created_id`` and
+    both carry a message: with those uniformly empty, a projection falling
+    through a sibling (``result.created_id or result.command_id``) passed
+    this test and all of ``tests/unit/api``, because ``None or x`` is ``x``
+    -- the uniform-fixture shape of #447/#456, one layer over.
     """
     from trellis.mutate import CommandResult, CommandStatus
 
@@ -317,12 +321,16 @@ def test_the_projection_carries_each_results_own_command_id() -> None:
             status=CommandStatus.SUCCESS,
             command_id="cid-wire-a",
             operation="entity.create",
+            created_id="node-wire-a",
+            message="created",
         ),
         CommandResult(
             status=CommandStatus.REJECTED,
             command_id="cid-wire-b",
             operation="link.remove",
+            message="Denied by policy: frozen",
         ),
     ]
     responses = [command_response(r) for r in results]
     assert [r.command_id for r in responses] == ["cid-wire-a", "cid-wire-b"]
+    assert [r.created_id for r in responses] == ["node-wire-a", None]

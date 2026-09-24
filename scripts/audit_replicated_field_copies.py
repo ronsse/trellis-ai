@@ -38,7 +38,7 @@ So this script counts, per ``Class.field``:
 and **over-counts**: a low gap is not evidence of coverage. It also counts
 assertion *statements* rather than the sites they reach, so it **under-counts**
 a field pinned through a shared helper: ``CommandResult.command_id`` reads
-12 sites / 2 pins / gap +10 with every one of its twelve sites pinned by
+12 sites / 3 pins / gap +9 (2026-09-24) with every one of its twelve sites pinned by
 ``tests/unit/mutate/test_command_result_attribution.py``. So a high gap is not
 a finding either. Only a mutant settles it, which is why the report ends by
 naming the mutants to run rather than a verdict.

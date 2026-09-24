@@ -35,9 +35,16 @@ The twelve sites, read top to bottom through ``execute`` and
 * handler returns (SUCCESS) -- ``test_success``
 
 Status alone does not identify a site (four are REJECTED, four FAILED),
-so every test also asserts a fragment of the message only that site
-writes. That is what makes the table above a per-site map rather than a
-per-status one: a test cannot pass by reaching a neighbouring branch.
+so every test also asserts a fragment of the message its site writes. Two
+pairs share a message *shape* -- both replay sites write ``Duplicate
+command: <key>`` (``IdempotencyError.__str__`` and the in-memory replay
+use the same words) and both handler-failure sites write ``Execution
+failed: <exc>`` -- and there the command that reaches the site is what
+separates them: a handler raising against a command with no idempotency
+key can only reach the handler site, and a typed exception can only reach
+the typed catch. The map is proved by execution rather than by the
+fragments alone: folding one site at a time, each fold dies to its own
+test and no other (the ``M1.n`` runs in the PR).
 
 Three properties every test holds, and why:
 
@@ -49,6 +56,14 @@ Three properties every test holds, and why:
 * **Results are compared positionally and strictly.** ``zip(strict=True)``
   plus a length check, so a result list that is short, long or reordered
   fails rather than being silently truncated.
+* **No sibling field can stand in for the id.** Every command carries a
+  non-``None`` ``target_id`` and ``idempotency_key``, each distinct from
+  its ``command_id``, and the helper refuses a command where either is
+  absent or collides. With those fields uniformly ``None`` -- the first
+  cut of this module -- a copy that fell through a sibling
+  (``command_id=command.target_id or command.command_id``) passed all
+  twelve tests, because ``None or x`` is ``x``. A uniform field in a
+  fixture is a field the fixture cannot see (#456).
 * **Real execution, no mocked seam.** A real ``MutationExecutor``, a real
   ``SQLiteEventLog`` and a real ``DefaultPolicyGate``; handlers are the only
   test doubles, and they are the injection point the executor declares.
@@ -166,12 +181,32 @@ def _executor(
     )
 
 
-def _create(command_id: str, name: str, **kwargs: object) -> Command:
+def _command(
+    command_id: str, operation: Operation, args: dict[str, object], **kwargs: object
+) -> Command:
+    """A command whose sibling string fields are set and distinct from its id.
+
+    ``target_id`` and ``idempotency_key`` default to values derived from the
+    id rather than to ``None``, so a copy falling through either sibling
+    lands on a different string (see the module docstring). A replay test
+    passes its own ``idempotency_key`` to make two commands share one.
+    """
+    kwargs.setdefault("target_id", f"target-of-{command_id}")
+    kwargs.setdefault("idempotency_key", f"key-of-{command_id}")
     return Command(
         command_id=command_id,
-        operation=Operation.ENTITY_CREATE,
-        args={"entity_type": "service", "name": name},
+        operation=operation,
+        args=args,
         **kwargs,  # type: ignore[arg-type]
+    )
+
+
+def _create(command_id: str, name: str, **kwargs: object) -> Command:
+    return _command(
+        command_id,
+        Operation.ENTITY_CREATE,
+        {"entity_type": "service", "name": name},
+        **kwargs,
     )
 
 
@@ -195,6 +230,16 @@ def _assert_attributed(
     ids = [c.command_id for c in commands]
     assert len(ids) >= 2, "a population of one cannot tell a copy from a constant"
     assert len(set(ids)) == len(ids), f"fixture ids collide: {ids}"
+    for command in commands:
+        siblings = {command.target_id, command.idempotency_key, command.requested_by}
+        assert None not in siblings, (
+            f"a sibling field of {command.command_id!r} is absent: a copy falling "
+            "through it (`command.target_id or command.command_id`) would pass"
+        )
+        assert command.command_id not in siblings, (
+            f"a sibling field of {command.command_id!r} equals the id: a copy "
+            "reading the wrong field would pass"
+        )
     assert len(results) == len(commands) == len(expected)
 
     for command, result, (status, fragment) in zip(
@@ -213,10 +258,10 @@ def _assert_attributed(
 def test_immutable_core_refusal(event_log: SQLiteEventLog) -> None:
     commands = [
         _create("cid-roster-a", "a", requested_by="worker:embed-traces"),
-        Command(
-            command_id="cid-roster-b",
-            operation=Operation.LINK_REMOVE,
-            args={"edge_id": "e-1"},
+        _command(
+            "cid-roster-b",
+            Operation.LINK_REMOVE,
+            {"edge_id": "e-1"},
             requested_by="worker:session-capture",
         ),
     ]
@@ -233,15 +278,11 @@ def test_immutable_core_refusal(event_log: SQLiteEventLog) -> None:
 
 def test_arg_validation_failure(event_log: SQLiteEventLog) -> None:
     commands = [
-        Command(
-            command_id="cid-validate-a",
-            operation=Operation.ENTITY_CREATE,
-            args={"entity_type": "service"},
-        ),
-        Command(
-            command_id="cid-validate-b",
-            operation=Operation.LINK_CREATE,
-            args={"source_id": "s", "target_id": "t"},
+        _command("cid-validate-a", Operation.ENTITY_CREATE, {"entity_type": "service"}),
+        _command(
+            "cid-validate-b",
+            Operation.LINK_CREATE,
+            {"source_id": "s", "target_id": "t"},
         ),
     ]
     results = _run(_executor(event_log, _Succeeds()), commands)
@@ -260,15 +301,9 @@ def test_arg_validation_failure(event_log: SQLiteEventLog) -> None:
 
 def test_policy_gate_rejection(event_log: SQLiteEventLog) -> None:
     commands = [
-        Command(
-            command_id="cid-policy-deny",
-            operation=_DENIED_OP,
-            args={"edge_id": "e-1"},
-        ),
-        Command(
-            command_id="cid-policy-approval",
-            operation=_APPROVAL_OP,
-            args={"target_id": "t-1", "label": "x"},
+        _command("cid-policy-deny", _DENIED_OP, {"edge_id": "e-1"}),
+        _command(
+            "cid-policy-approval", _APPROVAL_OP, {"target_id": "t-1", "label": "x"}
         ),
     ]
     results = _run(_executor(event_log, _Succeeds()), commands)
@@ -331,15 +366,9 @@ def test_persisted_replay(event_log: SQLiteEventLog) -> None:
 
 def test_no_handler(event_log: SQLiteEventLog) -> None:
     commands = [
-        Command(
-            command_id="cid-unhandled-a",
-            operation=Operation.ENTITY_UPDATE,
-            args={"entity_id": "n-1"},
-        ),
-        Command(
-            command_id="cid-unhandled-b",
-            operation=Operation.LABEL_ADD,
-            args={"target_id": "t-1", "label": "x"},
+        _command("cid-unhandled-a", Operation.ENTITY_UPDATE, {"entity_id": "n-1"}),
+        _command(
+            "cid-unhandled-b", Operation.LABEL_ADD, {"target_id": "t-1", "label": "x"}
         ),
     ]
     results = _run(_executor(event_log, _Succeeds()), commands)

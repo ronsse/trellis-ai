@@ -328,9 +328,13 @@ observability" a second time.
 `tests/unit/mutate/test_command_result_attribution.py` now pins every executor
 site through a real `MutationExecutor`, `SQLiteEventLog` and
 `DefaultPolicyGate`, one test per site, each running a batch of at least two
-commands with distinct ids and asserting a message fragment only that site
-writes, so a test cannot pass by reaching a neighbouring branch. Every site was
-reachable without mocking a seam. The module docstring carries the site-to-test
+commands with distinct ids and asserting the message fragment its site writes,
+so a test cannot pass by reaching a neighbouring branch. Two of those shapes are
+shared — `Duplicate command: <key>` at both replay sites, `Execution failed:
+<exc>` at both handler-failure sites — and there it is the command shape and the
+exception type that separate them, so the site-to-test map is proved by running
+each single-site fold (M1.n below) rather than by reading the fragment. Every
+site was reachable without mocking a seam. The module docstring carries the
 map.
 
 | Mutant | Change | Verdict |
@@ -340,12 +344,16 @@ map.
 | **M2** (replay) | the in-memory replay answers with the *recording* command's id | **KILLED** — `test_in_memory_replay` only; survives the rest of `tests/unit/mutate` |
 | **M3** | `command_response` → constant | **KILLED** — `test_command_response_rule.py::test_the_projection_carries_each_results_own_command_id` only; survives the rest of the full default selection |
 
-The scan still ranks `CommandResult.command_id` **first, at 12 sites / 2 pins
-/ gap +10**, because the twelve tests share one assertion in a helper (its
-`result.command_id == command.command_id` is the only pin, counted once per
-side; the REST test compares a list and is not counted at all). That is
-the under-count in the callout above, measured on a case whose ground truth is
-known — the mirror of `relevance_score`'s over-count.
+The scan still ranks `CommandResult.command_id` **first, at 12 sites / 3 pins
+/ gap +9**, because the twelve tests share one assertion in a helper (its
+`result.command_id == command.command_id` is the only pin of the copy, counted
+once per side; the REST test compares a list and is not counted at all). The
+third "pin" is the same helper's guard that no sibling field *equals* the id — a
+fixture check that asserts nothing about the copy and is counted because it
+names the attribute. So on one field, with ground truth known, `pins` both
+under-counts (one assertion, twelve sites) and over-counts (a guard on the
+input counted as a pin on the output): the mirror of `relevance_score`'s
+over-count, and both directions in one number.
 
 ### How to use this, and how not to
 
