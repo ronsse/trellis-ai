@@ -206,12 +206,18 @@ tuned scores. #456 then proved that same field uncovered at five of its six
 sites. So the column over-counted by roughly 21×, in the direction that hides
 a defect.
 
-> `gap` is a **lower bound**, and the error runs one way by construction.
-> `pins` cannot separate one class's field from another's with the same name,
-> so it only ever over-counts. **A high gap is trustworthy. A low or negative
-> gap is not evidence of coverage** — it can be off by an order of magnitude
-> when a common field name is asserted about a different class. Only a mutant
-> settles it.
+> `gap` is **not a coverage figure in either direction.** `pins` cannot
+> separate one class's field from another's with the same name, so it
+> over-counts — **a low or negative gap is not evidence of coverage**; it can
+> be off by an order of magnitude when a common field name is asserted about a
+> different class. And `pins` counts assertion *statements*, not the sites they
+> reach, so it also under-counts: one assertion in a helper that twelve tests
+> call pins twelve sites and scores 2 (both sides of its comparison are
+> attribute reads, so it is counted twice). This section first claimed the error ran
+> one way by construction and that a high gap was trustworthy; the
+> `CommandResult.command_id` pins below refuted that (still **+10** with every
+> site pinned — see [Closed since](#closed-since-m1-and-m3-now-die)). Only a
+> mutant settles it.
 
 One deliberate exclusion: `operation=Operation.ENTITY_CREATE` names an **enum
 member**, not an instance read. Folding it to a constant *is* the constant, so
@@ -241,9 +247,9 @@ Baseline for every run below: the full default selection on `1ef5c9c` —
 
 | Mutant | Change | Selection | Verdict |
 |---|---|---|---|
-| **M1** | `CommandResult.command_id` → `"mutant-cid"` at all **11** sites | full default | **SURVIVED** (294.94s) |
+| **M1** | `CommandResult.command_id` → `"mutant-cid"` at all **11** sites | full default | **SURVIVED** (294.94s) — killed since, [below](#closed-since-m1-and-m3-now-die) |
 | **M2** | `CommandResult.operation` → `"entity.create"` at all **11** sites | full default | **KILLED** — `tests/unit/cli/test_curate.py::TestCuratePromote::test_promote_json` |
-| **M3** | `CommandResponse.command_id` → `"mutant-cid"` at all **3** REST sites | full default | **SURVIVED** (286.88s) |
+| **M3** | `CommandResponse.command_id` → `"mutant-cid"` at all **3** REST sites | full default | **SURVIVED** (286.88s) — killed since, [below](#closed-since-m1-and-m3-now-die) |
 
 M2 is the control the ranking predicted: it is the one of the three carrying
 pre-existing pins (7 against 0), and it is the one that dies.
@@ -297,12 +303,49 @@ The aggregate-to-per-site inference is used three times above, so state its
 limit. A test that
 kills a single-site mutant also kills the whole-file fold — **unless** it
 asserts an equality *between* two of the folded sites, which folding both would
-restore. No such test exists for these fields: every `command_id` assertion in
-`tests/` is either a truthiness check or a comparison against an event payload
-or a hand-built fixture, none compares two `CommandResult.command_id` values,
-and a test asserting the eleven were *distinct* would have killed M1 outright.
-Subject to that, the whole-file survivals of M1, M3 and M2′ establish per-site
-survival without 11, 3 and 9 further runs.
+restore. No such test existed for these fields on `1ef5c9c`: every
+`command_id` assertion in `tests/` was either a truthiness check or a
+comparison against an event payload or a hand-built fixture, none compared two
+`CommandResult.command_id` values, and a test asserting the eleven were
+*distinct* would have killed M1 outright. Subject to that, the whole-file
+survivals of M1, M3 and M2′ establish per-site survival without 11, 3 and 9
+further runs.
+
+### Closed since: M1 and M3 now die
+
+Re-measured on `7a0b317`. The executor had grown a twelfth site (#598), and
+the three REST sites had been consolidated into one,
+`trellis_api/routes/_results.py::command_response`, held there by
+`tests/unit/api/test_command_response_rule.py`. Consolidation took
+`CommandResponse.command_id` out of the ranking (one site is below the two-site
+floor) but pinned nothing: M1 across all twelve sites and M3 on the single REST
+site both still **survived** the full default selection (M1: 8,721 passed / 32
+skipped, the unmutated baseline's own count; M3, re-run with only its new
+pinning test deselected: 8,733 passed / 32 skipped). A gap closed by
+consolidation still needs its pins — #456's "consolidation is not
+observability" a second time.
+
+`tests/unit/mutate/test_command_result_attribution.py` now pins every executor
+site through a real `MutationExecutor`, `SQLiteEventLog` and
+`DefaultPolicyGate`, one test per site, each running a batch of at least two
+commands with distinct ids and asserting a message fragment only that site
+writes, so a test cannot pass by reaching a neighbouring branch. Every site was
+reachable without mocking a seam. The module docstring carries the site-to-test
+map.
+
+| Mutant | Change | Verdict |
+|---|---|---|
+| **M1** | all **12** executor sites → `"mutant-cid"` | **KILLED** — all 12 tests in the module |
+| **M1.n** | one site at a time → constant | **KILLED**, each by its own mapped test (the `SUCCESS` site also by `test_in_memory_replay`, whose recording commands succeed) |
+| **M2** (replay) | the in-memory replay answers with the *recording* command's id | **KILLED** — `test_in_memory_replay` only; survives the rest of `tests/unit/mutate` |
+| **M3** | `command_response` → constant | **KILLED** — `test_command_response_rule.py::test_the_projection_carries_each_results_own_command_id` only; survives the rest of the full default selection |
+
+The scan still ranks `CommandResult.command_id` **first, at 12 sites / 2 pins
+/ gap +10**, because the twelve tests share one assertion in a helper (its
+`result.command_id == command.command_id` is the only pin, counted once per
+side; the REST test compares a list and is not counted at all). That is
+the under-count in the callout above, measured on a case whose ground truth is
+known — the mirror of `relevance_score`'s over-count.
 
 ### How to use this, and how not to
 

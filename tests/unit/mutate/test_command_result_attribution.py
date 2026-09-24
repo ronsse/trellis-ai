@@ -16,23 +16,23 @@ nowhere*).
 The twelve sites, read top to bottom through ``execute`` and
 ``_check_idempotency``, and the test that pins each:
 
-=====================================  ==========  ======================================
-outcome                                status      test
-=====================================  ==========  ======================================
-unattended-writer roster refusal       REJECTED    ``test_immutable_core_refusal``
-registry arg validation                FAILED      ``test_arg_validation_failure``
-policy gate: deny / require_approval   REJECTED    ``test_policy_gate_rejection``
-Stage 3 replay, in-memory key cache    DUPLICATE   ``test_in_memory_replay``
-Stage 3 replay, persisted event log    DUPLICATE   ``test_persisted_replay``
-no handler registered                  FAILED      ``test_no_handler``
-handler raises ``ValidationError``     REJECTED    ``test_handler_validation_error``
-handler raises ``PolicyViolationError``  REJECTED  ``test_handler_policy_violation``
-handler raises ``IdempotencyError``    DUPLICATE   ``test_handler_idempotency_error``
-handler raises ``StoreError`` /        FAILED      ``test_handler_typed_error``
-``TrellisError``
-handler raises an untyped panic        FAILED      ``test_handler_panic``
-handler returns                        SUCCESS     ``test_success``
-=====================================  ==========  ======================================
+* unattended-writer roster refusal (REJECTED) -- ``test_immutable_core_refusal``
+* registry arg validation (FAILED) -- ``test_arg_validation_failure``
+* policy gate, deny and require_approval (REJECTED) --
+  ``test_policy_gate_rejection``
+* Stage 3 replay, in-memory key cache (DUPLICATE) -- ``test_in_memory_replay``
+* Stage 3 replay, persisted event log (DUPLICATE) -- ``test_persisted_replay``
+* no handler registered (FAILED) -- ``test_no_handler``
+* handler raises ``ValidationError`` (REJECTED) --
+  ``test_handler_validation_error``
+* handler raises ``PolicyViolationError`` (REJECTED) --
+  ``test_handler_policy_violation``
+* handler raises ``IdempotencyError`` (DUPLICATE) --
+  ``test_handler_idempotency_error``
+* handler raises ``StoreError`` / ``TrellisError`` (FAILED) --
+  ``test_handler_typed_error``
+* handler raises an untyped panic (FAILED) -- ``test_handler_panic``
+* handler returns (SUCCESS) -- ``test_success``
 
 Status alone does not identify a site (four are REJECTED, four FAILED),
 so every test also asserts a fragment of the message only that site
@@ -203,8 +203,7 @@ def _assert_attributed(
         assert result.status == status, (result.status, result.message)
         assert fragment in result.message, result.message
         assert result.command_id == command.command_id, (
-            f"result for {command.command_id!r} is attributed to "
-            f"{result.command_id!r}"
+            f"result for {command.command_id!r} is attributed to {result.command_id!r}"
         )
 
     returned = [r.command_id for r in results]

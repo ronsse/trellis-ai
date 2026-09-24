@@ -32,12 +32,16 @@ So this script counts, per ``Class.field``:
 ``pins``
     Assertions under ``tests/unit/`` comparing ``.field`` to a concrete value.
 
-**Read ``gap = sites - pins`` as a lower bound, never as a coverage figure.**
+**Read ``gap = sites - pins`` as a ranking, never as a coverage figure.**
 ``pins`` is keyed on the bare attribute name, so it cannot separate
 ``Command.operation`` (the input) from ``CommandResult.operation`` (the copy)
-and **over-counts**. The error runs one way by construction: a high gap is
-trustworthy, a low gap is not evidence of coverage. Only a mutant settles it,
-which is why the report ends by naming the mutants to run rather than a verdict.
+and **over-counts**: a low gap is not evidence of coverage. It also counts
+assertion *statements* rather than the sites they reach, so it **under-counts**
+a field pinned through a shared helper: ``CommandResult.command_id`` reads
+12 sites / 2 pins / gap +10 with every one of its twelve sites pinned by
+``tests/unit/mutate/test_command_result_attribution.py``. So a high gap is not
+a finding either. Only a mutant settles it, which is why the report ends by
+naming the mutants to run rather than a verdict.
 
 The script is read-only, never modifies a source file, and emits deterministic
 Markdown so re-runs are diffable.
@@ -54,7 +58,7 @@ result. ``RejectedItem.relevance_score`` scored **-15** on that same pre-#456
 tree: 22 assertions read a bare ``.relevance_score`` and exactly one has a
 receiver that could be a ``RejectedItem``. #456 then proved that field uncovered
 at five of its six sites. The column over-counted by ~21x, in the direction that
-hides a defect — which is what the lower-bound caveat above is about, measured
+hides a defect — which is what the over-count caveat above is about, measured
 on a case whose ground truth is known.
 
 Usage
@@ -197,10 +201,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "",
         (
-            "`gap` is a **lower bound**: `pins` is keyed on the bare attribute name, "
-            "so it cannot separate one class's field from another's and over-counts. "
-            "A high gap is trustworthy; a low gap is not evidence of coverage. "
-            "Confirm with a mutant."
+            "`gap` is a **ranking, not a coverage figure**: `pins` is keyed on the "
+            "bare attribute name, so it over-counts (a low gap is not evidence of "
+            "coverage), and it counts assertion statements rather than the sites "
+            "they reach, so a shared helper under-counts (a high gap is not a "
+            "finding). Confirm with a mutant."
         ),
         "",
         "| Class.field | sites | same-name | pins | gap |",
