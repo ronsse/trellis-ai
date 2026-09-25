@@ -1,6 +1,6 @@
 """Withholding as a stated fact — a pack must say what it did not serve.
 
-``PackBuilder`` removes candidates for eleven distinct reasons before a pack
+``PackBuilder`` removes candidates for several distinct reasons before a pack
 is returned, and until now a caller could not tell **"this layer was empty"**
 from **"this layer was redacted."** Both render as fewer items, or as *"No
 context found for: …"*, which reads as greenfield.
@@ -13,9 +13,9 @@ What already existed, and what did not
 --------------------------------------
 
 Most of the *data* was there. ``PACK_ASSEMBLED.payload["rejected_items"]``
-carries a per-item row for eight of the first ten gates, ``budget_trace[]``
-prices every candidate the walk saw including the rejected ones (#359 replays on
-exactly that), and ``payload["content_floor"]`` records the floor's
+carried a per-item row for eight of the first ten gates, ``budget_trace[]``
+priced every candidate the walk saw including the rejected ones (#359 replays on
+exactly that), and ``payload["content_floor"]`` recorded the floor's
 decisions. Two things were missing, and they are the whole of this change:
 
 1. **None of it reached the pack the caller reads.**
@@ -136,8 +136,8 @@ remove, not to reproduce. Sensitivity *enforcement* is #194; when it lands it
 adds a gate here, and this report will count it because it counts whatever
 the pipeline rejects.
 
-Section routing is the eleventh gate, and it is reported differently
---------------------------------------------------------------------
+Section routing is a gate too, and it is reported differently
+-------------------------------------------------------------
 
 :meth:`~trellis.retrieve.pack_builder.PackBuilder.build_sectioned` routes
 the shared candidate pool through
@@ -149,8 +149,8 @@ a stronger and more misleading signal than the silence #404 replaced
 (#440).
 
 It is recorded now, but it is **not** a group in ``by_reason`` and it does
-not enter ``total``, because it does not make the claim the other ten gates
-make. Measured on the reference deployment: replaying the two shipped
+not enter ``total``, because it does not make the claim the ``by_reason``
+gates make. Measured on the reference deployment: replaying the two shipped
 section presets over the 47 flat packs assembled since 2026-07-07, the
 routing removes at least one *served* item on **46/47** packs under
 ``get_task_context``'s spec and **47/47** under ``get_objective_context``'s
