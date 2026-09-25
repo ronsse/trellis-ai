@@ -11,7 +11,9 @@ The registry is bounded by ADR §8 (#257): Trellis ingests normalized
 documents, and format conversion (PDF, audio, per-tool exports) is the
 client's pre-step, so those formats get no handler here. ADR §8 reads
 a ``.txt`` plaintext handler (§7 phase 3) as the one follow-up open.
-A file with no handler is reported as unsupported, never converted.
+A walked file with no handler is reported as unsupported, never
+converted; the paths the walker skips are not reported at all (see
+:mod:`trellis.ingest_corpus.walker`).
 """
 
 from __future__ import annotations

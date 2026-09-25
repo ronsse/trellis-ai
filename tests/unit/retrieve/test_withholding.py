@@ -1,12 +1,12 @@
 """A pack must state what it did not serve (trellis-ai#404).
 
-Eleven gates remove candidates before a pack is returned. Two of them —
-``exclude_archived`` and ``exclude_noise`` at the collect seam — recorded
-their decision *nowhere*: their only observable was a ``logger.debug``
-line, which is a no-op under the CLI's ``WARNING`` default and under the
-MCP server's own configuration. And none of the ten reached the pack the
-caller reads, so "this layer was empty" and "this layer was redacted"
-rendered identically.
+When this was filed, ten gates removed candidates before a pack was
+returned. Two of them — ``exclude_archived`` and ``exclude_noise`` at the
+collect seam — recorded their decision *nowhere*: their only observable
+was a ``logger.debug`` line, which is a no-op under the CLI's ``WARNING``
+default and under the MCP server's own configuration. And none of the ten
+reached the pack the caller reads, so "this layer was empty" and "this
+layer was redacted" rendered identically.
 
 The tests here are grouped by the claim each one would falsify:
 
@@ -17,8 +17,8 @@ The tests here are grouped by the claim each one would falsify:
   when the renderer's item loop breaks on budget,
 * the note never carrying ids or content,
 * the reporter itself failing loudly rather than silently,
-* the eleventh gate — section routing — being recorded at all, and being
-  reported as the narrower claim it makes (#440),
+* the section-routing gate being recorded at all, and being reported as
+  the narrower claim it makes (#440),
 * the **sectioned** path's rejection telemetry, every call of which could be
   deleted with the whole suite green (#447).
 """
@@ -818,8 +818,8 @@ class TestSectionRoutingIsAGate:
         assert _WITHHELD_BODY not in rendered
 
     def test_the_count_is_kept_out_of_the_headline_and_out_of_by_reason(self) -> None:
-        """It is a narrower claim than the other ten gates make, so it does
-        not join them — measured rationale in the module docstring."""
+        """It is a narrower claim than the ``by_reason`` gates make, so it
+        does not join them — measured rationale in the module docstring."""
         builder = PackBuilder(
             strategies=[_strategy("keyword", [_item("d0"), _item("d1")])]
         )

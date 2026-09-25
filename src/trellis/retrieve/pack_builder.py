@@ -1056,8 +1056,8 @@ class PackBuilder:
         ] = {}  # item_id -> (section, score)
         raw_sections: dict[str, list[PackItem]] = {}
         # Ids some requested section matched, accumulated across the fill
-        # loop so the eleventh gate below can be defined as "matched *no*
-        # section" rather than per-section leftovers (#440).
+        # loop so the section-routing gate below can be defined as "matched
+        # *no* section" rather than per-section leftovers (#440).
         matched_any: set[str] = set()
 
         for section_req in sections:

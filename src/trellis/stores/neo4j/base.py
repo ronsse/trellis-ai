@@ -95,7 +95,10 @@ def prepare_neo4j_registry_params(
     if "driver" in params:
         return params
     if "uri" not in params:
-        msg = "neo4j backend requires 'uri' in config or env"
+        msg = (
+            "neo4j backend requires 'uri' in config (e.g. bolt://host:7687); "
+            "it has no env var fallback"
+        )
         raise ConfigError(msg, setting=f"stores.{store_type}.uri")
 
     uri = params["uri"]
