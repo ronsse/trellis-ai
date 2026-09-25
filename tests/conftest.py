@@ -144,8 +144,7 @@ def neo4j_vector_search_supported() -> bool:
     three error substrings, and that is exactly the roster-shaped thing this
     repo has watched rot in duplicate: one copy gets a fourth substring, the
     other silently flips to "supported", and a skip becomes a red CI. One
-    probe, two suites — ``tests/unit/stores/test_neo4j_vector.py`` and
-    ``tests/integration/test_neo4j_e2e.py``, both through
+    probe serves every suite that needs it, each through
     :func:`require_neo4j_vector_search`. It is separate from that gate because
     it is **session**-scoped: the probe opens a driver and runs a query, and
     doing that per test would cost a connection for every gated case.
@@ -196,16 +195,16 @@ def require_neo4j_vector_search(neo4j_vector_search_supported: bool) -> None:
     Requesting this fixture by name *is* the gate, which is why it exists
     beside the bool rather than every call site repeating
     ``if not neo4j_vector_search_supported: pytest.skip(...)``. Two things
-    follow. The skip reason is written once, so the four gated tests cannot
-    drift into four different explanations of the same fact. And the gate is a
+    follow. The skip reason is written once, so the gated tests cannot drift
+    into different explanations of the same fact. And the gate is a
     parameter name, which
     ``tests/unit/test_neo4j_vector_live_infra_rule.py`` reads by AST to prove
     every SEARCH-issuing test in the unit suite is gated — an assertion it
     could not make against an ``if``-and-``skip`` idiom without pattern-
     matching statements, which reformatting breaks.
 
-    Every gated test in both suites takes this fixture; nothing branches on the
-    bool. An earlier cut of #356 claimed otherwise — that the e2e test read the
+    Every gated test takes this fixture; nothing branches on the bool. An
+    earlier cut of #356 claimed otherwise — that the e2e test read the
     bool "inside a test that also covers non-SEARCH ground" — and that was never
     true: its skip was the first statement in the body, so the whole test went
     either way, and the only thing the hand-rolled branch bought was a fifth
