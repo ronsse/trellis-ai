@@ -951,3 +951,233 @@ class TestParseSalvageCount:
         assert result.success is True
         assert result.parse_salvaged is True
         assert result.auto_class == "research"
+
+
+# ---------------------------------------------------------------------------
+# A response that parses as JSON but is not the object the prompt asks for.
+# Every such shape must come back as a failed result: an exception here
+# escapes ``enrich`` (its broad catch covers only the model call), so the
+# classifier raised instead of degrading and ``batch_enrich`` filed the item
+# under ``batch_collector_error``.
+# ---------------------------------------------------------------------------
+
+#: Every JSON type that is not an object, plus the fenced form the clean path
+#: unwraps. The second element is the type the failure must name.
+_NON_OBJECT_RESPONSES = [
+    pytest.param("[]", "list", id="empty-array"),
+    pytest.param(
+        '[{"tags": ["alpha"], "class": "research"}]', "list", id="array-of-object"
+    ),
+    pytest.param("null", "NoneType", id="null"),
+    pytest.param('"a bare string"', "str", id="string"),
+    pytest.param("42", "int", id="integer"),
+    pytest.param("0.25", "float", id="float"),
+    pytest.param("true", "bool", id="boolean"),
+    pytest.param('```json\n["alpha", "beta"]\n```', "list", id="fenced-array"),
+]
+
+
+class _ByContentLLM:
+    """Answer each prompt with the response keyed by a marker in its content.
+
+    ``batch_enrich`` runs items concurrently, so call order is not item order.
+    """
+
+    def __init__(self, responses: dict[str, str]) -> None:
+        self._responses = responses
+
+    async def generate(
+        self,
+        *,
+        messages: list[Message],
+        temperature: float = 0.3,
+        max_tokens: int = 500,
+        model: str | None = None,
+    ) -> LLMResponse:
+        prompt = messages[-1].content
+        matches = [text for marker, text in self._responses.items() if marker in prompt]
+        assert len(matches) == 1, prompt
+        return LLMResponse(content=matches[0], model="test-model")
+
+
+class TestNonObjectResponse:
+    @pytest.mark.parametrize(("response", "type_name"), _NON_OBJECT_RESPONSES)
+    async def test_enrich_returns_a_parse_error_instead_of_raising(
+        self, event_log: SQLiteEventLog, response: str, type_name: str
+    ) -> None:
+        from trellis.core.hashing import content_hash
+
+        service = EnrichmentService(
+            llm=_make_llm(response), event_log=event_log, model="model-7"
+        )
+        result = await service.enrich(content="source document")
+
+        assert result.success is False
+        assert result.failure_kind == "parse_error"
+        assert result.error == f"Not a JSON object: {type_name}"
+        assert result.raw_response == response
+        assert result.parse_salvaged is False
+        # A failed parse proves no model identity and stamps no score.
+        assert result.judging_model_id is None
+        assert result.importance_scored_at is None
+
+        events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
+        assert len(events) == 1
+        assert events[0].payload == {
+            "extractor_id": "EnrichmentService",
+            "extractor_tier": "llm",
+            "failure_kind": "parse_error",
+            "source_hint": "enrichment",
+            "prompt_hash": None,
+            # The response digest, as the two malformed-JSON branches record.
+            "source_excerpt_hash": content_hash(response),
+            "model": "model-7",
+            "error_class": "NonObjectResponse",
+            "error_excerpt": f"expected a JSON object, got {type_name}",
+            "correlation_id": None,
+            "cluster_count": 1,
+            "sampled": False,
+        }
+        assert (
+            event_log.get_events(event_type=EventType.EXTRACTION_PARSE_SALVAGED) == []
+        )
+
+    async def test_batch_enrich_records_the_pipeline_kind_per_item(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        """A non-object response is a parse failure, not a collector escape."""
+        llm = _ByContentLLM(
+            {
+                "ITEM-ALPHA": VALID_JSON,
+                "ITEM-BRAVO": "[]",
+                "ITEM-CHARLIE": "null",
+                "ITEM-DELTA": _SALVAGE_BODY,
+            }
+        )
+        service = EnrichmentService(llm=llm, event_log=event_log)
+        items = [
+            {"content": f"body of {marker}", "item_id": f"id-{marker}"}
+            for marker in ("ITEM-ALPHA", "ITEM-BRAVO", "ITEM-CHARLIE", "ITEM-DELTA")
+        ]
+        results = await service.batch_enrich(items, concurrency=2)
+
+        assert [r.success for r in results] == [True, False, False, True]
+        assert [r.failure_kind for r in results] == [
+            None,
+            "parse_error",
+            "parse_error",
+            None,
+        ]
+        # Each result is its own item's: the two successes parsed different bodies.
+        assert [r.auto_tags for r in results] == [
+            ["python", "machine-learning"],
+            [],
+            [],
+            ["sentinel-tag-alpha", "beta"],
+        ]
+
+        events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
+        assert sorted(
+            (e.payload["failure_kind"], e.payload["error_excerpt"]) for e in events
+        ) == [
+            ("parse_error", "expected a JSON object, got NoneType"),
+            ("parse_error", "expected a JSON object, got list"),
+        ]
+        assert {e.payload["extractor_id"] for e in events} == {"EnrichmentService"}
+
+
+# ---------------------------------------------------------------------------
+# One wrong-typed field degrades that field alone: the same conventions the
+# parser already applied to ``tags`` (non-list -> []) and to the confidences
+# (unparseable -> None), extended to the fields that raised instead.
+# ---------------------------------------------------------------------------
+
+#: Distinct values per field, so no constant satisfies the survival check.
+_GOOD_FIELDS: dict[str, Any] = {
+    "tags": ["Kappa Topic", "lambda_tag"],
+    "class": "architecture",
+    "summary": "Summary sentence four.",
+    "importance": 0.35,
+    "tag_confidence": 0.62,
+    "class_confidence": 0.47,
+}
+_GOOD_PARSED: dict[str, Any] = {
+    "auto_tags": ["kappa-topic", "lambda-tag"],
+    "auto_class": "architecture",
+    "auto_summary": "Summary sentence four.",
+    "auto_importance": 0.35,
+    "tag_confidence": 0.62,
+    "class_confidence": 0.47,
+}
+
+#: ``(response key, bad value, result field, degraded value)``. The degraded
+#: value is what an absent key already produces: ``0.0`` importance, ``None``
+#: class / summary / confidence, ``[]`` tags.
+_BAD_FIELDS = [
+    pytest.param("importance", "high", "auto_importance", 0.0, id="importance-word"),
+    pytest.param("importance", None, "auto_importance", 0.0, id="importance-null"),
+    pytest.param("importance", [0.9], "auto_importance", 0.0, id="importance-list"),
+    pytest.param(
+        "importance", {"score": 0.9}, "auto_importance", 0.0, id="importance-dict"
+    ),
+    pytest.param(
+        "importance", 10**400, "auto_importance", 0.0, id="importance-huge-int"
+    ),
+    pytest.param("summary", ["one", "two"], "auto_summary", None, id="summary-list"),
+    pytest.param("summary", {"text": "x"}, "auto_summary", None, id="summary-dict"),
+    pytest.param("summary", 12, "auto_summary", None, id="summary-int"),
+    pytest.param("summary", False, "auto_summary", None, id="summary-bool"),
+    pytest.param("summary", 0.5, "auto_summary", None, id="summary-float"),
+    pytest.param("class", [], "auto_class", None, id="class-empty-list"),
+    pytest.param("class", {}, "auto_class", None, id="class-empty-dict"),
+    pytest.param("class", 0, "auto_class", None, id="class-zero"),
+    pytest.param("class", False, "auto_class", None, id="class-false"),
+    pytest.param("class", 0.0, "auto_class", None, id="class-zero-float"),
+    pytest.param(
+        "tag_confidence", 10**400, "tag_confidence", None, id="tag-conf-huge-int"
+    ),
+    pytest.param(
+        "class_confidence", 10**400, "class_confidence", None, id="class-conf-huge"
+    ),
+    pytest.param("tags", "not-a-list", "auto_tags", [], id="tags-string"),
+]
+
+
+class TestWrongTypedField:
+    @pytest.mark.parametrize(("key", "bad", "field", "degraded"), _BAD_FIELDS)
+    async def test_one_bad_field_degrades_alone(
+        self,
+        event_log: SQLiteEventLog,
+        key: str,
+        bad: Any,
+        field: str,
+        degraded: Any,
+    ) -> None:
+        response = json.dumps({**_GOOD_FIELDS, key: bad})
+        service = EnrichmentService(llm=_make_llm(response), event_log=event_log)
+        result = await service.enrich(content="c")
+
+        expected = {**_GOOD_PARSED, field: degraded}
+        assert result.success is True
+        assert result.failure_kind is None
+        assert {name: getattr(result, name) for name in _GOOD_PARSED} == expected
+        # A degraded importance is no score, so it carries no scored-at stamp.
+        assert (result.importance_scored_at is not None) is (
+            expected["auto_importance"] > 0
+        )
+        assert event_log.get_events(event_type=EventType.EXTRACTION_FAILED) == []
+
+    async def test_quoted_number_importance_is_read(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        # Only a value ``float()`` cannot read degrades. A number the model
+        # quoted is still a number, so narrowing the guard to reject strings
+        # would zero it silently.
+        response = json.dumps({**_GOOD_FIELDS, "importance": "0.7"})
+        service = EnrichmentService(llm=_make_llm(response), event_log=event_log)
+        result = await service.enrich(content="c")
+
+        assert result.success is True
+        assert result.auto_importance == 0.7
+        assert result.importance_scored_at is not None
+        assert event_log.get_events(event_type=EventType.EXTRACTION_FAILED) == []

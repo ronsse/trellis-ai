@@ -71,21 +71,23 @@ class EnrichmentResult(TrellisModel):
     importance_scored_at: datetime | None = None
     #: Structured failure category mirroring the ``failure_kind`` slug on
     #: the emitted ``EXTRACTION_FAILED`` event. Populated only on failure
-    #: paths (``success=False``); ``None`` on success. Downstream consumers
-    #: (e.g. :class:`~trellis.classify.classifiers.llm.LLMFacetClassifier`
-    #: ``_emit_degraded``) read this to forward the specific upstream
-    #: ``failure_kind`` instead of a generic ``enrichment_failure`` slug.
+    #: paths (``success=False``); ``None`` on success.
+    #: :class:`~trellis.classify.classifiers.llm.LLMFacetClassifier` does
+    #: not forward it: its ``CLASSIFICATION_DEGRADED`` event records the
+    #: generic ``enrichment_failure`` slug whatever this holds.
     #: See ``docs/design/adr-extraction-failure-telemetry.md`` for the
     #: closed set of legal slugs.
     failure_kind: ExtractionFailureKind | None = None
     #: Actual response model when reported, otherwise the configured client
     #: default. ``None`` on failures where no model identity can be proven.
     judging_model_id: str | None = None
-    #: ``True`` when the response was not a JSON object and the brace
-    #: regex in ``_parse_response`` rescued one from it (#514). Stripping
-    #: one code fence is the clean path and leaves this ``False``. Read by
-    #: ``enrich`` to emit ``EXTRACTION_PARSE_SALVAGED``; nothing else
-    #: about the result depends on it.
+    #: ``True`` when the response did not decode as JSON and the brace
+    #: regex in ``_parse_response`` rescued an object from it (#514).
+    #: Stripping one code fence is the clean path and leaves this ``False``,
+    #: as does a response that decodes to something other than an object,
+    #: which is a parse failure rather than a salvage. Read by ``enrich`` to
+    #: emit ``EXTRACTION_PARSE_SALVAGED``; nothing else about the result
+    #: depends on it.
     parse_salvaged: bool = False
 
 
@@ -164,17 +166,18 @@ class EnrichmentService:
             getattr(llm, "_default_model", None)
         )
         # Why: enrichment is opt-in, but its failures must still be loud.
-        # Two emit paths use this sink:
-        # 1. enrich() — JSON-decode and broad-except sites emit
-        #    EXTRACTION_FAILED so the failure-telemetry analyzer sees them
-        #    (post-C1.5 cleanup, ADR-extraction-failure-telemetry).
+        # Three emit paths use this sink:
+        # 1. enrich() — parse-failure (undecodable, or decoded to something
+        #    other than an object), model-identity and broad-except sites
+        #    emit EXTRACTION_FAILED so the failure-telemetry analyzer sees
+        #    them (post-C1.5 cleanup, ADR-extraction-failure-telemetry).
         # 2. batch_enrich() — gather-collector exceptions that bubble past
         #    per-item handling emit EXTRACTION_FAILED with
         #    failure_kind="batch_collector_error".
         # 3. enrich() — a response the brace regex rescued emits
         #    EXTRACTION_PARSE_SALVAGED (#514), so the failure count above
         #    is not the only record of a model missing the format.
-        # When None, both emitters are no-ops (optional-event-log
+        # When None, all three are no-ops (optional-event-log
         # pattern: no wiring → no event).
         self._event_log = event_log
 
@@ -465,20 +468,59 @@ class EnrichmentService:
                     failure_kind="parse_error",
                 )
 
+        if not isinstance(data, dict):
+            # Decoded, but not an object: ``[]``, any other list, ``null``,
+            # or a bare string, number or boolean. None of the fields below
+            # can be read from it, and ``data.get`` would raise out of
+            # ``enrich()``, which calls this outside its broad catch.
+            # ``parse_error`` matches the LLM extractor, which emits it when a
+            # response decodes to a top-level scalar or ``null``; it lifts a
+            # bare list only because a list of entities means something to
+            # it, and a list means nothing here. The error class names the
+            # shape rather than borrowing ``JSONDecodeError``, because the
+            # response did decode.
+            got = type(data).__name__
+            emit_extraction_failure(
+                event_log=self._event_log,
+                extractor_id="EnrichmentService",
+                extractor_tier="llm",
+                failure_kind="parse_error",
+                source_hint="enrichment",
+                source_excerpt_hash=(content_hash(response) if response else None),
+                model=self.model,
+                error_class="NonObjectResponse",
+                error_excerpt=f"expected a JSON object, got {got}",
+            )
+            return EnrichmentResult(
+                success=False,
+                error=f"Not a JSON object: {got}",
+                raw_response=response,
+                failure_kind="parse_error",
+            )
+
+        # A wrong-typed field degrades that field alone, the way non-list
+        # tags and an unparseable confidence already did, instead of raising
+        # or failing a result whose other fields are usable. The degraded
+        # value is the one an absent key produces.
         tags = data.get("tags", [])
         if not isinstance(tags, list):
             tags = []
         tags = [normalize_tag(t) for t in tags if isinstance(t, str)]
 
         auto_class = data.get("class")
+        if not isinstance(auto_class, str):
+            auto_class = None
         if auto_class and auto_class not in self.classifications:
             auto_class = None
 
         summary = data.get("summary")
-        if summary in {"null", ""}:
+        if not isinstance(summary, str) or summary in {"null", ""}:
             summary = None
 
-        importance = float(data.get("importance", 0.0))
+        try:
+            importance = float(data.get("importance", 0.0))
+        except (TypeError, ValueError, OverflowError):
+            importance = 0.0
 
         # No manufactured default. A substituted 0.8 is indistinguishable from
         # a model that actually said 0.8, so every consumer downstream was
@@ -490,7 +532,7 @@ class EnrichmentService:
                 return None
             try:
                 return min(max(float(raw), 0.0), 1.0)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 return None
 
         return EnrichmentResult(
