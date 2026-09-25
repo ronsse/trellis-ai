@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -602,9 +603,9 @@ class TestIngestDbtManifestEmbeds:
         monkeypatch.delenv("TRELLIS_ENABLE_EMBED_ON_INGEST", raising=False)
         off = runner.invoke(app, ["ingest", "dbt-manifest", str(f)])
         assert off.exit_code == 0, off.stdout
-        assert "TRELLIS_ENABLE_EMBED_ON_INGEST" in off.stdout
+        assert "TRELLIS_ENABLE_EMBED_ON_INGEST" in plain(off.stdout)
 
         monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
         on = runner.invoke(app, ["ingest", "dbt-manifest", str(f)])
         assert on.exit_code == 0, on.stdout
-        assert "Embedded: 2" in on.stdout
+        assert "Embedded: 2" in plain(on.stdout)

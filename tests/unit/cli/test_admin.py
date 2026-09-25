@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis.llm.routing import LLMConsumer, resolve_llm_route
 from trellis_cli.admin import admin_app
 from trellis_cli.exit_codes import EXIT_STORE
@@ -394,8 +395,9 @@ class TestCheckExtractorsRouting:
         monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
         result = runner.invoke(admin_app, ["check-extractors"])
         assert result.exit_code == 0
-        assert "tier=deep" in result.stdout
-        assert "but unused" in result.stdout
+        out = plain(result.stdout)
+        assert "tier=deep" in out
+        assert "but unused" in out
 
     @patch("trellis_cli.admin._get_registry")
     def test_text_escapes_a_tier_name_that_reads_as_markup(
@@ -409,7 +411,7 @@ class TestCheckExtractorsRouting:
         result = runner.invoke(admin_app, ["check-extractors"])
         assert result.exit_code == 1, result.output
         assert result.exception is None or isinstance(result.exception, SystemExit)
-        assert "'[/]'" in result.stdout
+        assert "'[/]'" in plain(result.stdout)
 
 
 class TestLlmRoutes:

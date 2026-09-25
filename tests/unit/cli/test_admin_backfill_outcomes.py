@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis.feedback.models import PackFeedback
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -136,14 +137,15 @@ class TestBackfillOutcomesCommand:
         result = runner.invoke(app, ["admin", "backfill-outcomes"])
 
         assert result.exit_code == 0, result.output
-        assert "dry run" in result.output
-        assert "--apply" in result.output
-        assert "Tuner cells" in result.output
+        out = plain(result.output)
+        assert "dry run" in out
+        assert "--apply" in out
+        assert "Tuner cells" in out
         # The cell's *axes*, not just a line where a cell should be: Rich
         # reads `[...]` as a style tag and renders `[trellis-ai/plan/*]`
         # as the empty string (#492), which leaves a plausible-looking
         # cell line naming no cell.
-        assert "[trellis-ai/plan/*]" in result.output
+        assert "[trellis-ai/plan/*]" in out
 
     def test_truncation_exits_the_same_way_in_both_formats(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
