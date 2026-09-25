@@ -1127,10 +1127,12 @@ _BAD_FIELDS = [
     pytest.param("summary", {"text": "x"}, "auto_summary", None, id="summary-dict"),
     pytest.param("summary", 12, "auto_summary", None, id="summary-int"),
     pytest.param("summary", False, "auto_summary", None, id="summary-bool"),
+    pytest.param("summary", 0.5, "auto_summary", None, id="summary-float"),
     pytest.param("class", [], "auto_class", None, id="class-empty-list"),
     pytest.param("class", {}, "auto_class", None, id="class-empty-dict"),
     pytest.param("class", 0, "auto_class", None, id="class-zero"),
     pytest.param("class", False, "auto_class", None, id="class-false"),
+    pytest.param("class", 0.0, "auto_class", None, id="class-zero-float"),
     pytest.param(
         "tag_confidence", 10**400, "tag_confidence", None, id="tag-conf-huge-int"
     ),
@@ -1163,4 +1165,19 @@ class TestWrongTypedField:
         assert (result.importance_scored_at is not None) is (
             expected["auto_importance"] > 0
         )
+        assert event_log.get_events(event_type=EventType.EXTRACTION_FAILED) == []
+
+    async def test_quoted_number_importance_is_read(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        # Only a value ``float()`` cannot read degrades. A number the model
+        # quoted is still a number, so narrowing the guard to reject strings
+        # would zero it silently.
+        response = json.dumps({**_GOOD_FIELDS, "importance": "0.7"})
+        service = EnrichmentService(llm=_make_llm(response), event_log=event_log)
+        result = await service.enrich(content="c")
+
+        assert result.success is True
+        assert result.auto_importance == 0.7
+        assert result.importance_scored_at is not None
         assert event_log.get_events(event_type=EventType.EXTRACTION_FAILED) == []
