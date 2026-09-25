@@ -197,7 +197,7 @@ The shape #2 contract — including the "missing node raises", "delete strips em
 
 The expansion items above land as follow-ups when their gaps are felt (e.g., when the next graph backend lands and forces a contract violation).
 
-### 3.5 What Phase 0 does *not* ship
+### 3.6 What Phase 0 does *not* ship
 
 - No DSL.
 - No compiler.

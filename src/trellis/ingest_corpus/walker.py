@@ -2,8 +2,13 @@
 
 Yields files in sorted relative-path order so a sync run's plan, report
 and doc-id assignment are reproducible run-over-run. Dot-directories
-and dot-files (``.obsidian/``, ``.git/``, ``.DS_Store``) are skipped —
-they are tool state, not corpus content.
+and dot-files below the root (``.obsidian/``, ``.git/``, ``.DS_Store``)
+are skipped — they are tool state, not corpus content. ``os.walk``'s
+defaults skip two more kinds of directory: a symlinked directory below
+the root (not followed) and any directory that cannot be read, the root
+included (its error is discarded). None of these skips, and no path the
+``include`` filter rejects, is reported: ``unsupported`` holds only walked
+files that pass ``include`` and have no handler.
 """
 
 from __future__ import annotations

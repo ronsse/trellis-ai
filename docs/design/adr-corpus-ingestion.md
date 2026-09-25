@@ -222,7 +222,9 @@ enters core through the existing document-ingest APIs
   dogfood need, as before.
 - Zero code removed: the handler registry
   ([`handlers/__init__.py`](../../src/trellis/ingest_corpus/handlers/__init__.py))
-  is unchanged and holds the markdown handler only. A file with no
-  handler is reported as unsupported (`skipped_unsupported` in the run
-  report), never converted. `trellis ingest corpus --help` states this
-  contract.
+  is unchanged and holds the markdown handler only. A file the walker
+  reaches with no handler is reported as unsupported
+  (`skipped_unsupported` in the run report), never converted; paths the
+  walker skips (dot-paths, `--include` misses, symlinked and unreadable
+  directories) are not reported at all. `trellis ingest corpus --help`
+  states this contract.
