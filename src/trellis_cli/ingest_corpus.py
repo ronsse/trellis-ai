@@ -90,9 +90,13 @@ def ingest_corpus(
     """Sync a corpus directory into the document store, idempotently.
 
     Input contract: normalized text. Files ending .md or .markdown are
-    ingested; every other file is reported as unsupported and skipped.
-    Convert other formats (PDF, audio, per-tool exports) first. A Claude
-    conversation export (JSON) goes through `trellis ingest conversations`.
+    ingested; other files are reported as unsupported and skipped. Some
+    paths are skipped with no mention in that report: paths --include
+    does not match; dot-files, dot-directories and symlinked directories
+    below the root (symlinks to directories are never followed); and any
+    directory that cannot be read, the root included. Convert other
+    formats (PDF, audio, per-tool exports) first. A Claude conversation
+    export (JSON) goes through `trellis ingest conversations`.
     """
     root = Path(path)
     if not root.exists():

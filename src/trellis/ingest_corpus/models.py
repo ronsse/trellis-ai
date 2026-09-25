@@ -171,7 +171,9 @@ class CorpusSyncReport:
     dry_run: bool
     prune: bool
     files: list[FileOutcome] = field(default_factory=list)
-    #: Files under *root* no handler supports (reported, never ingested).
+    #: Walked files that pass ``include`` but no handler supports (reported,
+    #: never ingested). Paths the walker skips (see
+    #: :mod:`trellis.ingest_corpus.walker`) never appear here.
     unsupported: list[str] = field(default_factory=list)
     #: Parent doc ids deleted (or, on dry runs, that would be deleted)
     #: because their source file vanished. Only populated with ``prune``.

@@ -539,6 +539,10 @@ the document store, idempotently. Any other file is reported as
 `skipped_unsupported`, never converted — format conversion (PDF, audio,
 per-tool exports) is the client's pre-step, per the normalization
 boundary in [`adr-corpus-ingestion.md`](../design/adr-corpus-ingestion.md) §8.
+Some paths never reach that report at all: paths `--include` does not
+match; dot-files, dot-directories (tool state such as `.obsidian/`) and
+symlinked directories below the root (never followed); and any directory
+that cannot be read, the root included.
 
 ```bash
 trellis ingest corpus <path> [--source-system corpus] [--domain X] \
