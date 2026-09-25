@@ -313,3 +313,53 @@ class TestConfidenceIsNotManufactured:
 
         out = LLMFacetClassifier(_Stub()).classify("some content")  # type: ignore[arg-type]
         assert out.confidence == 0.0
+
+
+class TestNonObjectResponseDegrades:
+    """A response that parses as JSON but is not an object is a failed
+    enrichment, so the classifier takes its documented degraded path.
+
+    It used to escape ``EnrichmentService.enrich`` as ``AttributeError``
+    (``.get`` on a list, ``None``, a string or a number), and
+    ``classify_async`` raised instead of degrading.
+    """
+
+    @pytest.mark.parametrize(
+        "response",
+        ["[]", '[{"tags": ["a"]}]', "null", '"prose, not an object"', "7"],
+        ids=["empty-array", "array-of-object", "null", "string", "number"],
+    )
+    def test_classifier_degrades_instead_of_raising(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch, response: str
+    ) -> None:
+        from trellis.extract.telemetry import reset_extraction_failure_state
+        from trellis.stores.base.event_log import EventType
+        from trellis.stores.sqlite.event_log import SQLiteEventLog
+
+        reset_extraction_failure_state()
+        monkeypatch.setenv("EXTRACTION_FAILURE_NO_SAMPLE", "1")
+        log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            svc = EnrichmentService(llm=FakeLLM(response), event_log=log)
+            c = LLMFacetClassifier(enrichment_service=svc, event_log=log)
+            ctx = ClassificationContext(node_id="node-17", title="T")
+            result = _run(c.classify_async("content", context=ctx))
+
+            assert result.tags == {}
+            assert result.confidence == 0.0
+            assert result.needs_llm_review is True
+            assert result.classifier_name == "llm_facet"
+            degraded = log.get_events(event_type=EventType.CLASSIFICATION_DEGRADED)
+            assert [e.payload for e in degraded] == [
+                {
+                    "classifier_id": "llm_facet",
+                    "upstream_failure_kind": "enrichment_failure",
+                    "subject_entity_id": "node-17",
+                    "degraded_to": "needs_llm_review",
+                }
+            ]
+            failed = log.get_events(event_type=EventType.EXTRACTION_FAILED)
+            assert [e.payload["failure_kind"] for e in failed] == ["parse_error"]
+        finally:
+            log.close()
+            reset_extraction_failure_state()
