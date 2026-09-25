@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis.analyze.graph_shape import READ_MARGIN
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE
@@ -141,7 +142,7 @@ class TestRendersBothSurfaces:
         result = runner.invoke(app, ["analyze", "graph-shape"])
 
         assert result.exit_code == EXIT_OK, result.output
-        assert "0 nodes" in result.output
+        assert "0 nodes" in plain(result.output)
 
 
 class TestFormatExitParity:

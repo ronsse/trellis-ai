@@ -46,9 +46,21 @@ TRACE_BODY = {"source": "agent", "intent": "probe", "steps": [], "context": {}}
 
 
 @pytest.fixture
-def stores_dir(tmp_path: Path) -> Path:
-    # Exercise the sanitizer's exact long-token boundary (#523).
-    path = tmp_path / ("a" * 40) / "stores"
+def stores_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The registry's store directory, relative to ``tmp_path``.
+
+    The test runs from ``tmp_path``, so the body under test names only
+    components chosen here. Built from an absolute ``tmp_path``, the
+    message also carried pytest's basetemp, and a basetemp component of 40
+    or more ``[A-Za-z0-9+_-]`` characters (a long worktree slug passed as
+    ``--basetemp``) makes ``sanitize_error_message`` replace the whole
+    message with its suppression marker, file name and all.
+    """
+    monkeypatch.chdir(tmp_path)
+    # Exercise the sanitizer's exact long-token boundary (#523). The
+    # leading component is there because #532's exemption for this run
+    # needs a path separator in front of it.
+    path = Path("site") / ("a" * 40) / "stores"
     path.mkdir(parents=True)
     return path
 

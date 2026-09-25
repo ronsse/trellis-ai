@@ -56,14 +56,28 @@ DAMAGED_POLICY_FILE = '{"polices": []}'
 
 @pytest.fixture
 def damaged_policy_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point the CLI at a store directory whose policy file will not load."""
-    # Exercise the sanitizer's exact long-token boundary (#523).
-    data_dir = tmp_path / ("a" * 40) / "data"
+    """Point the CLI at a store directory whose policy file will not load.
+
+    The CLI is handed paths *relative* to ``tmp_path``, and runs from
+    there, so the message under test names only components chosen here.
+    Built from an absolute ``tmp_path``, that message also carried
+    pytest's basetemp, and a basetemp component of 40 or more
+    ``[A-Za-z0-9+_-]`` characters (a long worktree slug passed as
+    ``--basetemp``) makes ``sanitize_error_message`` replace the whole
+    ``--format json`` message with its suppression marker, file name and
+    all — so the assertions on the machine envelope were measuring the
+    machine's directory layout, not the boundary.
+    """
+    monkeypatch.chdir(tmp_path)
+    # Exercise the sanitizer's exact long-token boundary (#523). The
+    # leading component is there because #532's exemption for this run
+    # needs a path separator in front of it.
+    data_dir = Path("site") / ("a" * 40) / "data"
     stores = data_dir / "stores"
     stores.mkdir(parents=True)
     path = stores / "policies.json"
     path.write_text(DAMAGED_POLICY_FILE, encoding="utf-8")
-    monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("TRELLIS_CONFIG_DIR", "config")
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
     return path
 
@@ -318,7 +332,7 @@ class TestTheMachineEnvelopeIsLeakGuarded:
     ) -> None:
         """The guard must not cost the legibility this whole change buys.
 
-        A resolved path is exactly the shape the sanitizer was written to
+        A filesystem path is exactly the shape the sanitizer was written to
         pass — ``/`` and ``.`` break its token heuristic — so the ordinary
         case is unchanged and the file is still named.
         """
