@@ -274,13 +274,20 @@ def _is_roster_membership_test(test: ast.expr) -> bool:
     rostered case that was later parametrized would stop matching and run
     ungated. The right side must be the roster, not some other set, and a
     chained comparison adds a second condition, which can only narrow it.
+
+    The roster has to appear by its bare name. ``self.SEARCH_ISSUING_TESTS``
+    never reaches the module roster: it resolves only to a class attribute,
+    a second roster the pin does not read, and that one can hold every case.
+    A roster moved into the class is refused as well: a loud false positive,
+    not a silent pass.
     """
     return (
         isinstance(test, ast.Compare)
         and name_of(test.left) == "originalname"
         and len(test.ops) == 1
         and isinstance(test.ops[0], ast.In)
-        and name_of(test.comparators[0]) == CONTRACT_ROSTER_CONSTANT
+        and isinstance(test.comparators[0], ast.Name)
+        and test.comparators[0].id == CONTRACT_ROSTER_CONSTANT
     )
 
 
@@ -467,6 +474,13 @@ def _synthetic_gate(
             False,
             id="chained-comparison",
         ),
+        pytest.param(
+            _AUTOUSE,
+            "if request.node.originalname in "
+            f"self.{CONTRACT_ROSTER_CONSTANT}:\n    {_REQUEST}",
+            False,
+            id="roster-read-as-attribute",
+        ),
         pytest.param(_AUTOUSE, _REQUEST, False, id="unconditional"),
         pytest.param(
             _AUTOUSE,
@@ -566,7 +580,8 @@ def test_the_reset_exemption_premise_holds() -> None:
     contract case itself branches on, rather than scanning the class body: a
     scan cannot see an override the class inherits, and the store has a
     concrete base, ``BoltSessionRunner``. Importing the store needs no
-    ``neo4j`` driver, because the Bolt base module guards that import.
+    ``neo4j`` driver: both Bolt base modules guard that import, and every
+    other module on the path reads it only under ``TYPE_CHECKING``.
     """
     from trellis.stores.neo4j.vector import Neo4jVectorStore
 
