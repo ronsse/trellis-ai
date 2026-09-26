@@ -292,9 +292,9 @@ jobs:
         # contracts/test_neo4j_vector_contract.py rides the contracts/
         # directory above into this same invocation, so both hazards apply
         # to it and both are handled the same way: its SEARCH-issuing
-        # contract cases (15 of 40) take the same gate by name and skip
-        # here, the other 25 run; and it takes the same default index name
-        # at the same 3 dims. The rule module above pins both.
+        # contract cases take the same gate by name and skip here, and the
+        # rest run; and it takes the same default index name at the same 3
+        # dims. The rule module above pins the gate and the name.
         #
         # tests/integration/test_recommended_config.py was the last added,
         # and it is the marker lesson rather than the capability one. It
