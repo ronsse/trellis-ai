@@ -361,9 +361,9 @@ not a serial chain).
 
 | Issue | Verdict | Note |
 |---|---|---|
-| [#522](https://github.com/ronsse/trellis-ai/issues/522) | `valid-now` | Rich renders outside #492 handle rule |
-| [#523](https://github.com/ronsse/trellis-ai/issues/523) | `valid-now` | Boundary test message suppression on long `--basetemp` |
-| [#494](https://github.com/ronsse/trellis-ai/issues/494) | `valid-now` | Document `retrieve pack --quiet` ids |
+| [#522](https://github.com/ronsse/trellis-ai/issues/522) | closed 2026-09-04 (was `valid-now`) | Rich renders outside #492 handle rule — fixed by [#536](https://github.com/ronsse/trellis-ai/pull/536) |
+| [#523](https://github.com/ronsse/trellis-ai/issues/523) | closed 2026-09-08 (was `valid-now`) | Boundary test message suppression on long `--basetemp` — closed by [#532](https://github.com/ronsse/trellis-ai/pull/532); [#634](https://github.com/ronsse/trellis-ai/pull/634) (2026-09-25) later fixed four boundary tests that still failed at a 40-character basetemp component |
+| [#494](https://github.com/ronsse/trellis-ai/issues/494) | closed 2026-09-21 (was `valid-now`) | Document `retrieve pack --quiet` ids — done in [#576](https://github.com/ronsse/trellis-ai/pull/576) |
 | [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | Measurement slice — cache token fields in `TokenUsage` only |
 
 All others: [`manifest.json`](../issues/reviews/2026-09-04/manifest.json); live requirements

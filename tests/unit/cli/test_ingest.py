@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from tests.cli_output import plain
 from trellis_cli.main import app
+from trellis_cli.stores import _reset_registry
 
 runner = CliRunner()
 
@@ -608,4 +609,16 @@ class TestIngestDbtManifestEmbeds:
         monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
         on = runner.invoke(app, ["ingest", "dbt-manifest", str(f)])
         assert on.exit_code == 0, on.stdout
-        assert "Embedded: 2" in plain(on.stdout)
+        # Whole lines: a substring check is satisfied by "Embedded: 20".
+        on_lines = [line.strip() for line in plain(on.stdout).splitlines()]
+        assert "Embedded: 2" in on_lines
+
+        # A zero is a count too. Above, the embedded count equals the
+        # document count (2), so printing the wrong one of the two passes
+        # there; with every embed failing the line must read 0, not 2.
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _BROKEN_EMBED_FN_PATH)
+        _reset_registry()  # the registry caches the embedder it resolved
+        broken = runner.invoke(app, ["ingest", "dbt-manifest", str(f)])
+        assert broken.exit_code == 0, broken.stdout
+        broken_lines = [line.strip() for line in plain(broken.stdout).splitlines()]
+        assert "Embedded: 0" in broken_lines

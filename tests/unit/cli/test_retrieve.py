@@ -716,8 +716,18 @@ class TestOperatorCopyableIds:
         result = runner.invoke(app, ["retrieve", "entity", MANGLE_TRAP_ID])
 
         assert result.exit_code == 0
-        assert "[green]" not in result.stdout, "the style tag leaked as literal text"
-        assert "\x1b[" in result.stdout, "the style tag rendered nothing at all"
+        assert "[green]" not in plain(result.stdout), (
+            "the style tag leaked as literal text"
+        )
+        # Raw on purpose: this half is *about* the decoration, so it pins
+        # the tag's own SGR spanning exactly "Entity" (green is 32 under the
+        # standard, 256-colour and truecolor systems alike). "Some escape
+        # before it" would not do: under markup=False the highlighter bolds
+        # the literal brackets, and its reset after "]" lands right in front
+        # of "Entity".
+        assert "\x1b[32mEntity\x1b[0m" in result.stdout, (
+            "the style tag rendered nothing at all"
+        )
 
     def test_search_prints_the_whole_trap_line_verbatim(self) -> None:
         """The line #492 quotes, end to end — id **and** preview.
