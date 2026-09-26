@@ -2283,14 +2283,26 @@ class TestARefusedNightlyWriteEscalates:
         assert report.boundary_kinds[f"config_unreadable@{ADVISORY_FILENAME}"] == 1
 
     def test_the_refusal_message_rides_the_event(
-        self, tmp_path: Path, temp_stores: StoreRegistry
+        self,
+        tmp_path: Path,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The recovery advice reaches an operator reading the event.
 
         Without it the count says a write was refused and nothing says
         which file or what to type, so the reader has to re-run the job
         that failed to find out.
+
+        The CLI runs from ``tmp_path`` with a *relative* data dir, so the
+        path in the message is one chosen here (#634's shape). The message
+        is capped at 500 characters, and built from an absolute
+        ``tmp_path`` its ``mv`` command carried pytest's basetemp: under a
+        long ``--basetemp`` the cap fell inside the path and the ``mv``
+        assertion failed.
         """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("TRELLIS_DATA_DIR", "data")
         _seed_promote_signal(temp_stores)
         path = TestCurateSurvivesADegradedAdvisoryStore._corrupt_advisory_file(tmp_path)
 
@@ -2303,7 +2315,7 @@ class TestARefusedNightlyWriteEscalates:
         assert events[0].source == ADVISORY_WRITER_SURFACE
         msg = events[0].payload["rejections"][0]["msg"]
         assert "malformed_json" in msg
-        assert f"mv {path}" in msg
+        assert f"mv {path.relative_to(tmp_path)}" in msg
 
     def test_a_clean_cycle_emits_nothing(
         self, tmp_path: Path, temp_stores: StoreRegistry

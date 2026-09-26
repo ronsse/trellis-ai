@@ -86,6 +86,9 @@ class TestRendersBothSurfaces:
         result = runner.invoke(app, ["analyze", "graph-shape"])
 
         assert result.exit_code == EXIT_OK, result.output
+        # The counts, not only the heading: without this, the empty-graph
+        # test's header pin is satisfied by a header that always prints 0/0.
+        assert "Graph Shape — 9 nodes, 3 edges" in plain(result.output).splitlines()
         for heading in (
             "Graph Shape",
             "Node types",
@@ -142,7 +145,10 @@ class TestRendersBothSurfaces:
         result = runner.invoke(app, ["analyze", "graph-shape"])
 
         assert result.exit_code == EXIT_OK, result.output
-        assert "0 nodes" in plain(result.output)
+        # The whole header line, not "0 nodes": an empty report prints that
+        # on three other lines too, so rewording or deleting the header left
+        # this test green.
+        assert "Graph Shape — 0 nodes, 0 edges" in plain(result.output).splitlines()
 
 
 class TestFormatExitParity:

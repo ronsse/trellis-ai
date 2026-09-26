@@ -18,11 +18,14 @@ rendering is the exception, and the reason #488 saw a CI-only failure —
 ``typer.rich_utils`` forces a terminal when ``GITHUB_ACTIONS`` /
 ``FORCE_COLOR`` / ``PY_COLORS`` is set, so a *usage error* is coloured on
 CI while everything a command prints itself is not. So these assertions
-are conditioned on a renderer that is merely switched off: under
-``FORCE_COLOR=1``, 21 of them fail on ``origin/main``. That is the
-environment-drift axis #398 tracks, and it is what a TTY-attached run, a
-CI matrix leg, or a typer/rich release that widens that forcing would
-turn on with no warning (#495).
+are conditioned on a renderer that is merely switched off, and a
+TTY-attached run, a CI matrix leg, or a typer/rich release that widens
+that forcing would switch it on with no warning (#495). A switched-off
+renderer also lets new assertions it would break merge green: 21 were
+failing under ``FORCE_COLOR=1`` when #509 fixed them (2026-09-04), and
+five more had merged, across four PRs, by the time #634 fixed those
+(2026-09-25). ``FORCE_COLOR=1 pytest tests/unit/cli`` is the run that
+finds the next one; take the current count from it, not from here.
 
 Stripping is :func:`click.utils.strip_ansi` rather than a local regex:
 click owns ``CliRunner``, already strips these sequences in
@@ -33,8 +36,11 @@ spelling of a solved problem.
 
 This module is deliberately **not** a ``conftest`` fixture that turns
 colour on for the whole CLI package. Whether ``FORCE_COLOR=1`` becomes a
-standing default or a CI matrix leg is a #398 decision; what lives here
-is the vocabulary a test needs to be correct under *either* answer.
+standing default or a CI matrix leg was left to #398 by #495, but #398
+(an issue about local venvs) closed on 2026-09-03 without taking it up.
+#634 put the question to the owner again, and no decision is recorded
+as of 2026-09-26. What lives here is the vocabulary a test needs to be
+correct under *either* answer.
 """
 
 from __future__ import annotations
@@ -63,8 +69,8 @@ def plain(text: str) -> str:
 
     **The negatives are the urgent half, and that asymmetry is why they
     were swept and the remaining raw positives were not.** A positive
-    that a coloured run would break *announces itself* — it is one of the
-    21 that fail on ``origin/main`` under ``FORCE_COLOR=1``, and it gets
+    that a coloured run would break *announces itself* — it fails the next
+    ``FORCE_COLOR=1`` run, whenever someone makes one, and it gets
     fixed. A negative that a coloured run would break goes *green*, and
     stays green, saying nothing. Every raw negative left in
     ``tests/unit/cli/`` was checked one by one before this sweep and none
