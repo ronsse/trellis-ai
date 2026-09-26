@@ -86,9 +86,13 @@ class TestRendersBothSurfaces:
         result = runner.invoke(app, ["analyze", "graph-shape"])
 
         assert result.exit_code == EXIT_OK, result.output
+        # ``result.stdout``, not ``result.output``: since click 8.2 ``output``
+        # interleaves stderr, so a report printed to stderr passed here too.
+        # The report is stdout; stderr is where the CLI's logs and warnings go.
+        out = plain(result.stdout)
         # The counts, not only the heading: without this, the empty-graph
         # test's header pin is satisfied by a header that always prints 0/0.
-        assert "Graph Shape — 9 nodes, 3 edges" in plain(result.output).splitlines()
+        assert "Graph Shape — 9 nodes, 3 edges" in out.splitlines()
         for heading in (
             "Graph Shape",
             "Node types",
@@ -98,7 +102,7 @@ class TestRendersBothSurfaces:
             "External referents",
             "Document linkage",
         ):
-            assert heading in result.output
+            assert heading in out
 
     def test_json_output_is_parseable_and_complete(self, populated) -> None:
         result = runner.invoke(app, ["analyze", "graph-shape", "--format", "json"])
@@ -147,8 +151,8 @@ class TestRendersBothSurfaces:
         assert result.exit_code == EXIT_OK, result.output
         # The whole header line, not "0 nodes": an empty report prints that
         # on three other lines too, so rewording or deleting the header left
-        # this test green.
-        assert "Graph Shape — 0 nodes, 0 edges" in plain(result.output).splitlines()
+        # this test green. ``stdout`` because ``output`` also carries stderr.
+        assert "Graph Shape — 0 nodes, 0 edges" in plain(result.stdout).splitlines()
 
 
 class TestFormatExitParity:

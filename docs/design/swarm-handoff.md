@@ -373,7 +373,7 @@ on each **GitHub issue**; roadmap only where it governs that item.
 
 | Issue | Gate | Note |
 |---|---|---|
-| [#257](https://github.com/ronsse/trellis-ai/issues/257) | `owner-only` | Ingest-normalization ADR — not dispatchable regardless of corpus `valid-now` |
+| [#257](https://github.com/ronsse/trellis-ai/issues/257) | closed 2026-09-24 (was `owner-only`) | Ingest-normalization ADR — recorded as [`adr-corpus-ingestion.md` §8](./adr-corpus-ingestion.md#8-normalization-boundary-amendment-2026-09-24-257) by [#626](https://github.com/ronsse/trellis-ai/pull/626) |
 | [#475](https://github.com/ronsse/trellis-ai/issues/475) | `blocked:owner-decision` | Assumptions line set not agreed — live issue blocks dispatch |
 
 ### Persistent blockers
@@ -468,12 +468,17 @@ do not overlap:
 
 | Territory | Issues (sample) |
 |---|---|
-| `tests/`, CI workflows | #526, #356, #351, #350, #523, #522 |
+| `tests/`, CI workflows | all six closed: #350 and #522 on 2026-09-04; #351, #523 and #526 on 2026-09-08; #356 on 2026-09-21 |
 | `src/trellis/retrieve/` | #439, #503, #371, #375, #463 |
 | `src/trellis/mutate/` | #360, #369, #474, #194 |
 | `src/trellis/llm/` | #514, #515 |
 | `src/trellis/stores/` | #350, #351, #256 |
 | `src/trellis/learning/` | #264, #342, #261 |
+
+**Status (2026-09-26):** the issue lists are the 2026-09-04 corpus sample, not the open
+set. Besides the `tests/` row, 10 of the other rows' 17 entries have closed since. The
+territory column is the durable content: check `gh issue list --state open` before reading
+any row as open work.
 
 ## 7. Dispatch template
 
