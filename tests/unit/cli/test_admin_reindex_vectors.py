@@ -66,7 +66,10 @@ class TestReindexVectorsCLI:
         _reset_registry()
         result = runner.invoke(admin_app, ["reindex-vectors", "--format", "json"])
         assert result.exit_code == 1
-        assert "error" in result.output
+        # The error envelope is all of stdout too; ``output`` also holds stderr.
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert "embeddings config" in payload["message"]
 
     def test_backfills_and_skips_on_rerun(self, cli_env) -> None:
         _seed_documents()
