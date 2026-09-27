@@ -103,7 +103,7 @@ always emit the JSON `CaptureReport` on stdout.
 | `TRELLIS_CAPTURE_SAMPLE_DENOMINATOR` | `5` | Clean-session sampling (`1` = capture all clean sessions). |
 | `TRELLIS_CAPTURE_SOURCE_SYSTEM` | `claude-code` | Corpus namespace / doc-id prefix. |
 | `TRELLIS_DISTILL_MODEL` | `hermes3:8b` | Model id label recorded in training events. |
-| `TRELLIS_CAPTURE_STRICT` | `1` | When truthy (the default), a sweep that left any session unjudged exits non-zero. Set `0`/`false`/`no`/`off` to report the count and exit `0` instead — those sessions stay un-watermarked and are retried next sweep. A sweep with *no* judge at all always fails, strict or not. |
+| `TRELLIS_CAPTURE_STRICT` | `1` | When truthy (the default), a sweep that left any session unjudged, or in which a session raised, exits non-zero. Set `0`/`false`/`no`/`off` to report the counts and exit `0` instead — those sessions stay un-watermarked and are retried next sweep. A sweep with *no* judge at all always fails, strict or not. |
 | `TRELLIS_CAPTURE_MAX_SALIENT_CHARS` | `8000` | Cap on conversation text sent to the judge. **Coupled to the judge endpoint's context window — read the warning below before raising it.** |
 | `TRELLIS_ENABLE_RECONCILE_ON_WRITE` | *(unset)* | When truthy, near-duplicate captures are adjudicated (ADD/UPDATE/SUPERSEDE/NOOP) instead of piling up. Off by default. |
 
@@ -287,6 +287,15 @@ Health signals in the JSON `CaptureReport`:
   timeout in an otherwise-good sweep now fails the unit. Set
   `TRELLIS_CAPTURE_STRICT=0` in the unit to keep the count but restore the
   zero exit.
+- `sessions_errored` > 0 (equivalently, `warnings[].kind == "session_error"`,
+  which names the exception class) → a session raised part-way through,
+  usually on a transcript or a judge reply the pipeline did not anticipate.
+  The sweep skipped that session and carried on; none of its memories was
+  written and it stays un-watermarked, so each later sweep retries it — a
+  transient fault clears on its own, a deterministic one recurs every night
+  until the cause is fixed. The traceback is in the run log under
+  `capture_session_failed`. Under strict mode the run exits non-zero (`3`
+  from `trellis-session-capture`, `1` from `trellis worker capture-sessions`).
 - `sessions_skipped_watermark` should dominate on steady-state runs (only new
   work is processed).
 - `sessions_skipped_empty` > 0 → transcripts parsed to **zero

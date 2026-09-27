@@ -187,6 +187,19 @@ All notable changes to Trellis will be documented in this file.
   `sessions_judge_unavailable` count with the old zero exit. The *total*
   no-op (no judge at all) fails regardless — nothing ran, so nothing is
   retried.
+- **A capture session that raises no longer aborts the whole sweep.** An
+  exception out of any one session — reading its transcript, building the
+  judge prompt, parsing or hashing the judge's reply — used to propagate out
+  of `run_capture` before the write seam, the watermark save and
+  `CAPTURE_SWEEP_COMPLETED`, so no memory from that night's sweep was written
+  and the watermark did not advance; a deterministic fault did the same every
+  night. The session is now skipped, left un-watermarked for retry, and
+  counted in a new `sessions_errored` field of the report and the sweep event
+  (traceback logged as `capture_session_failed`). Under the default strict
+  mode the run exits non-zero: `3` from `trellis-session-capture` (`1` stays
+  the judge outage and wins when both apply) and `1` from `trellis worker
+  capture-sessions`, which reports `"status": "partial"`. With
+  `TRELLIS_CAPTURE_STRICT=0` it exits `0` where it used to crash.
 - **MinHash shingle hashing switched from MD5 to truncated SHA-256**
   (`classify/dedup/minhash.py`). Non-cryptographic use (similarity
   estimation, not secret protection), but CodeQL's sensitive-data-hashing

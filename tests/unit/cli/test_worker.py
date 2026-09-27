@@ -1556,6 +1556,63 @@ class TestWorkerCaptureSessions:
         assert result.exit_code == 0, result.output
         assert "supersede" not in plain(result.output)
 
+    def test_errored_sessions_are_rendered_in_text(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A session that raised mid-sweep is a defect, so it prints in red.
+
+        Strict mode is off here so the render is pinned apart from the exit.
+        """
+        monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "0")
+        spy = MagicMock(return_value=self._report(sessions_seen=5, sessions_errored=2))
+        monkeypatch.setattr(capture_sweep, "run_sweep", spy)
+
+        result = runner.invoke(worker_app, ["capture-sessions"])
+
+        assert result.exit_code == 0, result.output
+        assert "2 session(s) raised mid-sweep" in plain(result.output)
+
+        spy.return_value = self._report(sessions_seen=5)
+        clean = runner.invoke(worker_app, ["capture-sessions"])
+
+        assert clean.exit_code == 0, clean.output
+        assert "raised mid-sweep" not in plain(clean.output)
+
+    def test_errored_sessions_fail_a_strict_run(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(return_value=self._report(sessions_seen=3, sessions_errored=2)),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions", "--format", "json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout.strip().splitlines()[0])
+        assert payload["sessions_errored"] == 2
+        assert payload["sessions_judge_unavailable"] == 0
+        assert payload["status"] == "partial"
+
+    def test_errored_sessions_under_the_opt_out_exit_zero_and_stay_partial(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "0")
+        monkeypatch.setattr(
+            capture_sweep,
+            "run_sweep",
+            MagicMock(return_value=self._report(sessions_seen=3, sessions_errored=1)),
+        )
+
+        result = runner.invoke(worker_app, ["capture-sessions", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip().splitlines()[0])
+        assert payload["sessions_errored"] == 1
+        assert payload["status"] == "partial"
+
 
 class TestEnrichedContentTags:
     """``worker enrich``'s write-back must produce a parseable ``ContentTags``.

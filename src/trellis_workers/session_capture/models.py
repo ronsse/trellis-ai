@@ -298,6 +298,17 @@ class CaptureReport:
     #: They remain judged and are watermarked, preserving the retry posture,
     #: but are distinct from a valid empty judgment.
     sessions_judge_malformed: int = 0
+    #: Sessions that raised mid-sweep — a fault in reading, distilling,
+    #: gating, reconciling or hashing one session, caught at
+    #: ``run_capture``'s per-session boundary so it cannot end the sweep. No
+    #: memory or training pair from such a session is written, and it is left
+    #: un-watermarked, so a transient fault retries next sweep and a
+    #: deterministic one is counted here every night until it is fixed. What
+    #: the session did before the fault is not rolled back: the counters it
+    #: moved (``sessions_parsed``, ``sessions_triggered``, the candidate
+    #: counters) keep their increments, and a reconcile verdict it emitted
+    #: stays emitted.
+    sessions_errored: int = 0
     #: Distinct sessions that yielded at least one memory surviving every
     #: gate — the coverage numerator. Counted per **session**, not per
     #: document: one session commonly distils to several memories, and
@@ -374,6 +385,7 @@ class CaptureReport:
             "sessions_skipped_empty": self.sessions_skipped_empty,
             "sessions_judge_unavailable": self.sessions_judge_unavailable,
             "sessions_judge_malformed": self.sessions_judge_malformed,
+            "sessions_errored": self.sessions_errored,
             "sessions_with_memory": self.sessions_with_memory,
             "malformed_lines": self.malformed_lines,
             "candidates_distilled": self.candidates_distilled,
