@@ -75,7 +75,8 @@ EOF
 * If your `config.yaml` already has an uncommented `knowledge:` key,
   edit that block instead of appending, because PyYAML silently keeps
   the last of two duplicate keys and discards the first.
-* Trace, document, event-log, and blob stores stay on SQLite.
+* Trace, document, and event-log stores stay on SQLite; the blob store
+  stays on the local filesystem.
 * Never write `${TRELLIS_NEO4J_URI}` or any other `${VAR}` into
   `config.yaml`. It is read as plain YAML, so the placeholder reaches
   the driver literally; leave the key out and its env var supplies it.
@@ -194,7 +195,6 @@ trellis admin init
 | `ServiceUnavailable: Couldn't connect to localhost:7687` | Container not running | `docker ps` → start with the command in Step 1 |
 | `AuthError` | Password mismatch between container and env var | Re-run `docker run` with the same `NEO4J_AUTH` value as `TRELLIS_NEO4J_PASSWORD` |
 | `no such vector schema index` on first query after init | Race against AuraDB-style async index provisioning (rare on local Docker) | Phase 1.4's `wait_for_vector_index_online` should prevent this; if you hit it, file an issue with the timeline |
-| `trellis demo load` writes are slow | First-time Neo4j page-cache warm-up | One-time cost; subsequent runs are fast |
 
 ## Next steps
 
