@@ -294,8 +294,9 @@ Health signals in the JSON `CaptureReport`:
   written and it stays un-watermarked, so each later sweep retries it — a
   transient fault clears on its own, a deterministic one recurs every night
   until the cause is fixed. The traceback is in the run log under
-  `capture_session_failed`. Under strict mode the run exits non-zero (`3`
-  from `trellis-session-capture`, `1` from `trellis worker capture-sessions`).
+  `capture_session_failed`. Under strict mode the run exits non-zero: `3`
+  from `trellis-session-capture` (`1` if the judge also went away) and `1`
+  from `trellis worker capture-sessions`.
 - `sessions_skipped_watermark` should dominate on steady-state runs (only new
   work is processed).
 - `sessions_skipped_empty` > 0 → transcripts parsed to **zero
