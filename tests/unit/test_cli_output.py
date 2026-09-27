@@ -151,9 +151,12 @@ class TestForceColour:
         """
         buffer = io.StringIO()
         with pytest.MonkeyPatch.context() as monkeypatch:
-            # The ambient run may itself be coloured (the CI leg #398 is
-            # about, and the FORCE_COLOR=1 arm of this fix's own report),
-            # so the "piped" starting state is constructed, not assumed.
+            # The ambient run may itself be coloured: the FORCE_COLOR=1
+            # arm of this fix's own report is, and so would a CI matrix
+            # leg be if one is ever added (left to #398 by #495, but #398,
+            # an issue about local venvs, closed on 2026-09-03 without
+            # taking it up). So the "piped" starting state is constructed,
+            # not assumed.
             monkeypatch.delenv("FORCE_COLOR", raising=False)
             monkeypatch.delenv("TTY_COMPATIBLE", raising=False)
             console = Console(file=buffer, width=200)

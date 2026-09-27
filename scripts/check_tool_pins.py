@@ -93,16 +93,26 @@ is spelled as an allow-list rather than as a truthiness test (#498).
 Two further parity axes, measured and deliberately not checked here
 -------------------------------------------------------------------
 
-**Rich colour.** CI colorizes Typer/Rich CLI output and a local run does
-not, and Rich's highlighter styles *parts* of a token — so ``--include-
-chunks`` arrives as three separately-wrapped SGR runs and
+**Rich colour.** CI colours what Typer renders itself and a local run does
+not: ``typer.rich_utils`` forces a terminal when ``GITHUB_ACTIONS`` is set,
+so ``--help`` and usage errors arrive with SGR escapes, while a command's
+own Rich console sees ``CliRunner``'s pipe in CI exactly as it does
+locally, unless ``FORCE_COLOR`` or ``TTY_COMPATIBLE=1`` is set, which no
+workflow does as of 2026-09-26. Rich's highlighter styles *parts* of a
+token — so
+``--include-chunks`` arrives as three separately-wrapped SGR runs and
 ``"--include-chunks" in output`` is ``False`` against output that plainly
 displays it. That is a stronger divergence than anything above, because it
-changes an **assertion outcome** rather than a tool's verdict: it broke
-PR #488 on all three Python versions after a fully green local suite.
-Measured on ``origin/main``: 6814 passed plain, 22 failed under
-``FORCE_COLOR=1``, of which 21 are pre-existing across ten CLI test modules
-(#495). It is not a check here for two reasons. A parity *warning* would
+changes an **assertion outcome** rather than a tool's verdict: a usage
+error naming that option broke PR #488 on all three Python versions after
+a fully green local suite. Measured on ``origin/main`` for #496
+(2026-09-03): 6814 passed plain, 22 failed under ``FORCE_COLOR=1``, of
+which 21 are pre-existing across ten CLI test modules (#495). #509 fixed
+those 21 (2026-09-04) and #634 five more that had merged since
+(2026-09-25). On ``b780a6d6`` (2026-09-26) the default ``pytest tests/``
+selection gives 8846 passed, 32 skipped, 454 deselected under
+``FORCE_COLOR=1``, the same as plain, ``tests/unit/cli`` included. It is
+not a check here for two reasons. A parity *warning* would
 fire on **100% of local runs forever** — local can never be GitHub Actions
 — and this repo has already established that a caveat which always prints
 is one that always gets skipped. And the remedy is not the shape this
@@ -110,10 +120,16 @@ script issues: you cannot "install" your way to it, because the fix is to
 **pin** Rich's colour in the test harness (``FORCE_COLOR=1`` in the root
 ``conftest.py``, which makes local runs predictive by default — an extra CI
 matrix leg only tells you after you push, which is the failure #398 is
-about). That pin turns the suite red until #495 lands, so it belongs to
-#495. Note for whoever takes it: only ``FORCE_COLOR`` reproduces it —
-neither ``CI=true``, ``GITHUB_ACTIONS=true`` nor ``CliRunner(color=True)``
-does.
+about). That pin would have turned the suite red until #495's fixes
+landed. They have (the measurement above), so what remains is the
+decision: #495 closed on 2026-09-04 (#509) and left it to #398, which had
+closed on 2026-09-03 (#496) without taking it up. #634 put the question
+to the owner again, and no decision is recorded as of 2026-09-26. Note
+for whoever takes it: of the switches measured (2026-09-26), only
+``FORCE_COLOR=1`` and ``TTY_COMPATIBLE=1`` colour a command's own output;
+``CI=true``, ``GITHUB_ACTIONS=true``, ``PY_COLORS=1`` and
+``CliRunner.invoke(..., color=True)`` do not, and ``GITHUB_ACTIONS`` and
+``PY_COLORS`` colour Typer's ``--help`` and usage errors and nothing else.
 
 **Installed extras.** ``.ci-venv`` collected 255 tests CI never installs
 the extras for (31 skipped / 310 deselected against CI's 40 / 50). Not

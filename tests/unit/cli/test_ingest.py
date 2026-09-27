@@ -30,6 +30,8 @@ def _temp_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 #: objects — which is what makes ``_EMBED_CALLS`` readable from a test.
 _EMBED_FN_PATH = "tests.unit.cli.test_ingest._fake_embed"
 _BROKEN_EMBED_FN_PATH = "tests.unit.cli.test_ingest._broken_embed"
+_MODEL_FAILS_EMBED_FN_PATH = "tests.unit.cli.test_ingest._embed_failing_on_model"
+_SOURCE_FAILS_EMBED_FN_PATH = "tests.unit.cli.test_ingest._embed_failing_on_source"
 
 #: Every text the stub embedders were handed, so a test can assert the hook
 #: was reached rather than inferring it from an absent side effect.
@@ -47,6 +49,20 @@ def _broken_embed(text: str) -> list[float]:
     _EMBED_CALLS.append(text)
     msg = "embedder exploded"
     raise RuntimeError(msg)
+
+
+def _embed_failing_on_model(text: str) -> list[float]:
+    """Fails on the dbt model's description and embeds the source's."""
+    if text == "Staged orders":
+        return _broken_embed(text)
+    return _fake_embed(text)
+
+
+def _embed_failing_on_source(text: str) -> list[float]:
+    """Fails on the dbt source's description and embeds the model's."""
+    if text == "Raw orders table":
+        return _broken_embed(text)
+    return _fake_embed(text)
 
 
 def _trace_json() -> str:
@@ -622,3 +638,69 @@ class TestIngestDbtManifestEmbeds:
         assert broken.exit_code == 0, broken.stdout
         broken_lines = [line.strip() for line in plain(broken.stdout).splitlines()]
         assert "Embedded: 0" in broken_lines
+
+    @pytest.mark.parametrize(
+        ("embed_fn_path", "embedded_uid"),
+        [
+            pytest.param(
+                _MODEL_FAILS_EMBED_FN_PATH, "source.p.raw.orders", id="model-fails"
+            ),
+            pytest.param(
+                _SOURCE_FAILS_EMBED_FN_PATH, "model.p.stg_orders", id="source-fails"
+            ),
+        ],
+    )
+    def test_a_mixed_run_counts_only_the_embeds_that_succeeded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        embed_fn_path: str,
+        embedded_uid: str,
+    ) -> None:
+        """Exactly one of the two embeds fails, and the count reads 1.
+
+        Every case above that runs the embed is uniform: each embed succeeds
+        (2) or each fails (0). A uniform run cannot show how a failure
+        interacts with the count (#447's pool too uniform), so a count that
+        resets to zero on a failure, or stops counting at the first one,
+        passes all of them.
+
+        Both positions, because each kills a different one of those two. A
+        count that resets reads 0 only when the failure comes after a
+        success; a count that stops reads 0 only when the failure comes
+        first. Choosing which description fails, rather than which position,
+        covers both orders whatever order the extractor yields them in.
+        """
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", embed_fn_path)
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        payload, vectors = self._ingest(tmp_path)
+        assert payload["embedded"] == 1
+        # Both were attempted: the failure did not end the loop.
+        assert sorted(_EMBED_CALLS) == ["Raw orders table", "Staged orders"]
+        # The one row is the embed that succeeded, not the one that failed.
+        assert [row["item_id"] for row in vectors] == [f"dbt:{embedded_uid}"]
+
+    @pytest.mark.parametrize(
+        "embed_fn_path",
+        [
+            pytest.param(_MODEL_FAILS_EMBED_FN_PATH, id="model-fails"),
+            pytest.param(_SOURCE_FAILS_EMBED_FN_PATH, id="source-fails"),
+        ],
+    )
+    def test_text_output_counts_a_mixed_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, embed_fn_path: str
+    ) -> None:
+        """The operator line for the mixed run above, in both positions."""
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", embed_fn_path)
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        _EMBED_CALLS.clear()
+        runner.invoke(app, ["admin", "init"])
+        f = tmp_path / "manifest.json"
+        f.write_text(json.dumps(_SAMPLE_DBT_MANIFEST))
+        result = runner.invoke(app, ["ingest", "dbt-manifest", str(f)])
+        assert result.exit_code == 0, result.stdout
+        # Whole lines: a substring check is satisfied by "Embedded: 10".
+        lines = [line.strip() for line in plain(result.stdout).splitlines()]
+        assert "Embedded: 1" in lines
+        assert "Documents: 2" in lines
+        assert sorted(_EMBED_CALLS) == ["Raw orders table", "Staged orders"]
