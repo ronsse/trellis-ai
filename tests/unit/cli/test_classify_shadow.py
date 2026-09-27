@@ -51,7 +51,9 @@ def cli_env(tmp_path, monkeypatch) -> None:
 def _run_json(*args: str) -> dict[str, Any]:
     result = runner.invoke(classify_app, [*args, "--format", "json"])
     assert result.exit_code == 0, result.output
-    return json.loads(result.output.strip().splitlines()[-1])
+    # All of stdout, as ``| jq`` reads it -- not the last line of ``output``,
+    # which interleaves stderr and so parsed a payload printed there.
+    return json.loads(result.stdout)
 
 
 def _seed_shadowed(docs: list[tuple[str, str, list[str]]]) -> None:
@@ -150,7 +152,7 @@ class TestShadowCommand:
 
         assert result.exit_code == EXIT_STORE, result.output
         if fmt == "json":
-            payload = json.loads(result.output.strip().splitlines()[-1])
+            payload = json.loads(result.stdout)
             assert payload["status"] == "error"
             assert payload["error_type"] == "LLMRoutingError"
             assert payload["setting"] == "llm.routes.classify_shadow"
@@ -224,7 +226,7 @@ class TestTagCandidatesCommand:
         _seed_thresholds(tag_keyword_min_lift=-1.0)
         result = runner.invoke(classify_app, ["tag-candidates", "--format", "json"])
         assert result.exit_code != 0
-        payload = json.loads(result.output.strip().splitlines()[-1])
+        payload = json.loads(result.stdout)
         assert payload["status"] == "error"
         assert "min_lift" in payload["message"]
 

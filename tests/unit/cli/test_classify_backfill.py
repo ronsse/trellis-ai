@@ -51,7 +51,9 @@ def _seed_documents(count: int = 3) -> None:
 def _run_json(*args: str) -> dict[str, Any]:
     result = runner.invoke(classify_app, ["backfill", "--format", "json", *args])
     assert result.exit_code == 0, result.output
-    return json.loads(result.output.strip().splitlines()[-1])
+    # All of stdout, as ``| jq`` reads it -- not the last line of ``output``,
+    # which interleaves stderr and so parsed a payload printed there.
+    return json.loads(result.stdout)
 
 
 def _tags(doc_id: str) -> dict[str, Any]:
@@ -265,5 +267,5 @@ class TestClassifyBackfillCLI:
         result = runner.invoke(classify_app, ["backfill", "--format", "json"])
 
         assert result.exit_code == 1
-        payload = json.loads(result.output.strip().splitlines()[-1])
+        payload = json.loads(result.stdout)
         assert payload["status"] == "error"

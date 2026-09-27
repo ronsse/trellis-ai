@@ -108,7 +108,9 @@ class TestRendersBothSurfaces:
         result = runner.invoke(app, ["analyze", "graph-shape", "--format", "json"])
 
         assert result.exit_code == EXIT_OK, result.output
-        payload = json.loads(result.output)
+        # ``stdout`` alone, as ``| jq`` reads it: ``output`` interleaves
+        # stderr, so a payload printed there parsed here too.
+        payload = json.loads(result.stdout)
         assert payload["status"] == "ok"
         assert payload["nodes"] == 9
         assert payload["edges"] == 3
@@ -127,7 +129,7 @@ class TestRendersBothSurfaces:
 
     def test_json_carries_the_findings_the_text_arm_shows(self, populated) -> None:
         result = runner.invoke(app, ["analyze", "graph-shape", "--format", "json"])
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
 
         splits = payload["uncovered_splits"]
         assert len(splits) == 1
@@ -219,7 +221,7 @@ class TestFormatExitParity:
         )
 
         result = runner.invoke(app, ["analyze", "graph-shape", "--format", "json"])
-        payload = json.loads(result.output)
+        payload = json.loads(result.stdout)
 
         assert result.exit_code == EXIT_STORE
         assert payload["status"] == "truncated"
