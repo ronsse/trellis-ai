@@ -932,11 +932,20 @@ class TestPrune:
 class TestPruneKeepsWhatItCannotVerify:
     """A prune candidate is deleted only when its source is shown gone (#633)."""
 
-    def test_row_without_a_source_path_is_withheld(self, registry, vault):
+    @pytest.mark.parametrize(
+        ("extra", "recorded"),
+        [({}, None), ({"source_path": ""}, "")],
+        ids=["absent", "empty"],
+    )
+    def test_row_without_a_source_path_is_withheld(
+        self, registry, vault, extra, recorded
+    ):
+        # An empty source_path joins to the root itself, which is present: read
+        # as a path, the row would be kept silently instead of withheld.
         sync_corpus(registry, vault, source_system="t")
         store = registry.knowledge.document_store
         orphan_id = corpus_doc_id("t", "x.md")
-        store.put(orphan_id, "Orphan row.", metadata={"source_system": "t"})
+        store.put(orphan_id, "Orphan row.", metadata={"source_system": "t", **extra})
         (vault / "note-a.md").unlink()
 
         report = sync_corpus(registry, vault, source_system="t", prune=True)
@@ -945,7 +954,7 @@ class TestPruneKeepsWhatItCannotVerify:
         assert report.prune_withheld == [
             {
                 "doc_id": orphan_id,
-                "source_path": None,
+                "source_path": recorded,
                 "detail": "no source_path recorded",
             }
         ]
