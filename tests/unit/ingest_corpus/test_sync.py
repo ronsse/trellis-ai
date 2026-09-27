@@ -929,6 +929,55 @@ class TestPrune:
         assert registry.knowledge.document_store.get(keep_id) is not None
 
 
+class TestPruneKeepsWhatItCannotVerify:
+    """A prune candidate is deleted only when its source is shown gone (#633)."""
+
+    @pytest.mark.parametrize(
+        ("extra", "recorded"),
+        [({}, None), ({"source_path": ""}, "")],
+        ids=["absent", "empty"],
+    )
+    def test_row_without_a_source_path_is_withheld(
+        self, registry, vault, extra, recorded
+    ):
+        # An empty source_path joins to the root itself, which is present: read
+        # as a path, the row would be kept silently instead of withheld.
+        sync_corpus(registry, vault, source_system="t")
+        store = registry.knowledge.document_store
+        orphan_id = corpus_doc_id("t", "x.md")
+        store.put(orphan_id, "Orphan row.", metadata={"source_system": "t", **extra})
+        (vault / "note-a.md").unlink()
+
+        report = sync_corpus(registry, vault, source_system="t", prune=True)
+
+        assert [p["doc_id"] for p in report.pruned] == [corpus_doc_id("t", "note-a.md")]
+        assert report.prune_withheld == [
+            {
+                "doc_id": orphan_id,
+                "source_path": recorded,
+                "detail": "no source_path recorded",
+            }
+        ]
+        assert store.get(orphan_id) is not None
+
+    def test_missing_root_withholds_every_document(self, registry, vault, tmp_path):
+        sync_corpus(registry, vault, source_system="t")
+        store = registry.knowledge.document_store
+        before = sorted(d["doc_id"] for d in store.list_documents(limit=100))
+        vault.rename(tmp_path / "vault-moved")
+
+        report = sync_corpus(registry, vault, source_system="t", prune=True)
+
+        assert report.pruned == []
+        assert sorted(e["source_path"] for e in report.prune_withheld) == [
+            "note-a.md",
+            "sub/note-b.md",
+        ]
+        for entry in report.prune_withheld:
+            assert "root is not a directory" in entry["detail"]
+        assert sorted(d["doc_id"] for d in store.list_documents(limit=100)) == before
+
+
 class TestDryRun:
     def test_dry_run_writes_nothing_but_reports_plan(self, registry, vault):
         (vault / "long.md").write_text(_long_markdown())

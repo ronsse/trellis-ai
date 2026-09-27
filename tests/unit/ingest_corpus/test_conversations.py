@@ -263,6 +263,16 @@ class TestSyncConversations:
         assert store.get(conversation_doc_id("claude-ai", "conv-2")) is None
         assert store.get(conversation_doc_id("claude-ai", "conv-1")) is not None
 
+    def test_dropped_conversation_is_kept_without_prune(self, registry, tmp_path: Path):
+        src = _write_export(tmp_path, [_CONV_OLD, _CONV_NEW_SHAPE])
+        sync_conversations(registry, src)
+        _write_export(tmp_path, [_CONV_OLD])
+        report = sync_conversations(registry, src)
+        assert report.pruned == []
+        assert report.prune_withheld == []
+        store = registry.knowledge.document_store
+        assert store.get(conversation_doc_id("claude-ai", "conv-2")) is not None
+
     def test_long_conversation_is_chunked_and_retrievable(
         self, registry, tmp_path: Path, monkeypatch
     ):

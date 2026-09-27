@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 #: Separator between a parent document id and its chunk suffix. Chunk doc
 #: ids are ``f"{parent_doc_id}{CHUNK_ID_SEPARATOR}{index}"``.
@@ -162,6 +163,32 @@ class FileOutcome:
         return payload
 
 
+@dataclass(frozen=True)
+class SourceUnverified:
+    """A prune candidate whose source could not be checked (#633).
+
+    Prune deletes a document only when its source is *verifiably* gone. A
+    source it could not look at — an unreadable directory, a broken path,
+    an export that was not read whole — is not evidence of absence, so the
+    candidate is kept and reported under
+    :attr:`CorpusSyncReport.prune_withheld` with this ``detail``.
+    """
+
+    #: Why the source could not be checked, for the operator.
+    detail: str
+
+
+#: What a :data:`PruneCheck` says about one prune candidate's source:
+#: ``"vanished"`` (delete it), ``"present"`` (keep it), or
+#: :class:`SourceUnverified` (keep it and report it as withheld).
+SourceState: TypeAlias = Literal["vanished", "present"] | SourceUnverified
+
+#: The source-specific verdict ``sync_records`` asks about each prune
+#: candidate, called with its ``doc_id`` and stored metadata. Passing one is
+#: what turns prune on; ``None`` means no prune.
+PruneCheck: TypeAlias = Callable[[str, Mapping[str, Any]], SourceState]
+
+
 @dataclass
 class CorpusSyncReport:
     """Full report of one ``sync_corpus`` run."""
@@ -176,10 +203,14 @@ class CorpusSyncReport:
     #: :mod:`trellis.ingest_corpus.walker`) never appear here.
     unsupported: list[str] = field(default_factory=list)
     #: Parent doc ids deleted (or, on dry runs, that would be deleted)
-    #: because their source file vanished. Only populated with ``prune``.
+    #: because their source is verifiably gone. Only populated with ``prune``.
     pruned: list[dict[str, Any]] = field(default_factory=list)
-    #: Non-fatal findings: near-duplicate pairs, unreadable files,
-    #: malformed frontmatter. Each entry has a ``kind`` key.
+    #: Prune candidates kept because their source could not be checked
+    #: (#633): ``{doc_id, source_path, detail}``. Non-empty means the prune
+    #: did not finish, and the CLI exits 5 with ``status: "partial"``.
+    prune_withheld: list[dict[str, Any]] = field(default_factory=list)
+    #: Non-fatal findings: near-duplicate pairs, unreadable files and
+    #: directories, malformed frontmatter. Each entry has a ``kind`` key.
     warnings: list[dict[str, Any]] = field(default_factory=list)
     #: Entities created by the optional ``--extract`` pass this run.
     entities_extracted: int = 0
@@ -198,6 +229,7 @@ class CorpusSyncReport:
             "skipped_unchanged": by_action["skip"],
             "skipped_unsupported": len(self.unsupported),
             "pruned": len(self.pruned),
+            "prune_withheld": len(self.prune_withheld),
             "chunks_written": sum(o.chunks_written for o in self.files),
             "entities_extracted": self.entities_extracted,
             "edges_extracted": self.edges_extracted,
@@ -215,5 +247,6 @@ class CorpusSyncReport:
             "files": [o.to_payload() for o in self.files],
             "unsupported": list(self.unsupported),
             "pruned": list(self.pruned),
+            "prune_withheld": list(self.prune_withheld),
             "warnings": list(self.warnings),
         }
