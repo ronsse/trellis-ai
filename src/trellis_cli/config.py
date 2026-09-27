@@ -30,11 +30,21 @@ class TrellisConfig(TrellisModel):
 
     @classmethod
     def load(cls) -> TrellisConfig:
-        """Load config from file or return defaults."""
+        """Load config from file or return defaults.
+
+        ``config.yaml`` is shared: the store registry owns its plane
+        blocks (``knowledge``, ``operational``, ``embeddings``, ``llm`` …),
+        so only the keys this model declares are read and the rest are
+        left to their owner. The model itself stays ``extra="forbid"``.
+
+        The result therefore holds only the CLI-owned keys. Never
+        round-trip it through :meth:`save`, which rewrites the whole file:
+        a ``load()`` → ``save()`` would delete every plane block.
+        """
         config_path = get_config_dir() / "config.yaml"
         if config_path.exists():
             data = yaml.safe_load(config_path.read_text()) or {}
-            return cls(**data)
+            return cls(**{k: v for k, v in data.items() if k in cls.model_fields})
         return cls(data_dir=str(get_data_dir()))
 
     def save(self) -> None:

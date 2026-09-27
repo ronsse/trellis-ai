@@ -164,6 +164,22 @@ _PLANE_OF: dict[str, str] = {
     for store_type in store_types
 }
 
+# The file a ``sqlite`` store opens under ``stores_dir`` when its config
+# names no ``db_path``. Read by ``_instantiate`` (which opens it) and by
+# ``configured_sqlite_path`` (which only reports it), so the two cannot
+# name different files.
+_SQLITE_DB_NAMES: dict[str, str] = {
+    "trace": "traces.db",
+    "document": "documents.db",
+    "graph": "graph.db",
+    "vector": "vectors.db",
+    "event_log": "events.db",
+    "outcome": "outcomes.db",
+    "parameter": "parameters.db",
+    "tuner_state": "tuner_state.db",
+    "api_key": "api_keys.db",
+}
+
 # Environment variable names per plane for Postgres DSN resolution.
 _PLANE_PG_DSN_ENV: dict[str, str] = {
     "knowledge": "TRELLIS_KNOWLEDGE_PG_DSN",
@@ -849,6 +865,47 @@ class StoreRegistry:
             return "local"
         return "sqlite"
 
+    def configured_backend(self, store_type: str) -> str:
+        """Return the backend ``store_type`` is configured for, without opening it.
+
+        **Read-only and non-connecting.** It never instantiates or caches a
+        store, never creates ``stores_dir`` or a SQLite file, and never
+        touches the network — so a caller can ask what a deployment is
+        configured for without connecting to it. The answer is the backend
+        name ``_instantiate`` would use (the configured one, else the
+        default); it is not evidence that the backend is installed or
+        reachable, which is :meth:`validate`'s question.
+
+        Raises :class:`~trellis.errors.ValidationError` for a store type
+        the registry does not know, rather than answering the default.
+        """
+        if store_type not in _PLANE_OF:
+            msg = f"Unknown store type '{store_type}'"
+            raise ValidationError(msg)
+        backend, _params = self._resolve_backend(store_type)
+        return str(backend)
+
+    def configured_sqlite_path(self, store_type: str) -> Path | None:
+        """Return the SQLite file ``store_type`` would open, without opening it.
+
+        Same read-only, non-connecting contract as
+        :meth:`configured_backend`, which it calls first. ``None`` unless
+        the store is configured for the ``sqlite`` backend. An explicit
+        ``db_path`` wins; otherwise the file is the default name under
+        ``stores_dir`` — ``None`` when there is no ``stores_dir`` either,
+        the case in which ``_instantiate`` refuses to build the store.
+        The file may not exist: reporting that is the caller's business.
+        """
+        if self.configured_backend(store_type) != "sqlite":
+            return None
+        _backend, params = self._resolve_backend(store_type)
+        if "db_path" in params:
+            return Path(params["db_path"])
+        name = _SQLITE_DB_NAMES.get(store_type)
+        if self._stores_dir is None or name is None:
+            return None
+        return self._stores_dir / name
+
     def _instantiate(self, store_type: str) -> Any:
         """Create a store instance from config."""
         backend, params = self._resolve_backend(store_type)
@@ -879,18 +936,7 @@ class StoreRegistry:
                 )
                 raise ConfigError(msg, setting="stores_dir")
             self._stores_dir.mkdir(parents=True, exist_ok=True)
-            db_names = {
-                "trace": "traces.db",
-                "document": "documents.db",
-                "graph": "graph.db",
-                "vector": "vectors.db",
-                "event_log": "events.db",
-                "outcome": "outcomes.db",
-                "parameter": "parameters.db",
-                "tuner_state": "tuner_state.db",
-                "api_key": "api_keys.db",
-            }
-            params["db_path"] = self._stores_dir / db_names[store_type]
+            params["db_path"] = self._stores_dir / _SQLITE_DB_NAMES[store_type]
 
         # For local blob backend, default to stores_dir/blobs/
         if backend == "local" and "root_dir" not in params:

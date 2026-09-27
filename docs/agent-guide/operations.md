@@ -36,28 +36,32 @@ trellis admin init [--data-dir PATH] [--force] [--format text|json]
 
 ### `trellis admin health`
 
-Check health of Trellis stores.
+Check health of Trellis stores. Read-only: it resolves each store's backend from `config.yaml` without opening the store, so it makes no connection and creates no file.
 
 ```bash
 trellis admin health [--format text|json]
 ```
 
-**JSON output:**
+**JSON output** (knowledge plane on Postgres, operational plane on SQLite):
 
 ```json
 {
   "config": true,
   "data_dir": true,
   "stores_dir": true,
-  "documents.db": true,
-  "graph.db": true,
-  "vectors.db": false,
   "events.db": true,
-  "traces.db": true
+  "traces.db": false,
+  "backends": {
+    "document": "postgres",
+    "graph": "postgres",
+    "vector": "pgvector",
+    "event_log": "sqlite",
+    "trace": "sqlite"
+  }
 }
 ```
 
-A value of `false` means the store file does not exist. Run `trellis admin init` to create missing stores.
+`backends` is always present and names the configured backend of each store health reports on: `document`, `graph`, `vector`, `event_log` and `trace`. The blob, outcome, parameter, tuner_state and api_key stores are not reported. Only a `sqlite` store gets a `.db` key, and `false` means its file does not exist. That file is the store's `db_path` when `config.yaml` sets one, otherwise the key's name under the stores directory. `trellis admin init` creates no store files: each is created the first time its store is used, so `false` is normal on a fresh install. A store on any other backend has no `.db` key, and text output lists it as, for example, `postgres (not checked)`. Health opens no connection, so it cannot tell you whether that store is reachable.
 
 ### `trellis admin stats`
 
