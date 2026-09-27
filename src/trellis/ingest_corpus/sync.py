@@ -20,7 +20,10 @@ Write semantics (ADR §4), applied per record:
   the old document tree deleted. Reported as a move, not a new ingest.
   Move detection is a file-corpus concern (content-derived ids); readers
   with content-independent ids (conversation uuids) disable it.
-* **Vanished** → deleted only with ``prune=True``.
+* **Vanished** → deleted only when prune is on *and* the source is
+  verifiably gone. A source the prune check cannot look at is kept and
+  reported under ``prune_withheld`` (#633): not having seen a source is
+  not evidence that it is gone.
 * **Near-duplicates** across records are *warned about*, never skipped —
   unlike ``save_memory``, two legitimately similar notes / conversations
   are common.
@@ -46,7 +49,7 @@ by construction), unchunked documents embed the parent row itself.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -61,6 +64,11 @@ from trellis.classify.ingest import (
 )
 from trellis.core.document_write import put_document
 from trellis.core.hashing import content_hash
+from trellis.core.path_presence import (
+    UnknownFileIdentity,
+    file_identity,
+    path_is_present,
+)
 from trellis.extract.memory_ingest_hook import (
     build_memory_extractor,
     run_memory_extraction,
@@ -70,6 +78,7 @@ from trellis.ingest_corpus.handlers import handler_for, supported_extensions
 from trellis.ingest_corpus.models import (
     CorpusSyncReport,
     FileOutcome,
+    SourceUnverified,
     SyncRecord,
     chunk_doc_id,
     corpus_doc_id,
@@ -84,7 +93,7 @@ from trellis.stores.base.event_log import EventType
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from trellis.ingest_corpus.models import ChunkSpan
+    from trellis.ingest_corpus.models import ChunkSpan, PruneCheck, SourceState
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.registry import StoreRegistry
 
@@ -123,7 +132,9 @@ def sync_corpus(
             updated documents only; unchanged files are not re-tagged.
         include: Optional glob filter over relative paths.
         dry_run: Compute and report the full plan without writing.
-        prune: Delete documents whose source file vanished.
+        prune: Delete documents whose source file is verifiably gone. A
+            document whose file cannot be checked is kept and listed under
+            ``prune_withheld`` (see :func:`_corpus_prune_check`).
         extract: Opt into the flag-gated entity/edge extraction pass
             (also requires ``TRELLIS_ENABLE_MEMORY_EXTRACTION``).
         requested_by: Audit identifier for events and embed logging.
@@ -133,8 +144,18 @@ def sync_corpus(
         and warnings.
     """
     root = root.resolve()
+    walk_warnings: list[dict[str, Any]] = []
+
+    def _unreadable_directory(relpath: str, exc: OSError) -> None:
+        walk_warnings.append(
+            {"kind": "unreadable_directory", "path": relpath, "detail": str(exc)}
+        )
+
     supported, unsupported = walk_corpus(
-        root, include=tuple(include), extensions=supported_extensions()
+        root,
+        include=tuple(include),
+        extensions=supported_extensions(),
+        onerror=_unreadable_directory,
     )
 
     records: list[SyncRecord] = []
@@ -168,14 +189,47 @@ def sync_corpus(
         id_prefix=corpus_id_prefix(source_system),
         extra_metadata=extra_metadata,
         dry_run=dry_run,
-        prune=prune,
+        prune_check=_corpus_prune_check(root) if prune else None,
         extractor=build_memory_extractor(registry, opt_in=extract and not dry_run),
         requested_by=requested_by,
         root_label=str(root),
         detect_moves=True,
         unsupported=unsupported,
-        initial_warnings=read_warnings,
+        initial_warnings=[*walk_warnings, *read_warnings],
     )
+
+
+def _corpus_prune_check(root: Path) -> PruneCheck:
+    """Prune check for a file corpus: is the candidate's file verifiably gone?
+
+    Only ``FileNotFoundError`` on the candidate's own path is evidence of
+    absence — the :mod:`trellis.core.path_presence` rule. Any other failure
+    to look (a directory the walk could not read, a symlink loop, a path
+    component that became a file) keeps the document and says why, because
+    a walk that did not see a file says nothing about whether it is gone
+    (#633). A dangling symlink is kept too: a link is a declaration, not an
+    absence (#479), and ``path_is_present`` is where that rule lives.
+
+    A *root* that is not a directory — a single file, or a path that is
+    missing or broken — cannot vouch for any other document under this
+    source system, so every candidate is withheld.
+    """
+    if not root.is_dir():
+        return lambda _doc_id, _metadata: SourceUnverified(
+            "root is not a directory; no other document can be checked against it"
+        )
+
+    def check(_doc_id: str, metadata: Mapping[str, Any]) -> SourceState:
+        relpath = metadata.get("source_path")
+        if not isinstance(relpath, str) or not relpath:
+            return SourceUnverified("no source_path recorded")
+        path = root / relpath
+        identity = file_identity(path)
+        if isinstance(identity, UnknownFileIdentity):
+            return SourceUnverified(str(identity))
+        return "present" if path_is_present(path) else "vanished"
+
+    return check
 
 
 @dataclass
@@ -216,7 +270,7 @@ def sync_records(
     requested_by: str,
     extra_metadata: dict[str, Any] | None = None,
     dry_run: bool = False,
-    prune: bool = False,
+    prune_check: PruneCheck | None = None,
     detect_moves: bool = True,
     extractor: Any = None,
     extraction_participant_names: Sequence[str] = (),
@@ -237,8 +291,12 @@ def sync_records(
         requested_by: Audit identifier for events and embed logging.
         extra_metadata: Operator tags merged into every written document.
         dry_run: Compute and report the plan without writing.
-        prune: Delete documents under ``id_prefix`` whose source item is
-            gone.
+        prune_check: Turns prune on. Asked about each document under
+            ``id_prefix`` that no record of this run produced, with its
+            ``doc_id`` and stored metadata: ``"vanished"`` deletes it,
+            ``"present"`` keeps it, and :class:`SourceUnverified` keeps it
+            and lists it under ``report.prune_withheld`` (#633). ``None``
+            prunes nothing.
         detect_moves: Re-key a document whose content reappears under a
             new id. Enable for content-derived ids (files); disable for
             content-independent ids (conversation uuids).
@@ -254,8 +312,8 @@ def sync_records(
         unsupported: Source items with no handler (reported, not
             ingested) — for the run counts.
         initial_warnings: Reader warnings raised before record building
-            (e.g. unreadable files), seeded so the summary event counts
-            them.
+            (e.g. unreadable files and directories), seeded so the summary
+            event counts them.
 
     Returns:
         A :class:`CorpusSyncReport`.
@@ -265,7 +323,7 @@ def sync_records(
         root=root_label,
         source_system=source_system,
         dry_run=dry_run,
-        prune=prune,
+        prune=prune_check is not None,
     )
     report.unsupported = list(unsupported)
     report.warnings.extend(initial_warnings)
@@ -327,12 +385,13 @@ def sync_records(
             )
         report.files.append(outcome)
 
-    if prune:
+    if prune_check is not None:
         _prune_vanished(
             registry,
             report,
             id_prefix=id_prefix,
             keep_ids=current_ids | moved_from_ids,
+            check=prune_check,
             dry_run=dry_run,
         )
 
@@ -740,9 +799,15 @@ def _prune_vanished(
     *,
     id_prefix: str,
     keep_ids: set[str],
+    check: PruneCheck,
     dry_run: bool,
 ) -> None:
-    """Delete documents under ``id_prefix`` whose source item is gone."""
+    """Delete documents under ``id_prefix`` whose source is verifiably gone.
+
+    ``check`` rules on each candidate, and only ``"vanished"`` deletes. A
+    candidate whose source could not be checked is kept and listed under
+    ``report.prune_withheld`` (#633).
+    """
     doc_store = registry.knowledge.document_store
     vector_store = getattr(registry.knowledge, "vector_store", None)
 
@@ -761,11 +826,12 @@ def _prune_vanished(
                 or doc_id in keep_ids
             ):
                 continue
-            metadata = doc.get("metadata") or {}
+            metadata = _stored_metadata(doc)
             candidates.append(
                 {
                     "doc_id": doc_id,
                     "source_path": metadata.get("source_path"),
+                    "metadata": metadata,
                     "chunk_count": _chunk_count_of(doc),
                 }
             )
@@ -773,6 +839,18 @@ def _prune_vanished(
             break
 
     for candidate in sorted(candidates, key=lambda c: str(c["doc_id"])):
+        state = check(candidate["doc_id"], candidate["metadata"])
+        if isinstance(state, SourceUnverified):
+            report.prune_withheld.append(
+                {
+                    "doc_id": candidate["doc_id"],
+                    "source_path": candidate["source_path"],
+                    "detail": state.detail,
+                }
+            )
+            continue
+        if state != "vanished":
+            continue
         if not dry_run:
             _delete_document_tree(
                 doc_store,

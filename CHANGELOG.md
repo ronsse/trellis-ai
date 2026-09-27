@@ -103,6 +103,28 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **BREAKING: `ingest corpus --prune` and `ingest conversations --prune` now
+  exit `5` with `status: "partial"` when they keep a document they could not
+  check, instead of deleting it and exiting `0`** (#633). Corpus prune used to
+  delete every document whose file the walk did not yield, and the walk
+  silently skipped whatever it could not read, so a directory that lost its
+  permissions, a path component that became a file, or a symlink loop deleted
+  the documents it hid. Each candidate is now checked against the filesystem:
+  only a source that is verifiably gone is pruned, and one that cannot be
+  checked is listed under the new `prune_withheld` report key (and counted in
+  `counts.prune_withheld` and the `CORPUS_SYNCED` payload). Dry runs exit the
+  same way. Conversation prune runs only when the reader read the whole
+  export. Unreadable directories, the root included, are now reported as
+  `unreadable_directory` warnings instead of being skipped silently. **If a
+  wrapper treats any non-zero exit as a failed sync, note that a `5` here means
+  the rest of the run was written**; fix the path it names and re-run.
+
+- **BREAKING: `sync_records(prune=)` is replaced by `prune_check=`**, a
+  callable that says for each prune candidate whether its source is
+  `"vanished"`, `"present"`, or `SourceUnverified(detail)` (#633). `None`
+  still prunes nothing. A caller passing `prune=` now gets a `TypeError`.
+  `sync_corpus` and `sync_conversations` keep their `prune: bool`.
+
 - **BREAKING: a damaged `advisories.json` now exits `5`, not `2`.** Affects
   `trellis analyze generate-advisories`, `trellis analyze
   advisory-effectiveness` and `trellis worker curate`, on both `--format`

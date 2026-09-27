@@ -544,9 +544,10 @@ the document store, idempotently. Any other file is reported as
 per-tool exports) is the client's pre-step, per the normalization
 boundary in [`adr-corpus-ingestion.md`](../design/adr-corpus-ingestion.md) §8.
 Some paths never reach that report at all: paths `--include` does not
-match; dot-files, dot-directories (tool state such as `.obsidian/`) and
-symlinked directories below the root (never followed); and any directory
-that cannot be read, the root included.
+match, and dot-files, dot-directories (tool state such as `.obsidian/`)
+and symlinked directories below the root (never followed). A directory
+that cannot be read, the root included, is skipped and reported as an
+`unreadable_directory` warning.
 
 ```bash
 trellis ingest corpus <path> [--source-system corpus] [--domain X] \
@@ -561,7 +562,7 @@ trellis ingest corpus <path> [--source-system corpus] [--domain X] \
 | `--tag k=v` | — | Extra metadata (repeatable) |
 | `--include` | all files | Glob filter over relative paths (repeatable) |
 | `--dry-run` | off | Report the full plan (files, chunk counts, skips) without writing |
-| `--prune` | off | Delete documents whose source file vanished |
+| `--prune` | off | Delete documents whose source file is gone; one it cannot check is kept and the run exits `5` (see *Pruning fails closed*) |
 | `--extract` | off | Mine entities/edges from prose into the graph (see below) |
 
 Re-running over an unchanged tree performs zero writes (`content_hash`
@@ -579,6 +580,26 @@ Cross-file near-duplicates are warned about in the report, never
 skipped. Every new/changed file emits `MEMORY_STORED`; each run emits a
 `CORPUS_SYNCED` summary event.
 
+**Pruning fails closed** ([#633](https://github.com/ronsse/trellis-ai/issues/633)).
+`--prune` deletes a document only when its source file is verifiably
+gone. A source it cannot check — a directory that lost its permissions,
+a path component that became a file, a symlink loop — is kept, listed
+under `prune_withheld` with the OS's reason (text output:
+`withheld <path>: <reason>`), and the run exits **`5`** with
+`status: "partial"`. A `--dry-run` exits the same way, since its plan is
+just as incomplete. The rest of the run still happens, including the
+prune of files that are verifiably gone. To recover, fix the path or
+permission (or move the blocker aside) and re-run; there is no CLI
+document delete. A file replaced by a dangling symlink is kept with an
+`unreadable_file` warning (a link is a declaration), and a single-file
+path withholds every other document, because one file cannot vouch for
+the rest of the corpus. Prune assumes **one root per
+`--source-system`**: a document synced from another root under the same
+namespace is checked against this root. `ingest conversations --prune`
+assumes **a complete export**: if the reader could not read all of it,
+nothing is pruned, and each conversation missing from what it did read
+is withheld.
+
 **Entity extraction (`--extract`)** is **double-gated**: the `--extract`
 flag *and* the `TRELLIS_ENABLE_MEMORY_EXTRACTION` env flag must both be
 set (at corpus scale it's a per-run LLM-cost decision). When on and an
@@ -593,7 +614,7 @@ extraction runs.
 **JSON output (abridged):**
 
 ```json
-{"status": "synced", "counts": {"files_seen": 3, "ingested": 2, "updated": 1, "moved": 0, "skipped_unchanged": 0, "skipped_unsupported": 1, "pruned": 0, "chunks_written": 6, "warnings": 0}, "files": [{"path": "runbooks/deploy.md", "doc_id": "corpus:obsidian:7417df…", "action": "new", "chunks": 6}]}
+{"status": "synced", "counts": {"files_seen": 3, "ingested": 2, "updated": 1, "moved": 0, "skipped_unchanged": 0, "skipped_unsupported": 1, "pruned": 0, "prune_withheld": 0, "chunks_written": 6, "warnings": 0}, "files": [{"path": "runbooks/deploy.md", "doc_id": "corpus:obsidian:7417df…", "action": "new", "chunks": 6}]}
 ```
 
 ### `trellis ingest conversations`
@@ -615,7 +636,7 @@ trellis ingest conversations <path> [--source-system claude-ai] \
 | `--source-system` | `claude-ai` | Corpus namespace — part of every `doc_id` |
 | `--domain` / `--tag k=v` | — | Metadata applied to every written document |
 | `--dry-run` | off | Report the plan without writing |
-| `--prune` | off | Delete conversations no longer present in the export |
+| `--prune` | off | Delete conversations no longer present in the export. If the export was not read whole, ones it cannot check are kept and listed as withheld, and the run exits `5` (see `ingest corpus`) |
 | `--extract` | off | Mine entities/edges from conversation prose into the graph (double-gated with `TRELLIS_ENABLE_MEMORY_EXTRACTION`; see `ingest corpus`) |
 
 **Getting the export:** in claude.ai, Settings → Privacy → *Export data*;

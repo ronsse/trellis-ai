@@ -32,13 +32,14 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from trellis.ingest_corpus.models import SyncRecord
+from trellis.ingest_corpus.models import SourceUnverified, SyncRecord
 from trellis.ingest_corpus.sync import sync_records
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
-    from trellis.ingest_corpus.models import CorpusSyncReport
+    from trellis.ingest_corpus.models import CorpusSyncReport, SourceState
     from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
@@ -48,6 +49,11 @@ DEFAULT_SOURCE_SYSTEM = "claude-ai"
 
 #: Member read out of a ``.zip`` export.
 _EXPORT_MEMBER = "conversations.json"
+
+#: Reader warnings that still mean the export was read whole. Any other
+#: kind — an unreadable or malformed export, a conversation dropped for a
+#: missing id, and any kind added later — withholds the prune (#633).
+_COMPLETE_READ_KINDS = frozenset({"empty_conversation"})
 
 #: Provenance stamp on every document this reader writes, under
 #: :attr:`~trellis.schemas.document_metadata.DocumentMetadata.document_form`.
@@ -99,7 +105,9 @@ def sync_conversations(
             ``metadata.source_system`` and part of every ``doc_id``.
         extra_metadata: Operator tags merged into every written document.
         dry_run: Report the plan without writing.
-        prune: Delete conversations no longer present in the export.
+        prune: Delete conversations no longer present in the export —
+            only when the export was read whole. Otherwise every candidate
+            is kept and listed under ``prune_withheld``.
         extract: Opt into the flag-gated entity/edge extraction pass
             (also requires ``TRELLIS_ENABLE_MEMORY_EXTRACTION``).
         requested_by: Audit identifier for events and embed logging.
@@ -112,6 +120,23 @@ def sync_conversations(
     )
 
     records, warnings = read_claude_export(path, source_system=source_system)
+
+    # Taken now, from the reader's own warnings, before sync_records runs:
+    # the warnings sync adds (near_duplicate, event_emit_failed) say nothing
+    # about whether the export was read whole.
+    incomplete = sorted({w["kind"] for w in warnings} - _COMPLETE_READ_KINDS)
+    # An emptied conversation yields no record but is still in the export.
+    still_present = {
+        conversation_doc_id(source_system, w["conversation_id"])
+        for w in warnings
+        if w.get("kind") == "empty_conversation"
+    }
+
+    def check(doc_id: str, _metadata: Mapping[str, Any]) -> SourceState:
+        if incomplete:
+            return SourceUnverified(f"export not fully read: {', '.join(incomplete)}")
+        return "present" if doc_id in still_present else "vanished"
+
     return sync_records(
         registry,
         records,
@@ -121,7 +146,7 @@ def sync_conversations(
         requested_by=requested_by,
         extra_metadata=extra_metadata,
         dry_run=dry_run,
-        prune=prune,
+        prune_check=check if prune else None,
         extractor=build_memory_extractor(registry, opt_in=extract and not dry_run),
         # The turn labels this reader renders (plus "Unknown" for
         # unrecognised senders) — the extraction draft policy drops

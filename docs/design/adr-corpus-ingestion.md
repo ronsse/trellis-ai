@@ -138,11 +138,18 @@ unchanged files:
   `save_memory` it does **not** skip, because two legitimately similar
   notes are common in a vault.
 - **Deletion:** `--prune` (default **off**) deletes documents whose source
-  file vanished. Documents are deletable; traces remain immutable.
+  is verifiably gone: for a corpus, nothing left at the file's path
+  (`FileNotFoundError`, and not a dangling symlink, which is kept); for a
+  conversation export, an export read whole that no longer holds the
+  conversation. A source it cannot check is kept and listed under
+  `prune_withheld`, and the run exits `5` with `status: "partial"` (#633).
+  Prune decides by deleting, so it fails closed. The walker reports each
+  directory it cannot read as an `unreadable_directory` warning instead of
+  skipping it silently. Documents are deletable; traces remain immutable.
 - **Audit:** each new/changed document emits `MEMORY_STORED` (same event
   the MCP path emits) so downstream consumers see one signal regardless of
   entry point. The run itself emits a summary event with counts
-  (ingested/updated/skipped/pruned/warnings).
+  (ingested/updated/skipped/pruned/prune_withheld/warnings).
 
 ## 5. Optional graph extraction
 

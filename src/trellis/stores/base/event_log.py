@@ -179,11 +179,12 @@ class EventType(StrEnum):
 
     #: Emitted once per ``trellis ingest corpus`` run
     #: (:func:`trellis.ingest_corpus.sync_corpus`) with the run counts —
-    #: ingested / updated / moved / skipped / pruned / chunks_written /
-    #: warnings. Dry runs emit it too, flagged ``dry_run=True`` (same
-    #: convention as :attr:`BLOB_GC_SWEPT`). Per-document signals ride
-    #: the existing :attr:`MEMORY_STORED` event; this is the run-level
-    #: audit record. See ``docs/design/adr-corpus-ingestion.md`` §4.
+    #: ingested / updated / moved / skipped / pruned / prune_withheld /
+    #: chunks_written / warnings. Dry runs emit it too, flagged
+    #: ``dry_run=True`` (same convention as :attr:`BLOB_GC_SWEPT`).
+    #: Per-document signals ride the existing :attr:`MEMORY_STORED` event;
+    #: this is the run-level audit record. See
+    #: ``docs/design/adr-corpus-ingestion.md`` §4.
     CORPUS_SYNCED = "corpus.synced"
 
     #: Emitted once per session-capture sweep

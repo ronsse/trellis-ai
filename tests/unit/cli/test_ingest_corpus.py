@@ -5,13 +5,25 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from tests.unreadable_paths import (
+    UNREADABLE_PATH_IDS,
+    UNREADABLE_PATH_SHAPES,
+    UnreadablePathShape,
+    unreadable,
+)
 from trellis.ingest_corpus.handlers import supported_extensions
+from trellis.ingest_corpus.models import corpus_doc_id
 from trellis_cli.main import app
+from trellis_cli.stores import _get_registry
+
+if TYPE_CHECKING:
+    from click.testing import Result
 
 runner = CliRunner()
 
@@ -142,3 +154,249 @@ class TestIngestCorpusHelp:
             assert re.search(token, text), f"{ext!r} missing from corpus --help"
         assert "unsupported" in text
         assert "trellis ingest conversations" in text
+
+
+# --- #633: ``--prune`` deletes only what it saw vanish ----------------------
+
+#: Five small documents in two directories plus the root, so a test can
+#: break one directory and still have documents elsewhere that must survive.
+_TREE = {
+    "notes/a.md": "Sourdough wants a long cold proof.\n",
+    "notes/b.md": "Tide tables repeat on a lunar cycle.\n",
+    "sub/c.md": "A binary heap keeps its minimum at the root.\n",
+    "sub/d.md": "Granite is an igneous rock that cooled slowly underground.\n",
+    "top.md": "Morse code spells SOS as three dots, three dashes, three dots.\n",
+}
+
+
+def _shape(shape_id: str) -> UnreadablePathShape:
+    return next(shape for shape in UNREADABLE_PATH_SHAPES if shape.id == shape_id)
+
+
+@pytest.fixture
+def corpus(tmp_path: Path) -> Path:
+    root = tmp_path / "corpus"
+    for relpath, text in _TREE.items():
+        path = root / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return root
+
+
+def _ingest(*args: str) -> Result:
+    return runner.invoke(app, ["ingest", "corpus", *args, "--source-system", "t"])
+
+
+def _ingest_json(*args: str) -> tuple[int, dict[str, Any]]:
+    result = _ingest(*args, "--format", "json")
+    return result.exit_code, json.loads(result.stdout.strip())
+
+
+def _stored(relpath: str) -> bool:
+    store = _get_registry().knowledge.document_store
+    return store.get(corpus_doc_id("t", relpath)) is not None
+
+
+def _text(result: Result) -> str:
+    """Rendered output as the operator reads it, whitespace-normalised."""
+    return " ".join(plain(result.stdout).split())
+
+
+def _warned(data: dict[str, Any]) -> set[tuple[str, Any]]:
+    return {(warning["kind"], warning.get("path")) for warning in data["warnings"]}
+
+
+class TestPruneFailsClosed:
+    """A path prune cannot check is kept and reported, never deleted (#633).
+
+    Prune used to delete every document whose file the walk did not yield,
+    and the walk silently skips what it cannot read — so a directory that
+    lost its permissions, a clobbered path component or a symlink loop
+    deleted the documents it hid. Each candidate is now checked against the
+    filesystem: only a path that is *verifiably* gone is pruned; one that
+    cannot be checked is listed under ``prune_withheld`` and the run exits
+    5 with ``status: "partial"``.
+    """
+
+    @pytest.mark.parametrize("output_format", ["json", "text"])
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_unverifiable_source_is_withheld_not_pruned(
+        self, corpus: Path, shape: UnreadablePathShape, output_format: str
+    ) -> None:
+        assert _ingest_json(str(corpus))[0] == 0
+        (corpus / "notes" / "b.md").unlink()
+        # A loop breaks only its own path. The other two shapes break the
+        # directory, so the sibling in it cannot be checked either.
+        if shape.id == "symlink_loop":
+            expected = {"sub/c.md"}
+        else:
+            expected = {"sub/c.md", "sub/d.md"}
+        args = [str(corpus), "--prune"]
+        if output_format == "json":
+            args += ["--format", "json"]
+
+        with unreadable(shape, corpus / "sub" / "c.md"):
+            result = _ingest(*args)
+
+        assert result.exit_code == 5, result.output
+        if output_format == "json":
+            data = json.loads(result.stdout.strip())
+            assert data["status"] == "partial"
+            assert [e["source_path"] for e in data["pruned"]] == ["notes/b.md"]
+            assert [e["doc_id"] for e in data["pruned"]] == [
+                corpus_doc_id("t", "notes/b.md")
+            ]
+            assert {e["source_path"] for e in data["prune_withheld"]} == expected
+            for entry in data["prune_withheld"]:
+                # The OS's own reason, so the operator can act on it.
+                assert shape.message_fragment in entry["detail"]
+            assert data["counts"]["prune_withheld"] == len(expected)
+            assert data["counts"]["pruned"] == 1
+        else:
+            text = _text(result)
+            assert re.search(r"withheld sub/c\.md", text), text
+            assert shape.message_fragment in text
+            assert f"withheld={len(expected)}" in text
+            assert re.search(r"prune notes/b\.md", text), text
+        assert not _stored("notes/b.md")
+        for relpath in ("notes/a.md", "sub/c.md", "sub/d.md", "top.md"):
+            assert _stored(relpath), relpath
+
+    def test_include_filter_does_not_make_unmatched_files_vanish(
+        self, corpus: Path
+    ) -> None:
+        assert _ingest_json(str(corpus))[0] == 0
+        (corpus / "notes" / "b.md").unlink()
+
+        exit_code, data = _ingest_json(str(corpus), "--include", "notes/*", "--prune")
+
+        assert [e["source_path"] for e in data["pruned"]] == ["notes/b.md"]
+        assert data["prune_withheld"] == []
+        assert exit_code == 0
+        assert data["status"] == "synced"
+        for relpath in ("notes/a.md", "sub/c.md", "sub/d.md", "top.md"):
+            assert _stored(relpath), relpath
+
+    def test_symlinked_directory_is_not_read_as_vanished(
+        self, corpus: Path, tmp_path: Path
+    ) -> None:
+        assert _ingest_json(str(corpus))[0] == 0
+        elsewhere = tmp_path / "sub-elsewhere"
+        (corpus / "sub").rename(elsewhere)
+        (corpus / "sub").symlink_to(elsewhere, target_is_directory=True)
+        (elsewhere / "e.md").write_text("Basalt forms when lava cools fast.\n")
+
+        exit_code, data = _ingest_json(str(corpus), "--prune")
+
+        assert data["pruned"] == []
+        assert data["prune_withheld"] == []
+        assert exit_code == 0
+        assert _stored("sub/c.md")
+        assert _stored("sub/d.md")
+        # The walk still does not follow the link: that contract is unchanged.
+        assert not _stored("sub/e.md")
+
+    def test_dangling_symlink_is_kept_with_an_unreadable_file_warning(
+        self, corpus: Path, tmp_path: Path
+    ) -> None:
+        assert _ingest_json(str(corpus))[0] == 0
+        link = corpus / "sub" / "c.md"
+        link.unlink()
+        link.symlink_to(tmp_path / "nowhere.md")
+
+        exit_code, data = _ingest_json(str(corpus), "--prune")
+
+        assert data["pruned"] == []
+        assert data["prune_withheld"] == []
+        assert exit_code == 0
+        assert _stored("sub/c.md")
+        assert ("unreadable_file", "sub/c.md") in _warned(data)
+
+    def test_unreadable_root_withholds_every_document(self, corpus: Path) -> None:
+        assert _ingest_json(str(corpus))[0] == 0
+        unsearchable = _shape("unsearchable_parent")
+
+        with unreadable(unsearchable, corpus / "top.md"):
+            exit_code, data = _ingest_json(str(corpus), "--prune")
+
+        assert data["pruned"] == []
+        assert exit_code == 5
+        assert data["status"] == "partial"
+        assert sorted(e["source_path"] for e in data["prune_withheld"]) == sorted(_TREE)
+        for entry in data["prune_withheld"]:
+            assert unsearchable.message_fragment in entry["detail"]
+        assert ("unreadable_directory", ".") in _warned(data)
+        for relpath in _TREE:
+            assert _stored(relpath), relpath
+
+    def test_unreadable_directories_are_reported_not_silently_skipped(
+        self, corpus: Path
+    ) -> None:
+        unsearchable = _shape("unsearchable_parent")
+
+        with (
+            unreadable(unsearchable, corpus / "sub" / "c.md"),
+            unreadable(unsearchable, corpus / "notes" / "deep" / "e.md"),
+        ):
+            exit_code, data = _ingest_json(str(corpus))
+
+        assert exit_code == 0
+        assert data["status"] == "synced"
+        skipped = [w for w in data["warnings"] if w["kind"] == "unreadable_directory"]
+        assert {w["path"] for w in skipped} == {"sub", "notes/deep"}
+        for warning in skipped:
+            assert unsearchable.message_fragment in warning["detail"]
+        assert data["counts"]["ingested"] == 3
+
+    def test_dry_run_reports_withheld_documents_with_exit_5(self, corpus: Path) -> None:
+        assert _ingest_json(str(corpus))[0] == 0
+        (corpus / "notes" / "b.md").unlink()
+
+        with unreadable(_shape("symlink_loop"), corpus / "sub" / "c.md"):
+            exit_code, data = _ingest_json(str(corpus), "--dry-run", "--prune")
+
+        assert exit_code == 5
+        assert data["status"] == "partial"
+        assert data["dry_run"] is True
+        assert [e["source_path"] for e in data["pruned"]] == ["notes/b.md"]
+        assert [e["source_path"] for e in data["prune_withheld"]] == ["sub/c.md"]
+        for relpath in _TREE:
+            assert _stored(relpath), relpath
+
+    def test_bracketed_paths_render_verbatim(self, corpus: Path) -> None:
+        # ``[wip]`` is a style tag Rich deletes; ``[/x]`` is a closing tag
+        # with nothing to close, which Rich raises on.
+        (corpus / "notes" / "[wip].md").write_text("Quartz outlasts feldspar.\n")
+        (corpus / "notes" / "[").mkdir()
+        (corpus / "notes" / "[" / "x].md").write_text("Owls turn their heads far.\n")
+        assert _ingest_json(str(corpus))[0] == 0
+        loop = _shape("symlink_loop")
+
+        with (
+            unreadable(loop, corpus / "notes" / "[wip].md"),
+            unreadable(loop, corpus / "notes" / "[" / "x].md"),
+        ):
+            result = _ingest(str(corpus), "--prune")
+
+        assert result.exit_code == 5, result.output
+        text = _text(result)
+        assert re.search(r"withheld\s+notes/\[wip\]\.md", text), text
+        assert "path=notes/[/x].md" in text
+
+    def test_single_file_root_withholds_the_rest_of_the_corpus(
+        self, corpus: Path
+    ) -> None:
+        assert _ingest_json(str(corpus))[0] == 0
+
+        exit_code, data = _ingest_json(str(corpus / "top.md"), "--prune")
+
+        assert data["pruned"] == []
+        assert exit_code == 5
+        assert data["status"] == "partial"
+        assert sorted(e["source_path"] for e in data["prune_withheld"]) == sorted(
+            set(_TREE) - {"top.md"}
+        )
+        for entry in data["prune_withheld"]:
+            assert "root is not a directory" in entry["detail"]
+        for relpath in _TREE:
+            assert _stored(relpath), relpath
