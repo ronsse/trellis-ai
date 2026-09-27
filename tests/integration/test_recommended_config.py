@@ -1,24 +1,35 @@
 """Smoke tests for ``docs/deployment/recommended-config.yaml``.
 
-Pins two contracts:
+Pins four contracts:
 
-1. The file parses as valid YAML, even with all three configurations
-   commented out (the as-shipped state). Pure-unit, always runs.
-2. The "local default" block, when uncommented and env-substituted,
-   produces a working ``StoreRegistry`` against a real Neo4j instance
-   plus SQLite operational. Env-gated on ``TRELLIS_TEST_NEO4J_URI``
-   like the other integration tests.
+1. The file parses as valid YAML with all four configurations commented
+   out (the as-shipped state). Pure-unit, always runs.
+2. Each block, uncommented, names the backends its banner promises.
+3. Each block, uncommented verbatim and given only the env vars its
+   ``Required env vars:`` list names, hands every listed value to a store
+   (``test_shipped_block_delivers_documented_env``). Connection entry
+   points are recorded instead of dialled, so it needs no infrastructure.
+4. Two live tests validate hand-built configs of the Neo4j local and
+   ArcadeDB blessed shapes against real instances. They do not read the
+   shipped blocks; contract 3 is what ties those to the stores. Env-gated
+   on ``TRELLIS_TEST_NEO4J_URI`` / ``TRELLIS_TEST_ARCADEDB_URI``.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
+import types
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
+
+from trellis.stores.registry import StoreRegistry
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _CONFIG_PATH = _REPO_ROOT / "docs" / "deployment" / "recommended-config.yaml"
@@ -36,15 +47,8 @@ def test_recommended_config_is_valid_yaml() -> None:
 _TOP_LEVEL_KEYS = ("knowledge:", "operational:")
 
 
-def _extract_block(text: str, header: str) -> dict[str, Any]:
-    """Pull one of the three commented-out blocks out of the doc and parse it.
-
-    Each block sits under a ``# === ... <header> === ...`` banner.
-    Prose comments (``# Required env vars:``, ``# Pick this only if...``)
-    precede the actual YAML, so we skip until we see the first top-level
-    config key (``# knowledge:`` or ``# operational:``), then parse from
-    there to the next banner.
-    """
+def _block_body(text: str, header: str) -> str:
+    """The commented lines under one block's ``# === ... <header>`` banner."""
     pattern = (
         r"# =+\s*\n# \d+\.\s+"
         + re.escape(header)
@@ -54,11 +58,20 @@ def _extract_block(text: str, header: str) -> dict[str, Any]:
     if match is None:
         msg = f"Could not find {header!r} block in {_CONFIG_PATH}"
         raise AssertionError(msg)
-    body = match.group("body")
+    return match.group("body")
 
+
+def _block_yaml(text: str, header: str) -> str:
+    """One block's YAML, uncommented exactly as an operator would paste it.
+
+    Prose comments (``# Required env vars:``, ``# Pick this only if...``)
+    precede the actual YAML, so we skip until we see the first top-level
+    config key (``# knowledge:`` or ``# operational:``), then keep
+    everything from there to the next banner.
+    """
     yaml_lines: list[str] = []
     started = False
-    for line in body.splitlines():
+    for line in _block_body(text, header).splitlines():
         stripped = line.removeprefix("#")
         stripped = stripped.removeprefix(" ")
         if stripped.strip().startswith("==="):
@@ -70,7 +83,26 @@ def _extract_block(text: str, header: str) -> dict[str, Any]:
             else:
                 continue
         yaml_lines.append(stripped)
-    return yaml.safe_load("\n".join(yaml_lines)) or {}
+    return "\n".join(yaml_lines) + "\n"
+
+
+def _required_env(text: str, header: str) -> list[str]:
+    """The variables a block's ``# Required env vars:`` list names, in order."""
+    required: list[str] = []
+    in_list = False
+    for line in _block_body(text, header).splitlines():
+        if line.startswith("# Required env vars:"):
+            in_list = True
+        elif in_list and line.rstrip() == "#":
+            break
+        elif in_list and (match := re.match(r"#\s+(TRELLIS_[A-Z0-9_]+)=", line)):
+            required.append(match.group(1))
+    return required
+
+
+def _extract_block(text: str, header: str) -> dict[str, Any]:
+    """Pull one of the four commented-out blocks out of the doc and parse it."""
+    return yaml.safe_load(_block_yaml(text, header)) or {}
 
 
 class TestArcadeDBBlessedBlock:
@@ -142,6 +174,177 @@ class TestPostgresOnlyBlock:
 
     def test_knowledge_vector_uses_pgvector(self) -> None:
         assert self.block["knowledge"]["vector"]["backend"] == "pgvector"
+
+
+# ---------------------------------------------------------------------------
+# Each shipped block delivers its documented env to the stores (no network)
+# ---------------------------------------------------------------------------
+
+# (banner header, count of its ``Required env vars:`` lines read off the
+# file by hand, needs the neo4j driver package). The count comes from
+# outside the scan, so a scan that finds fewer variables cannot pass.
+_SHIPPED_BLOCKS = [
+    pytest.param("ARCADEDB (BLESSED)", 5, True, id="arcadedb"),
+    pytest.param("NEO4J LOCAL", 3, True, id="neo4j-local"),
+    pytest.param("NEO4J CLOUD", 7, True, id="neo4j-cloud"),
+    pytest.param("POSTGRES-ONLY ALTERNATIVE", 3, False, id="postgres-only"),
+]
+
+# Store classes that would connect on construction (and need psycopg or
+# boto3). Each module is swapped for one holding a recording spy.
+_SPIED_STORES = {
+    "trellis.stores.postgres.trace": "PostgresTraceStore",
+    "trellis.stores.postgres.event_log": "PostgresEventLog",
+    "trellis.stores.postgres.document": "PostgresDocumentStore",
+    "trellis.stores.postgres.graph": "PostgresGraphStore",
+    "trellis.stores.pgvector.store": "PgVectorStore",
+    "trellis.stores.s3.blob": "S3BlobStore",
+}
+
+# Set alongside the listed vars and read by no store: if its value is ever
+# "received", the collector is reading the environment, not the stores.
+_DECOY_ENV = "TRELLIS_TB_DECOY"
+
+
+class _SpyStore:
+    """Records its constructor kwargs where ``vars()`` will find them."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.received = kwargs
+
+    def close(self) -> None:
+        pass
+
+
+def _env_value(var: str) -> str:
+    """A value unique to ``var``, shaped like what its reader expects."""
+    token = "tb-" + var.lower().replace("_", "-")
+    if var.endswith("_URI"):
+        return f"bolt://{token}:7687"
+    if var.endswith("_DSN"):
+        return f"postgresql://{token}/db"
+    if var.endswith("_URL"):
+        return f"http://{token}:2480"
+    return token
+
+
+def _record_bolt_entry_points(monkeypatch: pytest.MonkeyPatch) -> list[MagicMock]:
+    """Record the neo4j / ArcadeDB connection calls instead of dialling them."""
+    pytest.importorskip("neo4j")
+    from trellis.stores.arcadedb import graph as arcadedb_graph
+    from trellis.stores.arcadedb import vector as arcadedb_vector
+    from trellis.stores.neo4j import base as neo4j_base
+    from trellis.stores.neo4j import graph as neo4j_graph
+    from trellis.stores.neo4j import vector as neo4j_vector
+
+    graph_database = MagicMock(name="GraphDatabase")
+    build_arcadedb_driver = MagicMock(name="build_arcadedb_driver")
+    ensure_database = MagicMock(name="ensure_database")
+    provenance_ddl = MagicMock(name="edge_provenance_schema")
+    monkeypatch.setattr(neo4j_base, "GraphDatabase", graph_database)
+    monkeypatch.setattr(arcadedb_graph, "build_arcadedb_driver", build_arcadedb_driver)
+    monkeypatch.setattr(arcadedb_graph, "ensure_database", ensure_database)
+    monkeypatch.setattr(
+        arcadedb_graph.ArcadeDBGraphStore,
+        "_init_arcadedb_edge_provenance_schema",
+        provenance_ddl,
+    )
+    for store_cls in (
+        neo4j_graph.Neo4jGraphStore,
+        neo4j_vector.Neo4jVectorStore,
+        arcadedb_graph.ArcadeDBGraphStore,
+        arcadedb_vector.ArcadeDBVectorStore,
+    ):
+        monkeypatch.setattr(store_cls, "_init_schema", lambda self, **_: None)
+    return [
+        graph_database.driver,
+        build_arcadedb_driver,
+        ensure_database,
+        provenance_ddl,
+    ]
+
+
+def _received_strings(*sources: object) -> set[str]:
+    """Every string inside what the stores and connection calls were handed.
+
+    Deliberately never reads ``os.environ``: a value counts as delivered
+    only if it reached a store's attributes or a connection entry point.
+    """
+    found: set[str] = set()
+    seen: set[int] = set()
+    stack = list(sources)
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            found.add(item)
+        elif id(item) in seen:
+            continue
+        elif isinstance(item, Mapping):
+            seen.add(id(item))
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            seen.add(id(item))
+            stack.extend(item)
+    return found
+
+
+@pytest.mark.parametrize(("header", "floor", "needs_bolt"), _SHIPPED_BLOCKS)
+def test_shipped_block_delivers_documented_env(
+    header: str,
+    floor: int,
+    needs_bolt: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A block pasted verbatim, plus exactly the env it lists, reaches the
+    stores: every listed value arrives where a store or driver reads it."""
+    text = _CONFIG_PATH.read_text(encoding="utf-8")
+    block_yaml = _block_yaml(text, header)
+    required = _required_env(text, header)
+
+    # config.yaml is read with yaml.safe_load, which expands nothing: a
+    # ``${VAR}`` placeholder reaches the store as that literal string.
+    placeholders = [line.strip() for line in block_yaml.splitlines() if "${" in line]
+    assert not placeholders, f"{header}: config.yaml never expands {placeholders}"
+
+    for var in [key for key in os.environ if key.startswith("TRELLIS_")]:
+        monkeypatch.delenv(var)
+    for var in [*required, _DECOY_ENV]:
+        monkeypatch.setenv(var, _env_value(var))
+    for module_name, class_name in _SPIED_STORES.items():
+        module = types.ModuleType(module_name)
+        setattr(module, class_name, type(class_name, (_SpyStore,), {}))
+        monkeypatch.setitem(sys.modules, module_name, module)
+    entry_points = _record_bolt_entry_points(monkeypatch) if needs_bolt else []
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(block_yaml, encoding="utf-8")
+    registry = StoreRegistry.from_config_dir(config_dir, tmp_path / "data")
+    stores: list[Any] = []
+    try:
+        for plane, entries in yaml.safe_load(block_yaml).items():
+            for store_type, entry in entries.items():
+                if entry["backend"] in {"sqlite", "local"}:
+                    continue
+                accessor = (
+                    "event_log" if store_type == "event_log" else f"{store_type}_store"
+                )
+                stores.append(getattr(getattr(registry, plane), accessor))
+    finally:
+        registry.close()
+
+    received = _received_strings(
+        [vars(store) for store in stores],
+        [mock.call_args_list for mock in entry_points],
+    )
+    missing = [var for var in required if _env_value(var) not in received]
+    assert not missing, f"{header}: listed, but no store received it: {missing}"
+    assert _env_value(_DECOY_ENV) not in received, "the collector read the environment"
+    assert len(required) >= floor, (
+        f"{header}: found {len(required)} required env vars, hand count is {floor}"
+    )
 
 
 # ---------------------------------------------------------------------------
