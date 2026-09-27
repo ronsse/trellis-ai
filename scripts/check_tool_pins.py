@@ -128,8 +128,16 @@ to the owner again, and no decision is recorded as of 2026-09-26. Note
 for whoever takes it: of the switches measured (2026-09-26), only
 ``FORCE_COLOR=1`` and ``TTY_COMPATIBLE=1`` colour a command's own output;
 ``CI=true``, ``GITHUB_ACTIONS=true``, ``PY_COLORS=1`` and
-``CliRunner.invoke(..., color=True)`` do not, and ``GITHUB_ACTIONS`` and
-``PY_COLORS`` colour Typer's ``--help`` and usage errors and nothing else.
+``CliRunner.invoke(..., color=True)`` do not. In a command's output,
+``GITHUB_ACTIONS`` and ``PY_COLORS`` colour only what Typer renders
+itself: in typer 0.27.2 either one sets ``typer.rich_utils.FORCE_TERMINAL``,
+whose only reader is ``_get_rich_console``, the console Typer builds for
+its own output. That console prints the help screen, the error block for
+a Click exception such as a usage error or a ``BadParameter``, the
+``Aborted.`` line and, in a real process but not under ``CliRunner``, the
+pretty traceback. The help screen and a usage error were measured; the
+rest is read from the source. Rich reads neither variable, so a command's
+own console ignores both.
 
 **Installed extras.** ``.ci-venv`` collected 255 tests CI never installs
 the extras for (31 skipped / 310 deselected against CI's 40 / 50). Not
