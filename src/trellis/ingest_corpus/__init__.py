@@ -6,7 +6,8 @@ long documents into embeddable chunk documents, and syncs the result
 into the :class:`~trellis.stores.base.document.DocumentStore`
 idempotently: unchanged files are skipped, edited files are re-put and
 re-embedded, moved files are re-keyed, and vanished files are pruned on
-request. See ``docs/design/adr-corpus-ingestion.md``.
+request — only when verifiably gone. See
+``docs/design/adr-corpus-ingestion.md``.
 """
 
 from trellis.ingest_corpus.chunker import chunk_spans
@@ -20,6 +21,8 @@ from trellis.ingest_corpus.models import (
     ChunkSpan,
     CorpusSyncReport,
     FileOutcome,
+    PruneCheck,
+    SourceUnverified,
     SyncRecord,
     corpus_doc_id,
 )
@@ -30,6 +33,8 @@ __all__ = [
     "ChunkSpan",
     "CorpusSyncReport",
     "FileOutcome",
+    "PruneCheck",
+    "SourceUnverified",
     "SyncRecord",
     "chunk_spans",
     "conversation_doc_id",

@@ -3,12 +3,12 @@
 Yields files in sorted relative-path order so a sync run's plan, report
 and doc-id assignment are reproducible run-over-run. Dot-directories
 and dot-files below the root (``.obsidian/``, ``.git/``, ``.DS_Store``)
-are skipped — they are tool state, not corpus content. ``os.walk``'s
-defaults skip two more kinds of directory: a symlinked directory below
-the root (not followed) and any directory that cannot be read, the root
-included (its error is discarded). None of these skips, and no path the
-``include`` filter rejects, is reported: ``unsupported`` holds only walked
-files that pass ``include`` and have no handler.
+are skipped — they are tool state, not corpus content — and so is a
+symlinked directory below the root (``os.walk`` does not follow it).
+Neither skip, and no path the ``include`` filter rejects, is reported:
+``unsupported`` holds only walked files that pass ``include`` and have no
+handler. A directory that cannot be read, the root included, is skipped
+too, but its error is handed to ``onerror`` rather than discarded.
 """
 
 from __future__ import annotations
@@ -16,6 +16,10 @@ from __future__ import annotations
 import os
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _matches_include(relpath: str, include: tuple[str, ...]) -> bool:
@@ -36,6 +40,7 @@ def walk_corpus(
     *,
     include: tuple[str, ...] = (),
     extensions: tuple[str, ...] = (),
+    onerror: Callable[[str, OSError], None] | None = None,
 ) -> tuple[list[tuple[str, Path]], list[str]]:
     """Enumerate corpus files under *root* (a directory or single file).
 
@@ -43,6 +48,9 @@ def walk_corpus(
         root: Directory to walk, or a single file to ingest alone.
         include: Optional glob patterns; empty means all files.
         extensions: Lower-case extensions with a registered handler.
+        onerror: Called with ``(relpath, error)`` for each directory that
+            could not be read — the root as ``"."`` — which is then skipped.
+            The walk never raises for one.
 
     Returns:
         ``(supported, unsupported)`` — ``supported`` is a sorted list of
@@ -50,11 +58,17 @@ def walk_corpus(
         ``unsupported`` is the sorted relpaths that passed the include
         filter but have no handler (reported, never silently dropped).
     """
+
+    def _report(exc: OSError) -> None:
+        if onerror is not None:
+            relpath = os.path.relpath(exc.filename or root, root)
+            onerror(Path(relpath).as_posix(), exc)
+
     candidates: list[tuple[str, Path]] = []
     if root.is_file():
         candidates.append((root.name, root))
     else:
-        for dirpath, dirnames, filenames in os.walk(root):
+        for dirpath, dirnames, filenames in os.walk(root, onerror=_report):
             dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
             base = Path(dirpath)
             for filename in sorted(filenames):

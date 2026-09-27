@@ -311,3 +311,28 @@ class TestPruneNeedsTheWholeExport:
         assert data["status"] == "synced"
         assert _stored("c2")
         assert not _stored("c3")
+
+    def test_bracketed_titles_and_paths_render_verbatim(self, tmp_path: Path) -> None:
+        # A title and an export path are the caller's text. Rich deletes
+        # ``[wip]`` as a style tag and raises on ``[/x]`` — a closing tag
+        # with nothing to close — after the sync has committed.
+        seed = _write_export(
+            tmp_path / "seed.json",
+            [
+                _conversation("c1", "[wip] Bread notes", *_C1[2:]),
+                _conversation("c2", "[/x] Tide notes", *_C2[2:]),
+            ],
+        )
+        assert _run(seed, "--format", "json").exit_code == 0
+        # No conversations.json inside, so the reader warns
+        # ``unreadable_export`` with a path and detail that both hold ``[/x]``.
+        export_dir = tmp_path / "[" / "x]"
+        export_dir.mkdir(parents=True)
+
+        result = _run(export_dir, "--prune")
+
+        assert result.exit_code == 5, result.output
+        text = " ".join(plain(result.stdout).split())
+        assert "withheld [wip] Bread notes: export not fully read" in text, text
+        assert "withheld [/x] Tide notes: export not fully read" in text, text
+        assert "warning unreadable_export: path=" in text, text
