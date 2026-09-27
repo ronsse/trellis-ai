@@ -91,28 +91,49 @@ def prepare_neo4j_registry_params(
     store_type: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """Inject one registry-owned driver shared by Neo4j store types."""
+    """Inject one registry-owned driver shared by Neo4j store types.
+
+    Each connection field resolves config key, then ``TRELLIS_NEO4J_*``
+    env var -- the ArcadeDB precedence (``arcadedb/graph.py``). ``user``
+    and ``database`` fall back to ``neo4j``; a missing ``uri``, or a
+    missing ``password`` when a new driver must be built, raises
+    :class:`ConfigError` naming both sources. An empty value counts as
+    unset, so an exported-but-blank variable falls through rather than
+    connecting with an empty string.
+    """
     if "driver" in params:
         return params
-    if "uri" not in params:
+
+    uri = params.get("uri") or ctx.env.get("TRELLIS_NEO4J_URI")
+    if not uri:
         msg = (
-            "neo4j backend requires 'uri' in config (e.g. bolt://host:7687); "
-            "it has no env var fallback"
+            "neo4j backend requires 'uri' in config or TRELLIS_NEO4J_URI "
+            "env var (e.g. bolt://host:7687)"
         )
         raise ConfigError(msg, setting=f"stores.{store_type}.uri")
-
-    uri = params["uri"]
-    user = params.get("user", "neo4j")
+    user = params.get("user") or ctx.env.get("TRELLIS_NEO4J_USER") or "neo4j"
+    password = params.get("password") or ctx.env.get("TRELLIS_NEO4J_PASSWORD")
+    database = (
+        params.get("database") or ctx.env.get("TRELLIS_NEO4J_DATABASE") or "neo4j"
+    )
     key = (uri, user)
     drivers = registry_driver_cache(ctx)
     prepared = {k: v for k, v in params.items() if k != "driver_config"}
+    # The store takes ``uri`` and ``database`` itself, so the resolved
+    # values ride through on both paths below. ``user`` and ``password``
+    # matter only to the driver built here: a store handed a driver
+    # ignores ``user`` and refuses a ``password``, hence the pops.
+    prepared.update(uri=uri, database=database)
     if key in drivers:
         prepared.pop("password", None)
         prepared["driver"] = drivers[key]
         return prepared
 
-    if "password" not in params:
-        msg = "neo4j backend requires 'password' in config"
+    if not password:
+        msg = (
+            "neo4j backend requires 'password' in config or "
+            "TRELLIS_NEO4J_PASSWORD env var"
+        )
         raise ConfigError(msg, setting=f"stores.{store_type}.password")
 
     raw_config = params.get("driver_config")
@@ -129,10 +150,10 @@ def prepare_neo4j_registry_params(
         )
         raise TypeError(msg)
 
-    driver = build_driver(uri, user, params["password"], config=driver_config)
+    driver = build_driver(uri, user, password, config=driver_config)
     drivers[key] = driver
     ctx.register_closer(driver.close)
-    prepared.pop("password")
+    prepared.pop("password", None)
     prepared["driver"] = driver
     return prepared
 

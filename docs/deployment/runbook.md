@@ -14,6 +14,10 @@ runs; this one describes *how* to operate it once it's running.
 
 ## Environment variables
 
+`config.yaml` selects each store's backend (see
+[recommended-config.yaml](recommended-config.yaml)); no variable
+below selects one.
+
 The minimum set to bring up the API against Postgres + Neo4j:
 
 | Variable                       | Required? | Purpose                                                                  |

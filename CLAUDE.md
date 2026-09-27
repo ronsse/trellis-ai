@@ -341,7 +341,9 @@ a green local run says nothing about any cloud backend. What CI actually covers:
   ([#579](https://github.com/ronsse/trellis-ai/issues/579)). Two are the store suites
   already counted among the eight; the third,
   `tests/integration/test_recommended_config.py`, was not, and its blessed-shape test —
-  which validates the *shipped* recommended config end-to-end against a real ArcadeDB —
+  which validates a hand-built config of the blessed shape against a real ArcadeDB (the
+  shipped blocks themselves are loaded, network mocked, by
+  `test_shipped_block_delivers_documented_env`) —
   had never executed in any workflow. Naming the path lit up **both** of that file's live
   nodes, the `neo4j` one included, which is the bullet above's hazard in a file nobody was
   looking at; it is safe only because that node resolves its index from the integration
