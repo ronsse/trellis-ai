@@ -246,40 +246,60 @@ def init_learning_params(
         )
 
 
+#: The stores ``admin health`` reports on, in its historical key order, each
+#: with the key its SQLite file has always been reported under.
+_HEALTH_STORES = (
+    ("document", "documents.db"),
+    ("graph", "graph.db"),
+    ("vector", "vectors.db"),
+    ("event_log", "events.db"),
+    ("trace", "traces.db"),
+)
+
+
 @admin_app.command()
 def health(
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
     ),
 ) -> None:
-    """Check health of Trellis stores."""
+    """Check health of Trellis stores.
+
+    Read-only: each store's backend is resolved from config without
+    building the store, so this opens no connection and creates no file.
+    A SQLite store is checked by whether its file exists. Any other
+    backend is reported by name as not checked — never as missing.
+    """
+    from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
+
+    registry = StoreRegistry.from_config_dir(
+        config_dir=get_config_dir(), data_dir=get_data_dir()
+    )
     config = TrellisConfig.load()
     data_dir = Path(config.data_dir) if config.data_dir else get_data_dir()
-    stores_dir = data_dir / "stores"
+    stores_dir = registry.stores_dir
 
     checks: dict[str, bool] = {
         "config": get_config_dir().exists(),
         "data_dir": data_dir.exists(),
-        "stores_dir": stores_dir.exists(),
+        "stores_dir": stores_dir is not None and stores_dir.exists(),
     }
-
-    # Check for store files
-    store_files = [
-        "documents.db",
-        "graph.db",
-        "vectors.db",
-        "events.db",
-        "traces.db",
-    ]
-    for sf in store_files:
-        checks[sf] = (stores_dir / sf).exists()
+    backends: dict[str, str] = {}
+    for store_type, file_key in _HEALTH_STORES:
+        backends[store_type] = registry.configured_backend(store_type)
+        sqlite_file = registry.configured_sqlite_path(store_type)
+        # No key for a store with no SQLite file: ``false`` would read as
+        # missing, and a file left over from before it moved off SQLite
+        # would read as OK.
+        if sqlite_file is not None:
+            checks[file_key] = sqlite_file.exists()
 
     if output_format == "json":
         # Plain ``print`` (not ``console.print``) so Rich's terminal-
         # width soft-wrap never splits the JSON across lines. Machine
         # consumers expect single-line JSON per the project rule in
         # CLAUDE.md (`parse JSON output, not human-readable text`).
-        print(json.dumps(checks))
+        print(json.dumps({**checks, "backends": backends}))
     else:
         table = Table(title="Trellis Health")
         table.add_column("Component", style="cyan")
@@ -287,6 +307,10 @@ def health(
         for name, ok in checks.items():
             status = "[green]OK[/green]" if ok else "[red]MISSING[/red]"
             table.add_row(name, status)
+        for store_type, file_key in _HEALTH_STORES:
+            if file_key not in checks:
+                backend = escape(backends[store_type])
+                table.add_row(store_type, f"[yellow]{backend} (not checked)[/yellow]")
         console.print(table)
 
 

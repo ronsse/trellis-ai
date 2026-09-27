@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import traceback
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
@@ -116,6 +119,252 @@ class TestAdminHealth:
         data = json.loads(result.stdout.strip())
         assert data["config"] is True
         assert data["data_dir"] is True
+
+
+# ── admin health against the config.yaml shapes the docs describe (F1) ──
+
+#: A fake credential. config.yaml is shared: the registry reads its store
+#: blocks, and those are the blocks that carry DSNs and passwords. Pydantic's
+#: ``extra_forbidden`` message quoted the tail of every rejected value, so the
+#: block that crashed ``health`` was also a block it could print.
+_SENTINEL = "Rk7Tq2Vz9Wm4Xb8Yc3Pn6Ls5"
+
+_FIVE_STORES = ("document", "graph", "vector", "event_log", "trace")
+
+
+def _health_env(tmp_path: Path, monkeypatch, config: dict | None) -> Path:
+    """Point the CLI at an isolated config dir holding ``config``.
+
+    Returns the data dir, which the config names and nothing creates.
+    """
+    config_dir = tmp_path / "config"
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(data_dir))
+    if config is not None:
+        config_dir.mkdir()
+        document = {"data_dir": str(data_dir), **config}
+        # sort_keys=False: the order is part of the fixture (see _mixed_planes).
+        text = yaml.safe_dump(document, sort_keys=False)
+        (config_dir / "config.yaml").write_text(text)
+    return data_dir
+
+
+def _mixed_planes() -> dict:
+    """A documented plane layout that mixes sqlite and non-sqlite stores."""
+    return {
+        "knowledge": {
+            "document": {"backend": "postgres"},
+            "vector": {"backend": "sqlite"},
+            # Last store, last key: pydantic kept the *tail* of a rejected
+            # value, so this is where an echo would land.
+            "graph": {
+                "backend": "neo4j",
+                "uri": "bolt://localhost:7687",
+                "password": _SENTINEL,
+            },
+        },
+        "operational": {
+            "trace": {"backend": "postgres"},
+            "event_log": {"backend": "sqlite"},
+        },
+        "embeddings": {"provider": "openai"},
+        "llm": {"provider": "openai"},
+    }
+
+
+def _table_rows(output: str) -> dict[str, str]:
+    """``{component: status}`` read off the rendered health table."""
+    rows: dict[str, str] = {}
+    for line in plain(output).splitlines():
+        cells = [cell.strip() for cell in line.split("│")[1:-1]]
+        if len(cells) == 2:
+            rows[cells[0]] = cells[1]
+    return rows
+
+
+def _assert_sentinel_never_surfaces(result) -> None:
+    """No 8-character window of the sentinel reaches any surface."""
+    surfaces = {"stdout": result.stdout, "stderr": result.stderr}
+    if result.exception is not None:
+        surfaces["exception"] = str(result.exception)
+        surfaces["traceback"] = "".join(traceback.format_exception(result.exception))
+    windows = {_SENTINEL[i : i + 8] for i in range(len(_SENTINEL) - 7)}
+    leaked = {
+        name: sum(window in text for window in windows)
+        for name, text in surfaces.items()
+    }
+    assert not any(leaked.values()), f"sentinel windows per surface: {leaked}"
+
+
+class TestAdminHealthConfiguredBackends:
+    """``admin health`` reads the shared config.yaml and every store's backend.
+
+    Before F1 it crashed on every documented plane layout, and the crash hid
+    a second defect: it checked only SQLite files, so a non-SQLite store read
+    MISSING and a stale ``.db`` file read OK for a store no longer on SQLite.
+    """
+
+    def test_plane_layout_loads_without_echoing_a_value(self, tmp_path, monkeypatch):
+        _health_env(tmp_path, monkeypatch, _mixed_planes())
+
+        result = runner.invoke(app, ["admin", "health", "--format", "json"])
+
+        _assert_sentinel_never_surfaces(result)
+        assert result.exit_code == 0, repr(result.exception)
+        assert isinstance(json.loads(result.stdout), dict)
+
+    def test_json_reports_every_backend_and_no_false_for_non_sqlite(
+        self, tmp_path, monkeypatch
+    ):
+        data_dir = _health_env(tmp_path, monkeypatch, _mixed_planes())
+        (data_dir / "stores").mkdir(parents=True)
+        (data_dir / "stores" / "vectors.db").touch()
+
+        result = runner.invoke(app, ["admin", "health", "--format", "json"])
+
+        assert result.exit_code == 0, repr(result.exception)
+        assert json.loads(result.stdout) == {
+            "config": True,
+            "data_dir": True,
+            "stores_dir": True,
+            "vectors.db": True,
+            "events.db": False,
+            "backends": {
+                "document": "postgres",
+                "graph": "neo4j",
+                "vector": "sqlite",
+                "event_log": "sqlite",
+                "trace": "postgres",
+            },
+        }
+
+    def test_text_reports_non_sqlite_stores_as_not_checked(self, tmp_path, monkeypatch):
+        data_dir = _health_env(tmp_path, monkeypatch, _mixed_planes())
+        (data_dir / "stores").mkdir(parents=True)
+        (data_dir / "stores" / "vectors.db").touch()
+
+        result = runner.invoke(app, ["admin", "health"])
+
+        assert result.exit_code == 0, repr(result.exception)
+        assert _table_rows(result.stdout) == {
+            "config": "OK",
+            "data_dir": "OK",
+            "stores_dir": "OK",
+            "vectors.db": "OK",
+            "events.db": "MISSING",
+            "document": "postgres (not checked)",
+            "graph": "neo4j (not checked)",
+            "trace": "postgres (not checked)",
+        }
+
+    def test_backend_name_reaches_the_table_verbatim(self, tmp_path, monkeypatch):
+        # The name comes from config.yaml, and Rich reads ``[document]`` as a
+        # style tag and deletes it.
+        config = {"knowledge": {"document": {"backend": "custom[document]"}}}
+        _health_env(tmp_path, monkeypatch, config)
+
+        result = runner.invoke(app, ["admin", "health"])
+
+        assert result.exit_code == 0, repr(result.exception)
+        rows = _table_rows(result.stdout)
+        assert rows["document"] == "custom[document] (not checked)"
+
+    def test_all_sqlite_keeps_every_key_and_value_and_only_adds_backends(
+        self, tmp_path, monkeypatch
+    ):
+        _health_env(tmp_path, monkeypatch, None)
+        assert runner.invoke(app, ["admin", "init"]).exit_code == 0
+        stores = tmp_path / "data" / "stores"
+        (stores / "documents.db").touch()
+        (stores / "events.db").touch()
+
+        result = runner.invoke(app, ["admin", "health", "--format", "json"])
+
+        assert result.exit_code == 0, repr(result.exception)
+        payload = json.loads(result.stdout)
+        backends = payload.pop("backends", None)
+        # The pre-F1 payload, key for key and in order: additive only.
+        assert list(payload.items()) == [
+            ("config", True),
+            ("data_dir", True),
+            ("stores_dir", True),
+            ("documents.db", True),
+            ("graph.db", False),
+            ("vectors.db", False),
+            ("events.db", True),
+            ("traces.db", False),
+        ]
+        assert backends == dict.fromkeys(_FIVE_STORES, "sqlite")
+        text = runner.invoke(app, ["admin", "health"])
+        assert _table_rows(text.stdout) == {
+            "config": "OK",
+            "data_dir": "OK",
+            "stores_dir": "OK",
+            "documents.db": "OK",
+            "graph.db": "MISSING",
+            "vectors.db": "MISSING",
+            "events.db": "OK",
+            "traces.db": "MISSING",
+        }
+
+    def test_stale_db_file_does_not_vouch_for_a_store_moved_off_sqlite(
+        self, tmp_path, monkeypatch
+    ):
+        config = {"knowledge": {"document": {"backend": "postgres"}}}
+        data_dir = _health_env(tmp_path, monkeypatch, config)
+        (data_dir / "stores").mkdir(parents=True)
+        (data_dir / "stores" / "documents.db").touch()
+        (data_dir / "stores" / "graph.db").touch()
+
+        result = runner.invoke(app, ["admin", "health", "--format", "json"])
+
+        assert result.exit_code == 0, repr(result.exception)
+        payload = json.loads(result.stdout)
+        assert "documents.db" not in payload
+        assert payload["graph.db"] is True
+        assert payload["backends"]["document"] == "postgres"
+        rows = _table_rows(runner.invoke(app, ["admin", "health"]).stdout)
+        assert "documents.db" not in rows
+        assert rows["document"] == "postgres (not checked)"
+        assert rows["graph.db"] == "OK"
+
+    @pytest.mark.parametrize("explicit_file_exists", [True, False])
+    def test_explicit_sqlite_db_path_is_the_file_checked(
+        self, tmp_path, monkeypatch, explicit_file_exists
+    ):
+        explicit = tmp_path / "elsewhere" / "docs.sqlite"
+        config = {
+            "knowledge": {"document": {"backend": "sqlite", "db_path": str(explicit)}}
+        }
+        data_dir = _health_env(tmp_path, monkeypatch, config)
+        (data_dir / "stores").mkdir(parents=True)
+        if explicit_file_exists:
+            explicit.parent.mkdir()
+            explicit.touch()
+        else:
+            # A file where the default would be, which the registry never opens.
+            (data_dir / "stores" / "documents.db").touch()
+
+        result = runner.invoke(app, ["admin", "health", "--format", "json"])
+
+        assert result.exit_code == 0, repr(result.exception)
+        assert json.loads(result.stdout)["documents.db"] is explicit_file_exists
+
+    @pytest.mark.parametrize(
+        "config", [None, {}, _mixed_planes()], ids=["no-file", "cli-keys", "planes"]
+    )
+    def test_health_creates_nothing(self, tmp_path, monkeypatch, config):
+        # Resolving a backend must not instantiate a store: a SQLite store
+        # creates the stores dir and its file the moment it is built.
+        _health_env(tmp_path, monkeypatch, config)
+        before = sorted(tmp_path.rglob("*"))
+
+        for args in (["admin", "health"], ["admin", "health", "--format", "json"]):
+            result = runner.invoke(app, args)
+            assert result.exit_code == 0, repr(result.exception)
+
+        assert sorted(tmp_path.rglob("*")) == before
 
 
 class TestAppStructure:
