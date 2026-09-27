@@ -54,38 +54,51 @@ curl -s http://localhost:7474 | head -2
 
 ## Step 2 — Configure Trellis
 
-Either of these two paths works. Pick one.
-
-### Option A — env vars (simplest)
+`config.yaml` selects each store's backend; the `TRELLIS_NEO4J_*`
+variables supply its connection settings. An env var never selects a
+backend, and a key set in `config.yaml` wins over its env var.
 
 ```bash
-export TRELLIS_KNOWLEDGE_GRAPH_BACKEND=neo4j
-export TRELLIS_KNOWLEDGE_VECTOR_BACKEND=neo4j
 export TRELLIS_NEO4J_URI=bolt://localhost:7687
-export TRELLIS_NEO4J_USER=neo4j
-export TRELLIS_NEO4J_PASSWORD=test1234
+export TRELLIS_NEO4J_PASSWORD=test1234   # TRELLIS_NEO4J_USER defaults to neo4j
+trellis admin init    # creates ~/.trellis/config.yaml and the SQLite store dirs
+cat >> ~/.trellis/config.yaml <<'EOF'   # or $TRELLIS_CONFIG_DIR/config.yaml
+knowledge:
+  graph: {backend: neo4j}
+  vector: {backend: neo4j, dimensions: 1536}
+EOF
 ```
 
-Trace, document, event-log, and blob defaults stay on SQLite.
-
-### Option B — `~/.trellis/config.yaml`
-
-See [`recommended-config.yaml`](./recommended-config.yaml) for the
-"local default" block — it's the same config, named, with comments.
+* Run `init` first, and never run `trellis admin init --force`
+  afterwards: it rewrites `config.yaml` and drops the `knowledge:`
+  block, which puts the graph back on SQLite without an error.
+* If your `config.yaml` already has an uncommented `knowledge:` key,
+  edit that block instead of appending, because PyYAML silently keeps
+  the last of two duplicate keys and discards the first.
+* Trace, document, event-log, and blob stores stay on SQLite.
+* Never write `${TRELLIS_NEO4J_URI}` or any other `${VAR}` into
+  `config.yaml`. It is read as plain YAML, so the placeholder reaches
+  the driver literally; leave the key out and its env var supplies it.
+* Export the variables wherever Trellis runs (the shell for the CLI,
+  and the environment of `trellis serve` or the MCP server).
+* Block #2 of [`recommended-config.yaml`](./recommended-config.yaml)
+  is the same shape, with comments.
 
 ## Step 3 — Smoke test
 
 ```bash
-trellis admin init        # one-time: creates SQLite store dirs
-trellis demo load         # loads 50 sample traces + entities + edges
-trellis admin graph-health  # should report counts > 0 for nodes / edges
+trellis curate entity concept smoke-check
+docker exec trellis-neo4j cypher-shell -u neo4j -p "$TRELLIS_NEO4J_PASSWORD" \
+  "MATCH (n:Node) RETURN count(n)"      # expect 1 (or more)
+ls ~/.trellis/data/stores/               # expect no graph.db  (or $TRELLIS_DATA_DIR/stores)
 ```
 
-The graph-health output should show entity types, role distribution,
-and edge counts populated against your local Neo4j. If it reports
-zero counts, the writes went to SQLite — check that
-`TRELLIS_KNOWLEDGE_GRAPH_BACKEND=neo4j` is exported in the same
-shell.
+The count shows the write reached Neo4j, and the missing `graph.db`
+shows the graph did not fall back to SQLite. A count of 0 beside a new
+`graph.db` means the `knowledge:` block is not being read. Neither
+`trellis admin graph-health` nor `trellis demo load` is a check here:
+both look the same on the SQLite fallback, and `demo load` currently
+fails on Bolt backends.
 
 ## Step 4 — Optional: enable startup connectivity check
 

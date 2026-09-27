@@ -54,51 +54,49 @@ config field is `database`.
 
 ## Step 3 — Configure Trellis
 
-### Option A — env vars
+`config.yaml` selects each store's backend; the `TRELLIS_NEO4J_*`
+variables supply its connection settings. An env var never selects a
+backend, and a key set in `config.yaml` wins over its env var.
 
 ```bash
-export TRELLIS_KNOWLEDGE_GRAPH_BACKEND=neo4j
-export TRELLIS_KNOWLEDGE_VECTOR_BACKEND=neo4j
 export TRELLIS_NEO4J_URI=neo4j+s://abcd1234.databases.neo4j.io
 export TRELLIS_NEO4J_USER=abcd1234           # AuraDB Free: == instance ID
 export TRELLIS_NEO4J_PASSWORD=<from console>
 export TRELLIS_NEO4J_DATABASE=abcd1234       # AuraDB Free: == instance ID
+trellis admin init    # creates ~/.trellis/config.yaml and the SQLite store dirs
+cat >> ~/.trellis/config.yaml <<'EOF'   # or $TRELLIS_CONFIG_DIR/config.yaml
+knowledge:
+  graph: {backend: neo4j}
+  vector: {backend: neo4j, dimensions: 1536}
+EOF
 ```
 
 For AuraDB Pro / self-hosted, `TRELLIS_NEO4J_USER` and
 `TRELLIS_NEO4J_DATABASE` are both `neo4j`.
 
-### Option B — `~/.trellis/config.yaml`
-
-See the "cloud-default" block in
-[`recommended-config.yaml`](./recommended-config.yaml).
+The rules from [`neo4j-local.md` Step 2](./neo4j-local.md#step-2--configure-trellis)
+apply here too: run `init` first and never `trellis admin init --force`
+afterwards (it drops the appended block, which puts the graph back on
+SQLite without an error); edit an existing `knowledge:` or
+`operational:` block instead of appending a second one; and never write
+`${VAR}` into `config.yaml`. Block #3 of
+[`recommended-config.yaml`](./recommended-config.yaml) is this shape
+plus a Postgres operational plane, with comments.
 
 ## Step 4 — Combined with Postgres operational plane
 
 For the full managed stack, pair AuraDB Knowledge with managed
-Postgres for the Operational Plane (traces / event log / parameters):
+Postgres for the Operational Plane (traces and the event log). Keep the
+`knowledge:` block from Step 3, export the DSN, and append the
+operational block:
 
-```yaml
-knowledge:
-  graph:
-    backend: neo4j
-    uri: neo4j+s://abcd1234.databases.neo4j.io
-    user: abcd1234
-    password: ${TRELLIS_NEO4J_PASSWORD}
-    database: abcd1234
-  vector:
-    backend: neo4j
-    uri: neo4j+s://abcd1234.databases.neo4j.io
-    user: abcd1234
-    password: ${TRELLIS_NEO4J_PASSWORD}
-    database: abcd1234
+```bash
+export TRELLIS_OPERATIONAL_PG_DSN=postgresql://user:pass@host/db?sslmode=require
+cat >> ~/.trellis/config.yaml <<'EOF'   # or $TRELLIS_CONFIG_DIR/config.yaml
 operational:
-  trace:
-    backend: postgres
-    dsn: ${TRELLIS_OPERATIONAL_PG_DSN}
-  event_log:
-    backend: postgres
-    dsn: ${TRELLIS_OPERATIONAL_PG_DSN}
+  trace: {backend: postgres}       # DSN from TRELLIS_OPERATIONAL_PG_DSN
+  event_log: {backend: postgres}   # DSN from TRELLIS_OPERATIONAL_PG_DSN
+EOF
 ```
 
 [Neon](https://neon.tech) (free tier with pgvector preinstalled) is
@@ -111,18 +109,29 @@ Google Cloud SQL are the natural production choices.
 # Load .env containing the TRELLIS_* vars
 set -a && source .env && set +a
 
-# Verify connectivity at startup, not first request
-export TRELLIS_VALIDATE_CONNECTIVITY=1
-
-trellis admin init
-trellis demo load
-trellis admin graph-health
+trellis curate entity concept smoke-check
+ls ~/.trellis/data/stores/               # expect no graph.db  (or $TRELLIS_DATA_DIR/stores)
 ```
 
-`graph-health` should report counts > 0 for nodes / edges. The
-connectivity-validate flag turns "AuraDB unreachable" from an opaque
-first-request Bolt error into a clean startup failure aggregated with
-any other config errors via `RegistryValidationError`.
+Then count the nodes, either in the AuraDB console's **Query** tab or
+with `cypher-shell` (it prompts for the password):
+
+```bash
+cypher-shell -a "$TRELLIS_NEO4J_URI" -u "$TRELLIS_NEO4J_USER" \
+  -d "$TRELLIS_NEO4J_DATABASE" "MATCH (n:Node) RETURN count(n)"   # expect 1 (or more)
+```
+
+The count shows the write reached AuraDB, and the missing `graph.db`
+shows the graph did not fall back to SQLite. Neither
+`trellis admin graph-health` nor `trellis demo load` is a check here:
+both look the same on the SQLite fallback, and `demo load` currently
+fails on Bolt backends.
+
+For the API server, also set `TRELLIS_VALIDATE_CONNECTIVITY=1`. The
+registry then pings AuraDB at API startup, which turns "AuraDB
+unreachable" from an opaque first-request Bolt error into a clean
+startup failure aggregated with any other config errors via
+`RegistryValidationError`. The CLI and MCP server never run this check.
 
 ## Driver tuning
 
@@ -147,7 +156,6 @@ knowledge:
     backend: neo4j
     uri: neo4j+s://abcd1234.databases.neo4j.io
     user: abcd1234
-    password: ${TRELLIS_NEO4J_PASSWORD}
     database: abcd1234
     driver_config:
       max_connection_pool_size: 200
