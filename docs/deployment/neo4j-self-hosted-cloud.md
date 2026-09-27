@@ -123,13 +123,19 @@ AuraDB Free instance-ID conflation is a managed-service quirk, not a
 Neo4j thing.
 
 ```bash
-export TRELLIS_KNOWLEDGE_GRAPH_BACKEND=neo4j
-export TRELLIS_KNOWLEDGE_VECTOR_BACKEND=neo4j
 export TRELLIS_NEO4J_URI=bolt://trellis-neo4j.neo4j.svc.cluster.local:7687
 export TRELLIS_NEO4J_USER=neo4j
 export TRELLIS_NEO4J_PASSWORD=<from helm install>
 export TRELLIS_NEO4J_DATABASE=neo4j
 ```
+
+These variables supply connection settings only; `config.yaml`
+selects the backend. Add the `knowledge:` block from
+[`neo4j-auradb.md` Step 3](./neo4j-auradb.md#step-3--configure-trellis)
+(graph and vector on `neo4j`), or copy block #3's `knowledge:` from
+[`recommended-config.yaml`](./recommended-config.yaml), which also
+moves documents to Postgres and blobs to S3 and lists the variables
+those need.
 
 Pair with managed Postgres (RDS / Cloud SQL / Neon) for the
 operational plane the same way the AuraDB doc shows in
@@ -218,7 +224,6 @@ knowledge:
     backend: neo4j
     uri: bolt://trellis-neo4j.neo4j.svc.cluster.local:7687
     user: neo4j
-    password: ${TRELLIS_NEO4J_PASSWORD}
     database: neo4j
     driver_config:
       max_connection_pool_size: 200

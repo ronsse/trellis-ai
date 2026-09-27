@@ -300,7 +300,7 @@ jobs:
         # and it is the marker lesson rather than the capability one. It
         # carries an arcadedb marker but lives outside contracts/, and this
         # job names paths -- so nothing selected it, and its blessed-shape
-        # test, which validates the shipped recommended config end-to-end
+        # test, which validates a hand-built config of the blessed shape
         # against a real ArcadeDB, had never run in CI. Both ArcadeDB store
         # suites above were dark for exactly this reason too.
         #

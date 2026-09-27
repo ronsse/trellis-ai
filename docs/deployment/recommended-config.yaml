@@ -3,6 +3,11 @@
 # Pick ONE of the blocks below and copy it to your config.yaml at the
 # path TRELLIS_CONFIG_DIR points at (default ~/.trellis/config.yaml).
 #
+# config.yaml is read as plain YAML: `${VAR}` is not expanded, so leave a
+# connection key out and the env var its block lists supplies it. An env
+# var never selects a backend; only `backend:` does. A key set in config
+# wins over its env var.
+#
 # The **ArcadeDB** block (#1) is the recommended self-hosted AWS shape:
 # one Apache-2.0 substrate covering both graph + vector planes, Bolt +
 # openCypher 25 at 97.8% TCK, native HNSW via jVector. Per
@@ -42,17 +47,8 @@
 # knowledge:
 #   graph:
 #     backend: arcadedb
-#     uri: ${TRELLIS_ARCADEDB_URI}
-#     user: ${TRELLIS_ARCADEDB_USER}
-#     password: ${TRELLIS_ARCADEDB_PASSWORD}
-#     database: ${TRELLIS_ARCADEDB_DATABASE}
-#     http_url: ${TRELLIS_ARCADEDB_HTTP_URL}
 #   vector:
 #     backend: arcadedb
-#     http_url: ${TRELLIS_ARCADEDB_HTTP_URL}
-#     user: ${TRELLIS_ARCADEDB_USER}
-#     password: ${TRELLIS_ARCADEDB_PASSWORD}
-#     database: ${TRELLIS_ARCADEDB_DATABASE}
 #     dimensions: 1536
 #   document:
 #     backend: sqlite       # or `postgres` if you already have an operational DSN
@@ -89,14 +85,8 @@
 # knowledge:
 #   graph:
 #     backend: neo4j
-#     uri: ${TRELLIS_NEO4J_URI}
-#     user: ${TRELLIS_NEO4J_USER}
-#     password: ${TRELLIS_NEO4J_PASSWORD}
 #   vector:
 #     backend: neo4j
-#     uri: ${TRELLIS_NEO4J_URI}
-#     user: ${TRELLIS_NEO4J_USER}
-#     password: ${TRELLIS_NEO4J_PASSWORD}
 #     dimensions: 1536
 #   document:
 #     backend: sqlite
@@ -132,6 +122,8 @@
 #   TRELLIS_NEO4J_PASSWORD=<from console>
 #   TRELLIS_NEO4J_DATABASE=<instance_id>       # AuraDB Free; "neo4j" on Pro
 #   TRELLIS_OPERATIONAL_PG_DSN=postgresql://user:pass@host/db?sslmode=require
+#   TRELLIS_KNOWLEDGE_PG_DSN=postgresql://user:pass@host/db?sslmode=require
+#   TRELLIS_S3_BUCKET=<bucket name>
 #
 # Optional:
 #   TRELLIS_VALIDATE_CONNECTIVITY=1
@@ -139,19 +131,11 @@
 # knowledge:
 #   graph:
 #     backend: neo4j
-#     uri: ${TRELLIS_NEO4J_URI}
-#     user: ${TRELLIS_NEO4J_USER}
-#     password: ${TRELLIS_NEO4J_PASSWORD}
-#     database: ${TRELLIS_NEO4J_DATABASE}
 #   vector:
 #     backend: neo4j
-#     uri: ${TRELLIS_NEO4J_URI}
-#     user: ${TRELLIS_NEO4J_USER}
-#     password: ${TRELLIS_NEO4J_PASSWORD}
-#     database: ${TRELLIS_NEO4J_DATABASE}
 #     dimensions: 1536
 #   document:
-#     backend: postgres   # uses TRELLIS_KNOWLEDGE_PG_DSN if set; falls back to operational DSN
+#     backend: postgres   # DSN from TRELLIS_KNOWLEDGE_PG_DSN (no fallback to the operational DSN)
 #   blob:
 #     backend: s3
 #     # bucket: from TRELLIS_S3_BUCKET
@@ -180,6 +164,7 @@
 # Required env vars:
 #   TRELLIS_KNOWLEDGE_PG_DSN=postgresql://user:pass@host/trellis_knowledge?sslmode=require
 #   TRELLIS_OPERATIONAL_PG_DSN=postgresql://user:pass@host/trellis_operational?sslmode=require
+#   TRELLIS_S3_BUCKET=<bucket name>
 #
 # knowledge:
 #   graph:
@@ -204,7 +189,7 @@
 #     backend: sqlite
 
 # ===========================================================================
-# Notes that apply to all three shapes
+# Notes that apply to all four shapes
 # ===========================================================================
 #
 # Driver tuning (Neo4j blocks): override DriverConfig defaults via the
@@ -213,11 +198,12 @@
 # store's driver_config wins. Defaults are production-safe (30s connect
 # timeout, 100-connection pool, keep-alive on).
 #
-# Connectivity check: set TRELLIS_VALIDATE_CONNECTIVITY=1 in any
-# environment to make StoreRegistry.validate() ping each Neo4j driver
-# at startup. Off by default (fast dev restarts), opt-in for production.
+# Connectivity check: set TRELLIS_VALIDATE_CONNECTIVITY=1 to make
+# StoreRegistry.validate() ping each Neo4j driver at API startup (the
+# CLI and MCP server never call validate()). Off by default (fast dev
+# restarts), opt-in for production.
 #
-# LLM enrichment: optional across all three. Add a `llm:` block when
+# LLM enrichment: optional across all four. Add a `llm:` block when
 # you've provisioned credentials and want LLMFacetClassifier or the
 # memory-extraction pipeline. Off by default — Trellis is fully
 # functional without it.
