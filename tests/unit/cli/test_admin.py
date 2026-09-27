@@ -270,6 +270,25 @@ class TestAdminHealthConfiguredBackends:
         rows = _table_rows(result.stdout)
         assert rows["document"] == "custom[document] (not checked)"
 
+    @pytest.mark.parametrize("backend", [None, {"name": "neo4j"}], ids=["null", "map"])
+    def test_a_non_string_backend_exits_alike_and_without_a_traceback(
+        self, tmp_path, monkeypatch, backend
+    ):
+        # ``_resolve_backend`` returns whatever the YAML held, whatever its
+        # ``str`` annotation says, and ``configured_backend`` coerces it. Without
+        # that, the text arm's ``escape`` raised TypeError (exit 1) while
+        # ``json.dumps`` took the value (exit 0).
+        config = {"knowledge": {"document": {"backend": backend}}}
+        _health_env(tmp_path, monkeypatch, config)
+
+        text = runner.invoke(app, ["admin", "health"])
+        as_json = runner.invoke(app, ["admin", "health", "--format", "json"])
+
+        # Parity alone passes when both arms crash alike.
+        for result in (text, as_json):
+            assert not isinstance(result.exception, Exception), repr(result.exception)
+        assert text.exit_code == as_json.exit_code
+
     def test_all_sqlite_keeps_every_key_and_value_and_only_adds_backends(
         self, tmp_path, monkeypatch
     ):
