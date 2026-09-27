@@ -61,7 +61,7 @@ trellis admin health [--format text|json]
 }
 ```
 
-`backends` is always present and names each store's configured backend. Only a `sqlite` store gets a `.db` key, and `false` means its file does not exist. That file is the store's `db_path` when `config.yaml` sets one, otherwise the key's name under the stores directory. `trellis admin init` creates no store files: each is created the first time its store is used, so `false` is normal on a fresh install. A store on any other backend has no `.db` key, and text output lists it as, for example, `postgres (not checked)`. Health opens no connection, so it cannot tell you whether that store is reachable.
+`backends` is always present and names the configured backend of each store health reports on: `document`, `graph`, `vector`, `event_log` and `trace`. The blob, outcome, parameter, tuner_state and api_key stores are not reported. Only a `sqlite` store gets a `.db` key, and `false` means its file does not exist. That file is the store's `db_path` when `config.yaml` sets one, otherwise the key's name under the stores directory. `trellis admin init` creates no store files: each is created the first time its store is used, so `false` is normal on a fresh install. A store on any other backend has no `.db` key, and text output lists it as, for example, `postgres (not checked)`. Health opens no connection, so it cannot tell you whether that store is reachable.
 
 ### `trellis admin stats`
 
