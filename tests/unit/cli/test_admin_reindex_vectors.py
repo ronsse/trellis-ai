@@ -51,7 +51,9 @@ def _seed_documents() -> None:
 def _run_json(*args: str) -> dict:
     result = runner.invoke(admin_app, ["reindex-vectors", "--format", "json", *args])
     assert result.exit_code == 0, result.output
-    return json.loads(result.output.strip().splitlines()[-1])
+    # All of stdout, as ``| jq`` reads it -- not the last line of ``output``,
+    # which interleaves stderr and so parsed a payload printed there.
+    return json.loads(result.stdout)
 
 
 class TestReindexVectorsCLI:
