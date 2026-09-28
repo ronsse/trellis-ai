@@ -582,7 +582,8 @@ skipped. Every new/changed file emits `MEMORY_STORED`; each run emits a
 
 **Pruning fails closed** ([#633](https://github.com/ronsse/trellis-ai/issues/633)).
 `--prune` deletes a document only when its source file is verifiably
-gone. A source it cannot check — a directory that lost its permissions,
+gone. A source it cannot check — one under a directory that lost its
+search (`x`) permission,
 a path component that became a file, a symlink loop — is kept, listed
 under `prune_withheld` with the OS's reason (text output:
 `withheld <path>: <reason>`), and the run exits **`5`** with

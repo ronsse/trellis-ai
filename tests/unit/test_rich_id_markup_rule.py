@@ -72,7 +72,8 @@ escaping the values alone would have fixed half a line.
 
 **What the name shape means, and what it deliberately does not.** A name
 ending ``_id`` / ``_ids`` / ``_path`` / ``_paths`` / ``_dir`` / ``_dirs``
-/ ``_file`` / ``_files``, or spelled as one of those words bare, read off
+/ ``_file`` / ``_files``, or spelled as one of those words bare (or as a
+handle that does not say so: ``relpath``, ``source_system``), read off
 an :class:`ast.Name`, an :class:`ast.Attribute`'s trailing attribute, or
 any string constant in the expression — which covers ``row['doc_id']`` and
 ``entry.get('source_path')`` without special-casing either. That is a rule
@@ -183,6 +184,12 @@ _ID_NAMES = frozenset(
         # CLI takes. A roster of eight is how the ninth gets missed.
         "relpath",
         "relpaths",
+        # ``source_system`` is the doc-id namespace
+        # (``corpus:<source_system>:<sha1>``) the operator re-types to
+        # re-sync, and both ingest commands printed it raw from an
+        # unvalidated flag: ``x[/y]`` raised after the sync had committed.
+        "source_system",
+        "source_systems",
     }
 )
 
@@ -735,9 +742,12 @@ for loop_value in doc_ids:                           # 32 handle-bearing iterabl
 for target, msg in report.errors:                    # 34 migrate-graph report shape
     console.print(target)                            # 35 first tuple item is legacy key
     console.print(msg)                               # 36 ALLOWED: message is prose
+console.print(f"  ({report.source_system})")         # 37 a doc-id namespace
+console.print(", ".join(source_systems))             # 38 its plural
+console.print(", ".join(relpaths))                   # 39 relpath's plural
 """
 
-#: Read off :data:`_JUDGEMENTS` by hand. Line 24 is the newest and the one
+#: Read off :data:`_JUDGEMENTS` by hand. Line 24 is the one
 #: #521's gate added: a handle interpolated into a local one line above the
 #: render was invisible to a scan that reads only the rendered expression,
 #: and nine such sites were live in ``src/trellis_cli`` *after* the escaping
@@ -764,6 +774,10 @@ for target, msg in report.errors:                    # 34 migrate-graph report s
 #: scanning them ever starts flagging one, this is where it shows. Lines 33
 #: and 35 distinguish a handle-bearing iterable and migrate-graph's
 #: ``(legacy_graph_key, message)`` report from the prose target on line 36.
+#: Lines 37 and 38 are ``relpath``'s lesson a second time — the corpus
+#: namespace ``source_system`` is a handle whose name ends in neither ``_id``
+#: nor ``_path`` — and 39 pins ``relpaths``, which nothing did before:
+#: dropping it from ``_ID_NAMES`` left this module green.
 _EXPECTED_JUDGEMENT_LINES = [
     4,
     5,
@@ -780,6 +794,9 @@ _EXPECTED_JUDGEMENT_LINES = [
     31,
     33,
     35,
+    37,
+    38,
+    39,
 ]
 
 

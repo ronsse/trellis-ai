@@ -107,6 +107,20 @@ class TestIngestConversations:
         assert result.exit_code == 0
         assert "new=1" in plain(result.stdout)
 
+    @pytest.mark.parametrize("source_system", ["x[/y]", "ob[bold]sidian"])
+    def test_source_system_renders_verbatim(
+        self, export: Path, source_system: str
+    ) -> None:
+        # The namespace inside every doc id (``conversation:<source_system>:``).
+        # Rich raised on the unmatched ``[/y]`` after the sync had committed,
+        # and deleted ``[bold]``.
+        result = runner.invoke(
+            app,
+            ["ingest", "conversations", str(export), "--source-system", source_system],
+        )
+        assert result.exit_code == 0, result.output
+        assert f"({source_system})" in " ".join(plain(result.stdout).split())
+
 
 # --- #633: ``--prune`` needs the whole export ----------------------------------
 

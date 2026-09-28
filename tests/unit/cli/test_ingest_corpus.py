@@ -135,6 +135,27 @@ class TestIngestCorpus:
         assert result.exit_code == 0
         assert "new=1" in plain(result.stdout)
 
+    @pytest.mark.parametrize("source_system", ["x[/y]", "ob[bold]sidian"])
+    def test_source_system_renders_verbatim(
+        self, vault: Path, source_system: str
+    ) -> None:
+        # The namespace inside every doc id (``corpus:<source_system>:``), so
+        # the operator re-types it to re-sync. Rich raised on the unmatched
+        # ``[/y]`` after the sync had committed, and deleted ``[bold]``.
+        result = runner.invoke(
+            app, ["ingest", "corpus", str(vault), "--source-system", source_system]
+        )
+        assert result.exit_code == 0, result.output
+        assert f"({source_system})" in _text(result)
+
+    @pytest.mark.parametrize("raw", ["x[/y]", "k[bold]v"])
+    def test_invalid_tag_renders_verbatim(self, vault: Path, raw: str) -> None:
+        # The text arm of test_invalid_tag_exits_with_validation_code: Rich
+        # raised on ``[/y]``, so it exited 1 rather than 2, and ate ``[bold]``.
+        result = runner.invoke(app, ["ingest", "corpus", str(vault), "--tag", raw])
+        assert result.exit_code == 2, result.output
+        assert f"Invalid --tag {raw!r}: expected k=v" in _text(result)
+
 
 class TestIngestCorpusHelp:
     """``--help`` states the input contract (ADR §8, #257)."""

@@ -34,7 +34,8 @@ def _render_report(report: CorpusSyncReport) -> None:
     counts = report.counts()
     verb = "Plan for" if report.dry_run else "Synced"
     console.print(
-        f"[green]{verb}[/green] {escape(str(report.root))} ({report.source_system})"
+        f"[green]{verb}[/green] {escape(str(report.root))} "
+        f"({escape(report.source_system)})"
     )
     for outcome in report.files:
         if outcome.action == "skip":

@@ -51,7 +51,9 @@ def _parse_tags(
                     )
                 )
             else:
-                console.print(f"[red]Invalid --tag {raw!r}: expected k=v[/red]")
+                console.print(
+                    f"[red]Invalid --tag {escape(repr(raw))}: expected k=v[/red]"
+                )
             raise typer.Exit(code=EXIT_VALIDATION)
         metadata[key.strip()] = value.strip()
     if domain:
@@ -76,7 +78,8 @@ def _render_report(report: CorpusSyncReport) -> None:
     counts = report.counts()
     verb = "Plan for" if report.dry_run else "Synced"
     console.print(
-        f"[green]{verb}[/green] {escape(str(report.root))} ({report.source_system})"
+        f"[green]{verb}[/green] {escape(str(report.root))} "
+        f"({escape(report.source_system)})"
     )
     for outcome in report.files:
         if outcome.action == "skip":
