@@ -342,6 +342,32 @@ class TestMalformedDistillObservability:
         assert not any("malformed distillation" in note for note in clean.notes)
 
 
+class TestErroredSessionObservability:
+    def test_errored_sessions_are_summed_and_named_in_a_note(
+        self, tmp_path: Path
+    ) -> None:
+        log = SQLiteEventLog(tmp_path / "errored.db")
+        _emit_sweep(log, sessions_errored=2)
+        _emit_sweep(log, sessions_errored=3)
+        # A sweep that predates the counter carries no such key at all.
+        _emit_sweep(log)
+
+        report = summarize_capture_coverage(log, days=7)
+
+        assert report.funnel.sessions_errored == 5
+        assert any("5 session(s) raised mid-sweep" in note for note in report.notes)
+
+    def test_no_note_when_nothing_errored(self, tmp_path: Path) -> None:
+        log = SQLiteEventLog(tmp_path / "clean.db")
+        _emit_sweep(log, sessions_errored=0)
+        _emit_sweep(log)
+
+        report = summarize_capture_coverage(log, days=7)
+
+        assert report.funnel.sessions_errored == 0
+        assert not any("raised mid-sweep" in note for note in report.notes)
+
+
 class TestStoredMemoryCrossCheck:
     def test_counts_distinct_capture_sessions(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
