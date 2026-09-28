@@ -78,8 +78,11 @@ EOF
 * Trace, document, and event-log stores stay on SQLite; the blob store
   stays on the local filesystem.
 * Never write `${TRELLIS_NEO4J_URI}` or any other `${VAR}` into
-  `config.yaml`. It is read as plain YAML, so the placeholder reaches
-  the driver literally; leave the key out and its env var supplies it.
+  `config.yaml`. It is read as plain YAML and never expanded: a value
+  that is only a placeholder makes Trellis refuse to open its stores,
+  with an error naming the key, and a placeholder inside a longer
+  value reaches the driver literally. Leave the key out and its env
+  var supplies it.
 * Export the variables wherever Trellis runs (the shell for the CLI,
   and the environment of `trellis serve` or the MCP server).
 * Block #2 of [`recommended-config.yaml`](./recommended-config.yaml)
