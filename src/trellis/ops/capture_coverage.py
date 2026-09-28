@@ -144,6 +144,9 @@ class CaptureFunnel(TrellisModel):
     sessions_triggered: int = 0
     sessions_judge_unavailable: int = 0
     sessions_judge_malformed: int = 0
+    #: Sessions that raised mid-sweep and were left un-watermarked for
+    #: retry. Reads 0 for sweeps that predate the counter.
+    sessions_errored: int = 0
     sessions_with_memory: int = 0
     memories_written: int = 0
     candidates_distilled: int = 0
@@ -358,6 +361,12 @@ def summarize_capture_coverage(
             f"{funnel.sessions_judge_malformed} malformed distillation "
             "response(s) were judged empty and watermarked; inspect "
             "distill_response_malformed warnings"
+        )
+    if funnel.sessions_errored > 0:
+        report.notes.append(
+            f"{funnel.sessions_errored} session(s) raised mid-sweep and were "
+            "left un-watermarked for retry; inspect capture_session_failed "
+            "warnings in the capture run log"
         )
 
     if funnel.sessions_triggered == 0:

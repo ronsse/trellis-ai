@@ -11,6 +11,9 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+from structlog.testing import capture_logs
+
 from trellis.stores.base.event_log import EventType
 from trellis_workers.session_capture import capture
 from trellis_workers.session_capture.capture import run_capture
@@ -831,3 +834,292 @@ class TestEmptyParseIsNotSampling:
         assert report.sessions_parsed == 1
         assert report.sessions_sampled_out == 1
         assert report.sessions_skipped_empty == 0
+
+
+# ---------------------------------------------------------------------------
+# Per-session boundary: one session's fault cannot end the sweep
+# ---------------------------------------------------------------------------
+
+_BOUNDARY_SESSIONS = ("sess-fake-0001", "sess-fake-0002", "sess-fake-0003")
+_POISONED_SESSION = "sess-fake-0002"
+
+#: One keepable candidate per session, unlike each other in every field the
+#: render reads, so an assertion about *which* sessions were stored cannot be
+#: satisfied by a sweep that stored the wrong one.
+_KEEPABLE_BY_SESSION = {
+    "sess-fake-0001": good_candidate(
+        title="Cache warmup must finish before the canary starts",
+        memory=(
+            "The canary reads through the query cache, so the warmup job has "
+            "to finish first or the canary reports a cold-cache latency spike "
+            "as a regression and blocks the rollout."
+        ),
+        memory_type="procedural",
+        signal="failure",
+        evidence="rollout log ordering; canary latency panel",
+        confidence=0.8,
+    ),
+    "sess-fake-0002": good_candidate(
+        title="The ingest consumer needs its dead-letter topic to exist",
+        memory=(
+            "The ingest consumer refuses to start when its dead-letter topic "
+            "is missing, and the error names the consumer group rather than "
+            "the topic, so the bootstrap script creates the topic first."
+        ),
+        memory_type="semantic",
+        signal="correction",
+        evidence="consumer start-up error text; bootstrap script",
+        confidence=0.65,
+    ),
+    "sess-fake-0003": good_candidate(
+        title="Report exports time out past ten thousand rows",
+        memory=(
+            "The report export runs in the request thread and times out once "
+            "a report passes roughly ten thousand rows; large exports have to "
+            "go through the batch endpoint instead."
+        ),
+        memory_type="procedural",
+        signal="failure",
+        evidence="export endpoint timeout; batch endpoint docs",
+        confidence=0.9,
+    ),
+}
+
+
+def _three_sessions(root: Path) -> Path:
+    """Three capture-mandatory transcripts; returns the poisoned one's path."""
+    for session_id in _BOUNDARY_SESSIONS:
+        _error_session(root / "proj" / f"{session_id}.jsonl", session_id)
+    return root / "proj" / f"{_POISONED_SESSION}.jsonl"
+
+
+def _reply(session_id: str, *extra: dict) -> str:
+    return candidates_json(_KEEPABLE_BY_SESSION[session_id], *extra)
+
+
+def _stored_session_ids(registry: MagicMock) -> list[str]:
+    return sorted(doc["metadata"]["session_id"] for doc in _stored_captures(registry))
+
+
+def _session_errors(report: capture.CaptureReport) -> list[dict]:
+    return [w for w in report.warnings if w.get("kind") == "session_error"]
+
+
+class TestPerSessionBoundary:
+    """A fault in one session is counted and skipped; the sweep completes.
+
+    Without the boundary, an exception out of any one session's read,
+    distil, gate, reconcile or hash aborts ``run_capture`` before the write
+    seam, the watermark save and ``CAPTURE_SWEEP_COMPLETED``: no memory from
+    the night is written, and the one event that reports a sweep never fires.
+    """
+
+    @pytest.mark.parametrize(
+        "fault",
+        [OverflowError, RecursionError, KeyError, OSError],
+        ids=lambda cls: cls.__name__,
+    )
+    def test_a_faulting_session_is_skipped_and_the_sweep_completes(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        fault: type[Exception],
+    ) -> None:
+        # None of the four is a ValueError, though three of the five real
+        # routes are (see the next test), so a boundary narrowed to
+        # ``except ValueError`` lets every one of these through.
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _three_sessions(root)
+        wm = tmp_path / "wm.json"
+
+        poisoned = {_POISONED_SESSION}
+        real_doc_id = capture.capture_doc_id
+
+        def doc_id_or_fault(source_system: str, content: str) -> str:
+            if any(session_id in content for session_id in poisoned):
+                msg = "injected fault"
+                raise fault(msg)
+            return real_doc_id(source_system, content)
+
+        monkeypatch.setattr(capture, "capture_doc_id", doc_id_or_fault)
+        client = FakeLLMClient(
+            [
+                _reply("sess-fake-0001"),
+                # The judge's own refusal is gated *before* the fault, so this
+                # discard is already collected when the session raises.
+                _reply("sess-fake-0002", _unworthy_candidate()),
+                _reply("sess-fake-0003"),
+            ]
+        )
+
+        with capture_logs() as logs:
+            report = run_capture(
+                registry, transcripts_root=root, watermark_path=wm, llm_client=client
+            )
+
+        assert len(client.calls) == 3
+        assert report.sessions_errored == 1
+        assert _session_errors(report) == [
+            {
+                "kind": "session_error",
+                "session_id": _POISONED_SESSION,
+                "error_class": fault.__name__,
+            }
+        ]
+        # What the class-only warning withholds reaches the log alone, as the
+        # exception itself, so the traceback renders there.
+        assert [
+            (entry["session_id"], type(entry["exc_info"]))
+            for entry in logs
+            if entry["event"] == "capture_session_failed"
+        ] == [(_POISONED_SESSION, fault)]
+        assert _stored_session_ids(registry) == ["sess-fake-0001", "sess-fake-0003"]
+        assert report.sessions_with_memory == 2
+        # Training pairs only for the sessions that completed: the poisoned
+        # session's discard must not be emitted without the rest of it.
+        assert sorted(
+            (p["input_digest"]["source_refs"][0], p["decision"])
+            for p in _judged_payloads(registry)
+        ) == [("sess-fake-0001", "keep"), ("sess-fake-0003", "keep")]
+        sweeps = registry.operational.event_log.get_events(
+            event_type=EventType.CAPTURE_SWEEP_COMPLETED, limit=10
+        )
+        assert len(sweeps) == 1
+        assert sweeps[0].payload["sessions_errored"] == 1
+        assert sweeps[0].payload["warning_kinds"] == {"session_error": 1}
+
+        # Not watermarked: the next sweep retries exactly the one that raised.
+        poisoned.clear()
+        retry_client = FakeLLMClient([_reply("sess-fake-0002")])
+        retry = run_capture(
+            registry, transcripts_root=root, watermark_path=wm, llm_client=retry_client
+        )
+
+        assert retry.sessions_skipped_watermark == 2
+        assert retry.sessions_triggered == 1
+        assert retry.sessions_errored == 0
+        assert len(retry_client.calls) == 1
+        assert _stored_session_ids(registry) == list(_BOUNDARY_SESSIONS)
+
+    @pytest.mark.parametrize(
+        ("poison", "error_class", "judge_calls"),
+        [
+            pytest.param(
+                "reply_surrogate", "UnicodeEncodeError", 3, id="reply-lone-surrogate"
+            ),
+            pytest.param(
+                "transcript_surrogate",
+                "ValidationError",
+                2,
+                id="transcript-lone-surrogate",
+            ),
+            pytest.param(
+                "transcript_invalid_utf8",
+                "UnicodeDecodeError",
+                2,
+                id="transcript-invalid-utf8",
+            ),
+        ],
+    )
+    def test_real_poison_inputs_are_contained(
+        self, tmp_path: Path, poison: str, error_class: str, judge_calls: int
+    ) -> None:
+        """Real inputs, not injected faults, and no parse fix closes them.
+
+        A lone surrogate survives ``json.loads`` and every ``str`` operation
+        and fails only where the text is finally encoded or validated; an
+        undecodable byte fails in the reader's line iterator, outside its
+        per-line guard. ``judge_calls`` shows where each one stops: the reply
+        route after the judge has answered, both transcript routes before it
+        is asked.
+        """
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        poisoned_path = _three_sessions(root)
+        responses = [_reply("sess-fake-0001")]
+        if poison == "reply_surrogate":
+            responses.append(
+                candidates_json(
+                    good_candidate(
+                        title="A reply cut mid-character",
+                        memory=(
+                            "The model stopped half way through an emoji \ud83d "
+                            "and left the high half of a surrogate pair behind."
+                        ),
+                    )
+                )
+            )
+        elif poison == "transcript_surrogate":
+            write_transcript(
+                poisoned_path,
+                [
+                    user_turn("run the deploy \udc80 now", _POISONED_SESSION),
+                    assistant_turn("running the migration", "Bash", _POISONED_SESSION),
+                    tool_result_turn(is_error=True, session_id=_POISONED_SESSION),
+                ],
+            )
+        else:
+            raw = poisoned_path.read_bytes()
+            poisoned_path.write_bytes(
+                raw.replace(b"run the deploy", b"run the deploy \xff", 1)
+            )
+        responses.append(_reply("sess-fake-0003"))
+        client = FakeLLMClient(responses)
+
+        report = run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=tmp_path / "wm.json",
+            llm_client=client,
+        )
+
+        assert len(client.calls) == judge_calls
+        assert report.sessions_errored == 1
+        assert _session_errors(report) == [
+            {
+                "kind": "session_error",
+                "session_id": _POISONED_SESSION,
+                "error_class": error_class,
+            }
+        ]
+        assert _stored_session_ids(registry) == ["sess-fake-0001", "sess-fake-0003"]
+
+    def test_a_clean_sweep_reports_zero_errored(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _three_sessions(root)
+        client = FakeLLMClient([_reply(sid) for sid in _BOUNDARY_SESSIONS])
+
+        report = run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=tmp_path / "wm.json",
+            llm_client=client,
+        )
+
+        assert report.to_payload()["sessions_errored"] == 0
+        assert _session_errors(report) == []
+        assert _stored_session_ids(registry) == list(_BOUNDARY_SESSIONS)
+
+    def test_an_interrupt_is_not_swallowed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``Exception``, not ``BaseException``: Ctrl-C must still end the run."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _three_sessions(root)
+
+        def interrupted(source_system: str, content: str) -> str:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(capture, "capture_doc_id", interrupted)
+        client = FakeLLMClient([_reply(sid) for sid in _BOUNDARY_SESSIONS])
+
+        with pytest.raises(KeyboardInterrupt):
+            run_capture(
+                registry,
+                transcripts_root=root,
+                watermark_path=tmp_path / "wm.json",
+                llm_client=client,
+            )

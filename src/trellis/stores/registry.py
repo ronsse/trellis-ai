@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+import re
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -229,6 +230,41 @@ def _resolve_connectivity_check(explicit: bool | None) -> bool:
     return raw in _TRUTHY
 
 
+# A config.yaml value that is nothing but a shell/compose placeholder: ${NAME},
+# or ${NAME} followed by a -, =, ? or + operator (colon optional) and any text
+# up to the brace: ${NAME:-x}, ${NAME?x}, ${NAME:+x}, ... The ``$`` also admits
+# the one trailing newline a ``|`` block scalar leaves. A placeholder inside a
+# longer value (a${B}c, ${DATA}/kuzu) is not matched.
+_LITERAL_PLACEHOLDER = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?[-=?+][^}]*)?\}$")
+
+
+def _literal_placeholders(
+    node: object, path: str, seen: set[int]
+) -> Iterator[tuple[str, str]]:
+    """Yield ``(key path, variable name)`` for every value that is a placeholder.
+
+    Each dict or list is walked once, from the first path that reaches it:
+    ``yaml.safe_load`` hands an anchor and its aliases the same object, and a
+    self-referential anchor is a real cycle.
+    """
+    if isinstance(node, str):
+        match = _LITERAL_PLACEHOLDER.match(node)
+        if match:
+            yield path, match.group(1)
+        return
+    if not isinstance(node, dict | list) or id(node) in seen:
+        return
+    seen.add(id(node))
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from _literal_placeholders(
+                value, f"{path}.{key}" if path else str(key), seen
+            )
+    else:
+        for index, value in enumerate(node):
+            yield from _literal_placeholders(value, f"{path}[{index}]", seen)
+
+
 def _extract_store_config(data: dict[str, Any], config_source: str) -> dict[str, Any]:
     """Flatten the YAML store config into the internal ``{store_type: cfg}`` shape.
 
@@ -237,6 +273,17 @@ def _extract_store_config(data: dict[str, Any], config_source: str) -> dict[str,
     (``{"graph": {...}, ...}``) because ``_instantiate`` resolves the
     plane from ``_PLANE_OF`` at lookup time.
     """
+    if "stores" in data:
+        # Nothing below reads the flat block, so a store configured only
+        # there runs on its default backend; without this line, silently.
+        logger.warning(
+            "registry_config_flat_stores_removed",
+            source=config_source,
+            hint=(
+                "the flat 'stores:' block was removed in 0.6.0 and is ignored;"
+                " move its entries under 'knowledge:' / 'operational:'"
+            ),
+        )
     knowledge_cfg = data.get("knowledge")
     operational_cfg = data.get("operational")
 
@@ -779,6 +826,23 @@ class StoreRegistry:
                     " Fix the YAML syntax and retry."
                 )
                 raise ConfigError(msg, setting="config.yaml") from exc
+            # Nothing expands ``${VAR}`` here, so such a value would reach a
+            # driver as those characters. Only the variable name is rendered:
+            # a default part (``${VAR:-x}``) can be the secret itself.
+            placeholders = list(_literal_placeholders(data, "", set()))
+            if placeholders:
+                listed = "; ".join(
+                    f"{path} is the literal text ${{{name}}}"
+                    for path, name in placeholders
+                )
+                msg = (
+                    "Trellis does not expand environment variables in"
+                    f" {config_path}: {listed}. Write the value itself, or delete"
+                    " the key where Trellis reads an environment variable in its"
+                    " place (for an llm or embeddings API key, name the variable"
+                    " with api_key_env)."
+                )
+                raise ConfigError(msg, setting=placeholders[0][0])
             store_config = _extract_store_config(data, str(config_path))
             embedding_config = data.get("embeddings", {})
             retrieval_config = data.get("retrieval", {})

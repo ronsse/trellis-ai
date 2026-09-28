@@ -88,14 +88,16 @@ def _sample_denominator() -> int:
 
 
 def strict_mode() -> bool:
-    """Whether a *partial* judge outage should fail the run.
+    """Whether a *partial* sweep should fail the run.
 
-    Default ``True``: a sweep that left sessions unjudged did not do the job
-    it was scheduled to do, and a green systemd unit would hide that. Set
-    ``TRELLIS_CAPTURE_STRICT=0`` to go back to the pre-existing softer
-    semantics — those sessions stay un-watermarked and are retried on the next
-    sweep, so an operator who considers a single transient model timeout in a
-    forty-session run self-healing rather than a failure can opt out. The
+    A sweep is partial when the judge went away part-way through and left
+    sessions unjudged, or when a session raised and was skipped
+    (``CaptureReport.sessions_errored``). Default ``True``: such a sweep did
+    not do the job it was scheduled to do, and a green systemd unit would
+    hide that. Set ``TRELLIS_CAPTURE_STRICT=0`` to report the counts and exit
+    zero instead — those sessions stay un-watermarked and are retried on the
+    next sweep, so an operator who considers a single transient model timeout
+    in a forty-session run self-healing rather than a failure can opt out. The
     *total* no-op (no judge at all) always fails, strict or not: nothing is
     retried because nothing ran.
     """
