@@ -124,8 +124,7 @@ cypher-shell -a "$TRELLIS_NEO4J_URI" -u "$TRELLIS_NEO4J_USER" \
 The count shows the write reached AuraDB, and the missing `graph.db`
 shows the graph did not fall back to SQLite. Neither
 `trellis admin graph-health` nor `trellis demo load` is a check here:
-both look the same on the SQLite fallback, and `demo load` currently
-fails on Bolt backends.
+both look the same on the SQLite fallback.
 
 For the API server, also set `TRELLIS_VALIDATE_CONNECTIVITY=1`. The
 registry then pings AuraDB at API startup, which turns "AuraDB

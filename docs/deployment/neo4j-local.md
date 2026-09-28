@@ -98,8 +98,7 @@ The count shows the write reached Neo4j, and the missing `graph.db`
 shows the graph did not fall back to SQLite. A count of 0 beside a new
 `graph.db` means the `knowledge:` block is not being read. Neither
 `trellis admin graph-health` nor `trellis demo load` is a check here:
-both look the same on the SQLite fallback, and `demo load` currently
-fails on Bolt backends.
+both look the same on the SQLite fallback.
 
 ## Step 4 — Optional: enable startup connectivity check
 
