@@ -1847,7 +1847,9 @@ def capture_sessions_cmd(
     when the judge went away mid-sweep — ``sessions_judge_unavailable`` counts
     the sessions left un-watermarked for a later retry, and
     ``TRELLIS_CAPTURE_STRICT=0`` downgrades that second case to a reported
-    count with a zero exit.
+    count with a zero exit. A session that raised mid-sweep
+    (``sessions_errored``) is treated the same way: skipped, left
+    un-watermarked for retry, and a failed run unless strict mode is off.
     """
     # Imported here, not at module scope: trellis_workers is an optional
     # install alongside the CLI, and every other `trellis worker` command
@@ -1873,16 +1875,17 @@ def capture_sessions_cmd(
     payload = report.to_payload()
     unjudged = judge_unavailable_sessions(report)
     payload["sessions_judge_unavailable"] = unjudged
+    failed = bool(unjudged or report.sessions_errored)
 
     if output_format == "json":
-        # "partial", not "ok": the command itself treats an unjudged session
-        # as a failed run, so a consumer keying off `status` must not read it
-        # as success.
-        emit_json({"status": "partial" if unjudged else "ok", **payload})
+        # "partial", not "ok": the command itself treats an unjudged or an
+        # errored session as a failed run, so a consumer keying off `status`
+        # must not read it as success.
+        emit_json({"status": "partial" if failed else "ok", **payload})
     else:
         _render_capture_text(payload)
 
-    if unjudged and strict_mode():
+    if failed and strict_mode():
         raise typer.Exit(code=EXIT_INTERNAL)
 
 
@@ -1929,6 +1932,12 @@ def _render_capture_text(payload: dict[str, Any]) -> None:
             f"[red]  {payload['sessions_judge_unavailable']} session(s) left "
             f"unjudged — the judge was unreachable; they stay un-watermarked "
             f"for a later retry.[/red]"
+        )
+    if payload["sessions_errored"]:
+        console.print(
+            f"[red]  {payload['sessions_errored']} session(s) raised mid-sweep "
+            f"— they stay un-watermarked for a later retry; see "
+            f"capture_session_failed in the log.[/red]"
         )
 
 

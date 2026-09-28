@@ -1227,7 +1227,7 @@ def _load_cold_start_fixture(fixture_dir: Path) -> tuple[int, int]:
 #  Load command
 # ---------------------------------------------------------------------------
 @demo_app.command("load")
-def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
+def load(  # noqa: PLR0915 - sequential fixture loading by section
     force: bool = typer.Option(
         False, "--force", "-f", help="Overwrite existing demo data"
     ),
@@ -1284,14 +1284,6 @@ def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
             ev.metadata,
             preserve_updated_at=False,
         )
-        # Also link evidence to entities in graph
-        for att in ev.attached_to:
-            graph.upsert_edge(
-                ev.evidence_id,
-                att.target_id,
-                EdgeKind.EVIDENCE_ATTACHED_TO,
-                {"evidence_type": ev.evidence_type},
-            )
     console.print(f"  [green]+[/green] {len(evidence_items)} evidence items")
 
     # 5. Documents (searchable)
@@ -1302,14 +1294,14 @@ def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
         )
     console.print(f"  [green]+[/green] {len(docs)} documents")
 
-    # 6. Precedents → graph nodes + edges
+    # 6. Precedents → graph nodes
     precedents = _build_precedents()
     for (
         prec_id,
         title,
         desc,
         promoted_by,
-        source_traces,
+        _source_traces,
         applicability,
         confidence,
         meta,
@@ -1327,13 +1319,6 @@ def load(  # noqa: PLR0912, PLR0915 - sequential fixture loading by section
                 **meta,
             },
         )
-        for tid in source_traces:
-            graph.upsert_edge(
-                tid,
-                prec_id,
-                EdgeKind.TRACE_PROMOTED_TO_PRECEDENT,
-                {"promoted_by": promoted_by},
-            )
     console.print(f"  [green]+[/green] {len(precedents)} precedents")
 
     # 7. Emit PRECEDENT_PROMOTED events so the precedents tab works

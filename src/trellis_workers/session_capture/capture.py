@@ -18,6 +18,11 @@ One nightly pass over the Claude Code transcript directory:
    **judged** candidate — ``keep`` for each written memory and ``discard``
    for each one the judge itself called unworthy — then advance the
    watermark for judged sessions only.
+
+Each session runs inside one boundary: a session that raises is counted in
+``sessions_errored``, skipped, and left un-watermarked for retry, so it cannot
+take the rest of the sweep down with it. The steps after the loop — the write,
+supersessions, training pairs and the watermark save — are outside it.
 """
 
 from __future__ import annotations
@@ -133,9 +138,9 @@ def _gate_candidates(
     Appends to *discards* every candidate the **judge** refused — and only
     those. The gates above worthiness are policy, not judgement, and are
     deliberately excluded; see :func:`_emit_training_pairs`. *discards* is an
-    accumulator rather than a second return value for the same reason
-    *report* is: it is filled across every session of one sweep, and the
-    emit happens once, after the write seam.
+    accumulator rather than a second return value: ``run_capture`` hands in
+    a per-session list and commits it to the sweep's only once the session
+    has completed, and the emit happens once, after the write seam.
     """
     survivors: list[CandidateMemory] = []
     for candidate in candidates:
@@ -198,8 +203,8 @@ def run_capture(
 
     written: list[CandidateMemory] = []
     #: Candidates the judge itself called unworthy — the negative half of the
-    #: #264 training pairs, collected across the whole sweep and emitted with
-    #: the positive half below.
+    #: #264 training pairs, collected from every session that completes and
+    #: emitted with the positive half below.
     discarded: list[CandidateMemory] = []
     records: list[SyncRecord] = []
     for path in discover_sessions(transcripts_root):
@@ -214,53 +219,77 @@ def run_capture(
             report.sessions_skipped_watermark += 1
             continue
 
-        # Snapshot BEFORE reading: a tail appended between read-EOF and a
-        # post-read stat would otherwise be claimed by the cursor and
-        # permanently skipped. With the pre-read snapshot, an appended tail
-        # makes the file compare as changed and the session re-processes.
-        pre_read_stat = _stat_or_none(path)
-        digest = parse_session(path)
-        report.sessions_parsed += 1
-        report.malformed_lines += digest.malformed_lines
+        # One session's fault must not end the sweep. What the steps after
+        # the loop consume — this session's records, survivors and judge
+        # discards — is buffered and committed only once it has completed, so
+        # a raise writes none of its memories and emits none of its training
+        # pairs, and the session is not watermarked, so the next sweep retries
+        # it. Its report counters, and any reconcile verdict it had already
+        # emitted, are not rolled back. ``Exception``, not a list of types:
+        # five unrelated error classes from four stages reach this loop
+        # (OverflowError and RecursionError from the judge's reply,
+        # UnicodeEncodeError hashing it, a pydantic ValidationError building
+        # the prompt, UnicodeDecodeError reading the transcript; each
+        # reproduced, none yet seen in production), and an enumeration is how
+        # the sixth would take the whole night down again.
+        session_discards: list[CandidateMemory] = []
+        try:
+            # Snapshot BEFORE reading: a tail appended between read-EOF and a
+            # post-read stat would otherwise be claimed by the cursor and
+            # permanently skipped. With the pre-read snapshot, an appended
+            # tail makes the file compare as changed and the session
+            # re-processes.
+            pre_read_stat = _stat_or_none(path)
+            digest = parse_session(path)
+            report.sessions_parsed += 1
+            report.malformed_lines += digest.malformed_lines
 
-        if not gating.should_distill(digest, sample_denominator):
-            # Two different outcomes hide behind one `False`. An empty digest
-            # is the reader finding no conversation; sampling is a deliberate
-            # cost decision. Counting them together is how #332 stayed
-            # invisible — see ``CaptureReport.sessions_skipped_empty``.
-            if digest.is_empty:
-                report.sessions_skipped_empty += 1
-            else:
-                report.sessions_sampled_out += 1
-            if not dry_run and pre_read_stat is not None:
-                watermark.record(path, stat=pre_read_stat)
-            continue
+            if not gating.should_distill(digest, sample_denominator):
+                # Two different outcomes hide behind one `False`. An empty
+                # digest is the reader finding no conversation; sampling is a
+                # deliberate cost decision. Counting them together is how
+                # #332 stayed invisible — see
+                # ``CaptureReport.sessions_skipped_empty``.
+                if digest.is_empty:
+                    report.sessions_skipped_empty += 1
+                else:
+                    report.sessions_sampled_out += 1
+                if not dry_run and pre_read_stat is not None:
+                    watermark.record(path, stat=pre_read_stat)
+                continue
 
-        survivors = _capture_session(
-            registry,
-            digest,
-            report=report,
-            discards=discarded,
-            llm_client=llm_client,
-            source_system=source_system,
-            id_prefix=id_prefix,
-            reconcile_enabled=reconcile_enabled,
-            dry_run=dry_run,
-        )
-        if survivors is None:
-            # Judge unavailable — leave un-watermarked so a later run retries.
-            continue
+            survivors = _capture_session(
+                registry,
+                digest,
+                report=report,
+                discards=session_discards,
+                llm_client=llm_client,
+                source_system=source_system,
+                id_prefix=id_prefix,
+                reconcile_enabled=reconcile_enabled,
+                dry_run=dry_run,
+            )
+            if survivors is None:
+                # Judge unavailable — leave un-watermarked so a later run
+                # retries.
+                continue
 
-        for i, candidate in enumerate(survivors):
-            records.append(
+            session_records = [
                 SyncRecord(
                     doc_id=candidate.doc_id,
                     source_key=f"session/{candidate.session_id}#{i}",
                     content=candidate.content,
                     handler_metadata=_candidate_metadata(candidate),
                 )
-            )
-            written.append(candidate)
+                for i, candidate in enumerate(survivors)
+            ]
+        except Exception as exc:
+            _record_session_error(report, path, exc)
+            continue
+
+        records.extend(session_records)
+        written.extend(survivors)
+        discarded.extend(session_discards)
         if not dry_run and pre_read_stat is not None:
             watermark.record(path, stat=pre_read_stat)
 
@@ -283,6 +312,28 @@ def run_capture(
     _emit_sweep_completed(registry, report, source_system=source_system)
     logger.info("capture_sweep_complete", **report.to_payload())
     return report
+
+
+def _record_session_error(report: CaptureReport, path: Path, exc: Exception) -> None:
+    """Count, warn and log one session that raised mid-sweep.
+
+    The warning names the class only: an exception message can quote the
+    transcript or the reply, and warnings ride the sweep payload. The
+    traceback goes to the log alone, passed as the exception itself rather
+    than ``exc_info=True``, so it does not depend on being called from
+    inside the handler.
+    """
+    error_class = type(exc).__name__
+    report.sessions_errored += 1
+    report.warnings.append(
+        {"kind": "session_error", "session_id": path.stem, "error_class": error_class}
+    )
+    logger.warning(
+        "capture_session_failed",
+        session_id=path.stem,
+        error_class=error_class,
+        exc_info=exc,
+    )
 
 
 def _emit_sweep_completed(

@@ -59,6 +59,7 @@ from trellis.feedback.recording import feedback_log_dir
 from trellis.feedback.recording import record_feedback as record_pack_feedback
 from trellis.llm.routing import LLMConsumer, LLMRoutingError
 from trellis.logging import configure_stderr_logging
+from trellis.mcp import supersession as _supersession
 from trellis.mcp.auth import (
     TRANSPORT_HTTP,
     HttpSettings,
@@ -90,6 +91,7 @@ from trellis.mcp.reconcile import (
 )
 from trellis.mutate import (
     Command,
+    CommandResult,
     CommandStatus,
     MutationExecutor,
     Operation,
@@ -1323,6 +1325,149 @@ def _resolve_evidence_pointer(
     return None, False
 
 
+def _plan_knowledge_supersedes(
+    registry: StoreRegistry,
+    supersedes: str | None,
+    *,
+    content: str | None,
+    evidence_ref: str | None,
+) -> _supersession.EntityPlan | None:
+    """Check ``save_knowledge(supersedes=…)`` before anything is written.
+
+    A refusal is recorded and raised here rather than in
+    :mod:`trellis.mcp.supersession`, so the rejection site carries the literal
+    ``tool=`` the capture-surface roster reads. ``None`` means there is
+    nothing to stamp: no ``supersedes``, or an ``evidence_ref`` naming no
+    document, which :func:`_resolve_evidence_pointer` refuses next with its
+    own message.
+    """
+    if supersedes is None:
+        return None
+    plan = _supersession.plan_entity_supersession(
+        registry, supersedes, content=content, evidence_ref=evidence_ref
+    )
+    if isinstance(plan, _supersession.Refusal):
+        _record_boundary_rejection(tool="save_knowledge", rejections=[plan.row()])
+        _raise_invalid_params(
+            plan.msg, data={"field": plan.loc, "supersedes": supersedes}
+        )
+    return plan
+
+
+def _raise_if_supersede_failed(
+    error: str | None,
+    *,
+    target: str,
+    supersedes: str,
+    successor: str,
+    applied: list[str],
+) -> None:
+    """Raise when a ``save_knowledge`` stamp failed, naming what was applied.
+
+    The stamps run before the entity is created, so no entity exists yet,
+    and a re-send finishes the call without repeating a stamp already in
+    place.
+    """
+    if error is None:
+        return
+    _raise_mutation_failed(
+        f"failed to supersede {target}: {error}; supersession applied: "
+        f"{', '.join(applied) or 'none'}; no entity was created; re-send the "
+        "same call to finish",
+        data={
+            "stage": "supersede",
+            "supersedes": supersedes,
+            "evidence_ref": successor,
+            "supersession_applied": list(applied),
+        },
+    )
+
+
+def _apply_knowledge_supersedes(
+    registry: StoreRegistry,
+    supersedes: str | None,
+    plan: _supersession.EntityPlan | None,
+    successor: str | None,
+) -> tuple[list[str], list[str]]:
+    """Stamp the superseded entity, then its evidence document.
+
+    The successor is the new entity's evidence document, the id a pack
+    carries for it. Runs once that document exists and before the entity is
+    created, so a failure here leaves no new entity beside an old version
+    that is still served. Returns ``(applied, lines)``: the ids stamped, and
+    the response lines reporting them — also on a re-send, where the stamps
+    are already in place and nothing is written.
+    """
+    if supersedes is None or plan is None or successor is None:
+        return [], []
+    error = _supersession.supersede_entity(
+        registry,
+        node_id=supersedes,
+        successor=successor,
+        requested_by="mcp:save_knowledge",
+    )
+    _raise_if_supersede_failed(
+        error, target=supersedes, supersedes=supersedes, successor=successor, applied=[]
+    )
+    applied = [supersedes]
+    lines = [f"Superseded: {supersedes} -> {successor}"]
+    if plan.t_doc is None:
+        return applied, lines
+    if plan.t_doc_skip is not None:
+        lines.append(
+            f"Evidence document {plan.t_doc} left unchanged ({plan.t_doc_skip})"
+        )
+        return applied, lines
+    error = _supersession.supersede_document(
+        registry,
+        doc_id=plan.t_doc,
+        successor=successor,
+        requested_by="mcp:save_knowledge",
+    )
+    _raise_if_supersede_failed(
+        error,
+        target=plan.t_doc,
+        supersedes=supersedes,
+        successor=successor,
+        applied=applied,
+    )
+    applied.append(plan.t_doc)
+    lines.append(f"Superseded: {plan.t_doc} -> {successor}")
+    return applied, lines
+
+
+def _raise_create_failed(
+    create_result: CommandResult,
+    evidence_ref: str | None,
+    *,
+    supersedes: str | None,
+    applied: list[str],
+) -> NoReturn:
+    """Raise for a failed entity create in ``save_knowledge``.
+
+    Any auto-created evidence document is left as an acceptable orphan — no
+    node was written, so there is no dangling pointer to clean up. When a
+    ``supersedes=`` stamp was already applied the message says so, because
+    the old version is now withheld wherever its successor is served; the
+    re-send that finishes the call does not repeat the stamps.
+    """
+    message = f"failed to create entity: {create_result.message}"
+    data: dict[str, Any] = {
+        "status": create_result.status.value,
+        "command_id": create_result.command_id,
+        "message": create_result.message,
+        "evidence_ref": evidence_ref,
+    }
+    if supersedes is not None:
+        stamped = ", ".join(f"{target} -> {evidence_ref}" for target in applied)
+        message += (
+            f"; supersession already applied: {stamped or 'none'} (re-send the "
+            "same call to finish; the stamps are not repeated)"
+        )
+        data["supersession_applied"] = list(applied)
+    _raise_mutation_failed(message, data=data)
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_INGEST))
 def save_knowledge(
     name: str,
@@ -1332,6 +1477,7 @@ def save_knowledge(
     edge_kind: str = "entity_related_to",
     content: str | None = None,
     evidence_ref: str | None = None,
+    supersedes: str | None = None,
 ) -> str:
     """Create an entity in the knowledge graph, optionally linking it.
 
@@ -1366,6 +1512,14 @@ def save_knowledge(
             is exactly the dangling state this tool exists to prevent. When
             set, no document is created and ``content`` is ignored (a notice
             is appended to the result).
+        supersedes: Optional id of an existing entity this one replaces.
+            Requires ``content`` or ``evidence_ref``. The old entity and its
+            evidence document are marked superseded by the new evidence
+            document, so a pack holding both serves only the new version; an
+            evidence document that cannot be marked (chunked, archived, or
+            superseded by something else) is left unchanged and named in the
+            reply. Refused, with nothing written, if the id is unknown, a
+            document, archived, or already superseded by something else.
     """
     if not name or not name.strip():
         _raise_invalid_params(
@@ -1374,6 +1528,11 @@ def save_knowledge(
         )
 
     registry = _get_registry()
+
+    # A supersedes= declaration is refused before anything is written.
+    plan = _plan_knowledge_supersedes(
+        registry, supersedes, content=content, evidence_ref=evidence_ref
+    )
 
     # Existence-check any explicit pointer / auto-create the evidence doc
     # (doc-FIRST) before any graph mutation — see _resolve_evidence_pointer
@@ -1384,6 +1543,13 @@ def save_knowledge(
         entity_type=entity_type,
         content=content,
         evidence_ref=evidence_ref,
+    )
+    # The stamps go on once their successor exists, and before the entity:
+    # a failure between the two then leaves the old version withheld behind
+    # a successor document that is served, never a new entity beside an old
+    # version still served. Re-sending finishes either half.
+    applied, supersede_lines = _apply_knowledge_supersedes(
+        registry, supersedes, plan, evidence_ref
     )
 
     props = dict(properties or {})
@@ -1406,17 +1572,8 @@ def save_knowledge(
         )
     )
     if create_result.status != CommandStatus.SUCCESS:
-        # Graph write failed. Any auto-created evidence doc is left as an
-        # acceptable orphan — we never wrote a node, so there is no dangling
-        # pointer to clean up.
-        _raise_mutation_failed(
-            f"failed to create entity: {create_result.message}",
-            data={
-                "status": create_result.status.value,
-                "command_id": create_result.command_id,
-                "message": create_result.message,
-                "evidence_ref": evidence_ref,
-            },
+        _raise_create_failed(
+            create_result, evidence_ref, supersedes=supersedes, applied=applied
         )
 
     node_id = create_result.created_id
@@ -1427,7 +1584,7 @@ def save_knowledge(
         result += "\nWarning: content ignored — evidence_ref takes precedence"
 
     if node_id is None:
-        return result
+        return "\n".join([result, *supersede_lines])
     # Entity already created — link failures come back as response lines,
     # never as a raise. See trellis.mcp.knowledge_links.
     link_lines = link_knowledge_node(
@@ -1438,7 +1595,7 @@ def save_knowledge(
         relates_to=relates_to,
         edge_kind=edge_kind,
     )
-    return "\n".join([result, *link_lines])
+    return "\n".join([result, *supersede_lines, *link_lines])
 
 
 # ---------------------------------------------------------------------------
@@ -1497,11 +1654,122 @@ def _emit_memory_stored_and_enrich(
     )
 
 
+def _check_memory_supersedes(
+    registry: StoreRegistry,
+    supersedes: str | None,
+    *,
+    doc_id: str | None,
+    existing: dict[str, Any] | None,
+) -> None:
+    """Refuse ``save_memory(supersedes=…)`` before anything is stored.
+
+    A refusal is recorded and raised here rather than in
+    :mod:`trellis.mcp.supersession`, so the rejection site carries the literal
+    ``tool=`` the capture-surface roster reads.
+    """
+    if supersedes is None:
+        return
+    refusal = _supersession.check_memory_target(
+        registry, supersedes, doc_id=doc_id, existing=existing
+    )
+    if refusal is None:
+        return
+    _record_boundary_rejection(tool="save_memory", rejections=[refusal.row()])
+    _raise_invalid_params(
+        refusal.msg, data={"field": refusal.loc, "supersedes": supersedes}
+    )
+
+
+def _memory_exists_response(
+    registry: StoreRegistry, existing_id: str, supersedes: str | None
+) -> str:
+    """Reply to an exact-hash hit, stamping ``supersedes`` onto the match.
+
+    The existing document is the successor. Nothing new is stored, so a
+    failed stamp is an error — the call did nothing. This branch is also how
+    a re-send finishes a stamp that failed after the memory was stored.
+    """
+    if supersedes is None:
+        return f"Memory already exists: {existing_id}"
+    error = _supersession.supersede_document(
+        registry,
+        doc_id=supersedes,
+        successor=existing_id,
+        requested_by=SAVE_MEMORY_SURFACE,
+    )
+    if error is not None:
+        _raise_mutation_failed(
+            f"failed to supersede {supersedes}: {error}; nothing was written "
+            f"({existing_id} already holds this content)",
+            data={
+                "stage": "supersede",
+                "supersedes": supersedes,
+                "existing": existing_id,
+            },
+        )
+    return f"Memory already exists (supersedes {supersedes}): {existing_id}"
+
+
+def _refuse_near_duplicate_supersedes(
+    supersedes: str | None, match_id: str, similarity: float
+) -> None:
+    """Refuse a ``supersedes=`` call whose content near-duplicates a memory.
+
+    Without ``supersedes`` a near-duplicate is answered with the match and
+    nothing is stored. With it that answer is wrong: the caller declared a
+    replacement, and reporting the match as the save would leave the target
+    served and unmarked. The target itself is excluded from the lookup,
+    since a close revision of it is exactly what ``supersedes=`` stores.
+    """
+    if supersedes is None:
+        return
+    message = (
+        f"content is a near-duplicate ({similarity:.0%}) of {match_id}; nothing "
+        f"was written and {supersedes} is unchanged"
+    )
+    _record_boundary_rejection(
+        tool="save_memory",
+        rejections=[{"kind": "value", "loc": "content", "msg": message}],
+    )
+    _raise_invalid_params(
+        message,
+        data={"field": "content", "supersedes": supersedes, "duplicate_of": match_id},
+    )
+
+
+def _supersede_saved_memory(
+    registry: StoreRegistry, stored_id: str, supersedes: str | None
+) -> str:
+    """Stamp ``supersedes`` once a new memory is stored, and word the reply.
+
+    The memory is already persisted, so a failed stamp is a warning rather
+    than an error: raising would tell the caller the save failed when it did
+    not. The warning says how to finish — a re-send hits the exact-hash
+    branch, which stores nothing and retries the stamp.
+    """
+    if supersedes is None:
+        return f"Memory saved: {stored_id}"
+    error = _supersession.supersede_document(
+        registry,
+        doc_id=supersedes,
+        successor=stored_id,
+        requested_by=SAVE_MEMORY_SURFACE,
+    )
+    if error is not None:
+        return (
+            f"Memory saved: {stored_id}\nWarning: supersession NOT applied — "
+            f"{supersedes} is unchanged ({error}). Re-send the same call to "
+            "retry; it will not store a duplicate."
+        )
+    return f"Memory saved (supersedes {supersedes}): {stored_id}"
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_INGEST))
 def save_memory(
     content: str,
     metadata: dict[str, Any] | None = None,
     doc_id: str | None = None,
+    supersedes: str | None = None,
 ) -> str:
     """Store a document in the experience graph memory.
 
@@ -1514,6 +1782,12 @@ def save_memory(
         content: Document content to store.
         metadata: Optional metadata (tags, source, domain, etc.).
         doc_id: Optional document ID. Auto-generated if not provided.
+        supersedes: Optional id of an existing whole document this memory
+            replaces. It is marked superseded by the saved (or matching)
+            memory, so a pack holding both serves only the new one. Refused,
+            with nothing written, if the id is unknown, a graph entity, part
+            of a chunked document, archived, or already superseded by another
+            document.
     """
     if not content or not content.strip():
         _record_boundary_rejection(
@@ -1537,8 +1811,10 @@ def save_memory(
     # Model-judged verdict tier (TRELLIS_ENABLE_RECONCILE_ON_WRITE=1). When a
     # near — not exact — match exists, a local model decides
     # ADD/UPDATE/SUPERSEDE/NOOP instead of today's binary keep/drop. Off by
-    # default: the deterministic-only path below is unchanged.
-    if reconcile_on_write_enabled():
+    # default: the deterministic-only path below is unchanged. An explicit
+    # supersedes= bypasses it: the caller has already said what this replaces,
+    # and the judge's verdict is not consulted over that declaration.
+    if reconcile_on_write_enabled() and supersedes is None:
         return _save_memory_reconciled(
             registry,
             executor,
@@ -1554,18 +1830,24 @@ def save_memory(
     with _save_memory_lock:
         # Dedup stage 1: exact content hash match.
         existing = registry.knowledge.document_store.get_by_hash(chash)
+        # Refused before any write, and checked against the exact match
+        # too: that match, not a new row, is then the successor.
+        _check_memory_supersedes(registry, supersedes, doc_id=doc_id, existing=existing)
         if existing is not None:
             existing_id = existing["doc_id"]
             logger.debug(
                 "save_memory_dedup_exact", doc_id=existing_id, content_hash=chash
             )
-            return f"Memory already exists: {existing_id}"
+            return _memory_exists_response(registry, existing_id, supersedes)
 
         # Dedup stage 2: fuzzy MinHash/LSH (catches typos, casing, punctuation).
         try:
             minhash_index = _get_minhash_index(registry)
             if minhash_index is not None:
-                match = minhash_index.find_duplicate(content)
+                match = minhash_index.find_duplicate(
+                    content,
+                    exclude_ids={supersedes} if supersedes is not None else None,
+                )
                 if match is not None:
                     match_id, similarity = match
                     logger.debug(
@@ -1573,6 +1855,7 @@ def save_memory(
                         match_id=match_id,
                         similarity=round(similarity, 3),
                     )
+                    _refuse_near_duplicate_supersedes(supersedes, match_id, similarity)
                     return f"Fuzzy duplicate (similarity {similarity:.0%}): {match_id}"
         except McpError:
             # _get_minhash_index already wrapped the cause structurally.
@@ -1612,8 +1895,12 @@ def save_memory(
                 data={"stage": "minhash_add", "doc_id": stored_id},
             )
 
+        # Under the lock, so no concurrent save_memory can pass the checks
+        # against a target this call is about to stamp.
+        reply = _supersede_saved_memory(registry, stored_id, supersedes)
+
     _emit_memory_stored_and_enrich(registry, stored_id, content, metadata, chash)
-    return f"Memory saved: {stored_id}"
+    return reply
 
 
 # ---------------------------------------------------------------------------
