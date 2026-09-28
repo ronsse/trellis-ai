@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.stores.base.event_log import EventType
 from trellis_workers.session_capture import capture
@@ -952,9 +953,10 @@ class TestPerSessionBoundary:
             ]
         )
 
-        report = run_capture(
-            registry, transcripts_root=root, watermark_path=wm, llm_client=client
-        )
+        with capture_logs() as logs:
+            report = run_capture(
+                registry, transcripts_root=root, watermark_path=wm, llm_client=client
+            )
 
         assert len(client.calls) == 3
         assert report.sessions_errored == 1
@@ -965,6 +967,13 @@ class TestPerSessionBoundary:
                 "error_class": fault.__name__,
             }
         ]
+        # What the class-only warning withholds reaches the log alone, as the
+        # exception itself, so the traceback renders there.
+        assert [
+            (entry["session_id"], type(entry["exc_info"]))
+            for entry in logs
+            if entry["event"] == "capture_session_failed"
+        ] == [(_POISONED_SESSION, fault)]
         assert _stored_session_ids(registry) == ["sess-fake-0001", "sess-fake-0003"]
         assert report.sessions_with_memory == 2
         # Training pairs only for the sessions that completed: the poisoned
