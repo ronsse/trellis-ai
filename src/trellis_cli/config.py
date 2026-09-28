@@ -47,9 +47,10 @@ class TrellisConfig(TrellisModel):
             return cls(**{k: v for k, v in data.items() if k in cls.model_fields})
         return cls(data_dir=str(get_data_dir()))
 
-    def save(self) -> None:
-        """Save config to file."""
-        config_dir = get_config_dir()
+    def save(self, config_dir: Path | None = None) -> None:
+        """Write ``config.yaml`` into ``config_dir``, default :func:`get_config_dir`."""
+        if config_dir is None:
+            config_dir = get_config_dir()
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "config.yaml"
         config_path.write_text(yaml.dump(self.model_dump(), default_flow_style=False))

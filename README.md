@@ -92,8 +92,9 @@ Every CLI command supports `--format json` for machine output.
 > **Wiring an external agent system into Trellis?** Start at the one-page
 > decision tree:
 > [docs/getting-started/integrate-your-agent.md](https://github.com/ronsse/trellis-ai/blob/main/docs/getting-started/integrate-your-agent.md).
-> MCP-speaking agents get the whole setup — stores, MCP server, and the
-> drop-in skills — in one command: `trellis admin quickstart --with-skills user`.
+> For MCP-speaking agents, `trellis admin quickstart --with-skills user` sets
+> up the stores and the drop-in skills, then prints the `claude mcp add`
+> command that registers the MCP server with Claude Code.
 
 > **Setting up for a team, a data platform, or production?** Local single-user
 > needs no decisions. Beyond that, a few choices are yours to make and easy to
@@ -465,7 +466,7 @@ The Claude Code / Cursor / Claude Desktop rows are first-class — `trellis-mcp`
 
 | | |
 |-|-|
-| [**Claude Code**](https://github.com/ronsse/trellis-ai/blob/main/docs/getting-started/mcp-claude-code.md) | One-command MCP install (`trellis admin quickstart`) |
+| [**Claude Code**](https://github.com/ronsse/trellis-ai/blob/main/docs/getting-started/mcp-claude-code.md) | `trellis admin quickstart`, then the `claude mcp add` command it prints |
 | [**Cursor**](https://github.com/ronsse/trellis-ai/blob/main/docs/getting-started/mcp-cursor.md) | Add Trellis MCP via `~/.cursor/mcp.json` |
 | [**Claude Desktop**](https://github.com/ronsse/trellis-ai/blob/main/docs/getting-started/mcp-claude-desktop.md) | Add Trellis MCP via `claude_desktop_config.json` |
 | [**OpenClaw template**](https://github.com/ronsse/trellis-ai/tree/main/examples/integrations/openclaw) | MCP skill + `openclaw.json` snippet for OpenClaw agents |
