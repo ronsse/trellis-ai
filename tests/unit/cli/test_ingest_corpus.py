@@ -135,13 +135,16 @@ class TestIngestCorpus:
         assert result.exit_code == 0
         assert "new=1" in plain(result.stdout)
 
-    @pytest.mark.parametrize("source_system", ["x[/y]", "ob[bold]sidian"])
+    @pytest.mark.parametrize(
+        "source_system", ["x[/y]", "ob[bold]sidian", "abc\\", "a\\[b]c"]
+    )
     def test_source_system_renders_verbatim(
         self, vault: Path, source_system: str
     ) -> None:
         # The namespace inside every doc id (``corpus:<source_system>:``), so
         # the operator re-types it to re-sync. Rich raised on the unmatched
-        # ``[/y]`` after the sync had committed, and deleted ``[bold]``.
+        # ``[/y]`` after the sync had committed, and deleted ``[bold]``. A
+        # backslash must survive before ``[b]`` and must not double at the end.
         result = runner.invoke(
             app, ["ingest", "corpus", str(vault), "--source-system", source_system]
         )
