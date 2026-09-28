@@ -142,3 +142,53 @@ class TestMain:
         captured = capsys.readouterr()
         assert json.loads(captured.out)["sessions_judge_unavailable"] == 2
         assert "2 session(s) left unjudged" in captured.err
+
+    def test_errored_sessions_fail_a_strict_run_under_their_own_code(
+        self, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        monkeypatch.setattr(
+            capture_main,
+            "run_sweep",
+            MagicMock(return_value=_report(sessions_seen=3, sessions_errored=2)),
+        )
+
+        exit_code = capture_main.main([])
+
+        # Distinct from a judge outage, and from argparse's usage error (2).
+        assert exit_code == capture_main.EXIT_SESSIONS_ERRORED
+        assert exit_code not in {0, 1, 2}
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)["sessions_errored"] == 2
+        assert "2 session(s) raised mid-sweep" in captured.err
+
+    def test_errored_sessions_under_the_opt_out_report_and_exit_zero(
+        self, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "0")
+        monkeypatch.setattr(
+            capture_main,
+            "run_sweep",
+            MagicMock(return_value=_report(sessions_seen=4, sessions_errored=1)),
+        )
+
+        assert capture_main.main([]) == capture_main.EXIT_OK
+
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)["sessions_errored"] == 1
+        assert "1 session(s) raised mid-sweep" in captured.err
+
+    def test_an_outage_and_an_errored_session_both_print(
+        self, monkeypatch, capsys
+    ) -> None:
+        """Both lines print before the exit is decided; the outage code wins."""
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        report = _unjudged_report()
+        report.sessions_errored = 1
+        monkeypatch.setattr(capture_main, "run_sweep", MagicMock(return_value=report))
+
+        assert capture_main.main([]) == capture_main.EXIT_JUDGE_UNAVAILABLE
+
+        err = capsys.readouterr().err
+        assert "2 session(s) left unjudged" in err
+        assert "1 session(s) raised mid-sweep" in err
