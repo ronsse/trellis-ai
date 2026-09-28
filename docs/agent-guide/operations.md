@@ -1965,7 +1965,7 @@ trellis worker capture-sessions [--dry-run] [--format text|json]
 | `--dry-run` | off | Plan the sweep without writing memories or advancing the watermark. |
 | `--format` | `text` | `text` or `json`. |
 
-Everything else is configured by the `TRELLIS_CAPTURE_*` environment variables documented in [session-auto-capture.md](session-auto-capture.md). **Requires a distillation judge** (an `llm:` block): distillation fail-closes, so a sweep without one captures nothing — the command exits non-zero rather than reporting a clean no-op. A judge that goes away *mid*-sweep is counted in `sessions_judge_unavailable`, reported as `"status": "partial"`, and also exits non-zero unless `TRELLIS_CAPTURE_STRICT=0`.
+Everything else is configured by the `TRELLIS_CAPTURE_*` environment variables documented in [session-auto-capture.md](session-auto-capture.md). **Requires a distillation judge** (an `llm:` block): distillation fail-closes, so a sweep without one captures nothing — the command exits non-zero rather than reporting a clean no-op. A judge that goes away *mid*-sweep is counted in `sessions_judge_unavailable`, reported as `"status": "partial"`, and also exits non-zero unless `TRELLIS_CAPTURE_STRICT=0`. A session that raises mid-sweep is skipped and left for retry rather than ending the sweep; it is counted in `sessions_errored` and handled the same way (`"partial"`, non-zero unless `TRELLIS_CAPTURE_STRICT=0`).
 
 ---
 

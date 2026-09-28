@@ -9,7 +9,9 @@ Exit codes follow the sweep's fail-closed contract: no judge at all is always
 a failure (nothing ran, nothing will be retried), and a judge that goes away
 *mid*-sweep is a failure under the default strict mode — see
 :func:`~trellis_workers.session_capture.sweep.strict_mode` for the
-``TRELLIS_CAPTURE_STRICT=0`` opt-out.
+``TRELLIS_CAPTURE_STRICT=0`` opt-out. A session that raised mid-sweep is the
+same kind of partial failure and follows the same strict rule, under its own
+exit code.
 """
 
 from __future__ import annotations
@@ -30,10 +32,12 @@ from trellis_workers.session_capture.sweep import (
 
 logger = structlog.get_logger(__name__)
 
-#: Exit codes. Non-zero means "this sweep did not judge everything it saw" —
-#: the systemd unit surfaces that instead of logging a clean success.
+#: Exit codes. Non-zero means "this sweep did not finish every session it
+#: saw" — the systemd unit surfaces that instead of logging a clean success.
 EXIT_OK = 0
 EXIT_JUDGE_UNAVAILABLE = 1
+#: Not 2: argparse exits 2 on a usage error.
+EXIT_SESSIONS_ERRORED = 3
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -68,8 +72,17 @@ def main(argv: list[str] | None = None) -> int:
             f"trellis-session-capture: {unjudged} session(s) left unjudged — "
             f"the judge was unreachable. They stay un-watermarked for retry.\n"
         )
-        if strict_mode():
+    if report.sessions_errored:
+        sys.stderr.write(
+            f"trellis-session-capture: {report.sessions_errored} session(s) "
+            "raised mid-sweep. They stay un-watermarked for retry; see "
+            "capture_session_failed in the log.\n"
+        )
+    if strict_mode():
+        if unjudged:
             return EXIT_JUDGE_UNAVAILABLE
+        if report.sessions_errored:
+            return EXIT_SESSIONS_ERRORED
     return EXIT_OK
 
 
