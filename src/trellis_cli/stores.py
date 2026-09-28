@@ -43,8 +43,8 @@ def _reset_registry() -> None:
 def _get_registry() -> StoreRegistry:
     """Get or create a cached StoreRegistry singleton from CLI config.
 
-    Delegates to :meth:`StoreRegistry.from_config_dir` so plane-split
-    cloud YAML and the legacy flat shape both work.
+    Delegates to :meth:`StoreRegistry.from_config_dir`, which reads the
+    plane-split ``knowledge:`` / ``operational:`` blocks of config.yaml.
     """
     global _registry  # noqa: PLW0603
     if _registry is None:

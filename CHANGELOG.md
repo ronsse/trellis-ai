@@ -103,6 +103,31 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **BREAKING: a `config.yaml` value that is only a `${VAR}` placeholder now
+  refuses to load.** Trellis never expands environment variables in
+  `config.yaml`, so `password: ${TRELLIS_NEO4J_PASSWORD}` reached the driver
+  as those characters and surfaced, at first use, as an authentication
+  failure that named neither the key nor the cause.
+  `StoreRegistry.from_config_dir` now raises `ConfigError` before any store is
+  built, naming every such key (`knowledge.graph.password is the literal text
+  ${TRELLIS_NEO4J_PASSWORD}`). The CLI, `trellis-api`, the MCP server and the
+  session-capture sweep all build through it, so a config carrying a dormant
+  placeholder, in a key today's command would never read, now refuses too;
+  the CLI exits `5`. The operator forms (`${VAR:-x}`, `${VAR:?x}`,
+  `${VAR:+x}`, ...) count, and the message renders only the variable name,
+  never the text after the operator. A placeholder inside a longer value
+  (`${DATA}/kuzu`) is not refused and still reaches the store literally. To
+  recover, write the value itself, or delete the key where Trellis reads an
+  environment variable in its place (`TRELLIS_NEO4J_PASSWORD` for a neo4j
+  password; for an `llm` or `embeddings` API key, name the variable with
+  `api_key_env`).
+
+- **A flat top-level `stores:` block in `config.yaml` now logs
+  `registry_config_flat_stores_removed`.** The block was removed in 0.6.0 and
+  nothing reads it, so a store configured only there ran on its default
+  backend without a word. It is still ignored; the warning names the file
+  and says to move the entries under `knowledge:` / `operational:`.
+
 - **BREAKING: `ingest corpus --prune` and `ingest conversations --prune` now
   exit `5` with `status: "partial"` when they keep a document they could not
   check, instead of deleting it and exiting `0`** (#633). Corpus prune used to
