@@ -22,7 +22,7 @@ See [`docs/design/adr-terminology.md`](docs/design/adr-terminology.md) for the c
 ## Hard Rules
 
 - **Traces are immutable.** Once ingested, a trace cannot be modified or deleted through normal operations.
-- **The governed mutation boundary is partial.** Graph, trace, feedback, retention, redaction and evidence creation route through `MutationExecutor`. The remaining direct document/vector writes are rostered in `tests/unit/test_governed_write_rule.py`, which may only shrink (decision-ledger T-3).
+- **The governed mutation boundary is partial.** Graph, trace, feedback, retention, redaction and agent-facing evidence creation route through `MutationExecutor`. The remaining direct document/vector writes are rostered in `tests/unit/test_governed_write_rule.py`, which may only shrink (decision-ledger T-3).
 - **Use `--format json` for machine output.** All CLI commands support it. Parse JSON output, not human-readable text. **A command's exit code must not depend on `--format`**: put the exit below the format branch and derive the payload's `status` from the same flag (`tests/unit/test_format_exit_parity_rule.py`).
 - **Extra fields are forbidden.** All schemas use `extra="forbid"` (via `TrellisModel` base). Unrecognized fields cause validation errors.
 - **No copyable handle reaches a Rich renderer raw.** Rich turns `:name:` into an emoji and deletes `[tag]` text. Build consoles with `trellis_cli.output.build_console`, never a bare `Console()`, and wrap identifier- or path-shaped values in `rich.markup.escape`, or pass `markup=False` for a wholly untrusted line (`tests/unit/test_rich_id_markup_rule.py`).
@@ -79,6 +79,7 @@ Operations route through `MutationExecutor` in 5 stages: validate → policy che
 - **Build images with `make docker-build`**; otherwise the stamp reads `fallback-version` with `commit: null` — honestly unidentifiable rather than falsely identified. A stale editable install adds `stamp_stale` and never overwrites `commit`.
 - An advisory step on the write path is wrapped whole, not guarded by a list of exception types, because one escaped exception fails every write; `resolve_stamp_staleness` is the model.
 - Add a write-behaviour knob only in [`write_config.py`](src/trellis/core/write_config.py), with an `ENV_VAR_BY_FIELD` entry. Inspect a process with `trellis admin write-config --format json`, a running API with `GET /api/version`.
+- Every document write goes through `put_document` ([`document_write.py`](src/trellis/core/document_write.py); routing pinned by `tests/unit/core/test_document_write_rule.py`). Its keyword-only `preserve_updated_at` has no default (`test_put_document_signature.py`), and no static rule checks the literal is right, so decide content write vs metadata-only deliberately.
 
 ### Store Abstraction (`src/trellis/stores/`)
 
@@ -87,6 +88,7 @@ Six ABCs in `stores/base/`: TraceStore, DocumentStore, GraphStore, VectorStore, 
 - Backend-specific setup belongs on the store class behind `prepare_registry_params`; `registry.py` never branches on a Bolt backend (`tests/unit/test_registry_plugin_boundary_rule.py`, [`adr-plugin-contract.md`](docs/design/adr-plugin-contract.md#registry-preparation-hook-store-plugins)).
 - The JSON file stores `PolicyStore` and `AdvisoryStore` share [`DegradableJsonStore`](src/trellis/stores/degradable_json_store.py): reads degrade, writes refuse. A third such file gets a subclass, never a copy.
 - **Contract test suites** in `tests/unit/stores/contracts/` are the authoritative spec, not the ABC docstrings; a new backend subclasses `GraphStoreContractTests` or `VectorStoreContractTests` ([`adr-canonical-graph-layer.md`](docs/design/adr-canonical-graph-layer.md)).
+- A shape-#2 vector store overrides the no-op `provision_storage` to create its backing node rather than weakening the contract (`test_provisioning_alone_stores_no_vector`). `scripts/check_live_floor.py` fails live-infra when a contract passes fewer cases, or skips more, than its `FLOORS` row allows.
 
 | Store | Default | Cloud |
 |-------|---------|-------|
