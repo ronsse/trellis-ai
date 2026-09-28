@@ -1140,6 +1140,30 @@ _BAD_FIELDS = [
         "class_confidence", 10**400, "class_confidence", None, id="class-conf-huge"
     ),
     pytest.param("tags", "not-a-list", "auto_tags", [], id="tags-string"),
+    # ``json.loads`` accepts NaN and ±Infinity, and ``float()`` reads them
+    # (and their quoted spellings) without raising. Each reads as a number too
+    # large for a float already does: the absent-key value, never a clamp.
+    pytest.param(
+        "importance", float("nan"), "auto_importance", 0.0, id="importance-nan"
+    ),
+    pytest.param(
+        "importance", "nan", "auto_importance", 0.0, id="importance-nan-string"
+    ),
+    pytest.param(
+        "importance", float("inf"), "auto_importance", 0.0, id="importance-inf"
+    ),
+    pytest.param(
+        "importance", float("-inf"), "auto_importance", 0.0, id="importance-neg-inf"
+    ),
+    pytest.param(
+        "tag_confidence", float("nan"), "tag_confidence", None, id="tag-conf-nan"
+    ),
+    pytest.param(
+        "class_confidence", float("inf"), "class_confidence", None, id="class-conf-inf"
+    ),
+    pytest.param(
+        "tag_confidence", "-inf", "tag_confidence", None, id="tag-conf-neg-inf-string"
+    ),
 ]
 
 
@@ -1181,3 +1205,70 @@ class TestWrongTypedField:
         assert result.auto_importance == 0.7
         assert result.importance_scored_at is not None
         assert event_log.get_events(event_type=EventType.EXTRACTION_FAILED) == []
+
+    @pytest.mark.parametrize(
+        ("key", "raw", "clamped"),
+        [
+            pytest.param("tag_confidence", 1.5, 1.0, id="tag-conf-above-one"),
+            pytest.param("class_confidence", -0.2, 0.0, id="class-conf-below-zero"),
+            pytest.param("tag_confidence", "7", 1.0, id="tag-conf-quoted-seven"),
+        ],
+    )
+    async def test_out_of_range_confidence_is_clamped(
+        self, event_log: SQLiteEventLog, key: str, raw: Any, clamped: float
+    ) -> None:
+        # Unlike the rows above, a finite number out of range is still a
+        # reading, so it clamps into [0, 1] rather than degrading to None.
+        response = json.dumps({**_GOOD_FIELDS, key: raw})
+        service = EnrichmentService(llm=_make_llm(response), event_log=event_log)
+        result = await service.enrich(content="c")
+
+        assert result.success is True
+        assert {name: getattr(result, name) for name in _GOOD_PARSED} == {
+            **_GOOD_PARSED,
+            key: clamped,
+        }
+
+
+# ---------------------------------------------------------------------------
+# The brace-regex salvage decodes a second time, and that decode fails in two
+# ways ``json.JSONDecodeError`` does not cover: an integer past the 4,300-digit
+# conversion limit raises ``ValueError`` and a nest past the recursion limit
+# raises ``RecursionError``. Both are malformed replies, not crashes: before,
+# either one escaped ``enrich()``, which parses outside its broad catch.
+# ---------------------------------------------------------------------------
+
+_SALVAGE_ESCAPES = [
+    pytest.param(
+        'Result: {"importance": ' + "1" * 4301 + "}",
+        "ValueError",
+        id="int-digit-limit",
+    ),
+    pytest.param(
+        'Result: {"tags": ' + "[" * 100_000 + "]" * 100_000 + "}",
+        "RecursionError",
+        id="deep-nest",
+    ),
+]
+
+
+class TestSalvageDecodeEscape:
+    @pytest.mark.parametrize(("response", "error_class"), _SALVAGE_ESCAPES)
+    async def test_salvage_decode_failure_is_a_parse_error(
+        self, event_log: SQLiteEventLog, response: str, error_class: str
+    ) -> None:
+        service = EnrichmentService(llm=_make_llm(response), event_log=event_log)
+        result = await service.enrich(content="source document")
+
+        assert result.success is False
+        assert result.failure_kind == "parse_error"
+        assert result.error.startswith("Invalid JSON: ")
+        assert result.parse_salvaged is False
+        assert result.importance_scored_at is None
+
+        events = event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
+        assert [e.payload["error_class"] for e in events] == [error_class]
+        assert events[0].payload["failure_kind"] == "parse_error"
+        assert (
+            event_log.get_events(event_type=EventType.EXTRACTION_PARSE_SALVAGED) == []
+        )

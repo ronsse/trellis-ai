@@ -40,7 +40,11 @@ from trellis.extract.telemetry import (
     emit_extraction_failure,
     emit_parse_salvaged,
 )
-from trellis.llm.json_response import JSONParseOutcome, parse_json_response
+from trellis.llm.json_response import (
+    JSONParseOutcome,
+    coerce_finite_float,
+    parse_json_response,
+)
 from trellis.schemas.enums import NodeRole
 from trellis.schemas.extraction import (
     EdgeDraft,
@@ -375,7 +379,9 @@ def _try_json_loads_with_exc(text: str) -> tuple[Any | None, Exception | None]:
     ``(None, exc)`` on failure."""
     try:
         return json.loads(text), None
-    except json.JSONDecodeError as exc:
+    # ValueError and RecursionError: an over-long integer or a deep nest
+    # inside the brace span is malformed too.
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
         return None, exc
 
 
@@ -500,10 +506,13 @@ def _edge_draft_from_raw(raw: dict[str, Any]) -> EdgeDraft | None:
 
 
 def _clamp_confidence(value: Any, default: float = 0.5) -> float:
-    """Coerce an arbitrary value to a float in ``[0.0, 1.0]``."""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
+    """Coerce an arbitrary value to a float in ``[0.0, 1.0]``.
+
+    NaN, ±Infinity and a number too large for a float take ``default``, as
+    a non-number does.
+    """
+    number = coerce_finite_float(value)
+    if number is None:
         return default
     if number < 0.0:
         return 0.0

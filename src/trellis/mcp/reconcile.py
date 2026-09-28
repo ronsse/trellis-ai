@@ -53,7 +53,11 @@ from trellis.core.document_write import put_document
 from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.core.write_config import WriteBehaviourConfig
-from trellis.llm.json_response import JSONParseOutcome, parse_json_response
+from trellis.llm.json_response import (
+    JSONParseOutcome,
+    coerce_finite_float,
+    parse_json_response,
+)
 from trellis.llm.types import Message
 from trellis.schemas.classification import Lifecycle
 from trellis.schemas.memory_op import (
@@ -266,7 +270,8 @@ def parse_verdict(raw: str) -> tuple[ReconcileDecision, float] | None:
     """Parse a strict verdict JSON blob.
 
     Returns ``(decision, confidence)`` or ``None`` when the response is not
-    valid — an unknown decision, a non-numeric confidence, or non-JSON. A
+    valid — an unknown decision, a non-numeric or non-finite (NaN, ±Infinity,
+    too large for a float) confidence, or non-JSON. A
     ``None`` return is the malformed-response signal the caller turns into a
     safe fallback ADD.
     """
@@ -289,11 +294,10 @@ def parse_verdict(raw: str) -> tuple[ReconcileDecision, float] | None:
     if isinstance(confidence_raw, bool):
         # bool is an int subclass; a boolean confidence is malformed.
         return None
-    try:
-        confidence = float(confidence_raw)
-    except (TypeError, ValueError):
+    confidence = coerce_finite_float(confidence_raw)
+    if confidence is None:
         return None
-    # Clamp rather than reject an out-of-range score — the decision is the
+    # Clamp rather than reject a finite out-of-range score — the decision is the
     # load-bearing field; the confidence is advisory.
     confidence = max(0.0, min(1.0, confidence))
     return decision, confidence

@@ -55,6 +55,68 @@ def test_parse_candidates_non_array_is_malformed() -> None:
     assert result.outcome is distill.DistillOutcome.MALFORMED
 
 
+def test_parse_candidates_reads_a_non_finite_confidence_as_absent() -> None:
+    """NaN, ±Infinity and a too-large number fall back to the absent-key 0.5.
+
+    json.loads accepts all three. Before this, a 311-digit integer raised
+    OverflowError out of the parse, and NaN clamped to the maximum 1.0.
+    """
+    topics = [
+        "cache eviction",
+        "queue retries",
+        "schema drift",
+        "lock ordering",
+        "log rotation",
+        "token refresh",
+        "index rebuild",
+        "clock skew",
+        "port collision",
+        "disk quota",
+    ]
+    confidences: list[object] = [
+        0.9,
+        0.3,
+        7,
+        -2,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        10**310,
+        "high",
+        "nan",
+    ]
+    items = [
+        good_candidate(
+            title=f"{topic.capitalize()} needs its guard step",
+            memory=(
+                f"Synthetic note {index}: the {topic} step fails unless its "
+                "guard runs first; add the guard before the deploy."
+            ),
+            confidence=confidence,
+        )
+        for index, (topic, confidence) in enumerate(
+            zip(topics, confidences, strict=True)
+        )
+    ]
+
+    result = distill.parse_candidates(candidates_json(*items), "sess-fake-0001")
+
+    assert result.outcome is distill.DistillOutcome.CANDIDATES
+    assert [c.title for c in result.candidates] == [i["title"] for i in items]
+    assert [c.confidence for c in result.candidates] == [
+        0.9,
+        0.3,
+        1.0,
+        0.0,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+    ]
+
+
 def test_parse_candidates_skips_items_missing_fields() -> None:
     raw = candidates_json({"title": "only a title"}, good_candidate())
     result = distill.parse_candidates(raw, "s")

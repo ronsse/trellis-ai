@@ -1214,6 +1214,30 @@ class TestWorkerEnrich:
             0.6
         )
 
+    def test_a_nan_importance_writes_no_importance(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """``NaN`` decodes, and is truthy, so it used to reach the row unstamped.
+
+        The serve-time reader raises on an unstamped ``auto_importance``, so on
+        SQLite that one row dropped the keyword axis from every pack it met.
+        """
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-x", "enrich me", {"title": "X"})
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM(
+                '{"tags": ["alpha"], "importance": NaN}'
+            ),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["enriched"] == 1
+        metadata = doc_store.get("doc-x")["metadata"]
+        assert metadata["content_tags"]["custom"]["llm_tags"] == ["alpha"]
+        assert "auto_importance" not in metadata
+
 
 # ===========================================================================
 # worker mine-precedents (WP3)
