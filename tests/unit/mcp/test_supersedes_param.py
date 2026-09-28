@@ -146,12 +146,17 @@ def _served(ctx: str, item_id: str) -> bool:
     return f"`{item_id}`" in ctx
 
 
-def _write_policy(reg: StoreRegistry, operation: str) -> None:
-    """Deny ``operation`` globally. Written after seeding, read per build."""
+def _write_policy(
+    reg: StoreRegistry, operation: str, scope: PolicyScope | None = None
+) -> None:
+    """Deny ``operation``, globally unless ``scope`` narrows it.
+
+    Written after seeding, read per build.
+    """
     assert reg.stores_dir is not None
     policy = Policy(
         policy_type=PolicyType.MUTATION,
-        scope=PolicyScope(level="global", value=None),
+        scope=scope or PolicyScope(level="global", value=None),
         rules=[PolicyRule(operation=operation, action="deny")],
         enforcement=Enforcement.ENFORCE,
     )
@@ -976,6 +981,63 @@ def test_node_stamp_failure_creates_no_entity(temp_registry):
     assert graph.count_nodes() == nodes_before
     assert declared_successor(_props(reg, n_old)) is None
     assert declared_successor(_meta(reg, t_doc)) is None
+
+
+def test_node_stamp_is_governed_by_a_policy_on_the_node_type(temp_registry):
+    # The stamp is an entity.update on the old node, so a policy scoped to
+    # that node's type governs it exactly as it governs a direct update.
+    reg = temp_registry
+    graph = reg.knowledge.graph_store
+    n_old, t_doc = _entity_ids(
+        save_knowledge(name=NAME, content=T_TEXT, entity_type="zf-rig")
+    )
+    nodes_before = graph.count_nodes()
+    _write_policy(
+        reg, "entity.update", PolicyScope(level="entity_type", value="zf-rig")
+    )
+
+    with pytest.raises(McpError) as excinfo:
+        save_knowledge(name=NAME, content=X_TEXT, supersedes=n_old)
+
+    assert excinfo.value.error.code == MUTATION_FAILED
+    assert excinfo.value.error.data["supersession_applied"] == []
+    assert graph.count_nodes() == nodes_before
+    assert declared_successor(_props(reg, n_old)) is None
+    assert declared_successor(_meta(reg, t_doc)) is None
+
+
+def test_a_stamp_that_raises_is_reported_not_raised(temp_registry, monkeypatch):
+    # Both stamps promise never to raise. One escaping after the store would
+    # leave the memory saved and indexed, skip MEMORY_STORED, and report the
+    # saved write as an error.
+    supersession = importlib.import_module("trellis.mcp.supersession")
+    reg = temp_registry
+    t = _doc_id(save_memory(T_TEXT))
+    n_old, _ = _entity_ids(save_knowledge(name=NAME, content=T7_OLD))
+    t_before = reg.knowledge.document_store.get(t)
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        msg = "executor unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(supersession, "build_curate_executor", broken)
+
+    node_error = supersession.supersede_entity(
+        reg, node_id=n_old, successor="zf-z", requested_by="mcp:save_knowledge"
+    )
+    reply = save_memory(X_TEXT, supersedes=t)
+
+    assert node_error == "RuntimeError: executor unavailable"
+    x = _doc_id(reply)
+    assert reply == (
+        f"Memory saved: {x}\nWarning: supersession NOT applied — {t} is "
+        "unchanged (RuntimeError: executor unavailable). Re-send the same call "
+        "to retry; it will not store a duplicate."
+    )
+    stored = [e for e in _events(reg, EventType.MEMORY_STORED) if e.entity_id == x]
+    assert len(stored) == 1
+    assert reg.knowledge.document_store.get(t) == t_before
+    assert declared_successor(_props(reg, n_old)) is None
 
 
 def test_stamp_names_a_target_removed_after_the_check(temp_registry):
