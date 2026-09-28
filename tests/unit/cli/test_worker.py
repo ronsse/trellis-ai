@@ -1214,6 +1214,39 @@ class TestWorkerEnrich:
             0.6
         )
 
+    def test_a_failed_item_logs_its_failure_kind(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """``failure_kind`` is a plain string, so the log carries it as one.
+
+        Reading ``.value`` off it (an enum idiom) always produced ``None``.
+        """
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-x", "enrich me", {"title": "X"})
+        calls: list[tuple[str, str, dict[str, Any]]] = []
+
+        class _Recorder:
+            def __getattr__(self, level: str):
+                def record(event: str, **kwargs: Any) -> None:
+                    calls.append((level, event, kwargs))
+
+                return record
+
+        monkeypatch.setattr(worker, "logger", _Recorder())
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM("I cannot classify this."),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        failed = [
+            kw for level, event, kw in calls if event == "worker_enrich.item_failed"
+        ]
+        assert [(kw["doc_id"], kw["failure_kind"]) for kw in failed] == [
+            ("doc-x", "parse_error")
+        ]
+
     def test_a_nan_importance_writes_no_importance(
         self, temp_stores: StoreRegistry, monkeypatch
     ) -> None:
