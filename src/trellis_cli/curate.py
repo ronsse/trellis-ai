@@ -60,7 +60,7 @@ def _execute_command(cmd: Command, output_format: str) -> None:
                 f"[red]\u2717 Command {result.status}[/red]: {result.operation}"
             )
         console.print(f"  ID: {escape(result.command_id)}")
-        console.print(f"  Message: {result.message}")
+        console.print(f"  Message: {result.message}", markup=False, highlight=False)
         for warning in result.warnings:
             console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}")
 
@@ -481,10 +481,10 @@ def entity(
         console.print(
             f"[green]\u2713 Entity created[/green]: {escape(str(result.created_id))}"
         )
-        console.print(f"  Type: {entity_type}")
-        console.print(f"  Name: {name}")
+        console.print(f"  Type: {entity_type}", markup=False, highlight=False)
+        console.print(f"  Name: {name}", markup=False, highlight=False)
         if properties:
-            console.print(f"  Properties: {props}")
+            console.print(f"  Properties: {props}", markup=False, highlight=False)
 
 
 @curate_app.command()

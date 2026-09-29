@@ -109,7 +109,8 @@ _FALLBACK_RATE_YELLOW = 0.2
 # plan-self-improvement-program.md §2 ("loud on misuse" — the library raises
 # when called without a registry; defaults are deliberately operator-facing).
 # Operators dismiss the WARN by running 'trellis admin init-learning-params'
-# which seeds these values to ``~/.config/trellis/learning_params.yaml``.
+# which seeds these values to ``learning_params.yaml`` in the config dir
+# (``$TRELLIS_CONFIG_DIR``, else ``~/.trellis``).
 LEARNING_PARAMETER_SEED_DEFAULTS: dict[str, float] = {
     LEARNING_PROMOTE_SUCCESS_KEY: 0.75,
     LEARNING_PROMOTE_RETRY_KEY: 0.25,
@@ -217,7 +218,7 @@ def _load_learning_params_config() -> dict[str, float] | None:
 def _build_learning_registry() -> ParameterRegistry:
     """Construct a ParameterRegistry for the learning.scoring component.
 
-    Loads ``~/.config/trellis/learning_params.yaml`` if present; otherwise
+    Loads ``learning_params.yaml`` from the config dir if present; otherwise
     seeds an in-memory store with :data:`LEARNING_PARAMETER_SEED_DEFAULTS`
     and emits a single WARN log line pointing the operator at
     ``trellis admin init-learning-params``.
@@ -1063,7 +1064,7 @@ def value(
                 f"item[/bold] "
                 f"[dim](${report.injected_dollars:,.4f} across "
                 f"{report.distinct_helpful_items} cited items, at "
-                f"${report.price_per_mtok:g}/Mtok {report.model}, "
+                f"${report.price_per_mtok:g}/Mtok {escape(report.model)}, "
                 f"{report.price_source})[/dim]"
             )
 
@@ -1270,7 +1271,7 @@ def cost(
     console.print(
         f"  [green]≈ ${report.overhead_dollars:,.4f}[/green] "
         f"at ${report.price_per_mtok:g}/Mtok input "
-        f"({report.model}, {report.price_source})"
+        f"({escape(report.model)}, {report.price_source})"
     )
     console.print(
         "  [dim]This is the marginal input-token overhead memory adds to "

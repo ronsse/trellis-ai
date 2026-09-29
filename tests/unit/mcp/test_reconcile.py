@@ -173,6 +173,24 @@ class TestParseVerdict:
             '{"confidence": 0.5}',  # missing decision
             '{"decision": "add", "confidence": "high"}',  # non-numeric
             '{"decision": "add", "confidence": true}',  # bool is malformed
+            # Non-finite: json.loads accepts all of these.
+            pytest.param('{"decision": "supersede", "confidence": NaN}', id="nan"),
+            pytest.param('{"decision": "noop", "confidence": Infinity}', id="infinity"),
+            pytest.param(
+                '{"decision": "update", "confidence": -Infinity}', id="neg-infinity"
+            ),
+            pytest.param(
+                '{"decision": "add", "confidence": 1e999}', id="1e999-decodes-to-inf"
+            ),
+            pytest.param(
+                '{"decision": "supersede", "confidence": 1' + "0" * 310 + "}",
+                id="overflowing-int",
+            ),
+            pytest.param(
+                '{"decision": "noop", "confidence": "nan"}',
+                id="nan-string-float-reads-nan",
+            ),
+            pytest.param("[" * 100_000, id="nested-past-recursion-limit"),
         ],
     )
     def test_malformed_returns_none(self, raw: str) -> None:
@@ -444,6 +462,31 @@ class TestFallbacks:
     ) -> None:
         base_id = _doc_id(save_memory(_BASE))
         _enable(monkeypatch, FakeLLMClient(content="I think you should keep both!"))
+        self._assert_skipped_add(
+            temp_registry,
+            base_id,
+            save_memory(_NEAR),
+            ReconcileFallbackReason.MALFORMED_RESPONSE,
+        )
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(
+                '{"decision": "supersede", "confidence": 1' + "0" * 310 + "}",
+                id="overflowing-int",
+            ),
+            pytest.param('{"decision": "supersede", "confidence": NaN}', id="nan"),
+        ],
+    )
+    def test_non_finite_confidence_adds_with_marker(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        content: str,
+    ) -> None:
+        base_id = _doc_id(save_memory(_BASE))
+        _enable(monkeypatch, FakeLLMClient(content=content))
         self._assert_skipped_add(
             temp_registry,
             base_id,

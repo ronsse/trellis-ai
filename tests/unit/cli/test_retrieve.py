@@ -806,6 +806,31 @@ class TestUntrustedTextRendering:
         assert result.exit_code == 0
         self._assert_literal(assert_coloured(result.stdout), f"Intent: {intent}")
 
+    def test_pack_domain_and_agent_survive_markup_under_colour(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import trellis_cli.retrieve as cli_retrieve
+
+        force_colour(monkeypatch, cli_retrieve)
+        result = runner.invoke(
+            app,
+            [
+                "retrieve",
+                "pack",
+                "--intent",
+                "q",
+                "--domain",
+                "[bold]d[/x]",
+                "--agent",
+                "[bold]a[/y]",
+            ],
+        )
+
+        assert result.exit_code == 0, plain(result.output)
+        rendered = assert_coloured(result.stdout)
+        self._assert_literal(rendered, "Domain: [bold]d[/x]")
+        self._assert_literal(rendered, "Agent: [bold]a[/y]")
+
     def test_trace_intent_survives_markup_under_colour(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -567,6 +567,108 @@ def test_reconcile_flag_on_drops_near_duplicate(tmp_path: Path, monkeypatch) -> 
     assert len(_stored_captures(registry)) == 1
 
 
+def _varied_error_session(root: Path, n: int, ask: str) -> None:
+    """A capture-mandatory session with its own text and its own tool id."""
+    session_id = f"sess-fake-000{n}"
+    write_transcript(
+        root / "proj" / f"{session_id}.jsonl",
+        [
+            user_turn(ask, session_id),
+            assistant_turn(f"running step {n}", "Bash", session_id, use_id=f"t-{n}"),
+            tool_result_turn(
+                is_error=True, session_id=session_id, tool_use_id=f"t-{n}"
+            ),
+        ],
+    )
+
+
+_TOMBSTONE = good_candidate(
+    title="Cache warmer must skip tombstones",
+    memory=(
+        "The cache warmer re-reads tombstoned keys unless the skip flag is on; "
+        "enable it before the nightly warm, or evicted rows reappear in the "
+        "read path until the next compaction."
+    ),
+)
+_RETRY = good_candidate(
+    title="Queue consumer needs the retry flag",
+    memory=(
+        "The gizmo queue consumer drops poison messages unless the retry flag "
+        "is set; set it in the consumer config before scaling out, or messages "
+        "are lost on the first transient failure."
+    ),
+    confidence=0.7,
+)
+
+
+def _sweeps(registry: MagicMock) -> int:
+    return len(
+        registry.operational.event_log.get_events(
+            event_type=EventType.CAPTURE_SWEEP_COMPLETED
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("poison", "written", "malformed", "judged"),
+    [
+        pytest.param(
+            candidates_json({**_TOMBSTONE, "confidence": 10**310}),
+            3,
+            0,
+            [0.5, 0.7, 0.9],
+            id="overflowing-confidence",
+        ),
+        pytest.param(
+            candidates_json({**_TOMBSTONE, "confidence": float("nan")}),
+            3,
+            0,
+            [0.5, 0.7, 0.9],
+            id="nan-confidence",
+        ),
+        pytest.param("[" * 100_000, 2, 1, [0.7, 0.9], id="nested-past-limit"),
+    ],
+)
+def test_one_poison_reply_does_not_abort_the_sweep(
+    tmp_path: Path, poison: str, written: int, malformed: int, judged: list[float]
+) -> None:
+    """One bad reply costs at most its own session, never the whole night.
+
+    Before the fix the overflow and the deep nest raised out of the parse, so
+    the per-session boundary counted that session errored and it wrote
+    nothing; NaN was judged at confidence 1.0.
+    """
+    registry = _registry(tmp_path)
+    root = tmp_path / "projects"
+    for n, ask in enumerate(
+        ("run the deploy", "rebuild the cache", "restart the consumer"), start=1
+    ):
+        _varied_error_session(root, n, ask)
+    wm = tmp_path / "wm.json"
+    client = FakeLLMClient(
+        [
+            candidates_json(good_candidate(confidence=0.9)),
+            poison,
+            candidates_json(_RETRY),
+        ]
+    )
+
+    report = run_capture(
+        registry, transcripts_root=root, watermark_path=wm, llm_client=client
+    )
+
+    assert len(client.calls) == 3  # the session after the poison was judged
+    # The parser absorbed the reply; the per-session boundary never fired.
+    assert report.sessions_errored == 0
+    assert report.sessions_triggered == 3
+    assert report.sessions_judge_malformed == malformed
+    assert report.memories_written == written
+    assert len(_stored_captures(registry)) == written
+    assert sorted(p["confidence"] for p in _judged_payloads(registry)) == judged
+    assert len(json.loads(wm.read_text())["cursors"]) == 3
+    assert _sweeps(registry) == 1
+
+
 def test_ephemeral_project_is_skipped_and_counted(tmp_path: Path) -> None:
     """A throwaway-directory session is skipped, and the skip is visible.
 

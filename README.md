@@ -419,11 +419,11 @@ flowchart LR
     style Substrates fill:#0b1120,stroke:#6366f1,stroke-width:1px,stroke-dasharray:6 4,color:#a5b4fc;
 ```
 
-Each store binds to a substrate through `~/.config/trellis/config.yaml`; the table below has the exact store-by-store mapping. In the diagram, green-bordered substrates are blessed defaults and dashed ones are alternates. Choosing pgvector collocates keyword, semantic, and graph retrieval in a single Postgres transaction — one DSN, one consistency story. **Neo4j (and AuraDB)** is supported as a graph-native alternative for graph + vector when you want Cypher-native traversal or are already on a managed Neo4j instance.
+Each store binds to a substrate through `~/.trellis/config.yaml`; the table below has the exact store-by-store mapping. In the diagram, green-bordered substrates are blessed defaults and dashed ones are alternates. Choosing pgvector collocates keyword, semantic, and graph retrieval in a single Postgres transaction — one DSN, one consistency story. **Neo4j (and AuraDB)** is supported as a graph-native alternative for graph + vector when you want Cypher-native traversal or are already on a managed Neo4j instance.
 
 ## Storage — local or cloud
 
-Backends are wired from `~/.config/trellis/config.yaml`. SQLite is the local default; **ArcadeDB is the blessed graph + vector substrate** (Apache 2.0, Bolt + openCypher 25, native HNSW via jVector) — see [`docs/design/adr-arcadedb-blessed-substrate.md`](docs/design/adr-arcadedb-blessed-substrate.md) and [`docs/deployment/recommended-config.yaml`](docs/deployment/recommended-config.yaml) for the recommended shape. **Postgres + pgvector** remains a supported alternative for shops standardized on Postgres. **Neo4j / AuraDB** is the migration target for existing Neo4j deployments — see [`docs/deployment/neo4j-local.md`](docs/deployment/neo4j-local.md) and [`docs/deployment/neo4j-auradb.md`](docs/deployment/neo4j-auradb.md).
+Backends are wired from `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`). SQLite is the local default; **ArcadeDB is the blessed graph + vector substrate** (Apache 2.0, Bolt + openCypher 25, native HNSW via jVector) — see [`docs/design/adr-arcadedb-blessed-substrate.md`](docs/design/adr-arcadedb-blessed-substrate.md) and [`docs/deployment/recommended-config.yaml`](docs/deployment/recommended-config.yaml) for the recommended shape. **Postgres + pgvector** remains a supported alternative for shops standardized on Postgres. **Neo4j / AuraDB** is the migration target for existing Neo4j deployments — see [`docs/deployment/neo4j-local.md`](docs/deployment/neo4j-local.md) and [`docs/deployment/neo4j-auradb.md`](docs/deployment/neo4j-auradb.md).
 
 | Store | Local default | Cloud blessed | Alternatives |
 |-------|---------------|---------------|--------------|
@@ -432,16 +432,14 @@ Backends are wired from `~/.config/trellis/config.yaml`. SQLite is the local def
 | Vector | `sqlite` | **`arcadedb`** (native HNSW) | `pgvector`, `neo4j` (HNSW on `:Node`) |
 | Blob | `local` | `s3` | — |
 
-For copy-paste config, see [`docs/deployment/recommended-config.yaml`](docs/deployment/recommended-config.yaml) — three blessed shapes (local Neo4j+SQLite, cloud AuraDB+Postgres, Postgres-only). Set `TRELLIS_VALIDATE_CONNECTIVITY=1` in production to fail-fast at startup if Neo4j is unreachable.
+For copy-paste config, see [`docs/deployment/recommended-config.yaml`](docs/deployment/recommended-config.yaml) — four shapes: ArcadeDB (blessed), Neo4j local, Neo4j cloud (AuraDB + Postgres) and Postgres-only. The REST API (`trellis-api` or `trellis admin serve`) builds every store when it starts, so a missing DSN or bucket stops startup instead of failing the first request. `TRELLIS_VALIDATE_CONNECTIVITY=1` also checks each cached Bolt driver (Neo4j, ArcadeDB graph) with one round-trip.
 
 ```yaml
-stores:
+knowledge:
   graph:
-    backend: postgres
-    dsn: postgresql://user:pass@host/db
+    backend: postgres   # DSN from TRELLIS_KNOWLEDGE_PG_DSN
   vector:
-    backend: pgvector
-    dsn: postgresql://user:pass@host/db
+    backend: pgvector   # DSN from TRELLIS_KNOWLEDGE_PG_DSN
   blob:
     backend: s3
     bucket: trellis-artifacts

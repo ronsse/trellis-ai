@@ -391,6 +391,21 @@ class TestDraftRobustness:
         confs = [e.confidence for e in result.entities]
         assert confs == [1.0, 0.0, 0.5]  # clamped / defaulted
 
+    async def test_a_boolean_confidence_reads_as_a_number(self) -> None:
+        # bool is an int subclass, and ``coerce_finite_float`` sets no bool
+        # policy: the extractor reads true as 1.0 and false as 0.0, as it did
+        # before the helper.
+        payload = {
+            "entities": [
+                {"entity_type": "p", "name": "X", "confidence": True},
+                {"entity_type": "p", "name": "Y", "confidence": False},
+            ],
+            "edges": [],
+        }
+        fake = FakeLLMClient(response_text=json.dumps(payload))
+        result = await LLMExtractor(llm_client=fake).extract("x")
+        assert [e.confidence for e in result.entities] == [1.0, 0.0]
+
     async def test_properties_not_dict_defaulted(self) -> None:
         payload = {
             "entities": [
@@ -898,3 +913,109 @@ class TestParseSalvageCount:
         assert [e.payload["failure_kind"] for e in failed_events] == [
             "validation_error"
         ]
+
+
+# ---------------------------------------------------------------------------
+# ``json.loads`` accepts NaN and ±Infinity, and an integer past float range
+# decodes to an ``int`` that ``float()`` cannot convert. None of them is a
+# usable confidence, so each takes the non-numeric default: not a clamp to a
+# bound, not a draft that fails validation and discards the whole extraction,
+# and not an ``OverflowError`` out of ``extract()``.
+# ---------------------------------------------------------------------------
+
+_NON_FINITE_CONFIDENCES = [
+    pytest.param(float("nan"), id="nan"),
+    pytest.param(float("inf"), id="inf"),
+    pytest.param(float("-inf"), id="neg-inf"),
+    pytest.param(10**310, id="int-past-float-range"),
+    pytest.param("nan", id="nan-string"),
+    pytest.param("inf", id="inf-string"),
+]
+
+
+class TestNonFiniteConfidence:
+    @pytest.mark.parametrize("bad", _NON_FINITE_CONFIDENCES)
+    async def test_entity_confidence_takes_the_default(self, bad: object) -> None:
+        payload = {
+            "entities": [
+                {"entity_type": "p", "name": "X", "confidence": bad},
+                {"entity_type": "p", "name": "Y", "confidence": 0.8},
+            ],
+            "edges": [
+                {
+                    "source_id": "X",
+                    "target_id": "Y",
+                    "edge_kind": "e",
+                    "confidence": 0.7,
+                }
+            ],
+        }
+        ext = LLMExtractor(llm_client=FakeLLMClient(json.dumps(payload)))
+        result = await ext.extract("x")
+        assert [e.confidence for e in result.entities] == [0.5, 0.8]
+        assert [e.confidence for e in result.edges] == [0.7]
+
+    @pytest.mark.parametrize("bad", _NON_FINITE_CONFIDENCES)
+    async def test_edge_confidence_takes_the_default(self, bad: object) -> None:
+        payload = {
+            "entities": [
+                {"entity_type": "p", "name": "X", "confidence": 0.9},
+                {"entity_type": "p", "name": "Y", "confidence": 0.8},
+            ],
+            "edges": [
+                {
+                    "source_id": "X",
+                    "target_id": "Y",
+                    "edge_kind": "e",
+                    "confidence": bad,
+                }
+            ],
+        }
+        ext = LLMExtractor(llm_client=FakeLLMClient(json.dumps(payload)))
+        result = await ext.extract("x")
+        assert [e.confidence for e in result.entities] == [0.9, 0.8]
+        assert [e.confidence for e in result.edges] == [0.5]
+
+
+# ---------------------------------------------------------------------------
+# The brace-span fallback decodes a second time, outside the shared parser, and
+# that decode can fail in two ways ``json.JSONDecodeError`` does not cover.
+# Both are malformed replies: reported and raised as a parse error, not an
+# exception out of ``extract()`` that no ``extraction.failed`` row records.
+# ---------------------------------------------------------------------------
+
+_BRACE_SPAN_ESCAPES = [
+    pytest.param(
+        'Result: {"entities": ' + "[" * 100_000 + "]" * 100_000 + "}",
+        "RecursionError",
+        id="deep-nest",
+    ),
+    pytest.param(
+        'Result: {"entities": [], "n": ' + "1" * 4301 + "}",
+        "ValueError",
+        id="int-digit-limit",
+    ),
+]
+
+
+class TestBraceSpanDecodeEscape:
+    @pytest.mark.parametrize(("response", "error_class"), _BRACE_SPAN_ESCAPES)
+    async def test_a_brace_span_decode_failure_is_a_parse_error(
+        self, salvage_event_log, response: str, error_class: str
+    ) -> None:
+        from trellis.extract.telemetry import ExtractionFailureError
+        from trellis.stores.base.event_log import EventType
+
+        ext = LLMExtractor(
+            llm_client=FakeLLMClient(response), event_log=salvage_event_log
+        )
+        with pytest.raises(ExtractionFailureError) as excinfo:
+            await ext.extract("input text", source_hint="freetext")
+
+        assert excinfo.value.failure_kind == "parse_error"
+        failed = salvage_event_log.get_events(event_type=EventType.EXTRACTION_FAILED)
+        assert [e.payload["error_class"] for e in failed] == [error_class]
+        assert (
+            salvage_event_log.get_events(event_type=EventType.EXTRACTION_PARSE_SALVAGED)
+            == []
+        )

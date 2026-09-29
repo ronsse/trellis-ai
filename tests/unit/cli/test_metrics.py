@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import assert_coloured, force_colour, plain
 from trellis.ops import record_outcome
 from trellis.schemas.outcome import GRAPH_SEARCH_COMPONENT_ID
 from trellis.schemas.parameters import (
@@ -21,6 +22,8 @@ from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.outcome import SQLiteOutcomeStore
 from trellis.stores.sqlite.parameter import SQLiteParameterStore
 from trellis.stores.sqlite.tuner_state import SQLiteTunerStateStore
+from trellis_cli import metrics as metrics_cli
+from trellis_cli import worker as worker_cli
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -96,6 +99,7 @@ def _seed_uncited_graph_outcomes(
     served_each: int = 5,
     referenced_total: int = 1,
     intent_family: str | None = None,
+    domain: str = "orders",
 ) -> None:
     """Seed a cell the shipped rule actually fires on.
 
@@ -133,7 +137,7 @@ def _seed_uncited_graph_outcomes(
             # rate, not on this.
             success=i % 5 == 0,
             latency_ms=12.0,
-            domain="orders",
+            domain=domain,
             intent_family=intent_family,
             items_served=served_each,
             items_referenced=1 if i < referenced_total else 0,
@@ -185,6 +189,43 @@ def test_metrics_tune_emits_proposals(cli_env):
     assert first["scope"]["component_id"] == GRAPH_SEARCH_COMPONENT_ID
 
 
+@pytest.mark.parametrize(
+    ("command", "summary"),
+    [
+        (["metrics", "tune"], "1 proposals persisted"),
+        (["worker", "tune"], "1 proposal(s) considered"),
+    ],
+)
+def test_tune_text_renders_the_tuner_name_verbatim(
+    cli_env, monkeypatch: pytest.MonkeyPatch, command: list[str], summary: str
+) -> None:
+    """Both RuleTuner surfaces echo ``--tuner-name`` after the tuner has run.
+
+    So ``[/x]`` raising ``MarkupError`` there exited 1 with the proposals
+    already persisted.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    force_colour(monkeypatch, metrics_cli, worker_cli)
+    result = runner.invoke(app, [*command, "--tuner-name", "[bold]t[/x]"])
+    assert result.exit_code == 0, plain(result.output)
+    rendered = " ".join(assert_coloured(result.stdout).split())
+    assert "tuner=[bold]t[/x]" in rendered
+    assert summary in rendered
+
+
+def test_tune_text_renders_a_stored_domain_verbatim(
+    cli_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each proposal line echoes its cell's domain, a stored value."""
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"], domain="[bold]d[/z]")
+    force_colour(monkeypatch, metrics_cli)
+    result = runner.invoke(app, ["metrics", "tune"])
+    assert result.exit_code == 0, plain(result.output)
+    rendered = " ".join(assert_coloured(result.stdout).split())
+    assert "1 proposals persisted" in rendered
+    assert "domain=[bold]d[/z]" in rendered
+
+
 # ---------------------------------------------------------------------------
 # proposals
 # ---------------------------------------------------------------------------
@@ -214,6 +255,47 @@ def test_metrics_proposals_status_filter(cli_env):
     # shown something to filter before it can be shown to filter right.
     assert len(payload) >= 1
     assert all(p["status"] == "pending" for p in payload)
+
+
+def test_proposals_text_renders_the_stored_tuner_and_the_filters_verbatim(
+    cli_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tuner name ``tune --format json`` stored reaches the table as written."""
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tuned = runner.invoke(
+        app, ["metrics", "tune", "--tuner-name", "[b]t[/x]", "--format", "json"]
+    )
+    assert tuned.exit_code == 0, tuned.output
+    monkeypatch.setenv("COLUMNS", "200")  # the table must not fold the cell
+    force_colour(monkeypatch, metrics_cli)
+
+    result = runner.invoke(app, ["metrics", "proposals"])
+    assert result.exit_code == 0, plain(result.output)
+    assert "[b]t[/x]" in assert_coloured(result.stdout)
+
+    filtered = runner.invoke(
+        app, ["metrics", "proposals", "--tuner", "[b]q[/z]", "--status", "[b]s[/w]"]
+    )
+    assert filtered.exit_code == 0, plain(filtered.output)
+    rendered = " ".join(assert_coloured(filtered.stdout).split())
+    assert "tuner=[b]q[/z] status=[b]s[/w]" in rendered
+
+
+def test_proposals_text_renders_filters_that_form_a_tag_together(
+    cli_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Escaping each filter apart misses the tag the two form together.
+
+    Neither ``[bold]q[/z`` nor ``s]`` ends in a whole closing tag, and no
+    bracket sits between them, so ``[/z status=s]`` raised ``MarkupError``.
+    """
+    force_colour(monkeypatch, metrics_cli)
+    result = runner.invoke(
+        app, ["metrics", "proposals", "--tuner", "[bold]q[/z", "--status", "s]"]
+    )
+    assert result.exit_code == 0, plain(result.output)
+    rendered = " ".join(assert_coloured(result.stdout).split())
+    assert "tuner=[bold]q[/z status=s]" in rendered
 
 
 # ---------------------------------------------------------------------------

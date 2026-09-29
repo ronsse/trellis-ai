@@ -262,7 +262,7 @@ def list_policies(
         table.add_row(
             escape(p.policy_id[:12] + "…"),
             p.policy_type.value,
-            scope_str,
+            escape(scope_str),
             p.enforcement.value,
             str(len(p.rules)),
         )
@@ -343,12 +343,18 @@ def show_policy(
     console.print(f"  Type: {match.policy_type.value}")
     console.print(
         f"  Scope: {match.scope.level}"
-        + (f":{match.scope.value}" if match.scope.value else "")
+        + (f":{match.scope.value}" if match.scope.value else ""),
+        markup=False,
+        highlight=False,
     )
     console.print(f"  Enforcement: {match.enforcement.value}")
     console.print(f"  Rules ({len(match.rules)}):")
     for i, rule in enumerate(match.rules, 1):
-        console.print(f"    {i}. [{rule.action}] {rule.operation} — {rule.condition}")
+        console.print(
+            f"    {i}. [{rule.action}] {rule.operation} — {rule.condition}",
+            markup=False,
+            highlight=False,
+        )
     if degraded:
         raise typer.Exit(code=EXIT_STORE)
 
@@ -409,7 +415,9 @@ def add_policy(
         console.print(
             f"  {action} {operation} (scope: {scope_level}"
             + (f":{scope_value}" if scope_value else "")
-            + ")"
+            + ")",
+            markup=False,
+            highlight=False,
         )
 
 

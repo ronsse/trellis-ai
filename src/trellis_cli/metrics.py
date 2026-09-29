@@ -154,7 +154,10 @@ def proposals_cmd(
 
     console.print(
         f"[bold]Proposals[/bold] ({len(proposals)} matching; "
-        f"tuner={tuner or 'any'} status={status or 'any'})"
+        # One escape over both filters: escaped apart, ``[/z`` and ``s]``
+        # still form one tag across the bracket-free text between them.
+        + escape(f"tuner={tuner or 'any'} status={status or 'any'}")
+        + ")"
     )
     if not proposals:
         return
@@ -186,7 +189,7 @@ def proposals_cmd(
             reachable = "[green]yes[/green]"
         table.add_row(
             escape(p.proposal_id[:18] + "…"),
-            p.tuner,
+            escape(p.tuner),
             p.status,
             escape(p.scope.component_id),
             escape(p.scope.domain or "-"),
@@ -312,13 +315,13 @@ def tune_cmd(
         return
 
     console.print(
-        f"[bold]RuleTuner[/bold] tuner={tuner_name} "
+        f"[bold]RuleTuner[/bold] tuner={escape(tuner_name)} "
         f"→ {len(proposals)} proposals persisted"
     )
     for p in proposals:
         console.print(
             f"  {escape(p.proposal_id[:18])}…  "
-            f"{escape(p.scope.component_id)} domain={p.scope.domain or '-'}  "
+            f"{escape(p.scope.component_id)} domain={escape(p.scope.domain or '-')}  "
             f"{json.dumps(p.proposed_values)}  (n={p.sample_size})"
         )
 

@@ -184,6 +184,19 @@ class TestCost:
         assert "Trellis Cost Overhead" in result.stdout
         assert "$" in result.stdout
 
+    def test_text_output_renders_the_model_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_COST_PRICE_PER_MTOK", raising=False)
+        force_colour(monkeypatch, analyze)
+        result = runner.invoke(
+            app,
+            ["analyze", "cost", "--model", "[bold]m[/x]", "--price-per-mtok", "3"],
+        )
+        assert result.exit_code == 0, plain(result.output)
+        rendered = " ".join(assert_coloured(result.stdout).split())
+        assert "([bold]m[/x], explicit_override)" in rendered
+
 
 class TestReplay:
     """``trellis analyze replay`` — the same window under a different policy."""
@@ -424,6 +437,20 @@ class TestValue:
         assert dear["dollars_per_cited_item"] == pytest.approx(
             cheap["dollars_per_cited_item"] * 10, rel=1e-6
         )
+
+    def test_text_output_renders_the_model_verbatim(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_COST_PRICE_PER_MTOK", raising=False)
+        self._seed_attributed_packs(temp_stores, 6)
+        force_colour(monkeypatch, analyze)
+        result = runner.invoke(
+            app,
+            ["analyze", "value", "--model", "[bold]m[/x]", "--price-per-mtok", "3"],
+        )
+        assert result.exit_code == 0, plain(result.output)
+        rendered = " ".join(assert_coloured(result.stdout).split())
+        assert "/Mtok [bold]m[/x], explicit_override)" in rendered
 
 
 class TestJudgedOutcomes:

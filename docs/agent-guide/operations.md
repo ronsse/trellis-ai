@@ -18,20 +18,20 @@ trellis admin init [--data-dir PATH] [--force] [--format text|json]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--data-dir` | Platform default | Custom data directory path |
+| `--data-dir` | `$TRELLIS_DATA_DIR`, else `data/` in the config dir (`$TRELLIS_CONFIG_DIR`, else `~/.trellis`) | Custom data directory path |
 | `--force` | `false` | Overwrite existing config |
 | `--format` | `text` | Output format |
 
 **JSON output (success):**
 
 ```json
-{"status": "initialized", "config_dir": "/home/user/.config/trellis", "data_dir": "/home/user/.local/share/trellis"}
+{"status": "initialized", "config_dir": "/home/user/.trellis", "data_dir": "/home/user/.trellis/data", "next_steps_doc": "docs/getting-started/setup-decisions.md"}
 ```
 
 **JSON output (already exists):**
 
 ```json
-{"status": "exists", "config_dir": "/home/user/.config/trellis"}
+{"status": "exists", "config_dir": "/home/user/.trellis"}
 ```
 
 ### `trellis admin health`
@@ -2358,7 +2358,7 @@ The MCP tool and `POST /api/v1/packs/{pack_id}/feedback` share both the mapping 
 
 ### Retrieval Budgets
 
-The three sectioned-context tools (`get_objective_context`, `get_task_context`, `get_sectioned_context`) resolve their token budgets from the `retrieval.budgets` section of `~/.config/trellis/config.yaml`. This lets you right-size budgets per tool and per domain without touching code.
+The three sectioned-context tools (`get_objective_context`, `get_task_context`, `get_sectioned_context`) resolve their token budgets from the `retrieval.budgets` section of `~/.trellis/config.yaml`. This lets you right-size budgets per tool and per domain without touching code.
 
 ```yaml
 retrieval:

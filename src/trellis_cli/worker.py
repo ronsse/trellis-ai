@@ -335,7 +335,7 @@ def _render_text(report: Any, *, tuner_name: str) -> None:
         "DISABLED" if not report.enabled else ("DRY-RUN" if report.dry_run else "LIVE")
     )
     console.print(
-        f"[bold]worker tune[/bold] tuner={tuner_name} mode={mode} "
+        f"[bold]worker tune[/bold] tuner={escape(tuner_name)} mode={mode} "
         f"→ {report.proposals_considered} proposal(s) considered"
     )
     console.print(
@@ -1616,7 +1616,7 @@ def _run_batch_enrichment(
                 "worker_enrich.item_failed",
                 doc_id=doc.get("doc_id"),
                 error=result.error,
-                failure_kind=getattr(result.failure_kind, "value", None),
+                failure_kind=result.failure_kind,
             )
             continue
         # Metadata-only: ``content`` is the row's own and only derived tags

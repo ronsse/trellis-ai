@@ -24,7 +24,7 @@ uv pip install -e ".[dev]"
 trellis admin init
 ```
 
-Creates `~/.config/trellis/config.yaml` and a stores directory with SQLite backends for each plane (graph, document, vector, blob, trace, event log). This is the substrate. No external services required.
+Creates `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`) and a stores directory, with SQLite backends for graph, document, vector, trace and event log (blob uses local files). This is the substrate. No external services required.
 
 ## 3. Seed the graph
 
@@ -36,15 +36,16 @@ Output (abridged):
 
 ```
 Loading demo data...
-  + 26 entities
-  + 22 relationships
+
+  + 25 entities
+  + 25 relationships
   + 6 traces
   + 3 evidence items
   + 4 documents
   + 3 precedents
-  + 16 cold-start entities (24 edges) via extractor path
+  + 20 cold-start entities (20 edges) via extractor path
 
-Done! Loaded 100 items into the knowledge graph.
+Done! Loaded 106 items into the knowledge graph.
 ```
 
 Two layers of demo data land:

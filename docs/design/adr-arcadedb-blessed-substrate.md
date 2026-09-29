@@ -111,7 +111,7 @@ When a Neo4j deployment wants to switch to ArcadeDB:
 1. Stand up an ArcadeDB cluster (ECS Fargate + EFS is the suggested shape; persistent EFS volume for the journal).
 2. Export Neo4j graph state via the GraphStore API (`get_node_history`, `get_edges`, `query`).
 3. Re-ingest against an `ArcadeDBGraphStore` pointing at the new cluster — vectors via `ArcadeDBVectorStore.upsert_bulk`.
-4. Swap `~/.config/trellis/config.yaml` to `graph: backend: arcadedb` (and `vector: backend: arcadedb` if consolidating from pgvector).
+4. Swap `~/.trellis/config.yaml` to `knowledge.graph.backend: arcadedb` (and `knowledge.vector.backend: arcadedb` if consolidating from pgvector).
 
 Detailed runbook is out of scope for this ADR.
 

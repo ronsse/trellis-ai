@@ -158,6 +158,32 @@ class TestPolicyAdd:
         data = json.loads(result.stdout.strip())
         assert data["status"] == "ok"
 
+    def test_add_text_echoes_operation_and_scope_value_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The echo runs after ``store.add``, so markup in it cost the exit.
+
+        ``[/y]`` raised ``MarkupError`` with the policy already written:
+        the id printed, then exit 1 -- while ``--format json`` exited 0.
+        """
+        force_colour(monkeypatch, policy_cli)
+        result = runner.invoke(
+            app,
+            [
+                "policy",
+                "add",
+                "--operation",
+                "entity.[bold]x[/y]",
+                "--scope",
+                "domain",
+                "--scope-value",
+                "[bold]d[/z]",
+            ],
+        )
+        assert result.exit_code == 0, plain(result.output)
+        rendered = " ".join(assert_coloured(result.stdout).split())
+        assert "deny entity.[bold]x[/y] (scope: domain:[bold]d[/z])" in rendered
+
 
 class TestPolicyShow:
     def test_show_by_id(self) -> None:
@@ -215,6 +241,46 @@ class TestPolicyShow:
     def test_show_not_found(self) -> None:
         result = runner.invoke(app, ["policy", "show", "nonexistent"])
         assert result.exit_code == 1
+
+    def test_list_and_show_render_a_stored_scope_and_rule_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Values ``add --format json`` stored reach both read surfaces.
+
+        ``show``'s rule line also carries literal brackets of its own, so
+        ``[deny]`` was eaten as a style tag even when nothing raised.
+        """
+        added = runner.invoke(
+            app,
+            [
+                "policy",
+                "add",
+                "--operation",
+                "e.[b]o[/y]",
+                "--condition",
+                "[b]c[/w]",
+                "--scope",
+                "domain",
+                "--scope-value",
+                "[b]d[/z]",
+                "--format",
+                "json",
+            ],
+        )
+        assert added.exit_code == 0, added.output
+        policy_id = json.loads(added.stdout)["policy_id"]
+        monkeypatch.setenv("COLUMNS", "200")  # the table must not fold the cell
+        force_colour(monkeypatch, policy_cli)
+
+        listed = runner.invoke(app, ["policy", "list"])
+        assert listed.exit_code == 0, plain(listed.output)
+        assert "domain:[b]d[/z]" in assert_coloured(listed.stdout)
+
+        shown = runner.invoke(app, ["policy", "show", policy_id])
+        assert shown.exit_code == 0, plain(shown.output)
+        rendered = " ".join(assert_coloured(shown.stdout).split())
+        assert "Scope: domain:[b]d[/z]" in rendered
+        assert "1. [deny] e.[b]o[/y] — [b]c[/w]" in rendered
 
 
 class TestPolicyRemove:
