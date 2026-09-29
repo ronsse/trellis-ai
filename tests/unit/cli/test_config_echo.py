@@ -36,9 +36,9 @@ _NEO = (
 
 
 def _write(path: Path, text: str | bytes) -> None:
-    body = text if isinstance(text, bytes) else text.replace("{S}", _SENTINEL).encode()
+    raw = text if isinstance(text, bytes) else text.encode()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(body)
+    path.write_bytes(raw.replace(b"{S}", _SENTINEL.encode()))
 
 
 def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str | bytes) -> Path:
@@ -175,7 +175,8 @@ def test_an_explicit_tag_that_cannot_construct_is_a_config_error(
 _NOT_A_CONFIG = {
     "top_level_list": "- {S}\n",
     "top_level_scalar": "{S}\n",
-    "not_utf8": b"knowledge:\n  graph:\n    backend: neo4j\n  x: \xff\xfe\n",
+    # {S} ends at the bad byte, so quoting the bytes near the offset prints it.
+    "not_utf8": b"knowledge:\n  graph:\n    backend: neo4j\n  x: {S}\xff\xfe\n",
     "bad_date": "knowledge:\n" + _NEO + "stamp: 2026-13-45\n",
     "timestamp_tag": "knowledge:\n  graph:\n    t: !!timestamp {S}\n",
 }
