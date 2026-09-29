@@ -243,6 +243,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`admin health` and config parse errors stop printing config.yaml
+  values.** `trellis admin health` printed a backend value that names no
+  registered backend, a DSN written as a name included; it now reports
+  `null` / `unknown backend (not checked)`. The registry's refusal of such
+  a backend and its schema fingerprint no longer repeat it either. The
+  config parse errors of the registry, `admin migrate-graph` and
+  `worker tune` no longer quote the file: they give the parser's reason,
+  with the line and column when it has them. A `TrellisConfig` validation
+  error or a `worker tune` setting check no longer repeats the value. In
+  the registry a top-level list or scalar, invalid UTF-8 or a tag that
+  cannot construct is now a `ConfigError` (exit 5), not a traceback.
+  ([#662](https://github.com/ronsse/trellis-ai/pull/662))
+
 - **The example curation workflow parses.** Two lines of stray markup
   followed the last step of
   `examples/integrations/github-actions/curation.yml`, so the copy that

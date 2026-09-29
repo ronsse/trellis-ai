@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import traceback
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,6 +14,7 @@ from typer.testing import CliRunner
 
 from tests.cli_output import plain
 from trellis.llm.routing import LLMConsumer, resolve_llm_route
+from trellis.stores.registry import _reset_backend_cache
 from trellis_cli.admin import admin_app
 from trellis_cli.exit_codes import EXIT_STORE
 from trellis_cli.main import app
@@ -197,6 +199,21 @@ def _assert_sentinel_never_surfaces(result) -> None:
     assert not any(leaked.values()), f"sentinel windows per surface: {leaked}"
 
 
+@pytest.fixture
+def custom_document_backend():
+    """Register ``custom[document]`` as a document backend, as a plugin would."""
+
+    def entry_points(*, group: str) -> list[SimpleNamespace]:
+        if group != "trellis.stores.document":
+            return []
+        return [SimpleNamespace(name="custom[document]", value="pkg.mod:Store")]
+
+    with patch("trellis.plugins.loader.entry_points", side_effect=entry_points):
+        _reset_backend_cache()
+        yield
+    _reset_backend_cache()
+
+
 class TestAdminHealthConfiguredBackends:
     """``admin health`` reads the shared config.yaml and every store's backend.
 
@@ -258,9 +275,10 @@ class TestAdminHealthConfiguredBackends:
             "trace": "postgres (not checked)",
         }
 
+    @pytest.mark.usefixtures("custom_document_backend")
     def test_backend_name_reaches_the_table_verbatim(self, tmp_path, monkeypatch):
-        # The name comes from config.yaml, and Rich reads ``[document]`` as a
-        # style tag and deletes it.
+        # A plugin names itself, and Rich reads ``[document]`` as a style tag
+        # and deletes it.
         config = {"knowledge": {"document": {"backend": "custom[document]"}}}
         _health_env(tmp_path, monkeypatch, config)
 
@@ -274,10 +292,10 @@ class TestAdminHealthConfiguredBackends:
     def test_a_non_string_backend_exits_alike_and_without_a_traceback(
         self, tmp_path, monkeypatch, backend
     ):
-        # ``_resolve_backend`` returns whatever the YAML held, whatever its
-        # ``str`` annotation says, and ``configured_backend`` coerces it. Without
-        # that, the text arm's ``escape`` raised TypeError (exit 1) while
-        # ``json.dumps`` took the value (exit 0).
+        # ``_resolve_backend`` returns whatever the YAML held, and
+        # ``configured_backend`` returns None for anything but a registered
+        # name. Before that, the text arm's ``escape`` raised TypeError (exit 1)
+        # while ``json.dumps`` took the value (exit 0).
         config = {"knowledge": {"document": {"backend": backend}}}
         _health_env(tmp_path, monkeypatch, config)
 
@@ -288,6 +306,24 @@ class TestAdminHealthConfiguredBackends:
         for result in (text, as_json):
             assert not isinstance(result.exception, Exception), repr(result.exception)
         assert text.exit_code == as_json.exit_code
+
+    def test_data_dir_and_stores_dir_are_read_where_the_registry_reads_them(
+        self, tmp_path, monkeypatch
+    ):
+        # config.yaml's ``data_dir`` beats TRELLIS_DATA_DIR, so a fixture that
+        # sets both to one directory cannot tell which one health checked.
+        data_dir = _health_env(tmp_path, monkeypatch, {})
+        (data_dir / "stores").mkdir(parents=True)
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "absent"))
+
+        text = runner.invoke(app, ["admin", "health"])
+        as_json = runner.invoke(app, ["admin", "health", "--format", "json"])
+
+        assert text.exit_code == as_json.exit_code == 0
+        payload = json.loads(as_json.stdout)
+        assert (payload["data_dir"], payload["stores_dir"]) == (True, True)
+        rows = _table_rows(text.stdout)
+        assert (rows["data_dir"], rows["stores_dir"]) == ("OK", "OK")
 
     def test_all_sqlite_keeps_every_key_and_value_and_only_adds_backends(
         self, tmp_path, monkeypatch

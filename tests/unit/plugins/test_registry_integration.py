@@ -35,8 +35,12 @@ class TestStoreRegistryPluginDiscovery:
             config={"graph": {"backend": "absent"}},
             stores_dir=tmp_path / "stores",
         )
-        with pytest.raises(ConfigError, match="Unknown backend 'absent'"):
+        with pytest.raises(
+            ConfigError, match="Unknown backend for store type 'graph'"
+        ) as exc:
             _ = registry.knowledge.graph_store
+        # The value can be a DSN written where a name belongs.
+        assert "absent" not in str(exc.value)
 
     def test_builtin_unaffected_by_absent_plugins(self, tmp_path: Path):
         """Existing SQLite behavior is unchanged when no plugins are present."""

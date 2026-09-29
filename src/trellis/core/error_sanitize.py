@@ -105,6 +105,58 @@ def sanitize_error_message(text: str, *, max_len: int = DEFAULT_MAX_LEN) -> str:
     return text
 
 
+# PyYAML quotes with ``%r``: one character (``':'``, ``'\t'``), a parser token
+# id (``'<block end>'``), or document text (an alias, anchor, tag or tag
+# handle). Only the first two survive; document text becomes ``'...'``.
+_QUOTED = re.compile(r"'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\"")
+_KEPT_QUOTED = re.compile(r".|\\(?:x[0-9a-f]{2}|u[0-9a-f]{4}|U[0-9a-f]{8}|.)|<[a-z ]+>")
+
+
+def _mask_quoted(text: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        quoted = match.group()
+        if _KEPT_QUOTED.fullmatch(quoted[1:-1]):
+            return quoted
+        return f"{quoted[0]}...{quoted[0]}"
+
+    return _QUOTED.sub(_replace, text)
+
+
+def describe_yaml_error(exc: BaseException) -> str:
+    """Describe a failed ``yaml.safe_load`` without quoting the document.
+
+    ``str(exc)`` of a PyYAML error prints the offending line, and a config
+    line can hold a DSN or a password. The description is rebuilt from the
+    structured fields instead: ``context`` and ``problem``, each with its
+    1-based line and column, with quoted document text masked. A
+    ``ReaderError`` (a non-printable character) gives its code point and
+    position. Anything else ``safe_load`` raises (``!!int`` and
+    ``!!float`` raise ``ValueError``, ``!!bool`` ``KeyError``, each naming
+    the value) is described by its type alone. ``str(exc)`` is never used.
+    """
+    parts: list[str] = []
+    for text, mark in (
+        (getattr(exc, "context", None), getattr(exc, "context_mark", None)),
+        (getattr(exc, "problem", None), getattr(exc, "problem_mark", None)),
+    ):
+        if not isinstance(text, str):
+            continue
+        piece = _mask_quoted(text)
+        if mark is not None:
+            piece += f" (line {mark.line + 1}, column {mark.column + 1})"
+        parts.append(piece)
+    if parts:
+        return "; ".join(parts)
+    character = getattr(exc, "character", None)
+    position = getattr(exc, "position", None)
+    if isinstance(character, int) and isinstance(position, int):
+        return f"unacceptable character #x{character:04x} at position {position}"
+    return (
+        f"a value could not be constructed ({type(exc).__name__}); check"
+        " explicit tags such as !!int, !!float or !!bool, and dates"
+    )
+
+
 def sanitized_error_payload(exc: BaseException, **context: Any) -> dict[str, Any]:
     """Build the standard leak-safe JSON error envelope for an exception.
 

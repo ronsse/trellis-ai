@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import structlog
 
+from trellis.core.error_sanitize import describe_yaml_error
 from trellis.core.path_presence import path_is_present
 from trellis.errors import BackendNotInstalledError, ConfigError, ValidationError
 from trellis.stores.base import (
@@ -818,14 +819,30 @@ class StoreRegistry:
                     " Check file permissions or pass an explicit config_dir."
                 )
                 raise ConfigError(msg, setting="config_dir") from exc
+            except UnicodeDecodeError as exc:
+                msg = (
+                    f"Could not read Trellis config at {config_path}: it is not"
+                    f" valid {exc.encoding} text (byte offset {exc.start})."
+                )
+                raise ConfigError(msg, setting="config.yaml") from None
+            # Not ``str(exc)``, which prints the offending line; and not only
+            # YAMLError, since ``!!int`` / ``!!bool`` raise ValueError / KeyError
+            # naming the value. ``from None`` keeps that text out of any
+            # traceback a caller prints.
             try:
                 data = yaml.safe_load(raw_text) or {}
-            except yaml.YAMLError as exc:
+            except Exception as exc:
                 msg = (
-                    f"Could not parse Trellis config at {config_path}: {exc}."
-                    " Fix the YAML syntax and retry."
+                    f"Could not parse Trellis config at {config_path}:"
+                    f" {describe_yaml_error(exc)}. Fix the YAML syntax and retry."
                 )
-                raise ConfigError(msg, setting="config.yaml") from exc
+                raise ConfigError(msg, setting="config.yaml") from None
+            if not isinstance(data, dict):
+                msg = (
+                    f"Trellis config at {config_path} must be a mapping at the"
+                    f" top level, not a {type(data).__name__}."
+                )
+                raise ConfigError(msg, setting="config.yaml")
             # Nothing expands ``${VAR}`` here, so such a value would reach a
             # driver as those characters. Only the variable name is rendered:
             # a default part (``${VAR:-x}``) can be the secret itself.
@@ -913,10 +930,16 @@ class StoreRegistry:
             classify_config=classify_config,
         )
 
-    def _resolve_backend(self, store_type: str) -> tuple[str, dict[str, Any]]:
-        """Resolve backend name and params for a store type."""
+    def _resolve_backend(self, store_type: str) -> tuple[object, dict[str, Any]]:
+        """Resolve the configured backend value and params for a store type.
+
+        The value is whatever config.yaml holds, which need not be a
+        registered name or even a string: null, a mapping, or a DSN written
+        where a name belongs. Check it against :func:`_get_merged_backends`
+        before using it, and never render it: it can be a credential.
+        """
         store_cfg = self._config.get(store_type, {})
-        if isinstance(store_cfg, str):
+        if not isinstance(store_cfg, dict):
             return store_cfg, {}
         backend = store_cfg.get("backend", self._default_backend(store_type))
         params = {k: v for k, v in store_cfg.items() if k != "backend"}
@@ -929,7 +952,7 @@ class StoreRegistry:
             return "local"
         return "sqlite"
 
-    def configured_backend(self, store_type: str) -> str:
+    def configured_backend(self, store_type: str) -> str | None:
         """Return the backend ``store_type`` is configured for, without opening it.
 
         **Read-only and non-connecting.** It never instantiates or caches a
@@ -940,6 +963,11 @@ class StoreRegistry:
         default); it is not evidence that the backend is installed or
         reachable, which is :meth:`validate`'s question.
 
+        ``None`` when the configured value is not a registered backend name
+        (built-in or plugin), the case ``_instantiate`` refuses. The value
+        itself is never returned: a DSN written where a name belongs would
+        reach whoever prints the answer.
+
         Raises :class:`~trellis.errors.ValidationError` for a store type
         the registry does not know, rather than answering the default.
         """
@@ -947,7 +975,9 @@ class StoreRegistry:
             msg = f"Unknown store type '{store_type}'"
             raise ValidationError(msg)
         backend, _params = self._resolve_backend(store_type)
-        return str(backend)
+        if isinstance(backend, str) and backend in _get_merged_backends(store_type):
+            return backend
+        return None
 
     def configured_sqlite_path(self, store_type: str) -> Path | None:
         """Return the SQLite file ``store_type`` would open, without opening it.
@@ -980,8 +1010,12 @@ class StoreRegistry:
             raise ValidationError(msg)
 
         registry = _get_merged_backends(store_type)
-        if backend not in registry:
-            msg = f"Unknown backend '{backend}' for store type '{store_type}'"
+        if not isinstance(backend, str) or backend not in registry:
+            # The value is not repeated: it can be a DSN written as a name.
+            msg = (
+                f"Unknown backend for store type '{store_type}'; configure one"
+                f" of: {', '.join(sorted(registry))}"
+            )
             raise ConfigError(msg, setting=f"stores.{store_type}.backend")
 
         module_path, class_name = registry[backend]
@@ -1113,10 +1147,9 @@ class StoreRegistry:
         """
         backend, _ = self._resolve_backend(store_type)
         registry = _get_merged_backends(store_type)
-        spec = registry.get(backend)
-        if spec is None:
+        if not isinstance(backend, str) or backend not in registry:
             return None
-        module_path, class_name = spec
+        module_path, class_name = registry[backend]
         import importlib  # noqa: PLC0415
 
         try:
@@ -1147,6 +1180,11 @@ class StoreRegistry:
         out: dict[str, str] = {}
         for store_type in store_types:
             backend, _ = self._resolve_backend(store_type)
+            registered = _get_merged_backends(store_type)
+            if not isinstance(backend, str) or backend not in registered:
+                # A mismatch message quotes the fingerprint, and the value
+                # can be a DSN written as a name. ``_instantiate`` refuses it.
+                backend = "unregistered"
             try:
                 cls = self._resolve_substrate_class(store_type)
             except BackendNotInstalledError:
