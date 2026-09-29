@@ -87,6 +87,32 @@ class TestQuickstart:
         assert "already" in result.stdout.lower()
 
     @pytest.mark.parametrize("scope_args", [[], ["--scope", "project"]])
+    def test_rerun_leaves_config_yaml_byte_identical(self, monkeypatch, scope_args):
+        """A re-run never rewrites an existing ``config.yaml``.
+
+        The store registry keeps its plane blocks in the same file, and
+        ``TrellisConfig.save`` rewrites the whole file with only the CLI's
+        keys, so a rewrite would drop a configured backend and the registry
+        would come up on its local defaults without an error.
+        """
+        project_dir = self._enter_project(monkeypatch)
+        args = ["admin", "quickstart", *scope_args, "--format", "json"]
+        assert runner.invoke(app, args).exit_code == 0
+        if scope_args:
+            config_path = project_dir / ".trellis" / "config.yaml"
+        else:
+            config_path = self.tmp / "trellis-config" / "config.yaml"
+        plane_block = b"knowledge:\n  graph:\n    backend: neo4j\n"
+        edited = config_path.read_bytes() + plane_block
+        config_path.write_bytes(edited)
+
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0
+        steps = json.loads(result.stdout.strip())["steps"]
+        assert steps[0] == "stores_already_initialized"
+        assert config_path.read_bytes() == edited
+
+    @pytest.mark.parametrize("scope_args", [[], ["--scope", "project"]])
     def test_writes_no_claude_settings(self, monkeypatch, scope_args):
         """Claude Code reads no ``mcpServers`` from either settings file.
 
@@ -106,23 +132,41 @@ class TestQuickstart:
         assert "Register the MCP server with Claude Code (run once):" in output
         assert "registered" not in output.lower()
 
+    @pytest.mark.parametrize("earlier_entry", [False, True])
     @pytest.mark.parametrize("force_args", [[], ["--force"]])
-    def test_leaves_existing_settings_byte_identical(self, force_args):
-        settings_path = self.tmp / "home" / ".claude" / "settings.json"
+    @pytest.mark.parametrize("scope_args", [[], ["--scope", "project"]])
+    def test_leaves_existing_settings_byte_identical(
+        self, monkeypatch, scope_args, force_args, earlier_entry
+    ):
+        """Each scope leaves the settings file it used to write untouched.
+
+        With no ``trellis`` entry the old code merged one in; with the entry
+        an earlier version wrote, it skipped unless ``--force``. Both
+        fixtures are needed to catch both, and the earlier entry stays: it
+        is inert, and the user's to delete.
+        """
+        if scope_args:
+            claude_dir = self._enter_project(monkeypatch) / ".claude"
+            settings_path = claude_dir / "settings.local.json"
+        else:
+            settings_path = self.tmp / "home" / ".claude" / "settings.json"
         settings_path.parent.mkdir(parents=True)
+        servers = {"other-server": {"command": "other", "args": ["-v"]}}
+        if earlier_entry:
+            servers["trellis"] = {"command": "trellis-mcp", "args": []}
         # Compact, several unrelated keys, no trailing newline: any
         # re-serialisation changes the bytes, not only an added entry.
         original = json.dumps(
             {
                 "permissions": {"allow": ["Bash(ls:*)"], "deny": []},
                 "theme": "dark",
-                "mcpServers": {"other-server": {"command": "other", "args": ["-v"]}},
+                "mcpServers": servers,
             },
             separators=(",", ":"),
         ).encode()
         settings_path.write_bytes(original)
 
-        result = runner.invoke(app, ["admin", "quickstart", *force_args])
+        result = runner.invoke(app, ["admin", "quickstart", *scope_args, *force_args])
         assert result.exit_code == 0
 
         assert settings_path.read_bytes() == original
