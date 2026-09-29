@@ -534,6 +534,10 @@ def run_curation_cycle(
       fitness loop mutate the advisory store).
     * learning stage — observations are still built and scored, but no
       artifacts are written to disk.
+    * meta-trace — each stage that runs still records its meta-Activity,
+      as every other meta-traced dry run does, but no finding: the
+      noise-tag and learning findings name writes (the tags, the review
+      files) that a dry run does not make.
 
     Returns a :class:`CurateCycleResult` with per-stage counts.
     """
@@ -639,7 +643,7 @@ def _curate_stage_noise_tags(
         noise_tagged = (
             len(screen.admitted) if screen is not None else len(report.noise_candidates)
         )
-        if record.enabled and noise_tagged:
+        if record.enabled and noise_tagged and not dry_run:
             record.produced_finding(
                 f"curate-noise-tags-d{days}",
                 finding_type="NoiseTagsApplied",
@@ -885,7 +889,7 @@ def _curate_stage_learning(
             )
             candidates_path = paths["candidates_path"]
             decisions_path = paths["decisions_template_path"]
-        if record.enabled and report["candidate_count"]:
+        if record.enabled and report["candidate_count"] and not dry_run:
             record.produced_finding(
                 f"curate-learning-d{days}",
                 finding_type="LearningCandidatesReport",
@@ -1128,14 +1132,19 @@ def curate_cmd(
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Analyze only — no noise tags, no advisory mutations, no artifacts.",
+        help=(
+            "Analyze only — no noise tags, no advisory mutations, no artifacts. "
+            "Each stage that runs still records its meta-Activity; add "
+            "--no-meta-trace to skip that."
+        ),
     ),
     reconcile_first: bool = typer.Option(
         False,
         "--reconcile-first",
         help=(
             "Backfill pack_feedback.jsonl into the EventLog before the cycle "
-            "(runs reconcile_feedback_log_to_event_log against the data dir)."
+            "(runs reconcile_feedback_log_to_event_log against the data dir). "
+            "Refused with --dry-run."
         ),
     ),
     skip_noise_tags: bool = typer.Option(
@@ -1170,6 +1179,16 @@ def curate_cmd(
     dependency is introduced — the interval is a plain-sleep convenience.
     """
     output_dir = output_dir.expanduser()
+
+    # Above the reconcile call and the --interval branch: reconcile emits a
+    # FEEDBACK_RECORDED event per file-only row, which a dry run must not.
+    if dry_run and reconcile_first:
+        msg = (
+            "--reconcile-first writes events, so --dry-run refuses it; preview "
+            "the backfill with 'trellis admin reconcile-feedback --log-dir DIR "
+            "--dry-run'"
+        )
+        raise typer.BadParameter(msg)
 
     if reconcile_first:
         _reconcile_before_cycle()

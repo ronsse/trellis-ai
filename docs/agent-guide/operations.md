@@ -1941,7 +1941,7 @@ Run one **full curation cycle** (Tier-2). Calls the curation library functions d
 trellis worker curate --output-dir DIR [--days N] [--interval SECONDS] \
   [--dry-run] [--reconcile-first] \
   [--skip-noise-tags] [--skip-advisories] [--skip-learning] \
-  [--format text|json]
+  [--no-meta-trace] [--format text|json]
 ```
 
 | Option | Default | Description |
@@ -1949,11 +1949,12 @@ trellis worker curate --output-dir DIR [--days N] [--interval SECONDS] \
 | `--output-dir` / `-o` | (required) | Directory for the learning-candidate review artifacts. |
 | `--days` | `30` | Days of EventLog history to scan. |
 | `--interval` | (off) | Loop mode: re-run the cycle every N seconds until SIGINT/SIGTERM. Plain sleep — **no scheduler dependency** (APScheduler/Celery deliberately rejected). |
-| `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts written. |
-| `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog (`reconcile_feedback_log_to_event_log`) before the cycle. |
+| `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts written. Each stage that runs still records its meta-Activity but no finding; add `--no-meta-trace` to skip that. |
+| `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog (`reconcile_feedback_log_to_event_log`) before the cycle. Refused with `--dry-run` (exit 2); preview with `trellis admin reconcile-feedback --log-dir DIR --dry-run`. |
 | `--skip-noise-tags` | off | Skip stage 1. |
 | `--skip-advisories` | off | Skip stages 2 + 3. |
 | `--skip-learning` | off | Skip stage 4. |
+| `--no-meta-trace` | off | Skip recording each stage as a meta-Activity. |
 | `--format` | `text` | `text` or `json`. |
 
 **Promotion stays human-gated.** This command writes learning candidates for review and **never promotes** (Tier-2 invariant). To promote, review the emitted `promotion_decisions.template.json`, set `approved: true` on the rows you want, then run `trellis curate promote-learning`. In `--interval` mode each cycle logs one structured `worker_curate.cycle` line with the headline counts (noise-tagged, advisories generated/suppressed, candidates written); SIGINT/SIGTERM drains the current cycle and exits cleanly.

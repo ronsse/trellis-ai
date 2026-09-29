@@ -159,6 +159,86 @@ def _make_feedback(*, outcome: str, items: list[str]):
     )
 
 
+_CURATE_KEPT = "wc:doc:kept"
+_CURATE_NOISY = "wc:doc:noisy"
+_CURATE_FINDINGS = frozenset(
+    {"NoiseTagsApplied", "AdvisoryCycleReport", "LearningCandidatesReport"}
+)
+
+
+def _seed_curate_signal(registry: StoreRegistry) -> None:
+    """Seed a store on which a live curate cycle writes in every stage.
+
+    Five successful packs serve both docs and cite the noisy one unhelpful;
+    five failed packs serve the noisy one alone. On this store a live cycle
+    noise-tags the noisy doc, changes the advisory file, writes both review
+    files and records one finding per stage, so a dry run that leaves each
+    of them alone is evidence rather than an empty fixture.
+    """
+    event_log = registry.operational.event_log
+    for outcome, served in (
+        ("success", [_CURATE_KEPT, _CURATE_NOISY]),
+        ("failure", [_CURATE_NOISY]),
+    ):
+        for i in range(5):
+            pack_id = f"wc-curate-{outcome}-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "wc-curate",
+                    "domain": "wc-test",
+                    "injected_item_ids": served,
+                    "injected_items": [
+                        {
+                            "item_id": item_id,
+                            "item_type": "document",
+                            "rank": rank,
+                            "strategy_source": "document",
+                        }
+                        for rank, item_id in enumerate(served)
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"wc-run-{outcome}-{i}",
+                    "intent_family": "wc-curate",
+                    "outcome": outcome,
+                    "success": outcome == "success",
+                    "helpful_item_ids": [_CURATE_KEPT] if outcome == "success" else [],
+                    "unhelpful_item_ids": [_CURATE_NOISY],
+                },
+            )
+    registry.knowledge.document_store.put(
+        _CURATE_NOISY,
+        "noisy test content",
+        {"content_tags": {"signal_quality": "standard"}},
+    )
+
+
+def _graph_shape(registry: StoreRegistry) -> dict[str, int]:
+    """Current nodes counted by type, plus the edge total under ``"edges"``."""
+    graph = registry.knowledge.graph_store
+    shape = {"edges": graph.count_edges()}
+    for node in graph.query(limit=1000):
+        shape[node["node_type"]] = shape.get(node["node_type"], 0) + 1
+    return shape
+
+
+def _file_state(path: Path) -> bytes | None:
+    """``path``'s bytes, or ``None`` while it does not exist."""
+    return path.read_bytes() if path.exists() else None
+
+
 # ---------------------------------------------------------------------------
 # worker_app moved here from main; tune is its sole subcommand today.
 # ---------------------------------------------------------------------------
@@ -404,14 +484,42 @@ class TestWorkerCurate:
         # No artifacts written when the learning stage is skipped.
         assert not (out_dir / "intent_learning_candidates.json").exists()
 
-    def test_dry_run_mutates_nothing(
-        self, tmp_path: Path, temp_stores: StoreRegistry
+    @pytest.mark.parametrize("output_format", ["json", "text"])
+    @pytest.mark.parametrize(
+        ("meta_args", "graph_after"),
+        [
+            # Each stage that runs records its Activity, as every other
+            # meta-traced dry run does. No stage records a finding.
+            ([], {"edges": 2, "Agent": 1, "Activity": 2}),
+            # The documented way to a dry run that writes nothing at all.
+            (["--no-meta-trace"], {"edges": 0}),
+        ],
+        ids=["meta-trace", "no-meta-trace"],
+    )
+    def test_dry_run_writes_no_finding_and_nothing_else(
+        self,
+        tmp_path: Path,
+        temp_stores: StoreRegistry,
+        output_format: str,
+        meta_args: list[str],
+        graph_after: dict[str, int],
     ) -> None:
-        _seed_promote_signal(temp_stores)
-        out_dir = tmp_path / "review"
+        """``--dry-run`` writes nothing but the meta-Activities its help names.
 
-        # Capture event count before — advisory generation/fitness emit events.
+        It recorded a ``NoiseTagsApplied`` and a ``LearningCandidatesReport``
+        finding for tags and review files it never wrote. A live cycle on
+        this seed writes in every stage (pinned by
+        ``test_live_run_keeps_meta_trace_and_reconcile``), so the graph,
+        advisory, document and review-file checks below each have something
+        to catch. The event count is only a guard: a live cycle on this seed
+        emits no event either.
+        """
+        _seed_curate_signal(temp_stores)
+        out_dir = tmp_path / "review"
+        advisory_path = Path(temp_stores.stores_dir) / ADVISORY_FILENAME
         events_before = temp_stores.operational.event_log.count()
+        advisories_before = _file_state(advisory_path)
+        noisy_before = temp_stores.knowledge.document_store.get(_CURATE_NOISY)
 
         result = runner.invoke(
             app,
@@ -421,23 +529,27 @@ class TestWorkerCurate:
                 "--output-dir",
                 str(out_dir),
                 "--dry-run",
+                *meta_args,
                 "--format",
-                "json",
+                output_format,
             ],
         )
+
         assert result.exit_code == 0, result.output
-        data = json.loads(result.stdout.strip())
-        assert data["dry_run"] is True
-        # Advisories are skipped wholesale in dry-run (they mutate the store).
-        assert "advisories" in data["skipped_stages"]
-        # No review artifacts written on disk.
-        assert data["candidates_path"] is None
-        assert not out_dir.exists() or not any(out_dir.iterdir())
-        # No document mutated to noise.
-        doc = temp_stores.knowledge.document_store.get("wc:doc:helpful")
-        assert doc is None  # never created — proves no write happened
-        # Dry-run emitted no new events.
+        if output_format == "json":
+            data = json.loads(result.stdout.strip())
+            assert data["dry_run"] is True
+            # Advisories are skipped wholesale in dry-run (they mutate the store).
+            assert "advisories" in data["skipped_stages"]
+            assert data["candidates_path"] is None
+            # A live run would have tagged and written candidates here.
+            assert data["noise_tagged"] >= 1
+            assert data["learning_candidates"] >= 1
+        assert _graph_shape(temp_stores) == graph_after
         assert temp_stores.operational.event_log.count() == events_before
+        assert _file_state(advisory_path) == advisories_before
+        assert temp_stores.knowledge.document_store.get(_CURATE_NOISY) == noisy_before
+        assert not out_dir.exists()
 
     def test_reconcile_first_backfills(
         self, tmp_path: Path, temp_stores: StoreRegistry
@@ -584,6 +696,118 @@ class TestWorkerCurate:
         assert event.entity_type == "pack"
         assert event.payload["pack_id"] == "pack-assoc"
         assert event.payload["rating"] == 0.3
+
+    @pytest.mark.parametrize("output_format", ["json", "text"])
+    @pytest.mark.parametrize(
+        "loop_args", [[], ["--interval", "60"]], ids=["one-shot", "interval"]
+    )
+    def test_dry_run_refuses_reconcile_first(
+        self,
+        tmp_path: Path,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        output_format: str,
+        loop_args: list[str],
+    ) -> None:
+        """``--dry-run --reconcile-first`` exits 2 before anything is written.
+
+        Reconcile emits a ``FEEDBACK_RECORDED`` event per feedback row the
+        EventLog lacks, which is a write the dry run promises not to make.
+        The ``--interval`` path reconciles before its first cycle too, so
+        the refusal must sit above both.
+        """
+        from trellis.feedback.recording import feedback_log_dir, record_feedback
+
+        def _no_loop(*_args: object, **_kwargs: object) -> None:
+            msg = "the refusal must come before the loop"
+            raise AssertionError(msg)
+
+        # Also keeps the pre-fix run from sleeping in the loop forever.
+        monkeypatch.setattr(worker, "_run_curate_loop", _no_loop)
+        log_dir = feedback_log_dir(Path(temp_stores.stores_dir))
+        record_feedback(_make_feedback(outcome="success", items=["x"]), log_dir=log_dir)
+        log_before = {path: path.read_bytes() for path in log_dir.iterdir()}
+        events_before = temp_stores.operational.event_log.count()
+        out_dir = tmp_path / "review"
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(out_dir),
+                "--dry-run",
+                "--reconcile-first",
+                *loop_args,
+                "--format",
+                output_format,
+            ],
+        )
+
+        assert result.exit_code == 2, result.output
+        assert result.stdout == ""
+        # The refusal names the read-only preview that already exists.
+        assert "reconcile-feedback" in plain(result.output)
+        assert {path: path.read_bytes() for path in log_dir.iterdir()} == log_before
+        assert temp_stores.operational.event_log.count() == events_before
+        assert _graph_shape(temp_stores) == {"edges": 0}
+        assert not out_dir.exists()
+
+    @pytest.mark.parametrize("output_format", ["json", "text"])
+    def test_live_run_keeps_meta_trace_and_reconcile(
+        self, tmp_path: Path, temp_stores: StoreRegistry, output_format: str
+    ) -> None:
+        """A live ``--reconcile-first`` run, the documented nightly shape, is unchanged.
+
+        It reconciles, records every stage's Activity and finding, and
+        writes in all three stages. That last part is also what gives the
+        dry-run test's write checks something to catch.
+        """
+        from trellis.feedback.recording import feedback_log_dir, record_feedback
+
+        _seed_curate_signal(temp_stores)
+        record_feedback(
+            _make_feedback(outcome="success", items=["x"]),
+            log_dir=feedback_log_dir(Path(temp_stores.stores_dir)),
+        )
+        advisory_path = Path(temp_stores.stores_dir) / ADVISORY_FILENAME
+        advisories_before = _file_state(advisory_path)
+        out_dir = tmp_path / "review"
+
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(out_dir),
+                "--reconcile-first",
+                "--format",
+                output_format,
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        reconciled = [
+            event
+            for event in temp_stores.operational.event_log.get_events(
+                event_type=EventType.FEEDBACK_RECORDED, limit=100
+            )
+            if event.source == "feedback.reconcile"
+        ]
+        assert len(reconciled) == 1
+        shape = _graph_shape(temp_stores)
+        assert shape["Activity"] == 3
+        assert {kind: shape.get(kind, 0) for kind in _CURATE_FINDINGS} == dict.fromkeys(
+            _CURATE_FINDINGS, 1
+        )
+        assert _file_state(advisory_path) != advisories_before
+        noisy = temp_stores.knowledge.document_store.get(_CURATE_NOISY)
+        assert noisy is not None
+        assert noisy["metadata"]["content_tags"]["signal_quality"] == "noise"
+        assert (out_dir / "intent_learning_candidates.json").is_file()
+        assert (out_dir / "promotion_decisions.template.json").is_file()
 
 
 # ===========================================================================
