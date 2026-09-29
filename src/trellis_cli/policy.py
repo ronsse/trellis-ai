@@ -409,7 +409,9 @@ def add_policy(
         console.print(
             f"  {action} {operation} (scope: {scope_level}"
             + (f":{scope_value}" if scope_value else "")
-            + ")"
+            + ")",
+            markup=False,
+            highlight=False,
         )
 
 

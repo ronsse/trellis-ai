@@ -335,7 +335,7 @@ def _render_text(report: Any, *, tuner_name: str) -> None:
         "DISABLED" if not report.enabled else ("DRY-RUN" if report.dry_run else "LIVE")
     )
     console.print(
-        f"[bold]worker tune[/bold] tuner={tuner_name} mode={mode} "
+        f"[bold]worker tune[/bold] tuner={escape(tuner_name)} mode={mode} "
         f"→ {report.proposals_considered} proposal(s) considered"
     )
     console.print(

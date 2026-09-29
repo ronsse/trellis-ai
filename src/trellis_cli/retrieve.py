@@ -183,9 +183,9 @@ def pack(
         console.print(f"  pack_id: {escape(pack_result.pack_id)}")
         console.print(f"  Intent: {intent}", markup=False, highlight=False)
         if domain:
-            console.print(f"  Domain: {domain}")
+            console.print(f"  Domain: {domain}", markup=False, highlight=False)
         if agent:
-            console.print(f"  Agent: {agent}")
+            console.print(f"  Agent: {agent}", markup=False, highlight=False)
         console.print(f"  Axes ran: {', '.join(axes['ran']) or '(none)'}")
         # Header, above the item blocks — never appended after them. The
         # same rule the pack formatters follow (#404): a note printed after

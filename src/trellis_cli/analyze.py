@@ -1063,7 +1063,7 @@ def value(
                 f"item[/bold] "
                 f"[dim](${report.injected_dollars:,.4f} across "
                 f"{report.distinct_helpful_items} cited items, at "
-                f"${report.price_per_mtok:g}/Mtok {report.model}, "
+                f"${report.price_per_mtok:g}/Mtok {escape(report.model)}, "
                 f"{report.price_source})[/dim]"
             )
 
@@ -1270,7 +1270,7 @@ def cost(
     console.print(
         f"  [green]≈ ${report.overhead_dollars:,.4f}[/green] "
         f"at ${report.price_per_mtok:g}/Mtok input "
-        f"({report.model}, {report.price_source})"
+        f"({escape(report.model)}, {report.price_source})"
     )
     console.print(
         "  [dim]This is the marginal input-token overhead memory adds to "

@@ -158,6 +158,32 @@ class TestPolicyAdd:
         data = json.loads(result.stdout.strip())
         assert data["status"] == "ok"
 
+    def test_add_text_echoes_operation_and_scope_value_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The echo runs after ``store.add``, so markup in it cost the exit.
+
+        ``[/y]`` raised ``MarkupError`` with the policy already written:
+        the id printed, then exit 1 -- while ``--format json`` exited 0.
+        """
+        force_colour(monkeypatch, policy_cli)
+        result = runner.invoke(
+            app,
+            [
+                "policy",
+                "add",
+                "--operation",
+                "entity.[bold]x[/y]",
+                "--scope",
+                "domain",
+                "--scope-value",
+                "[bold]d[/z]",
+            ],
+        )
+        assert result.exit_code == 0, plain(result.output)
+        rendered = " ".join(assert_coloured(result.stdout).split())
+        assert "deny entity.[bold]x[/y] (scope: domain:[bold]d[/z])" in rendered
+
 
 class TestPolicyShow:
     def test_show_by_id(self) -> None:

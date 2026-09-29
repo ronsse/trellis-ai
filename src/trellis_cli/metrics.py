@@ -312,13 +312,13 @@ def tune_cmd(
         return
 
     console.print(
-        f"[bold]RuleTuner[/bold] tuner={tuner_name} "
+        f"[bold]RuleTuner[/bold] tuner={escape(tuner_name)} "
         f"→ {len(proposals)} proposals persisted"
     )
     for p in proposals:
         console.print(
             f"  {escape(p.proposal_id[:18])}…  "
-            f"{escape(p.scope.component_id)} domain={p.scope.domain or '-'}  "
+            f"{escape(p.scope.component_id)} domain={escape(p.scope.domain or '-')}  "
             f"{json.dumps(p.proposed_values)}  (n={p.sample_size})"
         )
 
