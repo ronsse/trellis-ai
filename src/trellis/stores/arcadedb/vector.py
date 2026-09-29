@@ -89,7 +89,7 @@ class ArcadeDBVectorStore(VectorStore):
                 http_url = derive_http_url_from_bolt(bolt_uri)
         if not http_url:
             msg = (
-                "arcadedb vector backend requires 'http_url' in config or "
+                "arcadedb vector backend requires a non-empty 'http_url' in config or "
                 "TRELLIS_ARCADEDB_HTTP_URL env var (or a sibling Bolt 'uri' "
                 "to derive it from)"
             )
@@ -99,7 +99,7 @@ class ArcadeDBVectorStore(VectorStore):
         password = prepared.get("password") or ctx.env.get("TRELLIS_ARCADEDB_PASSWORD")
         if not password:
             msg = (
-                "arcadedb vector backend requires 'password' in config or "
+                "arcadedb vector backend requires a non-empty 'password' in config or "
                 "TRELLIS_ARCADEDB_PASSWORD env var"
             )
             raise ConfigError(msg, setting=f"stores.{store_type}.password")

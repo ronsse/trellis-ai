@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import importlib
+import os
 import sys
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, ClassVar
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from trellis.errors import ConfigError
 from trellis.plugins import loader
 from trellis.stores.registry import StoreRegistry, _reset_backend_cache
 
@@ -175,3 +180,87 @@ def test_arcadedb_hook_tracks_migration_once_per_shared_driver() -> None:
 
     assert first["driver"] is second["driver"] is driver
     migrate.assert_called_once()
+
+
+# The ``requires '<key>'`` messages the neo4j and arcadedb registry hooks raise,
+# each reached with the key present in the store's config but empty and its env
+# var unset. An empty value counts as unset, so the message must not read as if
+# the key were absent.
+@pytest.mark.parametrize(
+    ("store_path", "store_type", "params", "key", "env_var"),
+    [
+        pytest.param(
+            "neo4j.graph:Neo4jGraphStore",
+            "graph",
+            {"uri": ""},
+            "uri",
+            "TRELLIS_NEO4J_URI",
+            id="neo4j-uri",
+        ),
+        pytest.param(
+            "neo4j.graph:Neo4jGraphStore",
+            "graph",
+            {"uri": "bolt://localhost:7687", "password": ""},
+            "password",
+            "TRELLIS_NEO4J_PASSWORD",
+            id="neo4j-password",
+        ),
+        pytest.param(
+            "arcadedb.graph:ArcadeDBGraphStore",
+            "graph",
+            {"uri": ""},
+            "uri",
+            "TRELLIS_ARCADEDB_URI",
+            id="arcadedb-graph-uri",
+        ),
+        pytest.param(
+            "arcadedb.graph:ArcadeDBGraphStore",
+            "graph",
+            {"uri": "bolt://localhost:7687", "password": ""},
+            "password",
+            "TRELLIS_ARCADEDB_PASSWORD",
+            id="arcadedb-graph-password",
+        ),
+        pytest.param(
+            "arcadedb.vector:ArcadeDBVectorStore",
+            "vector",
+            {"http_url": ""},
+            "http_url",
+            "TRELLIS_ARCADEDB_HTTP_URL",
+            id="arcadedb-vector-http_url",
+        ),
+        pytest.param(
+            "arcadedb.vector:ArcadeDBVectorStore",
+            "vector",
+            {"http_url": "http://localhost:2480", "password": ""},
+            "password",
+            "TRELLIS_ARCADEDB_PASSWORD",
+            id="arcadedb-vector-password",
+        ),
+    ],
+)
+def test_an_empty_connection_value_is_named_as_empty_not_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    store_path: str,
+    store_type: str,
+    params: dict[str, str],
+    key: str,
+    env_var: str,
+) -> None:
+    for name in list(os.environ):
+        if name.startswith(("TRELLIS_NEO4J_", "TRELLIS_ARCADEDB_")):
+            monkeypatch.delenv(name)
+    module_name, class_name = store_path.split(":")
+    store_cls = getattr(
+        importlib.import_module(f"trellis.stores.{module_name}"), class_name
+    )
+    backend = module_name.split(".")[0]
+    registry = StoreRegistry()
+
+    with pytest.raises(ConfigError) as excinfo:
+        store_cls.prepare_registry_params(
+            registry._registry_context(store_type, backend), store_type, params
+        )
+
+    assert f"requires a non-empty '{key}' in config or {env_var}" in str(excinfo.value)
+    assert excinfo.value.setting == f"stores.{store_type}.{key}"
