@@ -8,7 +8,9 @@ semantics; this file pins the CLI surface only.
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -16,6 +18,12 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from tests.unreadable_paths import (
+    UNREADABLE_PATH_IDS,
+    UNREADABLE_PATH_SHAPES,
+    UnreadablePathShape,
+    unreadable,
+)
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis_cli.admin import admin_app
 from trellis_cli.exit_codes import EXIT_STORE
@@ -225,6 +233,70 @@ def test_migrate_graph_refuses_an_unusable_config(
     output = " ".join(plain(result.output).split())
     assert "[cfg]/src.yaml" in output
     assert expected in output
+
+
+@pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+def test_migrate_graph_refuses_an_unreadable_config_path(
+    shape: UnreadablePathShape,
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config path the loader cannot read exits 2 with the OS's reason.
+
+    The loader used to check ``Path.exists()``, which called the first two
+    shapes absent ("Config file not found") and re-raised the third as a
+    traceback. ``unsearchable_parent`` skips where chmod does not restrict
+    the process (root); the shape probes that itself.
+    """
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "[cfg]" / "src.yaml"
+    dst_config, _ = _write_sqlite_config(tmp_path, "dst")
+
+    with unreadable(shape, src):
+        result = runner.invoke(
+            admin_app,
+            [
+                "migrate-graph",
+                "--from-config",
+                "[cfg]/src.yaml",
+                "--to-config",
+                str(dst_config),
+            ],
+        )
+
+    assert result.exit_code == 2, result.output
+    output = " ".join(plain(result.output).split())
+    assert f"Could not read [cfg]/src.yaml: {shape.message_fragment}" in output
+
+
+def test_migrate_graph_refuses_a_config_name_too_long(
+    tmp_path: Path, runner: CliRunner
+) -> None:
+    """A file name longer than NAME_MAX exits 2 with the OS's reason.
+
+    ``stat`` raises ``ENAMETOOLONG``, which ``Path.exists()`` re-raised as a
+    traceback. No chmod is involved, so this fails before the fix even as
+    root. The path is not asserted: it cannot fit in 80 columns, and Rich
+    folds an overlong token mid-word.
+    """
+    dst_config, _ = _write_sqlite_config(tmp_path, "dst")
+
+    result = runner.invoke(
+        admin_app,
+        [
+            "migrate-graph",
+            "--from-config",
+            str(tmp_path / ("x" * 300 + ".yaml")),
+            "--to-config",
+            str(dst_config),
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    output = " ".join(plain(result.output).split())
+    assert "Could not read" in output
+    assert os.strerror(errno.ENAMETOOLONG) in output
 
 
 def test_migrate_graph_capacity_exceeded_returns_nonzero(
