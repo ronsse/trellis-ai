@@ -1846,7 +1846,7 @@ trellis worker tune [--tuner-name NAME] [--since-days N] [--dry-run] [--format t
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--tuner-name` | `rule_tuner` | Logical tuner name (cursor + proposal scope). |
-| `--since-days` | (cursor) | Force a rescan of the last N days, ignoring the tuner cursor. |
+| `--since-days` | 30-day window | Read the last N days instead of the tuner's trailing window. |
 | `--dry-run` | off | Report what *would* auto-promote without mutating stores or emitting events. |
 | `--format` | `text` | `text` or `json`. |
 

@@ -24,7 +24,7 @@ Create or edit `~/.cursor/mcp.json`:
 }
 ```
 
-Restart Cursor. Open the chat panel and the 11 Trellis macro tools should appear in the tool list (8 core + 3 sectioned-context).
+Restart Cursor. Open the chat panel and the 16 Trellis macro tools should appear in the tool list (10 core + 3 sectioned-context + 3 structured).
 
 ### Project-scoped install
 
@@ -57,7 +57,7 @@ trellis-mcp --help
 trellis admin health
 ```
 
-In Cursor, prompt: *"List your available MCP tools."* Confirm the 11 Trellis tools appear (`get_context`, `save_experience`, `save_knowledge`, `save_memory`, `get_lessons`, `get_graph`, `record_feedback`, `search`, plus `get_objective_context`, `get_task_context`, `get_sectioned_context`).
+In Cursor, prompt: *"List your available MCP tools."* Confirm the 16 Trellis tools appear (`get_context`, `save_experience`, `save_knowledge`, `save_memory`, `get_lessons`, `get_graph`, `get_items`, `get_file_context`, `record_feedback`, `search`, plus `get_objective_context`, `get_task_context`, `get_sectioned_context`, plus `record_observation`, `query_observations`, `execute_mutation`).
 
 ## Recommended `.cursorrules` snippet
 

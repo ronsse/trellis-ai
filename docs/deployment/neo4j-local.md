@@ -1,6 +1,6 @@
 # Trellis with local Neo4j (Docker)
 
-The blessed local-development path for the Knowledge Plane: a single
+The local-development path for a Neo4j Knowledge Plane: a single
 Neo4j Community container alongside whatever Trellis process you're
 running (CLI, API server, MCP). Operational stores stay on SQLite for
 zero-cloud-dep development. For the cloud equivalent see
@@ -8,8 +8,10 @@ zero-cloud-dep development. For the cloud equivalent see
 
 ## Why this path
 
-* Neo4j is the [blessed graph backend](../design/plan-neo4j-hardening.md)
-  for both local and cloud, so local dev mirrors production.
+* Neo4j is a
+  [fully supported graph + vector backend](../design/adr-arcadedb-blessed-substrate.md)
+  for both local and cloud, so local dev mirrors a Neo4j production
+  deployment.
 * Single container, no compose file, no orchestration cost.
 * SQLite for traces / events / parameters keeps zero-cloud-dep dev
   feasible; switch to Postgres when you're ready to mirror cloud
@@ -213,4 +215,4 @@ directory exists. Don't run `trellis admin init` to fix that: with
 * For managed cloud deployment: [`neo4j-auradb.md`](./neo4j-auradb.md)
 * For self-hosted cloud deployment (Helm / k8s / VM): [`neo4j-self-hosted-cloud.md`](./neo4j-self-hosted-cloud.md)
 * For the full recommended config (Postgres operational plane optional): [`recommended-config.yaml`](./recommended-config.yaml)
-* For the design rationale (why Neo4j is the blessed graph backend): [`../design/plan-neo4j-hardening.md`](../design/plan-neo4j-hardening.md)
+* For the hardening work behind this path: [`../design/plan-neo4j-hardening.md`](../design/plan-neo4j-hardening.md); for why ArcadeDB is the blessed substrate: [`../design/adr-arcadedb-blessed-substrate.md`](../design/adr-arcadedb-blessed-substrate.md)

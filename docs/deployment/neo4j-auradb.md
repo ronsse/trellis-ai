@@ -1,6 +1,6 @@
 # Trellis with Neo4j AuraDB (managed cloud)
 
-The blessed cloud path for the Knowledge Plane: Neo4j AuraDB Free for
+The managed-cloud path for a Neo4j Knowledge Plane: Neo4j AuraDB Free for
 evaluation, AuraDB Pro for production. Pair with managed Postgres for
 the Operational Plane to get a fully-managed Trellis deployment with
 no self-hosted infrastructure. For the local equivalent see

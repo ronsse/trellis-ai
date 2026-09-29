@@ -1,9 +1,10 @@
 # Trellis with self-hosted Neo4j in the cloud
 
-The blessed production path for the Knowledge Plane when AuraDB isn't
-on the table — your own Neo4j running on Kubernetes or a VM in your
-cloud account. Same Bolt protocol, same `TRELLIS_NEO4J_*` env vars,
-but you own the operational surface (backups, TLS, upgrades, scaling).
+The self-hosted production path for a Neo4j Knowledge Plane when
+AuraDB isn't on the table — your own Neo4j running on Kubernetes or a
+VM in your cloud account. Same Bolt protocol, same `TRELLIS_NEO4J_*`
+env vars, but you own the operational surface (backups, TLS, upgrades,
+scaling).
 
 For the managed equivalent see [`neo4j-auradb.md`](./neo4j-auradb.md);
 for laptop dev see [`neo4j-local.md`](./neo4j-local.md). The Trellis
@@ -282,5 +283,7 @@ Logs flow through Neo4j's stdout (Helm) or `/var/log/neo4j/` (raw VM)
 * For laptop dev on the same backend shape:
   [`neo4j-local.md`](./neo4j-local.md)
 * For the managed equivalent: [`neo4j-auradb.md`](./neo4j-auradb.md)
-* For the design rationale (why Neo4j is the blessed graph backend):
-  [`../design/plan-neo4j-hardening.md`](../design/plan-neo4j-hardening.md)
+* For the hardening work behind this path:
+  [`../design/plan-neo4j-hardening.md`](../design/plan-neo4j-hardening.md);
+  for why ArcadeDB is the blessed substrate:
+  [`../design/adr-arcadedb-blessed-substrate.md`](../design/adr-arcadedb-blessed-substrate.md)
