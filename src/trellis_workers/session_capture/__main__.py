@@ -11,7 +11,9 @@ a failure (nothing ran, nothing will be retried), and a judge that goes away
 :func:`~trellis_workers.session_capture.sweep.strict_mode` for the
 ``TRELLIS_CAPTURE_STRICT=0`` opt-out. A session that raised mid-sweep is the
 same kind of partial failure and follows the same strict rule, under its own
-exit code.
+exit code. A typed Trellis error that stops the sweep, such as a refused
+``config.yaml``, exits ``5`` with its message on stderr in place of a
+traceback; ``trellis worker capture-sessions`` exits ``5`` on the same fault.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import sys
 
 import structlog
 
+from trellis.errors import TrellisError
 from trellis.logging import configure_stderr_logging
 from trellis_workers.session_capture.sweep import (
     CaptureJudgeUnavailableError,
@@ -38,6 +41,14 @@ EXIT_OK = 0
 EXIT_JUDGE_UNAVAILABLE = 1
 #: Not 2: argparse exits 2 on a usage error.
 EXIT_SESSIONS_ERRORED = 3
+#: A typed Trellis error stopped the sweep before it could report: a refused
+#: ``config.yaml`` (a literal ``${VAR}``, unparseable YAML) or a store backend
+#: the registry does not know. 5, not 1: 1 already means the judge was
+#: unavailable, and 5 is what ``trellis worker capture-sessions`` exits for the
+#: same fault through the CLI's #459 boundary (``trellis_cli.exit_codes.
+#: exit_code_for`` maps ConfigError and StoreError to 5). Kept local: nothing
+#: under trellis_workers imports trellis_cli.
+EXIT_TRELLIS_ERROR = 5
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,6 +73,16 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("capture_judge_unavailable", error=str(exc))  # noqa: TRY400
         sys.stderr.write(f"trellis-session-capture: {exc}\n")
         return EXIT_JUDGE_UNAVAILABLE
+    except TrellisError as exc:
+        # The same operator-error shape for the typed family (#459's boundary,
+        # for this entry): a refused config's message names the file and the
+        # fix. Nothing broader: an untyped exception is a bug and keeps its
+        # traceback.
+        logger.error(  # noqa: TRY400
+            "capture_sweep_refused", error=str(exc), error_type=type(exc).__name__
+        )
+        sys.stderr.write(f"trellis-session-capture: {exc}\n")
+        return EXIT_TRELLIS_ERROR
 
     payload = report.to_payload()
     unjudged = judge_unavailable_sessions(report)

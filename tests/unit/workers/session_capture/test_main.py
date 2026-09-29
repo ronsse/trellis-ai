@@ -2,14 +2,16 @@
 
 ``__main__`` is argparse plus the exit-code contract; the sweep itself is
 covered by ``test_sweep.py``. The contract under test: the JSON report owns
-stdout, a missing judge exits non-zero with no report (nothing ran), and a
-judge that vanished mid-sweep is counted and — under the default strict mode —
-also exits non-zero.
+stdout, a missing judge exits non-zero with no report (nothing ran), a judge
+that vanished mid-sweep is counted and — under the default strict mode — also
+exits non-zero, and a typed Trellis error (a refused ``config.yaml``) exits
+``5`` with its message and no traceback.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -17,8 +19,23 @@ import pytest
 import structlog
 
 from tests.structlog_isolation import clear_cached_logger_proxies
+from trellis.errors import ConfigError
+from trellis_cli.exit_codes import EXIT_STORE
 from trellis_workers.session_capture import __main__ as capture_main
 from trellis_workers.session_capture.models import CaptureReport
+from trellis_workers.session_capture.sweep import ENV_ROOT, ENV_WATERMARK
+
+#: The shape #646's own refusal tests load
+#: (``tests/unit/stores/test_registry_config_literals.py``): a value that is
+#: only a ``${VAR}`` placeholder, which ``StoreRegistry.from_config_dir``
+#: refuses before any store is built.
+_NEO4J_CONFIG = """\
+knowledge:
+  graph:
+    backend: neo4j
+    uri: bolt://example.invalid:7687
+    password: ${TRELLIS_NEO4J_PASSWORD}
+"""
 
 
 @pytest.fixture(autouse=True)
@@ -192,3 +209,61 @@ class TestMain:
         err = capsys.readouterr().err
         assert "2 session(s) left unjudged" in err
         assert "1 session(s) raised mid-sweep" in err
+
+    def test_typed_trellis_error_exits_five_with_its_message(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A refused config is an operator error: its message, not a traceback."""
+        message = "/srv/trellis/config.yaml: knowledge.graph.uri is not a string"
+        monkeypatch.setattr(
+            capture_main, "run_sweep", MagicMock(side_effect=ConfigError(message))
+        )
+
+        exit_code = capture_main.main([])
+
+        assert exit_code == capture_main.EXIT_TRELLIS_ERROR
+        # `trellis worker capture-sessions` exits this for the same fault.
+        assert exit_code == EXIT_STORE
+        captured = capsys.readouterr()
+        assert message in captured.err
+        assert "Traceback" not in captured.err
+        assert captured.out == ""
+
+    def test_refused_config_exits_five_on_the_unmocked_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+    ) -> None:
+        """#646's refusal reaches this entry through the real sweep and stops here."""
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(_NEO4J_CONFIG, encoding="utf-8")
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setenv(ENV_ROOT, str(tmp_path / "transcripts"))
+        monkeypatch.setenv(ENV_WATERMARK, str(tmp_path / "watermark.json"))
+
+        assert capture_main.main([]) == capture_main.EXIT_TRELLIS_ERROR
+
+        captured = capsys.readouterr()
+        assert (
+            "knowledge.graph.password is the literal text ${TRELLIS_NEO4J_PASSWORD}"
+            in captured.err
+        )
+        assert str(config_dir / "config.yaml") in captured.err
+        assert "Traceback" not in captured.err
+        assert captured.out == ""
+
+    def test_untyped_exception_is_not_caught(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only the typed family is caught: an untyped error is a bug, trace intact."""
+        monkeypatch.setattr(
+            capture_main, "run_sweep", MagicMock(side_effect=KeyError("x"))
+        )
+
+        with pytest.raises(KeyError):
+            capture_main.main([])
