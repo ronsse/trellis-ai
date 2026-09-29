@@ -1038,7 +1038,7 @@ def _print_quickstart_summary(
 
 
 @admin_app.command()
-def quickstart(
+def quickstart(  # noqa: PLR0912
     scope: str = typer.Option("root", help="root (global) or project (local)"),
     force: bool = typer.Option(False, "--force", help="Overwrite existing skills"),
     with_skills: str | None = typer.Option(
@@ -1055,12 +1055,16 @@ def quickstart(
     ),
 ) -> None:
     """Initialize stores and print the command that registers the MCP server."""
-    if with_skills is not None and with_skills not in ("user", "project"):
+    msg: str | None = None
+    if scope not in ("root", "project"):
+        msg = f"--scope must be 'root' or 'project', got {scope!r}"
+    elif with_skills is not None and with_skills not in ("user", "project"):
         msg = f"--with-skills must be 'user' or 'project', got {with_skills!r}"
+    if msg is not None:
         if output_format == "json":
             typer.echo(json.dumps({"status": "error", "error": msg}))
         else:
-            console.print(f"[red]Error:[/red] {msg}")
+            console.print(f"[red]Error:[/red] {escape(msg)}")
         raise typer.Exit(EXIT_VALIDATION)
     project_dir = Path.cwd()
     if scope == "project":

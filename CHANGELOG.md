@@ -109,7 +109,10 @@ All notable changes to Trellis will be documented in this file.
   written by earlier versions are inert and can be deleted. `--format json`
   drops `settings_path` and adds `mcp_register_command`, the command as a
   list of arguments. `--scope project` now initializes `<cwd>/.trellis/`
-  instead of the global config dir.
+  instead of the global config dir, and a `--scope` other than `root` or
+  `project` exits `2` before writing anything, where it ran the global setup.
+  ([#651](https://github.com/ronsse/trellis-ai/pull/651),
+  [#669](https://github.com/ronsse/trellis-ai/pull/669))
 
 - **BREAKING: a `config.yaml` value that is only a `${VAR}` placeholder now
   refuses to load.** Trellis never expands environment variables in

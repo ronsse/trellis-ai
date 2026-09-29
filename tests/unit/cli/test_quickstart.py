@@ -353,3 +353,27 @@ class TestQuickstart:
         assert result.exit_code != 0
         data = json.loads(result.stdout.strip())
         assert data["status"] == "error"
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    def test_unknown_scope_exits_before_writing(self, monkeypatch, output_format):
+        """A ``--scope`` other than ``root`` or ``project`` writes nothing.
+
+        Only ``project`` was special-cased, so a typo ran the root setup:
+        it initialized the global config and data dirs and exited 0. The
+        value holds a ``[word]``, which Rich reads as a style tag and
+        deletes unless the text arm escapes it.
+        """
+        project_dir = self._enter_project(monkeypatch)
+        result = runner.invoke(
+            app,
+            ["admin", "quickstart", "--scope", "[project]", "--format", output_format],
+        )
+        msg = "--scope must be 'root' or 'project', got '[project]'"
+        assert result.exit_code == 2
+        if output_format == "json":
+            assert json.loads(result.stdout) == {"status": "error", "error": msg}
+        else:
+            assert msg in plain(result.output)
+        assert not (self.tmp / "trellis-config").exists()
+        assert not (self.tmp / "trellis-data").exists()
+        assert not (project_dir / ".trellis").exists()
