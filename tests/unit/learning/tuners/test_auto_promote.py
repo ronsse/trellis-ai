@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.learning.tuners import (
     AutoPromotePolicy,
@@ -201,6 +202,78 @@ def test_disabled_policy_promotes_nothing_and_emits_nothing(stores) -> None:
     assert _event_types(events) == []
     # Disabled outcomes report as "disabled" disposition (would-qualify subset).
     assert any(o.disposition == "disabled" for o in report.outcomes)
+
+
+# ---------------------------------------------------------------------------
+# dry_run writes nothing, and a later live run still promotes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_dry_run_writes_nothing_and_a_live_run_still_promotes(
+    stores, enabled: bool
+) -> None:
+    """``dry_run=True`` used to persist every proposal and set the cursor.
+
+    Two cells: ``orders`` has a baseline and clears the auto gate;
+    ``billing`` has none and stays ``pending_manual``.
+    """
+    params, outcomes, events, tuner_state = stores
+    at = datetime(2026, 6, 1, tzinfo=UTC)
+    params.put(
+        ParameterSet(
+            scope=ParameterScope(component_id=COMPONENT, domain="orders"),
+            values={"recency_half_life_days": 30.0},
+            source="test:baseline",
+        )
+    )
+    for domain in ("orders", "billing"):
+        _record_outcomes(
+            outcomes, params_version=None, success=10, failure=30, at=at, domain=domain
+        )
+    common = {
+        "tuner": _make_tuner(outcomes, tuner_state),
+        "parameter_store": params,
+        "tuner_state": tuner_state,
+        "outcome_store": outcomes,
+        "event_log": events,
+        "now": at + timedelta(days=1),
+    }
+
+    with capture_logs() as dry_logs:
+        dry = run_auto_promotion(
+            **common, policy=AutoPromotePolicy(enabled=enabled), dry_run=True
+        )
+
+    would = "would_auto_promote" if enabled else "disabled"
+    dispositions = sorted(o.disposition for o in dry.outcomes)
+    assert dispositions == sorted([would, "pending_manual"])
+    assert tuner_state.list_proposals() == []
+    assert tuner_state.get_cursor("rule_tuner") is None
+    assert _event_types(events) == []
+
+    with capture_logs() as live_logs:
+        live = run_auto_promotion(**common, policy=AutoPromotePolicy(enabled=True))
+
+    assert live.auto_promoted == 1
+    statuses = sorted(p.status for p in tuner_state.list_proposals())
+    assert statuses == ["pending", "promoted"]
+    assert tuner_state.get_cursor("rule_tuner") is not None
+    # The log says which kind of pass wrote its ``proposals_persisted`` count.
+    flags = [
+        next(e["persist"] for e in got if e["event"] == "rule_tuner.run_complete")
+        for got in (dry_logs, live_logs)
+    ]
+    assert flags == [False, True]
+    after_live = (tuner_state.list_proposals(), _event_types(events))
+
+    again = run_auto_promotion(
+        **common, policy=AutoPromotePolicy(enabled=enabled), dry_run=True
+    )
+
+    # ``orders`` is terminal now and skipped; ``billing`` is left as it was.
+    assert again.proposals_considered == 1
+    assert (tuner_state.list_proposals(), _event_types(events)) == after_live
 
 
 # ---------------------------------------------------------------------------

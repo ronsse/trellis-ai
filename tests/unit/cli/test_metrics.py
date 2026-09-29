@@ -213,6 +213,56 @@ def test_tune_text_renders_the_tuner_name_verbatim(
     assert summary in rendered
 
 
+@pytest.mark.parametrize("fmt", ["json", "text"])
+def test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes(
+    cli_env, tmp_path: Path, fmt: str
+) -> None:
+    """``worker tune --dry-run`` leaves proposals, cursor and events alone.
+
+    It used to persist every proposal and set the cursor.  ``orders`` has a
+    baseline and clears the auto gate; ``billing`` has none and stays pending.
+    """
+    config = tmp_path / "config"
+    config.mkdir(exist_ok=True)
+    (config / "config.yaml").write_text(
+        "learning:\n  auto_promote:\n    enabled: true\n", encoding="utf-8"
+    )
+    cli_env["param_store"].put(
+        ParameterSet(
+            scope=ParameterScope(
+                component_id=GRAPH_SEARCH_COMPONENT_ID, domain="orders"
+            ),
+            values={"domain_match_boost": 2.0},
+            source="test:baseline",
+        )
+    )
+    for domain in ("orders", "billing"):
+        _seed_uncited_graph_outcomes(cli_env["outcome_store"], n=40, domain=domain)
+    state, events = cli_env["tuner_state"], cli_env["event_log"]
+
+    dry = runner.invoke(app, ["worker", "tune", "--dry-run", "--format", fmt])
+
+    assert dry.exit_code == 0, plain(dry.output)
+    if fmt == "json":
+        payload = json.loads(dry.stdout)
+        assert (payload["proposals_considered"], payload["pending_manual"]) == (2, 1)
+    else:
+        out = " ".join(plain(dry.output).split())
+        assert "2 proposal(s) considered" in out
+        assert "A run without --dry-run leaves pending proposals queued" in out
+    assert state.list_proposals() == []
+    assert state.get_cursor("rule_tuner") is None
+    assert events.get_events(limit=100) == []
+
+    live = runner.invoke(app, ["worker", "tune", "--format", "json"])
+
+    assert live.exit_code == 0, plain(live.output)
+    assert json.loads(live.stdout)["auto_promoted"] == 1
+    statuses = sorted(p.status for p in state.list_proposals())
+    assert statuses == ["pending", "promoted"]
+    assert state.get_cursor("rule_tuner") is not None
+
+
 def test_tune_text_renders_a_stored_domain_verbatim(
     cli_env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
