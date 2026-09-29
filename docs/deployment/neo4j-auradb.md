@@ -153,16 +153,20 @@ Override via the `driver_config` block under each Neo4j store entry:
 knowledge:
   graph:
     backend: neo4j
-    uri: neo4j+s://abcd1234.databases.neo4j.io
-    user: abcd1234
-    database: abcd1234
+    driver_config:
+      max_connection_pool_size: 200
+      max_transaction_retry_time: 10.0
+  vector:
+    backend: neo4j
+    dimensions: 1536
     driver_config:
       max_connection_pool_size: 200
       max_transaction_retry_time: 10.0
 ```
 
-The graph + vector pair against the same `(uri, user)` shares one
-driver — first store's config wins.
+Graph and vector share one driver per `(uri, user)`, built by whichever
+store is opened first, and that depends on the command rather than on
+file order, so give both entries the same `driver_config`.
 
 ## Upgrading from Free to Pro
 

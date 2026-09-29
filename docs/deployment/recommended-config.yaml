@@ -69,17 +69,17 @@
 # ===========================================================================
 # 2. NEO4J LOCAL — Docker Neo4j + SQLite operational
 # ===========================================================================
-# The blessed local-development shape. Knowledge Plane talks to a Neo4j
+# The Neo4j local-development shape. Knowledge Plane talks to a Neo4j
 # container (`docker run neo4j:5 ...` per neo4j-local.md). Operational
 # Plane stays on SQLite — no second managed service needed for traces,
 # events, and parameter tuning.
 #
 # Required env vars:
 #   TRELLIS_NEO4J_URI=bolt://localhost:7687
-#   TRELLIS_NEO4J_USER=neo4j
 #   TRELLIS_NEO4J_PASSWORD=test1234        # whatever you set NEO4J_AUTH to
 #
 # Optional:
+#   TRELLIS_NEO4J_USER=neo4j               # the default when unset
 #   TRELLIS_VALIDATE_CONNECTIVITY=1        # ping Neo4j on startup
 #
 # knowledge:
@@ -107,7 +107,7 @@
 # ===========================================================================
 # 3. NEO4J CLOUD — AuraDB + Postgres operational
 # ===========================================================================
-# The blessed managed-cloud shape. Knowledge Plane on AuraDB, Operational
+# The Neo4j managed-cloud shape. Knowledge Plane on AuraDB, Operational
 # Plane on Postgres (Neon for the cheapest managed option, or RDS / Cloud
 # SQL for production). Both planes hosted, both managed, no self-hosted
 # infrastructure.
