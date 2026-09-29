@@ -385,7 +385,7 @@ Args: {"trace_id": "01JRK5N7QF", "success": true, "notes": "Clean implementation
 
 ### Key Points
 
-- All tools return **markdown**, not JSON — ready for LLM consumption
+- All tools except `record_observation`, `query_observations` and `execute_mutation` return **markdown**, not JSON — ready for LLM consumption
 - Use `max_tokens` to control response size (default: 2000)
 - `get_context` searches documents, graph, and traces simultaneously
 - `search` is for targeted queries; `get_context` is for broad task context
