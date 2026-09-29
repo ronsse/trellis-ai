@@ -218,6 +218,25 @@ def test_policy_add_writes_the_file_the_registry_s_gate_reads(tmp_path, monkeypa
     assert not data_env.exists()
 
 
+@pytest.mark.parametrize("config", ["keyed", "refused"])
+def test_demo_reset_wipes_only_the_registry_s_stores_dir(tmp_path, monkeypatch, config):
+    keyed, data_env = _keyed_and_env(tmp_path, monkeypatch)
+    if config == "refused":
+        (tmp_path / "config" / "config.yaml").write_text("data_dir: [unclosed\n")
+    for data_dir in (keyed, data_env):
+        (data_dir / "stores").mkdir(parents=True)
+        (data_dir / "stores" / "marker").touch()
+
+    _reset_registry()
+    result = runner.invoke(app, ["demo", "reset"], input="y\n")
+
+    # rmtree target: the registry's dir, and nothing when it refuses config.yaml.
+    assert result.exit_code == (5 if config == "refused" else 0), result.output
+    assert (data_env / "stores" / "marker").is_file()
+    assert (keyed / "stores" / "marker").exists() is (config == "refused")
+    assert (keyed / "stores").is_dir()
+
+
 @pytest.mark.parametrize("config_yaml", [True, False], ids=["config", "no-config"])
 def test_a_store_command_and_health_each_build_one_registry(
     tmp_path, monkeypatch, config_yaml
