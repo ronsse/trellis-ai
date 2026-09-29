@@ -743,12 +743,25 @@ def _accepted_params(cls: Any) -> frozenset[str] | None:
     """Return the keyword names ``cls(**params)`` accepts, or ``None``.
 
     ``None`` means any key may be valid, so the constructor decides: it
-    takes ``**kwargs``, has no readable signature, or declares one
-    (``__signature__``, as a pydantic model does) that can be narrower
-    than what the call binds. A ``functools.wraps`` wrapper is read as
-    itself, not as the ``__init__`` it wraps, for the same reason.
+    takes ``**kwargs``, has no readable signature, or inspect would read a
+    declaration instead of the code a call runs. That is the case when the
+    class, or the ``__init__``, ``__new__`` or metaclass ``__call__`` its
+    call runs, declares a ``__signature__`` (as a pydantic model does) or
+    wraps another callable (``__wrapped__``, as ``functools.wraps``, wrapt
+    and the decorator package set); either can be narrower than what the
+    call binds. A wrapper nested deeper is read as itself, not as the
+    callable it wraps.
     """
-    if getattr(cls, "__signature__", None) is not None:
+    runs = (
+        cls,
+        getattr(cls, "__init__", None),
+        getattr(cls, "__new__", None),
+        getattr(type(cls), "__call__", None),  # noqa: B004 - the metaclass method
+    )
+    if any(
+        getattr(obj, "__signature__", None) is not None or hasattr(obj, "__wrapped__")
+        for obj in runs
+    ):
         return None
     try:
         parameters = inspect.signature(cls, follow_wrapped=False).parameters.values()

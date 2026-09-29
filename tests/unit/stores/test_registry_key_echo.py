@@ -9,9 +9,10 @@ credential, ignoring case, in the message or the log events.
 from __future__ import annotations
 
 import functools
+import inspect
 from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
+from types import FunctionType, MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import pydantic
@@ -85,6 +86,16 @@ def test_a_constructor_taking_kwargs_or_without_a_signature_decides_itself() -> 
     assert registry_module._accepted_params(dict) is None  # no signature: ValueError
 
 
+def _init(self: object, db_path: str) -> None: ...
+
+
+def _make(db_path: str) -> None: ...
+
+
+#: What the constructors below declare; each of them also binds ``retries``.
+_NARROW = inspect.signature(_init)
+
+
 def _takes_retries(init: Callable[..., None]) -> Callable[..., None]:
     @functools.wraps(init)
     def wrapper(self: object, *args: object, retries: int = 3, **kw: object) -> None:
@@ -98,17 +109,83 @@ class _WrappedInit:
     def __init__(self, db_path: str) -> None: ...
 
 
+class _WrappedInPartialmethod:
+    # Only inspect sees the wrapper, through the partialmethod.
+    __init__ = functools.partialmethod(_takes_retries(_init))
+
+
+class _DeclaredInit:
+    def __init__(self, db_path: str, retries: int = 3) -> None: ...
+
+    __init__.__signature__ = _NARROW
+
+
+class _DeclaredNew:
+    def __new__(cls, db_path: str, retries: int = 3) -> _DeclaredNew:  # noqa: ARG004
+        return super().__new__(cls)
+
+    __new__.__signature__ = _NARROW
+
+
+class _DeclaredCallMeta(type):
+    def __call__(cls, db_path: str, retries: int = 3) -> object:
+        return super().__call__(db_path)
+
+    __call__.__signature__ = _NARROW
+
+
+class _DeclaredCall(metaclass=_DeclaredCallMeta):
+    def __init__(self, db_path: str) -> None: ...
+
+
+class _Proxy:
+    """A stand-in for a wrapt proxy, which reports itself as a function."""
+
+    def __init__(self, wrapped: Callable[..., None]) -> None:
+        self.__wrapped__ = wrapped
+
+    @property
+    def __class__(self) -> type:
+        return FunctionType
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.__wrapped__, name)
+
+    def __get__(self, instance: object, owner: type | None = None) -> object:
+        return self if instance is None else MethodType(self, instance)
+
+    def __call__(self, *args: object, retries: int = 3, **kw: object) -> None:
+        self.__wrapped__(*args, **kw)
+
+
+class _ProxiedInit:
+    __init__ = _Proxy(_init)
+
+
 class _Model(pydantic.BaseModel):
     db_path: str = ""
 
 
-def test_a_constructor_declaring_a_narrower_signature_decides_itself() -> None:
+@pytest.mark.parametrize(
+    "constructor",
+    [
+        pytest.param(_WrappedInit, id="wraps"),
+        pytest.param(_WrappedInPartialmethod, id="wraps-in-partialmethod"),
+        pytest.param(_DeclaredInit, id="declared-init"),
+        pytest.param(_DeclaredNew, id="declared-new"),
+        pytest.param(_DeclaredCall, id="declared-metaclass-call"),
+        pytest.param(_ProxiedInit, id="proxied-init"),
+        pytest.param(_Proxy(_make), id="proxied-function"),
+        pytest.param(_Model, id="pydantic"),  # ignores a field it does not declare
+    ],
+)
+def test_a_constructor_declaring_a_narrower_signature_decides_itself(
+    constructor: Callable[..., object],
+) -> None:
     # inspect.signature reports what these declare, not what the call binds.
-    _WrappedInit(db_path="x", retries=1)
-    _Model(db_path="x", other="x")  # pydantic ignores a field it does not declare
+    constructor(db_path="x", retries=1)
 
-    assert registry_module._accepted_params(_WrappedInit) is None
-    assert registry_module._accepted_params(_Model) is None
+    assert registry_module._accepted_params(constructor) is None
 
 
 def test_a_key_the_constructor_does_not_accept_is_refused_before_the_call(
