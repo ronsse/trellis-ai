@@ -289,10 +289,10 @@ def tune_cmd(
     monitoring (``auto_demote=True``) so degradation triggers an
     auto-rollback and ``PARAMS_AUTO_ROLLED_BACK``.
 
-    Proposals that do not clear the auto gate stay ``pending`` for manual
-    review via ``trellis metrics promote`` — they are reported, never
-    rejected. With auto-promote disabled (the default) this command is a
-    pure tuner pass: zero promotions, zero events beyond the tuner's own.
+    Without ``--dry-run``, proposals that do not clear the auto gate stay
+    ``pending`` for manual review via ``trellis metrics promote`` — they
+    are reported, never rejected. With auto-promote disabled (the default)
+    this command is a pure tuner pass: zero promotions, zero events.
     """
     policy = _build_auto_promote_policy_or_exit()
 
@@ -362,8 +362,8 @@ def _render_text(report: Any, *, tuner_name: str) -> None:
         )
     if report.pending_manual:
         console.print(
-            "[dim]Pending proposals stay eligible for manual review: "
-            "'trellis metrics promote <proposal_id> --commit'.[/dim]"
+            "[dim]A run without --dry-run leaves pending proposals queued for "
+            "manual review: 'trellis metrics promote <proposal_id> --commit'.[/dim]"
         )
 
 

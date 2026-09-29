@@ -149,7 +149,7 @@ Add a `learning.auto_promote` block with `enabled: true` to `$TRELLIS_CONFIG_DIR
 
 The auto thresholds **must be at least as strict as the manual-promote defaults** — the loader rejects looser values loudly. Monitoring is always armed; you cannot auto-promote without an armed rollback (Tier-1 invariant (b)).
 
-**What it writes/emits.** With auto-promote off: only the tuner's own proposals/events. With it on, each autonomous action emits a **dedicated, self-identifying** event on top of the normal governance event:
+**What it writes/emits.** With auto-promote off: only the tuner's own `pending` proposals and its cursor; the tuner emits no events. `--dry-run` writes nothing in either mode. With auto-promote on, each autonomous action emits a **dedicated, self-identifying** event on top of the normal governance event:
 
 | Event | Emitted when |
 |---|---|
