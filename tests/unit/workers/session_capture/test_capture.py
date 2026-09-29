@@ -14,7 +14,9 @@ from unittest.mock import MagicMock
 import pytest
 from structlog.testing import capture_logs
 
+from trellis.errors import ConfigError
 from trellis.stores.base.event_log import EventType
+from trellis.stores.registry import StoreRegistry
 from trellis_workers.session_capture import capture
 from trellis_workers.session_capture.capture import run_capture
 
@@ -1225,3 +1227,37 @@ class TestPerSessionBoundary:
                 watermark_path=tmp_path / "wm.json",
                 llm_client=client,
             )
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["live", "dry_run"])
+def test_refused_document_store_stops_the_sweep_before_the_judge(
+    tmp_path: Path, dry_run: bool
+) -> None:
+    """A document store the registry refuses fails the sweep before any judge call.
+
+    The judge count is the assertion because the raise passed before the fix
+    too: the registry builds a store on first use, so the refusal came from
+    the write seam once every session had been judged, and with the
+    watermark unsaved the next sweep paid for the same sessions again. Dry
+    runs call the judge, so they are held to it as well. A real registry
+    rather than ``_registry``, whose stores are all built up front.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "knowledge:\n  document:\n    backend: nosuch\n", encoding="utf-8"
+    )
+    registry = StoreRegistry.from_config_dir(config_dir, tmp_path / "data")
+    root = tmp_path / "projects"
+    _error_session(root / "proj" / "sess-fake-0001.jsonl")
+    client = FakeLLMClient([candidates_json(good_candidate())])
+
+    with pytest.raises(ConfigError, match="Unknown backend for store type 'document'"):
+        run_capture(
+            registry,
+            transcripts_root=root,
+            watermark_path=tmp_path / "wm.json",
+            llm_client=client,
+            dry_run=dry_run,
+        )
+    assert client.calls == []
