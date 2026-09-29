@@ -241,6 +241,16 @@ All notable changes to Trellis will be documented in this file.
   similarity behavior is statistically equivalent.
   ([#255](https://github.com/ronsse/trellis-ai/issues/255))
 
+### Fixed
+
+- **`trellis worker tune --dry-run` writes nothing.** It persisted every
+  proposal as `pending` and advanced the tuner cursor, although its help
+  said "without mutating or emitting"; it never emitted events. The tuner
+  now runs with `RuleTuner.run(persist=False)` on a dry run. To queue
+  proposals for `trellis metrics promote`, run `worker tune` without
+  `--dry-run` while auto-promote is off: that pass promotes nothing.
+  ([#659](https://github.com/ronsse/trellis-ai/pull/659))
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.

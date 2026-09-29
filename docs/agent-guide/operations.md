@@ -1848,7 +1848,7 @@ trellis worker tune [--tuner-name NAME] [--since-days N] [--dry-run] [--format t
 | `--dry-run` | off | Report what *would* auto-promote without mutating stores or emitting events. |
 | `--format` | `text` | `text` or `json`. |
 
-**Default behaviour is a pure tuner pass.** Auto-promotion is **off by default** (global default OFF, per Tier-1 invariant (d)). With it disabled, `worker tune` is byte-identical to `trellis metrics tune`: it produces/refreshes proposals and promotes nothing. Non-qualifying proposals always stay `pending` for manual review via `trellis metrics promote` — they are reported, never rejected.
+**Default behaviour is a pure tuner pass.** Auto-promotion is **off by default** (global default OFF, per Tier-1 invariant (d)). With it disabled and no `--dry-run`, `worker tune` is byte-identical to `trellis metrics tune`: it produces/refreshes proposals and promotes nothing. Without `--dry-run`, non-qualifying proposals stay `pending` for manual review via `trellis metrics promote` — they are reported, never rejected. `--dry-run` persists no proposal and leaves the tuner cursor alone.
 
 #### Enabling Tier-1 auto-promotion
 

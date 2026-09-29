@@ -532,6 +532,7 @@ class RuleTuner:
         *,
         since: datetime | None = None,
         until: datetime | None = None,
+        persist: bool = True,
     ) -> list[ParameterProposal]:
         """Run one tuning pass.
 
@@ -557,10 +558,15 @@ class RuleTuner:
                 over the window. When ``None``, the window is used.
             until: Optional upper bound (inclusive). Defaults to "now"
                 at the store level when unset.
+            persist: When ``False``, write nothing: no proposal row and
+                no cursor. The terminal-status check still reads the
+                state store, so the list returned is the one a
+                persisting pass would have written.
 
         Returns the list of proposals that were created or updated
-        this run — excludes proposals that matched an existing
-        terminal-status record.
+        this run (or, with ``persist=False``, would have been) —
+        excludes proposals that matched an existing terminal-status
+        record.
         """
         effective_since = since
         if effective_since is None:
@@ -612,7 +618,8 @@ class RuleTuner:
             if existing is not None and existing.status in _TERMINAL_STATUSES:
                 skipped_terminal += 1
                 continue
-            self._state.put_proposal(proposal)
+            if persist:
+                self._state.put_proposal(proposal)
             persisted.append(proposal)
 
         # Written as a record of the newest outcome this pass saw, not as
@@ -620,11 +627,13 @@ class RuleTuner:
         # docstring. Kept because "when did this tuner last see fresh
         # signal?" is the question an operator asks of a silent tuner.
         latest = max(o.occurred_at for o in outcomes)
-        self._state.set_cursor(self._tuner_name, latest.isoformat())
+        if persist:
+            self._state.set_cursor(self._tuner_name, latest.isoformat())
 
         logger.info(
             "rule_tuner.run_complete",
             tuner=self._tuner_name,
+            persist=persist,
             outcomes_scanned=len(outcomes),
             aggregates=len(aggregates),
             proposals_proposed=len(proposals),
