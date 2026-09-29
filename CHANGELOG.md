@@ -249,6 +249,7 @@ All notable changes to Trellis will be documented in this file.
   now runs with `RuleTuner.run(persist=False)` on a dry run. To queue
   proposals for `trellis metrics promote`, run `worker tune` without
   `--dry-run` while auto-promote is off: that pass promotes nothing.
+  ([#659](https://github.com/ronsse/trellis-ai/pull/659))
 
 ## [0.9.0] - 2026-05-13
 
