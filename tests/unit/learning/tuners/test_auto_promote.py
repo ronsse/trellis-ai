@@ -265,7 +265,21 @@ def test_dry_run_writes_nothing_and_a_live_run_still_promotes(
         for got in (dry_logs, live_logs)
     ]
     assert flags == [False, True]
-    after_live = (tuner_state.list_proposals(), _event_types(events))
+    after_live = (
+        tuner_state.list_proposals(),
+        tuner_state.get_cursor("rule_tuner"),
+        _event_types(events),
+    )
+    # Newer outcomes, so a dry run that refreshed the row or advanced the
+    # existing cursor would show.
+    _record_outcomes(
+        outcomes,
+        params_version=None,
+        success=10,
+        failure=30,
+        at=at + timedelta(hours=1),
+        domain="billing",
+    )
 
     again = run_auto_promotion(
         **common, policy=AutoPromotePolicy(enabled=enabled), dry_run=True
@@ -273,7 +287,11 @@ def test_dry_run_writes_nothing_and_a_live_run_still_promotes(
 
     # ``orders`` is terminal now and skipped; ``billing`` is left as it was.
     assert again.proposals_considered == 1
-    assert (tuner_state.list_proposals(), _event_types(events)) == after_live
+    assert (
+        tuner_state.list_proposals(),
+        tuner_state.get_cursor("rule_tuner"),
+        _event_types(events),
+    ) == after_live
 
 
 # ---------------------------------------------------------------------------
