@@ -1181,6 +1181,26 @@ class TestWorkerEnrich:
         text = " ".join(text.split())
         assert "the matching extra ([llm-openai] / [llm-anthropic])." in text
 
+    @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
+    def test_the_help_names_both_extras(
+        self, monkeypatch: pytest.MonkeyPatch, colour: bool
+    ) -> None:
+        """Typer renders this docstring as Rich markup, which deleted both extras.
+
+        ``--help`` showed an empty pair of double backticks where each one
+        belonged. Typer's help console colours from the ``FORCE_COLOR`` that
+        ``force_colour`` sets.
+        """
+        if colour:
+            force_colour(monkeypatch, worker)
+
+        result = runner.invoke(app, ["worker", "enrich", "--help"])
+
+        assert result.exit_code == 0, result.output
+        text = assert_coloured(result.stdout) if colour else plain(result.stdout)
+        text = " ".join(text.split())
+        assert "the matching ``[llm-openai]`` / ``[llm-anthropic]`` extra." in text
+
     def test_dry_run_selects_without_llm_call(
         self, tmp_path: Path, temp_stores: StoreRegistry, monkeypatch
     ) -> None:

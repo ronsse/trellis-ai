@@ -1332,7 +1332,7 @@ def enrich_cmd(
     ``tag_confidence`` stamp, then persisted via ``DocumentStore.put``.
 
     **Requires an LLM extra.** Enrichment needs a configured ``llm:`` block
-    and the matching ``[llm-openai]`` / ``[llm-anthropic]`` extra. When no
+    and the matching ``\\[llm-openai]`` / ``\\[llm-anthropic]`` extra. When no
     client can be built this command exits non-zero with an actionable
     message — it never silently no-ops.
     """
