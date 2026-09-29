@@ -248,11 +248,11 @@ All notable changes to Trellis will be documented in this file.
   `LearningCandidatesReport` meta-trace findings for noise tags and review
   files it never wrote, and `--reconcile-first` emitted a
   `FEEDBACK_RECORDED` event per file-only feedback row under it. A dry run
-  now records each stage's meta-Activity but no finding, `--dry-run
-  --reconcile-first` exits 2 (preview the backfill with `trellis admin
-  reconcile-feedback --log-dir DIR --dry-run`), and `--dry-run
-  --no-meta-trace` writes nothing beyond the `write.rejected` event a
-  degraded advisory file still emits. Live runs are unchanged.
+  now records the meta-Activity of each stage it runs but no finding,
+  `--dry-run --reconcile-first` exits 2 (preview the backfill with
+  `trellis admin reconcile-feedback --log-dir DIR --dry-run`), and
+  `--dry-run --no-meta-trace` writes nothing beyond the `write.rejected`
+  event a degraded advisory file still emits. Live runs are unchanged.
   ([#663](https://github.com/ronsse/trellis-ai/pull/663))
 
 - **`admin health` and config parse errors stop printing config.yaml
