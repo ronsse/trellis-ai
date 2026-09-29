@@ -928,6 +928,8 @@ def test_the_conditional_exit_helper_roster_is_exactly_the_private_may_exiters()
             "_exit_if_advisory_store_degraded",
         ],
         "classify": ["_require_llm_facet_classifier"],
+        # Exits on a REJECTED or FAILED command and returns on any other.
+        "curate": ["_execute_command"],
         "ingest_corpus": ["_parse_tags"],
         "policy": ["_exit_if_degraded", "_refuse_stale"],
         "stores": ["_get_registry"],
