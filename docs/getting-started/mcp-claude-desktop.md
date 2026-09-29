@@ -44,7 +44,7 @@ Quit Claude Desktop completely (not just the window — use the menu bar icon) a
 
 ## Verify
 
-In a new chat, ask: *"What MCP tools are available?"* You should see the 11 Trellis macro tools (8 core + 3 sectioned-context).
+In a new chat, ask: *"What MCP tools are available?"* You should see the 16 Trellis macro tools (10 core + 3 sectioned-context + 3 structured).
 
 If something's wrong, check the Claude Desktop logs:
 

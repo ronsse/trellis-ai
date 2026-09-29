@@ -130,7 +130,7 @@ Runs one `RuleTuner` pass. **Default behaviour is a pure tuner pass** — byte-i
 | Flag | Default | Purpose |
 |---|---|---|
 | `--tuner-name` | `rule_tuner` | Logical tuner name (cursor + proposal scope). |
-| `--since-days` | cursor | Force a rescan of the last N days, ignoring the tuner cursor. |
+| `--since-days` | 30-day window | Read the last N days instead of the tuner's trailing window. |
 | `--dry-run` | off | Report what *would* auto-promote without mutating or emitting. |
 | `--format` | `text` | `text` or `json`. |
 
@@ -273,6 +273,4 @@ If step 5's two files exist, the human-in-the-loop handoff is correctly wired: a
 - [`../design/adr-autonomy-ladder.md`](../design/adr-autonomy-ladder.md) — the four-tier model these processes operate under.
 - [`../agent-guide/operations.md`](../agent-guide/operations.md) — full CLI / REST / MCP reference, including the complete auth matrix.
 - [`../agent-guide/freshness-and-curation.md`](../agent-guide/freshness-and-curation.md) — the extraction/refresh half of keeping a deployment current.
-- [`../deployment/recommended-config.yaml`](../deployment/recommended-config.yaml) — the four blessed backend shapes.
-</content>
-</invoke>
+- [`../deployment/recommended-config.yaml`](../deployment/recommended-config.yaml) — four backend shapes: ArcadeDB (blessed), Neo4j local, Neo4j cloud (AuraDB + Postgres) and Postgres-only.

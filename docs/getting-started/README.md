@@ -45,7 +45,7 @@ You now have a working substrate. If you'd rather have the config and stores in 
 
 ## Hands-on: 5-minute walkthrough
 
-1. **Confirm the config and data paths exist, and see each store's backend.**
+1. **Confirm the config and data paths exist, and see the backends of the five stores health reports** (trace, document, graph, vector, event log).
 
    ```bash
    trellis admin health --format json

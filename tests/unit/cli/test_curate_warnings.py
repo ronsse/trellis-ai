@@ -64,9 +64,9 @@ def _declare(stores: Path, *, deny: bool = False) -> None:
     )
 
 
-def _label(*extra: str) -> str:
+def _label(*extra: str, exit_code: int = 0) -> str:
     result = runner.invoke(app, ["curate", "label", "ent_1", "important", *extra])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == exit_code, result.output
     return result.output
 
 
@@ -78,7 +78,7 @@ class TestJsonFormat:
 
     def test_warning_survives_a_rejection(self, stores_dir: Path) -> None:
         _declare(stores_dir, deny=True)
-        data = json.loads(_label("--format", "json").strip())
+        data = json.loads(_label("--format", "json", exit_code=2).strip())
         assert data["status"] == "rejected"
         assert data["warnings"] == [WARNING_TEXT]
 
@@ -101,3 +101,10 @@ class TestTextFormat:
         be noise rather than evidence.
         """
         assert "Warning:" not in plain(_label())
+
+    def test_warning_survives_a_rejection(self, stores_dir: Path) -> None:
+        """A refusal exits 2 only after the text arm has printed its warnings."""
+        _declare(stores_dir, deny=True)
+        output = plain(_label(exit_code=2))
+        assert "Command rejected" in output
+        assert WARNING_TEXT in output

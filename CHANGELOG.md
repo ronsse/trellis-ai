@@ -256,6 +256,20 @@ All notable changes to Trellis will be documented in this file.
   (exit 5), not a traceback.
   ([#662](https://github.com/ronsse/trellis-ai/pull/662))
 
+- **The example curation workflow parses.** Two lines of stray markup
+  followed the last step of
+  `examples/integrations/github-actions/curation.yml`, so the copy that
+  `docs/deployment/scheduled-curation.md` tells you to put in
+  `.github/workflows/` was an invalid workflow. A test now parses every
+  YAML file under `examples/`.
+  ([#661](https://github.com/ronsse/trellis-ai/pull/661))
+
+- **`trellis curate entity`, `promote`, `label` and `feedback` exit `2` when a
+  write is refused and `5` when it fails, in both formats.** They exited `0`,
+  and `curate entity` also printed "Entity created: None" with
+  `"status": "ok"`, so the Neo4j guides' smoke check passed on a failed write.
+  ([#660](https://github.com/ronsse/trellis-ai/pull/660))
+
 - **`trellis worker tune --dry-run` writes nothing.** It persisted every
   proposal as `pending` and advanced the tuner cursor, although its help
   said "without mutating or emitting"; it never emitted events. The tuner

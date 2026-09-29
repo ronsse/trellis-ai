@@ -110,7 +110,7 @@ flowchart TB
 
     subgraph Interfaces["🔌 Interfaces"]
         direction LR
-        CLI("CLI<br/>trellis") ~~~ MCP("MCP Server<br/>15 tools") ~~~ REST("REST API<br/>FastAPI") ~~~ SDK("Python SDK<br/>local + remote") ~~~ UI("Web UI<br/>Memory Explorer")
+        CLI("CLI<br/>trellis") ~~~ MCP("MCP Server<br/>16 tools") ~~~ REST("REST API<br/>FastAPI") ~~~ SDK("Python SDK<br/>local + remote") ~~~ UI("Web UI<br/>Memory Explorer")
     end
 
     subgraph Core["⚙️ Core engine"]
@@ -338,7 +338,7 @@ trellis admin migrate-graph \
 | POST | `/api/v1/feedback` | Record pack outcome |
 | GET | `/api/v1/effectiveness` | Pack effectiveness report |
 
-**MCP server** — `trellis-mcp`. Fourteen macro tools return token-budgeted **markdown**, not raw JSON, so context lands clean in the agent's window.
+**MCP server** — `trellis-mcp`. Sixteen macro tools. Thirteen return token-budgeted **markdown**, not raw JSON, so context lands clean in the agent's window; the three structured tools (`record_observation`, `query_observations`, `execute_mutation`) return JSON.
 
 | Tool | Purpose |
 |------|---------|
@@ -353,6 +353,8 @@ trellis admin migrate-graph \
 | `query_observations` | Query recorded observations |
 | `get_lessons` | Precedents as markdown |
 | `get_graph` | Entity + neighborhood as markdown |
+| `get_items` | Full bodies for known item ids (max 50), token-budgeted — the fetch step after an index pack |
+| `get_file_context` | Stored context for file paths: documents whose `source_path` names the file, plus doc-linked entities |
 | `record_feedback` | Grade a pack (`rating` 0.0–1.0) or a trace, with per-item attribution; writes the JSONL audit row **and** the authoritative event |
 | `search` | Combined doc (keyword + semantic) + graph search as markdown |
 | `execute_mutation` | Governed mutation escape hatch (validate → policy → execute → audit) |

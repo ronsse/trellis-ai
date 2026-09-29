@@ -48,7 +48,8 @@ class TestCuratePromote:
             ],
         )
         assert result.exit_code == 0
-        # No handler registered, so command fails with "No handler registered"
+        # The handler emits PRECEDENT_PROMOTED without looking the trace up,
+        # so a made-up id succeeds.
         assert "Command" in result.stdout
 
     def test_promote_json(self) -> None:

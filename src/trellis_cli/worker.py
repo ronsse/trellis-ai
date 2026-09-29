@@ -274,7 +274,7 @@ def tune_cmd(
     since_days: int | None = typer.Option(
         None,
         "--since-days",
-        help="Force rescan of the last N days (ignores the tuner cursor).",
+        help="Read the last N days instead of the tuner's 30-day window.",
     ),
     dry_run: bool = typer.Option(
         False,
