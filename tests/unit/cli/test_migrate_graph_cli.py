@@ -174,6 +174,59 @@ def test_migrate_graph_invalid_config_shape(tmp_path: Path, runner: CliRunner) -
     assert "graph" in result.output.lower()
 
 
+#: ``--from-config`` files the loader cannot use, and a phrase its refusal
+#: carries. ``None`` makes the path a directory.
+_UNUSABLE_CONFIGS: dict[str, tuple[bytes | None, str]] = {
+    "list": (b"- graph\n- backend\n", "must contain a 'graph:' block"),
+    "scalar": (b"42\n", "must contain a 'graph:' block"),
+    "bad_utf8": (
+        b"graph:\n  backend: sqlite\n  db_path: \xff\n",
+        "is not valid utf-8 text",
+    ),
+    "directory": (None, "Is a directory"),
+}
+
+
+@pytest.mark.parametrize("shape", list(_UNUSABLE_CONFIGS))
+def test_migrate_graph_refuses_an_unusable_config(
+    shape: str,
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config file the loader cannot use exits 2 with its reason.
+
+    The path is relative, which keeps each message inside 80 columns so
+    Rich cannot fold it mid-token, and its ``[cfg]`` segment is markup:
+    Rich deletes it unless the message escapes the path.
+    """
+    content, expected = _UNUSABLE_CONFIGS[shape]
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "[cfg]" / "src.yaml"
+    src.parent.mkdir()
+    if content is None:
+        src.mkdir()
+    else:
+        src.write_bytes(content)
+    dst_config, _ = _write_sqlite_config(tmp_path, "dst")
+
+    result = runner.invoke(
+        admin_app,
+        [
+            "migrate-graph",
+            "--from-config",
+            "[cfg]/src.yaml",
+            "--to-config",
+            str(dst_config),
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    output = " ".join(plain(result.output).split())
+    assert "[cfg]/src.yaml" in output
+    assert expected in output
+
+
 def test_migrate_graph_capacity_exceeded_returns_nonzero(
     tmp_path: Path, runner: CliRunner
 ) -> None:
