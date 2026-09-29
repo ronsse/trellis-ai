@@ -259,6 +259,7 @@ All notable changes to Trellis will be documented in this file.
   adds `data_dir` and `stores_created`. A `config.yaml` the registry
   refuses now makes `admin init` without `--force`, `policy`, `demo reset`
   and `admin quickstart` exit `5` (was `0`).
+  ([#666](https://github.com/ronsse/trellis-ai/pull/666))
 
 - **`trellis worker curate --dry-run` records no finding and refuses
   `--reconcile-first`.** A dry run recorded `NoiseTagsApplied` and
