@@ -1019,7 +1019,7 @@ def _print_quickstart_summary(
     if not mcp_on_path:
         console.print(
             "\n  [yellow]Warning:[/yellow] trellis-mcp not found on PATH."
-            '\n  Run: uv pip install -e ".[dev]"'
+            '\n  Run: uv pip install -e ".\\[dev]"'
         )
     console.print("\n[bold]Register the MCP server with Claude Code (run once):[/bold]")
     # A user copies this line, so nothing may alter it: markup off (a path
@@ -2017,7 +2017,7 @@ def _render_smoke_text(
         if check.get("error"):
             console.print(f"        [red]{check['error']}[/red]")
         if check.get("note"):
-            console.print(f"        [dim]{check['note']}[/dim]")
+            console.print(f"        [dim]{escape(check['note'])}[/dim]")
         if check.get("reason"):
             console.print(f"        [dim]{check['reason']}[/dim]")
         if check["name"] == "readyz" and check.get("backends"):

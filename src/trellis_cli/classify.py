@@ -278,8 +278,8 @@ def _require_llm_facet_classifier() -> Classifier:
     except BackendNotInstalledError as exc:
         console.print(
             f"[red]classify shadow requires an LLM SDK that is not installed: "
-            f"{exc}[/red]\n"
-            "[dim]Install it, e.g. 'uv pip install trellis-ai[llm-openai]', "
+            f"{escape(str(exc))}[/red]\n"
+            "[dim]Install it, e.g. 'uv pip install trellis-ai\\[llm-openai]', "
             "and configure an 'llm:' block in config.yaml.[/dim]"
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
