@@ -286,9 +286,9 @@ All notable changes to Trellis will be documented in this file.
   ([#663](https://github.com/ronsse/trellis-ai/pull/663))
 
 - **`trellis extract refresh` prints one error when the stores are not
-  initialized.** After "Stores not initialized. Run 'trellis admin init'
-  first." it printed a second, empty error on stdout: `Refresh failed: ` in
-  text, and `{"status": "error", "error_type": "Exit", "message": ""}` under
+  initialized.** After the refusal on stderr, it printed a second, empty
+  error on stdout: `Refresh failed: ` in text, and
+  `{"status": "error", "error_type": "Exit", "message": ""}` under
   `--format json`. Stdout now stays empty, as it does for every command
   that needs the stores. The exit code is still `1`.
   ([#676](https://github.com/ronsse/trellis-ai/pull/676))

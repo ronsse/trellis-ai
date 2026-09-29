@@ -256,6 +256,8 @@ class TestRefreshCliValidation:
         assert result.exit_code == 1
         assert result.stdout == ""
         assert "Stores not initialized" in plain(result.stderr)
+        # A crash after a swallowed refusal would pass every check above.
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
 
 
 # ---------------------------------------------------------------------------
