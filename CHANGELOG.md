@@ -311,10 +311,14 @@ All notable changes to Trellis will be documented in this file.
   error or a `worker tune` setting check no longer repeats the value. In
   the registry a top-level list or scalar, invalid UTF-8 or a tag that
   cannot construct is now a `ConfigError` (exit 5), not a traceback, and
-  `admin migrate-graph` refuses a top-level list or scalar, invalid UTF-8
-  or a directory with exit `2`, where it printed a traceback.
+  `admin migrate-graph` refuses a top-level list or scalar, invalid UTF-8,
+  a directory, a path it lacks permission to reach or a file name too long
+  with exit `2`, where it printed a traceback. For a symlink loop or a path
+  through a regular file it gives the operating system's reason, where it
+  said the file was not found.
   ([#662](https://github.com/ronsse/trellis-ai/pull/662),
-  [#673](https://github.com/ronsse/trellis-ai/pull/673))
+  [#673](https://github.com/ronsse/trellis-ai/pull/673),
+  [#677](https://github.com/ronsse/trellis-ai/pull/677))
 
 - **The example curation workflow parses.** Two lines of stray markup
   followed the last step of
