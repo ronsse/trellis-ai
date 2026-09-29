@@ -758,7 +758,7 @@ class TestWorkerCurate:
     def test_live_run_keeps_meta_trace_and_reconcile(
         self, tmp_path: Path, temp_stores: StoreRegistry, output_format: str
     ) -> None:
-        """A live ``--reconcile-first`` cycle, prod's nightly shape, is unchanged.
+        """A live ``--reconcile-first`` run, the documented nightly shape, is unchanged.
 
         It reconciles, records every stage's Activity and finding, and
         writes in all three stages. That last part is also what gives the

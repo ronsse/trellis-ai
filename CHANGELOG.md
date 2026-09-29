@@ -251,7 +251,8 @@ All notable changes to Trellis will be documented in this file.
   now records each stage's meta-Activity but no finding, `--dry-run
   --reconcile-first` exits 2 (preview the backfill with `trellis admin
   reconcile-feedback --log-dir DIR --dry-run`), and `--dry-run
-  --no-meta-trace` writes nothing. Live runs are unchanged.
+  --no-meta-trace` writes nothing beyond the `write.rejected` event a
+  degraded advisory file still emits. Live runs are unchanged.
   ([#663](https://github.com/ronsse/trellis-ai/pull/663))
 
 - **The example curation workflow parses.** Two lines of stray markup

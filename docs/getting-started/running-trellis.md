@@ -92,7 +92,7 @@ One full curation cycle. It calls the curation library functions directly — no
 | `--no-meta-trace` | off | Skip recording each stage as a meta-Activity. |
 | `--format` | `text` | `text` or `json`. |
 
-**What it writes/emits.** Stage 1 applies `signal_quality="noise"` tags (a governed mutation, reversible by re-tagging) and emits the corresponding events. Stages 2-3 mutate the advisory store. Stage 4 writes two files into `--output-dir` and, beyond its meta-trace record, emits **nothing into the graph**:
+**What it writes/emits.** Stage 1 applies `signal_quality="noise"` tags as a direct metadata write, outside the governed mutation pipeline (reversible by re-tagging), and emits no event. Stages 2-3 mutate the advisory store. Stage 4 writes two files into `--output-dir` and, beyond its meta-trace record, emits **nothing into the graph**:
 
 - `intent_learning_candidates.json` — the scored candidates.
 - `promotion_decisions.template.json` — the human-review template.
