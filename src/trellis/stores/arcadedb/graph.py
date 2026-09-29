@@ -185,7 +185,7 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         uri = params.get("uri") or ctx.env.get("TRELLIS_ARCADEDB_URI")
         if not uri:
             msg = (
-                "arcadedb backend requires 'uri' in config or "
+                "arcadedb backend requires a non-empty 'uri' in config or "
                 "TRELLIS_ARCADEDB_URI env var (e.g. bolt://host:7687)"
             )
             raise ConfigError(msg, setting=f"stores.{store_type}.uri")
@@ -244,7 +244,7 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
 
         if not password:
             msg = (
-                "arcadedb backend requires 'password' in config or "
+                "arcadedb backend requires a non-empty 'password' in config or "
                 "TRELLIS_ARCADEDB_PASSWORD env var"
             )
             raise ConfigError(msg, setting=f"stores.{store_type}.password")

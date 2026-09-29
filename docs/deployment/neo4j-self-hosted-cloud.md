@@ -222,16 +222,20 @@ Override per-deployment via the `driver_config` block in
 knowledge:
   graph:
     backend: neo4j
-    uri: bolt://trellis-neo4j.neo4j.svc.cluster.local:7687
-    user: neo4j
-    database: neo4j
+    driver_config:
+      max_connection_pool_size: 200
+      max_transaction_retry_time: 10.0
+  vector:
+    backend: neo4j
+    dimensions: 1536
     driver_config:
       max_connection_pool_size: 200
       max_transaction_retry_time: 10.0
 ```
 
-The graph + vector pair against the same `(uri, user)` shares one
-driver — first store's config wins.
+Graph and vector share one driver per `(uri, user)`, built by whichever
+store is opened first, and that depends on the command rather than on
+file order, so give both entries the same `driver_config`.
 
 ## Vector index
 

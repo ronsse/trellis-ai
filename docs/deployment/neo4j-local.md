@@ -135,16 +135,20 @@ under each Neo4j store entry in `config.yaml`:
 knowledge:
   graph:
     backend: neo4j
-    uri: bolt://localhost:7687
-    user: neo4j
-    password: test1234
+    driver_config:
+      connection_timeout: 5.0
+      max_connection_pool_size: 50
+  vector:
+    backend: neo4j
+    dimensions: 1536
     driver_config:
       connection_timeout: 5.0
       max_connection_pool_size: 50
 ```
 
-The first store wins for a given `(uri, user)` — both graph and
-vector share the first store's pool config.
+Graph and vector share one driver per `(uri, user)`, built by whichever
+store is opened first, and that depends on the command rather than on
+file order, so give both entries the same `driver_config`.
 
 ## Multi-writer caveat (Community Edition)
 
@@ -187,8 +191,14 @@ To wipe Trellis's SQLite stores too:
 
 ```bash
 rm -rf ~/.trellis/data/stores
-trellis admin init
+mkdir ~/.trellis/data/stores
 ```
+
+Trellis recreates each SQLite file on first use, but CLI commands that
+open a store exit with `Stores not initialized` until the `stores`
+directory exists. Don't run `trellis admin init` to fix that: with
+`config.yaml` present it does nothing, and `--force` rewrites
+`config.yaml` without the `knowledge:` block from Step 2.
 
 ## Troubleshooting
 

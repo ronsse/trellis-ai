@@ -107,8 +107,8 @@ def prepare_neo4j_registry_params(
     uri = params.get("uri") or ctx.env.get("TRELLIS_NEO4J_URI")
     if not uri:
         msg = (
-            "neo4j backend requires 'uri' in config or TRELLIS_NEO4J_URI "
-            "env var (e.g. bolt://host:7687)"
+            "neo4j backend requires a non-empty 'uri' in config or "
+            "TRELLIS_NEO4J_URI env var (e.g. bolt://host:7687)"
         )
         raise ConfigError(msg, setting=f"stores.{store_type}.uri")
     user = params.get("user") or ctx.env.get("TRELLIS_NEO4J_USER") or "neo4j"
@@ -131,7 +131,7 @@ def prepare_neo4j_registry_params(
 
     if not password:
         msg = (
-            "neo4j backend requires 'password' in config or "
+            "neo4j backend requires a non-empty 'password' in config or "
             "TRELLIS_NEO4J_PASSWORD env var"
         )
         raise ConfigError(msg, setting=f"stores.{store_type}.password")
