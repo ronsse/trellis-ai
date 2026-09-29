@@ -178,7 +178,7 @@ def list_api_keys_command(*, output_format: str) -> None:
         for row in rows:
             table.add_row(
                 escape(row["key_id"]),
-                row["name"],
+                escape(row["name"]),
                 ",".join(row["scopes"]),
                 row["created_at"],
                 "yes" if row["revoked"] else "no",

@@ -192,6 +192,20 @@ class TestList:
         assert "token" not in row
         assert created["token"] not in result.output
 
+    def test_list_text_renders_a_stored_name_verbatim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A name ``create --format json`` stored reaches the table as written."""
+        _init_stores(tmp_path, monkeypatch)
+        _create_key(name="[b]k[/x]")
+        monkeypatch.setenv("COLUMNS", "200")  # the table must not fold the cell
+        force_colour(monkeypatch, cli_api_keys)
+        result = _invoke(["api-keys", "list"])
+        text = _redacted(result.stdout)
+        assert result.exit_code == EXIT_OK, text
+        assert_coloured(result.stdout)
+        assert "[b]k[/x]" in text
+
 
 # ---------------------------------------------------------------------------
 # revoke

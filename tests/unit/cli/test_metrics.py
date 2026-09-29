@@ -257,6 +257,30 @@ def test_metrics_proposals_status_filter(cli_env):
     assert all(p["status"] == "pending" for p in payload)
 
 
+def test_proposals_text_renders_the_stored_tuner_and_the_filters_verbatim(
+    cli_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tuner name ``tune --format json`` stored reaches the table as written."""
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tuned = runner.invoke(
+        app, ["metrics", "tune", "--tuner-name", "[b]t[/x]", "--format", "json"]
+    )
+    assert tuned.exit_code == 0, tuned.output
+    monkeypatch.setenv("COLUMNS", "200")  # the table must not fold the cell
+    force_colour(monkeypatch, metrics_cli)
+
+    result = runner.invoke(app, ["metrics", "proposals"])
+    assert result.exit_code == 0, plain(result.output)
+    assert "[b]t[/x]" in assert_coloured(result.stdout)
+
+    filtered = runner.invoke(
+        app, ["metrics", "proposals", "--tuner", "[b]q[/z]", "--status", "[b]s[/w]"]
+    )
+    assert filtered.exit_code == 0, plain(filtered.output)
+    rendered = " ".join(assert_coloured(filtered.stdout).split())
+    assert "tuner=[b]q[/z] status=[b]s[/w]" in rendered
+
+
 # ---------------------------------------------------------------------------
 # versions
 # ---------------------------------------------------------------------------

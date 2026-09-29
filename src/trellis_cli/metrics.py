@@ -154,7 +154,7 @@ def proposals_cmd(
 
     console.print(
         f"[bold]Proposals[/bold] ({len(proposals)} matching; "
-        f"tuner={tuner or 'any'} status={status or 'any'})"
+        f"tuner={escape(tuner or 'any')} status={escape(status or 'any')})"
     )
     if not proposals:
         return
@@ -186,7 +186,7 @@ def proposals_cmd(
             reachable = "[green]yes[/green]"
         table.add_row(
             escape(p.proposal_id[:18] + "…"),
-            p.tuner,
+            escape(p.tuner),
             p.status,
             escape(p.scope.component_id),
             escape(p.scope.domain or "-"),
