@@ -19,7 +19,8 @@
 #     matching [llm-openai] / [llm-anthropic] extra; they exit non-zero
 #     without one. mine-precedents is included below — drop it until an
 #     LLM is configured.
-#   - `worker tune` is a no-op unless learning.auto_promote.enabled: true.
+#   - `worker tune` promotes nothing unless learning.auto_promote.enabled:
+#     true; until then it only queues pending proposals for manual review.
 
 name: Trellis curation
 
@@ -69,7 +70,7 @@ jobs:
             --days 30 \
             --format json
 
-      - name: Tuner pass (no-op unless learning.auto_promote.enabled)
+      - name: Tuner pass (promotes only when learning.auto_promote.enabled)
         run: trellis worker tune --format json
 
       - name: Upload learning-candidate review artifacts

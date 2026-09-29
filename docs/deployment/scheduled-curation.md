@@ -14,7 +14,7 @@ For *what* each command does, its autonomy tier, and where the human-in-the-loop
 |---|---|---|---|---|
 | `trellis admin reconcile-feedback --log-dir DIR` | Before every curate run (or use `worker curate --reconcile-first`) | Backfills file-only `pack_feedback.jsonl` rows into the EventLog so the curate cycle sees every signal. | no | — |
 | `trellis worker curate --output-dir DIR` | Daily | Demote (noise-tag) + advisory upkeep run unattended; learning candidates are written for human review. | no | Tier 0 + Tier 2 |
-| `trellis worker tune` | Daily, **only where `auto_promote.enabled`** | Re-monitors recent auto-promotions and rolls back any that degraded; promotes newly-qualifying proposals. With auto-promote off it's a cheap no-op — schedule it only once you've opted a scope in. | no | Tier 1 |
+| `trellis worker tune` | Daily, **only where `auto_promote.enabled`** | Re-monitors recent auto-promotions and rolls back any that degraded; promotes newly-qualifying proposals. With auto-promote off it promotes nothing and only queues `pending` proposals for manual review, as `trellis metrics tune` does — schedule it only once you've opted a scope in. | no | Tier 1 |
 | `trellis worker enrich` | Daily, off-peak | LLM tagging of under-tagged documents — costs money/time, so run when the warehouse and API are quiet. | **yes** | — |
 | `trellis worker mine-precedents` | Weekly | Failure-trace mining is comparatively expensive and the candidates need human review anyway; weekly keeps the review queue manageable. | **yes** | — |
 | `trellis analyze schema-evolution` | Weekly | Surfaces open-string types eligible for canonical promotion. Surface-only — a human authors the ADR amendment. | no | Tier 3 (surface) |
@@ -123,7 +123,7 @@ on:
     - cron: "0 5 * * 0"    # weekly Sun 05:00 UTC — worker mine-precedents, analyze schema-evolution
 ```
 
-The daily job reconciles feedback, runs the curation cycle, runs the tuner pass (a no-op unless `learning.auto_promote.enabled`), and uploads the learning-candidate review artifacts. The env/secrets wiring, checkout/install steps, and the weekly job are in the example file — copy it rather than this doc, so there is exactly one source to keep current.
+The daily job reconciles feedback, runs the curation cycle, runs the tuner pass (it promotes only when `learning.auto_promote.enabled`), and uploads the learning-candidate review artifacts. The env/secrets wiring, checkout/install steps, and the weekly job are in the example file — copy it rather than this doc, so there is exactly one source to keep current.
 
 **Promotion stays human-gated** — the workflow uploads `intent_learning_candidates.json` / `promotion_decisions.template.json` as build artifacts; a person downloads them, approves rows, and runs `trellis curate promote-learning` locally or in a separate gated workflow.
 

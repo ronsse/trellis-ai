@@ -243,6 +243,14 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The example curation workflow parses.** Two lines of stray markup
+  followed the last step of
+  `examples/integrations/github-actions/curation.yml`, so the copy that
+  `docs/deployment/scheduled-curation.md` tells you to put in
+  `.github/workflows/` was an invalid workflow. A test now parses every
+  YAML file under `examples/`.
+  ([#661](https://github.com/ronsse/trellis-ai/pull/661))
+
 - **`trellis worker tune --dry-run` writes nothing.** It persisted every
   proposal as `pending` and advanced the tuner cursor, although its help
   said "without mutating or emitting"; it never emitted events. The tuner

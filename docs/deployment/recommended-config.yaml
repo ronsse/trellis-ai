@@ -193,10 +193,11 @@
 # ===========================================================================
 #
 # Driver tuning (Neo4j blocks): override DriverConfig defaults via the
-# `driver_config` block under each Neo4j store entry. The graph + vector
-# pair against the same (uri, user) shares one driver, so the first
-# store's driver_config wins. Defaults are production-safe (30s connect
-# timeout, 100-connection pool, keep-alive on).
+# `driver_config` block under each Neo4j store entry. Graph and vector
+# share one driver per (uri, user), built by whichever store is opened
+# first, and that depends on the command rather than on file order, so
+# give both entries the same driver_config. Defaults are production-safe
+# (30s connect timeout, 100-connection pool, keep-alive on).
 #
 # Connectivity check: set TRELLIS_VALIDATE_CONNECTIVITY=1 to make
 # StoreRegistry.validate() ping each Neo4j driver at API startup (the

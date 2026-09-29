@@ -287,7 +287,9 @@ def versions_cmd(
 def tune_cmd(
     tuner_name: str = typer.Option("rule_tuner", "--tuner-name"),
     since_days: int | None = typer.Option(
-        None, "--since-days", help="Force rescan of the last N days (ignores cursor)."
+        None,
+        "--since-days",
+        help="Read the last N days instead of the tuner's 30-day window.",
     ),
     output_format: str = typer.Option("text", "--format"),
 ) -> None:

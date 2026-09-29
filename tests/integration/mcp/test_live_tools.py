@@ -32,11 +32,16 @@ _EXPECTED_TOOLS = {
     "save_memory",
     "get_lessons",
     "get_graph",
+    "get_items",
+    "get_file_context",
     "record_feedback",
     "search",
     "get_objective_context",
     "get_task_context",
     "get_sectioned_context",
+    "record_observation",
+    "query_observations",
+    "execute_mutation",
 }
 
 
@@ -62,8 +67,8 @@ def _result_text(result: object) -> str:
 # ── Tool inventory ────────────────────────────────────────────────────
 
 
-async def test_lists_eleven_tools(mcp_session: Client) -> None:
-    """The server advertises all 11 macro tools through the protocol."""
+async def test_lists_every_tool(mcp_session: Client) -> None:
+    """The server advertises all 16 macro tools through the protocol."""
     tools = await mcp_session.list_tools()
     names = {t.name for t in tools}
     assert _EXPECTED_TOOLS.issubset(names), f"Missing tools: {_EXPECTED_TOOLS - names}"
