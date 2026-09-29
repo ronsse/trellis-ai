@@ -737,7 +737,7 @@ trellis curate promote 01JRK5N7QF8GHTM2XVZP3CWD9E \
 }
 ```
 
-`label` and `feedback` share this output. All three exit `2` when the command is rejected (a policy denial, or a handler's validation refusal) and `5` when it fails, with `status` set to `"rejected"` or `"failed"`. The code is the same in both formats.
+`label` and `feedback` share this output. All three exit `2` when the command is rejected and `5` when it fails, with `status` set to `"rejected"` or `"failed"`. The code is the same in both formats.
 
 ### `trellis curate link`
 
