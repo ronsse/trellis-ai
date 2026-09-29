@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import httpx
+import pytest
 from typer.testing import CliRunner
 
-from tests.cli_output import plain
+from tests.cli_output import assert_coloured, force_colour, plain
 from trellis_cli import admin as admin_module
 from trellis_cli.main import app
-
-if TYPE_CHECKING:
-    import pytest
 
 runner = CliRunner()
 
@@ -299,6 +296,30 @@ class TestSmokeTestMetricsOptional:
         assert "observability" in metrics["note"]
         assert payload["summary"]["fail"] == 0
         assert payload["summary"]["info"] == 1
+
+    @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
+    def test_metrics_404_text_note_keeps_the_extra(
+        self, monkeypatch: pytest.MonkeyPatch, colour: bool
+    ) -> None:
+        """The text arm printed the note raw, so Rich deleted ``[observability]``.
+
+        The JSON arm above never lost it; only the render needed escaping.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/metrics":
+                return httpx.Response(404)
+            return _healthy_handler("secret")(request)
+
+        _patch_client(monkeypatch, handler)
+        if colour:
+            force_colour(monkeypatch, admin_module)
+
+        result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
+
+        assert result.exit_code == 0, result.stdout
+        text = assert_coloured(result.stdout) if colour else plain(result.stdout)
+        assert "install trellis-ai[observability] to enable" in " ".join(text.split())
 
     def test_metrics_200_but_not_prometheus_format_fails(
         self, monkeypatch: pytest.MonkeyPatch
