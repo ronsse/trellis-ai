@@ -1904,7 +1904,7 @@ trellis worker curate --output-dir DIR [--days N] [--interval SECONDS] \
 | `--output-dir` / `-o` | (required) | Directory for the learning-candidate review artifacts. |
 | `--days` | `30` | Days of EventLog history to scan. |
 | `--interval` | (off) | Loop mode: re-run the cycle every N seconds until SIGINT/SIGTERM. Plain sleep — **no scheduler dependency** (APScheduler/Celery deliberately rejected). |
-| `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts written. Each stage still records its meta-Activity but no finding; add `--no-meta-trace` to skip that. |
+| `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts written. Each stage that runs still records its meta-Activity but no finding; add `--no-meta-trace` to skip that. |
 | `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog (`reconcile_feedback_log_to_event_log`) before the cycle. Refused with `--dry-run` (exit 2); preview with `trellis admin reconcile-feedback --log-dir DIR --dry-run`. |
 | `--skip-noise-tags` | off | Skip stage 1. |
 | `--skip-advisories` | off | Skip stages 2 + 3. |

@@ -1130,8 +1130,8 @@ def curate_cmd(
         "--dry-run",
         help=(
             "Analyze only — no noise tags, no advisory mutations, no artifacts. "
-            "Each stage still records its meta-Activity; add --no-meta-trace "
-            "to skip that."
+            "Each stage that runs still records its meta-Activity; add "
+            "--no-meta-trace to skip that."
         ),
     ),
     reconcile_first: bool = typer.Option(

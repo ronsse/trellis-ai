@@ -86,7 +86,7 @@ One full curation cycle. It calls the curation library functions directly — no
 | `--output-dir` / `-o` | required | Directory the stage-4 review artifacts land in. |
 | `--days` | `30` | Days of EventLog history to scan. |
 | `--interval` | off | Loop mode: re-run every N seconds until SIGINT/SIGTERM. Plain sleep — **no scheduler dependency**. |
-| `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts. Each stage still records its meta-Activity; add `--no-meta-trace` to skip that (see below). |
+| `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts. Each stage that runs still records its meta-Activity; add `--no-meta-trace` to skip that (see below). |
 | `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog before the cycle (see below). Refused with `--dry-run`. |
 | `--skip-noise-tags` / `--skip-advisories` / `--skip-learning` | off | Skip stage 1 / stages 2-3 / stage 4. Run just the demote half with `--skip-advisories --skip-learning`. |
 | `--no-meta-trace` | off | Skip recording each stage as a meta-Activity. |
