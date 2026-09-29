@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import structlog
 import typer
+from rich.markup import escape
 
 from trellis.stores.base import (
     ApiKeyStore,
@@ -16,7 +17,7 @@ from trellis.stores.base import (
     TunerStateStore,
 )
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.config import get_config_dir, get_data_dir
+from trellis_cli.config import get_config_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL
 
 logger = structlog.get_logger(__name__)
@@ -48,9 +49,13 @@ def _get_registry() -> StoreRegistry:
     """
     global _registry  # noqa: PLW0603
     if _registry is None:
-        config_dir = get_config_dir()
-        data_dir = get_data_dir()
-        stores_dir = data_dir / "stores"
+        # Check the registry's own stores_dir. It resolves config.yaml's
+        # ``data_dir`` ahead of TRELLIS_DATA_DIR, and a guard that derived the
+        # path again would pass on one directory while the stores opened
+        # another. One registry, so config.yaml is read (and warned about) once.
+        registry = StoreRegistry.from_config_dir(config_dir=get_config_dir())
+        stores_dir = registry.stores_dir
+        assert stores_dir is not None  # from_config_dir always sets it
         if not stores_dir.exists():
             from trellis_cli.output import build_console  # noqa: PLC0415
 
@@ -58,13 +63,11 @@ def _get_registry() -> StoreRegistry:
             # the Exit and continue, and ``--format json`` consumers parse
             # stdout — an error line there poisons the machine output.
             build_console(stderr=True).print(
-                "[red]Stores not initialized. Run 'trellis admin init' first.[/red]"
+                f"[red]Stores not initialized at {escape(str(stores_dir))}."
+                " Run 'trellis admin init' first.[/red]"
             )
             raise typer.Exit(code=EXIT_INTERNAL)
-        _registry = StoreRegistry.from_config_dir(
-            config_dir=config_dir,
-            data_dir=data_dir,
-        )
+        _registry = registry
     return _registry
 
 

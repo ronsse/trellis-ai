@@ -37,7 +37,12 @@ from trellis.errors import BackendNotInstalledError
 from trellis.llm.routing import LLMConsumer, LLMRoute, LLMRoutingError
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.claude_integration import get_skills_target_dir, install_skills
-from trellis_cli.config import TrellisConfig, get_config_dir, get_data_dir
+from trellis_cli.config import (
+    TrellisConfig,
+    get_config_dir,
+    get_data_dir,
+    get_default_data_dir,
+)
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import (
@@ -119,20 +124,41 @@ def init(
     config_path = config_dir / "config.yaml"
 
     if config_path.exists() and not force:
+        # The stores guard sends an operator here, so recreate the stores
+        # dir it checks if that is missing. config.yaml itself is never
+        # touched without --force.
+        stores_dir = get_data_dir() / "stores"
+        stores_created = not stores_dir.exists()
+        if stores_created:
+            stores_dir.mkdir(parents=True)
         if output_format == "json":
             # Plain ``print`` (not ``console.print``) so Rich's terminal-
             # width soft-wrap never splits the JSON across lines — long
             # config paths can push the payload past 80 chars.
-            print(json.dumps({"status": "exists", "config_dir": str(config_dir)}))
+            print(
+                json.dumps(
+                    {
+                        "status": "exists",
+                        "config_dir": str(config_dir),
+                        "data_dir": str(stores_dir.parent),
+                        "stores_created": stores_created,
+                    }
+                )
+            )
         else:
             console.print(
                 f"[yellow]Config already exists at {escape(str(config_path))}."
                 " Use --force to overwrite.[/yellow]"
             )
+            if stores_created:
+                console.print(
+                    f"Created the missing stores directory: {escape(str(stores_dir))}"
+                )
         raise typer.Exit(code=EXIT_OK)
 
-    # Set up data directory
-    actual_data_dir = Path(data_dir) if data_dir else get_data_dir()
+    # Set up data directory. Not get_data_dir(): --force replaces a
+    # config.yaml without reading it, so an unparseable one can be fixed.
+    actual_data_dir = Path(data_dir) if data_dir else get_default_data_dir()
     actual_data_dir.mkdir(parents=True, exist_ok=True)
 
     # Create subdirectories for stores
@@ -269,11 +295,10 @@ def health(
     """
     from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
 
-    registry = StoreRegistry.from_config_dir(
-        config_dir=get_config_dir(), data_dir=get_data_dir()
-    )
+    registry = StoreRegistry.from_config_dir(config_dir=get_config_dir())
     config = TrellisConfig.load()
-    data_dir = Path(config.data_dir) if config.data_dir else get_data_dir()
+    # The registry's order, without building a second registry.
+    data_dir = Path(config.data_dir) if config.data_dir else get_default_data_dir()
     stores_dir = registry.stores_dir
 
     checks: dict[str, bool] = {
