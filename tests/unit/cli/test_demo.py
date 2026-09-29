@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.ast_rules import assert_hand_read_floor
+from tests.cli_output import plain
 from trellis.schemas.enums import EdgeKind
 from trellis_cli.main import app
 
@@ -202,3 +204,95 @@ class TestDemoLoadEdgeEndpoints:
         assert_hand_read_floor(
             len(calls), DIRECT_EDGE_CALL_FLOOR, subject="single-row upsert_edge call"
         )
+        from trellis_cli.stores import get_graph_store
+
+        assert_hand_read_floor(
+            get_graph_store().count_edges(), DEMO_EDGE_FLOOR, subject="demo graph edge"
+        )
+
+
+class TestDemoLoadColdStartFailures:
+    """A cold-start command the executor does not apply is reported.
+
+    The executor folds a handler exception into a FAILED result and a policy
+    denial into a REJECTED one, and raises neither. ``demo load`` counted
+    only SUCCESS results, so on both paths it printed a smaller edge count,
+    exited 0 and showed no failure line.
+    """
+
+    def test_a_failed_cold_start_command_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.stores.base.graph_query import NodeQuery
+        from trellis.stores.sqlite.graph import SQLiteGraphStore
+        from trellis_cli import demo
+        from trellis_cli.stores import get_graph_store
+
+        original = SQLiteGraphStore.upsert_edge
+        refused: list[tuple[str, str]] = []
+
+        def refuse_cold_start_edges(
+            self: SQLiteGraphStore,
+            source_id: str,
+            target_id: str,
+            *args: Any,
+            **kwargs: Any,
+        ) -> str:
+            # Every id the demo builds comes from demo._id; the fixture's don't.
+            demo_ids = set(demo._IDS.values())
+            if source_id in demo_ids and target_id in demo_ids:
+                return original(self, source_id, target_id, *args, **kwargs)
+            refused.append((source_id, target_id))
+            # A markup-shaped tail, as store text quoting an id can carry.
+            msg = f"Cannot upsert edge: {source_id!r} -> {target_id!r} [document]"
+            raise ValueError(msg)
+
+        monkeypatch.setattr(SQLiteGraphStore, "upsert_edge", refuse_cold_start_edges)
+        result = runner.invoke(app, ["demo", "load"])
+        assert result.exit_code == 0, (result.stdout, repr(result.exception))
+
+        # Rich wraps at the console width, which is 80 columns in CI.
+        out = " ".join(plain(result.stdout).split())
+        assert out.count("Cold-start fixture failed") == 1, out
+        counted = re.search(
+            r"Cold-start fixture failed: dbt-manifest: (\d+) of (\d+) commands", out
+        )
+        assert counted is not None, out
+        # The fixture's entities land before its edges, so the batch is the
+        # nodes it wrote plus the edges the store refused.
+        cold_start_nodes = [
+            n
+            for n in get_graph_store().execute_node_query(NodeQuery(limit=100_000))
+            if n["node_id"] not in set(demo._IDS.values())
+        ]
+        assert refused, "the patched store refused no cold-start edge"
+        assert (int(counted[1]), int(counted[2])) == (
+            len(refused),
+            len(refused) + len(cold_start_nodes),
+        ), out
+        source_id, target_id = refused[0]
+        assert "link.create failed: Execution failed: Cannot upsert edge: " in out
+        assert f"{source_id!r} -> {target_id!r} [document]" in out
+        assert "cold-start entities" not in out
+
+    def test_a_rejected_cold_start_command_is_reported(self, tmp_path: Path) -> None:
+        from trellis.schemas.enums import PolicyType
+        from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+        from trellis.stores.policy_store import PolicyStore
+
+        # Only the cold-start path writes through the executor, so denying
+        # link.create reaches no other demo write.
+        PolicyStore(tmp_path / "data" / "stores" / "policies.json").add(
+            Policy(
+                policy_type=PolicyType.MUTATION,
+                scope=PolicyScope(level="global"),
+                rules=[PolicyRule(operation="link.create", action="deny")],
+            )
+        )
+        result = runner.invoke(app, ["demo", "load"])
+        assert result.exit_code == 0, (result.stdout, repr(result.exception))
+
+        out = " ".join(plain(result.stdout).split())
+        assert out.count("Cold-start fixture failed") == 1, out
+        assert "link.create rejected" in out
+        assert "cold-start entities" not in out
