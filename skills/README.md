@@ -32,7 +32,7 @@ trellis admin install-skills project
 
 `user` writes to `~/.claude/skills/`; `project` writes to `<cwd>/.claude/skills/`. Both are idempotent — a skill that already exists is skipped and reported. Pass `--force` to overwrite, and `--format json` for machine-readable output.
 
-Doing a full setup at once? `trellis admin quickstart --with-skills user` initializes the stores, registers the MCP server, **and** installs the skills in a single command.
+Doing a full setup at once? `trellis admin quickstart --with-skills user` initializes the stores **and** installs the skills, then prints the `claude mcp add` command that registers the MCP server. Run that command once.
 
 Restart Claude Code afterward and the skills will be discoverable as `/retrieve-before-task`, `/record-after-task`, `/link-evidence`.
 
@@ -49,7 +49,7 @@ cp -r src/trellis_cli/skills/link-evidence ~/.claude/skills/
 
 ## Prerequisites
 
-All three skills assume the Trellis MCP server is running and registered with your agent. See [docs/getting-started/mcp-claude-code.md](../docs/getting-started/mcp-claude-code.md) for setup. The one-liner that does stores + MCP + skills together:
+All three skills assume the Trellis MCP server is running and registered with your agent. See [docs/getting-started/mcp-claude-code.md](../docs/getting-started/mcp-claude-code.md) for setup. This sets up the stores and skills together, then prints the command that registers the MCP server:
 
 ```bash
 trellis admin quickstart --with-skills user

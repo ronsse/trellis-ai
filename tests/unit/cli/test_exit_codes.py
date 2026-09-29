@@ -9,14 +9,11 @@ Covers:
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-import structlog
 
 from trellis_cli import exit_codes
-from trellis_cli.claude_integration import read_claude_settings
 from trellis_cli.extract_refresh import _emit_refresh_event, _snapshot_entities
 
 
@@ -42,29 +39,6 @@ class TestExitCodeMap:
             exit_codes.EXIT_STORE,
         }
         assert len(values) == 6
-
-
-class TestReadClaudeSettings:
-    """The missing-file branch is documented graceful degradation,
-    but it must log so the create-from-empty path is recoverable
-    from structured logs (no longer a silent swallow)."""
-
-    def test_missing_file_returns_empty_dict_and_logs(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from trellis_cli import claude_integration as ci
-
-        captured: list[tuple[str, dict]] = []
-
-        def _debug(event: str, **kw: object) -> None:
-            captured.append((event, dict(kw)))
-
-        monkeypatch.setattr(ci, "_logger", structlog.get_logger().bind())
-        monkeypatch.setattr(ci._logger, "debug", _debug)
-        target = tmp_path / "no-such-file.json"
-        result = read_claude_settings(target)
-        assert result == {}
-        assert ("claude_settings_not_found", {"path": str(target)}) in captured
 
 
 class TestExtractRefreshSnapshotErrors:
