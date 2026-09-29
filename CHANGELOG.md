@@ -239,8 +239,8 @@ All notable changes to Trellis will be documented in this file.
   A document store the registry refuses on first use (an unknown backend,
   a missing DSN) now stops the sweep, dry runs included, before any session
   is judged. It used to surface only after the judge had run on every
-  session, as a crash or, with reconcile on, as every session errored; with
-  the watermark unsaved, the next sweep paid for the same sessions again.
+  session, if at all; with the watermark unsaved, the next sweep paid for
+  the same sessions again.
   ([#644](https://github.com/ronsse/trellis-ai/pull/644),
   [#674](https://github.com/ronsse/trellis-ai/pull/674))
 - **MinHash shingle hashing switched from MD5 to truncated SHA-256**
