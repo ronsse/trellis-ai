@@ -841,7 +841,7 @@ EDGE_KIND_CONTAINS = "unity_catalog.contains"
 EDGE_KIND_DERIVED_FROM = "unity_catalog.derived_from"
 ```
 
-Core accepts any string at the storage and API layers ([CLAUDE.md](../../CLAUDE.md#store-abstraction-srctrelllissores)). Namespacing keeps domains from colliding and makes effectiveness analysis legible.
+Core accepts any string at the storage and API layers ([CLAUDE.md](../../CLAUDE.md#store-abstraction-srctrellisstores)). Namespacing keeps domains from colliding and makes effectiveness analysis legible.
 
 ### 3. Implement the extractor
 
