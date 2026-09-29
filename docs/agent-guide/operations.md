@@ -2304,7 +2304,7 @@ All three now route through the same one retrieval path as `get_context` and are
 | `query_observations` | `subject_entity_id?`, `observer_agent_id?`, `limit?` | JSON `{"status": "ok", "observations": [...]}` — each entry is the Observation property dict plus `node_id` and `node_type`. |
 | `execute_mutation` | `operation`, `args`, `idempotency_key?`, `actor?` | JSON `CommandResult`. MCP parity with `POST /commands/batch` for a single command; same five-stage governed pipeline, so policy gates and audit events apply identically. `operation` accepts the wire value (`"link.create"`) or the enum key (`"LINK_CREATE"`). |
 
-`session_id` lets every context tool deduplicate items returned by recent calls in the same session. `max_tokens` defaults to 2000, and `get_items` to 4000. The three sectioned tools default to `retrieval.budgets` in `config.yaml`, or 4000 if it is unset; pass `max_tokens > 0` to override it.
+`session_id` lets `get_context` and the three sectioned tools deduplicate items returned by recent calls in the same session. `max_tokens` defaults to 2000, and `get_items` to 4000. The three sectioned tools default to `retrieval.budgets` in `config.yaml`, or 4000 if it is unset; pass `max_tokens > 0` to override it.
 
 All read tools track token usage in the event log for observability.
 

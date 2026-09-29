@@ -764,7 +764,7 @@ Exit codes are CI-friendly:
 |------|----------|---------|
 | `0`  | READY    | LLM client configured AND feature flag set. Pipeline will run. |
 | `1`  | WARN     | Non-fatal. Flag unset (pipeline inert) OR flag set with only env fallback available (works, but operators should move config into `llm:` block). |
-| `2`  | BLOCKED  | Feature flag is on but no `LLMClient` is obtainable anywhere. Extraction would silently skip in production — this is the configuration bug you most want the probe to catch. |
+| `1`  | BLOCKED  | Feature flag is on but no `LLMClient` is obtainable anywhere. Extraction would silently skip in production — this is the configuration bug you most want the probe to catch. |
 
 Use `--format json` for machine-readable output (same schema, plus a `warnings` array with severity/signal/message).
 

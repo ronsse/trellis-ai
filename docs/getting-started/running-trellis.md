@@ -253,7 +253,7 @@ curl -fsS http://localhost:8420/readyz           # readiness — backend status
 trellis worker curate --output-dir /tmp/trellis-check/review --dry-run --no-meta-trace --format json
 #   expect: {"status": "ok", ..., "candidates_path": null, "dry_run": true}
 
-# 3. Tune is a no-op when auto-promote is OFF (the default)
+# 3. Tune promotes nothing when auto-promote is OFF (dry-run — writes no proposals or cursor)
 trellis worker tune --dry-run --format json
 #   expect: {"enabled": false, ..., "auto_promoted": 0}
 
