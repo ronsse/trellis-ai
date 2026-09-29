@@ -93,7 +93,7 @@ save_knowledge(name="rate-limiter", entity_type="concept", relates_to="api-gatew
 
 ## Context Window Tips
 
-- Use `max_tokens` to control response size — the core tools default to 2000 tokens, and the sectioned tools to `retrieval.budgets` in `config.yaml`
+- Use `max_tokens` to control response size — the core retrieval tools default to 2000 tokens, and the sectioned tools to `retrieval.budgets` in `config.yaml`, or 4000 if it is unset
 - For quick lookups, set `max_tokens=500`
 - For deep research, allow up to `max_tokens=4000`
 - Retrieval responses are pre-formatted markdown, ready for your context window
