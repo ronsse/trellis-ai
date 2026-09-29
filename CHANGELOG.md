@@ -252,6 +252,7 @@ All notable changes to Trellis will be documented in this file.
   --reconcile-first` exits 2 (preview the backfill with `trellis admin
   reconcile-feedback --log-dir DIR --dry-run`), and `--dry-run
   --no-meta-trace` writes nothing. Live runs are unchanged.
+  ([#663](https://github.com/ronsse/trellis-ai/pull/663))
 
 - **The example curation workflow parses.** Two lines of stray markup
   followed the last step of
