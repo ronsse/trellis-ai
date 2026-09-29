@@ -19,6 +19,7 @@ from tests.unreadable_paths import (
 )
 from trellis.ingest_corpus.handlers import supported_extensions
 from trellis.ingest_corpus.models import corpus_doc_id
+from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.main import app
 from trellis_cli.stores import _get_registry
 
@@ -158,6 +159,21 @@ class TestIngestCorpus:
         result = runner.invoke(app, ["ingest", "corpus", str(vault), "--tag", raw])
         assert result.exit_code == 2, result.output
         assert f"Invalid --tag {raw!r}: expected k=v" in _text(result)
+
+    def test_failure_message_renders_verbatim(
+        self, vault: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The text arm printed the raw exception inside ``[red]``, so an
+        # unmatched ``[/x]`` in its message raised out of the ``except`` arm
+        # and the operator got a traceback in place of the reason.
+        def _fail(*_args: object, **_kwargs: object) -> None:
+            msg = "[bold]b[/x]"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("trellis.ingest_corpus.sync_corpus", _fail)
+        result = runner.invoke(app, ["ingest", "corpus", str(vault)])
+        assert result.exit_code == EXIT_INTERNAL, result.output
+        assert "Corpus ingest failed: [bold]b[/x]" in _text(result)
 
 
 class TestIngestCorpusHelp:

@@ -144,7 +144,7 @@ def ingest_conversations(
         if output_format == "json":
             typer.echo(json.dumps(sanitized_error_payload(exc)))
         else:
-            console.print(f"[red]Conversation ingest failed: {exc}[/red]")
+            console.print(f"[red]Conversation ingest failed: {escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     status, exit_code = _sync_outcome(report)
