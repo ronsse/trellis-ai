@@ -9,6 +9,7 @@ from pathlib import Path
 
 import structlog
 import typer
+from rich.markup import escape
 
 from trellis.core.document_write import put_document
 from trellis.core.ids import generate_ulid
@@ -1154,6 +1155,10 @@ def _run_extractor_on_fixture(
     """Run an extractor against an in-memory raw input and execute the batch.
 
     Returns ``(nodes_created_or_updated, edges_created_or_updated)``.
+
+    Raises ``RuntimeError`` when any command comes back ``FAILED`` or
+    ``REJECTED``: the executor returns those as results rather than
+    raising, so counting only successes would drop them without a word.
     """
     registry = _get_registry()
     ext_registry = ExtractorRegistry()
@@ -1166,6 +1171,19 @@ def _run_extractor_on_fixture(
     )
     batch = result_to_batch(result, requested_by=f"cli:demo-load:{source_hint}")
     results = build_curate_executor(registry).execute_batch(batch)
+    failures = [
+        r
+        for r in results
+        if r.status in (CommandStatus.FAILED, CommandStatus.REJECTED)
+    ]
+    if failures:
+        first = failures[0]
+        msg = (
+            f"{source_hint}: {len(failures)} of {len(results)} commands "
+            f"failed or were rejected; first: {first.operation.value} "
+            f"{first.status.value}: {first.message}"
+        )
+        raise RuntimeError(msg)
     nodes = sum(
         1
         for r in results
@@ -1182,10 +1200,10 @@ def _run_extractor_on_fixture(
 def _load_cold_start_fixture(fixture_dir: Path) -> tuple[int, int]:
     """Load the cold-start fixture via the extractor path.
 
-    Returns ``(total_nodes, total_edges)``. Failures here are logged and
-    re-raised — the demo treats the cold-start path as required, so a
-    broken fixture should fail loudly rather than silently producing a
-    half-loaded graph.
+    Returns ``(total_nodes, total_edges)``. It stops at the first batch
+    with a failed or rejected command, whose ``RuntimeError`` the caller
+    prints as a warning before carrying on, so a broken fixture shows up
+    on screen rather than as a silently half-loaded graph.
     """
     from trellis_workers.extract import (  # noqa: PLC0415
         DbtManifestExtractor,
@@ -1379,7 +1397,9 @@ def load(  # noqa: PLR0915 - sequential fixture loading by section
                 error=str(exc),
                 exc_info=True,
             )
-            console.print(f"  [yellow]![/yellow] Cold-start fixture failed: {exc}")
+            console.print(
+                f"  [yellow]![/yellow] Cold-start fixture failed: {escape(str(exc))}"
+            )
         else:
             console.print(
                 f"  [green]+[/green] {cold_start_nodes} cold-start entities "
