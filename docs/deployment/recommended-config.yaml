@@ -1,4 +1,4 @@
-# Trellis recommended configurations — four blessed deployment shapes.
+# Trellis recommended configurations — four deployment shapes.
 #
 # Pick ONE of the blocks below and copy it to your config.yaml at the
 # path TRELLIS_CONFIG_DIR points at (default ~/.trellis/config.yaml).

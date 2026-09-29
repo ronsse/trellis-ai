@@ -74,7 +74,7 @@ Trellis ships all of that as one install. Started from a vector DB plus glue cod
 ```bash
 pip install trellis-ai
 trellis admin init          # write ~/.trellis/config.yaml + init SQLite stores
-trellis demo load           # populate 106 realistic items: entities, traces, precedents
+trellis demo load           # populate 66 realistic items: entities, traces, precedents
 trellis admin serve         # open http://localhost:8420
 ```
 
@@ -432,7 +432,7 @@ Backends are wired from `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config
 | Vector | `sqlite` | **`arcadedb`** (native HNSW) | `pgvector`, `neo4j` (HNSW on `:Node`) |
 | Blob | `local` | `s3` | — |
 
-For copy-paste config, see [`docs/deployment/recommended-config.yaml`](docs/deployment/recommended-config.yaml) — four shapes: ArcadeDB (blessed), Neo4j local, Neo4j cloud (AuraDB + Postgres) and Postgres-only. Only the REST API (`trellis-api` or `trellis admin serve`) validates the config, when it starts: it checks URI formats, embedding dimensions and schema fingerprints, then builds every store, so a missing DSN or bucket stops startup instead of failing the first request. Set `TRELLIS_VALIDATE_CONNECTIVITY=1` to add one Bolt round-trip per cached Bolt driver (Neo4j, ArcadeDB graph).
+For copy-paste config, see [`docs/deployment/recommended-config.yaml`](docs/deployment/recommended-config.yaml) — four shapes: ArcadeDB (blessed), Neo4j local, Neo4j cloud (AuraDB + Postgres) and Postgres-only. The REST API (`trellis-api` or `trellis admin serve`) builds every store when it starts, so a missing DSN or bucket stops startup instead of failing the first request. `TRELLIS_VALIDATE_CONNECTIVITY=1` also checks each cached Bolt driver (Neo4j, ArcadeDB graph) with one round-trip.
 
 ```yaml
 knowledge:
