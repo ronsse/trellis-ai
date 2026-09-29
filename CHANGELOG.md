@@ -291,7 +291,7 @@ All notable changes to Trellis will be documented in this file.
   text, and `{"status": "error", "error_type": "Exit", "message": ""}` under
   `--format json`. Stdout now stays empty, as it does for every command
   that needs the stores. The exit code is still `1`.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#676](https://github.com/ronsse/trellis-ai/pull/676))
 
 - **`admin health` and config parse errors stop printing config.yaml
   values.** `trellis admin health` printed a backend value that names no
