@@ -181,7 +181,7 @@ _UNUSABLE_CONFIGS: dict[str, tuple[bytes | None, str]] = {
     "scalar": (b"42\n", "must contain a 'graph:' block"),
     "bad_utf8": (
         b"graph:\n  backend: sqlite\n  db_path: \xff\n",
-        "is not valid utf-8 text",
+        "is not valid utf-8 text (byte offset 36)",
     ),
     "directory": (None, "Is a directory"),
 }
