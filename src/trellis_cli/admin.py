@@ -1656,7 +1656,18 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
         console.print(f"[red]Config file not found: {escape(str(path))}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION)
 
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        reason = escape(exc.strerror or str(exc))
+        console.print(f"[red]Could not read {escape(str(path))}: {reason}[/red]")
+        raise typer.Exit(code=EXIT_VALIDATION) from None
+    except UnicodeDecodeError as exc:
+        console.print(
+            f"[red]Could not read {escape(str(path))}: it is not valid"
+            f" {exc.encoding} text (byte offset {exc.start})[/red]"
+        )
+        raise typer.Exit(code=EXIT_VALIDATION) from None
     try:
         data = yaml.safe_load(text) or {}
     except Exception as exc:
@@ -1665,7 +1676,7 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
         console.print(f"[red]Invalid YAML in {escape(str(path))}: {reason}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
-    graph_block = data.get("graph")
+    graph_block = data.get("graph") if isinstance(data, dict) else None
     if not isinstance(graph_block, dict) or "backend" not in graph_block:
         console.print(
             f"[red]{escape(str(path))} must contain a 'graph:' block with a"
