@@ -22,6 +22,10 @@ trellis admin init [--data-dir PATH] [--force] [--format text|json]
 | `--force` | `false` | Overwrite existing config |
 | `--format` | `text` | Output format |
 
+`init` writes the data directory into `config.yaml` as `data_dir`. Every surface that opens the stores (CLI commands, `admin health`, the MCP server, the REST API and the capture sweep) reads it from there first, then from `$TRELLIS_DATA_DIR`, then uses `data/` in the config dir. With `--force`, the `--data-dir` default above applies: `init` does not read the `config.yaml` it replaces.
+
+When `config.yaml` exists and `--force` is not given, `init` leaves the file alone. If the `stores/` directory in that data directory is missing, `init` recreates it and reports `"stores_created": true`. That is the fix for `Stores not initialized at PATH`.
+
 **JSON output (success):**
 
 ```json
@@ -31,7 +35,7 @@ trellis admin init [--data-dir PATH] [--force] [--format text|json]
 **JSON output (already exists):**
 
 ```json
-{"status": "exists", "config_dir": "/home/user/.trellis"}
+{"status": "exists", "config_dir": "/home/user/.trellis", "data_dir": "/home/user/.trellis/data", "stores_created": false}
 ```
 
 ### `trellis admin health`
