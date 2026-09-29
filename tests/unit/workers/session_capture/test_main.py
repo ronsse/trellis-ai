@@ -227,7 +227,9 @@ class TestMain:
         # `trellis worker capture-sessions` exits this for the same fault.
         assert exit_code == EXIT_STORE
         captured = capsys.readouterr()
-        assert message in captured.err
+        # The operator's line, not only the structured log event's copy of it.
+        assert f"trellis-session-capture: {message}\n" in captured.err
+        assert "capture_sweep_refused" in captured.err
         assert "Traceback" not in captured.err
         assert captured.out == ""
 
