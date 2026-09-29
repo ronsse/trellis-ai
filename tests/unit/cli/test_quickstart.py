@@ -1,111 +1,50 @@
-"""Tests for quickstart command and Claude integration utilities."""
+"""Tests for ``trellis admin quickstart``."""
 
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
-from trellis_cli.claude_integration import (
-    get_claude_settings_path,
-    merge_mcp_server,
-    read_claude_settings,
-    write_claude_settings,
-)
+from tests.cli_output import plain
+from trellis_cli import admin
 from trellis_cli.main import app
+from trellis_cli.output import build_console
 
 runner = CliRunner()
 
-
-# ---------------------------------------------------------------------------
-# Unit tests for claude_integration.py
-# ---------------------------------------------------------------------------
-
-
-class TestGetClaudeSettingsPath:
-    def test_root_scope(self):
-        path = get_claude_settings_path("root")
-        assert path == Path.home() / ".claude" / "settings.json"
-
-    def test_project_scope(self, tmp_path):
-        path = get_claude_settings_path("project", project_dir=tmp_path)
-        assert path == tmp_path / ".claude" / "settings.local.json"
-
-    def test_project_scope_requires_dir(self):
-        with pytest.raises(ValueError, match="project_dir is required"):
-            get_claude_settings_path("project")
+# Hand-written rather than imported from the command: these are what Claude
+# Code's ``claude mcp add`` accepts, verified against a scratch HOME. ``-e``
+# is variadic, so the order is name, ``-e KEY=val``, ``--``, command.
+ROOT_REGISTER = [
+    "claude",
+    "mcp",
+    "add",
+    "--scope",
+    "user",
+    "trellis",
+    "--",
+    "trellis-mcp",
+]
 
 
-class TestReadClaudeSettings:
-    def test_missing_file(self, tmp_path):
-        assert read_claude_settings(tmp_path / "nope.json") == {}
-
-    def test_empty_file(self, tmp_path):
-        f = tmp_path / "settings.json"
-        f.write_text("")
-        assert read_claude_settings(f) == {}
-
-    def test_valid_json(self, tmp_path):
-        f = tmp_path / "settings.json"
-        f.write_text('{"mcpServers": {"foo": {}}}')
-        assert read_claude_settings(f) == {"mcpServers": {"foo": {}}}
-
-
-class TestMergeMcpServer:
-    def test_adds_to_empty(self):
-        settings, changed = merge_mcp_server({}, "trellis", {"command": "trellis-mcp"})
-        assert changed is True
-        assert settings["mcpServers"]["trellis"] == {"command": "trellis-mcp"}
-
-    def test_adds_alongside_existing(self):
-        settings = {"mcpServers": {"other": {"command": "other-cmd"}}}
-        settings, changed = merge_mcp_server(
-            settings, "trellis", {"command": "trellis-mcp"}
-        )
-        assert changed is True
-        assert "other" in settings["mcpServers"]
-        assert "trellis" in settings["mcpServers"]
-
-    def test_skips_if_present(self):
-        settings = {"mcpServers": {"trellis": {"command": "old"}}}
-        settings, changed = merge_mcp_server(
-            settings, "trellis", {"command": "trellis-mcp"}
-        )
-        assert changed is False
-        assert settings["mcpServers"]["trellis"]["command"] == "old"
-
-    def test_force_overwrites(self):
-        settings = {"mcpServers": {"trellis": {"command": "old"}}}
-        settings, changed = merge_mcp_server(
-            settings, "trellis", {"command": "trellis-mcp"}, force=True
-        )
-        assert changed is True
-        assert settings["mcpServers"]["trellis"]["command"] == "trellis-mcp"
-
-    def test_preserves_non_mcp_keys(self):
-        settings = {"apiKey": "secret", "mcpServers": {}}
-        settings, _ = merge_mcp_server(settings, "trellis", {"command": "trellis-mcp"})
-        assert settings["apiKey"] == "secret"
-
-
-class TestWriteClaudeSettings:
-    def test_creates_parent_dirs(self, tmp_path):
-        path = tmp_path / "deep" / "nested" / "settings.json"
-        write_claude_settings(path, {"mcpServers": {}})
-        assert path.exists()
-        assert json.loads(path.read_text()) == {"mcpServers": {}}
-
-    def test_file_ends_with_newline(self, tmp_path):
-        path = tmp_path / "settings.json"
-        write_claude_settings(path, {})
-        assert path.read_text().endswith("\n")
-
-
-# ---------------------------------------------------------------------------
-# Integration tests for `trellis admin quickstart`
-# ---------------------------------------------------------------------------
+def _project_register(project_dir: Path) -> list[str]:
+    return [
+        "claude",
+        "mcp",
+        "add",
+        "--scope",
+        "local",
+        "trellis",
+        "-e",
+        f"TRELLIS_CONFIG_DIR={project_dir / '.trellis'}",
+        "--",
+        "trellis-mcp",
+    ]
 
 
 class TestQuickstart:
@@ -115,9 +54,22 @@ class TestQuickstart:
         self.tmp = tmp_path
         monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "trellis-config"))
         monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "trellis-data"))
-        # Redirect HOME so Claude settings go to tmp_path
+        # Redirect HOME so nothing can land in the real ~/.claude
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+    def _enter_project(self, monkeypatch) -> Path:
+        """Chdir into a project whose path holds a space and a ``[word]``.
+
+        Those are the two ways a printed path stops pasting: a space needs
+        shell quoting, and Rich reads ``[draft]`` as a style tag and deletes
+        it. With a plain name the tests cannot tell quoted output from
+        unquoted, or markup on from off.
+        """
+        project_dir = self.tmp / "my project [draft]"
+        project_dir.mkdir()
+        monkeypatch.chdir(project_dir)
+        return project_dir
 
     def test_fresh_quickstart(self):
         result = runner.invoke(app, ["admin", "quickstart"])
@@ -128,35 +80,96 @@ class TestQuickstart:
         assert (self.tmp / "trellis-config" / "config.yaml").exists()
         assert (self.tmp / "trellis-data" / "stores").exists()
 
-        # Claude settings written
-        settings_path = self.tmp / "home" / ".claude" / "settings.json"
-        assert settings_path.exists()
-        settings = json.loads(settings_path.read_text())
-        assert "trellis" in settings["mcpServers"]
-        assert settings["mcpServers"]["trellis"]["command"] == "trellis-mcp"
-
     def test_idempotent_run(self):
         runner.invoke(app, ["admin", "quickstart"])
         result = runner.invoke(app, ["admin", "quickstart"])
         assert result.exit_code == 0
         assert "already" in result.stdout.lower()
 
-    def test_force_overwrites_mcp(self):
-        # First run
-        runner.invoke(app, ["admin", "quickstart"])
+    @pytest.mark.parametrize("scope_args", [[], ["--scope", "project"]])
+    def test_rerun_leaves_config_yaml_byte_identical(self, monkeypatch, scope_args):
+        """A re-run never rewrites an existing ``config.yaml``.
 
-        # Modify the entry
-        settings_path = self.tmp / "home" / ".claude" / "settings.json"
-        settings = json.loads(settings_path.read_text())
-        settings["mcpServers"]["trellis"]["command"] = "old-cmd"
-        settings_path.write_text(json.dumps(settings))
+        The store registry keeps its plane blocks in the same file, and
+        ``TrellisConfig.save`` rewrites the whole file with only the CLI's
+        keys, so a rewrite would drop a configured backend and the registry
+        would come up on its local defaults without an error.
+        """
+        project_dir = self._enter_project(monkeypatch)
+        args = ["admin", "quickstart", *scope_args, "--format", "json"]
+        assert runner.invoke(app, args).exit_code == 0
+        if scope_args:
+            config_path = project_dir / ".trellis" / "config.yaml"
+        else:
+            config_path = self.tmp / "trellis-config" / "config.yaml"
+        plane_block = b"knowledge:\n  graph:\n    backend: neo4j\n"
+        edited = config_path.read_bytes() + plane_block
+        config_path.write_bytes(edited)
 
-        # Force run
-        result = runner.invoke(app, ["admin", "quickstart", "--force"])
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0
+        steps = json.loads(result.stdout.strip())["steps"]
+        assert steps[0] == "stores_already_initialized"
+        assert config_path.read_bytes() == edited
+
+    @pytest.mark.parametrize("scope_args", [[], ["--scope", "project"]])
+    def test_writes_no_claude_settings(self, monkeypatch, scope_args):
+        """Claude Code reads no ``mcpServers`` from either settings file.
+
+        Both scopes used to merge an entry into one of them and report
+        ``MCP server registered`` — an entry nothing loads. Now neither
+        file is written, and the summary asks the user to register rather
+        than claiming it did.
+        """
+        project_dir = self._enter_project(monkeypatch)
+
+        result = runner.invoke(app, ["admin", "quickstart", *scope_args])
         assert result.exit_code == 0
 
-        settings = json.loads(settings_path.read_text())
-        assert settings["mcpServers"]["trellis"]["command"] == "trellis-mcp"
+        assert not (self.tmp / "home" / ".claude").exists()
+        assert not (project_dir / ".claude").exists()
+        output = plain(result.output)
+        assert "Register the MCP server with Claude Code (run once):" in output
+        assert "registered" not in output.lower()
+
+    @pytest.mark.parametrize("earlier_entry", [False, True])
+    @pytest.mark.parametrize("force_args", [[], ["--force"]])
+    @pytest.mark.parametrize("scope_args", [[], ["--scope", "project"]])
+    def test_leaves_existing_settings_byte_identical(
+        self, monkeypatch, scope_args, force_args, earlier_entry
+    ):
+        """Each scope leaves the settings file it used to write untouched.
+
+        With no ``trellis`` entry the old code merged one in; with the entry
+        an earlier version wrote, it skipped unless ``--force``. Both
+        fixtures are needed to catch both, and the earlier entry stays: it
+        is inert, and the user's to delete.
+        """
+        if scope_args:
+            claude_dir = self._enter_project(monkeypatch) / ".claude"
+            settings_path = claude_dir / "settings.local.json"
+        else:
+            settings_path = self.tmp / "home" / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        servers = {"other-server": {"command": "other", "args": ["-v"]}}
+        if earlier_entry:
+            servers["trellis"] = {"command": "trellis-mcp", "args": []}
+        # Compact, several unrelated keys, no trailing newline: any
+        # re-serialisation changes the bytes, not only an added entry.
+        original = json.dumps(
+            {
+                "permissions": {"allow": ["Bash(ls:*)"], "deny": []},
+                "theme": "dark",
+                "mcpServers": servers,
+            },
+            separators=(",", ":"),
+        ).encode()
+        settings_path.write_bytes(original)
+
+        result = runner.invoke(app, ["admin", "quickstart", *scope_args, *force_args])
+        assert result.exit_code == 0
+
+        assert settings_path.read_bytes() == original
 
     def test_json_output(self):
         result = runner.invoke(app, ["admin", "quickstart", "--format", "json"])
@@ -164,29 +177,81 @@ class TestQuickstart:
         data = json.loads(result.stdout.strip())
         assert data["status"] == "ok"
         assert data["scope"] == "root"
-        assert "stores_initialized" in data["steps"]
-        assert "mcp_registered" in data["steps"]
+        # ``steps`` records actions taken; quickstart registers nothing.
+        assert data["steps"] == ["stores_initialized"]
+        assert data["mcp_register_command"] == ROOT_REGISTER
+        assert "settings_path" not in data
+
+        rerun = runner.invoke(app, ["admin", "quickstart", "--format", "json"])
+        assert rerun.exit_code == 0
+        assert json.loads(rerun.stdout.strip())["steps"] == [
+            "stores_already_initialized"
+        ]
+
+    def test_json_output_project_scope(self, monkeypatch):
+        project_dir = self._enter_project(monkeypatch)
+
+        result = runner.invoke(
+            app, ["admin", "quickstart", "--scope", "project", "--format", "json"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout.strip())
+        assert data["steps"] == ["stores_initialized", "gitignore_created"]
+        assert data["mcp_register_command"] == _project_register(project_dir)
+        assert "settings_path" not in data
 
     def test_project_scope(self, monkeypatch):
-        project_dir = self.tmp / "myproject"
-        project_dir.mkdir()
-        monkeypatch.chdir(project_dir)
+        """Project stores land in ``./.trellis/`` and nowhere else."""
+        project_dir = self._enter_project(monkeypatch)
+        # Wide enough that the summary's path line is not folded.
+        monkeypatch.setattr(admin, "console", build_console(width=500, height=25))
 
         result = runner.invoke(app, ["admin", "quickstart", "--scope", "project"])
         assert result.exit_code == 0
 
-        # Settings written to project-local path
-        local_settings = project_dir / ".claude" / "settings.local.json"
-        assert local_settings.exists()
-        settings = json.loads(local_settings.read_text())
-        entry = settings["mcpServers"]["trellis"]
-        assert "env" in entry
-        assert "TRELLIS_CONFIG_DIR" in entry["env"]
+        config_path = project_dir / ".trellis" / "config.yaml"
+        config = yaml.safe_load(config_path.read_text())
+        # Absolute and pinned: config.yaml's data_dir overrides a global
+        # TRELLIS_DATA_DIR (set by this fixture) in StoreRegistry.
+        assert config["data_dir"] == str(project_dir / ".trellis" / "data")
+        assert (project_dir / ".trellis" / "data" / "stores").is_dir()
+        assert not (self.tmp / "trellis-config").exists()
+        assert not (self.tmp / "trellis-data").exists()
+        assert f"Stores initialized: {config_path}" in plain(result.output)
+
+    def test_project_scope_after_root(self, monkeypatch):
+        """A global install does not make a project look initialized."""
+        assert runner.invoke(app, ["admin", "quickstart"]).exit_code == 0
+        project_dir = self._enter_project(monkeypatch)
+
+        result = runner.invoke(
+            app, ["admin", "quickstart", "--scope", "project", "--format", "json"]
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.stdout.strip())["steps"][0] == "stores_initialized"
+        assert (project_dir / ".trellis" / "config.yaml").is_file()
+
+    @pytest.mark.parametrize("scope", ["root", "project"])
+    def test_register_command_is_pasteable_when_narrow(self, monkeypatch, scope):
+        """The printed command is one unbroken line at any terminal width.
+
+        Rich folds at the console width, and a command split across lines
+        does not paste. The project path holds a space and a ``[word]``, so
+        this also pins the shell quoting and the markup-off print.
+        ``height`` is passed only so Rich honours ``width`` on a forced dumb
+        terminal, where it otherwise reports 80 columns.
+        """
+        project_dir = self._enter_project(monkeypatch)
+        monkeypatch.setattr(admin, "console", build_console(width=40, height=25))
+        expected = ROOT_REGISTER if scope == "root" else _project_register(project_dir)
+
+        result = runner.invoke(app, ["admin", "quickstart", "--scope", scope])
+        assert result.exit_code == 0
+
+        assert shlex.join(expected) in plain(result.output)
 
     def test_project_scope_creates_gitignore(self, monkeypatch):
-        project_dir = self.tmp / "myproject"
-        project_dir.mkdir()
-        monkeypatch.chdir(project_dir)
+        project_dir = self._enter_project(monkeypatch)
 
         runner.invoke(app, ["admin", "quickstart", "--scope", "project"])
         gitignore = project_dir / ".gitignore"
@@ -194,9 +259,7 @@ class TestQuickstart:
         assert ".trellis/" in gitignore.read_text()
 
     def test_project_scope_appends_to_gitignore(self, monkeypatch):
-        project_dir = self.tmp / "myproject"
-        project_dir.mkdir()
-        monkeypatch.chdir(project_dir)
+        project_dir = self._enter_project(monkeypatch)
         gitignore = project_dir / ".gitignore"
         gitignore.write_text("node_modules/\n")
 
@@ -206,28 +269,12 @@ class TestQuickstart:
         assert ".trellis/" in lines
 
     def test_project_scope_no_duplicate_gitignore(self, monkeypatch):
-        project_dir = self.tmp / "myproject"
-        project_dir.mkdir()
-        monkeypatch.chdir(project_dir)
+        project_dir = self._enter_project(monkeypatch)
         gitignore = project_dir / ".gitignore"
         gitignore.write_text(".trellis/\n")
 
         runner.invoke(app, ["admin", "quickstart", "--scope", "project"])
         assert gitignore.read_text().count(".trellis/") == 1
-
-    def test_preserves_existing_mcp_servers(self):
-        settings_path = self.tmp / "home" / ".claude" / "settings.json"
-        settings_path.parent.mkdir(parents=True)
-        settings_path.write_text(
-            json.dumps({"mcpServers": {"other-server": {"command": "other"}}})
-        )
-
-        result = runner.invoke(app, ["admin", "quickstart"])
-        assert result.exit_code == 0
-
-        settings = json.loads(settings_path.read_text())
-        assert "other-server" in settings["mcpServers"]
-        assert "trellis" in settings["mcpServers"]
 
     def test_no_skills_by_default(self):
         """Skills are not installed unless --with-skills is passed."""
@@ -257,9 +304,7 @@ class TestQuickstart:
             assert (skills_dir / name / "SKILL.md").exists()
 
     def test_with_skills_project(self, monkeypatch):
-        project_dir = self.tmp / "myproject"
-        project_dir.mkdir()
-        monkeypatch.chdir(project_dir)
+        project_dir = self._enter_project(monkeypatch)
 
         result = runner.invoke(
             app,

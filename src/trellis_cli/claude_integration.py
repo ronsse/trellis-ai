@@ -1,8 +1,11 @@
-"""Claude Code settings integration utilities."""
+"""Install the bundled Trellis skills into a Claude Code skills directory.
+
+Nothing here writes Claude Code's MCP config: ``trellis admin quickstart``
+prints the ``claude mcp add`` command for the user to run instead.
+"""
 
 from __future__ import annotations
 
-import json
 import shutil
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -13,76 +16,6 @@ from trellis.core.error_sanitize import sanitize_error_message
 from trellis_cli.skills import SKILL_NAMES
 
 _logger = structlog.get_logger(__name__)
-
-
-def get_claude_settings_path(scope: str, project_dir: Path | None = None) -> Path:
-    """Return the path to the Claude Code settings file for the given scope.
-
-    Args:
-        scope: "root" for ~/.claude/settings.json, "project" for
-               <project_dir>/.claude/settings.local.json.
-        project_dir: Required when scope is "project".
-    """
-    if scope == "project":
-        if project_dir is None:
-            msg = "project_dir is required for project scope"
-            raise ValueError(msg)
-        return project_dir / ".claude" / "settings.local.json"
-    return Path.home() / ".claude" / "settings.json"
-
-
-def read_claude_settings(path: Path) -> dict:
-    """Read and parse a Claude Code settings file.
-
-    Returns an empty dict if the file does not exist or is empty.
-    The missing-file branch is documented graceful-degradation —
-    the initial ``trellis admin init`` call is expected to bootstrap
-    from no file. We log at ``debug`` so the create-from-empty path
-    is recoverable from structured logs.
-    """
-    try:
-        text = path.read_text().strip()
-    # GRACEFUL-DEGRADATION: ``trellis admin init`` bootstraps from no
-    # file — see docstring; empty-dict return is the expected branch.
-    except FileNotFoundError:
-        _logger.debug("claude_settings_not_found", path=str(path))
-        return {}
-    if not text:
-        return {}
-    result: dict = json.loads(text)
-    return result
-
-
-def merge_mcp_server(
-    settings: dict, name: str, entry: dict, *, force: bool = False
-) -> tuple[dict, bool]:
-    """Merge an MCP server entry into settings, returning (updated, changed).
-
-    Args:
-        settings: Existing parsed settings dict (mutated in place).
-        name: Server name key (e.g. "trellis").
-        entry: Server config dict (command, args, env, etc.).
-        force: Overwrite if name already present.
-
-    Returns:
-        Tuple of (settings dict, whether a change was made).
-    """
-    servers = settings.setdefault("mcpServers", {})
-    if name in servers and not force:
-        return settings, False
-    servers[name] = entry
-    return settings, True
-
-
-def write_claude_settings(path: Path, settings: dict) -> None:
-    """Write settings dict as formatted JSON, creating parent dirs as needed."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + "\n")
-
-
-# ---------------------------------------------------------------------------
-# Skill installation
-# ---------------------------------------------------------------------------
 
 
 def get_skills_target_dir(scope: str, project_dir: Path | None = None) -> Path:

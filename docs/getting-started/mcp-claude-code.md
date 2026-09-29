@@ -8,20 +8,25 @@ Trellis ships an MCP server (`trellis-mcp`) that exposes 16 macro tools to Claud
 
 All return token-budgeted markdown sized for the agent's context window.
 
-## One-command install
+## Install
 
 ```bash
 pip install -e ".[dev]"   # or: pip install trellis-ai
 trellis admin quickstart
 ```
 
-`quickstart` does three things:
+`quickstart` does two things:
 
-1. Initializes SQLite stores under `~/.config/trellis/`.
-2. Locates your Claude Code `settings.json` (`~/.claude/settings.json` on macOS/Linux, `%USERPROFILE%\.claude\settings.json` on Windows).
-3. Adds an `mcpServers.trellis` entry pointing at `trellis-mcp`.
+1. Initializes SQLite stores under `~/.trellis/` (or `$TRELLIS_CONFIG_DIR` / `$TRELLIS_DATA_DIR`, if set).
+2. Prints the command that registers `trellis-mcp` with Claude Code. It does not run it; run it once yourself:
 
-Restart Claude Code after `quickstart` so it picks up the new server.
+   ```bash
+   claude mcp add --scope user trellis -- trellis-mcp
+   ```
+
+Restart Claude Code after registering so it picks up the new server.
+
+Earlier versions of `quickstart` wrote an `mcpServers` entry into `~/.claude/settings.json` (or `.claude/settings.local.json` with `--scope project`) and reported the server as registered. Claude Code does not read MCP servers from either file, so that entry did nothing and you can delete it.
 
 To install the drop-in agent skills at the same time, add `--with-skills user`
 (global, `~/.claude/skills/`) or `--with-skills project` (`./.claude/skills/`):
@@ -41,36 +46,23 @@ If you'd rather keep stores beside your code (so each project has its own memory
 trellis admin quickstart --scope project
 ```
 
-Stores land in `./.trellis/`, and the entry written to `.claude/settings.json` includes `TRELLIS_CONFIG_DIR` so the MCP server reads from the project directory.
+Stores land in `./.trellis/`. The command `quickstart` prints registers a local-scope server (private to you, in this directory) whose env points `TRELLIS_CONFIG_DIR` at the project's absolute `.trellis` path, so the MCP server reads from the project. Inside the project a local-scope `trellis` takes precedence over a user-scope one, so the two installs can coexist.
+
+The CLI targets the project stores only when `TRELLIS_CONFIG_DIR` points there as well, for example `TRELLIS_CONFIG_DIR=$PWD/.trellis trellis admin health`.
 
 ## Manual configuration
 
-If you'd rather edit settings yourself, add this to `~/.claude/settings.json`:
+`claude mcp add` is how Claude Code registers MCP servers; it records them in `~/.claude.json`. These are the commands `quickstart` prints, except that for a project it spells out the absolute path where this uses `$PWD`:
 
-```json
-{
-  "mcpServers": {
-    "trellis": {
-      "command": "trellis-mcp",
-      "args": []
-    }
-  }
-}
+```bash
+# Global: available in all your projects
+claude mcp add --scope user trellis -- trellis-mcp
+
+# One project, stores in ./.trellis: run from the project root
+claude mcp add --scope local trellis -e TRELLIS_CONFIG_DIR="$PWD/.trellis" -- trellis-mcp
 ```
 
-For project scope, also set the env var:
-
-```json
-{
-  "mcpServers": {
-    "trellis": {
-      "command": "trellis-mcp",
-      "args": [],
-      "env": { "TRELLIS_CONFIG_DIR": "${workspaceFolder}/.trellis" }
-    }
-  }
-}
-```
+Keep the option order: `-e` accepts several values, so it goes after the server name and before `--`.
 
 ## Verify the install
 
@@ -101,9 +93,9 @@ For drop-in template skills (a self-contained version of the above plus structur
 | Symptom | Fix |
 |---|---|
 | `trellis-mcp: command not found` | Reinstall with `pip install -e ".[dev]"` from the repo root, or check that the active venv is on PATH. |
-| Tools don't appear in Claude Code | Confirm the entry exists in `settings.json` and restart Claude Code. |
+| Tools don't appear in Claude Code | Run `claude mcp list`. If `trellis` is absent, run the command `quickstart` printed, then restart Claude Code. If `claude mcp add` says the server already exists, remove it first with `claude mcp remove trellis --scope user` (`--scope local` for a project install). |
 | `get_context` returns "No relevant context" | Load demo data (`trellis demo load`) or ingest some real traces. |
-| Permission errors writing to `~/.config/trellis/` | Pass `--scope project` to keep stores in the current directory. |
+| Permission errors writing to `~/.trellis/` | Pass `--scope project` to keep stores in the current directory. |
 
 ## See also
 

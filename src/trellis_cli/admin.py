@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import time
 from collections import Counter, defaultdict
@@ -34,14 +35,7 @@ from trellis.core.write_provenance import build_write_provenance
 from trellis.errors import BackendNotInstalledError
 from trellis.llm.routing import LLMConsumer, LLMRoute, LLMRoutingError
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
-from trellis_cli.claude_integration import (
-    get_claude_settings_path,
-    get_skills_target_dir,
-    install_skills,
-    merge_mcp_server,
-    read_claude_settings,
-    write_claude_settings,
-)
+from trellis_cli.claude_integration import get_skills_target_dir, install_skills
 from trellis_cli.config import TrellisConfig, get_config_dir, get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.output import build_console, emit_json
@@ -914,15 +908,47 @@ def _print_graph_health_report(report: dict[str, Any]) -> None:
         console.print("\n[green]No warnings — graph looks healthy.[/green]")
 
 
-def _init_stores_if_needed(config_path: Path) -> str:
-    """Initialize stores if not already done. Returns step name."""
-    if config_path.exists():
+def _init_stores_if_needed(config_dir: Path, data_dir: Path) -> str:
+    """Create ``data_dir/stores`` and write ``config_dir/config.yaml``.
+
+    Does nothing if ``config.yaml`` already exists. Returns the step
+    name. ``config.yaml`` names ``data_dir``, which pins it: a truthy
+    ``data_dir`` in ``config.yaml`` overrides ``TRELLIS_DATA_DIR`` in
+    ``StoreRegistry.from_config_dir``, so project stores stay in the
+    project even when a global ``TRELLIS_DATA_DIR`` is set.
+    """
+    if (config_dir / "config.yaml").exists():
         return "stores_already_initialized"
-    data_dir = get_data_dir()
-    data_dir.mkdir(parents=True, exist_ok=True)
-    (data_dir / "stores").mkdir(exist_ok=True)
-    TrellisConfig(data_dir=str(data_dir)).save()
+    (data_dir / "stores").mkdir(parents=True, exist_ok=True)
+    TrellisConfig(data_dir=str(data_dir)).save(config_dir=config_dir)
     return "stores_initialized"
+
+
+def _mcp_register_argv(scope: str, config_dir: Path) -> list[str]:
+    """Return the ``claude mcp add`` argv that registers ``trellis-mcp``.
+
+    Printed for the user to run, never run here. ``claude mcp add`` is
+    Claude Code's supported writer; the ``mcpServers`` entry quickstart
+    used to merge into ``settings.json`` (``settings.local.json`` for
+    project scope) is one Claude Code never reads.
+    Project scope registers a local-scope server (this user, this
+    directory) whose env points ``TRELLIS_CONFIG_DIR`` at ``config_dir``.
+    ``-e`` is variadic, so it goes after the server name and before ``--``.
+    """
+    if scope == "project":
+        return [
+            "claude",
+            "mcp",
+            "add",
+            "--scope",
+            "local",
+            "trellis",
+            "-e",
+            f"TRELLIS_CONFIG_DIR={config_dir}",
+            "--",
+            "trellis-mcp",
+        ]
+    return ["claude", "mcp", "add", "--scope", "user", "trellis", "--", "trellis-mcp"]
 
 
 def _ensure_gitignore(project_dir: Path) -> str | None:
@@ -965,7 +991,7 @@ def _print_skills_summary(
 def _print_quickstart_summary(
     steps: list[str],
     config_path: Path,
-    settings_path: Path,
+    register_argv: list[str],
     mcp_on_path: bool,
     skills: list[dict[str, str]] | None = None,
     skills_dir: Path | None = None,
@@ -978,15 +1004,6 @@ def _print_quickstart_summary(
         console.print(
             f"  [dim]Stores already initialized:[/dim] {escape(str(config_path))}"
         )
-    if "mcp_registered" in steps:
-        console.print(
-            f"  [cyan]MCP server registered:[/cyan] {escape(str(settings_path))}"
-        )
-    else:
-        console.print(
-            f"  [dim]MCP server already registered:[/dim]"
-            f" {escape(str(settings_path))} (use --force to overwrite)"
-        )
     if skills is not None:
         _print_skills_summary(skills, skills_dir)
     if not mcp_on_path:
@@ -994,8 +1011,15 @@ def _print_quickstart_summary(
             "\n  [yellow]Warning:[/yellow] trellis-mcp not found on PATH."
             '\n  Run: uv pip install -e ".[dev]"'
         )
+    console.print("\n[bold]Register the MCP server with Claude Code (run once):[/bold]")
+    # A user copies this line, so nothing may alter it: markup off (a path
+    # can hold ``[...]``, which Rich would delete), and ``soft_wrap``
+    # because Rich folds at the console width and a project path can push
+    # this line past it. A folded command pastes as two lines, neither of
+    # which runs.
+    console.print(f"  {shlex.join(register_argv)}", markup=False, soft_wrap=True)
     console.print("\n[bold]Next steps:[/bold]")
-    console.print("  1. Restart Claude Code to pick up the new MCP server")
+    console.print("  1. Run the command above, then restart Claude Code")
     console.print("  2. Ask Claude to use get_context or save_experience")
     console.print(
         "\n[dim]Tip: Add experience graph usage guidance to your"
@@ -1006,9 +1030,7 @@ def _print_quickstart_summary(
 @admin_app.command()
 def quickstart(
     scope: str = typer.Option("root", help="root (global) or project (local)"),
-    force: bool = typer.Option(
-        False, "--force", help="Overwrite existing MCP server entry and skills"
-    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing skills"),
     with_skills: str | None = typer.Option(
         None,
         "--with-skills",
@@ -1022,7 +1044,7 @@ def quickstart(
         "text", "--format", help="Output format: text or json"
     ),
 ) -> None:
-    """Initialize stores and register MCP server with Claude Code."""
+    """Initialize stores and print the command that registers the MCP server."""
     if with_skills is not None and with_skills not in ("user", "project"):
         msg = f"--with-skills must be 'user' or 'project', got {with_skills!r}"
         if output_format == "json":
@@ -1030,34 +1052,15 @@ def quickstart(
         else:
             console.print(f"[red]Error:[/red] {msg}")
         raise typer.Exit(EXIT_VALIDATION)
-    config_path = get_config_dir() / "config.yaml"
-    steps: list[str] = [_init_stores_if_needed(config_path)]
-
-    # Build MCP server entry
     project_dir = Path.cwd()
-    mcp_entry: dict = {"command": "trellis-mcp", "args": []}
     if scope == "project":
-        mcp_entry["env"] = {
-            "TRELLIS_CONFIG_DIR": str(project_dir / ".trellis"),
-        }
-
-    # Merge into Claude settings
-    settings_path = get_claude_settings_path(
-        scope,
-        project_dir=project_dir if scope == "project" else None,
-    )
-    settings = read_claude_settings(settings_path)
-    settings, changed = merge_mcp_server(
-        settings,
-        "trellis",
-        mcp_entry,
-        force=force,
-    )
-    if changed:
-        write_claude_settings(settings_path, settings)
-        steps.append("mcp_registered")
+        config_dir = project_dir / ".trellis"
+        data_dir = config_dir / "data"
     else:
-        steps.append("mcp_already_registered")
+        config_dir, data_dir = get_config_dir(), get_data_dir()
+    config_path = config_dir / "config.yaml"
+    steps: list[str] = [_init_stores_if_needed(config_dir, data_dir)]
+    register_argv = _mcp_register_argv(scope, config_dir)
 
     # Project scope extras
     if scope == "project":
@@ -1084,7 +1087,10 @@ def quickstart(
             "status": "ok",
             "scope": scope,
             "steps": steps,
-            "settings_path": str(settings_path),
+            # A list, not a string, so a machine consumer never re-parses
+            # shell quoting. Printed, not run: ``steps`` records only what
+            # quickstart did, so it carries no MCP step.
+            "mcp_register_command": register_argv,
             "mcp_on_path": mcp_on_path,
         }
         if skills_results is not None:
@@ -1095,7 +1101,7 @@ def quickstart(
         _print_quickstart_summary(
             steps,
             config_path,
-            settings_path,
+            register_argv,
             mcp_on_path,
             skills=skills_results,
             skills_dir=skills_dir,

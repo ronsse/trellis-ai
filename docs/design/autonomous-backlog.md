@@ -446,7 +446,7 @@ negative signal is four times denser (`P(cited unhelpful | served) = 0.4118`) an
 rule never read `unhelpful_item_ids` at all. `EffectivenessReport` reports proposal
 (`noise_candidates`) and verdict (`demotion_screen.admitted`) **separately**, because a
 proposal that shrinks 62% at the gate is a fact about the proposal rule. Full reasoning:
-`CLAUDE.md` § "The demotion evidence gate". **Do not re-derive the numbers from this file** —
+`docs/design/claude-md-rationale.md` § "The demotion evidence gate". **Do not re-derive the numbers from this file** —
 the window rolls; re-run `trellis analyze value`.
 
 Residual, tracked elsewhere: ledger **A-4** (restore the 22 memories the unsound gate
@@ -604,7 +604,7 @@ What shipped instead is the **instrument, not a fix**:
 `PACK_ASSEMBLED.payload["parent_concentration"]` so the question is re-askable at larger `n`
 instead of re-derived by string-matching `item_id`. The cited-helpful evidence rests on two
 attributed groups, which is thin — **that** is the reopen condition, not taste. Full
-reasoning: `CLAUDE.md` § "Repeat-source concentration — measured, and the rollup refused".
+reasoning: `docs/design/claude-md-rationale.md` § "Repeat-source concentration — measured, and the rollup refused".
 
 The item's *second* half was a separate, live defect and shipped: the documents list view
 now default-filters chunk rows — [#385](https://github.com/ronsse/trellis-ai/issues/385) via

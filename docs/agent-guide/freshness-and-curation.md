@@ -387,7 +387,7 @@ Trellis's broader design is a *variation-selection* loop: extraction produces ca
 
 Refresh is the variation-side input. Feedback + `apply_noise_tags` is the selection-side output. They're complementary halves of the same loop — neither is sufficient on its own.
 
-Two feedback paths exist for historical reasons; see [CLAUDE.md](../../CLAUDE.md#two-feedback-paths--eventlog-authoritative-vs-jsonl-file-based) for the EventLog-authoritative vs JSONL-file-based split. Refresh consumes neither directly — but extractors that re-extract over time benefit from `apply_noise_tags` having already demoted historically-irrelevant items.
+Two feedback paths exist for historical reasons; see [CLAUDE.md](../../CLAUDE.md#feedback-path--eventlog-authoritative-jsonl-audit-log) for the EventLog-authoritative vs JSONL-file-based split. Refresh consumes neither directly — but extractors that re-extract over time benefit from `apply_noise_tags` having already demoted historically-irrelevant items.
 
 ### Running the selection-side loop: `trellis worker curate`
 

@@ -4,13 +4,13 @@
 
 End-to-end walkthrough of installing the Trellis MCP server in Claude Code and using its eleven macro tools in real prompts.
 
-## Setup (one command)
+## Setup
 
 ```bash
 trellis admin quickstart
 ```
 
-This initializes the local SQLite stores and registers `trellis-mcp` in your Claude Code `settings.json` under `mcpServers`. Restart Claude Code afterwards so it picks up the new server.
+This initializes the local SQLite stores and prints the `claude mcp add` command that registers `trellis-mcp` with Claude Code. Run that command once, then restart Claude Code so it picks up the new server.
 
 For per-project config (stores live in `./.trellis/`):
 
@@ -78,7 +78,7 @@ quality loop learns.
 ## Troubleshooting
 
 - **Server didn't start**: run `trellis-mcp --help` directly. If `command not found`, the install didn't put it on `$PATH` — `pip install -e ".[dev]"` from the repo root will fix it.
-- **Tools don't appear in Claude Code**: confirm the entry exists in `~/.claude/settings.json` under `mcpServers.trellis`, then restart Claude Code.
+- **Tools don't appear in Claude Code**: run `claude mcp list`. If `trellis` is absent, run the command `quickstart` printed, then restart Claude Code.
 - **`get_context` returns nothing**: load demo data with `trellis demo load` so retrieval has something to chew on, or ingest some real traces first.
 
 See [docs/getting-started/mcp-claude-code.md](../docs/getting-started/mcp-claude-code.md) for a deeper setup reference.
