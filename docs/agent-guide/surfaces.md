@@ -6,8 +6,8 @@ Trellis exposes three surfaces.  This page is the short answer to
 
 ## TL;DR
 
-- **Writing an LLM agent** → MCP.  Tools are token-budgeted and
-  return markdown optimized for context windows.
+- **Writing an LLM agent** → MCP.  Retrieval tools are token-budgeted
+  and return markdown optimized for context windows.
 - **Writing a script, CI job, or integration** → Python SDK, which
   calls REST.
 - **Building a client extractor package** (Unity Catalog, dbt, etc.)

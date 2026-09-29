@@ -6,7 +6,7 @@ Trellis ships an MCP server (`trellis-mcp`) that exposes 16 macro tools to Claud
 - **Sectioned context (3):** `get_objective_context`, `get_task_context`, `get_sectioned_context`.
 - **Structured (3):** `record_observation`, `query_observations`, `execute_mutation` — these return JSON rather than markdown.
 
-All return token-budgeted markdown sized for the agent's context window.
+The core and sectioned-context tools return markdown.
 
 ## Install
 
