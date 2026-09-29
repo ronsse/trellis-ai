@@ -241,6 +241,14 @@ All notable changes to Trellis will be documented in this file.
   similarity behavior is statistically equivalent.
   ([#255](https://github.com/ronsse/trellis-ai/issues/255))
 
+### Fixed
+
+- **`trellis curate entity`, `promote`, `label` and `feedback` exit `2` when a
+  write is refused and `5` when it fails, in both formats.** They exited `0`,
+  and `curate entity` also printed "Entity created: None" with
+  `"status": "ok"`, so the Neo4j guides' smoke check passed on a failed write.
+  ([#660](https://github.com/ronsse/trellis-ai/pull/660))
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.
