@@ -121,14 +121,14 @@ All notable changes to Trellis will be documented in this file.
   ${TRELLIS_NEO4J_PASSWORD}`). The CLI, `trellis-api`, the MCP server and the
   session-capture sweep all build through it, so a config carrying a dormant
   placeholder, in a key today's command would never read, now refuses too;
-  the CLI exits `5`. The operator forms (`${VAR:-x}`, `${VAR:?x}`,
-  `${VAR:+x}`, ...) count, and the message renders only the variable name,
-  never the text after the operator. A placeholder inside a longer value
-  (`${DATA}/kuzu`) is not refused and still reaches the store literally. To
-  recover, write the value itself, or delete the key where Trellis reads an
-  environment variable in its place (`TRELLIS_NEO4J_PASSWORD` for a neo4j
-  password; for an `llm` or `embeddings` API key, name the variable with
-  `api_key_env`).
+  the CLI and the standalone `trellis-session-capture` exit `5`. The
+  operator forms (`${VAR:-x}`, `${VAR:?x}`, `${VAR:+x}`, ...) count, and the
+  message renders only the variable name, never the text after the operator.
+  A placeholder inside a longer value (`${DATA}/kuzu`) is not refused and
+  still reaches the store literally. To recover, write the value itself, or
+  delete the key where Trellis reads an environment variable in its place
+  (`TRELLIS_NEO4J_PASSWORD` for a neo4j password; for an `llm` or
+  `embeddings` API key, name the variable with `api_key_env`).
 
 - **A flat top-level `stores:` block in `config.yaml` now logs
   `registry_config_flat_stores_removed`.** The block was removed in 0.6.0 and
