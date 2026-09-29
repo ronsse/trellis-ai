@@ -68,7 +68,7 @@ Keep the option order: `-e` accepts several values, so it goes after the server 
 
 ```bash
 trellis-mcp --help        # confirms the binary is on PATH
-trellis admin health      # confirms stores are healthy
+trellis admin health      # checks config and store paths (connects to nothing)
 ```
 
 In Claude Code, ask: *"List your available tools."* You should see `get_context`, `save_experience`, etc. in the response.

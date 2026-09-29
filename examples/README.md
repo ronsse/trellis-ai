@@ -9,7 +9,7 @@ Every example assumes you have already run:
 ```bash
 pip install -e ".[dev]"
 trellis admin init
-trellis demo load     # optional — seeds ~66 realistic items so retrieval has something to chew on
+trellis demo load     # optional — seeds 106 realistic items so retrieval has something to chew on
 ```
 
 | Example | What it shows |

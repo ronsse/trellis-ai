@@ -171,9 +171,6 @@ Once the task is `RUNNING`:
 curl -fsS http://<task-ip>:8420/healthz        # → {"status":"ok"}
 curl -fsS http://<task-ip>:8420/readyz         # → {"status":"ready"}
 curl -fsS http://<task-ip>:8420/api/version    # → version handshake JSON
-
-# Seed the demo corpus (optional — proves the full pipeline end-to-end):
-TRELLIS_API_URL=http://<task-ip>:8420 trellis demo load
 ```
 
 UI is reachable at `http://<task-ip>:8420/ui/` (tunnel through the bastion in your

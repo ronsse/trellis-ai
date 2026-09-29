@@ -70,12 +70,12 @@ All tools accept `max_tokens` (default 2000 for core tools, configurable via `re
 
 ## Configuration
 
-By default, Trellis uses SQLite for all stores (zero configuration). For advanced setups, create `~/.config/trellis/config.yaml`:
+By default, Trellis uses SQLite for all stores (zero configuration). For advanced setups, create `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`):
 
 ```yaml
-stores:
+knowledge:
   vector:
-    backend: pgvector   # Postgres + pgvector — blessed cloud default
+    backend: pgvector   # Postgres + pgvector; DSN from TRELLIS_KNOWLEDGE_PG_DSN
     # backend: sqlite   # SQLite vector store — zero-config local default
   # graph:
   #   backend: postgres
