@@ -1330,7 +1330,7 @@ def _build_check_extractors_report() -> dict[str, Any]:
                 "message": (
                     "LLM client is not buildable from config; only env-var"
                     " fallback is available. Consider adding an llm: block"
-                    " to ~/.trellis/config.yaml."
+                    f" to {get_config_dir() / 'config.yaml'}."
                 ),
             }
         )
@@ -1384,17 +1384,18 @@ def _print_check_extractors_report(report: dict[str, Any]) -> None:
     console.print("[bold]LLM client:[/bold]")
     tier = llm.get("tier")
     via = f"tier={escape(tier)}, " if tier else ""
+    config_path = str(get_config_dir() / "config.yaml")
     if llm["config_buildable"]:
         provider = escape(llm.get("provider") or "?")
         model = escape(llm.get("model") or "(default)")
         console.print(
-            f"  [green]OK[/green] configurable from ~/.trellis/config.yaml"
+            f"  [green]OK[/green] configurable from {escape(config_path)}"
             f" ({via}provider={provider}, model={model})"
         )
     else:
         suffix = f" ({via.removesuffix(', ')})" if via else ""
         console.print(
-            f"  [red]MISSING[/red] not configurable from ~/.trellis/config.yaml{suffix}"
+            f"  [red]MISSING[/red] not configurable from {escape(config_path)}{suffix}"
         )
     if llm["env_fallback_available"] and llm["env_fallback_applies"]:
         console.print(
