@@ -254,7 +254,7 @@ All notable changes to Trellis will be documented in this file.
   longer repeats the value. In the registry a top-level list or scalar,
   invalid UTF-8 or a tag that cannot construct is now a `ConfigError`
   (exit 5), not a traceback.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#662](https://github.com/ronsse/trellis-ai/pull/662))
 
 - **`trellis worker tune --dry-run` writes nothing.** It persisted every
   proposal as `pending` and advanced the tuner cursor, although its help
