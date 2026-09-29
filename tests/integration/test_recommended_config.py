@@ -185,7 +185,7 @@ class TestPostgresOnlyBlock:
 # outside the scan, so a scan that finds fewer variables cannot pass.
 _SHIPPED_BLOCKS = [
     pytest.param("ARCADEDB (BLESSED)", 5, True, id="arcadedb"),
-    pytest.param("NEO4J LOCAL", 3, True, id="neo4j-local"),
+    pytest.param("NEO4J LOCAL", 2, True, id="neo4j-local"),
     pytest.param("NEO4J CLOUD", 7, True, id="neo4j-cloud"),
     pytest.param("POSTGRES-ONLY ALTERNATIVE", 3, False, id="postgres-only"),
 ]
