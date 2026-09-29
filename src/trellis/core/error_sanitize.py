@@ -128,10 +128,11 @@ def describe_yaml_error(exc: BaseException) -> str:
     ``str(exc)`` of a PyYAML error prints the offending line, and a config
     line can hold a DSN or a password. The description is rebuilt from the
     structured fields instead: ``context`` and ``problem``, each with its
-    1-based line and column, with quoted document text masked. Anything
-    else ``safe_load`` raises (``!!int`` and ``!!float`` raise ``ValueError``,
-    ``!!bool`` ``KeyError``, each naming the value) is described by its type
-    alone. ``str(exc)`` is never used.
+    1-based line and column, with quoted document text masked. A
+    ``ReaderError`` (a non-printable character) gives its code point and
+    position. Anything else ``safe_load`` raises (``!!int`` and
+    ``!!float`` raise ``ValueError``, ``!!bool`` ``KeyError``, each naming
+    the value) is described by its type alone. ``str(exc)`` is never used.
     """
     parts: list[str] = []
     for text, mark in (
