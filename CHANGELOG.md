@@ -243,6 +243,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`admin health` and config parse errors stop printing config.yaml
+  values.** `trellis admin health` printed a backend value that names no
+  registered backend, a DSN written as a name included; it now reports
+  `null` / `unknown backend (not checked)`. The registry's refusal of such
+  a backend and its schema fingerprint no longer repeat it either. The
+  config parse errors of the registry, `admin migrate-graph` and
+  `worker tune` name the line and column without quoting the file, and a
+  `TrellisConfig` validation error or a `worker tune` setting check no
+  longer repeats the value. In the registry a top-level list or scalar,
+  invalid UTF-8 or a tag that cannot construct is now a `ConfigError`
+  (exit 5), not a traceback.
+  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+
 - **`trellis worker tune --dry-run` writes nothing.** It persisted every
   proposal as `pending` and advanced the tuner cursor, although its help
   said "without mutating or emitting"; it never emitted events. The tuner
