@@ -271,9 +271,8 @@ def parse_verdict(raw: str) -> tuple[ReconcileDecision, float] | None:
 
     Returns ``(decision, confidence)`` or ``None`` when the response is not
     valid — an unknown decision, a non-numeric or non-finite (NaN, ±Infinity,
-    too large for a float) confidence, or non-JSON. A
-    ``None`` return is the malformed-response signal the caller turns into a
-    safe fallback ADD.
+    too large for a float) confidence, or non-JSON. A ``None`` return is the
+    malformed-response signal the caller turns into a safe fallback ADD.
     """
     parsed = parse_json_response(raw)
     if parsed.outcome is JSONParseOutcome.MALFORMED:

@@ -1223,6 +1223,7 @@ class TestWorkerEnrich:
         """
         doc_store = temp_stores.knowledge.document_store
         doc_store.put("doc-x", "enrich me", {"title": "X"})
+        doc_store.put("doc-y", "fail the call", {"title": "Y"})
         calls: list[tuple[str, str, dict[str, Any]]] = []
 
         class _Recorder:
@@ -1232,19 +1233,32 @@ class TestWorkerEnrich:
 
                 return record
 
+        class _SplitLLM:
+            """An unparseable reply for doc-x, a transport error for doc-y."""
+
+            async def generate(
+                self, *, messages: list[Message], **_kwargs: Any
+            ) -> LLMResponse:
+                if any("fail the call" in m.content for m in messages):
+                    msg = "transport down"
+                    raise RuntimeError(msg)
+                return LLMResponse(content="I cannot classify this.", model="stub")
+
         monkeypatch.setattr(worker, "logger", _Recorder())
         monkeypatch.setattr(
             worker,
             "_require_llm_client_or_exit",
-            lambda _consumer, *, command: _StubLLM("I cannot classify this."),
+            lambda _consumer, *, command: _SplitLLM(),
         )
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
         assert result.exit_code == 0, result.output
         failed = [
             kw for level, event, kw in calls if event == "worker_enrich.item_failed"
         ]
-        assert [(kw["doc_id"], kw["failure_kind"]) for kw in failed] == [
-            ("doc-x", "parse_error")
+        # Two kinds, so a constant slug cannot satisfy it.
+        assert sorted((kw["doc_id"], kw["failure_kind"]) for kw in failed) == [
+            ("doc-x", "parse_error"),
+            ("doc-y", "model_error"),
         ]
 
     def test_a_nan_importance_writes_no_importance(
@@ -1270,6 +1284,7 @@ class TestWorkerEnrich:
         metadata = doc_store.get("doc-x")["metadata"]
         assert metadata["content_tags"]["custom"]["llm_tags"] == ["alpha"]
         assert "auto_importance" not in metadata
+        assert metadata["content_tags"].get("importance_scored_at") is None
 
 
 # ===========================================================================

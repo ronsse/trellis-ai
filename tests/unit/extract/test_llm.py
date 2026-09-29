@@ -391,6 +391,21 @@ class TestDraftRobustness:
         confs = [e.confidence for e in result.entities]
         assert confs == [1.0, 0.0, 0.5]  # clamped / defaulted
 
+    async def test_a_boolean_confidence_reads_as_a_number(self) -> None:
+        # bool is an int subclass, and ``coerce_finite_float`` sets no bool
+        # policy: the extractor reads true as 1.0 and false as 0.0, as it did
+        # before the helper.
+        payload = {
+            "entities": [
+                {"entity_type": "p", "name": "X", "confidence": True},
+                {"entity_type": "p", "name": "Y", "confidence": False},
+            ],
+            "edges": [],
+        }
+        fake = FakeLLMClient(response_text=json.dumps(payload))
+        result = await LLMExtractor(llm_client=fake).extract("x")
+        assert [e.confidence for e in result.entities] == [1.0, 0.0]
+
     async def test_properties_not_dict_defaulted(self) -> None:
         payload = {
             "entities": [

@@ -117,6 +117,32 @@ def test_parse_candidates_reads_a_non_finite_confidence_as_absent() -> None:
     ]
 
 
+def test_parse_candidates_reads_a_boolean_confidence_as_a_number() -> None:
+    """bool is an int subclass, and distill reads it as one: true is 1.0.
+
+    ``coerce_finite_float`` sets no bool policy. Each site keeps its own, and
+    this one is unchanged from before the helper.
+    """
+    items = [
+        good_candidate(
+            title=f"{topic.capitalize()} needs its guard step",
+            memory=(
+                f"Synthetic note {index}: the {topic} step fails unless its "
+                "guard runs first; add the guard before the deploy."
+            ),
+            confidence=confidence,
+        )
+        for index, (topic, confidence) in enumerate(
+            [("retry budget", True), ("cache warmup", False)]
+        )
+    ]
+
+    result = distill.parse_candidates(candidates_json(*items), "sess-fake-0001")
+
+    assert result.outcome is distill.DistillOutcome.CANDIDATES
+    assert [c.confidence for c in result.candidates] == [1.0, 0.0]
+
+
 def test_parse_candidates_skips_items_missing_fields() -> None:
     raw = candidates_json({"title": "only a title"}, good_candidate())
     result = distill.parse_candidates(raw, "s")

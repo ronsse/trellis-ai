@@ -174,15 +174,22 @@ class TestParseVerdict:
             '{"decision": "add", "confidence": "high"}',  # non-numeric
             '{"decision": "add", "confidence": true}',  # bool is malformed
             # Non-finite: json.loads accepts all of these.
-            '{"decision": "supersede", "confidence": NaN}',
-            '{"decision": "noop", "confidence": Infinity}',
-            '{"decision": "update", "confidence": -Infinity}',
-            '{"decision": "add", "confidence": 1e999}',  # decodes to inf
+            pytest.param('{"decision": "supersede", "confidence": NaN}', id="nan"),
+            pytest.param('{"decision": "noop", "confidence": Infinity}', id="infinity"),
+            pytest.param(
+                '{"decision": "update", "confidence": -Infinity}', id="neg-infinity"
+            ),
+            pytest.param(
+                '{"decision": "add", "confidence": 1e999}', id="1e999-decodes-to-inf"
+            ),
             pytest.param(
                 '{"decision": "supersede", "confidence": 1' + "0" * 310 + "}",
                 id="overflowing-int",
             ),
-            '{"decision": "noop", "confidence": "nan"}',  # float() reads NaN
+            pytest.param(
+                '{"decision": "noop", "confidence": "nan"}',
+                id="nan-string-float-reads-nan",
+            ),
             pytest.param("[" * 100_000, id="nested-past-recursion-limit"),
         ],
     )

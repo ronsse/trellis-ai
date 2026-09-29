@@ -1229,6 +1229,40 @@ class TestWrongTypedField:
             key: clamped,
         }
 
+    @pytest.mark.parametrize(
+        ("key", "raw", "field", "read"),
+        [
+            pytest.param(
+                "importance", True, "auto_importance", 1.0, id="importance-true"
+            ),
+            pytest.param(
+                "tag_confidence", True, "tag_confidence", 1.0, id="tag-conf-true"
+            ),
+            pytest.param(
+                "class_confidence",
+                False,
+                "class_confidence",
+                0.0,
+                id="class-conf-false",
+            ),
+        ],
+    )
+    async def test_a_boolean_reads_as_a_number(
+        self, event_log: SQLiteEventLog, key: str, raw: bool, field: str, read: float
+    ) -> None:
+        # bool is an int subclass, and ``coerce_finite_float`` sets no bool
+        # policy: enrichment reads true as 1.0 and false as 0.0, as it did
+        # before the helper.
+        response = json.dumps({**_GOOD_FIELDS, key: raw})
+        service = EnrichmentService(llm=_make_llm(response), event_log=event_log)
+        result = await service.enrich(content="c")
+
+        assert result.success is True
+        assert {name: getattr(result, name) for name in _GOOD_PARSED} == {
+            **_GOOD_PARSED,
+            field: read,
+        }
+
 
 # ---------------------------------------------------------------------------
 # The brace-regex salvage decodes a second time, and that decode fails in two
