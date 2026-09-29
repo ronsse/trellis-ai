@@ -18,6 +18,7 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
+from trellis.core.error_sanitize import describe_yaml_error
 from trellis.core.version import (
     STALENESS_FRESH,
     STALENESS_NOT_CHECKED,
@@ -262,7 +263,9 @@ def health(
     Read-only: each store's backend is resolved from config without
     building the store, so this opens no connection and creates no file.
     A SQLite store is checked by whether its file exists. Any other
-    backend is reported by name as not checked — never as missing.
+    backend is reported by name as not checked — never as missing. A
+    value that names no registered backend is reported as unknown, and
+    is never printed: it can be a DSN written where a name belongs.
     """
     from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
 
@@ -278,7 +281,9 @@ def health(
         "data_dir": data_dir.exists(),
         "stores_dir": stores_dir is not None and stores_dir.exists(),
     }
-    backends: dict[str, str] = {}
+    # ``None`` (JSON ``null``) for a value that names no registered backend:
+    # the value is never shown, since it can be a DSN written as a name.
+    backends: dict[str, str | None] = {}
     for store_type, file_key in _HEALTH_STORES:
         backends[store_type] = registry.configured_backend(store_type)
         sqlite_file = registry.configured_sqlite_path(store_type)
@@ -303,8 +308,13 @@ def health(
             table.add_row(name, status)
         for store_type, file_key in _HEALTH_STORES:
             if file_key not in checks:
-                backend = escape(backends[store_type])
-                table.add_row(store_type, f"[yellow]{backend} (not checked)[/yellow]")
+                backend = backends[store_type]
+                status = (
+                    "[red]unknown backend (not checked)[/red]"
+                    if backend is None
+                    else f"[yellow]{escape(backend)} (not checked)[/yellow]"
+                )
+                table.add_row(store_type, status)
         console.print(table)
 
 
@@ -1641,11 +1651,14 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
         console.print(f"[red]Config file not found: {escape(str(path))}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION)
 
+    text = path.read_text(encoding="utf-8")
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as exc:
-        console.print(f"[red]Invalid YAML in {escape(str(path))}: {exc}[/red]")
-        raise typer.Exit(code=EXIT_VALIDATION) from exc
+        data = yaml.safe_load(text) or {}
+    except Exception as exc:
+        # ``str(exc)`` prints the offending line, which can hold a password.
+        reason = escape(describe_yaml_error(exc))
+        console.print(f"[red]Invalid YAML in {escape(str(path))}: {reason}[/red]")
+        raise typer.Exit(code=EXIT_VALIDATION) from None
 
     graph_block = data.get("graph")
     if not isinstance(graph_block, dict) or "backend" not in graph_block:

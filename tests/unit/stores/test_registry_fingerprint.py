@@ -124,6 +124,55 @@ class TestMismatchedFingerprints:
         assert any("trace/sqlite/v0" in str(e) for e in cfg_errors)
 
 
+#: A fake credential in a DSN written where a backend name belongs.
+_SENTINEL = "Q8dFg3lHPbvl9M6NYBQsrLOu"
+
+
+class TestUnregisteredBackend:
+    """A value that names no registered backend is fingerprinted as such.
+
+    The mismatch message quotes both fingerprints and API startup raises it,
+    so the configured value, which can be a DSN, must not become one.
+    """
+
+    @pytest.mark.parametrize(
+        "backend",
+        [{"password": "p"}, ["p"], None, "postgress"],
+        ids=["map", "list", "null", "typo"],
+    )
+    def test_the_value_is_not_the_fingerprint(
+        self, tmp_path: Path, backend: object
+    ) -> None:
+        reg = StoreRegistry(
+            config={"document": {"backend": backend}}, stores_dir=tmp_path / "stores"
+        )
+
+        assert reg._compute_fingerprints(["document"]) == {
+            "document": "document/unregistered/v1"
+        }
+
+    def test_a_mismatch_is_still_reported_without_the_value(
+        self, tmp_path: Path
+    ) -> None:
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True)
+        (stores_dir / _FINGERPRINT_META_FILENAME).write_text(
+            json.dumps({"document": "document/sqlite/v1"})
+        )
+        config = {"document": f"postgresql://u:{_SENTINEL}@h/db"}
+        reg = StoreRegistry(config=config, stores_dir=stores_dir)
+
+        with pytest.raises(RegistryValidationError) as excinfo:
+            reg.validate(store_types=["document"])
+
+        rendered = str(excinfo.value)
+        windows = {_SENTINEL[i : i + 8] for i in range(len(_SENTINEL) - 7)}
+        leaked = sum(window in rendered for window in windows)
+        assert leaked == 0, f"{leaked} windows of the credential in the report"
+        assert "SchemaFingerprintMismatch" in rendered
+        assert "document/unregistered/v1" in rendered
+
+
 class TestEnvVarSkip:
     """``TRELLIS_SKIP_FINGERPRINT_CHECK=1`` short-circuits both branches."""
 

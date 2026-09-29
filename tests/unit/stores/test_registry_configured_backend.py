@@ -10,11 +10,13 @@ SQLite store is what creates the stores dir and the file health reports on.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from trellis.errors import ValidationError
-from trellis.stores.registry import _PLANE_OF, StoreRegistry
+from trellis.stores.registry import _PLANE_OF, StoreRegistry, _reset_backend_cache
 
 #: The default file of each store health checks — literal, not imported, so
 #: the accessor is pinned against the names rather than against itself.
@@ -59,6 +61,44 @@ def test_backend_reads_dict_form_string_form_and_defaults(tmp_path: Path) -> Non
         "tuner_state": "sqlite",
         "api_key": "sqlite",
     }
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"backend": "postgress"},
+        {"backend": None},
+        {"backend": {"password": "p"}},
+        "postgresql://u:p@h/db",
+        None,
+    ],
+    ids=["typo", "null", "map", "dsn", "null-store"],
+)
+def test_a_value_that_names_no_registered_backend_is_none(
+    tmp_path: Path, document: object
+) -> None:
+    # Never the value itself: a DSN written where a name belongs would reach
+    # whoever prints the answer (``admin health`` does).
+    config = {"knowledge": {"document": document}}
+    registry = StoreRegistry.from_config_dict(config, data_dir=tmp_path)
+
+    assert registry.configured_backend("document") is None
+
+
+def test_a_plugin_backend_is_a_registered_name(tmp_path: Path) -> None:
+    def entry_points(*, group: str) -> list[SimpleNamespace]:
+        if group != "trellis.stores.document":
+            return []
+        return [SimpleNamespace(name="custom", value="pkg.mod:Store")]
+
+    config = {"knowledge": {"document": {"backend": "custom"}}}
+    registry = StoreRegistry.from_config_dict(config, data_dir=tmp_path)
+    with patch("trellis.plugins.loader.entry_points", side_effect=entry_points):
+        _reset_backend_cache()
+        try:
+            assert registry.configured_backend("document") == "custom"
+        finally:
+            _reset_backend_cache()
 
 
 @pytest.mark.parametrize("accessor", ["configured_backend", "configured_sqlite_path"])

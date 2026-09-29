@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import yaml
+from pydantic import ConfigDict
 
 from trellis.core.base import TrellisModel
 
@@ -22,6 +23,11 @@ def get_data_dir() -> Path:
 
 class TrellisConfig(TrellisModel):
     """CLI configuration."""
+
+    # Its values come from config.yaml, so a ValidationError names the key
+    # and the expected type but never repeats the value (a mapping under
+    # ``default_domain`` could be a credentials block pasted one level off).
+    model_config = ConfigDict(hide_input_in_errors=True)
 
     data_dir: str = ""
     default_domain: str | None = None
