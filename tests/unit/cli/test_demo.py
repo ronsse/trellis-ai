@@ -217,7 +217,7 @@ class TestDemoLoadColdStartFailures:
     The executor folds a handler exception into a FAILED result and a policy
     denial into a REJECTED one, and raises neither. ``demo load`` counted
     only SUCCESS results, so on both paths it printed a smaller edge count,
-    exited 0 and showed no failure line.
+    exited 0 and put no failure line on stdout.
     """
 
     def test_a_failed_cold_start_command_is_reported(
