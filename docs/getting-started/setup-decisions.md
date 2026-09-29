@@ -46,7 +46,7 @@ adopting a convention that tooling will formalize later:
 
 | Decision | Status | Where | Reference |
 |---|---|---|---|
-| Use an LLM for memory extraction / enrichment? Which provider + model? | **Now** | Uncomment the `llm:` block in `~/.config/trellis/config.yaml` (written by `admin init`); set `TRELLIS_ENABLE_MEMORY_EXTRACTION=1` | [playbooks.md → "Configuring LLM extraction"](../agent-guide/playbooks.md) |
+| Use an LLM for memory extraction / enrichment? Which provider + model? | **Now** | Uncomment the `llm:` block in `~/.trellis/config.yaml` (written by `admin init`); set `TRELLIS_ENABLE_MEMORY_EXTRACTION=1` | [playbooks.md → "Configuring LLM extraction"](../agent-guide/playbooks.md) |
 
 Deterministic classification works with no LLM. The LLM path is an opt-in
 addition, never a silent substitution.

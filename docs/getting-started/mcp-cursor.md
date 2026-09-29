@@ -6,7 +6,7 @@ Cursor supports MCP servers via `~/.cursor/mcp.json` (global) or `<project>/.cur
 
 ```bash
 pip install -e ".[dev]"   # or: pip install trellis-ai
-trellis admin init        # initializes ~/.config/trellis/ with SQLite stores
+trellis admin init        # initializes ~/.trellis/ with SQLite stores
 ```
 
 ## Configure Cursor
@@ -31,8 +31,10 @@ Restart Cursor. Open the chat panel and the 11 Trellis macro tools should appear
 Keep memory inside the project:
 
 ```bash
-trellis admin init --scope project   # stores -> ./.trellis/
+TRELLIS_CONFIG_DIR=$PWD/.trellis trellis admin init   # stores -> ./.trellis/
 ```
+
+Every other `trellis` CLI command against this store needs the same `TRELLIS_CONFIG_DIR`.
 
 Then `<project>/.cursor/mcp.json`:
 

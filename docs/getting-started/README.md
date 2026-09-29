@@ -34,18 +34,18 @@ Agents use it via an MCP server (16 macro tools), a REST API, a Python SDK, or a
 
 ```bash
 pip install -e ".[dev]"        # or: pip install trellis-ai
-trellis admin init             # creates ~/.config/trellis/config.yaml + SQLite stores
-trellis demo load              # seeds ~66 realistic items (optional but recommended)
+trellis admin init             # creates ~/.trellis/config.yaml + SQLite stores
+trellis demo load              # seeds 106 realistic items (optional but recommended)
 trellis admin stats            # confirm everything wired up
 ```
 
-You now have a working substrate. Add `--scope project` to `init` if you'd rather have stores in `./.trellis/` next to your code.
+You now have a working substrate. If you'd rather have the config and stores in `./.trellis/` next to your code, run `TRELLIS_CONFIG_DIR=$PWD/.trellis trellis admin init` instead (or `trellis admin quickstart --scope project`). Every CLI command against that store needs the same `TRELLIS_CONFIG_DIR`.
 
 > Going past a local sandbox? Before a team / data-platform / production setup, walk [setup-decisions.md](setup-decisions.md) — the choices (domains & ontology, domain ownership, API security) that the default install never prompts for.
 
 ## Hands-on: 5-minute walkthrough
 
-1. **Confirm the substrate is alive.**
+1. **Confirm the config and data paths exist, and see each store's backend.**
 
    ```bash
    trellis admin health --format json
@@ -101,14 +101,14 @@ talks to a running `trellis admin serve` (there is no in-process SDK mode), so
 scripts, CI, and Python agent frameworks need the shared server.
 
 Default stores are local SQLite. Switch backends in
-`~/.config/trellis/config.yaml`:
+`~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`):
 
 ```yaml
 knowledge:
-  vector: { backend: pgvector }
-  blob: { backend: s3, bucket: ${TRELLIS_S3_BUCKET} }
+  vector: { backend: pgvector }  # DSN from TRELLIS_KNOWLEDGE_PG_DSN
+  blob: { backend: s3 }          # bucket from TRELLIS_S3_BUCKET
 operational:
-  trace: { backend: postgres, dsn: ${TRELLIS_OPERATIONAL_PG_DSN} }
+  trace: { backend: postgres }   # DSN from TRELLIS_OPERATIONAL_PG_DSN
 ```
 
 Start the REST API (and web UI) with:

@@ -69,7 +69,7 @@ For drop-in skill templates, see [../../skills/](../../skills/).
 |---|---|
 | `command not found` in logs | Use an absolute path (see PATH gotcha above). |
 | Tools don't appear after restart | Fully quit Claude Desktop (not just close window) and reopen. |
-| `permission denied` writing stores | Pre-create `~/.config/trellis/` and run `trellis admin init` once manually. |
+| `permission denied` writing stores | Pre-create `~/.trellis/` and run `trellis admin init` once manually. |
 
 ## See also
 

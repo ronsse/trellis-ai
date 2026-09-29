@@ -618,11 +618,11 @@ Extraction is purely additive: `save_memory` itself behaves exactly as before, a
 Both halves are required. Either alone is insufficient.
 
 1. **An `LLMClient` must be obtainable.** One of:
-   - (preferred) An `llm:` block in `~/.config/trellis/config.yaml` — see below.
+   - (preferred) An `llm:` block in `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`) — see below.
    - (fallback) An `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` environment variable visible to the MCP server process.
 2. **The feature flag must be set.** `TRELLIS_ENABLE_MEMORY_EXTRACTION=1` (also accepts `true`, `yes`, `on`).
 
-### Configuration via `~/.config/trellis/config.yaml`
+### Configuration via `~/.trellis/config.yaml`
 
 `trellis admin init` emits a commented-out `llm:` block at the bottom of `config.yaml`. Uncomment it and fill in the relevant fields:
 
@@ -744,7 +744,7 @@ $ trellis admin check-extractors
 Tiered Extraction — Readiness Report
 
 LLM client:
-  OK configurable from ~/.config/trellis/config.yaml (provider=openai, model=gpt-4o-mini)
+  OK configurable from ~/.trellis/config.yaml (provider=openai, model=gpt-4o-mini)
   OK OPENAI_API_KEY/ANTHROPIC_API_KEY env var is set (env fallback available)
 
 Memory-extraction feature flag:
