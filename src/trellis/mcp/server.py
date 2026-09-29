@@ -250,7 +250,7 @@ def _record_boundary_rejection(
 mcp = FastMCP(
     "trellis",
     instructions=(
-        "Trellis — persistent memory for AI agents. Responses are concise "
+        "Trellis — persistent memory for AI agents. Retrieval responses are concise "
         "markdown sized for LLM context windows.\n"
         "\n"
         "Use it as a loop, not a lookup table:\n"

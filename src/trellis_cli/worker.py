@@ -274,7 +274,11 @@ def tune_cmd(
     since_days: int | None = typer.Option(
         None,
         "--since-days",
-        help="Read the last N days instead of the tuner's 30-day window.",
+        help=(
+            "Read the last N days instead of the tuner's 30-day window. With "
+            "auto-promotion enabled, a live run also re-monitors earlier "
+            "auto-promotions over the same N days."
+        ),
     ),
     dry_run: bool = typer.Option(
         False,
