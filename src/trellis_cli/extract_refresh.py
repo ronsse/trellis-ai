@@ -424,6 +424,8 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
             summary = _refresh_entry(entry, sources_root=sources_path.parent.resolve())
+        except typer.Exit:
+            raise
         except typer.BadParameter as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL) from None
@@ -465,6 +467,8 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
                 source_hint=extractor_type,  # type: ignore[arg-type]
                 source_name=f"<adhoc:{extractor_type}>",
             )
+        except typer.Exit:
+            raise
         except typer.BadParameter as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL) from None
