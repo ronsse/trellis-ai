@@ -112,7 +112,7 @@ All notable changes to Trellis will be documented in this file.
   instead of the global config dir, and a `--scope` other than `root` or
   `project` exits `2` before writing anything, where it ran the global setup.
   ([#651](https://github.com/ronsse/trellis-ai/pull/651),
-  [#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  [#669](https://github.com/ronsse/trellis-ai/pull/669))
 
 - **BREAKING: a `config.yaml` value that is only a `${VAR}` placeholder now
   refuses to load.** Trellis never expands environment variables in
