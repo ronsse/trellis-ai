@@ -262,7 +262,7 @@ class TestMain:
     def test_untyped_exception_is_not_caught(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Only the typed family is caught: an untyped error is a bug, trace intact."""
+        """Only the typed family is caught: an untyped error keeps its traceback."""
         monkeypatch.setattr(
             capture_main, "run_sweep", MagicMock(side_effect=KeyError("x"))
         )

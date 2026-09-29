@@ -298,12 +298,13 @@ Health signals in the JSON `CaptureReport`:
   from `trellis-session-capture` (`1` if the judge also went away) and `1`
   from `trellis worker capture-sessions`.
 - No report at all and exit `5` → a typed Trellis error stopped the sweep
-  before it could report: a refused `config.yaml` (a literal `${VAR}`,
-  unparseable YAML) or a store backend the registry does not know.
+  before it could report, such as a refused `config.yaml` (a literal
+  `${VAR}`, unparseable YAML) or a store backend the registry does not know.
   `trellis-session-capture` writes the error's message to stderr in place of
   a traceback, and a refused config's message names the file and the fix.
   The watermark does not advance, so the next sweep picks up the same
-  sessions. `trellis worker capture-sessions` exits `5` on the same fault.
+  sessions. `trellis worker capture-sessions` also exits `5` on a refused
+  config or an unknown backend.
 - `sessions_skipped_watermark` should dominate on steady-state runs (only new
   work is processed).
 - `sessions_skipped_empty` > 0 → transcripts parsed to **zero
