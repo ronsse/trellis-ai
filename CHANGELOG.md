@@ -243,6 +243,12 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis curate entity`, `promote`, `label` and `feedback` exit `2` when a
+  write is refused and `5` when it fails, in both formats.** They exited `0`,
+  and `curate entity` also printed "Entity created: None" with
+  `"status": "ok"`, so the Neo4j guides' smoke check passed on a failed write.
+  ([#660](https://github.com/ronsse/trellis-ai/pull/660))
+
 - **`trellis worker tune --dry-run` writes nothing.** It persisted every
   proposal as `pending` and advanced the tuner cursor, although its help
   said "without mutating or emitting"; it never emitted events. The tuner
@@ -250,12 +256,6 @@ All notable changes to Trellis will be documented in this file.
   proposals for `trellis metrics promote`, run `worker tune` without
   `--dry-run` while auto-promote is off: that pass promotes nothing.
   ([#659](https://github.com/ronsse/trellis-ai/pull/659))
-
-- **`trellis curate entity`, `promote`, `label` and `feedback` exit `2` when a
-  write is refused and `5` when it fails, in both formats.** They exited `0`,
-  and `curate entity` also printed "Entity created: None" with
-  `"status": "ok"`, so the Neo4j guides' smoke check passed on a failed write.
-  ([#660](https://github.com/ronsse/trellis-ai/pull/660))
 
 ## [0.9.0] - 2026-05-13
 
