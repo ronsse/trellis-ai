@@ -51,11 +51,14 @@ def _declare(
     *,
     warn: bool = True,
     deny: bool = False,
-    condition: str = "unusual write",
+    conditions: tuple[str, ...] = ("unusual write",),
 ) -> None:
     rules = []
     if warn:
-        rules.append(PolicyRule(operation="*", condition=condition, action="warn"))
+        rules.extend(
+            PolicyRule(operation="*", condition=condition, action="warn")
+            for condition in conditions
+        )
     if deny:
         rules.append(
             PolicyRule(operation="*", condition="not permitted", action="deny")
@@ -209,6 +212,35 @@ def test_markup_in_a_policy_condition_prints_verbatim(stores_dir: Path) -> None:
     and the command exits 1. The id-markup rule cannot catch that, because
     ``warning`` is not an id-shaped name.
     """
-    _declare(stores_dir, condition="unusual [/x] write")
+    _declare(stores_dir, conditions=("unusual [/x] write",))
     output = plain(_run(_argv("prune")))
     assert "Policy warning (pol-warn): unusual [/x] write" in output
+
+
+def test_markup_in_a_link_refusal_prints_verbatim(stores_dir: Path) -> None:
+    """A ``link`` refusal can quote the ids it was given, so its line escapes.
+
+    Unescaped, ``[/x]`` in an id raises ``MarkupError`` before the refusal or
+    its warning prints. ``link`` refuses with exit 1, which is also what the
+    traceback exits with, so only the output tells the two apart.
+    """
+    source = _seed("a")
+    _declare(stores_dir)
+    output = plain(_run(["curate", "link", source, "ghost[/x]id"], exit_code=1))
+    assert "ghost[/x]id" in output
+    assert WARNING_TEXT in output
+
+
+def test_each_warning_gets_its_own_line(stores_dir: Path) -> None:
+    """Two warnings print two lines, in order, below the result.
+
+    Every other test here fires one warning, so a helper that printed only
+    the first would pass them all. Two is not exotic: a policy warning and
+    the ``audit_event_not_recorded`` note make two.
+    """
+    _declare(stores_dir, conditions=("unusual write", "second look"))
+    lines = plain(_run(_argv("entity"))).strip().splitlines()
+    assert [line.strip() for line in lines[-2:]] == [
+        f"Warning: {WARNING_TEXT}",
+        "Warning: Policy warning (pol-warn): second look",
+    ]

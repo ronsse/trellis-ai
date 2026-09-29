@@ -251,7 +251,10 @@ All notable changes to Trellis will be documented in this file.
   showed the policy's verdict. Each now prints a `Warning:` line per
   warning in text, and its JSON carries a `warnings` array on success,
   refusal and failure, `[]` when nothing warned. No exit code and no
-  existing key changes.
+  existing key changes. `link` now escapes the message it prints on a
+  refusal or failure, as the other four already did, so an id or a policy
+  condition containing `[/x]` prints instead of raising `MarkupError`
+  before the warning.
   ([#665](https://github.com/ronsse/trellis-ai/pull/665))
 
 - **`trellis worker curate --dry-run` records no finding and refuses

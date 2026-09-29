@@ -147,7 +147,7 @@ def link(
                 }
             )
         else:
-            console.print(f"[red]{result.message}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]")
             _print_warnings(result.warnings)
         raise typer.Exit(code=EXIT_INTERNAL)
 
