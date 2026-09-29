@@ -101,3 +101,10 @@ class TestTextFormat:
         be noise rather than evidence.
         """
         assert "Warning:" not in plain(_label())
+
+    def test_warning_survives_a_rejection(self, stores_dir: Path) -> None:
+        """A refusal exits 2 only after the text arm has printed its warnings."""
+        _declare(stores_dir, deny=True)
+        output = plain(_label(exit_code=2))
+        assert "Command rejected" in output
+        assert WARNING_TEXT in output
