@@ -192,6 +192,12 @@ def run_capture(
     dry_run: bool = False,
 ) -> CaptureReport:
     """Run one capture sweep and return its :class:`CaptureReport`."""
+    # Build the document store before the judge is paid for any session. The
+    # registry builds a store on first use, so a backend it refuses would
+    # otherwise surface only after every session had been judged, and since the
+    # watermark is saved after that point, the next sweep would pay for the
+    # same sessions again. Dry runs too: they call the judge.
+    _ = registry.knowledge.document_store
     reconcile_enabled = reconcile_on_write_enabled()
     report = CaptureReport(
         transcripts_root=str(transcripts_root),

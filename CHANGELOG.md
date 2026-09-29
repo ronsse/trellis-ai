@@ -236,6 +236,13 @@ All notable changes to Trellis will be documented in this file.
   the judge outage and wins when both apply) and `1` from `trellis worker
   capture-sessions`, which reports `"status": "partial"`. With
   `TRELLIS_CAPTURE_STRICT=0` it exits `0` where it used to crash.
+  A document store the registry refuses on first use (an unknown backend,
+  a missing DSN) now stops the sweep, dry runs included, before any session
+  is judged. It used to surface only after the judge had run on every
+  session, as a crash or, with reconcile on, as every session errored; with
+  the watermark unsaved, the next sweep paid for the same sessions again.
+  ([#644](https://github.com/ronsse/trellis-ai/pull/644),
+  [#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
 - **MinHash shingle hashing switched from MD5 to truncated SHA-256**
   (`classify/dedup/minhash.py`). Non-cryptographic use (similarity
   estimation, not secret protection), but CodeQL's sensitive-data-hashing
