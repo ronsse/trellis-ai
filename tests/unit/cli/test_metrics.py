@@ -263,6 +263,33 @@ def test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes(
     assert state.get_cursor("rule_tuner") is not None
 
 
+@pytest.mark.parametrize(("args", "dry_run"), [([], False), (["--dry-run"], True)])
+def test_worker_tune_json_dry_run_is_the_flag_with_auto_promote_off(
+    cli_env, args: list[str], dry_run: bool
+) -> None:
+    """``"dry_run"`` says whether the pass wrote, not whether it promoted.
+
+    With auto-promote off, a run without ``--dry-run`` writes its proposals
+    and the cursor, and it used to report ``"dry_run": true``.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"], n=40, domain="orders")
+    state = cli_env["tuner_state"]
+
+    result = runner.invoke(app, ["worker", "tune", "--format", "json", *args])
+
+    assert result.exit_code == 0, plain(result.output)
+    payload = json.loads(result.stdout)
+    assert payload["enabled"] is False
+    assert payload["proposals_considered"] >= 1
+    assert payload["dry_run"] is dry_run
+    if dry_run:
+        assert state.list_proposals() == []
+        assert state.get_cursor("rule_tuner") is None
+    else:
+        assert state.list_proposals() != []
+        assert state.get_cursor("rule_tuner") is not None
+
+
 def test_tune_text_renders_a_stored_domain_verbatim(
     cli_env, monkeypatch: pytest.MonkeyPatch
 ) -> None:

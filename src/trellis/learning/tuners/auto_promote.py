@@ -205,6 +205,8 @@ class AutoPromoteReport:
     """Aggregate result of one :func:`run_auto_promotion` pass."""
 
     enabled: bool
+    #: The caller's flag. False means the tuner pass persisted its proposals and
+    #: cursor (if it saw outcomes), even when disabled.
     dry_run: bool
     proposals_considered: int
     auto_promoted: int
@@ -369,7 +371,7 @@ def run_auto_promotion(
 
     return AutoPromoteReport(
         enabled=policy.enabled,
-        dry_run=effective_dry_run,
+        dry_run=dry_run,
         proposals_considered=len(proposals),
         auto_promoted=auto_promoted,
         rolled_back=rolled_back,
