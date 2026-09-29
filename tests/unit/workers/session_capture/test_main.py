@@ -19,7 +19,7 @@ import pytest
 import structlog
 
 from tests.structlog_isolation import clear_cached_logger_proxies
-from trellis.errors import ConfigError
+from trellis.errors import ConfigError, StoreError, TrellisError
 from trellis_cli.exit_codes import EXIT_STORE
 from trellis_workers.session_capture import __main__ as capture_main
 from trellis_workers.session_capture.models import CaptureReport
@@ -210,15 +210,19 @@ class TestMain:
         assert "2 session(s) left unjudged" in err
         assert "1 session(s) raised mid-sweep" in err
 
+    # StoreError too: the arm catches the typed family, so narrowing it to
+    # ConfigError (the one member today's routes raise) must fail here.
+    @pytest.mark.parametrize("error_cls", [ConfigError, StoreError])
     def test_typed_trellis_error_exits_five_with_its_message(
         self,
+        error_cls: type[TrellisError],
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """A refused config is an operator error: its message, not a traceback."""
         message = "/srv/trellis/config.yaml: knowledge.graph.uri is not a string"
         monkeypatch.setattr(
-            capture_main, "run_sweep", MagicMock(side_effect=ConfigError(message))
+            capture_main, "run_sweep", MagicMock(side_effect=error_cls(message))
         )
 
         exit_code = capture_main.main([])
