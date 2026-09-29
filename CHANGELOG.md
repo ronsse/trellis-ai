@@ -286,7 +286,7 @@ All notable changes to Trellis will be documented in this file.
   `admin migrate-graph` refuses a top-level list or scalar, invalid UTF-8
   or a directory with exit `2`, where it printed a traceback.
   ([#662](https://github.com/ronsse/trellis-ai/pull/662),
-  [#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  [#673](https://github.com/ronsse/trellis-ai/pull/673))
 
 - **The example curation workflow parses.** Two lines of stray markup
   followed the last step of
