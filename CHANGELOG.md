@@ -304,7 +304,7 @@ All notable changes to Trellis will be documented in this file.
   `--dry-run` while auto-promote is off: that pass promotes nothing, and
   its JSON now reports `"dry_run": false` where it reported `true`.
   ([#659](https://github.com/ronsse/trellis-ai/pull/659),
-  [#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  [#671](https://github.com/ronsse/trellis-ai/pull/671))
 
 ## [0.9.0] - 2026-05-13
 
