@@ -302,8 +302,11 @@ All notable changes to Trellis will be documented in this file.
   with the line and column when it has them. A `TrellisConfig` validation
   error or a `worker tune` setting check no longer repeats the value. In
   the registry a top-level list or scalar, invalid UTF-8 or a tag that
-  cannot construct is now a `ConfigError` (exit 5), not a traceback.
-  ([#662](https://github.com/ronsse/trellis-ai/pull/662))
+  cannot construct is now a `ConfigError` (exit 5), not a traceback, and
+  `admin migrate-graph` refuses a top-level list or scalar, invalid UTF-8
+  or a directory with exit `2`, where it printed a traceback.
+  ([#662](https://github.com/ronsse/trellis-ai/pull/662),
+  [#673](https://github.com/ronsse/trellis-ai/pull/673))
 
 - **The example curation workflow parses.** Two lines of stray markup
   followed the last step of

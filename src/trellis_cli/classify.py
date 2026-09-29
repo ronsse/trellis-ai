@@ -81,6 +81,7 @@ from trellis.learning.tag_evolution import (
 from trellis.ops import ParameterRegistry
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis_cli.analyze import _InMemoryParameterStore
+from trellis_cli.config import get_config_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
@@ -284,10 +285,11 @@ def _require_llm_facet_classifier() -> Classifier:
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     if llm is None:
+        config_path = str(get_config_dir() / "config.yaml")
         console.print(
             "[red]classify shadow requires an LLM client but none is "
             "configured.[/red]\n"
-            "[dim]Add an 'llm:' block to ~/.trellis/config.yaml (provider, "
+            f"[dim]Add an 'llm:' block to {escape(config_path)} (provider, "
             "api_key_env, model). A local model is the intended default here — "
             "the pass is ~1.6s per document and runs over the whole corpus.[/dim]"
         )
@@ -679,8 +681,9 @@ def _render_tag_candidates(
     fragment = apply_promotion({}, candidates).domain_keywords
     if not fragment:
         return
+    config_path = str(get_config_dir() / "config.yaml")
     console.print(
-        "\n[dim]To promote, merge into ~/.trellis/config.yaml (delete the "
+        f"\n[dim]To promote, merge into {escape(config_path)} (delete the "
         "lines to revoke):[/dim]"
     )
     console.print(f"{CLASSIFY_CONFIG_KEY}:")
@@ -869,8 +872,9 @@ def _render_domain_candidates(
             )
 
     fragment = apply_normalization({}, candidates).domain_aliases
+    config_path = str(get_config_dir() / "config.yaml")
     console.print(
-        "\n[dim]To merge, add to ~/.trellis/config.yaml (delete the lines to "
+        f"\n[dim]To merge, add to {escape(config_path)} (delete the lines to "
         "revoke):[/dim]"
     )
     console.print(f"{CLASSIFY_CONFIG_KEY}:")

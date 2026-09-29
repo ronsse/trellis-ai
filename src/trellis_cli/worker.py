@@ -1432,10 +1432,11 @@ def _require_llm_client_or_exit(consumer: LLMConsumer, *, command: str) -> Any:
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     if llm is None:
+        config_path = str(get_config_dir() / CONFIG_FILENAME)
         console.print(
             f"[red]{command} requires an LLM client but none is "
             "configured.[/red]\n"
-            "[dim]Add an 'llm:' block to ~/.trellis/config.yaml (provider, "
+            f"[dim]Add an 'llm:' block to {escape(config_path)} (provider, "
             "api_key_env, model) and install the matching extra "
             "(\\[llm-openai] / \\[llm-anthropic]).[/dim]"
         )

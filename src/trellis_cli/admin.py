@@ -1334,7 +1334,7 @@ def _build_check_extractors_report() -> dict[str, Any]:
                 "message": (
                     "LLM client is not buildable from config; only env-var"
                     " fallback is available. Consider adding an llm: block"
-                    " to ~/.trellis/config.yaml."
+                    f" to {get_config_dir() / 'config.yaml'}."
                 ),
             }
         )
@@ -1388,17 +1388,18 @@ def _print_check_extractors_report(report: dict[str, Any]) -> None:
     console.print("[bold]LLM client:[/bold]")
     tier = llm.get("tier")
     via = f"tier={escape(tier)}, " if tier else ""
+    config_path = str(get_config_dir() / "config.yaml")
     if llm["config_buildable"]:
         provider = escape(llm.get("provider") or "?")
         model = escape(llm.get("model") or "(default)")
         console.print(
-            f"  [green]OK[/green] configurable from ~/.trellis/config.yaml"
+            f"  [green]OK[/green] configurable from {escape(config_path)}"
             f" ({via}provider={provider}, model={model})"
         )
     else:
         suffix = f" ({via.removesuffix(', ')})" if via else ""
         console.print(
-            f"  [red]MISSING[/red] not configurable from ~/.trellis/config.yaml{suffix}"
+            f"  [red]MISSING[/red] not configurable from {escape(config_path)}{suffix}"
         )
     if llm["env_fallback_available"] and llm["env_fallback_applies"]:
         console.print(
@@ -1655,7 +1656,18 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
         console.print(f"[red]Config file not found: {escape(str(path))}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION)
 
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        reason = escape(exc.strerror or str(exc))
+        console.print(f"[red]Could not read {escape(str(path))}: {reason}[/red]")
+        raise typer.Exit(code=EXIT_VALIDATION) from None
+    except UnicodeDecodeError as exc:
+        console.print(
+            f"[red]Could not read {escape(str(path))}: it is not valid"
+            f" {exc.encoding} text (byte offset {exc.start})[/red]"
+        )
+        raise typer.Exit(code=EXIT_VALIDATION) from None
     try:
         data = yaml.safe_load(text) or {}
     except Exception as exc:
@@ -1664,7 +1676,7 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
         console.print(f"[red]Invalid YAML in {escape(str(path))}: {reason}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
-    graph_block = data.get("graph")
+    graph_block = data.get("graph") if isinstance(data, dict) else None
     if not isinstance(graph_block, dict) or "backend" not in graph_block:
         console.print(
             f"[red]{escape(str(path))} must contain a 'graph:' block with a"
