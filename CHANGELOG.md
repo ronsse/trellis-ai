@@ -243,6 +243,17 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis curate entity`, `prune`, `restore`, `redact` and `link` show
+  their warnings, as `label` already did.** Their output carried neither
+  kind of warning a result holds: an `Enforcement.WARN` policy's verdict,
+  or the note that the command's audit event was not recorded
+  (`audit_event_not_recorded`). Without `-v`, nothing else on the CLI
+  showed the policy's verdict. Each now prints a `Warning:` line per
+  warning in text, and its JSON carries a `warnings` array on success,
+  refusal and failure, `[]` when nothing warned. No exit code and no
+  existing key changes.
+  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+
 - **`admin health` and config parse errors stop printing config.yaml
   values.** `trellis admin health` printed a backend value that names no
   registered backend, a DSN written as a name included; it now reports
