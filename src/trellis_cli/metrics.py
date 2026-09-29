@@ -154,7 +154,10 @@ def proposals_cmd(
 
     console.print(
         f"[bold]Proposals[/bold] ({len(proposals)} matching; "
-        f"tuner={escape(tuner or 'any')} status={escape(status or 'any')})"
+        # One escape over both filters: escaped apart, ``[/z`` and ``s]``
+        # still form one tag across the bracket-free text between them.
+        + escape(f"tuner={tuner or 'any'} status={status or 'any'}")
+        + ")"
     )
     if not proposals:
         return

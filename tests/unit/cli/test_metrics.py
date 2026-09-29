@@ -281,6 +281,23 @@ def test_proposals_text_renders_the_stored_tuner_and_the_filters_verbatim(
     assert "tuner=[b]q[/z] status=[b]s[/w]" in rendered
 
 
+def test_proposals_text_renders_filters_that_form_a_tag_together(
+    cli_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Escaping each filter apart misses the tag the two form together.
+
+    Neither ``[bold]q[/z`` nor ``s]`` ends in a whole closing tag, and no
+    bracket sits between them, so ``[/z status=s]`` raised ``MarkupError``.
+    """
+    force_colour(monkeypatch, metrics_cli)
+    result = runner.invoke(
+        app, ["metrics", "proposals", "--tuner", "[bold]q[/z", "--status", "s]"]
+    )
+    assert result.exit_code == 0, plain(result.output)
+    rendered = " ".join(assert_coloured(result.stdout).split())
+    assert "tuner=[bold]q[/z status=s]" in rendered
+
+
 # ---------------------------------------------------------------------------
 # versions
 # ---------------------------------------------------------------------------
