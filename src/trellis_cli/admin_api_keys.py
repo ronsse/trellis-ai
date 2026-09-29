@@ -119,7 +119,7 @@ def create_api_key_command(
                 )
             )
         else:
-            console.print(f"[red]{exc}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION) from exc
 
     try:
@@ -142,7 +142,8 @@ def create_api_key_command(
         )
     else:
         console.print(
-            f"[bold]Created API key[/bold] {escape(record.key_id)} ({record.name})"
+            f"[bold]Created API key[/bold] {escape(record.key_id)} "
+            f"({escape(record.name)})"
         )
         console.print(f"  scopes: {', '.join(record.scopes)}")
         console.print(f"  token:  [bold green]{token}[/bold green]")
@@ -177,7 +178,7 @@ def list_api_keys_command(*, output_format: str) -> None:
         for row in rows:
             table.add_row(
                 escape(row["key_id"]),
-                row["name"],
+                escape(row["name"]),
                 ",".join(row["scopes"]),
                 row["created_at"],
                 "yes" if row["revoked"] else "no",

@@ -10,15 +10,19 @@ exit-code routing are all under contract. Each test isolates its own
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from typer.testing import CliRunner
 
+from tests.cli_output import assert_coloured, force_colour, plain
+
 if TYPE_CHECKING:
     import pytest
 
 from trellis.auth import TOKEN_PREFIX
+from trellis_cli import admin_api_keys as cli_api_keys
 from trellis_cli.exit_codes import EXIT_OK, EXIT_VALIDATION
 from trellis_cli.main import app as root_app
 
@@ -36,6 +40,23 @@ def _init_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
     init_result = _invoke(["init"])
     assert init_result.exit_code == EXIT_OK, init_result.output
+
+
+# The shape of a token line, never a value: ``trellis_ak_`` +
+# ``token_hex(6)`` + ``.`` + ``token_urlsafe(32)``.
+_TOKEN_LINE = re.compile(
+    rf"token:\s+{re.escape(TOKEN_PREFIX)}[0-9a-f]{{12}}\.[A-Za-z0-9_-]{{43}}"
+)
+_ANY_TOKEN = re.compile(rf"{re.escape(TOKEN_PREFIX)}\S+")
+
+
+def _redacted(output: str) -> str:
+    """``output`` stripped, whitespace-normalised, and carrying no token.
+
+    Assertions read this rather than ``stdout`` so that no failure message
+    can print a minted token.
+    """
+    return " ".join(_ANY_TOKEN.sub("<token>", plain(output)).split())
 
 
 def _create_key(scopes: str = "read", name: str = "ci") -> dict:
@@ -101,6 +122,44 @@ class TestCreate:
         result = _invoke(["api-keys", "create", "--name", "ci", "--scopes", " , "])
         assert result.exit_code == EXIT_VALIDATION, result.output
 
+    def test_create_text_renders_the_name_verbatim_and_prints_the_token(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The key is stored before the text arm renders a word of it.
+
+        So a name Rich reads as markup must not abort that arm: ``[/bot]``
+        raised ``MarkupError`` after ``store.create``, which exited 1 with
+        the key stored and its token -- shown once, by contract -- never
+        printed. ``[bold]`` alone would not raise; Rich would eat it.
+        """
+        _init_stores(tmp_path, monkeypatch)
+        force_colour(monkeypatch, cli_api_keys)
+        name = "[bold]ci[/bot]"
+        result = _invoke(["api-keys", "create", "--name", name, "--scopes", "read"])
+        text = _redacted(result.stdout)
+        has_token_line = _TOKEN_LINE.search(plain(result.stdout)) is not None
+        assert result.exit_code == EXIT_OK, text
+        assert_coloured(result.stdout)
+        assert f"({name})" in text
+        assert has_token_line, text
+
+    def test_scope_error_renders_the_scope_verbatim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The rejected scope is caller text inside a ``[red]`` message.
+
+        Unescaped, the validation error itself raised ``MarkupError``, so the
+        exit was 1 ("unexpected; file a bug") instead of 2.
+        """
+        _init_stores(tmp_path, monkeypatch)
+        force_colour(monkeypatch, cli_api_keys)
+        result = _invoke(
+            ["api-keys", "create", "--name", "ci", "--scopes", "[bold]r[/x]"]
+        )
+        assert result.exit_code == EXIT_VALIDATION, plain(result.output)
+        rendered = " ".join(assert_coloured(result.stdout).split())
+        assert "['[bold]r[/x]']" in rendered
+
 
 # ---------------------------------------------------------------------------
 # list
@@ -132,6 +191,20 @@ class TestList:
         assert "secret_hash" not in row
         assert "token" not in row
         assert created["token"] not in result.output
+
+    def test_list_text_renders_a_stored_name_verbatim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A name ``create --format json`` stored reaches the table as written."""
+        _init_stores(tmp_path, monkeypatch)
+        _create_key(name="[b]k[/x]")
+        monkeypatch.setenv("COLUMNS", "200")  # the table must not fold the cell
+        force_colour(monkeypatch, cli_api_keys)
+        result = _invoke(["api-keys", "list"])
+        text = _redacted(result.stdout)
+        assert result.exit_code == EXIT_OK, text
+        assert_coloured(result.stdout)
+        assert "[b]k[/x]" in text
 
 
 # ---------------------------------------------------------------------------

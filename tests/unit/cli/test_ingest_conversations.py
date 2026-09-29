@@ -12,6 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.main import app
 from trellis_cli.stores import _get_registry
 
@@ -123,6 +124,22 @@ class TestIngestConversations:
         )
         assert result.exit_code == 0, result.output
         assert f"({source_system})" in " ".join(plain(result.stdout).split())
+
+    def test_failure_message_renders_verbatim(
+        self, export: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same shape as ingest corpus: the raw exception inside ``[red]``
+        # raised on ``[/x]`` and the reason never reached the operator.
+        def _fail(*_args: object, **_kwargs: object) -> None:
+            msg = "[bold]b[/x]"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("trellis.ingest_corpus.sync_conversations", _fail)
+        result = runner.invoke(app, ["ingest", "conversations", str(export)])
+        assert result.exit_code == EXIT_INTERNAL, result.output
+        assert "Conversation ingest failed: [bold]b[/x]" in " ".join(
+            plain(result.stdout).split()
+        )
 
 
 # --- #633: ``--prune`` needs the whole export ----------------------------------

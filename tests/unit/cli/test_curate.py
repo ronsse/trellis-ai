@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from typer.testing import CliRunner
 
-from tests.cli_output import assert_coloured, force_colour
+from tests.cli_output import assert_coloured, force_colour, plain
 from trellis.learning import submit_learning_promotion
 from trellis.mutate.commands import (
     Command,
@@ -69,6 +69,55 @@ class TestCuratePromote:
         assert result.exit_code == 0
         data = json.loads(result.stdout.strip())
         assert data["operation"] == "precedent.promote"
+
+    def test_promote_message_echoes_the_title_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``result.message`` embeds the caller's title, so it is caller text."""
+        force_colour(monkeypatch, curate_cli)
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "promote",
+                "trace_123",
+                "--title",
+                "[bold]t[/x]",
+                "--description",
+                "d",
+            ],
+        )
+        assert result.exit_code == 0, plain(result.output)
+        rendered = " ".join(assert_coloured(result.stdout).split())
+        assert "Message: Precedent promoted: [bold]t[/x]" in rendered
+
+
+class TestCurateEntity:
+    def test_text_echoes_type_name_and_properties_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The echo runs after the node is written, so markup cost the exit.
+
+        ``[/x]`` in any of the three raised ``MarkupError`` with the entity
+        already created -- exit 1 on text, 0 on ``--format json``.
+        """
+        force_colour(monkeypatch, curate_cli)
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "entity",
+                "[bold]t[/x]",
+                "[bold]n[/y]",
+                "--properties",
+                '{"k": "[bold]v[/z]"}',
+            ],
+        )
+        assert result.exit_code == 0, plain(result.output)
+        rendered = " ".join(assert_coloured(result.stdout).split())
+        assert "Type: [bold]t[/x]" in rendered
+        assert "Name: [bold]n[/y]" in rendered
+        assert "Properties: {'k': '[bold]v[/z]'}" in rendered
 
 
 class TestCurateLink:
@@ -149,6 +198,20 @@ class TestCurateLabel:
         )
         data = json.loads(result.stdout.strip())
         assert data["operation"] == "label.add"
+
+    def test_label_message_echoes_the_label_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The label is applied before its message renders, as for promote."""
+        created = runner.invoke(
+            app, ["curate", "entity", "person", "Plain", "--format", "json"]
+        )
+        node_id = json.loads(created.stdout)["node_id"]
+        force_colour(monkeypatch, curate_cli)
+        result = runner.invoke(app, ["curate", "label", node_id, "[bold]l[/x]"])
+        assert result.exit_code == 0, plain(result.output)
+        rendered = " ".join(assert_coloured(result.stdout).split())
+        assert "Message: Label '[bold]l[/x]' added to" in rendered
 
 
 class TestCurateRedact:
