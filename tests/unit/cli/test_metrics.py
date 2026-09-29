@@ -267,7 +267,7 @@ def test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes(
 def test_worker_tune_json_dry_run_is_the_flag_with_auto_promote_off(
     cli_env, args: list[str], dry_run: bool
 ) -> None:
-    """``"dry_run"`` says whether the pass wrote, not whether it promoted.
+    """``"dry_run"`` is the ``--dry-run`` flag, not whether the pass promoted.
 
     With auto-promote off, a run without ``--dry-run`` writes its proposals
     and the cursor, and it used to report ``"dry_run": true``.
