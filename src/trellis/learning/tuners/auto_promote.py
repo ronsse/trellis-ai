@@ -30,8 +30,10 @@ any of that is allowed to run without a human in the loop:
 
 (d) **Per-scope opt-in, global default OFF.** :class:`AutoPromotePolicy`
     carries ``enabled`` (default ``False``). When disabled,
-    :func:`run_auto_promotion` performs zero mutations and emits zero
-    events — it only reports what *would* have happened.
+    :func:`run_auto_promotion` promotes nothing and emits zero events —
+    it reports what *would* have happened, and its tuner pass still
+    persists proposals as ``pending``, as ``metrics tune`` does. Only
+    ``dry_run=True`` writes nothing at all.
 
 The thresholds on :class:`AutoPromotePolicy` are deliberately **stricter**
 than the manual :class:`PromotionPolicy` defaults. The justification is in
@@ -104,7 +106,9 @@ class AutoPromotePolicy:
     Attributes:
         enabled: Master switch. ``False`` by default — global default OFF
             per tier-1 invariant (d). When ``False``,
-            :func:`run_auto_promotion` mutates nothing and emits nothing.
+            :func:`run_auto_promotion` promotes nothing and emits nothing;
+            its tuner pass still persists ``pending`` proposals unless
+            ``dry_run=True``.
         min_sample_size: Lower bound on ``ParameterProposal.sample_size``
             for *auto*-promotion. Must be ``>= PromotionPolicy``'s manual
             default; enforced at construction.
@@ -231,7 +235,7 @@ def run_auto_promotion(
 
     1. ``tuner.run(...)`` produces / refreshes proposals (same logic the
        manual ``metrics tune`` command drives).
-    2. Each persisted proposal is gated against
+    2. Each proposal the pass returns is gated against
        :meth:`AutoPromotePolicy.to_promotion_policy`. Non-qualifying
        proposals are reported as ``pending_manual`` and left untouched for
        manual review — they are *not* rejected.
@@ -246,9 +250,13 @@ def run_auto_promotion(
 
     When :attr:`AutoPromotePolicy.enabled` is ``False`` *or* ``dry_run`` is
     ``True``, no proposal is promoted and no event is emitted; the report
-    classifies what *would* have happened. With ``enabled=False`` the
-    behaviour is byte-identical to running the tuner alone — this is the
-    "disabled config => zero behaviour change" contract.
+    classifies what *would* have happened. With ``enabled=False`` and
+    ``dry_run=False`` the behaviour is byte-identical to running the tuner
+    alone — this is the "disabled config => zero behaviour change"
+    contract. ``dry_run=True`` runs the tuner with ``persist=False``, so no
+    proposal row or cursor is written: the report's proposal ids are the
+    deterministic ids a live pass would persist, and ``metrics promote``
+    cannot find them until one does.
 
     Args:
         tuner: Configured :class:`RuleTuner`; ``run`` is invoked once.
@@ -256,15 +264,16 @@ def run_auto_promotion(
         tuner_state: Proposal storage the tuner writes to.
         outcome_store: Signal source for post-promotion monitoring.
         event_log: Destination for governance + tier-1 audit events.
-        policy: The tier-1 gate. ``enabled=False`` => no-op mutation-wise.
+        policy: The tier-1 gate. ``enabled=False`` => promotes nothing.
         parameter_registry: Optional cache invalidated on promotion.
         since / until: Forwarded to ``tuner.run``.
-        dry_run: Report only; never mutate or emit. Independent of
-            ``policy.enabled`` — both must be truthy to actually promote.
+        dry_run: Report only; never mutate or emit (the tuner pass runs
+            with ``persist=False``). Promotion needs ``policy.enabled``
+            and ``dry_run=False``.
         source: Event source label on every emitted event.
         now: Reference timestamp for monitoring (tests).
     """
-    proposals = tuner.run(since=since, until=until)
+    proposals = tuner.run(since=since, until=until, persist=not dry_run)
 
     promotion_policy = policy.to_promotion_policy()
     effective_dry_run = dry_run or not policy.enabled
