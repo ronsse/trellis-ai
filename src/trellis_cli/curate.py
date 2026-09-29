@@ -25,6 +25,21 @@ curate_app = typer.Typer(no_args_is_help=True)
 console = build_console()
 
 
+def _print_warnings(warnings: list[str]) -> None:
+    """Print a command's warnings below its result, one ``Warning:`` line each.
+
+    Every curate write that shows warnings renders them here, so they look
+    alike; ``promote-learning`` shows none yet. The ``escape`` is
+    load-bearing: a policy's id and condition are free text, and so is the
+    error the audit note quotes. ``[/x]`` in any of them raises
+    ``MarkupError``, after the write has committed on the success path. The
+    id-markup rule does not police a name like ``warning``, so the escape
+    lives in this one place.
+    """
+    for warning in warnings:
+        console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}")
+
+
 def _execute_command(cmd: Command, output_format: str) -> None:
     """Submit a command, display the result, and exit non-zero on refusal or failure.
 
@@ -66,8 +81,7 @@ def _execute_command(cmd: Command, output_format: str) -> None:
             )
         console.print(f"  ID: {escape(result.command_id)}")
         console.print(f"  Message: {result.message}", markup=False, highlight=False)
-        for warning in result.warnings:
-            console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}")
+        _print_warnings(result.warnings)
 
     # Below the format branch, so both formats exit alike
     # (tests/unit/test_format_exit_parity_rule.py) and warnings print first.
@@ -125,9 +139,16 @@ def link(
         # of adr-extraction-validation.md §5.5); both error states should
         # exit non-zero so shell pipelines fail loud.
         if output_format == "json":
-            emit_json({"status": "error", "message": result.message})
+            emit_json(
+                {
+                    "status": "error",
+                    "message": result.message,
+                    "warnings": list(result.warnings),
+                }
+            )
         else:
-            console.print(f"[red]{result.message}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]")
+            _print_warnings(result.warnings)
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
@@ -138,6 +159,7 @@ def link(
                 "source_id": source_id,
                 "target_id": target_id,
                 "edge_kind": edge_kind,
+                "warnings": list(result.warnings),
             }
         )
     else:
@@ -155,6 +177,7 @@ def link(
             markup=False,
             highlight=False,
         )
+        _print_warnings(result.warnings)
 
 
 @curate_app.command()
@@ -260,10 +283,12 @@ def prune(
                     "status": result.status.value,
                     "command_id": result.command_id,
                     "message": result.message,
+                    "warnings": list(result.warnings),
                 }
             )
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
+            _print_warnings(result.warnings)
         raise typer.Exit(code=exit_code)
 
     if output_format == "json":
@@ -273,6 +298,7 @@ def prune(
                 "command_id": result.command_id,
                 "dry_run": not apply,
                 "message": result.message,
+                "warnings": list(result.warnings),
             }
         )
     else:
@@ -282,6 +308,7 @@ def prune(
                 "[yellow]Dry run — nothing was written. Re-run with --apply "
                 "to archive.[/yellow]"
             )
+        _print_warnings(result.warnings)
 
 
 @curate_app.command()
@@ -342,10 +369,12 @@ def restore(
                     "status": result.status.value,
                     "command_id": result.command_id,
                     "message": result.message,
+                    "warnings": list(result.warnings),
                 }
             )
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
+            _print_warnings(result.warnings)
         raise typer.Exit(code=exit_code)
 
     if output_format == "json":
@@ -354,10 +383,12 @@ def restore(
                 "status": result.status.value,
                 "command_id": result.command_id,
                 "message": result.message,
+                "warnings": list(result.warnings),
             }
         )
     else:
         console.print(f"[green]✓[/green] {escape(result.message)}")
+        _print_warnings(result.warnings)
 
 
 @curate_app.command()
@@ -418,10 +449,12 @@ def redact(
                     "status": result.status.value,
                     "command_id": result.command_id,
                     "message": result.message,
+                    "warnings": list(result.warnings),
                 }
             )
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
+            _print_warnings(result.warnings)
         raise typer.Exit(code=exit_code)
 
     if output_format == "json":
@@ -431,10 +464,12 @@ def redact(
                 "command_id": result.command_id,
                 "target_id": target_id,
                 "message": result.message,
+                "warnings": list(result.warnings),
             }
         )
     else:
         console.print(f"[green]✓[/green] {escape(result.message)}")
+        _print_warnings(result.warnings)
 
 
 @curate_app.command()
@@ -490,10 +525,12 @@ def entity(
                     "status": result.status.value,
                     "command_id": result.command_id,
                     "message": result.message,
+                    "warnings": list(result.warnings),
                 }
             )
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
+            _print_warnings(result.warnings)
         raise typer.Exit(code=exit_code)
 
     if output_format == "json":
@@ -504,6 +541,7 @@ def entity(
                 "entity_type": entity_type,
                 "name": name,
                 "properties": {**props, "name": name},
+                "warnings": list(result.warnings),
             }
         )
     else:
@@ -514,6 +552,7 @@ def entity(
         console.print(f"  Name: {name}", markup=False, highlight=False)
         if properties:
             console.print(f"  Properties: {props}", markup=False, highlight=False)
+        _print_warnings(result.warnings)
 
 
 @curate_app.command()
