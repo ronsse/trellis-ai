@@ -310,7 +310,7 @@ All notable changes to Trellis will be documented in this file.
   said the file was not found.
   ([#662](https://github.com/ronsse/trellis-ai/pull/662),
   [#673](https://github.com/ronsse/trellis-ai/pull/673),
-  [#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  [#677](https://github.com/ronsse/trellis-ai/pull/677))
 
 - **The example curation workflow parses.** Two lines of stray markup
   followed the last step of
