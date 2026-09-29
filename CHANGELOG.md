@@ -243,6 +243,16 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis worker curate --dry-run` records no finding and refuses
+  `--reconcile-first`.** A dry run recorded `NoiseTagsApplied` and
+  `LearningCandidatesReport` meta-trace findings for noise tags and review
+  files it never wrote, and `--reconcile-first` emitted a
+  `FEEDBACK_RECORDED` event per file-only feedback row under it. A dry run
+  now records each stage's meta-Activity but no finding, `--dry-run
+  --reconcile-first` exits 2 (preview the backfill with `trellis admin
+  reconcile-feedback --log-dir DIR --dry-run`), and `--dry-run
+  --no-meta-trace` writes nothing. Live runs are unchanged.
+
 - **The example curation workflow parses.** Two lines of stray markup
   followed the last step of
   `examples/integrations/github-actions/curation.yml`, so the copy that
