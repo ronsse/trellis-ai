@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
@@ -238,6 +239,22 @@ def _resolve_connectivity_check(explicit: bool | None) -> bool:
 # longer value (a${B}c, ${DATA}/kuzu) is not matched.
 _LITERAL_PLACEHOLDER = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?[-=?+][^}]*)?\}$")
 
+# The shape of a config.yaml key: lowercase letters, digits, ``_`` and ``-``
+# (an ``x-`` anchor block), the longest documented one 26 characters. A key
+# of any other shape, or a longer one such as a hex token, can be a value
+# typed where a key belongs (a DSN inside YAML flow braces, a password), so a
+# message or log line gives only its length.
+_NAMEABLE_KEY = re.compile(r"[a-z][a-z0-9_-]{0,29}")
+
+
+def _describe_key(key: object) -> str:
+    """Return a config key as a message or log line may show it."""
+    if isinstance(key, str):
+        if _NAMEABLE_KEY.fullmatch(key):
+            return key
+        return f"<{len(key)}-character key, not shown>"
+    return f"<{type(key).__name__} key, not shown>"
+
 
 def _literal_placeholders(
     node: object, path: str, seen: set[int]
@@ -258,8 +275,9 @@ def _literal_placeholders(
     seen.add(id(node))
     if isinstance(node, dict):
         for key, value in node.items():
+            name = _describe_key(key)
             yield from _literal_placeholders(
-                value, f"{path}.{key}" if path else str(key), seen
+                value, f"{path}.{name}" if path else name, seen
             )
     else:
         for index, value in enumerate(node):
@@ -310,7 +328,7 @@ def _extract_store_config(data: dict[str, Any], config_source: str) -> dict[str,
             if expected_plane is None:
                 logger.warning(
                     "registry_config_unknown_store_type",
-                    store_type=store_type,
+                    store_type=_describe_key(store_type),
                     plane=plane_name,
                     source=config_source,
                 )
@@ -695,27 +713,51 @@ _BACKEND_URI_RULES: dict[str, tuple[str, frozenset[str]]] = {
 
 
 def _validate_uri(
-    backend: str, uri: str, allowed_schemes: frozenset[str]
+    backend: str, uri: object, allowed_schemes: frozenset[str]
 ) -> str | None:
     """Return an error message when ``uri`` is malformed; ``None`` on success.
 
     Parses with :func:`urlparse`, demands a non-empty scheme matching
     one of ``allowed_schemes``, and demands a non-empty netloc (the
     last check catches ``postgres:///dbname`` and ``://localhost``
-    typos that the scheme check alone would miss).
+    typos that the scheme check alone would miss). The message never
+    repeats the URI or its scheme: without ``//``, the user name parses
+    as the scheme, and the rest can hold a password.
     """
+    if not isinstance(uri, str):
+        return f"expected a string, got {type(uri).__name__}"
     parsed = urlparse(uri)
     expected = sorted(allowed_schemes)
     if not parsed.scheme:
         return f"empty URL scheme (expected one of {expected})"
     if parsed.scheme not in allowed_schemes:
         return (
-            f"unexpected URL scheme '{parsed.scheme}' for {backend} backend"
-            f" (expected one of {expected})"
+            f"unexpected URL scheme for {backend} backend (expected one of {expected})"
         )
     if not parsed.netloc:
-        return f"empty network location in URI '{uri}' (host:port required)"
+        return "empty network location (host:port required)"
     return None
+
+
+def _accepted_params(cls: Any) -> frozenset[str] | None:
+    """Return the keyword names ``cls(**params)`` accepts, or ``None``.
+
+    ``None`` means any key may be valid, so the constructor decides: it
+    takes ``**kwargs``, has no readable signature, or declares one
+    (``__signature__``, as a pydantic model does) that can be narrower
+    than what the call binds. A ``functools.wraps`` wrapper is read as
+    itself, not as the ``__init__`` it wraps, for the same reason.
+    """
+    if getattr(cls, "__signature__", None) is not None:
+        return None
+    try:
+        parameters = inspect.signature(cls, follow_wrapped=False).parameters.values()
+    except (TypeError, ValueError):
+        return None
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters):
+        return None
+    keyword = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    return frozenset(p.name for p in parameters if p.kind in keyword)
 
 
 class StoreRegistry:
@@ -1079,6 +1121,20 @@ class StoreRegistry:
                 raise ConfigError(msg, setting="TRELLIS_S3_BUCKET")
             params["bucket"] = bucket
 
+        # Refused here because Python's TypeError would quote the key, and a
+        # DSN written inside YAML flow braces is read as a key.
+        accepted = _accepted_params(cls)
+        if accepted is not None:
+            unexpected = [k for k in params if k not in accepted]
+            if unexpected:
+                msg = (
+                    f"stores.{store_type} sets "
+                    f"{', '.join(_describe_key(k) for k in unexpected)}, which the"
+                    f" {backend} backend does not accept; it accepts:"
+                    f" {', '.join(sorted(accepted)) or 'no keys'}"
+                )
+                raise ConfigError(msg, setting=f"stores.{store_type}")
+
         logger.info("store_instantiated", store_type=store_type, backend=backend)
         return cls(**params)
 
@@ -1121,6 +1177,8 @@ class StoreRegistry:
             if not isinstance(store_cfg, dict):
                 continue
             backend = store_cfg.get("backend", self._default_backend(store_type))
+            if not isinstance(backend, str):
+                continue  # _instantiate refuses it without repeating it
             rule = _BACKEND_URI_RULES.get(backend)
             if rule is None:
                 continue
@@ -1130,7 +1188,9 @@ class StoreRegistry:
                 continue
             err_msg = _validate_uri(backend, uri, allowed)
             if err_msg is not None:
-                failures.append((store_type, ConfigError(err_msg, setting=param)))
+                failures.append(
+                    (store_type, ConfigError(f"{param}: {err_msg}", setting=param))
+                )
         return failures
 
     def _resolve_substrate_class(self, store_type: str) -> type | None:
