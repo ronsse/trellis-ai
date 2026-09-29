@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from trellis.core.error_sanitize import (
     SUPPRESSED_MARKER,
+    describe_yaml_error,
     sanitize_error_message,
     sanitized_error_payload,
 )
+
+#: A fake credential planted where PyYAML's ``str(exc)`` would quote it.
+_SENTINEL = "XQ1BR6asQyYAJ6tcK6JnaWKZ"
 
 
 class TestCleanPassthrough:
@@ -152,3 +157,67 @@ class TestPayload:
         # the message does not.
         assert payload["error_type"] == "RuntimeError"
         assert payload["message"] == SUPPRESSED_MARKER
+
+
+class TestDescribeYamlError:
+    """A config line can hold a password, so a parse error never quotes one."""
+
+    @pytest.mark.parametrize(
+        ("document", "expected"),
+        [
+            ("a: *{S}\n", "found undefined alias '...' (line 1, column 4)"),
+            (
+                "a: !!python/name:os.{S}\n",
+                (
+                    "could not determine a constructor for the tag '...'"
+                    " (line 1, column 4)"
+                ),
+            ),
+            (
+                "a: &{S} 1\nb: &{S} 2\n",
+                (
+                    "found duplicate anchor '...'; first occurrence (line 1, column 4);"
+                    " second occurrence (line 2, column 4)"
+                ),
+            ),
+            ("a: b: {S}\n", "mapping values are not allowed here (line 1, column 5)"),
+        ],
+        ids=["alias", "tag", "anchor", "value"],
+    )
+    def test_document_text_is_masked_and_positions_count_from_one(
+        self, document: str, expected: str
+    ) -> None:
+        with pytest.raises(yaml.YAMLError) as exc:
+            yaml.safe_load(document.replace("{S}", _SENTINEL))
+        assert describe_yaml_error(exc.value) == expected
+
+    def test_a_quoted_character_or_parser_token_is_kept(self) -> None:
+        with pytest.raises(yaml.YAMLError) as tab:
+            yaml.safe_load("a:\n\tb: c\n")
+        with pytest.raises(yaml.YAMLError) as flow:
+            yaml.safe_load("a: [b\n")
+
+        assert "found character '\\t' that cannot start any token" in (
+            describe_yaml_error(tab.value)
+        )
+        assert describe_yaml_error(flow.value) == (
+            "while parsing a flow sequence (line 1, column 4); expected ',' or"
+            " ']', but got '<stream end>' (line 2, column 1)"
+        )
+
+    def test_a_reader_error_names_the_code_point_and_offset(self) -> None:
+        with pytest.raises(yaml.YAMLError) as exc:
+            yaml.safe_load("a: \x07\n")
+        assert describe_yaml_error(exc.value) == (
+            "unacceptable character #x0007 at position 3"
+        )
+
+    @pytest.mark.parametrize("tag", ["!!int", "!!float", "!!bool"])
+    def test_a_tag_that_cannot_construct_is_named_by_type_alone(self, tag: str) -> None:
+        # Not YAMLError: ``int()`` / ``float()`` raise ValueError and the bool
+        # table a KeyError, each quoting the value (``!!bool`` lowercased).
+        with pytest.raises((ValueError, KeyError)) as exc:
+            yaml.safe_load(f"a: {tag} {_SENTINEL}\n")
+        described = describe_yaml_error(exc.value)
+        assert described.startswith("a value could not be constructed (")
+        assert _SENTINEL.lower() not in described.lower()

@@ -48,6 +48,7 @@ import yaml
 from rich.markup import escape
 
 from trellis.core.derived_metadata import apply_derived_metadata
+from trellis.core.error_sanitize import describe_yaml_error
 from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.core.vector_metadata import (
@@ -149,11 +150,13 @@ def _load_auto_promote_config() -> _RawAutoPromoteConfig | None:
     config_path = get_config_dir() / CONFIG_FILENAME
     if not config_path.exists():
         return None
+    text = config_path.read_text(encoding="utf-8")
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as exc:
-        msg = f"Invalid YAML in {config_path}: {exc}"
-        raise typer.BadParameter(msg) from exc
+        raw = yaml.safe_load(text) or {}
+    except Exception as exc:
+        # ``str(exc)`` prints the offending line, which can hold a password.
+        msg = f"Invalid YAML in {config_path}: {describe_yaml_error(exc)}"
+        raise typer.BadParameter(msg) from None
     if not isinstance(raw, dict):
         msg = f"{config_path}: expected a mapping, got {type(raw).__name__}"
         raise typer.BadParameter(msg)
@@ -195,22 +198,23 @@ def _load_auto_promote_config() -> _RawAutoPromoteConfig | None:
         value = section.get(key, default)
         try:
             return int(value)
-        except (TypeError, ValueError) as exc:
-            msg = f"{prefix}.{key} is not an int: {value!r}"
-            raise typer.BadParameter(msg) from exc
+        except (TypeError, ValueError):
+            # ``from None``: the ValueError quotes the value.
+            msg = f"{prefix}.{key} is not an int (got a {type(value).__name__})"
+            raise typer.BadParameter(msg) from None
 
     def _float(key: str, default: float) -> float:
         value = section.get(key, default)
         try:
             return float(value)
-        except (TypeError, ValueError) as exc:
-            msg = f"{prefix}.{key} is not a number: {value!r}"
-            raise typer.BadParameter(msg) from exc
+        except (TypeError, ValueError):
+            msg = f"{prefix}.{key} is not a number (got a {type(value).__name__})"
+            raise typer.BadParameter(msg) from None
 
     def _bool(key: str, default: bool) -> bool:
         value = section.get(key, default)
         if not isinstance(value, bool):
-            msg = f"{prefix}.{key} must be true/false, got {value!r}"
+            msg = f"{prefix}.{key} must be true/false, got a {type(value).__name__}"
             raise typer.BadParameter(msg)
         return value
 
