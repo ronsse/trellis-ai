@@ -766,7 +766,7 @@ Exit codes are CI-friendly:
 | `1`  | WARN     | Non-fatal. Flag unset (pipeline inert) OR flag set with only env fallback available (works, but operators should move config into `llm:` block). |
 | `1`  | BLOCKED  | Feature flag is on but no `LLMClient` is obtainable anywhere. Extraction would silently skip in production — this is the configuration bug you most want the probe to catch. |
 
-Use `--format json` for machine-readable output (same schema, plus a `warnings` array with severity/signal/message).
+Use `--format json` for machine-readable output (same schema, plus a `warnings` array with severity/signal/message); its `status` field (`warn` or `blocked`) tells the two exit-`1` rows apart.
 
 The probe resolves `memory_extraction`'s **route**, not the parent block, so the
 `provider=` / `model=` it reports are the ones the extractor will really call and
