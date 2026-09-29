@@ -214,5 +214,3 @@ trellis worker tune --dry-run --format json
 - [`../getting-started/running-trellis.md`](../getting-started/running-trellis.md) — the operating runbook: what each process does, its tier, and the human-in-the-loop steps.
 - [`../agent-guide/freshness-and-curation.md`](../agent-guide/freshness-and-curation.md) — the extraction/refresh half (`trellis extract refresh`) and its own scheduler recipes.
 - [`../design/adr-autonomy-ladder.md`](../design/adr-autonomy-ladder.md) — the autonomy tiers.
-</content>
-</invoke>

@@ -274,5 +274,3 @@ If step 5's two files exist, the human-in-the-loop handoff is correctly wired: a
 - [`../agent-guide/operations.md`](../agent-guide/operations.md) — full CLI / REST / MCP reference, including the complete auth matrix.
 - [`../agent-guide/freshness-and-curation.md`](../agent-guide/freshness-and-curation.md) — the extraction/refresh half of keeping a deployment current.
 - [`../deployment/recommended-config.yaml`](../deployment/recommended-config.yaml) — the four blessed backend shapes.
-</content>
-</invoke>

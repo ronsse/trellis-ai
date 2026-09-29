@@ -106,5 +106,3 @@ jobs:
 
       - name: Scan for schema-evolution candidates (surface-only)
         run: trellis analyze schema-evolution --format json
-</content>
-</invoke>
