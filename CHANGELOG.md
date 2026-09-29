@@ -246,6 +246,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Registry errors and warnings stop repeating config.yaml keys and URIs.**
+  A key the backend does not accept, a DSN inside YAML flow braces included,
+  was quoted by Python's `TypeError` (exit 1); it is now a `ConfigError`
+  (exit 5). That refusal, the `registry_config_unknown_store_type` warning
+  and the `${VAR}` refusal name a key only when it is shaped like one (a
+  lowercase letter, then lowercase letters, digits, `_` or `-`, at most 30
+  characters in all), and otherwise give its length, or its type when it is
+  not a string. A malformed `dsn` or `uri` is named by its setting, without
+  the URI or its scheme. At API startup, a `backend` written as a mapping or
+  list is a `ConfigError` instead of a `TypeError` crash. The CLI turns off
+  Typer's traceback locals, which Typer before 0.23 printed.
+  ([#670](https://github.com/ronsse/trellis-ai/pull/670))
+
 - **`trellis curate entity`, `prune`, `restore`, `redact` and `link` show
   their warnings, as `label` already did.** Their output carried neither
   kind of warning a result holds: an `Enforcement.WARN` policy's verdict,
@@ -307,8 +320,10 @@ All notable changes to Trellis will be documented in this file.
   said "without mutating or emitting"; it never emitted events. The tuner
   now runs with `RuleTuner.run(persist=False)` on a dry run. To queue
   proposals for `trellis metrics promote`, run `worker tune` without
-  `--dry-run` while auto-promote is off: that pass promotes nothing.
-  ([#659](https://github.com/ronsse/trellis-ai/pull/659))
+  `--dry-run` while auto-promote is off: that pass promotes nothing, and
+  its JSON now reports `"dry_run": false` where it reported `true`.
+  ([#659](https://github.com/ronsse/trellis-ai/pull/659),
+  [#671](https://github.com/ronsse/trellis-ai/pull/671))
 
 ## [0.9.0] - 2026-05-13
 

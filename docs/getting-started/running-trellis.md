@@ -140,8 +140,9 @@ Runs one `RuleTuner` pass. **Default behaviour is a pure tuner pass** — byte-i
 Verified shape with auto-promote disabled (the default), demo data:
 
 ```json
-{"enabled": false, "dry_run": true, "proposals_considered": 0, "auto_promoted": 0,
- "rolled_back": 0, "pending_manual": 0, "outcomes": [], "tuner_name": "rule_tuner"}
+{"enabled": false, "dry_run": false, "proposals_considered": 0, "auto_promoted": 0,
+ "rolled_back": 0, "pending_manual": 0, "outcomes": [], "status": "ok",
+ "tuner_name": "rule_tuner"}
 ```
 
 `"enabled": false` is the tell that Tier-1 autonomy is off — the command did a tuner pass and promoted nothing.

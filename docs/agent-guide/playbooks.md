@@ -744,7 +744,7 @@ $ trellis admin check-extractors
 Tiered Extraction — Readiness Report
 
 LLM client:
-  OK configurable from ~/.trellis/config.yaml (provider=openai, model=gpt-4o-mini)
+  OK configurable from /home/user/.trellis/config.yaml (provider=openai, model=gpt-4o-mini)
   OK OPENAI_API_KEY/ANTHROPIC_API_KEY env var is set (env fallback available)
 
 Memory-extraction feature flag:

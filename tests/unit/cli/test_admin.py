@@ -577,6 +577,73 @@ class TestCheckExtractorsWarn:
         assert any(w["signal"] == "env_fallback_only" for w in data["warnings"])
 
 
+@pytest.fixture
+def config_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The config.yaml the CLI reads, in a dir whose name Rich parses as markup.
+
+    Printed without ``escape()``, ``cfg[dev]`` loses ``[dev]``. ``COLUMNS``
+    keeps the tmp path on one line: Rich folds a word wider than the console.
+    """
+    config_dir = tmp_path / "cfg[dev]"
+    monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("COLUMNS", "500")
+    return config_dir / "config.yaml"
+
+
+class TestCheckExtractorsNamesTheConfigInUse:
+    """The report names the config.yaml the registry reads, not the default.
+
+    With ``TRELLIS_CONFIG_DIR`` set, ``~/.trellis/config.yaml`` is a file
+    the process never reads.
+    """
+
+    @patch("trellis_cli.admin._get_registry")
+    def test_the_ok_line(self, mock_get_reg, config_yaml, monkeypatch):
+        mock_get_reg.return_value = _make_registry()
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        result = runner.invoke(admin_app, ["check-extractors"])
+        assert result.exit_code == 0, result.output
+        text = " ".join(plain(result.stdout).split())
+        assert f"OK configurable from {config_yaml} (provider=openai" in text, text
+        assert "~/.trellis" not in text
+
+    @patch("trellis_cli.admin._get_registry")
+    def test_the_missing_line(self, mock_get_reg, config_yaml, monkeypatch):
+        mock_get_reg.return_value = _make_registry(
+            llm_client=None, provider=None, model=None
+        )
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        result = runner.invoke(admin_app, ["check-extractors"])
+        assert result.exit_code == 1, result.output
+        text = " ".join(plain(result.stdout).split())
+        assert f"MISSING not configurable from {config_yaml}" in text, text
+        assert "~/.trellis" not in text
+
+    @patch("trellis_cli.admin._get_registry")
+    def test_the_env_fallback_warning_in_json(
+        self, mock_get_reg, config_yaml, monkeypatch
+    ):
+        """The JSON arm carries the path raw: the text arm escapes every warning."""
+        mock_get_reg.return_value = _make_registry(
+            llm_client=None, provider=None, model=None
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        result = runner.invoke(admin_app, ["check-extractors", "--format", "json"])
+        assert result.exit_code == 1, result.output
+        (message,) = [
+            w["message"]
+            for w in json.loads(result.stdout)["warnings"]
+            if w["signal"] == "env_fallback_only"
+        ]
+        assert message.endswith(f" to {config_yaml}."), message
+        assert "~/.trellis" not in message
+
+
 # The extractor pinned to a litellm tier: same parent block the tests above
 # use, plus a tier that moves the endpoint and names its own credential.
 _ROUTED_LLM = {
