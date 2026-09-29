@@ -292,8 +292,7 @@ def tune_cmd(
     Without ``--dry-run``, proposals that do not clear the auto gate stay
     ``pending`` for manual review via ``trellis metrics promote`` — they
     are reported, never rejected. With auto-promote disabled (the default)
-    this command is a pure tuner pass: zero promotions, zero events beyond
-    the tuner's own.
+    this command is a pure tuner pass: zero promotions, zero events.
     """
     policy = _build_auto_promote_policy_or_exit()
 
