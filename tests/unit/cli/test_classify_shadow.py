@@ -32,7 +32,7 @@ from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.base.event_log import EventType
 from trellis_cli.admin import admin_app
 from trellis_cli.classify import classify_app
-from trellis_cli.exit_codes import EXIT_STORE
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
 from trellis_cli.main import app
 from trellis_cli.stores import _get_registry, _reset_registry
 
@@ -88,6 +88,37 @@ class TestShadowCommand:
         result = runner.invoke(classify_app, ["shadow"])
         assert result.exit_code != 0
         assert "llm" in result.output.lower()
+
+    @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
+    def test_the_missing_sdk_hint_keeps_its_extra(
+        self, cli_env, monkeypatch: pytest.MonkeyPatch, colour: bool
+    ) -> None:
+        """Rich read ``[llm-openai]`` as a markup tag and deleted it.
+
+        Both install lines lost it: the hint's own, and the one
+        ``BackendNotInstalledError`` puts in its message, so neither
+        installed the SDK the error is about.
+        """
+        from unittest.mock import MagicMock
+
+        from trellis.errors import BackendNotInstalledError
+        from trellis_cli import classify as classify_cli
+
+        registry = MagicMock()
+        registry.build_llm_client.side_effect = BackendNotInstalledError(
+            backend_name="openai", extra="llm-openai"
+        )
+        monkeypatch.setattr(classify_cli, "_get_registry", lambda: registry)
+        if colour:
+            force_colour(monkeypatch, classify_cli)
+
+        result = runner.invoke(classify_app, ["shadow"])
+
+        assert result.exit_code == EXIT_INTERNAL, result.output
+        text = assert_coloured(result.stdout) if colour else plain(result.stdout)
+        text = " ".join(text.split())
+        assert "'uv pip install trellis-ai[llm-openai]'" in text
+        assert 'Run: uv pip install -e ".[llm-openai]"' in text
 
     def test_the_race_counter_reaches_the_operator(self, cli_env, monkeypatch) -> None:
         """#421 — a counter nobody can read is not a counter.

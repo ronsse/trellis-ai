@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 from tests.cli_output import assert_coloured, force_colour, plain
 from tests.document_recency import fake_document_clock
 from trellis.core.vector_metadata import vector_metadata_diverges
+from trellis.errors import BackendNotInstalledError
 from trellis.llm import LLMResponse, Message
 from trellis.llm.routing import LLMConsumer
 from trellis.ops.capture_health import check_capture_health, is_capture_surface
@@ -1129,6 +1130,56 @@ class TestWorkerEnrich:
         result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
         assert result.exit_code == worker.EXIT_INTERNAL
         assert "LLM" in result.output
+
+    @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
+    def test_the_missing_sdk_hint_keeps_its_extra(
+        self,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        colour: bool,
+    ) -> None:
+        """Rich read ``[llm-openai]`` as a markup tag and deleted it.
+
+        Both install lines lost it: the hint's own, and the one
+        ``BackendNotInstalledError`` puts in its message, so neither
+        installed the SDK the error is about.
+        """
+        registry = MagicMock()
+        registry.build_llm_client.side_effect = BackendNotInstalledError(
+            backend_name="openai", extra="llm-openai"
+        )
+        monkeypatch.setattr(worker, "_get_registry", lambda: registry)
+        if colour:
+            force_colour(monkeypatch, worker)
+
+        result = runner.invoke(app, ["worker", "enrich"])
+
+        assert result.exit_code == worker.EXIT_INTERNAL, result.output
+        text = assert_coloured(result.stdout) if colour else plain(result.stdout)
+        text = " ".join(text.split())
+        assert "'uv pip install trellis-ai[llm-openai]'" in text
+        assert 'Run: uv pip install -e ".[llm-openai]"' in text
+
+    @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
+    def test_the_no_client_hint_names_both_extras(
+        self,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        colour: bool,
+    ) -> None:
+        """Rich read both extras as markup tags, leaving ``extra ( / ).``."""
+        registry = MagicMock()
+        registry.build_llm_client.return_value = None
+        monkeypatch.setattr(worker, "_get_registry", lambda: registry)
+        if colour:
+            force_colour(monkeypatch, worker)
+
+        result = runner.invoke(app, ["worker", "enrich"])
+
+        assert result.exit_code == worker.EXIT_INTERNAL, result.output
+        text = assert_coloured(result.stdout) if colour else plain(result.stdout)
+        text = " ".join(text.split())
+        assert "the matching extra ([llm-openai] / [llm-anthropic])." in text
 
     def test_dry_run_selects_without_llm_call(
         self, tmp_path: Path, temp_stores: StoreRegistry, monkeypatch
