@@ -252,7 +252,7 @@ All notable changes to Trellis will be documented in this file.
   warning in text, and its JSON carries a `warnings` array on success,
   refusal and failure, `[]` when nothing warned. No exit code and no
   existing key changes.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#665](https://github.com/ronsse/trellis-ai/pull/665))
 
 - **`trellis worker curate --dry-run` records no finding and refuses
   `--reconcile-first`.** A dry run recorded `NoiseTagsApplied` and
