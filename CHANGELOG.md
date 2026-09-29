@@ -254,7 +254,7 @@ All notable changes to Trellis will be documented in this file.
   the URI or its scheme. At API startup, a `backend` written as a mapping or
   list is a `ConfigError` instead of a `TypeError` crash. The CLI turns off
   Typer's traceback locals, which Typer before 0.23 printed.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#670](https://github.com/ronsse/trellis-ai/pull/670))
 
 - **`trellis curate entity`, `prune`, `restore`, `redact` and `link` show
   their warnings, as `label` already did.** Their output carried neither
