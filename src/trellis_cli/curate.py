@@ -26,7 +26,12 @@ console = build_console()
 
 
 def _execute_command(cmd: Command, output_format: str) -> None:
-    """Submit a command to the MutationExecutor and display the result."""
+    """Submit a command, display the result, and exit non-zero on refusal or failure.
+
+    A REJECTED command exits ``EXIT_VALIDATION`` and a FAILED one
+    ``EXIT_STORE``, as ``prune``, ``restore`` and ``redact`` do. A DUPLICATE
+    exits ``0``.
+    """
     result = build_curate_executor(_get_registry()).execute(cmd)
 
     # ``Enforcement.WARN`` means "allow, but say so", and the only
@@ -63,6 +68,14 @@ def _execute_command(cmd: Command, output_format: str) -> None:
         console.print(f"  Message: {result.message}", markup=False, highlight=False)
         for warning in result.warnings:
             console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}")
+
+    # Below the format branch, so both formats exit alike
+    # (tests/unit/test_format_exit_parity_rule.py) and warnings print first.
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        exit_code = (
+            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
+        )
+        raise typer.Exit(code=exit_code)
 
 
 @curate_app.command()
@@ -466,6 +479,22 @@ def entity(
         requested_by="cli:entity",
     )
     result = build_curate_executor(_get_registry()).execute(cmd)
+
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        exit_code = (
+            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
+        )
+        if output_format == "json":
+            emit_json(
+                {
+                    "status": result.status.value,
+                    "command_id": result.command_id,
+                    "message": result.message,
+                }
+            )
+        else:
+            console.print(f"[red]{escape(result.message)}[/red]")
+        raise typer.Exit(code=exit_code)
 
     if output_format == "json":
         emit_json(
