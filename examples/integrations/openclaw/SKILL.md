@@ -33,7 +33,7 @@ Structured institutional memory for AI agents. Record traces of your work, build
 
 ## Available Tools
 
-11 macro tools, all returning token-budgeted markdown (not raw JSON). Eight cover the most common write-and-read workflow; three more provide sectioned context for richer multi-step retrieval.
+Trellis exposes 16 macro tools. The eleven below return markdown (not raw JSON): eight cover the most common write-and-read workflow, and three more provide sectioned context for richer multi-step retrieval. The other five are `get_items`, `get_file_context`, `record_observation`, `query_observations` and `execute_mutation`.
 
 **Core tools**
 
@@ -96,5 +96,5 @@ save_knowledge(name="rate-limiter", entity_type="concept", relates_to="api-gatew
 - Use `max_tokens` to control response size — default is 2000 tokens
 - For quick lookups, set `max_tokens=500`
 - For deep research, allow up to `max_tokens=4000`
-- All responses are pre-formatted markdown, ready for your context window
+- Retrieval responses are pre-formatted markdown, ready for your context window
 - Prefer `get_context` for broad task context; use `search` for targeted queries

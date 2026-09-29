@@ -38,7 +38,7 @@ trellis admin init
 }
 ```
 
-4. Restart OpenClaw. Your agent now has 11 macro tools for structured memory.
+4. Restart OpenClaw. Your agent now has Trellis's 16 macro tools for structured memory.
 
 ## Alternative: ClawHub Install
 
@@ -50,7 +50,7 @@ This installs the skill and configures the MCP server automatically.
 
 ## What Your Agent Gets
 
-11 high-level tools returning token-budgeted markdown — 8 core tools plus 3 sectioned-context tools:
+16 macro tools. The eleven below (8 core tools plus 3 sectioned-context tools) return markdown, not raw JSON; [operations.md](../../../docs/agent-guide/operations.md#mcp-macro-tools) lists the other five.
 
 | Tool | Purpose |
 |------|---------|
@@ -66,7 +66,7 @@ This installs the skill and configures the MCP server automatically.
 | `get_task_context` | Step-level pack scoped to specific entity ids |
 | `get_sectioned_context` | Caller-defined sections with per-section budgets and affinities |
 
-All tools accept `max_tokens` (default 2000 for core tools, configurable via `retrieval.budgets` in `config.yaml` for sectioned tools). Responses are markdown, not raw JSON.
+The retrieval tools accept `max_tokens` (default 2000 for core tools, configurable via `retrieval.budgets` in `config.yaml` for sectioned tools). The four write tools (`save_experience`, `save_knowledge`, `save_memory`, `record_feedback`) do not.
 
 ## Configuration
 

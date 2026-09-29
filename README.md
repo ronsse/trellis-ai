@@ -338,7 +338,7 @@ trellis admin migrate-graph \
 | POST | `/api/v1/feedback` | Record pack outcome |
 | GET | `/api/v1/effectiveness` | Pack effectiveness report |
 
-**MCP server** — `trellis-mcp`. Sixteen macro tools. Thirteen return token-budgeted **markdown**, not raw JSON, so context lands clean in the agent's window; the three structured tools (`record_observation`, `query_observations`, `execute_mutation`) return JSON.
+**MCP server** — `trellis-mcp`. Sixteen macro tools. Thirteen return **markdown**, not raw JSON, so context lands clean in the agent's window; the three structured tools (`record_observation`, `query_observations`, `execute_mutation`) return JSON.
 
 | Tool | Purpose |
 |------|---------|
