@@ -70,9 +70,10 @@ def _deny_all(stores: Path) -> None:
 def _fake(monkeypatch: pytest.MonkeyPatch, status: CommandStatus) -> None:
     """Make every command come back with *status*.
 
-    No store path produces a FAILED label or entity on demand, so the
-    executor is replaced. It echoes the submitted operation back, as the real
-    one does.
+    A real FAILED exists: a neo4j graph with a blank ``TRELLIS_NEO4J_URI``
+    fails ``entity`` and ``label`` writes. These tests stay on the default
+    stores, so the executor is replaced. It echoes the submitted operation
+    back, as the real one does.
     """
     executor = MagicMock(spec=MutationExecutor)
 
@@ -114,7 +115,12 @@ class TestEntity:
         _fake(monkeypatch, CommandStatus.FAILED)
         code, data = _json(_ENTITY)
         assert code == 5, data
-        assert data == {"status": "failed", "command_id": "cmd-x", "message": MESSAGE}
+        assert data == {
+            "status": "failed",
+            "command_id": "cmd-x",
+            "message": MESSAGE,
+            "warnings": [],
+        }
 
     def test_failed_text_prints_the_message_verbatim(
         self, stores_dir: Path, monkeypatch: pytest.MonkeyPatch

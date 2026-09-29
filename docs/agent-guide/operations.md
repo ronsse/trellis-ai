@@ -699,6 +699,12 @@ Reads a JSON array or newline-delimited JSON file of OpenLineage events. Creates
 
 ## Curate Commands
 
+Every command in this section shows its warnings whether the write succeeds, is
+refused or fails: a `Warning:` line each in text, and in JSON a `warnings` array
+that is present on all three, `[]` when nothing warned. A warning is an
+`Enforcement.WARN` policy's verdict, or the note that the command's audit event
+was not recorded (it starts with `audit_event_not_recorded`).
+
 ### `trellis curate promote`
 
 Promote a trace to a precedent (reusable institutional knowledge).
@@ -712,7 +718,7 @@ trellis curate promote <trace_id> --title <title> --description <description> [-
 | `trace_id` | **Yes** | -- | Trace ID to promote |
 | `--title` | **Yes** | -- | Title for the precedent |
 | `--description` | **Yes** | -- | Description of the pattern |
-| `--by` | No | `"cli"` | Who is promoting |
+| `--by` | No | `cli:promote` | Who is promoting |
 | `--format` | No | `text` | Output format |
 
 **Example:**
@@ -733,7 +739,8 @@ trellis curate promote 01JRK5N7QF8GHTM2XVZP3CWD9E \
   "command_id": "01JRK7A3QF8GHTM2XVZP3CWD9E",
   "operation": "precedent.promote",
   "message": "Precedent promoted",
-  "created_id": "01JRK7A4QF8GHTM2XVZP3CWD9E"
+  "created_id": "01JRK7A4QF8GHTM2XVZP3CWD9E",
+  "warnings": []
 }
 ```
 
@@ -780,11 +787,12 @@ trellis curate link 01JRK5N7QF auth_service --kind entity_depends_on --format js
 
 ```json
 {
-  "status": "success",
-  "command_id": "01JRK8B2QF8GHTM2XVZP3CWD9E",
-  "operation": "link.create",
-  "message": "Link created",
-  "created_id": "01JRK8B3QF8GHTM2XVZP3CWD9E"
+  "status": "ok",
+  "edge_id": "01JRK8B3QF8GHTM2XVZP3CWD9E",
+  "source_id": "01JRK5N7QF",
+  "target_id": "auth_service",
+  "edge_kind": "entity_depends_on",
+  "warnings": []
 }
 ```
 
@@ -815,7 +823,8 @@ trellis curate label 01JRK5N7QF critical-path --format json
   "command_id": "01JRK9C1QF8GHTM2XVZP3CWD9E",
   "operation": "label.add",
   "message": "Label added",
-  "created_id": null
+  "created_id": null,
+  "warnings": []
 }
 ```
 
@@ -870,11 +879,12 @@ trellis curate redact 01JRK5N7QF --yes --reason "defect-minted entity (#299)" --
   "status": "success",
   "command_id": "01JRK9C1QF8GHTM2XVZP3CWD9E",
   "target_id": "01JRK5N7QF",
-  "message": "Entity redacted: 01JRK5N7QF (1 version(s), 0 edge(s), 0 alias(es), vector_deleted=False)"
+  "message": "Entity redacted: 01JRK5N7QF (1 version(s), 0 edge(s), 0 alias(es), vector_deleted=False)",
+  "warnings": []
 }
 ```
 
-On failure/rejection the JSON is `{"status": "failed"|"rejected", "command_id": ..., "message": ...}` — `command_id` joins the attempt to its audit event.
+On failure/rejection the JSON is `{"status": "failed"|"rejected", "command_id": ..., "message": ..., "warnings": [...]}` — `command_id` joins the attempt to its audit event.
 
 ### `trellis curate feedback`
 
@@ -913,9 +923,44 @@ trellis curate feedback 01JRK5N7QF 0.9 --comment "Solid pattern, well-documented
   "command_id": "01JRKAB1QF8GHTM2XVZP3CWD9E",
   "operation": "feedback.record",
   "message": "Feedback recorded",
-  "created_id": null
+  "created_id": null,
+  "warnings": []
 }
 ```
+
+### `trellis curate entity`
+
+Create an entity node in the knowledge graph. The Neo4j deployment guides run
+it as their smoke check.
+
+```bash
+trellis curate entity <entity_type> <name> [--properties <json>] [--format text|json]
+```
+
+| Argument/Option | Required | Default | Description |
+|-----------------|----------|---------|-------------|
+| `entity_type` | **Yes** | -- | Entity type (any string, e.g. `concept`, `person`, `system`) |
+| `name` | **Yes** | -- | Entity name |
+| `--properties`, `-p` | No | `null` | JSON object of properties |
+| `--format` | No | `text` | Output format |
+
+**JSON output (success):**
+
+```json
+{
+  "status": "ok",
+  "node_id": "01JRKAC1QF8GHTM2XVZP3CWD9E",
+  "entity_type": "concept",
+  "name": "smoke-check",
+  "properties": {"name": "smoke-check"},
+  "warnings": []
+}
+```
+
+It exits `2` when the command is rejected and `5` when it fails, with
+`{"status": "rejected"|"failed", "command_id": ..., "message": ..., "warnings": [...]}`
+and no `node_id`. Invalid `--properties` JSON exits `1` with `"status": "error"`
+and no `warnings` key, because nothing was submitted.
 
 ---
 

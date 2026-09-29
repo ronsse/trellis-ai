@@ -46,8 +46,16 @@ def stores_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return stores
 
 
-def _declare(stores: Path, *, deny: bool = False) -> None:
-    rules = [PolicyRule(operation="*", condition="unusual write", action="warn")]
+def _declare(
+    stores: Path,
+    *,
+    warn: bool = True,
+    deny: bool = False,
+    condition: str = "unusual write",
+) -> None:
+    rules = []
+    if warn:
+        rules.append(PolicyRule(operation="*", condition=condition, action="warn"))
     if deny:
         rules.append(
             PolicyRule(operation="*", condition="not permitted", action="deny")
@@ -108,3 +116,99 @@ class TestTextFormat:
         output = plain(_label(exit_code=2))
         assert "Command rejected" in output
         assert WARNING_TEXT in output
+
+
+# The curate writes that build their own result, instead of going through
+# ``_execute_command`` as ``label``, ``promote`` and ``feedback`` do.
+_SITES = ["entity", "prune", "restore", "redact", "link"]
+
+# ``link`` refuses with exit 1 and status "error", not 2 and "rejected".
+# That is a separate defect; these tests pin today's code.
+_REFUSAL_EXIT = {"entity": 2, "prune": 2, "restore": 2, "redact": 2, "link": 1}
+
+
+def _seed(name: str) -> str:
+    """Create an entity before any policy exists, and return its id."""
+    result = runner.invoke(
+        app, ["curate", "entity", "concept", name, "--format", "json"]
+    )
+    assert result.exit_code == 0, result.output
+    return json.loads(result.output.strip())["node_id"]
+
+
+def _argv(command: str) -> list[str]:
+    """Build *command*'s argv, seeding the entities it needs."""
+    if command == "entity":
+        return ["curate", "entity", "concept", "n"]
+    if command == "prune":
+        # ``--apply`` skips the dry-run notice, so a warning line nested
+        # under that notice's ``if`` would go missing.
+        return ["curate", "prune", "--reason", "r", "--noise-documents", "--apply"]
+    if command == "restore":
+        return ["curate", "restore", "--item-id", "x1", "--reason", "r"]
+    if command == "redact":
+        return ["curate", "redact", _seed("a"), "--reason", "r", "--yes"]
+    return ["curate", "link", _seed("a"), _seed("b")]
+
+
+def _run(argv: list[str], *extra: str, exit_code: int = 0) -> str:
+    result = runner.invoke(app, [*argv, *extra])
+    assert result.exit_code == exit_code, result.output
+    return result.output
+
+
+@pytest.mark.parametrize("command", _SITES)
+class TestEveryCurateWrite:
+    """The other curate writes show a warning the way ``label`` does."""
+
+    def test_json_carries_the_warning(self, stores_dir: Path, command: str) -> None:
+        argv = _argv(command)
+        _declare(stores_dir)
+        data = json.loads(_run(argv, "--format", "json").strip())
+        assert data["warnings"] == [WARNING_TEXT]
+
+    def test_json_refusal_carries_the_warning(
+        self, stores_dir: Path, command: str
+    ) -> None:
+        argv = _argv(command)
+        _declare(stores_dir, deny=True)
+        output = _run(argv, "--format", "json", exit_code=_REFUSAL_EXIT[command])
+        assert json.loads(output.strip())["warnings"] == [WARNING_TEXT]
+
+    def test_json_key_is_present_and_empty_with_no_policies(
+        self, stores_dir: Path, command: str
+    ) -> None:
+        data = json.loads(_run(_argv(command), "--format", "json").strip())
+        assert data["warnings"] == []
+
+    def test_json_refusal_with_no_warning_keeps_the_empty_key(
+        self, stores_dir: Path, command: str
+    ) -> None:
+        argv = _argv(command)
+        _declare(stores_dir, warn=False, deny=True)
+        output = _run(argv, "--format", "json", exit_code=_REFUSAL_EXIT[command])
+        assert json.loads(output.strip())["warnings"] == []
+
+    def test_text_prints_the_warning(self, stores_dir: Path, command: str) -> None:
+        argv = _argv(command)
+        _declare(stores_dir)
+        assert WARNING_TEXT in plain(_run(argv))
+
+    def test_text_refusal_prints_the_warning(
+        self, stores_dir: Path, command: str
+    ) -> None:
+        argv = _argv(command)
+        _declare(stores_dir, deny=True)
+        assert WARNING_TEXT in plain(_run(argv, exit_code=_REFUSAL_EXIT[command]))
+
+
+def test_markup_in_a_policy_condition_prints_verbatim(stores_dir: Path) -> None:
+    """A policy's condition is free text, so the warning line escapes it.
+
+    Unescaped, ``[/x]`` raises ``MarkupError`` after the write has committed,
+    and the command exits 1. The id-markup rule cannot catch that, because
+    ``warning`` is not an id-shaped name.
+    """
+    _declare(stores_dir, condition="unusual [/x] write")
+    output = plain(_run(_argv("prune")))
+    assert "Policy warning (pol-warn): unusual [/x] write" in output
