@@ -1172,9 +1172,7 @@ def _run_extractor_on_fixture(
     batch = result_to_batch(result, requested_by=f"cli:demo-load:{source_hint}")
     results = build_curate_executor(registry).execute_batch(batch)
     failures = [
-        r
-        for r in results
-        if r.status in (CommandStatus.FAILED, CommandStatus.REJECTED)
+        r for r in results if r.status in (CommandStatus.FAILED, CommandStatus.REJECTED)
     ]
     if failures:
         first = failures[0]
