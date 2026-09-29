@@ -103,6 +103,14 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **BREAKING: `trellis admin quickstart` no longer writes Claude Code settings
+  files; it prints the `claude mcp add` command that registers `trellis-mcp`.**
+  Claude Code never read the `mcpServers` entry it wrote there, so entries
+  written by earlier versions are inert and can be deleted. `--format json`
+  drops `settings_path` and adds `mcp_register_command`, the command as a
+  list of arguments. `--scope project` now initializes `<cwd>/.trellis/`
+  instead of the global config dir.
+
 - **BREAKING: a `config.yaml` value that is only a `${VAR}` placeholder now
   refuses to load.** Trellis never expands environment variables in
   `config.yaml`, so `password: ${TRELLIS_NEO4J_PASSWORD}` reached the driver
