@@ -1164,10 +1164,19 @@ class TestWorkerEnrich:
     def test_the_no_client_hint_names_both_extras(
         self,
         temp_stores: StoreRegistry,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         colour: bool,
     ) -> None:
-        """Rich read both extras as markup tags, leaving ``extra ( / ).``."""
+        """Rich read both extras as markup tags, leaving ``extra ( / ).``.
+
+        The hint names the config.yaml the CLI reads, not ``~/.trellis``: a
+        ``[dev]`` in its dir name is deleted the same way unless escaped, and
+        ``COLUMNS`` keeps the tmp path on one line.
+        """
+        config_dir = tmp_path / "cfg[dev]"
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("COLUMNS", "500")
         registry = MagicMock()
         registry.build_llm_client.return_value = None
         monkeypatch.setattr(worker, "_get_registry", lambda: registry)
@@ -1180,6 +1189,8 @@ class TestWorkerEnrich:
         text = assert_coloured(result.stdout) if colour else plain(result.stdout)
         text = " ".join(text.split())
         assert "the matching extra ([llm-openai] / [llm-anthropic])." in text
+        assert f"Add an 'llm:' block to {config_dir / 'config.yaml'} (provider," in text
+        assert "~/.trellis" not in text
 
     @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
     def test_the_help_names_both_extras(
