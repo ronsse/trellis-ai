@@ -5,8 +5,8 @@
 every CLI store command) reads that key ahead of ``TRELLIS_DATA_DIR``, but
 the CLI's ``get_data_dir`` did not. So the stores guard checked another
 directory, and the ``admin init`` it advised found ``config.yaml`` and
-repaired nothing. The directory names below carry Rich markup, which only
-an escaped render prints.
+repaired nothing. Two of the directory names below carry Rich markup, which
+only an escaped render prints.
 """
 
 from __future__ import annotations

@@ -125,8 +125,8 @@ def init(
 
     if config_path.exists() and not force:
         # The stores guard sends an operator here, so recreate the stores
-        # dir config.yaml points at when it is gone. config.yaml itself is
-        # never touched without --force.
+        # dir it checks if that is missing. config.yaml itself is never
+        # touched without --force.
         stores_dir = get_data_dir() / "stores"
         stores_created = not stores_dir.exists()
         if stores_created:

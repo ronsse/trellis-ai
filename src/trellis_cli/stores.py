@@ -49,10 +49,10 @@ def _get_registry() -> StoreRegistry:
     """
     global _registry  # noqa: PLW0603
     if _registry is None:
-        # Check the registry's own stores_dir: config.yaml's ``data_dir``
-        # decides where it is, and a guard that derived the path again would
-        # pass on one directory while the stores opened another. One
-        # registry, so config.yaml is read (and warned about) once.
+        # Check the registry's own stores_dir. It resolves config.yaml's
+        # ``data_dir`` ahead of TRELLIS_DATA_DIR, and a guard that derived the
+        # path again would pass on one directory while the stores opened
+        # another. One registry, so config.yaml is read (and warned about) once.
         registry = StoreRegistry.from_config_dir(config_dir=get_config_dir())
         stores_dir = registry.stores_dir
         assert stores_dir is not None  # from_config_dir always sets it
