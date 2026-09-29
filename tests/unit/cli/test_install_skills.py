@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis_cli.claude_integration import (
     get_skills_target_dir,
     install_skills,
@@ -182,6 +183,23 @@ class TestInstallSkillsCommand:
         result = runner.invoke(
             app, ["admin", "install-skills", "nope", "--format", "json"]
         )
-        assert result.exit_code != 0
-        data = json.loads(result.stdout.strip())
-        assert data["status"] == "error"
+        assert result.exit_code == 2
+        assert json.loads(result.stdout) == {
+            "status": "error",
+            "error": "scope must be 'user' or 'project', got 'nope'",
+        }
+
+    def test_invalid_scope_text_keeps_its_brackets(self):
+        """The refusal quotes the value as typed, brackets included.
+
+        Rich reads a ``[word]`` as a style tag and deletes it unless the
+        message is escaped, which printed ``got ''``. Comparing the whole
+        line also pins the rendered ``Error:`` prefix, so printing the
+        markup literally fails too.
+        """
+        result = runner.invoke(app, ["admin", "install-skills", "[user]"])
+        assert result.exit_code == 2
+        assert (
+            plain(result.stdout).strip()
+            == "Error: scope must be 'user' or 'project', got '[user]'"
+        )

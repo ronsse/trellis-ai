@@ -350,9 +350,11 @@ class TestQuickstart:
             app,
             ["admin", "quickstart", "--with-skills", "bogus", "--format", "json"],
         )
-        assert result.exit_code != 0
-        data = json.loads(result.stdout.strip())
-        assert data["status"] == "error"
+        assert result.exit_code == 2
+        assert json.loads(result.stdout) == {
+            "status": "error",
+            "error": "--with-skills must be 'user' or 'project', got 'bogus'",
+        }
 
     @pytest.mark.parametrize("output_format", ["text", "json"])
     def test_unknown_scope_exits_before_writing(self, monkeypatch, output_format):
@@ -373,7 +375,7 @@ class TestQuickstart:
         if output_format == "json":
             assert json.loads(result.stdout) == {"status": "error", "error": msg}
         else:
-            assert msg in plain(result.output)
+            assert plain(result.stdout).strip() == f"Error: {msg}"
         assert not (self.tmp / "trellis-config").exists()
         assert not (self.tmp / "trellis-data").exists()
         assert not (project_dir / ".trellis").exists()
