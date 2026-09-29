@@ -467,8 +467,9 @@ class RuleTuner:
     Reads from an :class:`~trellis.stores.base.outcome.OutcomeStore`,
     persists proposals to a
     :class:`~trellis.stores.base.tuner_state.TunerStateStore`, and
-    tracks a per-tuner cursor so future runs can start from the
-    newest event seen.
+    records the newest event seen as a per-tuner cursor. No run reads
+    the cursor back: each pass aggregates over a trailing window
+    (:data:`DEFAULT_WINDOW_DAYS`) unless the caller passes ``since``.
 
     Idempotency comes from two layers:
 

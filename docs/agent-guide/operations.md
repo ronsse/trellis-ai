@@ -1846,7 +1846,7 @@ trellis worker tune [--tuner-name NAME] [--since-days N] [--dry-run] [--format t
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--tuner-name` | `rule_tuner` | Logical tuner name (cursor + proposal scope). |
-| `--since-days` | 30-day window | Read the last N days instead of the tuner's trailing window. |
+| `--since-days` | 30-day window | Read the last N days instead of the tuner's trailing window. When auto-promotion is enabled, a live run also re-monitors earlier auto-promotions over the same N days (30 by default). |
 | `--dry-run` | off | Report what *would* auto-promote without mutating stores or emitting events. |
 | `--format` | `text` | `text` or `json`. |
 
@@ -2223,7 +2223,7 @@ day-window selector drive all charts.
 
 ## MCP Macro Tools
 
-Start with `trellis-mcp`. 16 tools returning token-budgeted markdown — 10 core tools, 3 sectioned-context tools for richer pack assembly, and 3 structured tools (observations + the mutation escape hatch) that return JSON.
+Start with `trellis-mcp`. 16 tools: 10 core tools and 3 sectioned-context tools for richer pack assembly return markdown, and 3 structured tools (observations + the mutation escape hatch) return JSON.
 
 **Core tools**
 

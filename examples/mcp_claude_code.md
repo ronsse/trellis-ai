@@ -2,7 +2,7 @@
 
 > **Status: preview.** This walkthrough is in flux while parallel work lands. Tool names, signatures, and setup commands may change before the next minor release.
 
-End-to-end walkthrough of installing the Trellis MCP server in Claude Code and using its eleven macro tools in real prompts.
+End-to-end walkthrough of installing the Trellis MCP server in Claude Code and using its macro tools in real prompts.
 
 ## Setup
 
@@ -20,7 +20,7 @@ trellis admin quickstart --scope project
 
 ## What you get
 
-Eleven macro tools, all returning **token-budgeted markdown** (not raw JSON).
+Sixteen macro tools. The eleven in these tables return **markdown** (not raw JSON); [operations.md](../docs/agent-guide/operations.md#mcp-macro-tools) lists all sixteen, including the three that return JSON.
 
 **Core tools** — the daily-driver eight:
 

@@ -50,7 +50,7 @@ SDK_MIN = "0.1.0"
 # MCP tool surface version — versioned independently from API_MAJOR.
 #
 # The MCP server (``trellis.mcp``) is a separate, narrower contract:
-# ~8 agent-shaped tools consumed by LLM agents via the Model Context
+# agent-shaped tools consumed by LLM agents via the Model Context
 # Protocol.  It evolves on its own cadence — adding or changing a
 # tool doesn't have to move the REST API major, and moving the REST
 # API major doesn't invalidate deployed MCP clients.  Bump this when:
