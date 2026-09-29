@@ -1336,7 +1336,7 @@ def enrich_cmd(
     ``tag_confidence`` stamp, then persisted via ``DocumentStore.put``.
 
     **Requires an LLM extra.** Enrichment needs a configured ``llm:`` block
-    and the matching ``[llm-openai]`` / ``[llm-anthropic]`` extra. When no
+    and the matching ``\\[llm-openai]`` / ``\\[llm-anthropic]`` extra. When no
     client can be built this command exits non-zero with an actionable
     message — it never silently no-ops.
     """
@@ -1426,8 +1426,8 @@ def _require_llm_client_or_exit(consumer: LLMConsumer, *, command: str) -> Any:
     except BackendNotInstalledError as exc:
         console.print(
             f"[red]{command} requires an LLM SDK that is not installed: "
-            f"{exc}[/red]\n"
-            "[dim]Install it, e.g. 'uv pip install trellis-ai[llm-openai]', "
+            f"{escape(str(exc))}[/red]\n"
+            "[dim]Install it, e.g. 'uv pip install trellis-ai\\[llm-openai]', "
             "and configure an 'llm:' block in config.yaml.[/dim]"
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
@@ -1437,7 +1437,7 @@ def _require_llm_client_or_exit(consumer: LLMConsumer, *, command: str) -> Any:
             "configured.[/red]\n"
             "[dim]Add an 'llm:' block to ~/.trellis/config.yaml (provider, "
             "api_key_env, model) and install the matching extra "
-            "([llm-openai] / [llm-anthropic]).[/dim]"
+            "(\\[llm-openai] / \\[llm-anthropic]).[/dim]"
         )
         raise typer.Exit(code=EXIT_INTERNAL)
     return llm
