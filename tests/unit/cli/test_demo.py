@@ -275,18 +275,24 @@ class TestDemoLoadColdStartFailures:
         assert f"{source_id!r} -> {target_id!r} [document]" in out
         assert "cold-start entities" not in out
 
-    def test_a_rejected_cold_start_command_is_reported(self, tmp_path: Path) -> None:
+    # Denying entity.create leaves the edges landing (they may dangle), so a
+    # check that looked only at edges, or only at an all-edges failure, passes
+    # the link.create case and fails this one.
+    @pytest.mark.parametrize("operation", ["link.create", "entity.create"])
+    def test_a_rejected_cold_start_command_is_reported(
+        self, tmp_path: Path, operation: str
+    ) -> None:
         from trellis.schemas.enums import PolicyType
         from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
         from trellis.stores.policy_store import PolicyStore
 
         # Only the cold-start path writes through the executor, so denying
-        # link.create reaches no other demo write.
+        # either operation reaches no other demo write.
         PolicyStore(tmp_path / "data" / "stores" / "policies.json").add(
             Policy(
                 policy_type=PolicyType.MUTATION,
                 scope=PolicyScope(level="global"),
-                rules=[PolicyRule(operation="link.create", action="deny")],
+                rules=[PolicyRule(operation=operation, action="deny")],
             )
         )
         result = runner.invoke(app, ["demo", "load"])
@@ -294,5 +300,5 @@ class TestDemoLoadColdStartFailures:
 
         out = " ".join(plain(result.stdout).split())
         assert out.count("Cold-start fixture failed") == 1, out
-        assert "link.create rejected" in out
+        assert f"{operation} rejected" in out
         assert "cold-start entities" not in out
