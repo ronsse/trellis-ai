@@ -1158,7 +1158,7 @@ def _run_extractor_on_fixture(
 
     Raises ``RuntimeError`` when any command comes back ``FAILED`` or
     ``REJECTED``: the executor returns those as results rather than
-    raising, so counting only successes would drop them without a word.
+    raising, so counting only successes would leave them off stdout.
     """
     registry = _get_registry()
     ext_registry = ExtractorRegistry()
