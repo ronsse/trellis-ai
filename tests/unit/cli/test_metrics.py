@@ -246,6 +246,7 @@ def test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes(
     if fmt == "json":
         payload = json.loads(dry.stdout)
         assert (payload["proposals_considered"], payload["pending_manual"]) == (2, 1)
+        assert payload["dry_run"] is True
     else:
         out = " ".join(plain(dry.output).split())
         assert "2 proposal(s) considered" in out
@@ -257,7 +258,9 @@ def test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes(
     live = runner.invoke(app, ["worker", "tune", "--format", "json"])
 
     assert live.exit_code == 0, plain(live.output)
-    assert json.loads(live.stdout)["auto_promoted"] == 1
+    live_payload = json.loads(live.stdout)
+    assert live_payload["auto_promoted"] == 1
+    assert live_payload["dry_run"] is False
     statuses = sorted(p.status for p in state.list_proposals())
     assert statuses == ["pending", "promoted"]
     assert state.get_cursor("rule_tuner") is not None
