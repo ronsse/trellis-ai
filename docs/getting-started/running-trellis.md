@@ -76,7 +76,7 @@ Three more env toggles control what an unauthenticated caller can reach. All thr
 trellis worker curate --output-dir DIR [--days 30] [--interval SECONDS] \
   [--dry-run] [--reconcile-first] \
   [--skip-noise-tags] [--skip-advisories] [--skip-learning] \
-  [--format text|json]
+  [--no-meta-trace] [--format text|json]
 ```
 
 One full curation cycle. It calls the curation library functions directly — no shelling out — in a fixed order: **(1)** effectiveness feedback (demote: noise-tag low-value items), **(2)** advisory generation, **(3)** advisory fitness loop (adjust confidence / suppress weak advisories), **(4)** learning-candidate scoring → review artifacts. This single command spans **two tiers**: stages 1–3 are Tier 0 (fully automatic, reversible re-tagging) and run unattended; stage 4 is **Tier 2** — it only *prepares* promotion artifacts and **never promotes**.
@@ -86,12 +86,13 @@ One full curation cycle. It calls the curation library functions directly — no
 | `--output-dir` / `-o` | required | Directory the stage-4 review artifacts land in. |
 | `--days` | `30` | Days of EventLog history to scan. |
 | `--interval` | off | Loop mode: re-run every N seconds until SIGINT/SIGTERM. Plain sleep — **no scheduler dependency**. |
-| `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts. |
-| `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog before the cycle (see below). |
+| `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts. Each stage still records its meta-Activity; add `--no-meta-trace` to skip that (see below). |
+| `--reconcile-first` | off | Backfill `pack_feedback.jsonl` into the EventLog before the cycle (see below). Refused with `--dry-run`. |
 | `--skip-noise-tags` / `--skip-advisories` / `--skip-learning` | off | Skip stage 1 / stages 2-3 / stage 4. Run just the demote half with `--skip-advisories --skip-learning`. |
+| `--no-meta-trace` | off | Skip recording each stage as a meta-Activity. |
 | `--format` | `text` | `text` or `json`. |
 
-**What it writes/emits.** Stage 1 applies `signal_quality="noise"` tags (a governed mutation, reversible by re-tagging) and emits the corresponding events. Stages 2-3 mutate the advisory store. Stage 4 writes two files into `--output-dir` and emits **nothing into the graph**:
+**What it writes/emits.** Stage 1 applies `signal_quality="noise"` tags (a governed mutation, reversible by re-tagging) and emits the corresponding events. Stages 2-3 mutate the advisory store. Stage 4 writes two files into `--output-dir` and, beyond its meta-trace record, emits **nothing into the graph**:
 
 - `intent_learning_candidates.json` — the scored candidates.
 - `promotion_decisions.template.json` — the human-review template.
@@ -106,12 +107,14 @@ Verified shape (`--format json`, demo data, isolated config dir):
  "skipped_stages": [], "dry_run": false}
 ```
 
-In `--dry-run`, advisories are skipped wholesale (`"skipped_stages": ["advisories"]`) and both `*_path` fields are `null` — the analysis still runs and reports counts, but nothing is written:
+In `--dry-run`, advisories are skipped wholesale (`"skipped_stages": ["advisories"]`) and both `*_path` fields are `null` — the analysis still runs and reports counts, but no noise tag, advisory, event or review file is written:
 
 ```json
 {"status": "ok", "noise_tagged": 0, ..., "candidates_path": null, "decisions_path": null,
  "skipped_stages": ["advisories"], "dry_run": true}
 ```
+
+Each stage that runs still records its meta-Activity, as every other meta-traced dry run does, but no finding, because the noise-tag and learning findings name writes (the tags, the review files) that a dry run does not make; add `--no-meta-trace` for a dry run that writes nothing. A degraded advisory file still emits its `write.rejected` health event and exits 5, since a dry run is the usual health probe. `--reconcile-first` exits 2 under `--dry-run`, because the backfill writes events; preview it with `trellis admin reconcile-feedback --log-dir DIR --dry-run`.
 
 In `--interval` mode each cycle logs one structured `worker_curate.cycle` line with the headline counts; SIGINT/SIGTERM drains the current cycle and exits cleanly (no half-written artifact).
 
@@ -246,7 +249,7 @@ curl -fsS http://localhost:8420/healthz          # liveness — no credential ne
 curl -fsS http://localhost:8420/readyz           # readiness — backend status
 
 # 2. Curate runs clean (dry-run — touches nothing)
-trellis worker curate --output-dir /tmp/trellis-check/review --dry-run --format json
+trellis worker curate --output-dir /tmp/trellis-check/review --dry-run --no-meta-trace --format json
 #   expect: {"status": "ok", ..., "candidates_path": null, "dry_run": true}
 
 # 3. Tune is a no-op when auto-promote is OFF (the default)
