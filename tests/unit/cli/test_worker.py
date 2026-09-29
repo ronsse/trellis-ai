@@ -1214,6 +1214,78 @@ class TestWorkerEnrich:
             0.6
         )
 
+    def test_a_failed_item_logs_its_failure_kind(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """``failure_kind`` is a plain string, so the log carries it as one.
+
+        Reading ``.value`` off it (an enum idiom) always produced ``None``.
+        """
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-x", "enrich me", {"title": "X"})
+        doc_store.put("doc-y", "fail the call", {"title": "Y"})
+        calls: list[tuple[str, str, dict[str, Any]]] = []
+
+        class _Recorder:
+            def __getattr__(self, level: str):
+                def record(event: str, **kwargs: Any) -> None:
+                    calls.append((level, event, kwargs))
+
+                return record
+
+        class _SplitLLM:
+            """An unparseable reply for doc-x, a transport error for doc-y."""
+
+            async def generate(
+                self, *, messages: list[Message], **_kwargs: Any
+            ) -> LLMResponse:
+                if any("fail the call" in m.content for m in messages):
+                    msg = "transport down"
+                    raise RuntimeError(msg)
+                return LLMResponse(content="I cannot classify this.", model="stub")
+
+        monkeypatch.setattr(worker, "logger", _Recorder())
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _SplitLLM(),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        failed = [
+            kw for level, event, kw in calls if event == "worker_enrich.item_failed"
+        ]
+        # Two kinds, so a constant slug cannot satisfy it.
+        assert sorted((kw["doc_id"], kw["failure_kind"]) for kw in failed) == [
+            ("doc-x", "parse_error"),
+            ("doc-y", "model_error"),
+        ]
+
+    def test_a_nan_importance_writes_no_importance(
+        self, temp_stores: StoreRegistry, monkeypatch
+    ) -> None:
+        """``NaN`` decodes, and is truthy, so it used to reach the row unstamped.
+
+        The serve-time reader raises on an unstamped ``auto_importance``, so on
+        SQLite that one row dropped the keyword axis from every pack it met.
+        """
+        doc_store = temp_stores.knowledge.document_store
+        doc_store.put("doc-x", "enrich me", {"title": "X"})
+        monkeypatch.setattr(
+            worker,
+            "_require_llm_client_or_exit",
+            lambda _consumer, *, command: _StubLLM(
+                '{"tags": ["alpha"], "importance": NaN}'
+            ),
+        )
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["enriched"] == 1
+        metadata = doc_store.get("doc-x")["metadata"]
+        assert metadata["content_tags"]["custom"]["llm_tags"] == ["alpha"]
+        assert "auto_importance" not in metadata
+        assert metadata["content_tags"].get("importance_scored_at") is None
+
 
 # ===========================================================================
 # worker mine-precedents (WP3)

@@ -36,7 +36,11 @@ import structlog
 from trellis.core.elision import elide_text
 from trellis.core.memory_op_judged import emit_memory_op_judged
 from trellis.llm import Message
-from trellis.llm.json_response import JSONParseOutcome, parse_json_response
+from trellis.llm.json_response import (
+    JSONParseOutcome,
+    coerce_finite_float,
+    parse_json_response,
+)
 from trellis.schemas.memory_op import (
     REF_TYPE_DOCUMENT,
     REF_TYPE_SESSION,
@@ -360,9 +364,8 @@ def _coerce_candidate(item: Any, session_id: str) -> CandidateMemory | None:
         return None
     if not title.strip() or not memory.strip():
         return None
-    try:
-        confidence = float(item.get("confidence", 0.5))
-    except (TypeError, ValueError):
+    confidence = coerce_finite_float(item.get("confidence", 0.5))
+    if confidence is None:
         confidence = 0.5
     memory_type = item.get("memory_type")
     signal = item.get("signal")

@@ -6,7 +6,7 @@ The one-page decision tree for wiring an external agent system into Trellis. Pic
 How does your agent talk to tools?
 │
 ├─ It speaks MCP (Claude Code, Cursor, Claude Desktop, any MCP client)
-│     → Path 1: MCP + skills  (one command, no code)
+│     → Path 1: MCP + skills  (no code)
 │
 ├─ It's a Python framework (LangGraph, CrewAI, a custom loop)
 │     → Path 2: SDK + hooks  (pip install, wrap your tasks)
@@ -25,19 +25,20 @@ For any agent that loads MCP servers: Claude Code, Cursor, Claude Desktop, or an
 
 ### Steps
 
-1. **Install Trellis and wire it up in one command.**
+1. **Install Trellis, then register the MCP server.**
 
    ```bash
    pip install trellis-ai          # or, from a checkout: pip install -e ".[dev]"
    trellis admin quickstart --with-skills user
    ```
 
-   `quickstart` initializes local SQLite stores, registers the `trellis` MCP
-   server in your Claude Code `settings.json`, and (with `--with-skills user`)
-   installs three drop-in skills into `~/.claude/skills/`. Use
-   `--with-skills project` to install into `./.claude/skills/` instead, and
-   `--scope project` to keep stores beside your code. Run with `--format json`
-   if you want machine-readable output.
+   `quickstart` initializes local SQLite stores and (with `--with-skills user`)
+   installs three drop-in skills into `~/.claude/skills/`. It then prints the
+   `claude mcp add` command that registers the `trellis` MCP server with
+   Claude Code; run that command once. Use `--with-skills project` to install
+   into `./.claude/skills/` instead, and `--scope project` to keep stores
+   beside your code. Run with `--format json` if you want machine-readable
+   output.
 
 2. **Restart your agent** so it picks up the new MCP server and skills.
 

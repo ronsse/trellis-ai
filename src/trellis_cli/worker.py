@@ -1616,7 +1616,7 @@ def _run_batch_enrichment(
                 "worker_enrich.item_failed",
                 doc_id=doc.get("doc_id"),
                 error=result.error,
-                failure_kind=getattr(result.failure_kind, "value", None),
+                failure_kind=result.failure_kind,
             )
             continue
         # Metadata-only: ``content`` is the row's own and only derived tags

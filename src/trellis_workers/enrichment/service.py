@@ -22,6 +22,7 @@ from trellis.extract.telemetry import (
 from trellis.llm import LLMClient, LLMResponse, Message, TokenUsage
 from trellis.llm.json_response import (
     JSONParseOutcome,
+    coerce_finite_float,
     parse_json_response,
     strip_code_fence,
 )
@@ -424,7 +425,9 @@ class EnrichmentService:
                 try:
                     data = json.loads(match.group())
                     salvaged = True
-                except json.JSONDecodeError as inner_exc:
+                # ValueError and RecursionError: an over-long integer or a
+                # deep nest inside the brace span is malformed too.
+                except (json.JSONDecodeError, ValueError, RecursionError) as inner_exc:
                     # GRACEFUL-DEGRADATION: enrichment failure stays in
                     # the EnrichmentResult contract (callers handle
                     # ``success=False``), but we emit EXTRACTION_FAILED
@@ -517,9 +520,9 @@ class EnrichmentService:
         if not isinstance(summary, str) or summary in {"null", ""}:
             summary = None
 
-        try:
-            importance = float(data.get("importance", 0.0))
-        except (TypeError, ValueError, OverflowError):
+        # NaN and ±Infinity decode, so they read as a non-number would.
+        importance = coerce_finite_float(data.get("importance", 0.0))
+        if importance is None:
             importance = 0.0
 
         # No manufactured default. A substituted 0.8 is indistinguishable from
@@ -530,10 +533,8 @@ class EnrichmentService:
             raw = data.get(key)
             if raw is None:
                 return None
-            try:
-                return min(max(float(raw), 0.0), 1.0)
-            except (TypeError, ValueError, OverflowError):
-                return None
+            value = coerce_finite_float(raw)
+            return None if value is None else min(max(value, 0.0), 1.0)
 
         return EnrichmentResult(
             auto_tags=tags,
