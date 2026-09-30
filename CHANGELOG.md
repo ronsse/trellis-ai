@@ -268,7 +268,7 @@ All notable changes to Trellis will be documented in this file.
   `entity --properties` JSON exits `2`, not `1`. A REJECTED `CommandResult`
   names its audit reason in `metadata["rejection_reason"]`. No REST or MCP
   response carries `metadata`, so neither changes.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#681](https://github.com/ronsse/trellis-ai/pull/681))
 
 - **Registry errors and warnings stop repeating config.yaml keys and URIs.**
   A key the backend does not accept, a DSN inside YAML flow braces included,
