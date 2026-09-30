@@ -409,6 +409,24 @@ All notable changes to Trellis will be documented in this file.
   and a promoted precedent lives in its own event.
   ([#683](https://github.com/ronsse/trellis-ai/pull/683))
 
+- **Every `trellis ingest` command exits by the exit-code map.** A path that
+  does not exist, a file `ingest trace`, `evidence`, `dbt-manifest` or
+  `openlineage` cannot read or parse as JSON, and a trace or evidence file
+  that fails its schema exited `1`; they now exit `2`, and `ingest trace`
+  on a directory or an unreadable file prints an error, JSON under
+  `--format json`, instead of a traceback. An `ingest trace` refusal
+  exits `3` for a policy, `2` for any other reason and `5` for a failed
+  write, as `trellis curate` does since #681; its payload is unchanged. A
+  typed store or configuration error that stops `dbt-manifest` or
+  `openlineage` exits by `exit_code_for` (`5` for a damaged `policies.json`),
+  not `1`. The trace's intent and a refusal's message print verbatim: an
+  intent quoting `[/x]` crashed the text output after the write, and
+  bracketed text such as `[x]` was deleted from a refusal. `dbt-manifest`
+  and `openlineage` still exit `0` when every write is refused or fails. The
+  `--file` examples, an option `ingest trace` does not have, now pass the
+  path positionally.
+  ([#684](https://github.com/ronsse/trellis-ai/pull/684))
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.

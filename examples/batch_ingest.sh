@@ -29,7 +29,7 @@ shopt -s nullglob
 ok=0
 fail=0
 for f in "$dir"/*.json; do
-  if trellis ingest trace --file "$f" --format json; then
+  if trellis ingest trace "$f" --format json; then
     ok=$((ok + 1))
   else
     fail=$((fail + 1))

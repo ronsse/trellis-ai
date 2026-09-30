@@ -100,7 +100,7 @@ class TestIngestConversations:
         result = runner.invoke(
             app, ["ingest", "conversations", "/nope/missing.json", "--format", "json"]
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert json.loads(result.stdout.strip())["status"] == "error"
 
     def test_text_output_mentions_counts(self, export: Path) -> None:

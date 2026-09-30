@@ -29,6 +29,11 @@ Mapping to the typed exception hierarchy in :mod:`trellis.errors`:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from trellis.mutate.commands import CommandResult
+
 EXIT_OK = 0
 EXIT_INTERNAL = 1
 EXIT_VALIDATION = 2
@@ -44,6 +49,7 @@ __all__ = [
     "EXIT_STORE",
     "EXIT_VALIDATION",
     "exit_code_for",
+    "refusal_exit_code",
 ]
 
 
@@ -94,3 +100,25 @@ def exit_code_for(exc: BaseException) -> int:
     if isinstance(exc, (StoreError, ConfigError)):
         return EXIT_STORE
     return EXIT_INTERNAL
+
+
+def refusal_exit_code(result: CommandResult) -> int:
+    """Return the exit code for a refused or failed write, per the exit-code ADR.
+
+    A policy refusal exits ``EXIT_POLICY`` ("get approval, don't retry"),
+    any other refusal ``EXIT_VALIDATION`` ("fix your input"), and a failure
+    ``EXIT_STORE``. The executor names a refusal's cause in
+    ``metadata["rejection_reason"]``, and a result without one is not a
+    policy refusal. It returns rather than raises, so each caller's
+    ``raise`` stays below its format branch
+    (``tests/unit/test_format_exit_parity_rule.py``).
+    """
+    from trellis.mutate.commands import (  # noqa: PLC0415 - no trellis import at module load
+        CommandStatus,
+    )
+
+    if result.status != CommandStatus.REJECTED:
+        return EXIT_STORE
+    if result.metadata.get("rejection_reason") == "policy_violation":
+        return EXIT_POLICY
+    return EXIT_VALIDATION

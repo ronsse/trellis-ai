@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 from tests.cli_output import plain
+from trellis.mutate.commands import Command, CommandResult, CommandStatus
+from trellis.mutate.executor import MutationExecutor
+from trellis.mutate.policy_source import POLICY_FILENAME
+from trellis.schemas.enums import Enforcement, PolicyType
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis_cli import ingest as ingest_cli
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
 
@@ -65,11 +73,11 @@ def _embed_failing_on_source(text: str) -> list[float]:
     return _fake_embed(text)
 
 
-def _trace_json() -> str:
+def _trace_json(intent: str = "deploy service") -> str:
     return json.dumps(
         {
             "source": "agent",
-            "intent": "deploy service",
+            "intent": intent,
             "steps": [],
             "context": {"agent_id": "agent-1", "domain": "platform"},
         }
@@ -103,21 +111,22 @@ class TestIngestTrace:
         assert data["status"] == "ingested"
         assert "trace_id" in data
 
-    def test_ingest_trace_from_stdin(self) -> None:
-        result = runner.invoke(app, ["ingest", "trace", "-"], input=_trace_json())
+    @pytest.mark.parametrize("args", [["-"], []], ids=["dash", "omitted"])
+    def test_ingest_trace_from_stdin(self, args: list[str]) -> None:
+        result = runner.invoke(app, ["ingest", "trace", *args], input=_trace_json())
         assert result.exit_code == 0
 
     def test_ingest_trace_invalid_json(self, tmp_path: Path) -> None:
         f = tmp_path / "bad.json"
         f.write_text("not json")
         result = runner.invoke(app, ["ingest", "trace", str(f)])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
 
     def test_ingest_trace_invalid_schema(self, tmp_path: Path) -> None:
         f = tmp_path / "bad.json"
         f.write_text(json.dumps({"bogus": "data"}))
         result = runner.invoke(app, ["ingest", "trace", str(f)])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
 
     @pytest.mark.parametrize(
         ("payload", "kept"),
@@ -133,12 +142,12 @@ class TestIngestTrace:
         f = tmp_path / "bad.json"
         f.write_text(json.dumps(payload))
         result = runner.invoke(app, ["ingest", "trace", str(f)])
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 2, result.output
         assert kept in plain(result.output)
 
     def test_ingest_trace_file_not_found(self) -> None:
         result = runner.invoke(app, ["ingest", "trace", "/nonexistent/file.json"])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
 
 
 def _rich_trace_json() -> str:
@@ -251,11 +260,11 @@ class TestIngestEvidence:
         f = tmp_path / "bad.json"
         f.write_text(json.dumps({"bad": "data"}))
         result = runner.invoke(app, ["ingest", "evidence", str(f)])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
 
     def test_ingest_evidence_file_not_found(self) -> None:
         result = runner.invoke(app, ["ingest", "evidence", "/nonexistent.json"])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
 
 
 class TestIngestHelp:
@@ -333,7 +342,7 @@ class TestIngestDbtManifest:
         result = runner.invoke(
             app, ["ingest", "dbt-manifest", "/nonexistent/manifest.json"]
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 2
 
 
 class TestIngestOpenLineage:
@@ -366,7 +375,7 @@ class TestIngestOpenLineage:
         result = runner.invoke(
             app, ["ingest", "openlineage", "/nonexistent/events.json"]
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 2
 
 
 class TestIngestDbtManifestClassifies:
@@ -721,3 +730,221 @@ class TestIngestDbtManifestEmbeds:
         assert "Embedded: 1" in lines
         assert "Documents: 2" in lines
         assert sorted(_EMBED_CALLS) == ["Raw orders table", "Staged orders"]
+
+
+# ---------------------------------------------------------------------------
+# Exit codes (docs/design/adr-cli-exit-codes.md)
+# ---------------------------------------------------------------------------
+
+#: A closing tag with no opener. Printed as markup, Rich raises ``MarkupError``
+#: and the command dies with exit 1 instead of reporting.
+_MESSAGE = "boom [/x]"
+
+_FORMATS = pytest.mark.parametrize("fmt", ["json", "text"])
+
+
+def _invoke(args: list[str], fmt: str) -> Result:
+    """Run the CLI, adding ``--format json`` when *fmt* asks for it."""
+    return runner.invoke(app, [*args, "--format", "json"] if fmt == "json" else args)
+
+
+def _refuse_trace_ingest(tmp_path: Path, action: str) -> None:
+    """Refuse ``trace.ingest`` at Stage 2, with a condition Rich would eat."""
+    policy = Policy(
+        policy_id="pol-ingest",
+        policy_type=PolicyType.MUTATION,
+        scope=PolicyScope(level="global"),
+        rules=[
+            PolicyRule(operation="trace.ingest", condition="frozen [x]", action=action)
+        ],
+        enforcement=Enforcement.ENFORCE,
+    )
+    (tmp_path / "data" / "stores" / POLICY_FILENAME).write_text(
+        json.dumps({"policies": [policy.model_dump(mode="json")]}), encoding="utf-8"
+    )
+
+
+def _fake_executor(
+    monkeypatch: pytest.MonkeyPatch, status: CommandStatus, metadata: dict[str, str]
+) -> None:
+    """Make the trace write come back with *status*, carrying ``_MESSAGE``."""
+    executor = MagicMock(spec=MutationExecutor)
+
+    def _execute(cmd: Command) -> CommandResult:
+        return CommandResult(
+            command_id="cmd-x",
+            status=status,
+            operation=cmd.operation,
+            message=_MESSAGE,
+            metadata=dict(metadata),
+        )
+
+    executor.execute.side_effect = _execute
+    monkeypatch.setattr(ingest_cli, "build_curate_executor", lambda _reg: executor)
+
+
+class TestIngestTraceExitCodes:
+    """Input it cannot use exits 2; a refusal 3 or 2 by its reason; a failure 5."""
+
+    @_FORMATS
+    def test_a_directory_exits_2(self, tmp_path: Path, fmt: str) -> None:
+        """The read sat outside the parse ``try``: a traceback, exit 1, no JSON."""
+        result = _invoke(["ingest", "trace", str(tmp_path)], fmt)
+        assert result.exit_code == 2, result.output
+        if fmt == "json":
+            assert json.loads(result.stdout)["error_type"] == "IsADirectoryError"
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0, reason="root reads any file regardless of mode"
+    )
+    @_FORMATS
+    def test_an_unreadable_file_exits_2(self, tmp_path: Path, fmt: str) -> None:
+        f = tmp_path / "trace.json"
+        f.write_text(_trace_json())
+        f.chmod(0)
+        try:
+            result = _invoke(["ingest", "trace", str(f)], fmt)
+        finally:
+            f.chmod(0o600)
+        assert result.exit_code == 2, result.output
+        if fmt == "json":
+            assert json.loads(result.stdout)["error_type"] == "PermissionError"
+
+    @_FORMATS
+    @pytest.mark.parametrize("action", ["deny", "require_approval"])
+    def test_a_policy_refusal_exits_3(
+        self, tmp_path: Path, fmt: str, action: str
+    ) -> None:
+        _refuse_trace_ingest(tmp_path, action)
+        f = tmp_path / "trace.json"
+        f.write_text(_trace_json())
+        result = _invoke(["ingest", "trace", str(f)], fmt)
+        assert result.exit_code == 3, result.output
+        if fmt == "json":
+            payload = json.loads(result.stdout)
+            # The released shape: the exit carries the class, not a new field.
+            assert set(payload) == {"status", "message"}
+            assert payload["status"] == "error"
+            assert "frozen [x]" in payload["message"]
+        else:
+            assert "frozen [x]" in plain(result.output)
+
+    @_FORMATS
+    @pytest.mark.parametrize(
+        ("status", "metadata", "code"),
+        [
+            pytest.param(
+                CommandStatus.REJECTED,
+                {"rejection_reason": "immutable_core"},
+                2,
+                id="other-refusal",
+            ),
+            pytest.param(CommandStatus.FAILED, {}, 5, id="failed"),
+        ],
+    )
+    def test_any_other_refusal_or_a_failure_exits_by_the_map(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        fmt: str,
+        status: CommandStatus,
+        metadata: dict[str, str],
+        code: int,
+    ) -> None:
+        _fake_executor(monkeypatch, status, metadata)
+        f = tmp_path / "trace.json"
+        f.write_text(_trace_json())
+        result = _invoke(["ingest", "trace", str(f)], fmt)
+        assert result.exit_code == code, result.output
+        if fmt == "json":
+            assert json.loads(result.stdout) == {"status": "error", "message": _MESSAGE}
+        else:
+            assert _MESSAGE in plain(result.output)
+
+    @pytest.mark.parametrize(
+        "intent",
+        ["probe a [/x] b", "probe [bold]kept[/bold] [x]", "ends with \\"],
+        ids=["closing-tag", "tags", "trailing-backslash"],
+    )
+    def test_the_intent_prints_verbatim(self, tmp_path: Path, intent: str) -> None:
+        """The trace is stored before this line prints.
+
+        Printed as markup, ``[/x]`` raised ``MarkupError`` after the write, so
+        a wrapper that retried on exit 1 stored the trace twice. The backslash
+        row is why the line is printed with ``markup=False`` rather than
+        through ``escape``, which doubles a trailing backslash that no tag
+        follows. It compares whole lines: the doubled form contains the single.
+        """
+        f = tmp_path / "trace.json"
+        f.write_text(_trace_json(intent))
+        result = runner.invoke(app, ["ingest", "trace", str(f)])
+        assert result.exit_code == 0, result.output
+        assert f"  Intent: {intent}" in plain(result.output).splitlines()
+
+
+@pytest.mark.parametrize(
+    "command", ["trace", "evidence", "dbt-manifest", "openlineage"]
+)
+def test_a_missing_path_exits_2_and_keeps_its_brackets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """A relative path keeps the line too short for Rich to wrap."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["ingest", command, "nope[/x].json"])
+    assert result.exit_code == 2, result.output
+    assert "nope[/x].json" in plain(result.output)
+
+
+def _batch_input(tmp_path: Path, command: str) -> str:
+    f = tmp_path / "in.json"
+    sample = _SAMPLE_DBT_MANIFEST if command == "dbt-manifest" else _SAMPLE_OL_EVENTS
+    f.write_text(json.dumps(sample))
+    return str(f)
+
+
+_BATCHES = pytest.mark.parametrize("command", ["dbt-manifest", "openlineage"])
+
+
+class TestIngestBatchExitCodes:
+    """Unusable input exits 2, a typed error by its type, anything else 1."""
+
+    @_FORMATS
+    @_BATCHES
+    def test_unparseable_input_exits_2(
+        self, tmp_path: Path, fmt: str, command: str
+    ) -> None:
+        f = tmp_path / "in.json"
+        f.write_text("not json")
+        result = _invoke(["ingest", command, str(f)], fmt)
+        assert result.exit_code == 2, result.output
+        if fmt == "json":
+            assert json.loads(result.stdout)["error_type"] == "JSONDecodeError"
+
+    @_FORMATS
+    @_BATCHES
+    def test_a_damaged_policy_file_exits_5(
+        self, tmp_path: Path, fmt: str, command: str
+    ) -> None:
+        """Building the batch's executor raises ``ConfigError`` inside the catch-all."""
+        (tmp_path / "data" / "stores" / POLICY_FILENAME).write_text("{not json")
+        result = _invoke(["ingest", command, _batch_input(tmp_path, command)], fmt)
+        assert result.exit_code == 5, result.output
+        if fmt == "json":
+            assert json.loads(result.stdout)["error_type"] == "ConfigError"
+
+    @_FORMATS
+    @_BATCHES
+    def test_an_untyped_error_still_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fmt: str, command: str
+    ) -> None:
+        """An exception ``exit_code_for`` does not know is still a bug report."""
+
+        def _boom(*_a: object, **_k: object) -> object:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(ingest_cli, "_run_extraction", _boom)
+        result = _invoke(["ingest", command, _batch_input(tmp_path, command)], fmt)
+        assert result.exit_code == 1, result.output
+        if fmt == "json":
+            assert json.loads(result.stdout)["error_type"] == "RuntimeError"

@@ -13,12 +13,11 @@ from rich.table import Table
 from trellis.learning import prepare_learning_promotions, submit_learning_promotion
 from trellis.mutate import (
     Command,
-    CommandResult,
     CommandStatus,
     Operation,
     build_curate_executor,
 )
-from trellis_cli.exit_codes import EXIT_POLICY, EXIT_STORE, EXIT_VALIDATION
+from trellis_cli.exit_codes import EXIT_VALIDATION, refusal_exit_code
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
 
@@ -41,28 +40,10 @@ def _print_warnings(warnings: list[str]) -> None:
         console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}")
 
 
-def _refusal_exit_code(result: CommandResult) -> int:
-    """Return the exit code for a refused or failed write, per the exit-code ADR.
-
-    A policy refusal exits ``EXIT_POLICY`` ("get approval, don't retry"),
-    any other refusal ``EXIT_VALIDATION`` ("fix your input"), and a failure
-    ``EXIT_STORE``. The executor names a refusal's cause in
-    ``metadata["rejection_reason"]``, and a result without one is not a
-    policy refusal. It returns rather than raises, so each caller's
-    ``raise`` stays below its format branch
-    (``tests/unit/test_format_exit_parity_rule.py``).
-    """
-    if result.status != CommandStatus.REJECTED:
-        return EXIT_STORE
-    if result.metadata.get("rejection_reason") == "policy_violation":
-        return EXIT_POLICY
-    return EXIT_VALIDATION
-
-
 def _execute_command(cmd: Command, output_format: str) -> None:
     """Submit a command, display the result, and exit non-zero on refusal or failure.
 
-    A refused or failed command exits with ``_refusal_exit_code``, as every
+    A refused or failed command exits with ``refusal_exit_code``, as every
     curate write does. A DUPLICATE exits ``0``.
     """
     result = build_curate_executor(_get_registry()).execute(cmd)
@@ -104,7 +85,7 @@ def _execute_command(cmd: Command, output_format: str) -> None:
     # Below the format branch, so both formats exit alike
     # (tests/unit/test_format_exit_parity_rule.py) and warnings print first.
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        raise typer.Exit(code=_refusal_exit_code(result))
+        raise typer.Exit(code=refusal_exit_code(result))
 
 
 @curate_app.command()
@@ -165,7 +146,7 @@ def link(
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
             _print_warnings(result.warnings)
-        raise typer.Exit(code=_refusal_exit_code(result))
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -306,7 +287,7 @@ def prune(
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
             _print_warnings(result.warnings)
-        raise typer.Exit(code=_refusal_exit_code(result))
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -396,7 +377,7 @@ def restore(
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
             _print_warnings(result.warnings)
-        raise typer.Exit(code=_refusal_exit_code(result))
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -474,7 +455,7 @@ def redact(
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
             _print_warnings(result.warnings)
-        raise typer.Exit(code=_refusal_exit_code(result))
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -549,7 +530,7 @@ def entity(
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
             _print_warnings(result.warnings)
-        raise typer.Exit(code=_refusal_exit_code(result))
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(

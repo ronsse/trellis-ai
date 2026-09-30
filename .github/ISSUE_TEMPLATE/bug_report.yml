@@ -12,7 +12,7 @@ body:
       label: What happened?
       description: A short description of the bug. Include the exact command, MCP tool call, or SDK call you ran.
       placeholder: |
-        I ran `trellis ingest trace --file foo.json` and got ...
+        I ran `trellis ingest trace foo.json` and got ...
     validations:
       required: true
   - type: textarea

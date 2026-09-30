@@ -153,13 +153,13 @@ EOF
 **JSON output (validation error):**
 
 ```json
-{"status": "error", "message": "1 validation error for Trace\nsource\n  Field required"}
+{"status": "error", "error_type": "ValidationError", "message": "1 validation error for Trace\nsource\n  Field required [type=missing, input_value={'intent': 'Refactored da...', 'domain': 'backend'}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing"}
 ```
 
 **Error cases:**
-- File not found: exit code 1, prints error message
-- Invalid JSON: exit code 1, prints parse error
-- Schema validation failure: exit code 1, prints Pydantic validation error
+- A path that does not exist, a directory, an unreadable file, invalid JSON or a schema failure: exit code `2`, JSON `{"status": "error", "error_type": …, "message": …}`.
+- A policy refusal (`deny` or `require_approval`): exit code `3`. Any other refusal: `2`. A failed write: `5`. JSON `{"status": "error", "message": …}`.
+- Each case exits with the same code in both formats.
 
 #### Trace → graph extraction (opt-in)
 
@@ -536,6 +536,8 @@ trellis ingest evidence /tmp/evidence.json --format json
 {"status": "ingested", "evidence_id": "01JRK6M3QF8GHTM2XVZP3CWD9E", "evidence_type": "snippet"}
 ```
 
+A path that does not exist, a directory, an unreadable file, invalid JSON or a schema failure exits `2`, with the same JSON shape as `ingest trace`'s.
+
 ### `trellis ingest corpus`
 
 Sync a directory of `.md`/`.markdown` files (e.g. a notes vault) into
@@ -547,7 +549,7 @@ Some paths never reach that report at all: paths `--include` does not
 match, and dot-files, dot-directories (tool state such as `.obsidian/`)
 and symlinked directories below the root (never followed). A directory
 that cannot be read, the root included, is skipped and reported as an
-`unreadable_directory` warning.
+`unreadable_directory` warning. A path that does not exist exits `2`.
 
 ```bash
 trellis ingest corpus <path> [--source-system corpus] [--domain X] \
@@ -624,7 +626,8 @@ Sync a **Claude conversation export** — the personal context in your
 everyday Claude chat — into the document store as one document per
 conversation. This is the capture path for real usage: the memories you
 accumulate by talking to Claude, which the Claude Code / MCP path never
-sees. Shares the idempotent sync core with `ingest corpus`.
+sees. Shares the idempotent sync core with `ingest corpus`. A path that
+does not exist exits `2`.
 
 ```bash
 trellis ingest conversations <path> [--source-system claude-ai] \
@@ -679,6 +682,8 @@ Creates entities for models, seeds, snapshots, sources, and tests. Creates `depe
 {"status": "ingested", "nodes": 12, "edges": 8, "documents": 9, "embedded": 9}
 ```
 
+An input that cannot be read or parsed as JSON exits `2`, and a typed store or configuration error exits by the exit-code map (e.g. a damaged `policies.json`, `5`). `nodes` and `edges` count only writes that succeeded: a write a policy refuses or the graph fails is logged and not counted, and the command still exits `0`.
+
 ### `trellis ingest openlineage`
 
 Import OpenLineage events into the knowledge graph.
@@ -694,6 +699,8 @@ Reads a JSON array or newline-delimited JSON file of OpenLineage events. Creates
 ```json
 {"status": "ingested", "nodes": 6, "edges": 4}
 ```
+
+An input that cannot be read or parsed as JSON exits `2`, and a typed store or configuration error exits by the exit-code map (e.g. a damaged `policies.json`, `5`). `nodes` and `edges` count only writes that succeeded: a write a policy refuses or the graph fails is logged and not counted, and the command still exits `0`.
 
 ---
 

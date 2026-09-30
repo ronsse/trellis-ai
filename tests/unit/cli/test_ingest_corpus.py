@@ -127,7 +127,7 @@ class TestIngestCorpus:
         result = runner.invoke(
             app, ["ingest", "corpus", "/nope/missing", "--format", "json"]
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         data = json.loads(result.stdout.strip())
         assert data["status"] == "error"
 
