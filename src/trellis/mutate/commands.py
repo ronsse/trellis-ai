@@ -84,7 +84,15 @@ class Command(VersionedModel):
 
 
 class CommandResult(VersionedModel):
-    """Result of executing a command through the pipeline."""
+    """Result of executing a command through the pipeline.
+
+    A REJECTED result names why in ``metadata["rejection_reason"]``, the
+    ``reason`` its ``MUTATION_REJECTED`` event carries: ``policy_violation``,
+    ``immutable_core``, or a handler's ``ValidationError.code``
+    (``handler_validate`` when it set none). A caller holding only the
+    result, such as the CLI choosing an exit code, can then tell a policy
+    refusal from any other.
+    """
 
     command_id: str
     status: CommandStatus

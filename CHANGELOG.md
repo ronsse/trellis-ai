@@ -253,6 +253,25 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A policy refusal exits `3` on every single-command `trellis curate`
+  write, and `curate link` refuses like the rest.** A refused write exited
+  `2`, whatever refused it. A policy refusal, by `deny` or `require_approval`,
+  now exits `3` ("get approval, don't retry"), and any other refusal, such
+  as the unattended-writer roster or a blank `--reason`, still exits `2`.
+  `curate link` exited `1`, the code for a bug, on every refusal and
+  failure, with `"status": "error"` and no `command_id`. It now exits `3`,
+  `2` or `5` and reports `"rejected"` or `"failed"` with a `command_id`, as
+  the other writes do, so a missing source or target is a `2`. `prune` with
+  no criteria and `restore` with no ids answer `--format json` with
+  `{"status": "error", "message": ...}`, a `restore --from-file` path the OS
+  cannot read prints a message and exits `2` instead of a traceback, and invalid
+  `entity --properties` JSON exits `2`, not `1`. A REJECTED `CommandResult`
+  names its audit reason in `metadata["rejection_reason"]`. No REST or MCP
+  response carries `metadata`, so neither changes. `curate promote-learning`
+  is unchanged: it reports each candidate's outcome and exits `0` even when
+  policy refuses every one.
+  ([#681](https://github.com/ronsse/trellis-ai/pull/681))
+
 - **Registry errors and warnings stop repeating config.yaml keys and URIs.**
   A key the backend does not accept, a DSN inside YAML flow braces included,
   was quoted by Python's `TypeError` (exit 1); it is now a `ConfigError`
@@ -328,8 +347,8 @@ All notable changes to Trellis will be documented in this file.
   YAML file under `examples/`.
   ([#661](https://github.com/ronsse/trellis-ai/pull/661))
 
-- **`trellis curate entity`, `promote`, `label` and `feedback` exit `2` when a
-  write is refused and `5` when it fails, in both formats.** They exited `0`,
+- **`trellis curate entity`, `promote`, `label` and `feedback` exit non-zero
+  when a write is refused or fails, in both formats.** They exited `0`,
   and `curate entity` also printed "Entity created: None" with
   `"status": "ok"`, so the Neo4j guides' smoke check passed on a failed write.
   ([#660](https://github.com/ronsse/trellis-ai/pull/660))

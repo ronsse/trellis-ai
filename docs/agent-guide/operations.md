@@ -744,7 +744,7 @@ trellis curate promote 01JRK5N7QF8GHTM2XVZP3CWD9E \
 }
 ```
 
-`label` and `feedback` share this output. All three exit `2` when the command is rejected and `5` when it fails, with `status` set to `"rejected"` or `"failed"`. The code is the same in both formats.
+`label` and `feedback` share this output. All three exit `3` when a policy rejects the command, `2` when it is rejected for any other reason and `5` when it fails, with `status` set to `"rejected"` or `"failed"`. The code is the same in both formats.
 
 ### `trellis curate link`
 
@@ -795,6 +795,11 @@ trellis curate link 01JRK5N7QF auth_service --kind entity_depends_on --format js
   "warnings": []
 }
 ```
+
+A refused or failed link exits `3` (rejected by a policy), `2`
+(rejected otherwise — e.g. a source or target that does not exist) or
+`5` (failed), with
+`{"status": "rejected"|"failed", "command_id": ..., "message": ..., "warnings": [...]}`.
 
 ### `trellis curate label`
 
@@ -851,8 +856,9 @@ Scope boundaries, stated plainly:
   path; it does not rewrite the audit log.
 
 Prompts for confirmation unless `--yes` is passed (required for scripted use).
-Exit codes follow the `exit_codes` map: `2` (rejected — e.g. blank/over-long
-reason), `5` (failed — e.g. target not found), `0` success.
+Exit codes follow the `exit_codes` map: `3` (rejected by a policy), `2`
+(rejected otherwise — e.g. blank/over-long reason), `5` (failed — e.g.
+target not found), `0` success.
 
 ```bash
 trellis curate redact <target_id> --reason <text> [--yes] [--by <caller>] [--format text|json]
@@ -957,9 +963,10 @@ trellis curate entity <entity_type> <name> [--properties <json>] [--format text|
 }
 ```
 
-It exits `2` when the command is rejected and `5` when it fails, with
+It exits `3` when a policy rejects the command, `2` when it is rejected
+for any other reason and `5` when it fails, with
 `{"status": "rejected"|"failed", "command_id": ..., "message": ..., "warnings": [...]}`
-and no `node_id`. Invalid `--properties` JSON exits `1` with `"status": "error"`
+and no `node_id`. Invalid `--properties` JSON exits `2` with `"status": "error"`
 and no `warnings` key, because nothing was submitted.
 
 ---
