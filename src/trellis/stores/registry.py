@@ -222,6 +222,13 @@ _EXTRA_FOR_BACKEND: dict[str, str] = {
 }
 
 
+def _backend_not_installed(backend: str) -> BackendNotInstalledError:
+    """Build the refusal for a backend whose import or setup needs a module."""
+    return BackendNotInstalledError(
+        backend_name=backend, extra=_EXTRA_FOR_BACKEND.get(backend)
+    )
+
+
 def _resolve_connectivity_check(explicit: bool | None) -> bool:
     """Return the effective connectivity-check flag for a validate() call."""
     if explicit is not None:
@@ -1055,7 +1062,7 @@ class StoreRegistry:
             return None
         return self._stores_dir / name
 
-    def _instantiate(self, store_type: str) -> Any:
+    def _instantiate(self, store_type: str) -> Any:  # noqa: PLR0915
         """Create a store instance from config."""
         backend, params = self._resolve_backend(store_type)
 
@@ -1077,7 +1084,10 @@ class StoreRegistry:
 
         import importlib  # noqa: PLC0415
 
-        module = importlib.import_module(module_path)
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise _backend_not_installed(backend) from exc
         cls = getattr(module, class_name)
 
         # For sqlite backends, default to stores_dir/<type>.db
@@ -1119,7 +1129,10 @@ class StoreRegistry:
         prepare = getattr(cls, "prepare_registry_params", None)
         if callable(prepare):
             ctx = self._registry_context(store_type, backend)
-            params = prepare(ctx, store_type, params)
+            try:
+                params = prepare(ctx, store_type, params)
+            except ImportError as exc:
+                raise _backend_not_installed(backend) from exc
 
         # For s3 backend, default bucket from env
         if backend == "s3" and "bucket" not in params:
@@ -1149,7 +1162,11 @@ class StoreRegistry:
                 raise ConfigError(msg, setting=f"stores.{store_type}")
 
         logger.info("store_instantiated", store_type=store_type, backend=backend)
-        return cls(**params)
+        try:
+            store = cls(**params)
+        except ImportError as exc:
+            raise _backend_not_installed(backend) from exc
+        return store
 
     def _registry_context(self, store_type: str, backend: str) -> RegistryContext:
         import os  # noqa: PLC0415
@@ -1228,10 +1245,7 @@ class StoreRegistry:
         try:
             module = importlib.import_module(module_path)
         except ImportError as exc:
-            raise BackendNotInstalledError(
-                backend_name=backend,
-                extra=_EXTRA_FOR_BACKEND.get(backend),
-            ) from exc
+            raise _backend_not_installed(backend) from exc
         cls = getattr(module, class_name, None)
         return cls if isinstance(cls, type) else None
 

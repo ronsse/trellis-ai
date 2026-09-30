@@ -344,6 +344,17 @@ All notable changes to Trellis will be documented in this file.
   ([#659](https://github.com/ronsse/trellis-ai/pull/659),
   [#671](https://github.com/ronsse/trellis-ai/pull/671))
 
+- **A store whose optional extra is missing is refused with its install
+  command.** Opening a `postgres`, `pgvector`, `s3` or `neo4j` store without
+  its dependencies raised `ModuleNotFoundError`, `ImportError`, or a
+  `NameError` for the Neo4j driver, so a command that does not catch the
+  error printed a traceback and exited `1`. `StoreRegistry` now raises
+  `BackendNotInstalledError`, which names the extra to install, and such a
+  command exits `5`. A command that catches it keeps its exit code, and the
+  API server (`trellis serve`, `trellis-api`), the only opener of an `s3`
+  store, still exits `3` at startup.
+  ([#679](https://github.com/ronsse/trellis-ai/pull/679))
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.

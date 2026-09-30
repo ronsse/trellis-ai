@@ -52,7 +52,7 @@ class TestValidateFailure:
         # Postgres store_type with no DSN — neither in config nor env —
         # is a textbook fail-fast scenario. The exact exception type
         # depends on whether psycopg is installed (a missing driver
-        # would raise ``ModuleNotFoundError`` first), but either way
+        # would raise ``BackendNotInstalledError`` first), but either way
         # validation must catch it before request-time.
         monkeypatch.delenv("TRELLIS_KNOWLEDGE_PG_DSN", raising=False)
         monkeypatch.delenv("TRELLIS_OPERATIONAL_PG_DSN", raising=False)
