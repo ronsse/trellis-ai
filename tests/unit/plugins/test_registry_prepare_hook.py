@@ -161,6 +161,7 @@ def test_arcadedb_hook_tracks_migration_once_per_shared_driver() -> None:
             "trellis.stores.arcadedb.graph.build_arcadedb_driver",
             return_value=driver,
         ),
+        patch("trellis.stores.arcadedb.graph.check_driver_installed"),
         patch("trellis.stores.arcadedb.graph.ensure_database"),
         patch.object(
             ArcadeDBGraphStore,
