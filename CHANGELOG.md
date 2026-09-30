@@ -417,13 +417,14 @@ All notable changes to Trellis will be documented in this file.
   `--format json`, instead of a traceback. An `ingest trace` refusal
   exits `3` for a policy, `2` for any other reason and `5` for a failed
   write, as `trellis curate` does since #681; its payload is unchanged. A
-  typed store or configuration error in `dbt-manifest` or `openlineage`
-  exits by `exit_code_for` (`5` for a damaged `policies.json`), not `1`. The
-  trace's intent and a refusal's message print verbatim: an intent quoting
-  `[/x]` crashed the text output after the write, and bracketed text such
-  as `[x]` was deleted from a refusal. `dbt-manifest` and `openlineage` still
-  exit `0` when every write is refused. The `--file` examples, an option
-  `ingest trace` does not have, now pass the path positionally.
+  typed store or configuration error that stops `dbt-manifest` or
+  `openlineage` exits by `exit_code_for` (`5` for a damaged `policies.json`),
+  not `1`. The trace's intent and a refusal's message print verbatim: an
+  intent quoting `[/x]` crashed the text output after the write, and
+  bracketed text such as `[x]` was deleted from a refusal. `dbt-manifest`
+  and `openlineage` still exit `0` when every write is refused or fails. The
+  `--file` examples, an option `ingest trace` does not have, now pass the
+  path positionally.
   ([#684](https://github.com/ronsse/trellis-ai/pull/684))
 
 ## [0.9.0] - 2026-05-13

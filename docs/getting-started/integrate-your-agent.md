@@ -169,7 +169,7 @@ path is fully available on `main` today.
    curl -s -X POST http://127.0.0.1:8420/api/v1/traces \
      -H 'Content-Type: application/json' \
      -d '{
-       "source": "ci.deploy",
+       "source": "workflow",
        "intent": "deploy orders-api v2.3",
        "steps": [{"step_type": "note", "name": "deploy",
                   "result": {"ok": true}}],

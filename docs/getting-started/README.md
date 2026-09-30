@@ -62,7 +62,7 @@ You now have a working substrate. If you'd rather have the config and stores in 
    ```bash
    cat <<'EOF' > /tmp/trace.json
    {
-     "source": "manual.demo",
+     "source": "human",
      "intent": "Try ingesting a trace",
      "steps": [{"step_type": "note", "name": "first_step",
                 "result": {"ok": true}}],
