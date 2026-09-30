@@ -346,7 +346,7 @@ All notable changes to Trellis will be documented in this file.
   `NameError` for the Neo4j driver, so the CLI printed a traceback and exited
   `1`. `StoreRegistry` now raises `BackendNotInstalledError`, which names the
   extra to install, and the CLI exits `5`.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#679](https://github.com/ronsse/trellis-ai/pull/679))
 
 ## [0.9.0] - 2026-05-13
 
