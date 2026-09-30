@@ -374,7 +374,7 @@ All notable changes to Trellis will be documented in this file.
   and migrated its schema over HTTP, and only then found the driver missing;
   with the server down it reported a connection error instead of the extra
   to install. It now checks for the driver first, as the constructor does.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#682](https://github.com/ronsse/trellis-ai/pull/682))
 
 ## [0.9.0] - 2026-05-13
 
