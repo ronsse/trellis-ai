@@ -396,23 +396,17 @@ All notable changes to Trellis will be documented in this file.
   ([#682](https://github.com/ronsse/trellis-ai/pull/682))
 
 - **A label on a node that does not exist is refused, not reported as
-  done.** `label.add` and `label.remove` on a `target_id` that names no
-  node returned a success with the message `Node not found: <target_id>`:
-  `trellis curate label` exited `0` with `"status": "success"`, and the
-  audit log recorded a `mutation.executed` for a label that was never
-  written. Both handlers now raise a `ValidationError` with code
-  `target_not_found`, as `link.create` does with `orphan_edge`, so the
-  command is rejected with the same message and audited as a
-  `mutation.rejected` with reason `target_not_found` (also the result's
-  `metadata["rejection_reason"]`). `trellis curate label` exits `2`, with
-  `"status": "rejected"` in JSON and `✗ Command rejected` in text;
-  `created_id` stays `null`. MCP `execute_mutation` and REST
-  `POST /api/v1/commands/batch` report `rejected` instead of `success`, and
-  a `stop_on_error` batch now stops at that command instead of running the
-  rest. `feedback.record` and `precedent.promote` are unchanged: a feedback
-  target may be a trace, precedent or entity id, so there is no one store
-  to check, and a promoted precedent lives in its own event, so a made-up
-  trace id still succeeds.
+  done.** `label.add` and `label.remove` on a missing `target_id` returned
+  success with the message `Node not found: <target_id>`, audited as a
+  `mutation.executed` for a label never written. Both now raise a
+  `ValidationError` with code `target_not_found`, as `link.create` does
+  with `orphan_edge`: `trellis curate label`, MCP `execute_mutation` and
+  REST `POST /api/v1/commands/batch` report `rejected`, audited as a
+  `mutation.rejected` with that reason; the CLI exits `2`, not `0`, and a
+  `stop_on_error` batch stops there. `feedback.record` and
+  `precedent.promote` still accept an id that names nothing: a feedback
+  target may be a trace or precedent id, so no one store can check it,
+  and a promoted precedent lives in its own event.
   ([#683](https://github.com/ronsse/trellis-ai/pull/683))
 
 ## [0.9.0] - 2026-05-13

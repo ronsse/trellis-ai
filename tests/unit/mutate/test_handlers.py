@@ -8,7 +8,13 @@ import pytest
 
 from trellis.errors import ValidationError
 from trellis.mutate import build_curate_executor
-from trellis.mutate.commands import Command, CommandStatus, Operation
+from trellis.mutate.commands import (
+    BatchStrategy,
+    Command,
+    CommandBatch,
+    CommandStatus,
+    Operation,
+)
 from trellis.mutate.handlers import (
     EntityCreateHandler,
     FeedbackRecordHandler,
@@ -248,6 +254,27 @@ class TestLabelOnAMissingNode:
         assert [(e.payload["command_id"], e.payload["reason"]) for e in rejected] == [
             (missing.command_id, "target_not_found")
         ]
+
+    def test_stop_on_error_batch_stops_at_it(self, registry: StoreRegistry) -> None:
+        """A returned miss let a ``stop_on_error`` batch run the commands after it."""
+        batch = CommandBatch(
+            commands=[
+                Command(
+                    operation=Operation.LABEL_ADD,
+                    args={"target_id": "ghost", "label": "x"},
+                ),
+                Command(
+                    operation=Operation.ENTITY_CREATE,
+                    args={"entity_type": "concept", "name": "after"},
+                ),
+            ],
+            strategy=BatchStrategy.STOP_ON_ERROR,
+        )
+
+        results = build_curate_executor(registry).execute_batch(batch)
+
+        assert [r.status for r in results] == [CommandStatus.REJECTED]
+        assert registry.knowledge.graph_store.query(node_type="concept") == []
 
 
 class TestFeedbackRecordHandler:
