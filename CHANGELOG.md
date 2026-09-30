@@ -413,7 +413,7 @@ All notable changes to Trellis will be documented in this file.
   target may be a trace, precedent or entity id, so there is no one store
   to check, and a promoted precedent lives in its own event, so a made-up
   trace id still succeeds.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#683](https://github.com/ronsse/trellis-ai/pull/683))
 
 ## [0.9.0] - 2026-05-13
 
