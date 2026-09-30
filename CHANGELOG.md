@@ -424,7 +424,7 @@ All notable changes to Trellis will be documented in this file.
   as `[x]` was deleted from a refusal. `dbt-manifest` and `openlineage` still
   exit `0` when every write is refused. The `--file` examples, an option
   `ingest trace` does not have, now pass the path positionally.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#684](https://github.com/ronsse/trellis-ai/pull/684))
 
 ## [0.9.0] - 2026-05-13
 
