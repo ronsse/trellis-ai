@@ -301,13 +301,16 @@ class TestBeforeACommandIsBuilt:
         self, stores_dir: Path, tmp_path: Path, unreadable: str
     ) -> None:
         path = tmp_path / _MISSING if unreadable == "missing" else tmp_path
+        with pytest.raises(OSError) as raised:
+            path.read_text()
         code, data = _json(
             ["curate", "restore", "--reason", "r", "--from-file", str(path)]
         )
         assert code == 2, data
-        assert set(data) == {"status", "message"}
-        assert data["status"] == "error"
-        assert data["message"].startswith("Cannot read --from-file: ")
+        assert data == {
+            "status": "error",
+            "message": f"Cannot read --from-file: {raised.value}",
+        }
 
     @pytest.mark.parametrize("unreadable", ["missing", "directory"])
     def test_unreadable_from_file_text(
