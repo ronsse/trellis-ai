@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 import typer
+from rich.markup import escape
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.extract.telemetry import emit_extraction_failure
@@ -358,7 +359,7 @@ def migrate_provenance_command(
             }
             emit_json(payload, indent=2)
         else:
-            console.print(f"[red]{exc}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     except typer.Exit:
         raise
@@ -373,7 +374,10 @@ def migrate_provenance_command(
                 indent=2,
             )
         else:
-            console.print(f"[red]store error: {type(exc).__name__}: {exc}[/red]")
+            console.print(
+                f"[red]store error: {escape(type(exc).__name__)}: "
+                f"{escape(str(exc))}[/red]"
+            )
         raise typer.Exit(code=EXIT_STORE) from exc
 
     if output_format == "json":

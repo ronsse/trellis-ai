@@ -344,6 +344,18 @@ All notable changes to Trellis will be documented in this file.
   ([#659](https://github.com/ronsse/trellis-ai/pull/659),
   [#671](https://github.com/ronsse/trellis-ai/pull/671))
 
+- **Error lines keep the brackets in an exception's text.** The CLI printed
+  exception messages through Rich markup, which deleted any `[word…]` and
+  raised `MarkupError` on a stray `[/x]`. `trellis ingest trace` on an
+  invalid trace now shows pydantic's `[type=missing, …]` detail, an install
+  hint keeps its extra (`uv pip install -e ".[cloud]"`, not `-e "."`), and an
+  input that quotes `[/x]`, such as a trace intent or a line of
+  `learning_params.yaml`, prints its error where it printed a traceback.
+  Thirty error lines across `admin`, `analyze`, `classify`, `curate`,
+  `extract`, `ingest` and `worker` escape the text, and
+  `tests/unit/test_rich_exception_markup_rule.py` fails the build on a new one.
+  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.

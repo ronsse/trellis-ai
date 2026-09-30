@@ -110,7 +110,7 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Invalid trace: {exc}[/red]")
+            console.print(f"[red]Invalid trace: {escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # Persist via the governed mutation pipeline
@@ -182,7 +182,7 @@ def ingest_evidence(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Invalid evidence: {exc}[/red]")
+            console.print(f"[red]Invalid evidence: {escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # Persist to document store
@@ -369,7 +369,7 @@ def ingest_dbt_manifest(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Could not read manifest: {exc}[/red]")
+            console.print(f"[red]Could not read manifest: {escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     from trellis_workers.extract import DbtManifestExtractor  # noqa: PLC0415
@@ -390,7 +390,7 @@ def ingest_dbt_manifest(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]dbt ingest failed: {exc}[/red]")
+            console.print(f"[red]dbt ingest failed: {escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     doc_count, embedded = _index_dbt_descriptions(registry, result)
@@ -442,7 +442,7 @@ def ingest_openlineage(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Could not read events file: {exc}[/red]")
+            console.print(f"[red]Could not read events file: {escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     from trellis_workers.extract import OpenLineageExtractor  # noqa: PLC0415
@@ -463,7 +463,7 @@ def ingest_openlineage(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]OpenLineage ingest failed: {exc}[/red]")
+            console.print(f"[red]OpenLineage ingest failed: {escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     counts = {"nodes": nodes, "edges": edges}

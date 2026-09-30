@@ -259,12 +259,14 @@ def _build_auto_promote_policy_or_exit() -> AutoPromotePolicy:
     try:
         return _build_auto_promote_policy()
     except typer.BadParameter as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     except ValueError as exc:
         # AutoPromotePolicy.__post_init__ rejects thresholds looser than the
         # manual gate or a disarmed rollback.
-        console.print(f"[red]invalid learning.auto_promote config: {exc}[/red]")
+        console.print(
+            f"[red]invalid learning.auto_promote config: {escape(str(exc))}[/red]"
+        )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
 

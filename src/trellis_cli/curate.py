@@ -500,7 +500,9 @@ def entity(
                     }
                 )
             else:
-                console.print(f"[red]Invalid JSON for --properties[/red]: {exc}")
+                console.print(
+                    f"[red]Invalid JSON for --properties[/red]: {escape(str(exc))}"
+                )
             raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     cmd = Command(
