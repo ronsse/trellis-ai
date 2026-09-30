@@ -330,7 +330,10 @@ class LabelAddHandler:
 
         node = store.get_node(target_id)
         if node is None:
-            return None, f"Node not found: {target_id}"
+            # Raised, not returned: the executor audits any return as a write
+            # that happened. ``code`` becomes the rejection's audit reason.
+            msg = f"Node not found: {target_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
 
         props = dict(node["properties"])
         labels = props.get("labels", [])
@@ -370,7 +373,9 @@ class LabelRemoveHandler:
 
         node = store.get_node(target_id)
         if node is None:
-            return None, f"Node not found: {target_id}"
+            # Raised, as in LabelAddHandler.
+            msg = f"Node not found: {target_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
 
         props = dict(node["properties"])
         labels = props.get("labels", [])
