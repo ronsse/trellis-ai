@@ -263,8 +263,8 @@ All notable changes to Trellis will be documented in this file.
   `2` or `5` and reports `"rejected"` or `"failed"` with a `command_id`, as
   the other writes do, so a missing source or target is a `2`. `prune` with
   no criteria and `restore` with no ids answer `--format json` with
-  `{"status": "error", "message": ...}`, a `restore --from-file` that cannot
-  be read prints a message and exits `2` instead of a traceback, and invalid
+  `{"status": "error", "message": ...}`, a `restore --from-file` path the OS
+  cannot read prints a message and exits `2` instead of a traceback, and invalid
   `entity --properties` JSON exits `2`, not `1`. A REJECTED `CommandResult`
   names its audit reason in `metadata["rejection_reason"]`. No REST or MCP
   response carries `metadata`, so neither changes. `curate promote-learning`
