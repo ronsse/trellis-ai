@@ -89,7 +89,7 @@ class TestJsonFormat:
 
     def test_warning_survives_a_rejection(self, stores_dir: Path) -> None:
         _declare(stores_dir, deny=True)
-        data = json.loads(_label("--format", "json", exit_code=2).strip())
+        data = json.loads(_label("--format", "json", exit_code=3).strip())
         assert data["status"] == "rejected"
         assert data["warnings"] == [WARNING_TEXT]
 
@@ -114,9 +114,9 @@ class TestTextFormat:
         assert "Warning:" not in plain(_label())
 
     def test_warning_survives_a_rejection(self, stores_dir: Path) -> None:
-        """A refusal exits 2 only after the text arm has printed its warnings."""
+        """A policy refusal exits 3, after the text arm has printed its warnings."""
         _declare(stores_dir, deny=True)
-        output = plain(_label(exit_code=2))
+        output = plain(_label(exit_code=3))
         assert "Command rejected" in output
         assert WARNING_TEXT in output
 
@@ -124,10 +124,6 @@ class TestTextFormat:
 # The curate writes that build their own result, instead of going through
 # ``_execute_command`` as ``label``, ``promote`` and ``feedback`` do.
 _SITES = ["entity", "prune", "restore", "redact", "link"]
-
-# ``link`` refuses with exit 1 and status "error", not 2 and "rejected".
-# That is a separate defect; these tests pin today's code.
-_REFUSAL_EXIT = {"entity": 2, "prune": 2, "restore": 2, "redact": 2, "link": 1}
 
 
 def _seed(name: str) -> str:
@@ -175,7 +171,7 @@ class TestEveryCurateWrite:
     ) -> None:
         argv = _argv(command)
         _declare(stores_dir, deny=True)
-        output = _run(argv, "--format", "json", exit_code=_REFUSAL_EXIT[command])
+        output = _run(argv, "--format", "json", exit_code=3)
         assert json.loads(output.strip())["warnings"] == [WARNING_TEXT]
 
     def test_json_key_is_present_and_empty_with_no_policies(
@@ -189,7 +185,7 @@ class TestEveryCurateWrite:
     ) -> None:
         argv = _argv(command)
         _declare(stores_dir, warn=False, deny=True)
-        output = _run(argv, "--format", "json", exit_code=_REFUSAL_EXIT[command])
+        output = _run(argv, "--format", "json", exit_code=3)
         assert json.loads(output.strip())["warnings"] == []
 
     def test_text_prints_the_warning(self, stores_dir: Path, command: str) -> None:
@@ -202,7 +198,7 @@ class TestEveryCurateWrite:
     ) -> None:
         argv = _argv(command)
         _declare(stores_dir, deny=True)
-        assert WARNING_TEXT in plain(_run(argv, exit_code=_REFUSAL_EXIT[command]))
+        assert WARNING_TEXT in plain(_run(argv, exit_code=3))
 
 
 def test_markup_in_a_policy_condition_prints_verbatim(stores_dir: Path) -> None:
@@ -221,12 +217,11 @@ def test_markup_in_a_link_refusal_prints_verbatim(stores_dir: Path) -> None:
     """A ``link`` refusal can quote the ids it was given, so its line escapes.
 
     Unescaped, ``[/x]`` in an id raises ``MarkupError`` before the refusal or
-    its warning prints. ``link`` refuses with exit 1, which is also what the
-    traceback exits with, so only the output tells the two apart.
+    its warning prints, and the traceback exits 1. The refusal exits 2.
     """
     source = _seed("a")
     _declare(stores_dir)
-    output = plain(_run(["curate", "link", source, "ghost[/x]id"], exit_code=1))
+    output = plain(_run(["curate", "link", source, "ghost[/x]id"], exit_code=2))
     assert "ghost[/x]id" in output
     assert WARNING_TEXT in output
 

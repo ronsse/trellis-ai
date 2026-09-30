@@ -1,9 +1,10 @@
 """A refused or failed curate write exits non-zero, in both output formats.
 
-``curate prune``, ``restore`` and ``redact`` already exit ``2``
-(``EXIT_VALIDATION``) on a REJECTED command and ``5`` (``EXIT_STORE``) on a
-FAILED one. ``entity``, ``promote``, ``label`` and ``feedback`` exited ``0``
-on both. ``entity`` also printed "Entity created: None" and emitted
+A write that a policy refuses exits ``3`` (``EXIT_POLICY``), one refused for
+any other reason ``2`` (``EXIT_VALIDATION``), and a FAILED one ``5``
+(``EXIT_STORE``), whichever curate command submitted it. ``entity``,
+``promote``, ``label`` and ``feedback`` once exited ``0`` on a REJECTED or
+FAILED command. ``entity`` also printed "Entity created: None" and emitted
 ``"status": "ok"``, so the Neo4j guides' smoke check,
 ``trellis curate entity concept smoke-check``, passed on a write that never
 happened.
@@ -40,6 +41,43 @@ _ENTITY = ["curate", "entity", "concept", "n"]
 _LABEL = ["curate", "label", "e1", "x"]
 _PROMOTE = ["curate", "promote", "t1", "--title", "T", "--description", "D"]
 _FEEDBACK = ["curate", "feedback", "t1", "0.9"]
+# A worker id the unattended-writer roster refuses ``precedent.promote`` to.
+_ROSTER = [*_PROMOTE, "--by", "worker:embed-traces"]
+
+# One argv per place curate.py picks an exit code. ``promote`` and
+# ``feedback`` reach the same one as ``label``, through ``_execute_command``.
+_SITES = {
+    "entity": _ENTITY,
+    "label": _LABEL,
+    "link": ["curate", "link", "a", "b"],
+    "prune": ["curate", "prune", "--reason", "r", "--noise-documents"],
+    "restore": ["curate", "restore", "--item-id", "x1", "--reason", "r"],
+    "redact": ["curate", "redact", "t", "--reason", "r", "--yes"],
+}
+
+# Only a policy refusal exits 3. The roster row is the refusal most easily
+# mistaken for a policy one, and the row with no reason is what any REJECTED
+# built outside the executor would look like.
+_OUTCOMES = [
+    pytest.param(
+        CommandStatus.REJECTED, {"rejection_reason": "policy_violation"}, 3, id="policy"
+    ),
+    pytest.param(
+        CommandStatus.REJECTED, {"rejection_reason": "immutable_core"}, 2, id="roster"
+    ),
+    pytest.param(CommandStatus.REJECTED, {}, 2, id="no-reason"),
+    pytest.param(CommandStatus.FAILED, {}, 5, id="failed"),
+]
+
+_NO_CRITERIA = (
+    "No criteria selected — a prune must say what it is pruning. "
+    "Pass at least one of --noise-documents / --unconfirmed-mints / "
+    "--lifecycle-state."
+)
+_NO_IDS = "No ids supplied — pass --item-id (repeatable) or --from-file."
+# The OS error names the path. Printed without ``escape``, its ``[/x]`` raises
+# ``MarkupError`` and restore exits 1.
+_MISSING = "ids[/x].txt"
 
 
 @pytest.fixture
@@ -67,8 +105,12 @@ def _deny_all(stores: Path) -> None:
     )
 
 
-def _fake(monkeypatch: pytest.MonkeyPatch, status: CommandStatus) -> None:
-    """Make every command come back with *status*.
+def _fake(
+    monkeypatch: pytest.MonkeyPatch,
+    status: CommandStatus,
+    metadata: dict[str, str] | None = None,
+) -> None:
+    """Make every command come back with *status* and *metadata*.
 
     A real FAILED exists: a neo4j graph with a blank ``TRELLIS_NEO4J_URI``
     fails ``entity`` and ``label`` writes. These tests stay on the default
@@ -83,6 +125,7 @@ def _fake(monkeypatch: pytest.MonkeyPatch, status: CommandStatus) -> None:
             status=status,
             operation=cmd.operation,
             message=MESSAGE,
+            metadata=dict(metadata or {}),
         )
 
     executor.execute.side_effect = _execute
@@ -98,7 +141,7 @@ class TestEntity:
     def test_rejected_json(self, stores_dir: Path) -> None:
         _deny_all(stores_dir)
         code, data = _json(_ENTITY)
-        assert code == 2, data
+        assert code == 3, data
         assert data["status"] == "rejected"
         assert data["command_id"]
         assert "node_id" not in data, "a refused write has no node to name"
@@ -106,7 +149,7 @@ class TestEntity:
     def test_rejected_text(self, stores_dir: Path) -> None:
         _deny_all(stores_dir)
         result = runner.invoke(app, _ENTITY)
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == 3, result.output
         assert "Entity created" not in plain(result.output)
 
     def test_failed_json(
@@ -142,7 +185,7 @@ class TestExecuteCommand:
     def test_rejected_json(self, stores_dir: Path, args: list[str]) -> None:
         _deny_all(stores_dir)
         code, data = _json(args)
-        assert code == 2, data
+        assert code == 3, data
         assert data["status"] == "rejected"
 
     @pytest.mark.parametrize(
@@ -151,7 +194,7 @@ class TestExecuteCommand:
     def test_rejected_text(self, stores_dir: Path, args: list[str]) -> None:
         _deny_all(stores_dir)
         result = runner.invoke(app, args)
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == 3, result.output
         assert "Command rejected" in plain(result.output)
 
     def test_failed_json(
@@ -179,3 +222,114 @@ class TestExecuteCommand:
         # label on a missing node with SUCCESS, which also exits 0.
         assert data["status"] == "duplicate"
         assert code == 0, data
+
+
+@pytest.mark.parametrize("site", sorted(_SITES))
+@pytest.mark.parametrize(("status", "metadata", "expected"), _OUTCOMES)
+class TestEveryExitSite:
+    """Every site exits by the refusal's reason, and ``link`` reports like the rest."""
+
+    def test_json(
+        self,
+        stores_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        site: str,
+        status: CommandStatus,
+        metadata: dict[str, str],
+        expected: int,
+    ) -> None:
+        _fake(monkeypatch, status, metadata)
+        code, data = _json(_SITES[site])
+        assert code == expected, data
+        assert data["status"] == status.value
+        assert data["command_id"] == "cmd-x"
+
+    def test_text(
+        self,
+        stores_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        site: str,
+        status: CommandStatus,
+        metadata: dict[str, str],
+        expected: int,
+    ) -> None:
+        _fake(monkeypatch, status, metadata)
+        result = runner.invoke(app, _SITES[site])
+        assert result.exit_code == expected, result.output
+        assert MESSAGE in plain(result.output)
+
+
+class TestRosterRefusal:
+    """The unattended-writer roster is not a ``PolicyGate``, so it exits 2."""
+
+    def test_json(self, stores_dir: Path) -> None:
+        code, data = _json(_ROSTER)
+        assert code == 2, data
+        assert data["status"] == "rejected"
+
+    def test_text(self, stores_dir: Path) -> None:
+        result = runner.invoke(app, _ROSTER)
+        assert result.exit_code == 2, result.output
+        assert "Command rejected" in plain(result.output)
+
+
+class TestBeforeACommandIsBuilt:
+    """An exit taken before any command exists answers JSON, and exits 2."""
+
+    def test_prune_without_criteria_json(self, stores_dir: Path) -> None:
+        code, data = _json(["curate", "prune", "--reason", "r"])
+        assert code == 2, data
+        assert data == {"status": "error", "message": _NO_CRITERIA}
+
+    def test_prune_without_criteria_text(self, stores_dir: Path) -> None:
+        result = runner.invoke(app, ["curate", "prune", "--reason", "r"])
+        assert result.exit_code == 2, result.output
+        assert "No criteria selected" in plain(result.output)
+
+    def test_restore_without_ids_json(self, stores_dir: Path) -> None:
+        code, data = _json(["curate", "restore", "--reason", "r"])
+        assert code == 2, data
+        assert data == {"status": "error", "message": _NO_IDS}
+
+    def test_restore_without_ids_text(self, stores_dir: Path) -> None:
+        result = runner.invoke(app, ["curate", "restore", "--reason", "r"])
+        assert result.exit_code == 2, result.output
+        assert "No ids supplied" in plain(result.output)
+
+    @pytest.mark.parametrize("unreadable", ["missing", "directory"])
+    def test_unreadable_from_file_json(
+        self, stores_dir: Path, tmp_path: Path, unreadable: str
+    ) -> None:
+        path = tmp_path / _MISSING if unreadable == "missing" else tmp_path
+        with pytest.raises(OSError) as raised:
+            path.read_text()
+        code, data = _json(
+            ["curate", "restore", "--reason", "r", "--from-file", str(path)]
+        )
+        assert code == 2, data
+        assert data == {
+            "status": "error",
+            "message": f"Cannot read --from-file: {raised.value}",
+        }
+
+    @pytest.mark.parametrize("unreadable", ["missing", "directory"])
+    def test_unreadable_from_file_text(
+        self, stores_dir: Path, tmp_path: Path, unreadable: str
+    ) -> None:
+        path = tmp_path / _MISSING if unreadable == "missing" else tmp_path
+        result = runner.invoke(
+            app, ["curate", "restore", "--reason", "r", "--from-file", str(path)]
+        )
+        assert result.exit_code == 2, result.output
+        assert "Cannot read --from-file" in plain(result.output)
+
+    def test_invalid_properties_json(self, stores_dir: Path) -> None:
+        code, data = _json([*_ENTITY, "--properties", "{bad"])
+        assert code == 2, data
+        assert data["status"] == "error"
+        assert data["message"].startswith("Invalid JSON for --properties")
+
+    def test_invalid_properties_text(self, stores_dir: Path) -> None:
+        result = runner.invoke(app, [*_ENTITY, "--properties", "{bad"])
+        assert result.exit_code == 2, result.output
+        assert "Invalid JSON for --properties" in plain(result.output)

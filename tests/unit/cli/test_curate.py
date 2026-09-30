@@ -177,7 +177,18 @@ class TestCurateLink:
 
     def test_link_missing_source(self) -> None:
         result = runner.invoke(app, ["curate", "link", "nonexistent", "also_nope"])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
+
+    def test_link_missing_source_json(self) -> None:
+        """A dangling endpoint is input to fix, reported like any refusal."""
+        result = runner.invoke(
+            app,
+            ["curate", "link", "nonexistent", "also_nope", "--format", "json"],
+        )
+        assert result.exit_code == 2
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+        assert data["command_id"]
 
 
 class TestCurateLabel:
