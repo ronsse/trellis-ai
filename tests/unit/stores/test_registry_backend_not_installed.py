@@ -433,14 +433,22 @@ def test_instantiate_missing_neo4j_driver_raises(
     assert isinstance(exc_info.value.__cause__, ImportError)
 
 
+@pytest.mark.parametrize(
+    "ensure_setting",
+    [{}, {"ensure_database_exists": False}],
+    ids=["ensure-default", "ensure-off"],
+)
 def test_arcadedb_preparation_refuses_before_touching_the_server(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ensure_setting: dict[str, Any],
 ) -> None:
     """A missing driver is refused before ArcadeDB's preparation calls HTTP.
 
-    Preparation creates the database and migrates its schema over HTTP.
-    Checking for the driver afterwards changed the server first, and with
-    the server down it reported a connection error instead of the extra.
+    Preparation creates the database and migrates its schema over HTTP; with
+    ``ensure_database_exists`` off it still migrates the schema. Checking for
+    the driver afterwards changed the server first, and with the server down
+    it reported a connection error instead of the extra.
     """
     from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
 
@@ -463,6 +471,7 @@ def test_arcadedb_preparation_refuses_before_touching_the_server(
                     "backend": "arcadedb",
                     "uri": "bolt://127.0.0.1:9",
                     "password": "unused",
+                    **ensure_setting,
                 },
             },
         },
