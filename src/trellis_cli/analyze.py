@@ -260,7 +260,7 @@ def _build_learning_registry_or_exit() -> ParameterRegistry:
     try:
         return _build_learning_registry()
     except typer.BadParameter as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
 
@@ -878,7 +878,7 @@ def replay(
             refill=not no_refill,
         )
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(code=2) from exc
 
     event_log = get_event_log()

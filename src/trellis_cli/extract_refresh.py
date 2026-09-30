@@ -427,13 +427,13 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         except typer.Exit:
             raise
         except typer.BadParameter as exc:
-            console.print(f"[red]{exc}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":
                 print(json.dumps(sanitized_error_payload(exc)))
             else:
-                console.print(f"[red]Refresh failed: {exc}[/red]")
+                console.print(f"[red]Refresh failed: {escape(str(exc))}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL) from None
     else:
         # --type path
@@ -470,13 +470,13 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         except typer.Exit:
             raise
         except typer.BadParameter as exc:
-            console.print(f"[red]{exc}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":
                 print(json.dumps(sanitized_error_payload(exc)))
             else:
-                console.print(f"[red]Refresh failed: {exc}[/red]")
+                console.print(f"[red]Refresh failed: {escape(str(exc))}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL) from None
 
     if output_format == "json":
@@ -558,7 +558,7 @@ def traces(
         if output_format == "json":
             print(json.dumps(sanitized_error_payload(exc)))
         else:
-            console.print(f"[red]Trace query failed: {exc}[/red]")
+            console.print(f"[red]Trace query failed: {escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     executor = build_curate_executor(registry)

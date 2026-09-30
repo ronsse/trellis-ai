@@ -119,6 +119,23 @@ class TestIngestTrace:
         result = runner.invoke(app, ["ingest", "trace", str(f)])
         assert result.exit_code == 1
 
+    @pytest.mark.parametrize(
+        ("payload", "kept"),
+        [({"bogus": "data"}, "[type=missing"), ({"intent": "a [/x] tag"}, "[/x]")],
+    )
+    def test_invalid_trace_error_keeps_its_brackets(
+        self, tmp_path: Path, payload: dict[str, str], kept: str
+    ) -> None:
+        """Pydantic's ``[type=...]`` survives Rich, and a quoted ``[/x]`` is text.
+
+        Printed raw, Rich deleted the first and raised MarkupError on the second.
+        """
+        f = tmp_path / "bad.json"
+        f.write_text(json.dumps(payload))
+        result = runner.invoke(app, ["ingest", "trace", str(f)])
+        assert result.exit_code == 1, result.output
+        assert kept in plain(result.output)
+
     def test_ingest_trace_file_not_found(self) -> None:
         result = runner.invoke(app, ["ingest", "trace", "/nonexistent/file.json"])
         assert result.exit_code == 1

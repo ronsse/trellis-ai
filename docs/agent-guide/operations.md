@@ -1251,7 +1251,11 @@ trellis retrieve search <query> [--limit N] [--domain DOMAIN] [--include-chunks]
 > with `emoji=False`, and every identifier or path reaching a Rich renderer is
 > wrapped in `rich.markup.escape`. `tests/unit/test_rich_id_markup_rule.py`
 > derives both halves from the AST and fails the build on a new bare
-> `Console()` or a new unescaped id.
+> `Console()` or a new unescaped id. An error line that prints the exception
+> it caught escapes that text the same way, because pydantic's
+> `[type=missing, …]` and an install hint's `".[cloud]"` were deleted and a
+> quoted `[/x]` raised `MarkupError`;
+> `tests/unit/test_rich_exception_markup_rule.py` fails the build on a new one.
 >
 > Note **where the two corruptions sat in that one line**, because the fixes
 > differ: the emoji was in the id and the eaten `[document]` was in the

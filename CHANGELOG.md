@@ -253,9 +253,9 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
-- **A policy refusal exits `3` on every `trellis curate` write, and
-  `curate link` refuses like the rest.** A refused write exited `2`,
-  whatever refused it. A policy refusal, by `deny` or `require_approval`,
+- **A policy refusal exits `3` on every single-command `trellis curate`
+  write, and `curate link` refuses like the rest.** A refused write exited
+  `2`, whatever refused it. A policy refusal, by `deny` or `require_approval`,
   now exits `3` ("get approval, don't retry"), and any other refusal, such
   as the unattended-writer roster or a blank `--reason`, still exits `2`.
   `curate link` exited `1`, the code for a bug, on every refusal and
@@ -267,7 +267,9 @@ All notable changes to Trellis will be documented in this file.
   be read prints a message and exits `2` instead of a traceback, and invalid
   `entity --properties` JSON exits `2`, not `1`. A REJECTED `CommandResult`
   names its audit reason in `metadata["rejection_reason"]`. No REST or MCP
-  response carries `metadata`, so neither changes.
+  response carries `metadata`, so neither changes. `curate promote-learning`
+  is unchanged: it reports each candidate's outcome and exits `0` even when
+  policy refuses every one.
   ([#681](https://github.com/ronsse/trellis-ai/pull/681))
 
 - **Registry errors and warnings stop repeating config.yaml keys and URIs.**
@@ -360,6 +362,31 @@ All notable changes to Trellis will be documented in this file.
   its JSON now reports `"dry_run": false` where it reported `true`.
   ([#659](https://github.com/ronsse/trellis-ai/pull/659),
   [#671](https://github.com/ronsse/trellis-ai/pull/671))
+
+- **A store whose optional extra is missing is refused with its install
+  command.** Opening a `postgres`, `pgvector`, `s3` or `neo4j` store without
+  its dependencies raised `ModuleNotFoundError`, `ImportError`, or a
+  `NameError` for the Neo4j driver, so a command that does not catch the
+  error printed a traceback and exited `1`. `StoreRegistry` now raises
+  `BackendNotInstalledError`, which names the extra to install, and such a
+  command exits `5`. A command that catches it keeps its exit code, and the
+  API server (`trellis serve`, `trellis-api`), the only opener of an `s3`
+  store, still exits `3` at startup.
+  ([#679](https://github.com/ronsse/trellis-ai/pull/679))
+
+- **Error lines that print a caught exception keep the brackets in its
+  text.** They passed that text through Rich markup, which deleted any
+  `[word…]` and raised `MarkupError` on a stray `[/x]`.
+  `trellis ingest trace` on an invalid trace now shows pydantic's
+  `[type=missing, …]` detail, an install hint in such a line keeps its extra
+  (`uv pip install -e ".[cloud]"`, not `-e "."`), and an input that quotes
+  `[/x]`, such as a trace intent or a line of `learning_params.yaml`, prints
+  its error where it printed a traceback. Thirty error lines across `admin`,
+  `analyze`, `classify`, `curate`, `extract`, `ingest` and `worker` escape the
+  text, and `tests/unit/test_rich_exception_markup_rule.py` fails the build on
+  a new one. A message carried on a result object, such as `ingest trace`'s
+  report of a failed write, still prints through markup.
+  ([#680](https://github.com/ronsse/trellis-ai/pull/680))
 
 ## [0.9.0] - 2026-05-13
 
