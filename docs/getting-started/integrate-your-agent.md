@@ -181,7 +181,7 @@ path is fully available on `main` today.
    Or from the CLI, against the local stores without a server:
 
    ```bash
-   trellis ingest trace --file ./trace.json --format json
+   trellis ingest trace ./trace.json --format json
    ```
 
 3. **Retrieve a context pack** before a job acts:

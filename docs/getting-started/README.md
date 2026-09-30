@@ -70,7 +70,7 @@ You now have a working substrate. If you'd rather have the config and stores in 
      "context": {"domain": "general"}
    }
    EOF
-   trellis ingest trace --file /tmp/trace.json --format json
+   trellis ingest trace /tmp/trace.json --format json
    ```
 
 4. **Assemble a context pack.**
