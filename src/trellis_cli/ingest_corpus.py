@@ -183,7 +183,7 @@ def ingest_corpus(
             )
         else:
             console.print(f"[red]Path not found: {escape(path)}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+        raise typer.Exit(code=EXIT_VALIDATION)
 
     extra_metadata = _parse_tags(tag, domain, output_format)
 

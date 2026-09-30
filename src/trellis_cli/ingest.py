@@ -34,7 +34,7 @@ from trellis.schemas.evidence import Evidence
 from trellis.schemas.extraction import ExtractionResult
 from trellis.schemas.trace import Trace
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.exit_codes import EXIT_VALIDATION, exit_code_for, refusal_exit_code
 from trellis_cli.ingest_conversations import ingest_conversations
 from trellis_cli.ingest_corpus import ingest_corpus
 from trellis_cli.output import build_console, emit_json
@@ -47,7 +47,7 @@ console = build_console()
 def _fail(
     message: str, output_format: str, *, error_type: str = "FileNotFoundError"
 ) -> NoReturn:
-    """Report *message* on the caller's chosen surface, then exit non-zero.
+    """Report *message* on the caller's chosen surface, then exit ``EXIT_VALIDATION``.
 
     The JSON branch is not optional. ``--format json`` is documented as
     *the* machine surface, so an error delivered as Rich prose on stdout is
@@ -77,8 +77,8 @@ def _fail(
             }
         )
     else:
-        console.print(f"[red]{message}[/red]")
-    raise typer.Exit(code=EXIT_INTERNAL)
+        console.print(f"[red]{escape(message)}[/red]")
+    raise typer.Exit(code=EXIT_VALIDATION)
 
 
 ingest_app.command("corpus")(ingest_corpus)
@@ -86,24 +86,20 @@ ingest_app.command("conversations")(ingest_conversations)
 
 
 @ingest_app.command("trace")
-def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
+def ingest_trace(
     file: str = typer.Argument(None, help="Path to trace JSON file, or '-' for stdin"),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
     ),
 ) -> None:
     """Ingest a trace from a JSON file or stdin."""
-    # Read input
-    if file == "-" or file is None:
-        raw = sys.stdin.read()
-    else:
-        path = Path(file)
-        if not path.exists():
-            _fail(f"File not found: {file}", output_format)
-        raw = path.read_text()
-
-    # Parse and validate
+    # Read, parse and validate: a file that exists but cannot be read is
+    # input the caller must fix, like one that does not parse.
+    path = None if file == "-" or file is None else Path(file)
+    if path is not None and not path.exists():
+        _fail(f"File not found: {file}", output_format)
     try:
+        raw = sys.stdin.read() if path is None else path.read_text()
         data = json.loads(raw)
         trace = Trace.model_validate(data)
     except Exception as exc:
@@ -111,7 +107,7 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
             emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]Invalid trace: {escape(str(exc))}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL) from None
+        raise typer.Exit(code=EXIT_VALIDATION) from None
 
     # Persist via the governed mutation pipeline
     registry = _get_registry()
@@ -133,8 +129,10 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
             }
             emit_json(error_payload)
         else:
-            console.print(f"[red]Failed to ingest trace: {result.message}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+            console.print(
+                f"[red]Failed to ingest trace: {escape(result.message)}[/red]"
+            )
+        raise typer.Exit(code=refusal_exit_code(result))
 
     # Feature-flagged post-ingest trace->graph extraction
     # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs the deterministic
@@ -155,7 +153,7 @@ def ingest_trace(  # noqa: PLR0912 - CLI dispatch with explicit format branching
     else:
         console.print(f"[green]Trace ingested[/green]: {escape(trace.trace_id)}")
         console.print(f"  Source: {trace.source}")
-        console.print(f"  Intent: {trace.intent}")
+        console.print(f"  Intent: {trace.intent}", markup=False, highlight=False)
         if extraction is not None and extraction.get("executed"):
             console.print(
                 f"  Extracted: {extraction['entities']} entities, "
@@ -183,7 +181,7 @@ def ingest_evidence(
             emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]Invalid evidence: {escape(str(exc))}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL) from None
+        raise typer.Exit(code=EXIT_VALIDATION) from None
 
     # Persist to document store
     registry = _get_registry()
@@ -370,7 +368,7 @@ def ingest_dbt_manifest(
             emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]Could not read manifest: {escape(str(exc))}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL) from None
+        raise typer.Exit(code=EXIT_VALIDATION) from None
 
     from trellis_workers.extract import DbtManifestExtractor  # noqa: PLC0415
 
@@ -391,7 +389,7 @@ def ingest_dbt_manifest(
             emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]dbt ingest failed: {escape(str(exc))}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL) from None
+        raise typer.Exit(code=exit_code_for(exc)) from None
 
     doc_count, embedded = _index_dbt_descriptions(registry, result)
 
@@ -443,7 +441,7 @@ def ingest_openlineage(
             emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]Could not read events file: {escape(str(exc))}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL) from None
+        raise typer.Exit(code=EXIT_VALIDATION) from None
 
     from trellis_workers.extract import OpenLineageExtractor  # noqa: PLC0415
 
@@ -464,7 +462,7 @@ def ingest_openlineage(
             emit_json(sanitized_error_payload(exc))
         else:
             console.print(f"[red]OpenLineage ingest failed: {escape(str(exc))}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL) from None
+        raise typer.Exit(code=exit_code_for(exc)) from None
 
     counts = {"nodes": nodes, "edges": edges}
     if output_format == "json":

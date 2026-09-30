@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.mutate.commands import CommandResult, CommandStatus, Operation
 from trellis_cli import exit_codes
 from trellis_cli.extract_refresh import _emit_refresh_event, _snapshot_entities
 
@@ -39,6 +40,50 @@ class TestExitCodeMap:
             exit_codes.EXIT_STORE,
         }
         assert len(values) == 6
+
+
+class TestRefusalExitCode:
+    """A refused or failed write exits by its reason, for curate and ingest alike."""
+
+    @pytest.mark.parametrize(
+        ("status", "metadata", "code"),
+        [
+            pytest.param(
+                CommandStatus.REJECTED,
+                {"rejection_reason": "policy_violation"},
+                exit_codes.EXIT_POLICY,
+                id="policy",
+            ),
+            pytest.param(
+                CommandStatus.REJECTED,
+                {"rejection_reason": "immutable_core"},
+                exit_codes.EXIT_VALIDATION,
+                id="other-refusal",
+            ),
+            pytest.param(
+                CommandStatus.REJECTED, {}, exit_codes.EXIT_VALIDATION, id="no-reason"
+            ),
+            pytest.param(CommandStatus.FAILED, {}, exit_codes.EXIT_STORE, id="failed"),
+            # The reason is read only on a refusal: a FAILED result is a store
+            # outcome whatever its metadata says.
+            pytest.param(
+                CommandStatus.FAILED,
+                {"rejection_reason": "policy_violation"},
+                exit_codes.EXIT_STORE,
+                id="failed-with-reason",
+            ),
+        ],
+    )
+    def test_maps_status_and_reason(
+        self, status: CommandStatus, metadata: dict[str, str], code: int
+    ) -> None:
+        result = CommandResult(
+            command_id="c",
+            status=status,
+            operation=Operation.TRACE_INGEST,
+            metadata=metadata,
+        )
+        assert exit_codes.refusal_exit_code(result) == code
 
 
 class TestExtractRefreshSnapshotErrors:
