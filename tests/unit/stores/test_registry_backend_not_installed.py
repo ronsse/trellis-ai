@@ -389,6 +389,9 @@ def test_instantiate_missing_module_raises(
         _ = registry.knowledge.document_store
     assert exc_info.value.backend_name == "postgres"
     assert exc_info.value.extra == "cloud"
+    # The refusal names the extra, not the module that failed; the chained
+    # ImportError is what a traceback or an exc_info log line shows.
+    assert isinstance(exc_info.value.__cause__, ImportError)
 
 
 def test_instantiate_missing_neo4j_driver_raises(
@@ -427,6 +430,7 @@ def test_instantiate_missing_neo4j_driver_raises(
         _ = registry.knowledge.graph_store
     assert exc_info.value.backend_name == "neo4j"
     assert exc_info.value.extra == "neo4j"
+    assert isinstance(exc_info.value.__cause__, ImportError)
 
 
 def test_instantiate_constructor_import_error_raises(
@@ -449,6 +453,7 @@ def test_instantiate_constructor_import_error_raises(
         _ = registry.knowledge.blob_store
     assert exc_info.value.backend_name == "s3"
     assert exc_info.value.extra == "cloud"
+    assert isinstance(exc_info.value.__cause__, ImportError)
 
 
 # -- _load_fingerprint_meta raises ---------------------------------------
