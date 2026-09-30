@@ -19,6 +19,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from trellis.core.error_sanitize import describe_yaml_error
+from trellis.core.path_presence import path_is_present
 from trellis.core.version import (
     STALENESS_FRESH,
     STALENESS_NOT_CHECKED,
@@ -1660,7 +1661,10 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
 
     from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
 
-    if not path.exists():
+    # ``path_is_present``, not ``Path.exists()``, which calls a symlink loop or
+    # a path through a regular file absent and raises on an unsearchable parent
+    # or an overlong name. The read below reports each with the OS's reason.
+    if not path_is_present(path):
         console.print(f"[red]Config file not found: {escape(str(path))}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION)
 
