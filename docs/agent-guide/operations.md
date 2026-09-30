@@ -834,11 +834,14 @@ trellis curate label 01JRK5N7QF critical-path --format json
   "status": "success",
   "command_id": "01JRK9C1QF8GHTM2XVZP3CWD9E",
   "operation": "label.add",
-  "message": "Label added",
-  "created_id": null,
+  "message": "Label 'critical-path' added to 01JRK5N7QF",
+  "created_id": "01JRK5N7QF",
   "warnings": []
 }
 ```
+
+A `target_id` that names no node exits `2` with `"status": "rejected"` and
+the message `Node not found: <target_id>`, and no label is written.
 
 ### `trellis curate redact`
 
@@ -1690,8 +1693,8 @@ result = executor.execute(cmd)
 
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
-| `label.add` | `target_id`, `label` | Add a label (also available via CLI) |
-| `label.remove` | `target_id`, `label` | Remove a label |
+| `label.add` | `target_id`, `label` | Add a label (also available via CLI). A `target_id` that names no node is rejected (`target_not_found`). |
+| `label.remove` | `target_id`, `label` | Remove a label. A `target_id` that names no node is rejected (`target_not_found`). |
 
 ### Feedback Operations
 

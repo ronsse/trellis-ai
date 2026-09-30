@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 
 from trellis.errors import ValidationError
-from trellis.mutate.commands import Command, Operation
+from trellis.mutate import build_curate_executor
+from trellis.mutate.commands import (
+    BatchStrategy,
+    Command,
+    CommandBatch,
+    CommandStatus,
+    Operation,
+)
 from trellis.mutate.handlers import (
     EntityCreateHandler,
     FeedbackRecordHandler,
@@ -179,15 +186,16 @@ class TestLabelAddHandler:
         assert node is not None
         assert node["properties"]["labels"].count("existing") == 1
 
-    def test_missing_node(self, registry: StoreRegistry) -> None:
+    def test_missing_node_is_refused(self, registry: StoreRegistry) -> None:
         handler = LabelAddHandler(registry)
         cmd = Command(
             operation=Operation.LABEL_ADD,
             args={"target_id": "nonexistent", "label": "x"},
         )
-        result_id, message = handler.handle(cmd)
-        assert result_id is None
-        assert "not found" in message.lower()
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+        assert exc_info.value.code == "target_not_found"
+        assert str(exc_info.value) == "Node not found: nonexistent"
 
 
 class TestLabelRemoveHandler:
@@ -207,6 +215,66 @@ class TestLabelRemoveHandler:
         assert node is not None
         assert "a" not in node["properties"]["labels"]
         assert "b" in node["properties"]["labels"]
+
+
+class TestLabelOnAMissingNode:
+    """A label on a node id that names no node is refused, and audited as one.
+
+    A handler that returns is a success to the executor, which then records a
+    ``mutation.executed`` for a write that never happened.
+    """
+
+    @pytest.mark.parametrize(
+        "operation", [Operation.LABEL_ADD, Operation.LABEL_REMOVE], ids=str
+    )
+    def test_rejected_and_audited(
+        self, registry: StoreRegistry, operation: Operation
+    ) -> None:
+        node_id = registry.knowledge.graph_store.upsert_node(
+            node_id=None,
+            node_type="concept",
+            properties={"name": "test", "labels": ["x"]},
+        )
+        executor = build_curate_executor(registry)
+        applied = executor.execute(
+            Command(operation=operation, args={"target_id": node_id, "label": "x"})
+        )
+        missing = executor.execute(
+            Command(operation=operation, args={"target_id": "ghost", "label": "x"})
+        )
+
+        assert applied.status == CommandStatus.SUCCESS
+        assert missing.status == CommandStatus.REJECTED
+        assert missing.message == "Node not found: ghost"
+        assert missing.metadata["rejection_reason"] == "target_not_found"
+        log = registry.operational.event_log
+        executed = log.get_events(event_type=EventType.MUTATION_EXECUTED)
+        assert [e.payload["command_id"] for e in executed] == [applied.command_id]
+        rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert [(e.payload["command_id"], e.payload["reason"]) for e in rejected] == [
+            (missing.command_id, "target_not_found")
+        ]
+
+    def test_stop_on_error_batch_stops_at_it(self, registry: StoreRegistry) -> None:
+        """A returned miss let a ``stop_on_error`` batch run the commands after it."""
+        batch = CommandBatch(
+            commands=[
+                Command(
+                    operation=Operation.LABEL_ADD,
+                    args={"target_id": "ghost", "label": "x"},
+                ),
+                Command(
+                    operation=Operation.ENTITY_CREATE,
+                    args={"entity_type": "concept", "name": "after"},
+                ),
+            ],
+            strategy=BatchStrategy.STOP_ON_ERROR,
+        )
+
+        results = build_curate_executor(registry).execute_batch(batch)
+
+        assert [r.status for r in results] == [CommandStatus.REJECTED]
+        assert registry.knowledge.graph_store.query(node_type="concept") == []
 
 
 class TestFeedbackRecordHandler:

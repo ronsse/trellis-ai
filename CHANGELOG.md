@@ -395,6 +395,20 @@ All notable changes to Trellis will be documented in this file.
   to install. It now checks for the driver first, as the constructor does.
   ([#682](https://github.com/ronsse/trellis-ai/pull/682))
 
+- **A label on a node that does not exist is refused, not reported as
+  done.** `label.add` and `label.remove` on a missing `target_id` returned
+  success with the message `Node not found: <target_id>`, audited as a
+  `mutation.executed` for a label never written. Both now raise a
+  `ValidationError` with code `target_not_found`, as `link.create` does
+  with `orphan_edge`: `trellis curate label`, MCP `execute_mutation` and
+  REST `POST /api/v1/commands/batch` report `rejected`, audited as a
+  `mutation.rejected` with that reason; the CLI exits `2`, not `0`, and a
+  `stop_on_error` batch stops there. `feedback.record` and
+  `precedent.promote` still accept an id that names nothing: a feedback
+  target may be a trace or precedent id, so no one store can check it,
+  and a promoted precedent lives in its own event.
+  ([#683](https://github.com/ronsse/trellis-ai/pull/683))
+
 - **Every `trellis ingest` command exits by the exit-code map.** A path that
   does not exist, and a file `ingest trace`, `evidence`, `dbt-manifest` or
   `openlineage` cannot read or parse, exited `1`; they now exit `2`, and
