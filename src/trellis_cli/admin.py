@@ -10,7 +10,7 @@ import time
 from collections import Counter, defaultdict
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 import structlog
@@ -1038,8 +1038,21 @@ def _print_quickstart_summary(
     )
 
 
+def _refuse_option(msg: str, output_format: str) -> NoReturn:
+    """Print an invalid-option refusal in the chosen format and exit 2.
+
+    The message quotes the value as typed, so the text arm escapes it: Rich
+    reads a ``[word]`` as a style tag and deletes it.
+    """
+    if output_format == "json":
+        typer.echo(json.dumps({"status": "error", "error": msg}))
+    else:
+        console.print(f"[red]Error:[/red] {escape(msg)}")
+    raise typer.Exit(EXIT_VALIDATION)
+
+
 @admin_app.command()
-def quickstart(  # noqa: PLR0912
+def quickstart(
     scope: str = typer.Option("root", help="root (global) or project (local)"),
     force: bool = typer.Option(False, "--force", help="Overwrite existing skills"),
     with_skills: str | None = typer.Option(
@@ -1056,17 +1069,15 @@ def quickstart(  # noqa: PLR0912
     ),
 ) -> None:
     """Initialize stores and print the command that registers the MCP server."""
-    msg: str | None = None
     if scope not in ("root", "project"):
-        msg = f"--scope must be 'root' or 'project', got {scope!r}"
-    elif with_skills is not None and with_skills not in ("user", "project"):
-        msg = f"--with-skills must be 'user' or 'project', got {with_skills!r}"
-    if msg is not None:
-        if output_format == "json":
-            typer.echo(json.dumps({"status": "error", "error": msg}))
-        else:
-            console.print(f"[red]Error:[/red] {escape(msg)}")
-        raise typer.Exit(EXIT_VALIDATION)
+        _refuse_option(
+            f"--scope must be 'root' or 'project', got {scope!r}", output_format
+        )
+    if with_skills is not None and with_skills not in ("user", "project"):
+        _refuse_option(
+            f"--with-skills must be 'user' or 'project', got {with_skills!r}",
+            output_format,
+        )
     project_dir = Path.cwd()
     if scope == "project":
         config_dir = project_dir / ".trellis"
@@ -1137,12 +1148,9 @@ def install_skills_cmd(
 ) -> None:
     """Install the drop-in agent skills into a Claude Code skills directory."""
     if scope not in ("user", "project"):
-        msg = f"scope must be 'user' or 'project', got {scope!r}"
-        if output_format == "json":
-            typer.echo(json.dumps({"status": "error", "error": msg}))
-        else:
-            console.print(f"[red]Error:[/red] {msg}")
-        raise typer.Exit(EXIT_VALIDATION)
+        _refuse_option(
+            f"scope must be 'user' or 'project', got {scope!r}", output_format
+        )
 
     skills_dir = get_skills_target_dir(
         scope,
