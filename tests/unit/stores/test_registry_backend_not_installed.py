@@ -7,6 +7,9 @@ Covers C2 Phase 2 of the silent-fallback cleanup
   ``src/trellis/stores/registry.py`` now raises
   :class:`BackendNotInstalledError` (or a sibling
   :class:`ConfigError`) naming the missing extra.
+* ``StoreRegistry._instantiate`` raises it too, when a backend's module,
+  its registry preparation or its constructor needs a module that is not
+  installed.
 * The default-substrate path (SQLite + local blob) keeps working with
   no optional extras installed.
 * Installed-but-misconfigured cases raise a *different* error class
@@ -14,7 +17,8 @@ Covers C2 Phase 2 of the silent-fallback cleanup
   tell "extra missing" apart from "wrong knob".
 
 All synthetic missing-import scenarios use ``monkeypatch`` to make the
-import machinery raise; no extras are actually uninstalled. Tests run
+import machinery raise, or to clear the flag a guarded import sets; no
+extras are actually uninstalled. Tests run
 the same way whether or not ``[llm-openai]``, ``[neo4j]``,
 ``[arcadedb]`` etc. happen to be present in the test environment.
 """
@@ -351,6 +355,105 @@ def test_resolve_substrate_class_unknown_backend_still_returns_none(
         config_dir=config_dir, data_dir=tmp_path / "data"
     )
     assert registry._resolve_substrate_class("graph") is None
+
+
+# -- _instantiate raises --------------------------------------------------
+
+
+def test_instantiate_missing_module_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A backend module whose import needs a missing module raises loudly.
+
+    Pins the import site in ``_instantiate``: ``trellis.stores.postgres``
+    imports ``psycopg_pool`` at module level.
+    """
+    # Block the package too: an earlier test may have cached it, and a
+    # cached module would slip the import through.
+    _block_imports(monkeypatch, {"psycopg_pool", "psycopg", "trellis.stores.postgres"})
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        stores={
+            "knowledge": {
+                "document": {
+                    "backend": "postgres",
+                    "dsn": "postgresql://nobody@127.0.0.1:9/x",
+                },
+            },
+        },
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(BackendNotInstalledError) as exc_info:
+        _ = registry.knowledge.document_store
+    assert exc_info.value.backend_name == "postgres"
+    assert exc_info.value.extra == "cloud"
+    # The refusal names the extra, not the module that failed; the chained
+    # ImportError is what a traceback or an exc_info log line shows.
+    assert isinstance(exc_info.value.__cause__, ImportError)
+
+
+def test_instantiate_missing_neo4j_driver_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Registry preparation that needs a missing driver raises loudly.
+
+    Pins the preparation site in ``_instantiate``: the Neo4j store's
+    ``prepare_registry_params`` builds the driver before the constructor
+    runs.
+    """
+    # Both halves of a missing driver, so the test behaves the same with
+    # or without ``neo4j`` installed: the flag ``check_driver_installed``
+    # reads, and the name the guarded ``from neo4j import GraphDatabase``
+    # leaves unbound.
+    monkeypatch.setattr("trellis.stores.bolt_opencypher.base.HAS_NEO4J", False)
+    monkeypatch.delattr("trellis.stores.neo4j.base.GraphDatabase", raising=False)
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        stores={
+            "knowledge": {
+                # Preparation refuses a missing password before it builds
+                # the driver.
+                "graph": {
+                    "backend": "neo4j",
+                    "uri": "bolt://127.0.0.1:9",
+                    "password": "unused",
+                },
+            },
+        },
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(BackendNotInstalledError) as exc_info:
+        _ = registry.knowledge.graph_store
+    assert exc_info.value.backend_name == "neo4j"
+    assert exc_info.value.extra == "neo4j"
+    assert isinstance(exc_info.value.__cause__, ImportError)
+
+
+def test_instantiate_constructor_import_error_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store constructor that needs a missing module raises loudly.
+
+    Pins the constructor site in ``_instantiate``: ``S3BlobStore.__init__``
+    raises ``ImportError`` when ``boto3`` is missing.
+    """
+    monkeypatch.setattr("trellis.stores.s3.blob.HAS_BOTO3", False)
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        stores={"knowledge": {"blob": {"backend": "s3", "bucket": "b"}}},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(BackendNotInstalledError) as exc_info:
+        _ = registry.knowledge.blob_store
+    assert exc_info.value.backend_name == "s3"
+    assert exc_info.value.extra == "cloud"
+    assert isinstance(exc_info.value.__cause__, ImportError)
 
 
 # -- _load_fingerprint_meta raises ---------------------------------------
