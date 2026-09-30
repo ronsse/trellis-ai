@@ -354,7 +354,7 @@ All notable changes to Trellis will be documented in this file.
   Thirty error lines across `admin`, `analyze`, `classify`, `curate`,
   `extract`, `ingest` and `worker` escape the text, and
   `tests/unit/test_rich_exception_markup_rule.py` fails the build on a new one.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#680](https://github.com/ronsse/trellis-ai/pull/680))
 
 ## [0.9.0] - 2026-05-13
 
