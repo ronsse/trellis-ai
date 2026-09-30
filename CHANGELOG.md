@@ -395,6 +395,20 @@ All notable changes to Trellis will be documented in this file.
   to install. It now checks for the driver first, as the constructor does.
   ([#682](https://github.com/ronsse/trellis-ai/pull/682))
 
+- **A label on a node that does not exist is refused, not reported as
+  done.** `label.add` and `label.remove` on a missing `target_id` returned
+  success with the message `Node not found: <target_id>`, audited as a
+  `mutation.executed` for a label never written. Both now raise a
+  `ValidationError` with code `target_not_found`, as `link.create` does
+  with `orphan_edge`: `trellis curate label`, MCP `execute_mutation` and
+  REST `POST /api/v1/commands/batch` report `rejected`, audited as a
+  `mutation.rejected` with that reason; the CLI exits `2`, not `0`, and a
+  `stop_on_error` batch stops there. `feedback.record` and
+  `precedent.promote` still accept an id that names nothing: a feedback
+  target may be a trace or precedent id, so no one store can check it,
+  and a promoted precedent lives in its own event.
+  ([#683](https://github.com/ronsse/trellis-ai/pull/683))
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.
