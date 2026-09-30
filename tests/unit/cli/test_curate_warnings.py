@@ -75,48 +75,56 @@ def _declare(
     )
 
 
-def _label(*extra: str, exit_code: int = 0) -> str:
-    result = runner.invoke(app, ["curate", "label", "ent_1", "important", *extra])
+@pytest.fixture
+def node_id(stores_dir: Path) -> str:
+    """An entity to label, created before the test body declares a policy."""
+    return _seed("labelled")
+
+
+def _label(node_id: str, *extra: str, exit_code: int = 0) -> str:
+    result = runner.invoke(app, ["curate", "label", node_id, "important", *extra])
     assert result.exit_code == exit_code, result.output
     return result.output
 
 
 class TestJsonFormat:
-    def test_warning_present_when_a_policy_fires(self, stores_dir: Path) -> None:
+    def test_warning_present_when_a_policy_fires(
+        self, stores_dir: Path, node_id: str
+    ) -> None:
         _declare(stores_dir)
-        data = json.loads(_label("--format", "json").strip())
+        data = json.loads(_label(node_id, "--format", "json").strip())
         assert data["warnings"] == [WARNING_TEXT]
 
-    def test_warning_survives_a_rejection(self, stores_dir: Path) -> None:
+    def test_warning_survives_a_rejection(self, stores_dir: Path, node_id: str) -> None:
         _declare(stores_dir, deny=True)
-        data = json.loads(_label("--format", "json", exit_code=3).strip())
+        data = json.loads(_label(node_id, "--format", "json", exit_code=3).strip())
         assert data["status"] == "rejected"
         assert data["warnings"] == [WARNING_TEXT]
 
-    def test_key_is_present_and_empty_with_no_policies(self, stores_dir: Path) -> None:
-        data = json.loads(_label("--format", "json").strip())
+    def test_key_is_present_and_empty_with_no_policies(self, node_id: str) -> None:
+        data = json.loads(_label(node_id, "--format", "json").strip())
         assert "warnings" in data, "absent key is indistinguishable from an old build"
         assert data["warnings"] == []
 
 
 class TestTextFormat:
-    def test_warning_is_printed(self, stores_dir: Path) -> None:
+    def test_warning_is_printed(self, stores_dir: Path, node_id: str) -> None:
         _declare(stores_dir)
-        assert WARNING_TEXT in plain(_label())
+        assert WARNING_TEXT in plain(_label(node_id))
 
-    def test_nothing_printed_when_no_policy_fires(self, stores_dir: Path) -> None:
+    def test_nothing_printed_when_no_policy_fires(self, node_id: str) -> None:
         """No policies must leave the rendering exactly as it was.
 
         The transparency property the JSON arm gives up on purpose: a human
         surface has no parser to mislead, so an empty ``Warning:`` line would
         be noise rather than evidence.
         """
-        assert "Warning:" not in plain(_label())
+        assert "Warning:" not in plain(_label(node_id))
 
-    def test_warning_survives_a_rejection(self, stores_dir: Path) -> None:
+    def test_warning_survives_a_rejection(self, stores_dir: Path, node_id: str) -> None:
         """A policy refusal exits 3, after the text arm has printed its warnings."""
         _declare(stores_dir, deny=True)
-        output = plain(_label(exit_code=3))
+        output = plain(_label(node_id, exit_code=3))
         assert "Command rejected" in output
         assert WARNING_TEXT in output
 

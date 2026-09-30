@@ -218,8 +218,8 @@ class TestExecuteCommand:
     ) -> None:
         _fake(monkeypatch, CommandStatus.DUPLICATE)
         code, data = _json(_LABEL)
-        # The status proves the fake served: a real executor would answer a
-        # label on a missing node with SUCCESS, which also exits 0.
+        # The status proves the fake served: a real executor refuses a label
+        # on a missing node, which exits 2.
         assert data["status"] == "duplicate"
         assert code == 0, data
 

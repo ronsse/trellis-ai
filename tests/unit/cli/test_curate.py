@@ -192,17 +192,26 @@ class TestCurateLink:
 
 
 class TestCurateLabel:
+    def _create_node(self) -> str:
+        created = runner.invoke(
+            app, ["curate", "entity", "person", "Plain", "--format", "json"]
+        )
+        node_id: str = json.loads(created.stdout)["node_id"]
+        return node_id
+
     def test_label(self) -> None:
-        result = runner.invoke(app, ["curate", "label", "ent_1", "important"])
+        node_id = self._create_node()
+        result = runner.invoke(app, ["curate", "label", node_id, "important"])
         assert result.exit_code == 0
 
     def test_label_json(self) -> None:
+        node_id = self._create_node()
         result = runner.invoke(
             app,
             [
                 "curate",
                 "label",
-                "ent_1",
+                node_id,
                 "critical",
                 "--format",
                 "json",
@@ -210,15 +219,32 @@ class TestCurateLabel:
         )
         data = json.loads(result.stdout.strip())
         assert data["operation"] == "label.add"
+        assert data["status"] == "success"
+        assert data["created_id"] == node_id
+
+    def test_label_missing_node_json(self) -> None:
+        """A node id that names no node is input to fix, and nothing is written."""
+        result = runner.invoke(
+            app, ["curate", "label", "ghost", "critical", "--format", "json"]
+        )
+        assert result.exit_code == 2, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+        assert data["message"] == "Node not found: ghost"
+        assert data["created_id"] is None
+
+    def test_label_missing_node_text(self) -> None:
+        result = runner.invoke(app, ["curate", "label", "ghost", "critical"])
+        assert result.exit_code == 2, result.output
+        output = plain(result.output)
+        assert "Command rejected" in output
+        assert "Node not found: ghost" in output
 
     def test_label_message_echoes_the_label_verbatim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The label is applied before its message renders, as for promote."""
-        created = runner.invoke(
-            app, ["curate", "entity", "person", "Plain", "--format", "json"]
-        )
-        node_id = json.loads(created.stdout)["node_id"]
+        node_id = self._create_node()
         force_colour(monkeypatch, curate_cli)
         result = runner.invoke(app, ["curate", "label", node_id, "[bold]l[/x]"])
         assert result.exit_code == 0, plain(result.output)
