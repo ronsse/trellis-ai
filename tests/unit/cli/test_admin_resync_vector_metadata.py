@@ -11,6 +11,7 @@ needing none is the point of this command existing beside
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -204,3 +205,24 @@ class TestTextOutput:
         result = runner.invoke(admin_app, ["resync-vector-metadata"])
         assert result.exit_code == 0, result.output
         assert "repaired 1 of 1 scanned" in plain(result.output)
+
+    def test_a_missing_backend_keeps_its_install_hint(
+        self, cli_env: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rich printed ``uv pip install -e "."``, which installs the wrong thing."""
+        hint = 'Backend is not installed. Run: uv pip install -e ".[cloud]"'
+
+        class _Knowledge:
+            document_store = None
+
+            @property
+            def vector_store(self) -> Any:
+                raise RuntimeError(hint)
+
+        monkeypatch.setattr(
+            "trellis_cli.admin_resync_vector_metadata._get_registry",
+            lambda: SimpleNamespace(knowledge=_Knowledge()),
+        )
+        result = runner.invoke(admin_app, ["resync-vector-metadata", "--dry-run"])
+        assert result.exit_code == 1, result.output
+        assert '".[cloud]"' in plain(result.output)

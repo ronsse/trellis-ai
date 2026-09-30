@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 import typer
+from rich.markup import escape
 
 from trellis.core.vector_metadata import (
     MIRRORED_METADATA_KEYS,
@@ -178,7 +179,7 @@ def register(admin_app: typer.Typer) -> None:
             if output_format == "json":
                 print(json.dumps({"status": "error", "message": str(exc)}))
             else:
-                console.print(f"[red]{exc}[/red]")
+                console.print(f"[red]{escape(str(exc))}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL) from exc
 
         if output_format == "json":

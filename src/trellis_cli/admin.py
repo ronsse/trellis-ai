@@ -1677,7 +1677,7 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
     except UnicodeDecodeError as exc:
         console.print(
             f"[red]Could not read {escape(str(path))}: it is not valid"
-            f" {exc.encoding} text (byte offset {exc.start})[/red]"
+            f" {escape(exc.encoding)} text (byte offset {escape(str(exc.start))})[/red]"
         )
         raise typer.Exit(code=EXIT_VALIDATION) from None
     try:
@@ -1798,10 +1798,10 @@ def migrate_graph(
             try:
                 report = migrator.run(dry_run=dry_run, strategy=strategy)
             except MigrationCapacityExceededError as exc:
-                console.print(f"[red]{exc}[/red]")
+                console.print(f"[red]{escape(str(exc))}[/red]")
                 raise typer.Exit(code=EXIT_INTERNAL) from exc
             except MigrationStepError as exc:
-                console.print(f"[red]Migration aborted: {exc}[/red]")
+                console.print(f"[red]Migration aborted: {escape(str(exc))}[/red]")
                 console.print(
                     "[yellow]Re-run with --continue-on-error to capture all "
                     "failures in one pass.[/yellow]"

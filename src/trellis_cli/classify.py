@@ -170,7 +170,7 @@ def backfill(
         if output_format == "json":
             emit_json({"status": "error", "message": str(exc)})
         else:
-            console.print(f"[red]{exc}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     result = reclassify_stale(
@@ -632,7 +632,7 @@ def tag_candidates(
         if output_format == "json":
             emit_json({"status": "error", "message": message})
         else:
-            console.print(f"[red]{message}[/red]")
+            console.print(f"[red]{escape(message)}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     if output_format == "json":
@@ -796,7 +796,7 @@ def domain_candidates(
         if output_format == "json":
             emit_json({"status": "error", "message": message})
         else:
-            console.print(f"[red]{message}[/red]")
+            console.print(f"[red]{escape(message)}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     shown = [c for c in candidates if c.documents_gained >= min_gain]
