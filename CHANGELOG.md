@@ -355,16 +355,18 @@ All notable changes to Trellis will be documented in this file.
   store, still exits `3` at startup.
   ([#679](https://github.com/ronsse/trellis-ai/pull/679))
 
-- **Error lines keep the brackets in an exception's text.** The CLI printed
-  exception messages through Rich markup, which deleted any `[word…]` and
-  raised `MarkupError` on a stray `[/x]`. `trellis ingest trace` on an
-  invalid trace now shows pydantic's `[type=missing, …]` detail, an install
-  hint keeps its extra (`uv pip install -e ".[cloud]"`, not `-e "."`), and an
-  input that quotes `[/x]`, such as a trace intent or a line of
-  `learning_params.yaml`, prints its error where it printed a traceback.
-  Thirty error lines across `admin`, `analyze`, `classify`, `curate`,
-  `extract`, `ingest` and `worker` escape the text, and
-  `tests/unit/test_rich_exception_markup_rule.py` fails the build on a new one.
+- **Error lines that print a caught exception keep the brackets in its
+  text.** They passed that text through Rich markup, which deleted any
+  `[word…]` and raised `MarkupError` on a stray `[/x]`.
+  `trellis ingest trace` on an invalid trace now shows pydantic's
+  `[type=missing, …]` detail, an install hint in such a line keeps its extra
+  (`uv pip install -e ".[cloud]"`, not `-e "."`), and an input that quotes
+  `[/x]`, such as a trace intent or a line of `learning_params.yaml`, prints
+  its error where it printed a traceback. Thirty error lines across `admin`,
+  `analyze`, `classify`, `curate`, `extract`, `ingest` and `worker` escape the
+  text, and `tests/unit/test_rich_exception_markup_rule.py` fails the build on
+  a new one. A message carried on a result object, such as `ingest trace`'s
+  report of a failed write, still prints through markup.
   ([#680](https://github.com/ronsse/trellis-ai/pull/680))
 
 ## [0.9.0] - 2026-05-13
