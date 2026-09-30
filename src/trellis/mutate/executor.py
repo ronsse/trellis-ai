@@ -176,6 +176,7 @@ class MutationExecutor:
                 status=CommandStatus.REJECTED,
                 operation=command.operation,
                 message=roster_refusal,
+                metadata={"rejection_reason": "immutable_core"},
             )
 
         valid, errors = self._registry.validate(command)
@@ -231,6 +232,7 @@ class MutationExecutor:
                     operation=command.operation,
                     message=message,
                     warnings=[*policy_warnings, *_audit_warnings(audit)],
+                    metadata={"rejection_reason": "policy_violation"},
                 )
 
         # Stage 3: Idempotency Check
@@ -272,6 +274,7 @@ class MutationExecutor:
                 operation=command.operation,
                 message=str(exc),
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
+                metadata={"rejection_reason": reason},
             )
         except PolicyViolationError as exc:
             # Handlers may evaluate row-level policies that the gate
@@ -293,6 +296,7 @@ class MutationExecutor:
                 operation=command.operation,
                 message=str(exc),
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
+                metadata={"rejection_reason": "policy_violation"},
             )
         except IdempotencyError as exc:
             # Handler-level duplicate detection (e.g., a downstream

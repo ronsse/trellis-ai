@@ -13,11 +13,12 @@ from rich.table import Table
 from trellis.learning import prepare_learning_promotions, submit_learning_promotion
 from trellis.mutate import (
     Command,
+    CommandResult,
     CommandStatus,
     Operation,
     build_curate_executor,
 )
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
+from trellis_cli.exit_codes import EXIT_POLICY, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
 
@@ -40,12 +41,29 @@ def _print_warnings(warnings: list[str]) -> None:
         console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}")
 
 
+def _refusal_exit_code(result: CommandResult) -> int:
+    """Return the exit code for a refused or failed write, per the exit-code ADR.
+
+    A policy refusal exits ``EXIT_POLICY`` ("get approval, don't retry"),
+    any other refusal ``EXIT_VALIDATION`` ("fix your input"), and a failure
+    ``EXIT_STORE``. The executor names a refusal's cause in
+    ``metadata["rejection_reason"]``, and a result without one is not a
+    policy refusal. It returns rather than raises, so each caller's
+    ``raise`` stays below its format branch
+    (``tests/unit/test_format_exit_parity_rule.py``).
+    """
+    if result.status != CommandStatus.REJECTED:
+        return EXIT_STORE
+    if result.metadata.get("rejection_reason") == "policy_violation":
+        return EXIT_POLICY
+    return EXIT_VALIDATION
+
+
 def _execute_command(cmd: Command, output_format: str) -> None:
     """Submit a command, display the result, and exit non-zero on refusal or failure.
 
-    A REJECTED command exits ``EXIT_VALIDATION`` and a FAILED one
-    ``EXIT_STORE``, as ``prune``, ``restore`` and ``redact`` do. A DUPLICATE
-    exits ``0``.
+    A refused or failed command exits with ``_refusal_exit_code``, as every
+    curate write does. A DUPLICATE exits ``0``.
     """
     result = build_curate_executor(_get_registry()).execute(cmd)
 
@@ -86,10 +104,7 @@ def _execute_command(cmd: Command, output_format: str) -> None:
     # Below the format branch, so both formats exit alike
     # (tests/unit/test_format_exit_parity_rule.py) and warnings print first.
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        exit_code = (
-            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
-        )
-        raise typer.Exit(code=exit_code)
+        raise typer.Exit(code=_refusal_exit_code(result))
 
 
 @curate_app.command()
@@ -141,7 +156,8 @@ def link(
         if output_format == "json":
             emit_json(
                 {
-                    "status": "error",
+                    "status": result.status.value,
+                    "command_id": result.command_id,
                     "message": result.message,
                     "warnings": list(result.warnings),
                 }
@@ -149,7 +165,7 @@ def link(
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
             _print_warnings(result.warnings)
-        raise typer.Exit(code=EXIT_INTERNAL)
+        raise typer.Exit(code=_refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -258,11 +274,15 @@ def prune(
         "max_items": max_items,
     }
     if not (noise_documents or unconfirmed_mints or lifecycle_state):
-        console.print(
-            "[red]No criteria selected — a prune must say what it is pruning. "
+        message = (
+            "No criteria selected — a prune must say what it is pruning. "
             "Pass at least one of --noise-documents / --unconfirmed-mints / "
-            "--lifecycle-state.[/red]"
+            "--lifecycle-state."
         )
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{message}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION)
 
     cmd = Command(
@@ -274,9 +294,6 @@ def prune(
     result = build_curate_executor(_get_registry()).execute(cmd)
 
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        exit_code = (
-            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
-        )
         if output_format == "json":
             emit_json(
                 {
@@ -289,7 +306,7 @@ def prune(
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
             _print_warnings(result.warnings)
-        raise typer.Exit(code=exit_code)
+        raise typer.Exit(code=_refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -340,15 +357,22 @@ def restore(
     """
     ids = list(item_id)
     if from_file:
-        ids.extend(
-            line.strip()
-            for line in Path(from_file).read_text().splitlines()
-            if line.strip()
-        )
+        try:
+            text = Path(from_file).read_text()
+        except OSError as exc:
+            unreadable = f"Cannot read --from-file: {exc}"
+            if output_format == "json":
+                emit_json({"status": "error", "message": unreadable})
+            else:
+                console.print(f"[red]{escape(unreadable)}[/red]")
+            raise typer.Exit(code=EXIT_VALIDATION) from exc
+        ids.extend(line.strip() for line in text.splitlines() if line.strip())
     if not ids:
-        console.print(
-            "[red]No ids supplied — pass --item-id (repeatable) or --from-file.[/red]"
-        )
+        message = "No ids supplied — pass --item-id (repeatable) or --from-file."
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{message}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION)
 
     cmd = Command(
@@ -360,9 +384,6 @@ def restore(
     result = build_curate_executor(_get_registry()).execute(cmd)
 
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        exit_code = (
-            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
-        )
         if output_format == "json":
             emit_json(
                 {
@@ -375,7 +396,7 @@ def restore(
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
             _print_warnings(result.warnings)
-        raise typer.Exit(code=exit_code)
+        raise typer.Exit(code=_refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -436,13 +457,11 @@ def redact(
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         # Destructive command: error states must exit non-zero so shell
         # pipelines fail loud, and the code follows the exit_codes map —
-        # REJECTED is a validation/policy outcome (EXIT_VALIDATION),
-        # FAILED on this path is a store outcome such as target-not-found
-        # (EXIT_STORE). ``command_id`` rides the JSON so a failed attempt
-        # still joins to its MUTATION_REJECTED audit event.
-        exit_code = (
-            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
-        )
+        # a policy refusal is EXIT_POLICY, any other REJECTED (a blank
+        # reason) EXIT_VALIDATION, and FAILED on this path is a store
+        # outcome such as target-not-found (EXIT_STORE). ``command_id``
+        # rides the JSON so a failed attempt still joins to its
+        # MUTATION_REJECTED audit event.
         if output_format == "json":
             emit_json(
                 {
@@ -455,7 +474,7 @@ def redact(
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
             _print_warnings(result.warnings)
-        raise typer.Exit(code=exit_code)
+        raise typer.Exit(code=_refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -501,7 +520,7 @@ def entity(
                 )
             else:
                 console.print(f"[red]Invalid JSON for --properties[/red]: {exc}")
-            raise typer.Exit(code=EXIT_INTERNAL) from exc
+            raise typer.Exit(code=EXIT_VALIDATION) from exc
 
     cmd = Command(
         operation=Operation.ENTITY_CREATE,
@@ -516,9 +535,6 @@ def entity(
     result = build_curate_executor(_get_registry()).execute(cmd)
 
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        exit_code = (
-            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
-        )
         if output_format == "json":
             emit_json(
                 {
@@ -531,7 +547,7 @@ def entity(
         else:
             console.print(f"[red]{escape(result.message)}[/red]")
             _print_warnings(result.warnings)
-        raise typer.Exit(code=exit_code)
+        raise typer.Exit(code=_refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
