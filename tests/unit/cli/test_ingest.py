@@ -111,8 +111,9 @@ class TestIngestTrace:
         assert data["status"] == "ingested"
         assert "trace_id" in data
 
-    def test_ingest_trace_from_stdin(self) -> None:
-        result = runner.invoke(app, ["ingest", "trace", "-"], input=_trace_json())
+    @pytest.mark.parametrize("args", [["-"], []], ids=["dash", "omitted"])
+    def test_ingest_trace_from_stdin(self, args: list[str]) -> None:
+        result = runner.invoke(app, ["ingest", "trace", *args], input=_trace_json())
         assert result.exit_code == 0
 
     def test_ingest_trace_invalid_json(self, tmp_path: Path) -> None:
