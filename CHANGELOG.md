@@ -388,6 +388,13 @@ All notable changes to Trellis will be documented in this file.
   report of a failed write, still prints through markup.
   ([#680](https://github.com/ronsse/trellis-ai/pull/680))
 
+- **An ArcadeDB graph store without the `neo4j` driver is refused before
+  the registry calls the server.** Registry preparation created the database
+  and migrated its schema over HTTP, and only then found the driver missing;
+  with the server down it reported a connection error instead of the extra
+  to install. It now checks for the driver first, as the constructor does.
+  ([#682](https://github.com/ronsse/trellis-ai/pull/682))
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.

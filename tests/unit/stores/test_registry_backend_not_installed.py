@@ -433,6 +433,60 @@ def test_instantiate_missing_neo4j_driver_raises(
     assert isinstance(exc_info.value.__cause__, ImportError)
 
 
+@pytest.mark.parametrize(
+    "ensure_setting",
+    [{}, {"ensure_database_exists": False}],
+    ids=["ensure-default", "ensure-off"],
+)
+def test_arcadedb_preparation_refuses_before_touching_the_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ensure_setting: dict[str, Any],
+) -> None:
+    """A missing driver is refused before ArcadeDB's preparation calls HTTP.
+
+    Preparation creates the database and migrates its schema over HTTP; with
+    ``ensure_database_exists`` off it still migrates the schema. Checking for
+    the driver afterwards changed the server first, and with the server down
+    it reported a connection error instead of the extra.
+    """
+    from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
+
+    monkeypatch.setattr("trellis.stores.bolt_opencypher.base.HAS_NEO4J", False)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "trellis.stores.arcadedb.graph.ensure_database",
+        lambda *_args: calls.append("ensure_database"),
+    )
+    monkeypatch.setattr(
+        ArcadeDBGraphStore,
+        "_init_arcadedb_edge_provenance_schema",
+        classmethod(lambda _cls, **_kwargs: calls.append("migrate_schema")),
+    )
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        stores={
+            "knowledge": {
+                "graph": {
+                    "backend": "arcadedb",
+                    "uri": "bolt://127.0.0.1:9",
+                    "password": "unused",
+                    **ensure_setting,
+                },
+            },
+        },
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(BackendNotInstalledError) as exc_info:
+        _ = registry.knowledge.graph_store
+    assert exc_info.value.backend_name == "arcadedb"
+    assert exc_info.value.extra == "arcadedb"
+    assert isinstance(exc_info.value.__cause__, ImportError)
+    assert calls == []
+
+
 def test_instantiate_constructor_import_error_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

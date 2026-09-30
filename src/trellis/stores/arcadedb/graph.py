@@ -264,6 +264,10 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
             )
             raise TypeError(msg)
 
+        # The HTTP calls below create the database and migrate its schema;
+        # refuse a missing driver before making them.
+        check_driver_installed()
+
         if params.get("ensure_database_exists", True):
             http_url = http_url or derive_http_url_from_bolt(uri)
             if not http_url:
