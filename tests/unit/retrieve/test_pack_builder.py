@@ -2973,6 +2973,41 @@ class TestAttributionTelemetry:
         assert payload["run_id"] == "run-9"
         assert payload["intent_family"] == "asset_generation"
 
+    def test_project_rides_the_flat_payload(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
+            event_log=session_event_log,
+            project="delta-proj",
+        )
+        builder.build("generate sql")
+        assert self._pack_payload(session_event_log)["project"] == "delta-proj"
+
+    def test_project_rides_the_sectioned_payload(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
+            event_log=session_event_log,
+            project="delta-proj",
+        )
+        builder.build_sectioned("generate sql", sections=[SectionRequest(name="All")])
+        assert self._pack_payload(session_event_log)["project"] == "delta-proj"
+
+    def test_project_key_is_present_and_none_by_default(
+        self, session_event_log: SQLiteEventLog
+    ) -> None:
+        """The ``domain`` idiom: a reader never has to tell absent from unknown."""
+        builder = PackBuilder(
+            strategies=[_make_strategy("kw", [_item("d1", 0.9)])],
+            event_log=session_event_log,
+        )
+        builder.build("generate sql")
+        payload = self._pack_payload(session_event_log)
+        assert "project" in payload
+        assert payload["project"] is None
+
 
 class TestIndexMode:
     """Index mode changes the budget charge, nothing else (#305)."""

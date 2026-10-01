@@ -1529,6 +1529,7 @@ Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBL
 | Key | Notes |
 |-----|-------|
 | `run_id` | **Request-scoped attribution.** The unit of work the pack was served to — narrower than `session_id`. The learning join prefers the feedback payload's `run_id` and falls back to this one; when both are absent the observation buckets under `unknown-run`. |
+| `project` | The MCP server's project, by the rule in [trace-format.md § Project stamp](trace-format.md#project-stamp); a stdio server resolves it once per process. Always present; `null` when unknown and on the REST and CLI surfaces. Filter with `get_events(payload_filters={"project": ...})`. |
 | `intent_family` | Canonical intent bucket, read by the metrics `group_by=intent_family` axis. Never null on a `PackBuilder`-assembled pack: when the caller supplies none it is derived via `normalize_intent_family(intent=...)`, which falls back to `general_context` rather than an empty value. |
 | `injected_item_ids` | The served set — and the **fallback** source for the `reference_rate` metric, not the first one: `compute_timeseries` reads the feedback payload's `items_served` and only uses this when that is empty. `PackFeedback.from_agent_signal` deliberately leaves `items_served` empty (cited ids are what the agent *referenced*, not what the pack contained), so agent-graded packs do land here. |
 | `injected_item_hashes` | `{item_id: hash}` of each item's **excerpt**, so a later build in the same session can re-serve an item whose content changed rather than suppressing it as already-seen (#258). Additive — older events without the key fall back to id-only suppression. |
@@ -2297,7 +2298,7 @@ Start with `trellis-mcp`. 16 tools: 10 core tools and 3 sectioned-context tools 
 | Tool | Args | Returns |
 |------|------|---------|
 | `get_context` | `intent`, `domain?`, `max_tokens?`, `session_id?`, `run_id?`, `sections?`, `index?` | Markdown pack fusing keyword + graph + semantic axes (RRF, recency/importance decay, session dedup) with a citable `pack_id`. Pass `sections` for the sectioned layout. Pass `run_id` (the unit of work this context is for — narrower than `session_id`) so later feedback can credit the runs a memory actually helped; without it the learning join buckets the pack under `unknown-run`. Pass `index=True` for the id index (see "Progressive disclosure" below); mutually exclusive with `sections`. |
-| `save_experience` | `trace_json` | Confirmation with trace_id |
+| `save_experience` | `trace_json` | Confirmation with trace_id. The server sets `metadata.project` before ingest ([trace-format.md § Project stamp](trace-format.md#project-stamp)) |
 | `save_knowledge` | `name`, `entity_type?`, `properties?`, `relates_to?`, `edge_kind?`, `content?`, `evidence_ref?`, `supersedes?` | Confirmation with entity_id. `supersedes` names an entity this one replaces (see "The stamp's first deterministic producer" above). |
 | `save_memory` | `content`, `metadata?`, `doc_id?`, `supersedes?` | Confirmation with doc_id. `supersedes` names a document this memory replaces. Tags the document inline when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (see "Document → content tags"), embeds it when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`. |
 | `get_lessons` | `domain?`, `limit?`, `max_tokens?` | Markdown list of precedents |
