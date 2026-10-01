@@ -194,6 +194,20 @@ class TestBuildPackBuilder:
         )
         assert [e.entity_id for e in events] == [pack.pack_id]
 
+    def test_the_project_reaches_the_event(self, tmp_path: Path) -> None:
+        registry = self._registry(tmp_path)
+        builder = build_pack_builder(registry, surface="test", project="delta-proj")
+        registry.knowledge.document_store.put("d1", "a canary rollout runbook body")
+
+        builder.build("canary rollout")
+
+        from trellis.stores.base.event_log import EventType
+
+        (event,) = registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=10
+        )
+        assert event.payload["project"] == "delta-proj"
+
     def test_advisories_are_wired(self, tmp_path: Path) -> None:
         """The half that had already drifted.
 

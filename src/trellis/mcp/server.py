@@ -41,6 +41,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.core.document_write import put_document
+from trellis.core.project import project_override, resolve_project
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.core.write_config import (
     MINHASH_SEED_MAX_DOCS_ENV,
@@ -290,6 +291,38 @@ def _get_registry() -> StoreRegistry:
     return _registry
 
 
+def _session_project() -> str | None:
+    """Return the project this server's packs and traces are stamped with.
+
+    stdio: :func:`~trellis.core.project.resolve_project`.  http: the
+    ``TRELLIS_PROJECT`` override only, because one server answers every
+    caller and its own working directory names none of their projects.
+    """
+    try:
+        if resolve_transport() == TRANSPORT_HTTP:
+            return project_override()
+        return resolve_project()
+    except Exception:  # advisory; never fail a pack or a write
+        return None
+
+
+def _stamp_trace_project(trace: Trace) -> Trace:
+    """Return ``trace`` with ``metadata["project"]`` set by this server.
+
+    The server's value always owns ``project``, even when it is ``None``:
+    a stamp the agent could overwrite would not attribute anything.  An
+    agent-supplied value that disagrees is kept as ``project_unverified``,
+    the ``<field>_unverified`` idiom of :mod:`trellis.extract.evidence`.
+    """
+    project = _session_project()
+    metadata = dict(trace.metadata)
+    supplied = metadata.get("project")
+    if supplied not in (None, project):
+        metadata["project_unverified"] = supplied
+    metadata["project"] = project
+    return trace.model_copy(update={"metadata": metadata})
+
+
 def _build_pack_builder(registry: StoreRegistry) -> PackBuilder:
     """Create a PackBuilder wired to this deployment's advisory store.
 
@@ -297,8 +330,10 @@ def _build_pack_builder(registry: StoreRegistry) -> PackBuilder:
     :func:`~trellis.retrieve.builder_factory.build_pack_builder` (#410) —
     one construction for every pack surface, because four copies of an
     argument list is four chances to drift, and one of them already had.
+    Only this surface passes a ``project``: the REST and CLI processes'
+    working directories name no caller's project.
     """
-    return build_pack_builder(registry, surface="mcp")
+    return build_pack_builder(registry, surface="mcp", project=_session_project())
 
 
 _minhash_index: Any = None
@@ -1221,6 +1256,8 @@ def save_experience(trace_json: str) -> str:
             },
         )
 
+    # Stamped before ingest: a stored trace is immutable.
+    trace = _stamp_trace_project(trace)
     registry = _get_registry()
     executor = build_curate_executor(registry)
     result = executor.execute(

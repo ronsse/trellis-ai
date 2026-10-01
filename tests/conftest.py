@@ -242,6 +242,21 @@ def _reset_write_provenance() -> Iterator[None]:
     resolve_stamp_staleness.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_project_stamp(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Unset ``TRELLIS_PROJECT`` and drop the memoized project around every test.
+
+    A developer's own override, or a memo warmed by an earlier test's cwd,
+    would otherwise leak into every pack and trace a later test asserts on.
+    """
+    from trellis.core.project import PROJECT_ENV, resolve_project
+
+    monkeypatch.delenv(PROJECT_ENV, raising=False)
+    resolve_project.cache_clear()
+    yield
+    resolve_project.cache_clear()
+
+
 @pytest.fixture
 def pin_source_tree(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
     """Pin what the write-provenance staleness probe sees.

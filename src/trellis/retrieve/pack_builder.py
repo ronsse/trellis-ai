@@ -453,6 +453,7 @@ class PackBuilder:
         token_budget_validator: TokenCounter | None = None,
         content_floor: ContentFloorConfig | None = None,
         disclosure: DisclosureConfig | None = None,
+        project: str | None = None,
     ) -> None:
         self._strategies = strategies or []
         self._event_log = event_log
@@ -501,6 +502,9 @@ class PackBuilder:
         #: :data:`~trellis.retrieve.disclosure.DISCLOSURE_OFF` for the
         #: every-item-gets-a-body behaviour that preceded it.
         self._disclosure = disclosure or DEFAULT_DISCLOSURE
+        #: Project stamped on every ``PACK_ASSEMBLED`` payload: per process,
+        #: not per request, and ``None`` (never absent) when unknown.
+        self._project = project
 
     def add_strategy(self, strategy: SearchStrategy) -> None:
         """Add a search strategy."""
@@ -1263,6 +1267,7 @@ class PackBuilder:
                 # need a second change once it is.
                 "run_id": pack.run_id,
                 "intent_family": pack.intent_family,
+                "project": self._project,
                 "section_count": len(pack.sections),
                 "total_items": pack.total_items,
                 # Per-item content hashes (issue #258), flattened across
@@ -1481,6 +1486,7 @@ class PackBuilder:
                 # present, its value is ``None`` when unknown.
                 "run_id": pack.run_id,
                 "intent_family": pack.intent_family,
+                "project": self._project,
                 "items_count": len(pack.items),
                 "injected_item_ids": [item.item_id for item in pack.items],
                 # Per-item content hashes (issue #258): lets a later build in

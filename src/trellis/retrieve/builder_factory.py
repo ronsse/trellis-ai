@@ -85,7 +85,9 @@ class AxisReport(TypedDict):
     semantic: str
 
 
-def build_pack_builder(registry: StoreRegistry, *, surface: str) -> PackBuilder:
+def build_pack_builder(
+    registry: StoreRegistry, *, surface: str, project: str | None = None
+) -> PackBuilder:
     """Wire a :class:`PackBuilder` for ``registry``.
 
     Args:
@@ -94,6 +96,8 @@ def build_pack_builder(registry: StoreRegistry, *, surface: str) -> PackBuilder:
             ``"cli.retrieve"``, ``"cli.analyze.pack-quality"``. It rides
             the advisory-store log line so an operator reading the journal
             can tell which surface saw what (#373).
+        project: The project every ``PACK_ASSEMBLED`` payload is stamped
+            with, or ``None``.
     """
     param_registry = ParameterRegistry(registry.operational.parameter_store)
     return PackBuilder(
@@ -111,6 +115,7 @@ def build_pack_builder(registry: StoreRegistry, *, surface: str) -> PackBuilder:
         # relevance-ordered so the highest-scoring copy wins. Default 0.85
         # Jaccard per the config's guidance table.
         semantic_dedup=SemanticDedupConfig(),
+        project=project,
     )
 
 

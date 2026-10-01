@@ -100,6 +100,15 @@ All notable changes to Trellis will be documented in this file.
   CI / containers without an X server render correctly. Imported only
   from the eval package; core library and CLI runtime have no
   matplotlib dependency.
+- **The stdio MCP server stamps its session's project on every pack and
+  trace.** `PACK_ASSEMBLED` payloads gain a `project` key (always
+  present, `null` when unknown) and `save_experience` sets
+  `metadata["project"]` before ingest. The value is `TRELLIS_PROJECT`
+  when set, else the git repository containing the server's working
+  directory, read from `.git` without a subprocess, so a linked worktree
+  reports its main repository. Over HTTP only the override counts, and
+  REST/CLI packs carry `null`. An agent's disagreeing value is kept as
+  `project_unverified`. New module `trellis.core.project`.
 
 ### Changed
 
