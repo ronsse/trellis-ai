@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from trellis.core.path_presence import path_is_present
-from trellis.core.project import PROJECT_ENV, resolve_project
+from trellis.core.project import resolve_project
 
 
 def _repo(root: Path, name: str) -> Path:
@@ -77,14 +77,14 @@ class TestOverride:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         repo = _repo(tmp_path, "alpha-repo")
-        monkeypatch.setenv(PROJECT_ENV, " gamma ")
+        monkeypatch.setenv("TRELLIS_PROJECT", " gamma ")
         assert _resolve_from(repo, monkeypatch) == "gamma"
 
     def test_a_blank_override_is_ignored(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         repo = _repo(tmp_path, "alpha-repo")
-        monkeypatch.setenv(PROJECT_ENV, "   ")
+        monkeypatch.setenv("TRELLIS_PROJECT", "   ")
         assert _resolve_from(repo, monkeypatch) == "alpha-repo"
 
 
