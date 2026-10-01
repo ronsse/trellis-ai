@@ -105,7 +105,7 @@ All notable changes to Trellis will be documented in this file.
   present, `null` when unknown) and `save_experience` sets
   `metadata["project"]` before ingest. The value is `TRELLIS_PROJECT`
   when set, else the git repository containing the server's working
-  directory, read from `.git` without a subprocess, so a linked worktree
+  directory, read from `.git` without a subprocess; a linked worktree
   reports its main repository. Over HTTP only the override counts, and
   REST/CLI packs carry `null`. An agent's disagreeing value is kept as
   `project_unverified`. New module `trellis.core.project`.
