@@ -110,6 +110,13 @@ class TestHttpTransport:
         monkeypatch.setenv(PROJECT_ENV, "eta-deploy")
         assert _save(temp_registry) == {"project": "eta-deploy"}
 
+    def test_a_null_stamp_still_owns_the_key(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_MCP_TRANSPORT", "http")
+        metadata = _save(temp_registry, {"project": "zeta-claimed"})
+        assert metadata == {"project": None, "project_unverified": "zeta-claimed"}
+
 
 class TestFailSoft:
     @pytest.fixture(params=["resolver-raises", "bad-transport"])
