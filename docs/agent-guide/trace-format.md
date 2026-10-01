@@ -19,7 +19,7 @@ A `Trace` is the primary record of an agent or workflow execution. Every trace i
 | `outcome` | `Outcome` | No | `null` | Final outcome of the trace. |
 | `feedback` | `list[Feedback]` | No | `[]` | Quality feedback recorded against this trace. |
 | `context` | `TraceContext` | **Yes** | -- | Execution context (agent, team, domain, timing). |
-| `metadata` | `dict` | No | `{}` | Arbitrary key-value pairs. The MCP server sets `project` itself; see [Project stamp](#project-stamp). |
+| `metadata` | `dict` | No | `{}` | Arbitrary key-value pairs. MCP `save_experience` sets `project` itself; see [Project stamp](#project-stamp). |
 | `schema_version` | `string` | No | `"0.1.0"` | Schema version. Do not set manually. |
 | `created_at` | `datetime` | No | Current UTC time | When the trace was created. |
 | `updated_at` | `datetime` | No | Current UTC time | When the trace was last updated. |
@@ -107,7 +107,7 @@ A `Trace` is the primary record of an agent or workflow execution. Every trace i
 
 ### Project stamp
 
-A trace saved through the MCP `save_experience` tool gets `metadata["project"]` from the server, not from the agent: `TRELLIS_PROJECT` when set, else the git repository containing the stdio server's working directory (a linked worktree reports its main repository), else `null`. The server's value always owns the key, even when it is `null`. An agent-supplied `project` that disagrees is kept as `metadata["project_unverified"]`. Over the HTTP transport only `TRELLIS_PROJECT` counts, because one server answers every caller. Traces ingested through the CLI or REST are not stamped. Query it with `json_extract(trace_json, '$.metadata.project')` (SQLite) or `trace_json->'metadata'->>'project'` (Postgres).
+A trace saved through the MCP `save_experience` tool gets `metadata["project"]` from the server, not from the agent: `TRELLIS_PROJECT` when set, else the git repository containing the stdio server's working directory (a linked worktree reports its main repository), else `null`. The server's value always owns the key, even when it is `null`. An agent-supplied `project` that disagrees is kept as `metadata["project_unverified"]`. Over the HTTP transport only `TRELLIS_PROJECT` counts, because one server answers every caller. Traces ingested any other way (the CLI, REST, or MCP `execute_mutation`) are not stamped and keep whatever `project` they carry. Query it with `json_extract(trace_json, '$.metadata.project')` (SQLite) or `trace_json->'metadata'->>'project'` (Postgres).
 
 ---
 
