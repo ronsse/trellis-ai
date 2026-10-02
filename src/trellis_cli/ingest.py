@@ -244,9 +244,7 @@ def _execute_batch(
     """Submit the batch and return ``(nodes_created, edges_created, refusal)``.
 
     ``refusal`` is the first result when every command was refused or failed,
-    so the caller exits by the map instead of reporting an ingest that wrote
-    nothing. A batch that wrote anything, or held nothing, returns ``None``: a
-    partial refusal exits 0 and the counts report what landed.
+    and ``None`` otherwise, so a partial refusal or an empty batch exits 0.
     """
     results = build_curate_executor(registry).execute_batch(batch)
     nodes = sum(

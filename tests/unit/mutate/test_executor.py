@@ -420,8 +420,6 @@ class TestBatchExecution:
 
     @pytest.mark.parametrize("source", ["policy_gate", "handler"])
     def test_batch_stop_on_error_stops_on_a_rejection(self, source: str) -> None:
-        # A refusal stops the batch as a failure does, from either stage
-        # that refuses: the policy gate or a handler's ValidationError.
         handler = _handler()
         gate = MagicMock()
         gate.check.return_value = (True, "", [])

@@ -114,7 +114,6 @@ class TestIngestConversations:
     def test_an_unreadable_root_exits_2_and_says_why(
         self, tmp_path: Path, shape: UnreadablePathShape, fmt: str
     ) -> None:
-        """EACCES was a traceback (exit 1); ELOOP and ENOTDIR read as absent."""
         root = tmp_path / "in" / "root"
         args = [
             "ingest",

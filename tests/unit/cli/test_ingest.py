@@ -1003,7 +1003,6 @@ class TestIngestBatchRefusals:
     def test_a_policy_refusal_of_every_write_exits_3(
         self, tmp_path: Path, fmt: str, command: str, action: str
     ) -> None:
-        """It printed "ingested" and exited 0 with nothing written."""
         _refuse(tmp_path, action, "entity.create", "link.create")
         result = _invoke(["ingest", command, _batch_input(tmp_path, command)], fmt)
         assert result.exit_code == 3, result.output
@@ -1083,10 +1082,6 @@ class TestIngestBatchRefusals:
 def test_an_unreadable_path_exits_2_and_says_why(
     tmp_path: Path, command: str, shape: UnreadablePathShape, fmt: str
 ) -> None:
-    """EACCES raised out of ``Path.exists()`` as a traceback (exit 1).
-
-    ELOOP and ENOTDIR exited 2 as "not found", which hid the reason.
-    """
     with unreadable(shape, tmp_path / "in" / "x.json") as target:
         result = _invoke(["ingest", command, str(target)], fmt)
     assert result.exit_code == 2, result.output

@@ -116,9 +116,8 @@ def ingest_conversations(
 ) -> None:
     """Sync a Claude conversation export into the document store."""
     root = Path(path)
-    # ``file_identity``, not ``Path.exists()``, which raises EACCES and
-    # ENAMETOOLONG as a traceback. Not ``path_is_present`` either: what the
-    # sync does with a root it cannot stat is not a legible failure.
+    # ``file_identity``, not ``path_is_present``: no legible failure sits
+    # downstream of a root whose ``stat`` fails.
     identity = file_identity(root)
     if identity is None or isinstance(identity, UnknownFileIdentity):
         reason = "not found" if identity is None else f"unreadable ({identity.detail})"
