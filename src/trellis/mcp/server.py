@@ -38,6 +38,7 @@ import structlog
 from fastmcp import FastMCP
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
+from pydantic import ValidationError
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.core.document_write import put_document
@@ -3526,7 +3527,9 @@ def execute_mutation(
     Provides MCP-surface parity with the REST ``/api/v1/commands/batch``
     endpoint for operator scripting. Wraps a single command in the same
     five-stage pipeline (validate → policy → idempotency → execute →
-    emit), so policy gates and audit events apply identically.
+    emit), so policy gates and audit events apply identically. One
+    difference: a ``trace.ingest`` trace is stamped with this server's
+    project first, as ``save_experience`` stamps it.
 
     Args:
         operation: Operation name. Accepts the wire value
@@ -3575,6 +3578,17 @@ def execute_mutation(
         )
 
     requested_by = actor.strip() if actor and actor.strip() else "mcp:execute_mutation"
+
+    if op is Operation.TRACE_INGEST:
+        # Stamped before ingest, as in save_experience: a stored trace is
+        # immutable. A trace that does not validate goes on as sent, for the
+        # handler to refuse.
+        try:
+            trace = Trace.model_validate(args.get("trace"))
+        except ValidationError:
+            pass
+        else:
+            args = {**args, "trace": _stamp_trace_project(trace)}
 
     try:
         if op is Operation.EVIDENCE_INGEST and isinstance(args.get("evidence"), dict):

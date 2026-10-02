@@ -101,15 +101,16 @@ All notable changes to Trellis will be documented in this file.
   from the eval package; core library and CLI runtime have no
   matplotlib dependency.
 - **The stdio MCP server stamps its session's project on every pack and
-  every `save_experience` trace.** `PACK_ASSEMBLED` payloads gain a
+  every trace it ingests, through `save_experience` or
+  `execute_mutation`'s `trace.ingest`.** `PACK_ASSEMBLED` payloads gain a
   `project` key (always present, `null` when unknown), and the trace's
   `metadata["project"]` is set before ingest. The value is
   `TRELLIS_PROJECT` when set, else the git repository containing the
   server's working directory, read from `.git` without a subprocess; a
   linked worktree reports its main repository. Over HTTP only the
-  override counts, and REST/CLI packs carry `null`. An agent's
-  disagreeing value is kept as `project_unverified`. New module
-  `trellis.core.project`.
+  override counts. REST/CLI packs carry `null`, and REST/CLI traces are
+  not stamped. An agent's disagreeing value is kept as
+  `project_unverified`. New module `trellis.core.project`.
 
 ### Changed
 
