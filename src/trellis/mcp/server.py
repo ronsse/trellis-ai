@@ -3528,8 +3528,8 @@ def execute_mutation(
     endpoint for operator scripting. Wraps a single command in the same
     five-stage pipeline (validate → policy → idempotency → execute →
     emit), so policy gates and audit events apply identically. One
-    difference: a ``trace.ingest`` trace that validates is stamped with
-    this server's project first, exactly as ``save_experience`` stamps it.
+    difference: a ``trace.ingest`` trace is stamped with this server's
+    project first, as ``save_experience`` stamps it.
 
     Args:
         operation: Operation name. Accepts the wire value
@@ -3581,8 +3581,8 @@ def execute_mutation(
 
     if op is Operation.TRACE_INGEST:
         # Stamped before ingest, as in save_experience: a stored trace is
-        # immutable. A trace that does not validate goes on as sent, so the
-        # handler refuses it with the status and message it always has.
+        # immutable. A trace that does not validate goes on as sent, for the
+        # handler to refuse.
         try:
             trace = Trace.model_validate(args.get("trace"))
         except ValidationError:

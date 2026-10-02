@@ -53,7 +53,7 @@ def _pack_events(registry: StoreRegistry, **filters: Any) -> list[Event]:
     )
 
 
-def _ingest(surface: str, trace: dict[str, Any] | Trace) -> str:
+def _ingest(surface: str, trace: dict[str, Any]) -> str:
     """Ingest *trace* through one MCP surface and return the stored id."""
     if surface == "save_experience":
         return save_experience(json.dumps(trace)).split("Trace saved:")[1].strip()
@@ -176,11 +176,16 @@ class TestExecuteMutation:
         trace = Trace.model_validate(
             {**_TRACE, "metadata": {"project": "zeta-claimed"}}
         )
-        trace_id = _ingest("execute_mutation", trace)
-        assert _stored_metadata(temp_registry, trace_id) == {
+        args: dict[str, Any] = {"trace": trace}
+        payload = json.loads(execute_mutation(operation="trace.ingest", args=args))
+
+        assert _stored_metadata(temp_registry, payload["created_id"]) == {
             "project": _REPO,
             "project_unverified": "zeta-claimed",
         }
+        # The stamp goes on a copy: the caller's args and trace are untouched.
+        assert args["trace"] is trace
+        assert trace.metadata == {"project": "zeta-claimed"}
 
     @pytest.mark.parametrize(
         "trace",
@@ -193,7 +198,7 @@ class TestExecuteMutation:
         ],
         ids=["missing-field", "extra-field", "bad-enum", "json-string", "null"],
     )
-    def test_an_invalid_trace_is_refused_by_the_handler_as_before(
+    def test_an_invalid_trace_is_refused_by_the_handler(
         self, temp_registry: StoreRegistry, trace: Any
     ) -> None:
         with pytest.raises(ValidationError) as refused:
@@ -209,7 +214,7 @@ class TestExecuteMutation:
         )
         assert temp_registry.operational.trace_store.count() == 0
 
-    def test_a_missing_trace_is_refused_by_validation_as_before(
+    def test_a_missing_trace_is_refused_by_validation(
         self, temp_registry: StoreRegistry
     ) -> None:
         payload = json.loads(execute_mutation(operation="trace.ingest", args={}))
