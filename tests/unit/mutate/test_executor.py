@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from trellis.errors import ValidationError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
@@ -415,6 +417,40 @@ class TestBatchExecution:
         assert len(results) == 2  # stopped after failure
         assert results[0].status == CommandStatus.SUCCESS
         assert results[1].status == CommandStatus.FAILED
+
+    @pytest.mark.parametrize("source", ["policy_gate", "handler"])
+    def test_batch_stop_on_error_stops_on_a_rejection(self, source: str) -> None:
+        # A refusal stops the batch as a failure does, from either stage
+        # that refuses: the policy gate or a handler's ValidationError.
+        handler = _handler()
+        gate = MagicMock()
+        gate.check.return_value = (True, "", [])
+        if source == "policy_gate":
+            gate.check.side_effect = [
+                (True, "", []),
+                (False, "denied", ["frozen"]),
+                (True, "", []),
+            ]
+        else:
+            handler.handle.side_effect = [
+                ("id-1", "ok"),
+                ValidationError("refused", code="test_refusal"),
+                ("id-3", "ok"),
+            ]
+        executor = MutationExecutor(
+            policy_gate=gate,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+        batch = CommandBatch(
+            commands=[_cmd(), _cmd(), _cmd()],
+            strategy=BatchStrategy.STOP_ON_ERROR,
+        )
+        results = executor.execute_batch(batch)
+        assert [r.status for r in results] == [
+            CommandStatus.SUCCESS,
+            CommandStatus.REJECTED,
+        ]
+        assert handler.handle.call_count == (1 if source == "policy_gate" else 2)
 
     def test_batch_continue_on_error(self) -> None:
         good_handler = _handler()
