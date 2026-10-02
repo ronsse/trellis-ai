@@ -439,8 +439,8 @@ All notable changes to Trellis will be documented in this file.
 
 - **`trellis ingest dbt-manifest` and `openlineage` exit by the map when
   every write is refused, and an ingest path `stat` cannot read exits `2`.**
-  Both batch commands printed "ingested" and exited `0` with nothing
-  written. When every write is refused or fails they now exit the first
+  Both batch commands printed "ingested" and exited `0` with no node or
+  edge written. When every write is refused or fails they now exit the first
   one's code (`3` for a policy, `2` for another refusal, `5` for a failure)
   with `"status": "error"` and its message beside the counts; a batch that
   wrote anything still exits `0`. A path whose `stat` fails with `EACCES`
