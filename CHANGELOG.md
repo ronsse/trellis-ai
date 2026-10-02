@@ -447,6 +447,7 @@ All notable changes to Trellis will be documented in this file.
   or `ENAMETOOLONG` raised a traceback (exit `1`) in every `trellis ingest`
   command; it now exits `2` with the operating system's reason, and
   `ELOOP` or `ENOTDIR` no longer reads as "not found".
+  ([#687](https://github.com/ronsse/trellis-ai/pull/687))
 
 ## [0.9.0] - 2026-05-13
 
