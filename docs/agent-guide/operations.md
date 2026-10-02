@@ -682,7 +682,7 @@ Creates entities for models, seeds, snapshots, sources, and tests. Creates `depe
 {"status": "ingested", "nodes": 12, "edges": 8, "documents": 9, "embedded": 9}
 ```
 
-An input that cannot be read or parsed as JSON exits `2`, and a typed store or configuration error exits by the exit-code map (e.g. a damaged `policies.json`, `5`). `nodes` and `edges` count only writes that succeeded: a write a policy refuses or the graph fails is logged and not counted, and the command still exits `0`.
+An input that cannot be read or parsed as JSON exits `2`, and a typed store or configuration error exits by the exit-code map (e.g. a damaged `policies.json`, `5`). `nodes` and `edges` count only writes that succeeded. When every write is refused or fails, the command exits by the map for the first one (`3` for a policy refusal, `2` for any other refusal, `5` for a failure) with `"status": "error"` and its `message` beside the counts; descriptions are still indexed, so `documents` can be non-zero. A batch that wrote anything exits `0`.
 
 ### `trellis ingest openlineage`
 
@@ -700,7 +700,7 @@ Reads a JSON array or newline-delimited JSON file of OpenLineage events. Creates
 {"status": "ingested", "nodes": 6, "edges": 4}
 ```
 
-An input that cannot be read or parsed as JSON exits `2`, and a typed store or configuration error exits by the exit-code map (e.g. a damaged `policies.json`, `5`). `nodes` and `edges` count only writes that succeeded: a write a policy refuses or the graph fails is logged and not counted, and the command still exits `0`.
+An input that cannot be read or parsed as JSON exits `2`, and a typed store or configuration error exits by the exit-code map (e.g. a damaged `policies.json`, `5`). `nodes` and `edges` count only writes that succeeded. When every write is refused or fails, the command exits by the map for the first one (`3` for a policy refusal, `2` for any other refusal, `5` for a failure) with `"status": "error"` and its `message` beside the counts. A batch that wrote anything exits `0`.
 
 ---
 

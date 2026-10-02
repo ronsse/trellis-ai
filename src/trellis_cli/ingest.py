@@ -17,6 +17,7 @@ from trellis.core.error_sanitize import (
     sanitize_error_message,
     sanitized_error_payload,
 )
+from trellis.core.path_presence import path_is_present
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
@@ -26,6 +27,7 @@ from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     Command,
     CommandBatch,
+    CommandResult,
     CommandStatus,
     Operation,
 )
@@ -96,7 +98,7 @@ def ingest_trace(
     # Read, parse and validate: a file that exists but cannot be read is
     # input the caller must fix, like one that does not parse.
     path = None if file == "-" or file is None else Path(file)
-    if path is not None and not path.exists():
+    if path is not None and not path_is_present(path):
         _fail(f"File not found: {file}", output_format)
     try:
         raw = sys.stdin.read() if path is None else path.read_text()
@@ -170,7 +172,7 @@ def ingest_evidence(
 ) -> None:
     """Ingest evidence from a JSON file."""
     path = Path(file)
-    if not path.exists():
+    if not path_is_present(path):
         _fail(f"File not found: {file}", output_format)
 
     try:
@@ -238,8 +240,14 @@ def _run_extraction(
 def _execute_batch(
     registry: StoreRegistry,
     batch: CommandBatch,
-) -> tuple[int, int]:
-    """Submit the batch and return ``(nodes_created, edges_created)``."""
+) -> tuple[int, int, CommandResult | None]:
+    """Submit the batch and return ``(nodes_created, edges_created, refusal)``.
+
+    ``refusal`` is the first result when every command was refused or failed,
+    so the caller exits by the map instead of reporting an ingest that wrote
+    nothing. A batch that wrote anything, or held nothing, returns ``None``: a
+    partial refusal exits 0 and the counts report what landed.
+    """
     results = build_curate_executor(registry).execute_batch(batch)
     nodes = sum(
         1
@@ -251,7 +259,19 @@ def _execute_batch(
         for r in results
         if r.operation == Operation.LINK_CREATE and r.status == CommandStatus.SUCCESS
     )
-    return nodes, edges
+    refused = [
+        r for r in results if r.status in (CommandStatus.REJECTED, CommandStatus.FAILED)
+    ]
+    if results and len(refused) == len(results):
+        return nodes, edges, refused[0]
+    return nodes, edges, None
+
+
+def _batch_status(refusal: CommandResult | None) -> dict[str, str]:
+    """The JSON status for a batch ingest, from the flag that sets its exit."""
+    if refusal is None:
+        return {"status": "ingested"}
+    return {"status": "error", "message": sanitize_error_message(refusal.message)}
 
 
 def _index_dbt_descriptions(
@@ -356,12 +376,11 @@ def ingest_dbt_manifest(
 ) -> None:
     """Ingest a dbt manifest through the governed extraction pipeline."""
     path = Path(manifest_path)
-    if not path.exists():
+    if not path_is_present(path):
         _fail(f"Path not found: {manifest_path}", output_format)
 
-    manifest_file = path / "target" / "manifest.json" if path.is_dir() else path
-
     try:
+        manifest_file = path / "target" / "manifest.json" if path.is_dir() else path
         manifest = json.loads(manifest_file.read_text())
     except Exception as exc:
         if output_format == "json":
@@ -380,7 +399,7 @@ def ingest_dbt_manifest(
             raw_input=manifest,
             source_hint="dbt-manifest",
         )
-        nodes, edges = _execute_batch(
+        nodes, edges, refusal = _execute_batch(
             registry,
             result_to_batch(result, requested_by="cli:dbt-manifest"),
         )
@@ -404,9 +423,13 @@ def ingest_dbt_manifest(
         "embedded": embedded,
     }
     if output_format == "json":
-        emit_json({"status": "ingested", **counts})
+        emit_json({**_batch_status(refusal), **counts})
     else:
-        console.print("[green]dbt manifest ingested[/green]")
+        console.print(
+            "[green]dbt manifest ingested[/green]"
+            if refusal is None
+            else f"[red]dbt ingest failed: {escape(refusal.message)}[/red]"
+        )
         console.print(f"  Nodes: {counts['nodes']}")
         console.print(f"  Edges: {counts['edges']}")
         console.print(f"  Documents: {counts['documents']}")
@@ -414,6 +437,8 @@ def ingest_dbt_manifest(
             console.print(f"  Embedded: {embedded}")
         elif doc_count:
             console.print("  Embedded: not run (TRELLIS_ENABLE_EMBED_ON_INGEST is off)")
+    if refusal is not None:
+        raise typer.Exit(code=refusal_exit_code(refusal))
 
 
 @ingest_app.command("openlineage")
@@ -425,7 +450,7 @@ def ingest_openlineage(
 ) -> None:
     """Ingest OpenLineage events through the governed extraction pipeline."""
     path = Path(events_path)
-    if not path.exists():
+    if not path_is_present(path):
         _fail(f"File not found: {events_path}", output_format)
 
     # Support JSON array and NDJSON — CLI owns file I/O.
@@ -453,7 +478,7 @@ def ingest_openlineage(
             raw_input=events,
             source_hint="openlineage",
         )
-        nodes, edges = _execute_batch(
+        nodes, edges, refusal = _execute_batch(
             registry,
             result_to_batch(result, requested_by="cli:openlineage"),
         )
@@ -466,8 +491,14 @@ def ingest_openlineage(
 
     counts = {"nodes": nodes, "edges": edges}
     if output_format == "json":
-        emit_json({"status": "ingested", **counts})
+        emit_json({**_batch_status(refusal), **counts})
     else:
-        console.print("[green]OpenLineage events ingested[/green]")
+        console.print(
+            "[green]OpenLineage events ingested[/green]"
+            if refusal is None
+            else f"[red]OpenLineage ingest failed: {escape(refusal.message)}[/red]"
+        )
         console.print(f"  Nodes: {counts['nodes']}")
         console.print(f"  Edges: {counts['edges']}")
+    if refusal is not None:
+        raise typer.Exit(code=refusal_exit_code(refusal))

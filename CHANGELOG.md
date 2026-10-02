@@ -432,11 +432,21 @@ All notable changes to Trellis will be documented in this file.
   `openlineage` exits by `exit_code_for` (`5` for a damaged `policies.json`),
   not `1`. The trace's intent and a refusal's message print verbatim: an
   intent quoting `[/x]` crashed the text output after the write, and
-  bracketed text such as `[x]` was deleted from a refusal. `dbt-manifest`
-  and `openlineage` still exit `0` when every write is refused or fails. The
+  bracketed text such as `[x]` was deleted from a refusal. The
   `--file` examples, an option `ingest trace` does not have, now pass the
   path positionally.
   ([#684](https://github.com/ronsse/trellis-ai/pull/684))
+
+- **`trellis ingest dbt-manifest` and `openlineage` exit by the map when
+  every write is refused, and an ingest path `stat` cannot read exits `2`.**
+  Both batch commands printed "ingested" and exited `0` with nothing
+  written. When every write is refused or fails they now exit the first
+  one's code (`3` for a policy, `2` for another refusal, `5` for a failure)
+  with `"status": "error"` and its message beside the counts; a batch that
+  wrote anything still exits `0`. A path whose `stat` fails with `EACCES`
+  or `ENAMETOOLONG` raised a traceback (exit `1`) in every `trellis ingest`
+  command; it now exits `2` with the operating system's reason, and
+  `ELOOP` or `ENOTDIR` no longer reads as "not found".
 
 ## [0.9.0] - 2026-05-13
 
