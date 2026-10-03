@@ -346,15 +346,69 @@ class TestTunerProposals:
 
 
 class TestLearningCandidates:
-    def test_no_artifact_returns_hint(self, client):
+    def test_missing_dir_is_named_not_served_as_no_candidates(self, client, tmp_path):
+        # The registry fixture's stores live in tmp_path/stores, so the
+        # default artifacts directory is tmp_path/learning, never created.
         data = client.get("/api/v1/learning/candidates").json()
+        expected = str(tmp_path / "learning")
+        assert data["status"] == "error"
+        assert data["code"] == "learning_artifacts_dir_missing"
+        assert data["artifacts_dir"] == expected
+        assert expected in data["hint"]
         assert data["candidate_count"] == 0
         assert data["candidates"] == []
-        assert data["hint"]
+
+    def test_empty_dir_names_the_artifact_it_expected(self, client, tmp_path):
+        (tmp_path / "learning").mkdir()
+        data = client.get("/api/v1/learning/candidates").json()
+        assert data["status"] == "error"
+        assert data["code"] == "learning_candidates_missing"
+        assert data["artifacts_dir"] == str(tmp_path / "learning")
+        expected_file = tmp_path / "learning" / "intent_learning_candidates.json"
+        assert str(expected_file) in data["hint"]
+
+    def test_unreadable_artifact_is_named_on_both_routes(self, client, tmp_path):
+        artifacts = tmp_path / "learning"
+        artifacts.mkdir()
+        bad = artifacts / "intent_learning_candidates.json"
+        bad.write_text("{not json", encoding="utf-8")
+        data = client.get("/api/v1/learning/candidates").json()
+        resp = client.post(
+            "/api/v1/learning/promotions",
+            json={"decisions": [{"candidate_id": "x", "approved": True}]},
+        )
+        assert data["status"] == "error"
+        assert data["code"] == "learning_candidates_unreadable"
+        assert str(bad) in data["hint"]
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "learning_candidates_unreadable"
+        assert resp.json()["detail"]["path"] == str(bad)
+
+    def test_no_stores_dir_and_no_override_says_so(self, client, registry):
+        # Assigned, not monkeypatched: the registry fixture's teardown resets
+        # the module global to None, and a monkeypatch undo running after it
+        # would restore the fixture's closed registry instead.
+        app_module._registry = StoreRegistry()
+        data = client.get("/api/v1/learning/candidates").json()
+        resp = client.post(
+            "/api/v1/learning/promotions",
+            json={"decisions": [{"candidate_id": "x", "approved": True}]},
+        )
+        assert data["status"] == "error"
+        assert data["code"] == "stores_dir_unconfigured"
+        assert data["artifacts_dir"] is None
+        assert "TRELLIS_LEARNING_ARTIFACTS_DIR" in data["hint"]
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "stores_dir_unconfigured"
 
     def test_serves_artifact(self, client, tmp_path, monkeypatch):
-        _write_learning_candidates(tmp_path, monkeypatch, [_learning_candidate()])
+        artifacts = _write_learning_candidates(
+            tmp_path, monkeypatch, [_learning_candidate()]
+        )
         data = client.get("/api/v1/learning/candidates").json()
+        assert data["status"] == "ok"
+        assert data["code"] is None
+        assert data["artifacts_dir"] == str(artifacts)
         assert data["candidate_count"] == 1
         assert data["candidates"][0]["candidate_id"] == "source_analysis:abc"
 
@@ -385,12 +439,29 @@ class TestLearningCandidates:
         # And a review-decision audit row.
         assert _count_events(registry, EventType.REVIEW_DECISION_RECORDED) == 1
 
-    def test_promotion_without_artifact_409(self, client):
+    @pytest.mark.parametrize(
+        ("make_dir", "code"),
+        [
+            (False, "learning_artifacts_dir_missing"),
+            (True, "learning_candidates_missing"),
+        ],
+    )
+    def test_promotion_without_artifact_409_names_what_is_missing(
+        self, client, tmp_path, make_dir, code
+    ):
+        artifacts = tmp_path / "learning"
+        if make_dir:
+            artifacts.mkdir()
         resp = client.post(
             "/api/v1/learning/promotions",
             json={"decisions": [{"candidate_id": "x", "approved": True}]},
         )
         assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert detail["code"] == code
+        missing = artifacts / "intent_learning_candidates.json" if make_dir else artifacts
+        assert detail["path"] == str(missing)
+        assert str(missing) in detail["message"]
 
     def test_unapproved_not_promoted(self, client, registry, tmp_path, monkeypatch):
         cand = _learning_candidate()
