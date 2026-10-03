@@ -448,6 +448,14 @@ All notable changes to Trellis will be documented in this file.
   command; it now exits `2` with the operating system's reason, and
   `ELOOP` or `ENOTDIR` no longer reads as "not found".
   ([#687](https://github.com/ronsse/trellis-ai/pull/687))
+- **MCP `execute_mutation`'s `trace.ingest` targets its trace, as every
+  other trace write path does.** The `Command` it built carried no
+  `target_id` or `target_type`, so a policy scoped `entity_type: trace`
+  never matched it, and its `MUTATION_EXECUTED` / `MUTATION_REJECTED`
+  event named no entity. A trace that validates now gets
+  `target_type: "trace"` and its own id, as in `save_experience`, the CLI
+  and REST. A trace that does not validate goes on untargeted, and the
+  handler refuses it as before. Other operations are unchanged.
 
 ## [0.9.0] - 2026-05-13
 

@@ -3529,7 +3529,8 @@ def execute_mutation(
     five-stage pipeline (validate → policy → idempotency → execute →
     emit), so policy gates and audit events apply identically. One
     difference: a ``trace.ingest`` trace is stamped with this server's
-    project first, as ``save_experience`` stamps it.
+    project first and the command targets it (``target_type="trace"``),
+    as in ``save_experience``.
 
     Args:
         operation: Operation name. Accepts the wire value
@@ -3579,9 +3580,13 @@ def execute_mutation(
 
     requested_by = actor.strip() if actor and actor.strip() else "mcp:execute_mutation"
 
+    target_id: str | None = None
+    target_type: str | None = None
     if op is Operation.TRACE_INGEST:
         # Stamped before ingest, as in save_experience: a stored trace is
-        # immutable. A trace that does not validate goes on as sent, for the
+        # immutable. Targeted as there too: the target is what an
+        # ``entity_type: trace`` policy matches and the audit event names. A
+        # trace that does not validate goes on as sent and untargeted, for the
         # handler to refuse.
         try:
             trace = Trace.model_validate(args.get("trace"))
@@ -3589,6 +3594,8 @@ def execute_mutation(
             pass
         else:
             args = {**args, "trace": _stamp_trace_project(trace)}
+            target_id = trace.trace_id
+            target_type = "trace"
 
     try:
         if op is Operation.EVIDENCE_INGEST and isinstance(args.get("evidence"), dict):
@@ -3600,6 +3607,8 @@ def execute_mutation(
         else:
             command = Command(
                 operation=op,
+                target_id=target_id,
+                target_type=target_type,
                 args=dict(args),
                 idempotency_key=idempotency_key,
                 requested_by=requested_by,
