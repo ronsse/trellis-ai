@@ -453,6 +453,103 @@ class TestPostgresGraphStore:
         store._init_schema()
         store._init_schema()
 
+    def test_a_schema_migrated_from_v0_3_reads_back_the_full_payload(self) -> None:
+        """Every node read names its columns rather than trusting their order.
+
+        ``ALTER TABLE ... ADD COLUMN`` appends, so a database created by
+        v0.3.x (before ``document_ids``, added in v0.4.0) and migrated
+        forward stores ``document_ids`` last, not between
+        ``generation_spec`` and ``properties`` as ``_CREATE_NODES`` does.
+        Mapped by position, a ``SELECT *`` row there comes back with empty
+        properties and with the ``document_ids`` column as ``valid_to``.
+        """
+        from trellis.stores.base.graph_query import FilterClause, NodeQuery
+        from trellis.stores.postgres.graph import PostgresGraphStore
+
+        assert PG_DSN is not None
+        with psycopg.connect(PG_DSN, autocommit=True) as conn:
+            conn.execute(_NODES_DDL_V0_3)
+        store = PostgresGraphStore(PG_DSN)
+        try:
+            with psycopg.connect(PG_DSN) as conn:
+                columns = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT column_name FROM information_schema.columns"
+                        " WHERE table_name = 'nodes' ORDER BY ordinal_position"
+                    )
+                ]
+            # The precondition this test exists for: without it, every
+            # read below passes whatever its SELECT list says.
+            assert columns[-1] == "document_ids"
+
+            store.upsert_node("n1", "service", {"name": "Alpha"}, document_ids=["d1"])
+            reads = {
+                "get_node": [store.get_node("n1")],
+                "get_nodes_bulk": store.get_nodes_bulk(["n1"]),
+                "get_node_history": store.get_node_history("n1"),
+                "query": store.query(node_type="service"),
+                "execute_node_query": store.execute_node_query(
+                    NodeQuery(filters=(FilterClause("node_id", "eq", "n1"),))
+                ),
+                "get_subgraph": store.get_subgraph(["n1"], depth=0)["nodes"],
+            }
+            for read, nodes in reads.items():
+                assert len(nodes) == 1, read
+                node = nodes[0]
+                assert node is not None, read
+                assert node["properties"] == {"name": "Alpha"}, read
+                assert node["document_ids"] == ["d1"], read
+                assert node["valid_from"] is not None, read
+                assert node["valid_to"] is None, read
+        finally:
+            store.close()
+
+    def test_an_alias_seed_confirms_through_namespace_seed_extractor(
+        self, store
+    ) -> None:
+        """Graph-axis seeding resolves an alias-bound entity on Postgres.
+
+        ``NamespaceSeedExtractor`` confirms an alias-derived id through
+        ``get_subgraph(depth=0)`` and keeps it only while the node's
+        ``properties["name"]`` still normalizes to the alias key, so the
+        subgraph payload decides whether the alias path seeds anything.
+        """
+        from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
+        from trellis.retrieve.strategies import NamespaceSeedExtractor
+
+        # An id no namespace candidate (``<ns>:orion``) can reach, so only
+        # the alias path can seed it.
+        entity_id = "entity-0001"
+        store.upsert_node(entity_id, "service", {"name": "Orion"})
+        store.upsert_alias(
+            entity_id, NAME_ALIAS_SOURCE_SYSTEM, "orion", raw_name="Orion"
+        )
+        extractor = NamespaceSeedExtractor(store)
+        assert extractor.extract("deploy orion") == [entity_id]
+
+        # The binding is checked against the payload: rename the node and
+        # the same alias no longer seeds it.
+        store.upsert_node(entity_id, "service", {"name": "Vega"})
+        assert extractor.extract("deploy orion") == []
+
+
+# ``nodes`` exactly as v0.3.x created it (3b9cedbd), before v0.4.0 added
+# ``document_ids``. ``PostgresGraphStore`` migrates it forward on open.
+_NODES_DDL_V0_3 = """\
+CREATE TABLE nodes (
+    version_id TEXT PRIMARY KEY,
+    node_id TEXT NOT NULL,
+    node_type TEXT NOT NULL,
+    node_role TEXT NOT NULL DEFAULT 'semantic',
+    generation_spec JSONB DEFAULT NULL,
+    properties JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    valid_from TIMESTAMPTZ NOT NULL,
+    valid_to TIMESTAMPTZ DEFAULT NULL
+)"""
+
 
 # ======================================================================
 # EventLog

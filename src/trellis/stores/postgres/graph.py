@@ -74,6 +74,32 @@ CREATE TABLE IF NOT EXISTS nodes (
     valid_to TIMESTAMPTZ DEFAULT NULL
 )"""
 
+# The columns every node SELECT reads, in the order ``_node_row_to_dict``
+# maps them back by name. One list for both sides, so a query and the
+# mapper cannot disagree about a slot. Never ``SELECT *``: a column added
+# by ``ALTER TABLE ... ADD COLUMN`` lands last in the physical order, so
+# on a migrated database ``*`` does not follow ``_CREATE_NODES``.
+_NODE_COLUMNS: tuple[str, ...] = (
+    "version_id",
+    "node_id",
+    "node_type",
+    "node_role",
+    "generation_spec",
+    "document_ids",
+    "properties",
+    "created_at",
+    "updated_at",
+    "valid_from",
+    "valid_to",
+)
+
+
+def _node_select_list(table_alias: str = "") -> str:
+    """Render :data:`_NODE_COLUMNS` as a SELECT list, optionally qualified."""
+    prefix = f"{table_alias}." if table_alias else ""
+    return ", ".join(f"{prefix}{column}" for column in _NODE_COLUMNS)
+
+
 # Additive migrations run after CREATE TABLE so upgrades from older
 # schema versions pick up new columns without a rebuild.
 _MIGRATE_ADD_NODE_ROLE = [
@@ -345,10 +371,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         """
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT version_id, node_id, node_type, node_role,
-                       generation_spec, document_ids, properties,
-                       created_at, updated_at, valid_from, valid_to
+                f"""
+                SELECT {_node_select_list()}
                 FROM nodes
                 WHERE node_id = %s AND valid_to IS NULL
                 FOR UPDATE
@@ -440,9 +464,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT version_id, node_id, node_type, node_role,
-                       generation_spec, document_ids, properties,
-                       created_at, updated_at, valid_from, valid_to
+                SELECT {_node_select_list()}
                 FROM nodes
                 WHERE node_id = %s AND {temporal}
                 """,
@@ -466,9 +488,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT version_id, node_id, node_type, node_role,
-                       generation_spec, document_ids, properties,
-                       created_at, updated_at, valid_from, valid_to
+                SELECT {_node_select_list()}
                 FROM nodes
                 WHERE node_id = ANY(%s) AND {temporal}
                 """,
@@ -480,10 +500,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     def get_node_history(self, node_id: str) -> list[dict[str, Any]]:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT version_id, node_id, node_type, node_role,
-                       generation_spec, document_ids, properties,
-                       created_at, updated_at, valid_from, valid_to
+                f"""
+                SELECT {_node_select_list()}
                 FROM nodes
                 WHERE node_id = %s
                 ORDER BY valid_from DESC
@@ -1100,18 +1118,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             FROM traversal
             GROUP BY node_id
         )
-        SELECT
-            n.version_id,
-            n.node_id,
-            n.node_type,
-            n.node_role,
-            n.generation_spec,
-            n.properties,
-            n.created_at,
-            n.updated_at,
-            n.valid_from,
-            n.valid_to,
-            un.min_depth
+        SELECT {_node_select_list("n")}
         FROM unique_nodes un
         JOIN nodes n ON n.node_id = un.node_id AND {node_temporal}
         ORDER BY un.min_depth, n.node_id
@@ -1135,8 +1142,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             collected_nodes: list[dict[str, Any]] = []
             node_id_set: set[str] = set()
             for row in node_rows:
-                node_id_set.add(row[1])  # node_id is index 1
-                collected_nodes.append(self._node_row_to_dict(row))
+                node = self._node_row_to_dict(row)
+                node_id_set.add(node["node_id"])
+                collected_nodes.append(node)
 
             collected_edges: list[dict[str, Any]] = []
             if node_id_set:
@@ -1214,9 +1222,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT version_id, node_id, node_type, node_role,
-                       generation_spec, document_ids, properties,
-                       created_at, updated_at, valid_from, valid_to
+                SELECT {_node_select_list()}
                 FROM nodes
                 WHERE {where_clause}
                 ORDER BY created_at DESC
@@ -1307,7 +1313,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             where_parts.append(frag)
             params.extend(p)
         sql = (
-            "SELECT * FROM nodes WHERE "
+            f"SELECT {_node_select_list()} FROM nodes WHERE "
             + " AND ".join(where_parts)
             + " ORDER BY created_at DESC LIMIT %s"
         )
@@ -1560,12 +1566,13 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
 
     @classmethod
     def _node_row_to_dict(cls, row: tuple[Any, ...]) -> dict[str, Any]:
-        # Row layout (v4 — Phase 4 of ADR planes-and-substrates added
-        # document_ids between generation_spec and properties):
-        # 0 version_id, 1 node_id, 2 node_type, 3 node_role,
-        # 4 generation_spec, 5 document_ids, 6 properties,
-        # 7 created_at, 8 updated_at, 9 valid_from, 10 valid_to
-        gen_spec_raw = row[4]
+        # Read by name from the row a ``_node_select_list()`` query
+        # returned. ``strict=True`` makes a SELECT whose column count
+        # differs from ``_NODE_COLUMNS`` raise here; before it, a missing
+        # column shifted every later field one slot and the isinstance
+        # fallbacks below dropped the misplaced values without a sound.
+        col = dict(zip(_NODE_COLUMNS, row, strict=True))
+        gen_spec_raw = col["generation_spec"]
         if gen_spec_raw is None:
             generation_spec: dict[str, Any] | None = None
         elif isinstance(gen_spec_raw, str):
@@ -1575,7 +1582,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         else:
             generation_spec = None
 
-        doc_ids_raw = row[5]
+        doc_ids_raw = col["document_ids"]
         if doc_ids_raw is None:
             document_ids: list[str] = []
         elif isinstance(doc_ids_raw, str):
@@ -1585,7 +1592,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         else:
             document_ids = []
 
-        props_raw = row[6]
+        props_raw = col["properties"]
         if isinstance(props_raw, str):
             props = json.loads(props_raw)
         elif isinstance(props_raw, dict):
@@ -1594,16 +1601,16 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             props = {}
 
         return {
-            "node_id": row[1],
-            "node_type": row[2],
-            "node_role": row[3] or "semantic",
+            "node_id": col["node_id"],
+            "node_type": col["node_type"],
+            "node_role": col["node_role"] or "semantic",
             "generation_spec": generation_spec,
             "document_ids": document_ids,
             "properties": props,
-            "created_at": cls._to_iso(row[7]),
-            "updated_at": cls._to_iso(row[8]),
-            "valid_from": cls._to_iso(row[9]),
-            "valid_to": cls._to_iso(row[10]),
+            "created_at": cls._to_iso(col["created_at"]),
+            "updated_at": cls._to_iso(col["updated_at"]),
+            "valid_from": cls._to_iso(col["valid_from"]),
+            "valid_to": cls._to_iso(col["valid_to"]),
         }
 
     @classmethod
