@@ -275,9 +275,11 @@ def _header_pack_id(text: str) -> str | None:
     the capture banner (a blockquote above the title) and an intent that
     wraps the title onto a second line. The last header-shaped line wins:
     the formatters print the header after every line of the intent, so a
-    header-shaped line inside the intent cannot displace it. A header-shaped
-    line further down sits inside an item, written by some other session,
-    and is not read.
+    header-shaped line inside the intent cannot displace it. A blank line
+    inside the intent ends the paragraph before the real header, though: a
+    header-shaped line above it is then read instead, and without one the
+    result counts as unparsed. A header-shaped line further down sits
+    inside an item, written by some other session, and is not read.
     """
     lines = text.split("\n")
     title = next((i for i, line in enumerate(lines) if line.startswith("# ")), None)

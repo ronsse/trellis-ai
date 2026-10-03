@@ -29,9 +29,9 @@ instance are set up here.
    `tool_result` / `toolUseResult` content
    (where `op`-style secret reads and env dumps live) never enters the digest.
    Malformed lines are skipped and counted; unknown record types, sidechains,
-   and compaction summaries are tolerated. Each parsed session's pack ids are
-   recorded as one `capture.session_packs` event, an empty list for a session
-   that never retrieved. A re-parse writes a new event only when its payload,
+   and compaction summaries are tolerated. Each parsed session with a turn or
+   a tool call has its pack ids recorded as one `capture.session_packs` event,
+   an empty list for a session that never retrieved. A re-parse writes a new event only when its payload,
    retrieval counts included, differs from the session's latest one.
 3. **Trigger** deterministically: sessions with errors or user corrections are
    capture-mandatory (failure-bias); clean sessions are sampled ~1-in-N.
