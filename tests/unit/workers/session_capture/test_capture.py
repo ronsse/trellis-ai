@@ -1569,6 +1569,45 @@ class TestSessionPackJoin:
             "sess-still": [_join([D], results=1)],
         }
 
+    def test_a_transcript_that_grows_without_a_new_pack_records_its_new_counts(
+        self, tmp_path: Path
+    ) -> None:
+        """The whole join is compared, not only its pack ids. A transcript
+        that grew a failed retrieval and a ``get_items`` call on a pack it
+        already had keeps the same pack ids, and its latest join must still
+        say it retrieved three times and failed once."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        wm = tmp_path / "wm.json"
+        path = root / "proj" / "sess-recount.jsonl"
+        _pack_session(path, "sess-recount", ("get_context", A))
+        _sweep(registry, root, wm)
+
+        with path.open("a", encoding="utf-8") as handle:
+            records = [
+                assistant_tools(
+                    ("mcp__trellis__get_context", "t-fail"),
+                    ("mcp__trellis__get_items", "t-items"),
+                    session_id="sess-recount",
+                ),
+                pack_result_turn(
+                    "t-fail", "fake failure", is_error=True, session_id="sess-recount"
+                ),
+                pack_result_turn(
+                    "t-items", mcp_envelope(pack_markdown(A)), session_id="sess-recount"
+                ),
+            ]
+            handle.writelines(json.dumps(record) + "\n" for record in records)
+        night2 = _sweep(registry, root, wm)
+
+        assert night2.pack_joins_recorded == 1
+        assert _joins(registry) == {
+            "sess-recount": [
+                _join([A], results=1),
+                _join([A], results=3, errors=1),
+            ],
+        }
+
     def test_a_dry_run_counts_the_join_and_writes_none(self, tmp_path: Path) -> None:
         registry = _registry(tmp_path)
         root = tmp_path / "projects"
