@@ -549,9 +549,13 @@ All notable changes to Trellis will be documented in this file.
   and `Concept` read apart, Activity labels are shortened with the full
   text on hover, and edge labels reach 5.25:1 contrast (from 2.41:1). A
   node's detail lists its `document_ids` as links that open each document
-  in the Memories view. `GET /api/v1/graph/search` also failed with a `500`
-  on every SQLite store: a `sqlite3.Connection` is callable, so the route
-  took it for the Postgres store.
+  in the Memories view. A node id reaches the search list's and the
+  detail panel's click handlers as data, not inline JavaScript, so an id
+  containing a quote no longer runs as script. `GET /api/v1/graph/search`
+  also failed with a `500` on every SQLite store: a `sqlite3.Connection` is
+  callable, so the route took it for the Postgres store. **Out-of-tree
+  `GraphStore` backends must implement `count_nodes_by_type`**: the method
+  is abstract, so a subclass without it no longer instantiates.
   ([#695](https://github.com/ronsse/trellis-ai/pull/695))
 
 ## [0.9.0] - 2026-05-13

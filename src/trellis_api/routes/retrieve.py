@@ -180,7 +180,10 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
 
 @router.get("/graph/search", summary="Search graph entities")
 def search_entities(
-    q: str | None = Query(None, description="Name substring search (case-insensitive)"),
+    q: str | None = Query(
+        None,
+        description="A case-insensitive substring of the name, node_id or node_type",
+    ),
     node_type: str | None = Query(None, description="Filter by node type"),
     sort: str = Query(
         "created_at", description="Sort field: created_at, name, node_type"

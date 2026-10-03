@@ -1,14 +1,8 @@
 """``GET /api/v1/graph/search`` and ``/facets``: the graph page's list and chips.
 
-The chips were counted in the browser from one ``/graph/search`` page of at
-most 500 rows sorted by type, so with more than 500 nodes of the first type
-every later type read as absent and that type's chip stopped at 500. The
-facet counts every current node per stored ``node_type`` server-side, under
-the same ``q`` the list applies, so its counts sum to the list's ``total``.
-
-The list itself failed on every SQLite store: it told the backends apart by
-whether the store's ``_conn`` was callable, and a ``sqlite3.Connection`` is,
-so SQLite took the Postgres branch.
+The facet counts every current node per stored ``node_type`` server-side,
+under the same ``q`` the list applies, so its counts sum to the list's
+``total`` however many pages the list spans.
 """
 
 from __future__ import annotations
@@ -30,7 +24,7 @@ from trellis_api.routes import retrieve
 FACETS = "/api/v1/graph/search/facets"
 SEARCH = "/api/v1/graph/search"
 
-# More than the 500 rows the page used to count chips from.
+# More nodes of one type than a single /graph/search page holds (limit <= 500).
 ACTIVITY_COUNT = 600
 
 
@@ -89,7 +83,7 @@ def test_search_lists_current_nodes_on_a_sqlite_store(
     ]
 
 
-def test_facets_count_every_type_past_the_old_500_row_window(
+def test_facets_count_every_type_beyond_one_list_page(
     client: TestClient, store: GraphStore
 ) -> None:
     store.upsert_nodes_bulk(
@@ -157,6 +151,26 @@ def test_facets_honour_q_as_the_list_does(
     nothing = _facets(client, q="no-node-has-this")
     assert nothing["node_types"] == []
     assert nothing["total"] == 0
+
+
+@pytest.mark.parametrize("q", ["", "%", "_", " ", "É"])
+def test_facets_agree_with_the_list_on_wildcards_blanks_and_case(
+    client: TestClient, store: GraphStore, q: str
+) -> None:
+    store.upsert_node("n-1", "Activity", {"name": "100% done"})
+    store.upsert_node("n_2", "concept", {"name": "snake_case name"})
+    store.upsert_node("n-3", "Concept", {"name": "Éclair widget"})
+    store.upsert_node("n-4", "Person", {"name": "plain"})
+
+    body = _facets(client, q=q)
+
+    # What %, _ and non-ASCII case match differs by backend; the facet
+    # applies the list's own predicate, so the two agree.
+    total = _list_total(client, q=q)
+    assert total > 0
+    assert body["total"] == total
+    for row in body["node_types"]:
+        assert row["count"] == _list_total(client, q=q, node_type=row["node_type"])
 
 
 def test_facets_count_current_versions_only(

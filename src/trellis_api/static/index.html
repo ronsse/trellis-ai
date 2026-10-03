@@ -3047,6 +3047,10 @@
             } else {
                 renderFlatResults(itemsEl);
             }
+            // Node ids are agent-written: they reach the handler through the
+            // DOM, never through inline JavaScript.
+            itemsEl.querySelectorAll('.srp-item').forEach(el =>
+                el.addEventListener('click', () => selectSearchResult(el.dataset.entityId)));
         }
 
         function renderGroupedResults(container) {
@@ -3083,7 +3087,7 @@
             const type = nodeTypeOf(r);
             const color = nodeColor(type);
             const created = r.created_at ? timeAgo(r.created_at) : '';
-            return `<div class="srp-item" onclick="selectSearchResult('${escHtml(id)}')">
+            return `<div class="srp-item" data-entity-id="${escHtml(id).replace(/"/g, '&quot;')}">
                 <span style="display:flex; align-items:center; gap:0.4rem; min-width:0">
                     <span class="legend-dot" style="background:${color}; flex-shrink:0"></span>
                     <strong style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis">${escHtml(name)}</strong>
@@ -3266,13 +3270,20 @@
                 <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:0.75rem" class="mono">${escHtml(nodeId)}</div>
                 ${propsHtml ? `<dl class="props">${propsHtml}</dl>` : '<p style="color:var(--text-dim); font-size:0.85rem">No properties</p>'}
                 <div class="detail-actions">
-                    <button class="btn btn-ghost btn-sm" onclick="loadEntity('${escHtml(nodeId)}')">Center on node</button>
-                    <button class="btn btn-ghost btn-sm" onclick="loadEntity('${escHtml(nodeId)}', true)">Expand neighbors</button>
-                    <button class="btn btn-ghost btn-sm" onclick="loadNodeHistory('${escHtml(nodeId)}')">History</button>
-                    <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escHtml(nodeId)}')">Copy ID</button>
+                    <button class="btn btn-ghost btn-sm" data-act="center">Center on node</button>
+                    <button class="btn btn-ghost btn-sm" data-act="expand">Expand neighbors</button>
+                    <button class="btn btn-ghost btn-sm" data-act="history">History</button>
+                    <button class="btn btn-ghost btn-sm" data-act="copy">Copy ID</button>
                 </div>
                 <div id="node-history"></div>
             `;
+            const acts = {
+                center: () => loadEntity(nodeId),
+                expand: () => loadEntity(nodeId, true),
+                history: () => loadNodeHistory(nodeId),
+                copy: () => copyToClipboard(nodeId),
+            };
+            el.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', acts[b.dataset.act]));
             const docIds = Array.isArray(data.document_ids)
                 ? data.document_ids.filter(d => typeof d === 'string' && d)
                 : [];

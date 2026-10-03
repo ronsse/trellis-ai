@@ -2727,7 +2727,7 @@ paths:
       description: Search graph nodes by name or type.
       operationId: search_entities_api_v1_graph_search_get
       parameters:
-      - description: Name substring search (case-insensitive)
+      - description: A case-insensitive substring of the name, node_id or node_type
         in: query
         name: q
         required: false
@@ -2735,7 +2735,7 @@ paths:
           anyOf:
           - type: string
           - type: 'null'
-          description: Name substring search (case-insensitive)
+          description: A case-insensitive substring of the name, node_id or node_type
           title: Q
       - description: Filter by node type
         in: query
