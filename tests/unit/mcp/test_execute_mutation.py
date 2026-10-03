@@ -372,12 +372,11 @@ def _deny_traces(registry: StoreRegistry, operation: str) -> None:
 
 
 class TestTraceIngestTarget:
-    """``trace.ingest`` targets its trace, as every other trace write path does.
+    """``trace.ingest`` targets its trace, as ``save_experience`` does.
 
-    ``save_experience``, the CLI and REST build the ``Command`` with
-    ``target_type="trace"`` and the trace's id. The policy gate matches an
-    ``entity_type`` scope on ``target_type``, and the executor's audit event
-    records both fields.
+    ``trellis ingest trace`` and ``POST /api/v1/traces`` do the same. The
+    policy gate matches an ``entity_type`` scope on ``target_type``, and the
+    executor's audit event records ``target_type`` and ``target_id``.
     """
 
     def test_the_audit_event_names_each_stored_trace(
@@ -457,10 +456,10 @@ class TestTraceIngestTarget:
     def test_an_invalid_trace_is_still_refused_by_the_handler(
         self, temp_registry: StoreRegistry, trace: Any
     ) -> None:
-        """An invalid trace has no id to target, so it goes on untargeted.
+        """A trace that does not validate goes on untargeted.
 
         A policy scoped to traces does not match it, and the handler refuses
-        it with the same status and message as before the target was added.
+        it with the trace's own validation error.
         """
         _deny_traces(temp_registry, "trace.ingest")
         with pytest.raises(ValidationError) as refused:
