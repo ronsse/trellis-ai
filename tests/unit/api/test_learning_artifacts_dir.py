@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
 import trellis_cli.stores as cli_stores
+from tests.cli_output import plain
 from trellis.core.path_presence import path_is_present
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -208,7 +209,9 @@ def test_writer_with_nothing_to_resolve_asks_for_output_dir(
     monkeypatch.setattr(cli_stores, "_registry", StoreRegistry())
     result = cli_runner.invoke(cli_app, WRITERS[writer])
     assert result.exit_code == 2
-    assert "--output-dir" in result.output
+    # A usage error is Typer's own rendering, coloured wherever CI sets
+    # GITHUB_ACTIONS, so read it through ``plain``.
+    assert "--output-dir" in plain(result.output)
     assert not path_is_present(data_dir / "learning")
 
 
