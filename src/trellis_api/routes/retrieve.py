@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -179,7 +180,10 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
 
 @router.get("/graph/search", summary="Search graph entities")
 def search_entities(
-    q: str | None = Query(None, description="Name substring search (case-insensitive)"),
+    q: str | None = Query(
+        None,
+        description="A case-insensitive substring of the name, node_id or node_type",
+    ),
     node_type: str | None = Query(None, description="Filter by node type"),
     sort: str = Query(
         "created_at", description="Sort field: created_at, name, node_type"
@@ -192,14 +196,12 @@ def search_entities(
     registry = get_registry()
     store = registry.knowledge.graph_store
 
-    # Detect backend by the shape of ``_conn``: SQLite stores hold a
-    # ``sqlite3.Connection`` object; the Postgres store's ``_conn`` is a
-    # *method* returning a pooled-connection context manager (used as
-    # ``with store._conn() as conn``), so callable means Postgres.
-    conn_attr = getattr(store, "_conn", None)
-    is_sqlite = conn_attr is not None and not callable(conn_attr)
-
-    if is_sqlite:
+    # Detect backend by the type of ``_conn``: SQLite stores hold a
+    # ``sqlite3.Connection``; the Postgres store's ``_conn`` is a method
+    # returning a pooled-connection context manager (used as
+    # ``with store._conn() as conn``). Callability cannot tell them apart,
+    # because a ``sqlite3.Connection`` is callable too.
+    if isinstance(getattr(store, "_conn", None), sqlite3.Connection):
         return _search_entities_sqlite(store, q, node_type, sort, order, limit, offset)
     return _search_entities_postgres(store, q, node_type, sort, order, limit, offset)
 
@@ -350,6 +352,32 @@ def _search_entities_postgres(
         "offset": offset,
         "results": results,
     }
+
+
+@router.get("/graph/search/facets", summary="Count graph search matches per node type")
+def search_entity_facets(
+    q: str | None = Query(
+        None,
+        description=(
+            "The /graph/search q filter: a case-insensitive substring of the"
+            " name, node_id or node_type"
+        ),
+    ),
+) -> dict[str, Any]:
+    """Count current graph nodes per stored ``node_type`` under ``q``.
+
+    The graph page's type chips. Every type is counted server-side, in its
+    stored case, by count descending then type, and the counts sum to
+    ``/graph/search``'s ``total`` for the same ``q``. ``node_type`` is not a
+    parameter because it is the dimension being counted.
+    """
+    store = get_registry().knowledge.graph_store
+    counts = store.count_nodes_by_type(search=q or None)
+    node_types = [
+        {"node_type": node_type, "count": count}
+        for node_type, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    return {"status": "ok", "total": sum(counts.values()), "node_types": node_types}
 
 
 @router.get("/entities/{entity_id:path}")

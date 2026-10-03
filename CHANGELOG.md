@@ -125,6 +125,20 @@ All notable changes to Trellis will be documented in this file.
   `CaptureReport` gains `pack_joins_recorded`, `pack_joins_unchanged` and
   `pack_ids_unparsed`. Only the id is read out of a result, and only once
   it matches the pack-id alphabet.
+- **`GraphStore.update_node_if_current` writes a new node version only over
+  the version its caller read.** The caller passes the `valid_from` that
+  `get_node` returned. While that version is current the call replaces it
+  and returns `True`; once another write has replaced it, or `delete_node`
+  has purged the node, it writes nothing and returns `False`. It never
+  creates a node, so unlike `upsert_node` it cannot bring back an id that a
+  purge removed between a caller's read and its write. Of concurrent calls
+  holding one token exactly one writes, on SQLite, Postgres, Neo4j and
+  ArcadeDB; a concurrent `upsert_node` is not checked against the token, and
+  on Neo4j the two can leave two current versions. A token that is not a
+  timestamp string raises `TypeError` or `ValueError` before anything is
+  read, on every backend. No caller uses it yet. **Out-of-tree `GraphStore`
+  backends must implement it**: the method is abstract, so a subclass
+  without it no longer instantiates.
 - **The `capture.session_packs` join now carries each session's outcome.**
   The payload gains `outcome`, read from the transcript and from no pack,
   so it can measure a pack the agent's own grade cannot: `tool_calls`,
@@ -546,6 +560,32 @@ All notable changes to Trellis will be documented in this file.
   disagrees with that list raises instead of shifting. SQLite, Neo4j and
   ArcadeDB were not affected.
   ([#692](https://github.com/ronsse/trellis-ai/pull/692))
+
+- **The UI graph page's type chips count every type, and its legend,
+  colours and labels follow the data.** The chips counted only the first
+  500 matches in type order, so when the type that sorts first had 500 or
+  more nodes, it was the only chip offered. They now read a new
+  `GET /api/v1/graph/search/facets`, which counts current nodes per stored
+  `node_type` under the list's `q` through a new
+  `GraphStore.count_nodes_by_type` on every backend, and the active chip
+  follows the filter. The legend lists the types on the canvas
+  with counts, and every entry hides its type; it listed ten fixed
+  lowercase names, and an entry acted only when the canvas held a type
+  matching one of them. A type's colour comes from its stored name: the
+  sixteen canonical types have fixed colours and every other type a stable
+  hashed one, where any type not spelled as one of those ten names was the
+  accent indigo. Search group headers keep the stored case, so `concept`
+  and `Concept` read apart, Activity labels are shortened with the full
+  text on hover, and edge labels reach 5.25:1 contrast (from 2.41:1). A
+  node's detail lists its `document_ids` as links that open each document
+  in the Memories view. A node id reaches the search list's and the
+  detail panel's click handlers as data, not inline JavaScript, so an id
+  containing a quote no longer runs as script. `GET /api/v1/graph/search`
+  also failed with a `500` on every SQLite store: a `sqlite3.Connection` is
+  callable, so the route took it for the Postgres store. **Out-of-tree
+  `GraphStore` backends must implement `count_nodes_by_type`**: the method
+  is abstract, so a subclass without it no longer instantiates.
+  ([#695](https://github.com/ronsse/trellis-ai/pull/695))
 
 ## [0.9.0] - 2026-05-13
 
