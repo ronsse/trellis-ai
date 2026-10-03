@@ -1501,6 +1501,42 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         record = self._run_read_single(cypher)
         return int(record["cnt"]) if record else 0
 
+    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+        if not search:
+            cypher = (
+                "MATCH (n:Node) WHERE n.valid_to IS NULL "
+                "RETURN n.node_type AS node_type, "
+                "count(DISTINCT n.node_id) AS cnt"
+            )
+            return {
+                str(r["node_type"]): int(r["cnt"]) for r in self._run_read_list(cypher)
+            }
+        # The name lives inside properties_json, which json.dumps wrote with
+        # non-ASCII escaped, so a Cypher CONTAINS on that string would miss
+        # non-ASCII names and decoding it in Cypher needs APOC. Match
+        # client-side instead, as query() does for property filters.
+        cypher = (
+            "MATCH (n:Node) WHERE n.valid_to IS NULL "
+            "RETURN n.node_id AS node_id, n.node_type AS node_type, "
+            "n.properties_json AS properties_json"
+        )
+        needle = search.lower()
+        matched: dict[str, str] = {}
+        for r in self._run_read_list(cypher):
+            props = json.loads(r["properties_json"] or "{}")
+            name = props.get("name") if isinstance(props, dict) else None
+            haystacks = (
+                "" if name is None else str(name),
+                str(r["node_id"]),
+                str(r["node_type"]),
+            )
+            if any(needle in h.lower() for h in haystacks):
+                matched[str(r["node_id"])] = str(r["node_type"])
+        counts: dict[str, int] = {}
+        for node_type in matched.values():
+            counts[node_type] = counts.get(node_type, 0) + 1
+        return counts
+
     def count_edges(self) -> int:
         cypher = "MATCH ()-[r:EDGE]->() WHERE r.valid_to IS NULL RETURN count(r) AS cnt"
         record = self._run_read_single(cypher)

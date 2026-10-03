@@ -1010,6 +1010,53 @@ class GraphStoreContractTests:
         store.upsert_edge("a", "b", "depends_on")
         assert store.count_edges() == 1
 
+    def test_count_nodes_by_type_counts_current_versions_per_stored_type(
+        self, store: GraphStore
+    ) -> None:
+        assert store.count_nodes_by_type() == {}
+        for i in range(3):
+            store.upsert_node(f"act-{i}", "Activity", {"name": f"step {i}"})
+        store.upsert_node("lower-1", "concept", {"name": "lower one"})
+        store.upsert_node("lower-2", "concept", {"name": "lower two"})
+        store.upsert_node("upper-1", "Concept", {"name": "upper one"})
+        # Two closed versions: a same-type update must not count twice, and
+        # a type that survives only on a closed version must not appear.
+        store.upsert_node("svc", "service", {"v": 1})
+        store.upsert_node("moved", "legacy_kind", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_node("svc", "service", {"v": 2})
+        store.upsert_node("moved", "Activity", {"v": 2})
+
+        counts = store.count_nodes_by_type()
+
+        assert counts == {"Activity": 4, "concept": 2, "Concept": 1, "service": 1}
+        assert sum(counts.values()) == store.count_nodes()
+
+    def test_count_nodes_by_type_search_matches_name_id_or_type(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n-name", "Activity", {"name": "Deploy the Widget"})
+        store.upsert_node("widget-id", "concept", {"name": "unrelated"})
+        store.upsert_node("n-type", "WidgetKind", {"name": "also unrelated"})
+        store.upsert_node("n-miss-1", "Activity", {"name": "gadget"})
+        store.upsert_node("n-miss-2", "concept", {})
+        # A closed version whose name matched stops counting once renamed.
+        store.upsert_node("n-renamed", "Activity", {"name": "old widget"})
+        _sleep_for_ordering()
+        store.upsert_node("n-renamed", "Activity", {"name": "new gadget"})
+
+        assert store.count_nodes_by_type(search="WIDGET") == {
+            "Activity": 1,
+            "concept": 1,
+            "WidgetKind": 1,
+        }
+        assert store.count_nodes_by_type(search="no-node-has-this") == {}
+        assert store.count_nodes_by_type(search="") == {
+            "Activity": 3,
+            "concept": 2,
+            "WidgetKind": 1,
+        }
+
     # ------------------------------------------------------------------
     # node_role + generation_spec
     # ------------------------------------------------------------------

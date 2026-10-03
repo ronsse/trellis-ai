@@ -574,6 +574,19 @@ class GraphStore(ABC):
         """Total current node count (valid_to IS NULL)."""
 
     @abstractmethod
+    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+        """Current node count (valid_to IS NULL) per stored ``node_type``.
+
+        Keys keep their stored case, so ``"concept"`` and ``"Concept"`` are
+        counted apart; a type with no current node is absent. A non-empty
+        *search* keeps only nodes whose ``name`` property, ``node_id`` or
+        ``node_type`` contains it, ignoring case: the filter that
+        ``GET /graph/search`` applies to ``q``. The SQL backends apply that
+        route's ``LIKE``/``ILIKE`` predicate verbatim, so ``%`` and ``_`` in
+        *search* are wildcards there, exactly as they are in the list.
+        """
+
+    @abstractmethod
     def count_edges(self) -> int:
         """Total current edge count (valid_to IS NULL)."""
 
