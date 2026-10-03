@@ -31,7 +31,8 @@ instance are set up here.
    Malformed lines are skipped and counted; unknown record types, sidechains,
    and compaction summaries are tolerated. Each parsed session's pack ids are
    recorded as one `capture.session_packs` event, an empty list for a session
-   that never retrieved, and written again only when they change.
+   that never retrieved. A re-parse writes a new event only when its payload,
+   retrieval counts included, differs from the session's latest one.
 3. **Trigger** deterministically: sessions with errors or user corrections are
    capture-mandatory (failure-bias); clean sessions are sampled ~1-in-N.
 4. **Distil** triggered sessions with the local model. The judge prompt carries
