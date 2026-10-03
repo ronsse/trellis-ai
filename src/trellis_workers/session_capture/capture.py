@@ -4,6 +4,9 @@ One nightly pass over the Claude Code transcript directory:
 
 #. **Discover** transcript files; **watermark**-skip unchanged ones.
 #. **Parse** each new/changed file into a secret-free digest (F8-safe).
+#. **Join** each parsed session to the context packs it was served: one
+   ``CAPTURE_SESSION_PACKS`` event, written again only when the join
+   changes. Ahead of the trigger, so a sampled-out session is joined too.
 #. **Trigger** deterministically — error/correction sessions are mandatory,
    clean ones sampled.
 #. **Distil** triggered sessions with the local model (fail-closed).
@@ -54,6 +57,7 @@ from trellis_workers.session_capture.secret_scan import scan as scan_for_leak_cl
 from trellis_workers.session_capture.transcripts import (
     discover_sessions,
     is_ephemeral_project,
+    parent_session_id,
     parse_session,
 )
 from trellis_workers.session_capture.watermark import WatermarkStore
@@ -180,7 +184,7 @@ def _gate_candidates(
     return survivors
 
 
-def run_capture(
+def run_capture(  # noqa: PLR0915
     registry: StoreRegistry,
     *,
     transcripts_root: Path,
@@ -249,6 +253,14 @@ def run_capture(
             digest = parse_session(path)
             report.sessions_parsed += 1
             report.malformed_lines += digest.malformed_lines
+            _record_pack_join(
+                registry,
+                digest,
+                report,
+                parent=parent_session_id(path, transcripts_root),
+                source_system=source_system,
+                dry_run=dry_run,
+            )
 
             if not gating.should_distill(digest, sample_denominator):
                 # Two different outcomes hide behind one `False`. An empty
@@ -318,6 +330,71 @@ def run_capture(
     _emit_sweep_completed(registry, report, source_system=source_system)
     logger.info("capture_sweep_complete", **report.to_payload())
     return report
+
+
+def _record_pack_join(
+    registry: StoreRegistry,
+    digest: SessionDigest,
+    report: CaptureReport,
+    *,
+    parent: str | None,
+    source_system: str,
+    dry_run: bool,
+) -> None:
+    """Record which context packs *digest*'s session was served.
+
+    One ``CAPTURE_SESSION_PACKS`` event keyed on the session id, its payload
+    the join itself; see :class:`~trellis.stores.base.event_log.EventType`.
+    An event rather than a field on the pack: the server that assembles a
+    pack is not told which Claude Code session asked (a pack's
+    ``session_id`` is whatever the agent passes), and the pack's
+    ``PACK_ASSEMBLED`` event cannot be amended once a transcript names it,
+    because the event log is append-only. A payload is a plain dict, so no
+    ``extra="forbid"`` schema has to grow a field for it.
+
+    A transcript with no turn and no tool call gets no join: a blank file or
+    a workflow journal is not a session, and an empty join there would claim
+    one ran without retrieving. Every other parse is compared with the
+    session's latest join and writes only on a difference, so a judge-outage
+    retry or a watermark reset adds nothing while a transcript that grew
+    records its new packs.
+
+    Not fail-soft, unlike :func:`_emit_sweep_completed`: this runs inside
+    the per-session boundary, so a failed write leaves the session
+    un-watermarked for the next sweep. Swallowing it would watermark the
+    session and lose its join for good. A dry run reads, counts and writes
+    nothing.
+    """
+    if digest.is_empty and not digest.tool_calls:
+        return
+    report.pack_ids_unparsed += digest.pack_ids_unparsed
+    payload: dict[str, object] = {
+        "pack_ids": list(digest.pack_ids),
+        "retrieval_results": digest.retrieval_results,
+        "retrieval_errors": digest.retrieval_errors,
+        "pack_ids_unparsed": digest.pack_ids_unparsed,
+        "parent_session_id": parent,
+        "source_system": source_system,
+    }
+    event_log = registry.operational.event_log
+    latest = event_log.get_events(
+        event_type=EventType.CAPTURE_SESSION_PACKS,
+        entity_id=digest.session_id,
+        order="desc",
+        limit=1,
+    )
+    if latest and latest[0].payload == payload:
+        report.pack_joins_unchanged += 1
+        return
+    if not dry_run:
+        event_log.emit(
+            EventType.CAPTURE_SESSION_PACKS,
+            source=_REQUESTED_BY,
+            entity_id=digest.session_id,
+            entity_type="capture_session",
+            payload=payload,
+        )
+    report.pack_joins_recorded += 1
 
 
 def _record_session_error(report: CaptureReport, path: Path, exc: Exception) -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trellis_workers.session_capture import transcripts
 from trellis_workers.session_capture.models import ToolUseRollup
 from trellis_workers.session_capture.transcripts import (
     discover_sessions,
@@ -17,8 +18,12 @@ from trellis_workers.session_capture.transcripts import (
 )
 
 from .conftest import (
+    PACK_IDS,
     assistant_tools,
     assistant_turn,
+    mcp_envelope,
+    pack_markdown,
+    pack_result_turn,
     tool_result_turn,
     user_turn,
     write_transcript,
@@ -425,3 +430,336 @@ class TestToolErrorAttribution:
         digest = parse_session(path)
         assert digest.has_error is False
         assert digest.tool_rollup == [ToolUseRollup(name="Bash", calls=1, errors=0)]
+
+
+#: Every Trellis retrieval tool whose result carries the ``**pack_id:**``
+#: header, with the title line its formatter prints. Each tool gets its own
+#: pack id below, so a parser that reads only some of them cannot match.
+_PACK_TOOL_TITLES = (
+    ("get_context", "# Context index for: fake intent in index mode"),
+    ("search", "# Context for: fake search query"),
+    ("get_objective_context", "# Context for: fake objective"),
+    ("get_task_context", "# Context for: fake task"),
+    ("get_sectioned_context", "# Context for: fake sectioned intent"),
+    ("get_items", "# Fetched items"),
+)
+
+
+def _served(*results: tuple[str, str, object]) -> list[dict]:
+    """A transcript serving one tool result per ``(tool, use_id, content)``."""
+    records: list[dict] = [user_turn("gather what we know about the widget deploy")]
+    for tool, use_id, content in results:
+        records.append(assistant_tools((tool, use_id)))
+        records.append(pack_result_turn(use_id, content))
+    records.append(assistant_turn("done gathering"))
+    return records
+
+
+class TestPackIdExtraction:
+    """Which packs a session was served — step 1 of the effectiveness plan.
+
+    A Trellis retrieval tool prints ``**pack_id:** `<id>``` on the line after
+    its title. That id is the one thing the digest reads out of a
+    ``tool_result``: a generated identifier, kept only once it matches its
+    own 26-character alphabet, so no tool output rides along with it.
+    """
+
+    def test_a_session_served_two_packs_records_both(self, tmp_path: Path) -> None:
+        path = tmp_path / "s.jsonl"
+        first, second = PACK_IDS[0], PACK_IDS[1]
+        write_transcript(
+            path,
+            _served(
+                (
+                    "mcp__trellis__get_context",
+                    "u-1",
+                    mcp_envelope(pack_markdown(first)),
+                ),
+                ("mcp__trellis__search", "u-2", mcp_envelope(pack_markdown(second))),
+                # Expanding the first pack echoes its id: one pack, not two.
+                (
+                    "mcp__trellis__get_items",
+                    "u-3",
+                    mcp_envelope(pack_markdown(first, title="# Fetched items")),
+                ),
+            ),
+        )
+        digest = parse_session(path)
+        assert digest.pack_ids == [first, second]
+        assert digest.retrieval_results == 3
+        assert digest.retrieval_errors == 0
+        assert digest.pack_ids_unparsed == 0
+
+    def test_every_retrieval_tool_that_prints_the_header_is_read(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "s.jsonl"
+        served = [
+            (
+                f"mcp__trellis__{tool}",
+                f"u-{i}",
+                mcp_envelope(pack_markdown(pack_id, title=title)),
+            )
+            for i, ((tool, title), pack_id) in enumerate(
+                zip(_PACK_TOOL_TITLES, PACK_IDS, strict=False)
+            )
+        ]
+        write_transcript(path, _served(*served))
+        digest = parse_session(path)
+        assert digest.pack_ids == list(PACK_IDS[: len(_PACK_TOOL_TITLES)])
+        assert digest.retrieval_results == len(_PACK_TOOL_TITLES)
+
+    def test_only_a_trellis_server_counts(self, tmp_path: Path) -> None:
+        """The stdio server and the claude.ai connector differ only in the
+        server segment of the tool name. A same-named tool on another server,
+        or ``Bash`` printing a header, served no Trellis pack."""
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            _served(
+                (
+                    "mcp__trellis__search",
+                    "u-1",
+                    mcp_envelope(pack_markdown(PACK_IDS[0])),
+                ),
+                (
+                    "mcp__claude_ai_Fake-trellis__get_context",
+                    "u-2",
+                    mcp_envelope(pack_markdown(PACK_IDS[1])),
+                ),
+                (
+                    "mcp__other-memory__get_context",
+                    "u-3",
+                    mcp_envelope(pack_markdown(PACK_IDS[2])),
+                ),
+                ("Bash", "u-4", pack_markdown(PACK_IDS[3])),
+            ),
+        )
+        digest = parse_session(path)
+        assert digest.pack_ids == [PACK_IDS[0], PACK_IDS[1]]
+        assert digest.retrieval_results == 2
+
+    def test_each_result_shape_is_read(self, tmp_path: Path) -> None:
+        """The FastMCP envelope (what Claude Code records today), a bare
+        markdown string, and a list of text blocks."""
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            _served(
+                (
+                    "mcp__trellis__get_context",
+                    "u-1",
+                    mcp_envelope(pack_markdown(PACK_IDS[0])),
+                ),
+                ("mcp__trellis__get_context", "u-2", pack_markdown(PACK_IDS[1])),
+                (
+                    "mcp__trellis__get_context",
+                    "u-3",
+                    [
+                        {
+                            "type": "text",
+                            "text": mcp_envelope(pack_markdown(PACK_IDS[2])),
+                        },
+                        {"type": "text", "text": "a second fake block"},
+                    ],
+                ),
+            ),
+        )
+        assert parse_session(path).pack_ids == list(PACK_IDS[:3])
+
+    def test_the_capture_banner_and_a_wrapped_intent_do_not_hide_the_header(
+        self, tmp_path: Path
+    ) -> None:
+        """The banner sits above the title while capture is failing; an
+        intent with a newline in it wraps the title line. Neither moves the
+        header out of the title's paragraph."""
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            _served(
+                (
+                    "mcp__trellis__get_context",
+                    "u-1",
+                    mcp_envelope(pack_markdown(PACK_IDS[0], banner=True)),
+                ),
+                (
+                    "mcp__trellis__get_sectioned_context",
+                    "u-2",
+                    mcp_envelope(
+                        pack_markdown(
+                            PACK_IDS[1],
+                            title="# Context for: fake intent\nwrapped onto line two",
+                        )
+                    ),
+                ),
+            ),
+        )
+        digest = parse_session(path)
+        assert digest.pack_ids == [PACK_IDS[0], PACK_IDS[1]]
+        assert digest.pack_ids_unparsed == 0
+
+    def test_errors_and_empty_packs_are_retrievals_without_a_pack(
+        self, tmp_path: Path
+    ) -> None:
+        """Three different zeros, told apart: a failed call, a pack with
+        nothing in it (the formatter prints no header), and a served pack."""
+        path = tmp_path / "s.jsonl"
+        records = _served(
+            (
+                "mcp__trellis__get_context",
+                "u-1",
+                mcp_envelope("No context found for: fake intent with no precedent"),
+            ),
+            ("mcp__trellis__search", "u-2", mcp_envelope(pack_markdown(PACK_IDS[4]))),
+        )
+        records.append(assistant_tools(("mcp__trellis__get_context", "u-3")))
+        records.append(
+            pack_result_turn("u-3", "Error: fake store unavailable", is_error=True)
+        )
+        write_transcript(path, records)
+        digest = parse_session(path)
+        assert digest.pack_ids == [PACK_IDS[4]]
+        assert digest.retrieval_results == 3
+        assert digest.retrieval_errors == 1
+        assert digest.pack_ids_unparsed == 0
+
+    def test_a_session_that_never_retrieved_has_no_retrievals(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            [
+                user_turn("rename the widget module"),
+                assistant_turn("renaming", "Edit", use_id="u-1"),
+                tool_result_turn(is_error=False, tool_use_id="u-1"),
+            ],
+        )
+        digest = parse_session(path)
+        assert digest.pack_ids == []
+        assert digest.retrieval_results == 0
+        assert digest.pack_ids_unparsed == 0
+
+    def test_a_truncated_or_unrecognised_result_is_counted_not_fatal(
+        self, tmp_path: Path
+    ) -> None:
+        """A result cut off mid-envelope, a header whose id is not a pack id,
+        and a content shape the parser has never seen: each is counted as
+        unparsed, and the pack served next to them is still recorded."""
+        path = tmp_path / "s.jsonl"
+        envelope = mcp_envelope(pack_markdown(PACK_IDS[0]))
+        # Cut inside the id: the label survives, the envelope does not close.
+        truncated = envelope[: envelope.index("**pack_id:**") + 20]
+        write_transcript(
+            path,
+            _served(
+                ("mcp__trellis__get_context", "u-1", truncated),
+                (
+                    "mcp__trellis__get_context",
+                    "u-2",
+                    mcp_envelope(pack_markdown("not-a-pack-id")),
+                ),
+                ("mcp__trellis__search", "u-3", {"unexpected": "shape"}),
+                (
+                    "mcp__trellis__search",
+                    "u-4",
+                    mcp_envelope(pack_markdown(PACK_IDS[5])),
+                ),
+            ),
+        )
+        digest = parse_session(path)
+        assert "**pack_id:**" in truncated
+        assert digest.pack_ids == [PACK_IDS[5]]
+        assert digest.pack_ids_unparsed == 3
+        assert digest.retrieval_results == 4
+        assert digest.malformed_lines == 0
+
+    def test_a_header_quoted_in_an_item_body_is_not_a_join(
+        self, tmp_path: Path
+    ) -> None:
+        """``get_items`` called without a pack id prints no header, so a
+        header-shaped line inside an item belongs to whatever session wrote
+        that item. It mentions the label, so it is counted as unparsed."""
+        path = tmp_path / "s.jsonl"
+        body = "# Fetched items\n\n## fake item\n**pack_id:** `" + PACK_IDS[6] + "`"
+        write_transcript(
+            path,
+            _served(
+                ("mcp__trellis__get_items", "u-1", mcp_envelope(body)),
+                (
+                    "mcp__trellis__get_context",
+                    "u-2",
+                    mcp_envelope(pack_markdown(PACK_IDS[7])),
+                ),
+            ),
+        )
+        digest = parse_session(path)
+        assert digest.pack_ids == [PACK_IDS[7]]
+        assert digest.pack_ids_unparsed == 1
+
+    def test_no_result_text_reaches_the_digest(self, tmp_path: Path) -> None:
+        """F8: the id is read out of the result; the result stays out."""
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            _served(
+                (
+                    "mcp__trellis__get_context",
+                    "u-1",
+                    mcp_envelope(pack_markdown(PACK_IDS[0])),
+                ),
+            ),
+        )
+        digest = parse_session(path)
+        assert digest.pack_ids == [PACK_IDS[0]]
+        assert "frobnicator" not in repr(digest)
+        assert "Context for" not in repr(digest)
+
+
+class TestParentSessionId:
+    """A sub-agent transcript names its parent session by where it lives.
+
+    Claude Code nests sub-agents at
+    ``<project>/<parent-session>/subagents/[workflows/<wf>/]agent-*.jsonl``,
+    so the parent session is the directory that holds ``subagents``.
+    """
+
+    def test_main_and_nested_transcripts(self, tmp_path: Path) -> None:
+        project = tmp_path / "-home-me-proj"
+        assert (
+            transcripts.parent_session_id(project / "sess-main.jsonl", tmp_path) is None
+        )
+        assert (
+            transcripts.parent_session_id(
+                project / "sess-main" / "subagents" / "agent-a1.jsonl", tmp_path
+            )
+            == "sess-main"
+        )
+        assert (
+            transcripts.parent_session_id(
+                project
+                / "sess-other"
+                / "subagents"
+                / "workflows"
+                / "wf_1"
+                / "agent-b2.jsonl",
+                tmp_path,
+            )
+            == "sess-other"
+        )
+
+    def test_a_path_outside_the_root_or_off_pattern_has_none(
+        self, tmp_path: Path
+    ) -> None:
+        assert (
+            transcripts.parent_session_id(
+                Path("/elsewhere/p/s/subagents/a.jsonl"), tmp_path
+            )
+            is None
+        )
+        assert (
+            transcripts.parent_session_id(
+                tmp_path / "p" / "s" / "notes" / "agent-c3.jsonl", tmp_path
+            )
+            is None
+        )

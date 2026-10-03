@@ -21,11 +21,16 @@ from trellis_workers.session_capture import capture
 from trellis_workers.session_capture.capture import run_capture
 
 from .conftest import (
+    PACK_IDS,
     BrokenLLMClient,
     FakeLLMClient,
+    assistant_tools,
     assistant_turn,
     candidates_json,
     good_candidate,
+    mcp_envelope,
+    pack_markdown,
+    pack_result_turn,
     tool_result_turn,
     user_turn,
     write_transcript,
@@ -1261,3 +1266,366 @@ def test_refused_document_store_stops_the_sweep_before_the_judge(
             dry_run=dry_run,
         )
     assert client.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Session <-> pack join: which packs each session was served
+# ---------------------------------------------------------------------------
+
+A, B, C, D, E, F = PACK_IDS[:6]
+
+
+def _pack_session(
+    path: Path,
+    session_id: str,
+    *served: tuple[str, str | None],
+    error: bool = False,
+    sidechain: bool = False,
+) -> None:
+    """A transcript that calls Trellis retrieval tools.
+
+    Each ``(tool, pack_id)`` is one call and its result, and ``None`` is a
+    pack with nothing in it (the formatter prints no header). ``error`` adds
+    an errored ``Bash`` call, which makes the session capture-mandatory so
+    the judge runs on it; a clean session is left to sampling.
+    """
+    records = [user_turn("look for prior work on the widget deploy", session_id)]
+    for i, (tool, pack_id) in enumerate(served):
+        use_id = f"t-{session_id}-{i}"
+        records.append(
+            assistant_tools((f"mcp__trellis__{tool}", use_id), session_id=session_id)
+        )
+        if pack_id is None:
+            markdown = "No context found for: fake intent with no precedent"
+        elif tool == "get_items":
+            markdown = pack_markdown(pack_id, title="# Fetched items")
+        else:
+            markdown = pack_markdown(pack_id)
+        records.append(
+            pack_result_turn(use_id, mcp_envelope(markdown), session_id=session_id)
+        )
+    if error:
+        bash_id = f"t-{session_id}-bash"
+        records.append(
+            assistant_turn("running the migration", "Bash", session_id, use_id=bash_id)
+        )
+        records.append(
+            tool_result_turn(is_error=True, session_id=session_id, tool_use_id=bash_id)
+        )
+    records.append(assistant_turn("summarised the precedent", None, session_id))
+    if sidechain:
+        for record in records:
+            record["isSidechain"] = True
+    write_transcript(path, records)
+
+
+def _joins(registry: MagicMock) -> dict[str, list[dict]]:
+    """Every join event's payload, per session, oldest first."""
+    joins: dict[str, list[dict]] = {}
+    for event in registry.operational.event_log.get_events(
+        event_type=EventType.CAPTURE_SESSION_PACKS, limit=1000
+    ):
+        joins.setdefault(event.entity_id, []).append(event.payload)
+    return joins
+
+
+def _join(
+    pack_ids: list[str],
+    *,
+    results: int,
+    errors: int = 0,
+    unparsed: int = 0,
+    parent: str | None = None,
+) -> dict:
+    return {
+        "pack_ids": pack_ids,
+        "retrieval_results": results,
+        "retrieval_errors": errors,
+        "pack_ids_unparsed": unparsed,
+        "parent_session_id": parent,
+        "source_system": "claude-code",
+    }
+
+
+def _sweep(
+    registry: MagicMock,
+    root: Path,
+    wm: Path,
+    client: object | None = None,
+    *,
+    dry_run: bool = False,
+) -> capture.CaptureReport:
+    return run_capture(
+        registry,
+        transcripts_root=root,
+        watermark_path=wm,
+        llm_client=client or FakeLLMClient([candidates_json()]),
+        # Clean sessions are sampled out (asserted where it matters), so the
+        # join is shown to be recorded whether or not the judge runs.
+        sample_denominator=10_000,
+        dry_run=dry_run,
+    )
+
+
+class TestSessionPackJoin:
+    """The sweep records which packs each session was served.
+
+    Nothing else joins a context pack to the Claude Code session that used
+    it: a pack's ``session_id`` is a label the agent chooses. One
+    ``CAPTURE_SESSION_PACKS`` event per parsed conversation, keyed on the
+    transcript stem the captured memories already carry.
+    """
+
+    def test_a_session_served_two_packs_records_both_ids(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _pack_session(
+            root / "proj" / "sess-pack-0001.jsonl",
+            "sess-pack-0001",
+            ("get_context", A),
+            ("search", B),
+        )
+        _pack_session(
+            root / "proj" / "sess-pack-0001" / "subagents" / "agent-pk1.jsonl",
+            "sess-pack-0001",
+            ("get_task_context", C),
+            sidechain=True,
+        )
+        _pack_session(
+            root / "proj" / "sess-pack-0002.jsonl",
+            "sess-pack-0002",
+            ("get_items", A),
+            ("get_sectioned_context", D),
+            ("get_context", None),
+        )
+
+        report = _sweep(registry, root, tmp_path / "wm.json")
+
+        assert report.sessions_sampled_out == 3
+        assert _joins(registry) == {
+            "sess-pack-0001": [_join([A, B], results=2)],
+            "agent-pk1": [_join([C], results=1, parent="sess-pack-0001")],
+            "sess-pack-0002": [_join([A, D], results=3)],
+        }
+        assert report.pack_joins_recorded == 3
+        log = registry.operational.event_log
+        (latest,) = log.get_events(
+            event_type=EventType.CAPTURE_SESSION_PACKS,
+            entity_id="sess-pack-0001",
+            order="desc",
+            limit=1,
+        )
+        assert latest.entity_type == "capture_session"
+        assert latest.source == "worker:session-capture"
+        assert latest.payload["pack_ids"] == [A, B]
+        users_of_a = sorted(
+            session
+            for session, events in _joins(registry).items()
+            if A in events[-1]["pack_ids"]
+        )
+        assert users_of_a == ["sess-pack-0001", "sess-pack-0002"]
+
+    def test_a_session_that_never_retrieved_records_an_empty_join(
+        self, tmp_path: Path
+    ) -> None:
+        """ "Retrieved nothing" is an event with no pack ids; "not parsed" is
+        no event at all. A transcript with no conversation in it — an empty
+        file, a workflow journal — gets none, because a zero there would be
+        a claim about a session that never happened."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _clean_session(root / "proj" / "sess-none-0001.jsonl", "sess-none-0001")
+        _pack_session(
+            root / "proj" / "sess-empty-pack.jsonl",
+            "sess-empty-pack",
+            ("get_context", None),
+        )
+        write_transcript(root / "proj" / "sess-blank.jsonl", [])
+        write_transcript(
+            root
+            / "proj"
+            / "sess-none-0001"
+            / "subagents"
+            / "workflows"
+            / "wf_1"
+            / "journal.jsonl",
+            [{"type": "started", "step": 1}, {"type": "result", "step": 1}],
+        )
+        _pack_session(
+            root / "-tmp-tmpa1b2c3" / "sess-ephemeral.jsonl",
+            "sess-ephemeral",
+            ("get_context", E),
+        )
+
+        report = _sweep(registry, root, tmp_path / "wm.json")
+
+        assert report.sessions_parsed == 4
+        assert _joins(registry) == {
+            "sess-none-0001": [_join([], results=0)],
+            "sess-empty-pack": [_join([], results=1)],
+        }
+        assert report.pack_joins_recorded == 2
+
+    def test_a_truncated_tool_result_is_counted_and_the_sweep_continues(
+        self, tmp_path: Path
+    ) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        path = root / "proj" / "sess-trunc.jsonl"
+        _pack_session(path, "sess-trunc", ("search", E))
+        envelope = mcp_envelope(pack_markdown(F))
+        with path.open("a", encoding="utf-8") as handle:
+            records = [
+                assistant_tools(
+                    ("mcp__trellis__get_context", "t-cut"), session_id="sess-trunc"
+                ),
+                pack_result_turn(
+                    "t-cut",
+                    envelope[: envelope.index("**pack_id:**") + 20],
+                    session_id="sess-trunc",
+                ),
+            ]
+            handle.writelines(json.dumps(record) + "\n" for record in records)
+            # And a record cut off mid-line by a partial flush.
+            handle.write(
+                '{"type": "user", "message": {"content": [{"type": "tool_res\n'
+            )
+        _pack_session(root / "proj" / "sess-ok.jsonl", "sess-ok", ("get_context", A))
+
+        report = _sweep(registry, root, tmp_path / "wm.json")
+
+        assert report.sessions_errored == 0
+        assert report.malformed_lines == 1
+        assert report.pack_ids_unparsed == 1
+        assert _joins(registry) == {
+            "sess-trunc": [_join([E], results=2, unparsed=1)],
+            "sess-ok": [_join([A], results=1)],
+        }
+        (sweep,) = registry.operational.event_log.get_events(
+            event_type=EventType.CAPTURE_SWEEP_COMPLETED, limit=10
+        )
+        assert sweep.payload["pack_ids_unparsed"] == 1
+        assert sweep.payload["pack_joins_recorded"] == 2
+
+    def test_an_idempotent_resweep_does_not_duplicate_the_join(
+        self, tmp_path: Path
+    ) -> None:
+        """Night 1 the judge is down, so the error session stays
+        un-watermarked and night 2 parses it again; night 3 runs on a fresh
+        watermark and parses everything again. One join each, throughout."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        wm = tmp_path / "wm.json"
+        _pack_session(
+            root / "proj" / "sess-retry.jsonl",
+            "sess-retry",
+            ("get_context", A),
+            ("search", B),
+            error=True,
+        )
+        _pack_session(
+            root / "proj" / "sess-quiet.jsonl", "sess-quiet", ("get_context", C)
+        )
+
+        night1 = _sweep(registry, root, wm, BrokenLLMClient())
+        night2 = _sweep(registry, root, wm)
+        wm.unlink()
+        night3 = _sweep(registry, root, wm)
+
+        assert night1.sessions_judge_unavailable == 1
+        assert (night1.pack_joins_recorded, night1.pack_joins_unchanged) == (2, 0)
+        assert night2.sessions_skipped_watermark == 1
+        assert (night2.pack_joins_recorded, night2.pack_joins_unchanged) == (0, 1)
+        assert (night3.pack_joins_recorded, night3.pack_joins_unchanged) == (0, 2)
+        assert _joins(registry) == {
+            "sess-retry": [_join([A, B], results=2)],
+            "sess-quiet": [_join([C], results=1)],
+        }
+
+    def test_a_transcript_that_grows_records_its_new_pack(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        wm = tmp_path / "wm.json"
+        path = root / "proj" / "sess-grow.jsonl"
+        _pack_session(path, "sess-grow", ("get_context", A))
+        _pack_session(root / "proj" / "sess-still.jsonl", "sess-still", ("search", D))
+        _sweep(registry, root, wm)
+
+        with path.open("a", encoding="utf-8") as handle:
+            records = [
+                assistant_tools(
+                    ("mcp__trellis__search", "t-more"), session_id="sess-grow"
+                ),
+                pack_result_turn(
+                    "t-more", mcp_envelope(pack_markdown(B)), session_id="sess-grow"
+                ),
+            ]
+            handle.writelines(json.dumps(record) + "\n" for record in records)
+        night2 = _sweep(registry, root, wm)
+
+        assert night2.pack_joins_recorded == 1
+        assert _joins(registry) == {
+            "sess-grow": [_join([A], results=1), _join([A, B], results=2)],
+            "sess-still": [_join([D], results=1)],
+        }
+
+    def test_a_dry_run_counts_the_join_and_writes_none(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        wm = tmp_path / "wm.json"
+        _pack_session(
+            root / "proj" / "sess-dry-1.jsonl", "sess-dry-1", ("get_context", A)
+        )
+        _pack_session(root / "proj" / "sess-dry-2.jsonl", "sess-dry-2")
+
+        planned = _sweep(registry, root, wm, dry_run=True)
+        assert planned.pack_joins_recorded == 2
+        assert _joins(registry) == {}
+
+        live = _sweep(registry, root, wm)
+        assert live.pack_joins_recorded == 2
+        assert _joins(registry) == {
+            "sess-dry-1": [_join([A], results=1)],
+            "sess-dry-2": [_join([], results=0)],
+        }
+
+    def test_a_failed_join_write_errors_the_session_and_retries(
+        self, tmp_path: Path
+    ) -> None:
+        """Not fail-soft, unlike the funnel event: a join that is skipped
+        and watermarked is lost for good, so the session is left for the
+        next sweep exactly as any other per-session fault is."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        wm = tmp_path / "wm.json"
+        _pack_session(
+            root / "proj" / "sess-lost.jsonl", "sess-lost", ("get_context", A)
+        )
+        _pack_session(root / "proj" / "sess-kept.jsonl", "sess-kept", ("search", B))
+
+        real_log = registry.operational.event_log
+        broken = MagicMock(wraps=real_log)
+
+        def _emit(event_type, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if (
+                event_type is EventType.CAPTURE_SESSION_PACKS
+                and kwargs.get("entity_id") == "sess-lost"
+            ):
+                msg = "event log refused the write"
+                raise RuntimeError(msg)
+            return real_log.emit(event_type, *args, **kwargs)
+
+        broken.emit = _emit
+        registry.operational.event_log = broken
+        night1 = _sweep(registry, root, wm)
+        registry.operational.event_log = real_log
+        night2 = _sweep(registry, root, wm)
+
+        assert night1.sessions_errored == 1
+        assert _session_errors(night1)[0]["session_id"] == "sess-lost"
+        assert night2.sessions_skipped_watermark == 1
+        assert night2.pack_joins_recorded == 1
+        assert _joins(registry) == {
+            "sess-kept": [_join([B], results=1)],
+            "sess-lost": [_join([A], results=1)],
+        }

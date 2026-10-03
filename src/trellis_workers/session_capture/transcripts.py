@@ -22,20 +22,25 @@ Claude Code writes one JSONL file per session under
   boundaries are structural artifacts, not turns; counted and skipped.
 * **``tool_result`` content arrays** — a tool result's ``content`` may be a
   bare string *or* a list of typed blocks. Either way it is raw tool output
-  (``op read`` results, env dumps) and is **never** copied into the digest;
-  only its ``is_error`` flag and its ``tool_use_id`` survive. The id is an
-  opaque correlation handle, and it is read for one reason: it attributes
+  (``op read`` results, env dumps) and is **never** copied into the digest.
+  What survives is its ``is_error`` flag, its ``tool_use_id`` and, for a
+  Trellis retrieval tool's result alone, the pack id printed in its header.
+  The use id is an opaque correlation handle, read because it attributes
   the failure to the call that produced it, which is the difference between
   "this session errored" and "``Bash`` errored 38 times out of 412" (#306).
+  The pack id is a generated identifier, kept only once it matches the
+  26-character alphabet it is generated in, so nothing else in the result
+  rides along with it. See :func:`_collect_pack_ids`.
 
 The output is a :class:`~trellis_workers.session_capture.models.SessionDigest`
 that carries only natural-language turns, tool *names* with per-call error
-flags, and structural signals.
+flags, the pack ids the session was served, and structural signals.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -69,6 +74,29 @@ _EPHEMERAL_PROJECT_ROOTS = ("-tmp", "-var-tmp", "-private-tmp", "-private-var-tm
 _TYPE_USER = "user"
 _TYPE_ASSISTANT = "assistant"
 _TYPE_SUMMARY = "summary"
+
+#: The Trellis MCP tools whose result prints a ``**pack_id:**`` header on
+#: the line after its title (``trellis.mcp.formatters``). ``get_items``
+#: echoes the id of the pack it expands, so its header names a pack the
+#: session was already served. ``get_file_context`` prints no header.
+_PACK_TOOLS = frozenset(
+    {
+        "get_context",
+        "search",
+        "get_objective_context",
+        "get_task_context",
+        "get_sectioned_context",
+        "get_items",
+    }
+)
+
+#: The header's label. A result that mentions it but yields no pack id is
+#: counted as unparsed rather than read as "served no pack".
+_PACK_LABEL = "**pack_id:**"
+
+#: The whole header line. A pack id is a ULID: 26 characters of Crockford
+#: base32, which has no ``I``, ``L``, ``O`` or ``U``.
+_PACK_HEADER = re.compile(r"\*\*pack_id:\*\* `([0-9A-HJKMNP-TV-Z]{26})`")
 
 
 def discover_sessions(root: Path) -> list[Path]:
@@ -126,6 +154,25 @@ def is_ephemeral_project(path: Path, root: Path) -> bool:
     )
 
 
+def parent_session_id(path: Path, root: Path) -> str | None:
+    """The session a sub-agent transcript belongs to, or ``None``.
+
+    Claude Code nests a sub-agent's transcript at
+    ``<project>/<parent-session>/subagents/[workflows/<wf>/]agent-*.jsonl``,
+    so the parent is the directory that holds ``subagents``. A main session,
+    a path outside *root* or any other layout has none.
+    """
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return None
+    match parts:
+        case (_, parent, "subagents", *_, _):
+            return parent
+        case _:
+            return None
+
+
 def _extract_text(content: Any) -> list[str]:
     """Pull natural-language text out of a message ``content`` field.
 
@@ -173,6 +220,104 @@ def _errored_result_ids(content: Any) -> list[str | None]:
             use_id = block.get("tool_use_id")
             ids.append(use_id if isinstance(use_id, str) and use_id else None)
     return ids
+
+
+def _is_pack_tool(name: str) -> bool:
+    """Whether *name* is a Trellis retrieval tool that prints a pack id.
+
+    MCP tools are named ``mcp__<server>__<tool>``. The local stdio server
+    is ``trellis`` and the claude.ai connector carries ``trellis`` inside a
+    longer server name, so the server is matched on containing it. A
+    same-named tool on any other server served no Trellis pack.
+    """
+    if not name.startswith("mcp__"):
+        return False
+    server, _, tool = name.removeprefix("mcp__").rpartition("__")
+    return "trellis" in server.lower() and tool in _PACK_TOOLS
+
+
+def _unwrap(text: str) -> str:
+    """The markdown inside a FastMCP ``{"result": ...}`` envelope, else *text*.
+
+    A truncated envelope does not decode and comes back as it is, so the
+    caller sees the label without a header it can read.
+    """
+    try:
+        decoded = json.loads(text)
+    except (ValueError, RecursionError):
+        return text
+    result = decoded.get("result") if isinstance(decoded, dict) else None
+    return result if isinstance(result, str) else text
+
+
+def _result_text(content: Any) -> str | None:
+    """A tool result's text, unwrapped; ``None`` for a shape with no text."""
+    if isinstance(content, str):
+        return _unwrap(content)
+    if isinstance(content, list):
+        texts = [
+            _unwrap(block["text"])
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ]
+        return "\n".join(texts) if texts else None
+    return None
+
+
+def _header_pack_id(text: str) -> str | None:
+    """The pack id in the header of a retrieval result's title paragraph.
+
+    The formatters print the title, the ``**pack_id:**`` line, an optional
+    note, then a blank line before any item. So the header is looked for
+    from the first ``# `` line to the first blank line, which steps over
+    the capture banner (a blockquote above the title) and an intent that
+    wraps the title onto a second line. A header-shaped line further down
+    sits inside an item, written by some other session, and is not read.
+    """
+    lines = text.split("\n")
+    title = next((i for i, line in enumerate(lines) if line.startswith("# ")), None)
+    if title is None:
+        return None
+    for line in lines[title + 1 :]:
+        if not line.strip():
+            return None
+        found = _PACK_HEADER.fullmatch(line)
+        if found:
+            return found.group(1)
+    return None
+
+
+def _collect_pack_ids(digest: SessionDigest, content: Any) -> None:
+    """Record the pack id each Trellis retrieval result in *content* names.
+
+    A result is attributed to its call through ``tool_use_id``, so only a
+    call this file holds can be read. Every retrieval result is counted,
+    errored ones separately; a result that should have named a pack and did
+    not parse is counted as unparsed, never mistaken for an empty pack. The
+    id is the only text kept, and only once it matches :data:`_PACK_HEADER`.
+    """
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not (isinstance(block, dict) and block.get("type") == "tool_result"):
+            continue
+        use_id = block.get("tool_use_id")
+        name = digest.tool_name(use_id if isinstance(use_id, str) else None)
+        if name is None or not _is_pack_tool(name):
+            continue
+        digest.retrieval_results += 1
+        if block.get("is_error"):
+            digest.retrieval_errors += 1
+            continue
+        text = _result_text(block.get("content"))
+        pack_id = _header_pack_id(text) if text is not None else None
+        if pack_id is not None:
+            if pack_id not in digest.pack_ids:
+                digest.pack_ids.append(pack_id)
+        elif text is None or _PACK_LABEL in text:
+            digest.pack_ids_unparsed += 1
 
 
 def _add_turns(
@@ -230,6 +375,7 @@ def _handle_record(record: dict[str, Any], digest: SessionDigest) -> None:
             digest.has_error = True
         for use_id in errored_ids:
             digest.mark_tool_result(use_id, errored=True)
+        _collect_pack_ids(digest, content)
     elif record_type == _TYPE_ASSISTANT:
         _add_turns(digest, ROLE_ASSISTANT, content, sidechain=sidechain)
         _collect_tool_names(digest, content)
