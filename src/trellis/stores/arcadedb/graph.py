@@ -152,9 +152,12 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         attempts, not a data-dependent condition, so the cost is 3x
         latency on a path that is already broken. One caller passes data
         through: :meth:`update_node_if_current` (whose lost race also
-        arrives here) hands its ``expected_valid_from`` to ``datetime()``,
-        and a malformed one fails on this code, measured. It raises after
-        three attempts instead of one; it never reads as a refusal.
+        arrives here) hands its ``expected_valid_from`` to ``datetime()``.
+        It refuses a token Python cannot parse before the query runs, but
+        ``datetime()`` is stricter than Python (it rejects a space for the
+        ``T`` and a comma before the fraction, measured), and such a token
+        fails on this code. It raises after three attempts instead of
+        one; it never reads as a refusal.
 
         ``gql_status`` is deliberately **not** part of the check. Every
         shape above reports 50N42, the syntax errors included, so it

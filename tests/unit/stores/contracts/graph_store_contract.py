@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Barrier
 from typing import TYPE_CHECKING, Any
 
@@ -997,9 +997,9 @@ class GraphStoreContractTests:
     # update_node_if_current — compare-and-set on the version token
     #
     # The token is the current version's ``valid_from`` exactly as
-    # ``get_node`` returns it. Every case reads it through ``get_node``,
-    # so C1 also pins that each backend's comparison accepts its own
-    # rendering of the timestamp.
+    # ``get_node`` returns it. Every case but the malformed-token one reads
+    # it through ``get_node``, so C1 also pins that each backend's
+    # comparison accepts its own rendering of the timestamp.
     # ------------------------------------------------------------------
 
     def test_update_node_if_current_writes_a_version_on_a_fresh_token(
@@ -1033,6 +1033,28 @@ class GraphStoreContractTests:
         history = store.get_node_history("n1")
         assert [h["properties"] for h in history] == [{"v": 2}, {"v": 1}]
         assert history[1]["valid_to"] is not None
+
+    def test_update_node_if_current_leaves_closed_versions_unchanged(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_node("n1", "service", {"v": 2})
+        closed = store.get_node_history("n1")[1]
+        _sleep_for_ordering()
+
+        written = store.update_node_if_current(
+            "n1",
+            _current(store, "n1")["valid_from"],
+            "service",
+            {"v": 3},
+            node_role="semantic",
+        )
+
+        assert written is True
+        history = store.get_node_history("n1")
+        assert [h["properties"] for h in history] == [{"v": 3}, {"v": 2}, {"v": 1}]
+        assert history[2] == closed
 
     def test_update_node_if_current_never_creates_a_node(
         self, store: GraphStore
@@ -1085,6 +1107,22 @@ class GraphStoreContractTests:
         assert written is False
         assert store.get_node("n1") == current
         assert len(store.get_node_history("n1")) == 2
+
+    def test_update_node_if_current_refuses_a_token_one_microsecond_off(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1})
+        current = _current(store, "n1")
+        token = datetime.fromisoformat(current["valid_from"])
+        off_by_one = (token + timedelta(microseconds=1)).isoformat()
+
+        written = store.update_node_if_current(
+            "n1", off_by_one, "service", {"v": 2}, node_role="semantic"
+        )
+
+        assert written is False
+        assert store.get_node("n1") == current
+        assert len(store.get_node_history("n1")) == 1
 
     def test_update_node_if_current_refuses_a_token_from_before_a_recreation(
         self, store: GraphStore
@@ -1145,6 +1183,32 @@ class GraphStoreContractTests:
 
         assert store.get_node("cluster_x") == current
         assert len(store.get_node_history("cluster_x")) == 1
+
+    def test_update_node_if_current_rejects_a_token_that_is_not_a_timestamp(
+        self, store: GraphStore
+    ) -> None:
+        # Raised before the query, so the backends agree. Past that point
+        # SQL compares the token as text and refuses, the Bolt engines
+        # raise their own errors, and Neo4j writes over a datetime object.
+        store.upsert_node("n1", "service", {"v": 1})
+        current = _current(store, "n1")
+
+        for token in ("", "not-a-timestamp"):
+            with pytest.raises(ValueError, match="expected_valid_from"):
+                store.update_node_if_current(
+                    "n1", token, "service", {"v": 2}, node_role="semantic"
+                )
+        with pytest.raises(TypeError, match="expected_valid_from"):
+            store.update_node_if_current(
+                "n1",
+                datetime.fromisoformat(current["valid_from"]),  # type: ignore[arg-type]
+                "service",
+                {"v": 2},
+                node_role="semantic",
+            )
+
+        assert store.get_node("n1") == current
+        assert len(store.get_node_history("n1")) == 1
 
     def test_update_node_if_current_is_atomic_for_concurrent_writers(
         self, store: GraphStore

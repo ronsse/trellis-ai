@@ -133,9 +133,12 @@ All notable changes to Trellis will be documented in this file.
   creates a node, so unlike `upsert_node` it cannot bring back an id that a
   purge removed between a caller's read and its write. Of concurrent calls
   holding one token exactly one writes, on SQLite, Postgres, Neo4j and
-  ArcadeDB. No caller uses it yet. **Out-of-tree `GraphStore` backends must
-  implement it**: the method is abstract, so a subclass without it no
-  longer instantiates.
+  ArcadeDB; a concurrent `upsert_node` is not checked against the token, and
+  on Neo4j the two can leave two current versions. A token that is not a
+  timestamp string raises `TypeError` or `ValueError` before anything is
+  read, on every backend. No caller uses it yet. **Out-of-tree `GraphStore`
+  backends must implement it**: the method is abstract, so a subclass
+  without it no longer instantiates.
 
 ### Changed
 

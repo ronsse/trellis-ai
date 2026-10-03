@@ -31,6 +31,7 @@ from trellis.stores.base.graph import (
     validate_document_ids,
     validate_node_role_args,
     validate_subgraph_depth,
+    validate_version_token,
 )
 from trellis.stores.base.graph_query import (
     DOC_LINK_FIELD,
@@ -369,6 +370,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         generation_spec: dict[str, Any] | None = None,
         document_ids: list[str] | None = None,
     ) -> bool:
+        validate_version_token(expected_valid_from)
         validate_node_role_args(node_role, generation_spec)
         validate_document_ids(document_ids)
         with self._conn() as conn:

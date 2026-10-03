@@ -179,6 +179,35 @@ def validate_document_ids(document_ids: list[str] | None) -> None:
         seen.add(doc_id)
 
 
+def validate_version_token(expected_valid_from: str) -> None:
+    """Refuse a compare-and-set token that cannot be a ``valid_from``.
+
+    :meth:`GraphStore.get_node` returns ``valid_from`` as an ISO 8601
+    string, so anything else is a caller bug. Checking before the query
+    makes every backend raise for it; past this point a SQL backend
+    compares it as text and refuses, while a Bolt backend fails inside
+    the engine.
+
+    Raises:
+        TypeError: if ``expected_valid_from`` is not a ``str``.
+        ValueError: if it does not parse as an ISO 8601 timestamp.
+    """
+    if not isinstance(expected_valid_from, str):
+        msg = (
+            "expected_valid_from must be the valid_from string get_node "
+            f"returned, got {type(expected_valid_from).__name__}"
+        )
+        raise TypeError(msg)
+    try:
+        datetime.fromisoformat(expected_valid_from)
+    except ValueError:
+        msg = (
+            "expected_valid_from must be the valid_from string get_node "
+            f"returned, got {expected_valid_from!r}"
+        )
+        raise ValueError(msg) from None
+
+
 def check_node_role_immutable(
     node_id: str,
     existing: dict[str, Any],
@@ -480,12 +509,17 @@ class GraphStore(ABC):
         The check and the write commit together. Of concurrent calls
         holding the same current token exactly one returns ``True``, and
         once a :meth:`delete_node` has committed, a call holding a token
-        read before it returns ``False``. Two versions written within one
+        read before it returns ``False``. A concurrent :meth:`upsert_node`
+        reads no token, so nothing here orders this call against it: on
+        Neo4j the two can leave two current versions, as two concurrent
+        :meth:`upsert_node` calls can. Two versions written within one
         microsecond share a token, which this cannot tell apart.
 
         Raises:
             ValueError / TypeError: under the same conditions as
-                :meth:`upsert_node`. Role immutability is checked against
+                :meth:`upsert_node`, and before anything is read when
+                ``expected_valid_from`` is not a string that parses as an
+                ISO 8601 timestamp. Role immutability is checked against
                 the version the call would replace.
 
         Backend failures raise rather than being reported as ``False``.

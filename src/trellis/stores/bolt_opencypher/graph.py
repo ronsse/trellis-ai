@@ -11,13 +11,16 @@ Note: most openCypher implementations do not support partial uniqueness
 constraints (``UNIQUE ... WHERE valid_to IS NULL``). The "at most one
 current version per ``node_id``" invariant is enforced by the
 close-then-insert transaction rather than by the database. Under
-concurrent ``upsert_node`` writers, a second writer can observe a stale
-"no current" state and create a duplicate current row. Enterprise
-Neo4j / AuraDB users can layer a node key constraint on top; ArcadeDB
-users rely on single-writer discipline at the application layer.
-``update_node_if_current`` is the exception: of concurrent calls holding
-one token exactly one writes, on both engines (measured against
-``neo4j:2025.12`` and ``arcadedata/arcadedb:26.8.1``).
+concurrent writers, an ``upsert_node`` can create a duplicate current
+row: it observes a stale "no current" state, or, on Neo4j, it closes a
+version that a concurrent ``upsert_node`` or ``update_node_if_current``
+has already closed and inserts beside that writer's version, because it
+re-reads nothing once it holds the row's lock. Enterprise Neo4j /
+AuraDB users can layer a node key constraint on top; ArcadeDB users
+rely on single-writer discipline at the application layer. Among
+``update_node_if_current`` calls holding one token exactly one writes,
+on both engines (measured against ``neo4j:2025.12`` and
+``arcadedata/arcadedb:26.8.1``).
 
 Per-backend subclasses override the **seams**:
 
@@ -65,6 +68,7 @@ from trellis.stores.base.graph import (
     validate_document_ids,
     validate_node_role_args,
     validate_subgraph_depth,
+    validate_version_token,
 )
 from trellis.stores.base.graph_query import (
     DOC_LINK_FIELD,
@@ -486,6 +490,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         generation_spec: dict[str, Any] | None = None,
         document_ids: list[str] | None = None,
     ) -> bool:
+        validate_version_token(expected_valid_from)
         validate_node_role_args(node_role, generation_spec)
         validate_document_ids(document_ids)
         now = _iso(utc_now())
