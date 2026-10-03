@@ -465,6 +465,7 @@ All notable changes to Trellis will be documented in this file.
   `{"status": "ok"}` with the unstored `trace_id`. It now answers `400`
   with the refusal's message before extraction, as `POST /api/v1/evidence`
   and the curate routes do. A failed write keeps its `409`.
+  ([#690](https://github.com/ronsse/trellis-ai/pull/690))
 
 ## [0.9.0] - 2026-05-13
 
