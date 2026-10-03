@@ -456,6 +456,7 @@ All notable changes to Trellis will be documented in this file.
   `target_type: "trace"` and its own id, as in `save_experience`, the CLI
   and REST. A trace that does not validate goes on untargeted, and the
   handler refuses it as before. Other operations are unchanged.
+  ([#688](https://github.com/ronsse/trellis-ai/pull/688))
 
 ## [0.9.0] - 2026-05-13
 
