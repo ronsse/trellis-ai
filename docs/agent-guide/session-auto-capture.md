@@ -31,8 +31,20 @@ instance are set up here.
    Malformed lines are skipped and counted; unknown record types, sidechains,
    and compaction summaries are tolerated. Each parsed session with a turn or
    a tool call has its pack ids recorded as one `capture.session_packs` event,
-   an empty list for a session that never retrieved. A re-parse writes a new event only when its payload,
-   retrieval counts included, differs from the session's latest one.
+   an empty list for a session that never retrieved. The same payload carries
+   the session's `outcome`, read from the transcript and from no pack: tool
+   calls and errors, assistant and user turns, token totals where usage was
+   recorded (`null`, not 0, where it was not), the wall-clock span, commits
+   and pull requests made, and whether it ended on an error or an interrupt.
+   It holds counts, one duration and two flags, never command, path, URL or
+   message text. A record a resumed session writes into its file again
+   counts once; one copied into the new session's file counts in both, so a
+   resumed session's outcome includes the history it resumed. A sub-agent
+   transcript has its own outcome; its parent's holds none of it. A re-parse
+   writes a new event only when its payload, retrieval counts and outcome
+   included, differs from the session's latest one. A session the watermark
+   skips keeps the join it has, so a join written before the outcome existed
+   gains one only when its transcript next changes.
 3. **Trigger** deterministically: sessions with errors or user corrections are
    capture-mandatory (failure-bias); clean sessions are sampled ~1-in-N.
 4. **Distil** triggered sessions with the local model. The judge prompt carries

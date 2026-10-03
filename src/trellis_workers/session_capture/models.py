@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from trellis_workers.session_capture.outcome import SessionOutcome
+
 
 @dataclass
 class ToolCall:
@@ -21,7 +23,9 @@ class ToolCall:
     Tool *inputs* (a bash command line, a file path with an inline token)
     and tool *outputs* (``op read`` results, env dumps) are deliberately
     excluded from the digest: only the tool name and whether its result
-    errored survive parsing, so no raw tool payload can reach the distiller.
+    errored survive parsing on the call, so no raw tool payload can reach
+    the distiller. :attr:`SessionDigest.outcome` keeps counts read from a
+    ``Bash`` command and its result, never their text.
 
     ``is_error`` is set by :meth:`SessionDigest.mark_tool_result`, which
     joins a ``tool_result`` block back to the ``tool_use`` it answers on
@@ -78,11 +82,12 @@ class SessionDigest:
     """A secret-free structured view of one transcript file.
 
     Carries only natural-language turns, tool *names*, the pack ids of the
-    session's Trellis retrieval results, and structural signals. Raw
-    ``tool_result`` / ``toolUseResult`` content — the fields that embed
-    secrets — never lands here (F8 threat model, #255 guide): a pack id is
-    read out of a result and kept only once it matches the alphabet the
-    server generates it in.
+    session's Trellis retrieval results, the session's outcome as counts,
+    and structural signals. Raw ``tool_result`` / ``toolUseResult`` content
+    — the fields that embed secrets — never lands here (F8 threat model,
+    #255 guide): a pack id is read out of a result and kept only once it
+    matches the alphabet the server generates it in, and the outcome keeps
+    only what it counts.
     """
 
     session_id: str
@@ -126,6 +131,10 @@ class SessionDigest:
     #: not know: a truncated result, or a header off the formatters' layout.
     #: Non-zero means :attr:`pack_ids` may be missing a pack.
     pack_ids_unparsed: int = 0
+    #: What the session did, as counts, a duration and flags, read from the
+    #: whole file and from nothing a pack touched. Counts derived from tool
+    #: inputs and results, never their text.
+    outcome: SessionOutcome = field(default_factory=SessionOutcome)
 
     def add_turn(self, role: str, text: str, *, sidechain: bool = False) -> None:
         """Append one turn, preserving transcript order."""
