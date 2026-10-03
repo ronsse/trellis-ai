@@ -31,6 +31,7 @@ from trellis.stores.base.graph import (
     validate_document_ids,
     validate_node_role_args,
     validate_subgraph_depth,
+    validate_version_token,
 )
 from trellis.stores.base.graph_query import (
     DOC_LINK_FIELD,
@@ -357,6 +358,61 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                     )
 
         return node_id
+
+    def update_node_if_current(
+        self,
+        node_id: str,
+        expected_valid_from: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str,
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        validate_version_token(expected_valid_from)
+        validate_node_role_args(node_role, generation_spec)
+        validate_document_ids(document_ids)
+        with self._conn() as conn:
+            # ``FOR UPDATE`` waits out a concurrent UPDATE or DELETE of the
+            # row and then re-reads it, so a writer that lost either race
+            # sees the closed or purged version here and refuses.
+            current = self._fetch_current_node_for_update(conn, node_id)
+            if current is None or current["valid_from"] != expected_valid_from:
+                return False
+            check_node_role_immutable(node_id, current, node_role)
+            # Read the clock under the lock, so versions are stamped in
+            # the order they commit.
+            now = utc_now()
+            new_version: dict[str, Any] = {
+                "version_id": generate_ulid(),
+                "node_id": node_id,
+                "node_type": node_type,
+                "node_role": node_role,
+                "generation_spec": (
+                    json.dumps(generation_spec) if generation_spec is not None else None
+                ),
+                "document_ids": (
+                    json.dumps(document_ids) if document_ids is not None else None
+                ),
+                "properties": json.dumps(properties),
+                "created_at": current["created_at"],
+                "updated_at": now,
+                "valid_from": now,
+                "valid_to": None,
+            }
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE nodes SET valid_to = %s"
+                    " WHERE node_id = %s AND valid_to IS NULL",
+                    (now, node_id),
+                )
+                cur.execute(
+                    f"INSERT INTO nodes ({', '.join(_NODE_COLUMNS)})"
+                    f" VALUES ({', '.join(['%s'] * len(_NODE_COLUMNS))})",
+                    tuple(new_version[column] for column in _NODE_COLUMNS),
+                )
+        return True
 
     def _fetch_current_node_for_update(
         self, conn: psycopg.Connection, node_id: str

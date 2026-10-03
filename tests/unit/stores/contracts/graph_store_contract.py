@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Barrier
 from typing import TYPE_CHECKING, Any
 
@@ -994,6 +994,242 @@ class GraphStoreContractTests:
         assert store.get_edges("b", direction="both", as_of=before_delete) == []
 
     # ------------------------------------------------------------------
+    # update_node_if_current — compare-and-set on the version token
+    #
+    # The token is the current version's ``valid_from`` exactly as
+    # ``get_node`` returns it. Every case but the malformed-token one reads
+    # it through ``get_node``, so C1 also pins that each backend's
+    # comparison accepts its own rendering of the timestamp.
+    # ------------------------------------------------------------------
+
+    def test_update_node_if_current_writes_a_version_on_a_fresh_token(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1}, document_ids=["doc-1"])
+        before = _current(store, "n1")
+        _sleep_for_ordering()
+
+        written = store.update_node_if_current(
+            "n1",
+            before["valid_from"],
+            "person",
+            {"v": 2},
+            node_role="semantic",
+            document_ids=["doc-2"],
+        )
+
+        assert written is True
+        after = _current(store, "n1")
+        assert after["node_type"] == "person"
+        assert after["properties"] == {"v": 2}
+        assert after["document_ids"] == ["doc-2"]
+        assert after["valid_from"] != before["valid_from"]
+        # Compared as instants: ArcadeDB renders a carried-forward
+        # ``created_at`` with ``Z`` where the first version had
+        # ``+00:00``, as it does for ``upsert_node``.
+        assert datetime.fromisoformat(after["created_at"]) == datetime.fromisoformat(
+            before["created_at"]
+        )
+        history = store.get_node_history("n1")
+        assert [h["properties"] for h in history] == [{"v": 2}, {"v": 1}]
+        assert history[1]["valid_to"] is not None
+
+    def test_update_node_if_current_leaves_closed_versions_unchanged(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_node("n1", "service", {"v": 2})
+        closed = store.get_node_history("n1")[1]
+        _sleep_for_ordering()
+
+        written = store.update_node_if_current(
+            "n1",
+            _current(store, "n1")["valid_from"],
+            "service",
+            {"v": 3},
+            node_role="semantic",
+        )
+
+        assert written is True
+        history = store.get_node_history("n1")
+        assert [h["properties"] for h in history] == [{"v": 3}, {"v": 2}, {"v": 1}]
+        assert history[2] == closed
+
+    def test_update_node_if_current_never_creates_a_node(
+        self, store: GraphStore
+    ) -> None:
+        # A real token (another node's), so the refusal cannot come from
+        # a timestamp the backend fails to parse.
+        store.upsert_node("other", "service", {})
+        token = _current(store, "other")["valid_from"]
+
+        written = store.update_node_if_current(
+            "ghost", token, "service", {"v": 1}, node_role="semantic"
+        )
+
+        assert written is False
+        assert store.get_node("ghost") is None
+        assert store.get_node_history("ghost") == []
+        assert store.count_nodes() == 1
+
+    def test_update_node_if_current_refuses_a_deleted_node(
+        self, store: GraphStore
+    ) -> None:
+        # The redaction race: a writer read the node, a purge committed,
+        # then the write arrived. It must not re-create the purged id.
+        store.upsert_node("n1", "service", {"v": 1})
+        token = _current(store, "n1")["valid_from"]
+        assert store.delete_node("n1") is True
+
+        written = store.update_node_if_current(
+            "n1", token, "service", {"v": 2}, node_role="semantic"
+        )
+
+        assert written is False
+        assert store.get_node("n1") is None
+        assert store.get_node_history("n1") == []
+
+    def test_update_node_if_current_refuses_a_stale_token(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1})
+        stale = _current(store, "n1")["valid_from"]
+        _sleep_for_ordering()
+        store.upsert_node("n1", "service", {"v": 2})
+        current = _current(store, "n1")
+        assert current["valid_from"] != stale
+
+        written = store.update_node_if_current(
+            "n1", stale, "service", {"v": 3}, node_role="semantic"
+        )
+
+        assert written is False
+        assert store.get_node("n1") == current
+        assert len(store.get_node_history("n1")) == 2
+
+    def test_update_node_if_current_refuses_a_token_one_microsecond_off(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1})
+        current = _current(store, "n1")
+        token = datetime.fromisoformat(current["valid_from"])
+        off_by_one = (token + timedelta(microseconds=1)).isoformat()
+
+        written = store.update_node_if_current(
+            "n1", off_by_one, "service", {"v": 2}, node_role="semantic"
+        )
+
+        assert written is False
+        assert store.get_node("n1") == current
+        assert len(store.get_node_history("n1")) == 1
+
+    def test_update_node_if_current_refuses_a_token_from_before_a_recreation(
+        self, store: GraphStore
+    ) -> None:
+        # ABA: the id was purged and created again. A token read before
+        # the purge names a version that no longer exists.
+        store.upsert_node("n1", "service", {"v": 1})
+        purged = _current(store, "n1")["valid_from"]
+        assert store.delete_node("n1") is True
+        _sleep_for_ordering()
+        store.upsert_node("n1", "service", {"v": "recreated"})
+        current = _current(store, "n1")
+        assert current["valid_from"] != purged
+
+        written = store.update_node_if_current(
+            "n1", purged, "service", {"v": 2}, node_role="semantic"
+        )
+
+        assert written is False
+        assert store.get_node("n1") == current
+        assert len(store.get_node_history("n1")) == 1
+
+    def test_update_node_if_current_refuses_a_role_change(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("col", "uc_column", {"v": 1}, node_role="structural")
+        current = _current(store, "col")
+
+        with pytest.raises(ValueError, match="node_role"):
+            store.update_node_if_current(
+                "col",
+                current["valid_from"],
+                "uc_column",
+                {"v": 2},
+                node_role="semantic",
+            )
+
+        assert store.get_node("col") == current
+        assert len(store.get_node_history("col")) == 1
+
+    def test_update_node_if_current_requires_a_spec_for_a_curated_node(
+        self, store: GraphStore
+    ) -> None:
+        spec = {"generator_name": "louvain", "generator_version": "1.0.0"}
+        store.upsert_node(
+            "cluster_x", "concept", {"v": 1}, node_role="curated", generation_spec=spec
+        )
+        current = _current(store, "cluster_x")
+
+        with pytest.raises(ValueError, match="generation_spec"):
+            store.update_node_if_current(
+                "cluster_x",
+                current["valid_from"],
+                "concept",
+                {"v": 2},
+                node_role="curated",
+            )
+
+        assert store.get_node("cluster_x") == current
+        assert len(store.get_node_history("cluster_x")) == 1
+
+    def test_update_node_if_current_rejects_a_token_that_is_not_a_timestamp(
+        self, store: GraphStore
+    ) -> None:
+        # Raised before the query, so the backends agree. Past that point
+        # SQL compares the token as text and refuses, the Bolt engines
+        # raise their own errors, and Neo4j writes over a datetime object.
+        store.upsert_node("n1", "service", {"v": 1})
+        current = _current(store, "n1")
+
+        for token in ("", "not-a-timestamp"):
+            with pytest.raises(ValueError, match="expected_valid_from"):
+                store.update_node_if_current(
+                    "n1", token, "service", {"v": 2}, node_role="semantic"
+                )
+        with pytest.raises(TypeError, match="expected_valid_from"):
+            store.update_node_if_current(
+                "n1",
+                datetime.fromisoformat(current["valid_from"]),  # type: ignore[arg-type]
+                "service",
+                {"v": 2},
+                node_role="semantic",
+            )
+
+        assert store.get_node("n1") == current
+        assert len(store.get_node_history("n1")) == 1
+
+    def test_update_node_if_current_is_atomic_for_concurrent_writers(
+        self, store: GraphStore
+    ) -> None:
+        # Twenty races, not one: with the Bolt lock idiom removed, one race
+        # caught the mutant in 5 of 50 runs on Neo4j and twenty races in 50
+        # of 50 (measured 2026-10-03). ArcadeDB's commit check almost always
+        # fails the loser of a simultaneous start, so this misses that mutant
+        # there (0 of 50); over 0-20 ms start offsets both wrote in 4 of 532 races.
+        for round_number in range(20):
+            node_id = f"n{round_number}"
+            results = _race_update_node_if_current(store, node_id)
+
+            assert sorted(results) == [False, True], (node_id, results)
+            winner = "a" if results[0] else "b"
+            history = store.get_node_history(node_id)
+            assert len(history) == 2
+            assert [h["valid_to"] for h in history].count(None) == 1
+            assert _current(store, node_id)["properties"] == {"by": winner}
+
+    # ------------------------------------------------------------------
     # counts
     # ------------------------------------------------------------------
 
@@ -1611,3 +1847,29 @@ def _now() -> datetime:
     from trellis.core.base import utc_now
 
     return utc_now()
+
+
+def _current(store: GraphStore, node_id: str) -> dict[str, Any]:
+    """Return the current version of ``node_id``, failing when there is none."""
+    node = store.get_node(node_id)
+    assert node is not None, f"{node_id} has no current version"
+    return node
+
+
+def _race_update_node_if_current(store: GraphStore, node_id: str) -> list[bool]:
+    """Create ``node_id``, then race two compare-and-sets on its one token.
+
+    Returns writer ``a``'s result, then writer ``b``'s.
+    """
+    store.upsert_node(node_id, "service", {"v": 0})
+    token = _current(store, node_id)["valid_from"]
+    barrier = Barrier(2)
+
+    def _contend(writer: str) -> bool:
+        barrier.wait()
+        return store.update_node_if_current(
+            node_id, token, "service", {"by": writer}, node_role="semantic"
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        return list(pool.map(_contend, ("a", "b")))
