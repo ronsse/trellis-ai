@@ -273,20 +273,24 @@ def _header_pack_id(text: str) -> str | None:
     note, then a blank line before any item. So the header is looked for
     from the first ``# `` line to the first blank line, which steps over
     the capture banner (a blockquote above the title) and an intent that
-    wraps the title onto a second line. A header-shaped line further down
-    sits inside an item, written by some other session, and is not read.
+    wraps the title onto a second line. The last header-shaped line wins:
+    the formatters print the header after every line of the intent, so a
+    header-shaped line inside the intent cannot displace it. A header-shaped
+    line further down sits inside an item, written by some other session,
+    and is not read.
     """
     lines = text.split("\n")
     title = next((i for i, line in enumerate(lines) if line.startswith("# ")), None)
     if title is None:
         return None
+    pack_id = None
     for line in lines[title + 1 :]:
         if not line.strip():
-            return None
+            break
         found = _PACK_HEADER.fullmatch(line)
         if found:
-            return found.group(1)
-    return None
+            pack_id = found.group(1)
+    return pack_id
 
 
 def _collect_pack_ids(digest: SessionDigest, content: Any) -> None:

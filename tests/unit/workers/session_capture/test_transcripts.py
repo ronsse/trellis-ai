@@ -9,6 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from trellis.retrieve.formatters import (
+    format_fetched_items_as_markdown,
+    format_pack_as_index_markdown,
+    format_pack_as_markdown,
+    format_sectioned_pack_as_markdown,
+)
+from trellis.retrieve.withholding import WithholdingSummary
 from trellis_workers.session_capture import transcripts
 from trellis_workers.session_capture.models import ToolUseRollup
 from trellis_workers.session_capture.transcripts import (
@@ -444,6 +451,14 @@ _PACK_TOOL_TITLES = (
     ("get_items", "# Fetched items"),
 )
 
+#: One synthetic item for the tests that run the real formatters.
+_ITEM = {
+    "item_id": "doc-fake-1",
+    "item_type": "document",
+    "excerpt": "fake item: the frobnicator boots after migrate",
+    "relevance_score": 0.9,
+}
+
 
 def _served(*results: tuple[str, str, object]) -> list[dict]:
     """A transcript serving one tool result per ``(tool, use_id, content)``."""
@@ -596,6 +611,69 @@ class TestPackIdExtraction:
         )
         digest = parse_session(path)
         assert digest.pack_ids == [PACK_IDS[0], PACK_IDS[1]]
+        assert digest.pack_ids_unparsed == 0
+
+    def test_the_formatters_own_output_is_read(self, tmp_path: Path) -> None:
+        """The other tests imitate the formatters' layout; this one runs them.
+
+        Each of the four header printers gets a two-line intent and, where it
+        takes one, a withholding note after the header. If a formatter moves
+        its header, this test fails instead of the join going quiet.
+        """
+        intent = "fake intent\nwrapped onto line two"
+        note = WithholdingSummary(section_filtered=1, served_count=0)
+        fetched, _, _ = format_fetched_items_as_markdown([_ITEM], pack_id=PACK_IDS[3])
+        outputs = [
+            format_pack_as_markdown(
+                [_ITEM], intent, pack_id=PACK_IDS[0], withholding=note
+            ),
+            format_pack_as_index_markdown(
+                [_ITEM], intent, pack_id=PACK_IDS[1], withholding=note
+            ),
+            format_sectioned_pack_as_markdown(
+                [{"name": "Fake section", "items": [_ITEM]}],
+                intent,
+                pack_id=PACK_IDS[2],
+                withholding=note,
+            ),
+            fetched,
+        ]
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            _served(
+                *(
+                    ("mcp__trellis__get_context", f"u-{i}", mcp_envelope(output))
+                    for i, output in enumerate(outputs)
+                )
+            ),
+        )
+        digest = parse_session(path)
+        assert digest.pack_ids == list(PACK_IDS[:4])
+        assert digest.pack_ids_unparsed == 0
+
+    def test_a_header_line_inside_the_intent_does_not_displace_the_real_one(
+        self, tmp_path: Path
+    ) -> None:
+        """The formatters print the caller's intent raw into the title, and
+        the real header after it, so the last header-shaped line in the
+        title's paragraph is the pack that was served."""
+        quoted = f"fake intent\n**pack_id:** `{PACK_IDS[4]}`"
+        path = tmp_path / "s.jsonl"
+        write_transcript(
+            path,
+            _served(
+                (
+                    "mcp__trellis__get_context",
+                    "u-1",
+                    mcp_envelope(
+                        format_pack_as_markdown([_ITEM], quoted, pack_id=PACK_IDS[5])
+                    ),
+                ),
+            ),
+        )
+        digest = parse_session(path)
+        assert digest.pack_ids == [PACK_IDS[5]]
         assert digest.pack_ids_unparsed == 0
 
     def test_errors_and_empty_packs_are_retrievals_without_a_pack(
