@@ -2727,7 +2727,7 @@ paths:
       description: Search graph nodes by name or type.
       operationId: search_entities_api_v1_graph_search_get
       parameters:
-      - description: Name substring search (case-insensitive)
+      - description: A case-insensitive substring of the name, node_id or node_type
         in: query
         name: q
         required: false
@@ -2735,7 +2735,7 @@ paths:
           anyOf:
           - type: string
           - type: 'null'
-          description: Name substring search (case-insensitive)
+          description: A case-insensitive substring of the name, node_id or node_type
           title: Q
       - description: Filter by node type
         in: query
@@ -2804,6 +2804,50 @@ paths:
       security:
       - APIKeyHeader: []
       summary: Search graph entities
+      tags:
+      - retrieve
+  /api/v1/graph/search/facets:
+    get:
+      description: 'Count current graph nodes per stored ``node_type`` under ``q``.
+
+
+        The graph page''s type chips. Every type is counted server-side, in its
+
+        stored case, by count descending then type, and the counts sum to
+
+        ``/graph/search``''s ``total`` for the same ``q``. ``node_type`` is not a
+
+        parameter because it is the dimension being counted.'
+      operationId: search_entity_facets_api_v1_graph_search_facets_get
+      parameters:
+      - description: 'The /graph/search q filter: a case-insensitive substring of the name, node_id or node_type'
+        in: query
+        name: q
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'The /graph/search q filter: a case-insensitive substring of the name, node_id or node_type'
+          title: Q
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Search Entity Facets Api V1 Graph Search Facets Get
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Count graph search matches per node type
       tags:
       - retrieve
   /api/v1/health:

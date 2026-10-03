@@ -1334,6 +1334,28 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         assert row is not None
         return int(row[0])
 
+    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+        where = "valid_to IS NULL"
+        params: list[str] = []
+        if search:
+            # GET /graph/search's q predicate, verbatim, so these counts sum
+            # to that route's total for the same q.
+            where += (
+                " AND (properties->>'name' ILIKE %s"
+                " OR node_id ILIKE %s"
+                " OR node_type ILIKE %s)"
+            )
+            pattern = f"%{search}%"
+            params = [pattern, pattern, pattern]
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT node_type, COUNT(*) FROM nodes"
+                f" WHERE {where} GROUP BY node_type",
+                params,
+            )
+            rows = cur.fetchall()
+        return {str(row[0]): int(row[1]) for row in rows}
+
     def count_edges(self) -> int:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM edges WHERE valid_to IS NULL")

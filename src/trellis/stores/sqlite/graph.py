@@ -1382,6 +1382,26 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         assert row is not None
         return int(row["cnt"])
 
+    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+        where = "valid_to IS NULL"
+        params: list[str] = []
+        if search:
+            # GET /graph/search's q predicate, verbatim, so these counts sum
+            # to that route's total for the same q.
+            where += (
+                " AND (json_extract(properties_json, '$.name') LIKE ?"
+                " OR node_id LIKE ?"
+                " OR node_type LIKE ?)"
+            )
+            pattern = f"%{search}%"
+            params = [pattern, pattern, pattern]
+        cursor = self._conn.execute(
+            "SELECT node_type, COUNT(*) AS cnt FROM nodes"
+            f" WHERE {where} GROUP BY node_type",
+            params,
+        )
+        return {row["node_type"]: int(row["cnt"]) for row in cursor.fetchall()}
+
     def count_edges(self) -> int:
         cursor = self._conn.execute(
             "SELECT COUNT(*) AS cnt FROM edges WHERE valid_to IS NULL"
