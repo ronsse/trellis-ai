@@ -1,7 +1,7 @@
 ---
 name: record-after-task
-description: After completing meaningful work, write a structured trace to Trellis with steps + outcome, then record success/failure feedback. This is what makes future runs of retrieve-before-task useful — without it, the institutional memory is empty.
-version: 1.0.0
+description: Save a Trellis trace after meaningful work — a fix, feature, refactor, instructive failure, or non-obvious discovery — so future agents inherit it. Skip trivial edits and conversational turns.
+version: 1.1.0
 status: preview
 ---
 
@@ -9,91 +9,139 @@ status: preview
 
 > **Status: preview.** Tool signatures are in flux while parallel work lands. Expect revisions before the next minor release.
 
-The retrieve-before-task skill is only useful if there's something to retrieve. This skill closes the loop: once you finish meaningful work, save a structured trace so future agents (and future-you) inherit the result.
+retrieve-before-task only helps if there is something to retrieve. When the
+work is done: save a trace, grade the packs you were served, and save any
+durable environment fact as knowledge.
 
-## When to invoke
+## 1. Save the trace
 
-Trigger at the **end** of any task that:
-
-- Successfully fixed a bug, shipped a feature, or completed a refactor.
-- Failed in an instructive way (a wrong path that's worth not repeating).
-- Discovered a non-obvious gotcha or pattern worth preserving.
-
-Do **not** invoke for: trivial edits, exploratory reads, conversational turns.
-
-## How to invoke
-
-Call `save_experience` with a JSON trace, then `record_feedback` with the returned id.
+`save_experience(trace_json=...)` validates the whole trace against a strict
+schema: **one wrong key discards the entire trace**, and nothing is recorded.
+Required top-level keys: `source`, `intent`, `context`. `source` is one of
+`agent | human | workflow | system`; the name of your agent or client
+(`"claude-code"`, say) is not one, and belongs in `context.agent_id`.
 
 ```
 save_experience(trace_json='{
-  "source": "claude-code",
-  "intent": "<one sentence describing what you set out to do>",
+  "source": "agent",
+  "intent": "<one sentence: what you set out to do>",
   "steps": [
-    {"step_type": "tool_call", "name": "edit_file",
-     "result": {"path": "src/...", "summary": "..."}},
-    {"step_type": "tool_call", "name": "run_tests",
-     "result": {"passed": 12, "failed": 0}}
+    {"step_type": "tool_call", "name": "Edit",
+     "args": {"file_path": "src/payments/client.py"},
+     "result": {"summary": "added retry with jitter to charge()"}},
+    {"step_type": "tool_call", "name": "Bash",
+     "args": {"command": "make test"},
+     "result": {"passed": 12, "failed": 0}},
+    {"step_type": "tool_call", "name": "Bash",
+     "args": {"command": "psql -l"},
+     "result": {},
+     "error": "psql: command not found; not installed on this host"}
+  ],
+  "artifacts_produced": [
+    {"artifact_id": "payments@35a9978", "artifact_type": "commit"}
   ],
   "outcome": {
     "status": "success",
-    "summary": "<2-3 sentences: what changed and why it works>"
+    "summary": "<2-3 sentences: what changed and why it works>",
+    "metrics": {"tests_passed": 12}
   },
-  "context": {"domain": "<backend/frontend/data-platform/infra/...>"}
+  "context": {"domain": "<backend/frontend/data-platform/infra/...>",
+              "agent_id": "claude-code"},
+  "metadata": {"repo": "acme/payments"}
 }')
-
-record_feedback(trace_id="<id from save_experience>", success=true, notes="<optional>")
 ```
 
-## What goes in `steps`
+It replies `Trace saved: <trace_id>`.
 
-A condensed sequence of meaningful actions, not a verbatim tool log. 3-8 entries is typical. Each step is one action with its result. Skip noise like "read file to understand" — keep the load-bearing actions.
+### A step takes these keys and no others
 
-## What goes in `outcome.summary`
+| Key | Type | Holds |
+|---|---|---|
+| `step_type` | string, **required** | `"tool_call"` for a tool use (the only value trace extraction reads), or a label such as `"decision"` |
+| `name` | string, **required** | the tool or action: `"Edit"`, `"Bash"` |
+| `args` | object | the inputs, under the tool's own argument names; extraction reads touched files and commands run from `file_path` and `command` |
+| `result` | **object, never a string** | what came back: `{"passed": 12}`, or `{"summary": "..."}` for prose |
+| `error` | string | what went wrong, when the step failed |
+| `duration_ms` | integer | optional |
+| `started_at` | ISO 8601 datetime | optional; defaults to ingest time |
+| `schema_version` | string | never set it; it has a default |
 
-The single most important field. Future retrieval will surface this to other agents. Write it for the reader who has *no context* — name the change, say what it accomplishes, mention any constraint that drove the design.
+### Gotchas: the four mistakes behind most rejections
 
-Bad: "Fixed it."
-Good: "Added exponential-backoff retry with jitter to PaymentsClient.charge(). Three attempts max, 100-1600ms backoff. Required because Stripe's idempotency layer drops requests during their nightly maintenance window."
+| Rejected | Write instead |
+|---|---|
+| `"description": "ran the tests"` | `"name": "Bash", "args": {"command": "make test"}` |
+| `"output": "12 passed"` | `"result": {"summary": "12 passed"}` |
+| `"result": "12 passed"` | `"result": {"summary": "12 passed"}` |
+| a step without `step_type` | `"step_type": "tool_call"` |
 
-## When the task failed
+The rest of the trace:
 
-Record it anyway. Use `outcome.status: "failure"` and put the lesson in `outcome.summary`:
+- Artifacts you produced (commits, files, PRs) go in top-level
+  `artifacts_produced[]` as `{artifact_id, artifact_type}`, never in
+  `outcome`, which takes only `status` (`success | failure | partial |
+  unknown`), `summary` and `metrics`.
+- `context` takes `domain`, `agent_id`, `team`, `workflow_id`,
+  `parent_trace_id`, `started_at` and `ended_at`.
+- A rejection names the field and a fix (`... | fix: ...`). Move what it names
+  and retry. **Never drop content to get past the validator**:
+  `outcome.metrics` and top-level `metadata` are free-form objects, so a stray
+  fact always has a legal home.
 
-> "Tried adding rate limiting via Redis token bucket — abandoned because the orders API runs in a serverless worker pool with no shared cache. Need to revisit once we've decided on a shared state strategy."
+### What to write
 
-Then `record_feedback(success=false)`. This is just as valuable to retrieve-before-task as a success.
+- **Steps**: 3–8 load-bearing actions, one line each, not a tool log. Keep the
+  steps that failed, with `error` filled in: a failure you worked around is
+  often the most reusable thing in the trace, and a trace with no `error` from
+  a session that hit real failures is sanitized.
+- **`outcome.summary`** is for a reader with no context: the change, what it
+  accomplishes, and the constraint that drove it. Bad: "Fixed it." Good:
+  "Added exponential-backoff retry with jitter to PaymentsClient.charge(),
+  three attempts max, because Stripe drops requests during its nightly
+  maintenance window."
+- **A disproved belief**: if this session overturned something recorded
+  earlier, name the superseded belief and why it was wrong. Memory only
+  appends; nothing retracts it for you.
+- **A failed task** is still recorded, with `outcome.status: "failure"` and
+  the lesson in the summary. `trellis worker mine-precedents` learns from
+  failures as much as from successes.
+- **`context.domain`**, always: untagged traces are nearly invisible to
+  retrieval.
 
-## Example end-to-end
+## 2. Grade the packs you were served
 
-After finishing the rate-limiting task from the retrieve-before-task example:
+For each `get_context` pack that informed the work:
 
 ```
-save_experience(trace_json='{
-  "source": "claude-code",
-  "intent": "Add rate limiting to the orders API",
-  "steps": [
-    {"step_type": "tool_call", "name": "edit_file",
-     "result": {"path": "src/orders/middleware.py"}},
-    {"step_type": "tool_call", "name": "edit_file",
-     "result": {"path": "src/orders/config.py"}},
-    {"step_type": "tool_call", "name": "run_tests",
-     "result": {"passed": 24, "failed": 0}}
-  ],
-  "outcome": {
-    "status": "success",
-    "summary": "Added FastAPI middleware enforcing 100 req/min/user via slowapi. Per-user keying matches the auth-service convention used by the payments service."
-  },
-  "context": {"domain": "backend"}
-}')
-
-record_feedback(trace_id="01JRK...", success=true,
-                notes="Pattern lifted from payments-service rate-limiter")
+record_feedback(pack_id="<pack_id>", rating=0.6,
+                helpful_item_ids=["<id>"], unhelpful_item_ids=["<id>"])
 ```
 
-## Failure modes to avoid
+- Cite ids. Feedback on a pack with no item ids joins to nothing and teaches
+  the retrieval loop nothing. A pack that missed still gets graded: its noise
+  goes in `unhelpful_item_ids`, the more valuable signal of the two.
+  `ignored_item_ids` (read, not used) may be added but does not count as
+  citing.
+- `rating` is how useful the pack was, 0.0 (useless) to 1.0 (all on point).
+  An honest low rating beats a polite high one.
+- Only when no pack informed the work, grade the trace instead:
+  `record_feedback(trace_id="<trace_id>", success=...)`. `success` means the
+  user's intent was achieved, not that nothing errored.
 
-- **Don't skip recording when you're tired at the end of the task.** That's exactly when the memory is freshest and most valuable.
-- **Don't dump raw tool output into `steps`.** Summarize each step to one line.
-- **Don't omit the domain.** Untagged traces are nearly invisible to retrieval.
-- **Don't conflate success with "no error".** Use `success=false` if the task didn't actually achieve the user's intent.
+## 3. Environment gotchas go in `save_knowledge`, not the trace
+
+A durable fact about how a system behaves, one that cost you time and will
+cost the next agent the same, outlives the task:
+
+```
+save_knowledge(name="<the fact, as a short title>",
+               content="<the fact, and how you found it>",
+               relates_to="<the tool, system or repo it is about>")
+```
+
+Triggers: a build names images differently than the deploy expects; CI pins a
+tool to a different version than the lockfile; a host lacks a binary you
+assumed; a port binds an interface you did not expect; a documented flag is a
+silent no-op. It is chronically under-used: reach for it whenever something
+surprised you. The `link-evidence` skill covers anchoring such a fact to an
+entity, and what the reply tells you about whether the link was made.
