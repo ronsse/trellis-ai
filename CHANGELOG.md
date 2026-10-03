@@ -459,6 +459,20 @@ All notable changes to Trellis will be documented in this file.
   it as before. Other operations are unchanged.
   ([#688](https://github.com/ronsse/trellis-ai/pull/688))
 
+- **A missing redaction or update target is refused, not failed.**
+  `redaction.apply` and `entity.update` on an id that names no node raised
+  `NotFoundError`, which the executor reports as a store failure: `trellis
+  curate redact` exited `5`, and the audit event carried
+  `status: "failed"` and no reason. Both now raise a `ValidationError`
+  with code `target_not_found`, as `label.add` and `label.remove` do
+  (#683): `trellis curate redact`, MCP `execute_mutation` and REST
+  `POST /api/v1/commands/batch` report `rejected` with the message
+  `Node not found: <id>`, audited with that reason, and the CLI exits `2`.
+  Re-redacting an already-redacted id is refused the same way. A redaction
+  that loses a concurrent purge between its read and its delete still
+  fails.
+  ([#PRNUM](https://github.com/ronsse/trellis-ai/pull/PRNUM))
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.

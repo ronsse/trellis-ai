@@ -867,8 +867,8 @@ Scope boundaries, stated plainly:
 
 Prompts for confirmation unless `--yes` is passed (required for scripted use).
 Exit codes follow the `exit_codes` map: `3` (rejected by a policy), `2`
-(rejected otherwise — e.g. blank/over-long reason), `5` (failed — e.g.
-target not found), `0` success.
+(rejected otherwise — e.g. blank/over-long reason, or a missing target), `5`
+(failed — e.g. a concurrent purge or a store error), `0` success.
 
 ```bash
 trellis curate redact <target_id> --reason <text> [--yes] [--by <caller>] [--format text|json]
@@ -901,6 +901,9 @@ trellis curate redact 01JRK5N7QF --yes --reason "defect-minted entity (#299)" --
 ```
 
 On failure/rejection the JSON is `{"status": "failed"|"rejected", "command_id": ..., "message": ..., "warnings": [...]}` — `command_id` joins the attempt to its audit event.
+
+A `target_id` that names no node, including one already redacted, exits `2`
+with `"status": "rejected"` and the message `Node not found: <target_id>`.
 
 ### `trellis curate feedback`
 

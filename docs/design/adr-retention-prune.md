@@ -154,9 +154,9 @@ Excluded — never candidates, enforced in the handler, not left to policy:
   Refuses `NullEventLog` for destructive runs, exactly as redaction does: the
   event is the only record that survives the purge.
 - **Idempotency:** `Command.idempotency_key` for at-most-once batch runs;
-  re-pruning an already-pruned id is a recorded no-op inside the batch, not a
-  failure (unlike redaction's single-target `NotFoundError`, a criteria-driven
-  batch tolerates a moving candidate set).
+  re-pruning an already-pruned id is a recorded no-op inside the batch, not an
+  error (unlike redaction's single-target `target_not_found` refusal, a
+  criteria-driven batch tolerates a moving candidate set).
 - **Orphan resolution:** the module is retired under Option A too, not
   rehabilitated. `RetentionWorker`'s trace-marking mode predates the
   immutability hard rule doing that job by construction.
