@@ -545,9 +545,20 @@ class ProposalRejectRequest(WireRequestModel):
 
 
 class LearningCandidateListResponse(WireModel):
-    """Most-recent learning-candidate artifact, or an empty hint."""
+    """Most-recent learning-candidate artifact, or why none could be served.
+
+    ``status`` is ``"ok"`` when the artifact was read (``candidates`` may
+    still be empty) and ``"error"`` when there was none to read; then
+    ``code`` says why (``learning_artifacts_dir_missing``,
+    ``learning_candidates_missing``, ``learning_candidates_unreadable`` or
+    ``stores_dir_unconfigured``) and ``hint`` names the path and how to
+    produce the artifact. ``artifacts_dir`` names the directory looked in,
+    ``None`` only when none could be resolved.
+    """
 
     status: str = "ok"
+    code: str | None = None
+    artifacts_dir: str | None = None
     generated_at_utc: str | None = None
     candidate_count: int = 0
     candidates: list[dict[str, Any]] = Field(default_factory=list)

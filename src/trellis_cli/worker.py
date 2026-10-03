@@ -90,6 +90,7 @@ from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.analyze import (
     _build_learning_registry_or_exit,
     _render_advisory_degradation,
+    _resolve_learning_output_dir,
 )
 from trellis_cli.config import get_config_dir, get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
@@ -1120,11 +1121,15 @@ def _exit_if_advisory_write_refused(result: CurateCycleResult | None) -> None:
 
 @worker_app.command("curate")
 def curate_cmd(
-    output_dir: Path = typer.Option(  # noqa: B008 - typer option default
-        ...,
+    output_dir: Path | None = typer.Option(  # noqa: B008 - typer option default
+        None,
         "--output-dir",
         "-o",
-        help="Directory for learning-candidate review artifacts.",
+        help=(
+            "Directory for learning-candidate review artifacts. Defaults to "
+            "TRELLIS_LEARNING_ARTIFACTS_DIR when set, else <data_dir>/learning: "
+            "the directory the API's Review queue reads."
+        ),
     ),
     days: int = typer.Option(30, "--days", help="Days of EventLog history to scan."),
     interval: int | None = typer.Option(
@@ -1184,8 +1189,6 @@ def curate_cmd(
     SIGINT/SIGTERM, logging one structured line per cycle. No scheduler
     dependency is introduced — the interval is a plain-sleep convenience.
     """
-    output_dir = output_dir.expanduser()
-
     # Above the reconcile call and the --interval branch: reconcile emits a
     # FEEDBACK_RECORDED event per file-only row, which a dry run must not.
     if dry_run and reconcile_first:
@@ -1195,6 +1198,8 @@ def curate_cmd(
             "--dry-run'"
         )
         raise typer.BadParameter(msg)
+
+    output_dir = _resolve_learning_output_dir(output_dir)
 
     if reconcile_first:
         _reconcile_before_cycle()

@@ -26,6 +26,7 @@ from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import StoreWriteRefusedError
 from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.learning import (
+    LEARNING_ARTIFACTS_DIR_ENV,
     LEARNING_NOISE_RETRY_KEY,
     LEARNING_NOISE_SUCCESS_KEY,
     LEARNING_PROMOTE_RETRY_KEY,
@@ -36,6 +37,7 @@ from trellis.learning import (
     analyze_learning_observations,
     analyze_well_known_candidates,
     build_learning_observations_from_event_log,
+    resolve_learning_artifacts_dir,
     write_learning_review_artifacts,
 )
 from trellis.learning import (
@@ -262,6 +264,27 @@ def _build_learning_registry_or_exit() -> ParameterRegistry:
     except typer.BadParameter as exc:
         console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(code=EXIT_INTERNAL) from exc
+
+
+def _resolve_learning_output_dir(output_dir: Path | None) -> Path:
+    """Return ``--output-dir`` when given, else the directory the API reads.
+
+    The default is :func:`resolve_learning_artifacts_dir` over the
+    registry's ``stores_dir``, the same resolver ``GET
+    /api/v1/learning/candidates`` reads through, so a writer run with no
+    flag and an API sharing its data directory meet in one place.
+    """
+    if output_dir is not None:
+        return output_dir.expanduser()
+    resolved = resolve_learning_artifacts_dir(_get_registry().stores_dir)
+    if resolved is None:
+        msg = (
+            "no learning-artifacts directory: the store registry has no "
+            f"stores_dir and {LEARNING_ARTIFACTS_DIR_ENV} is unset; pass "
+            "--output-dir"
+        )
+        raise typer.BadParameter(msg, param_hint="'--output-dir'")
+    return resolved
 
 
 def _print_demotion_outcome(report: Any) -> None:
@@ -2751,13 +2774,15 @@ def graph_shape(
 
 @analyze_app.command("learning-candidates")
 def learning_candidates(
-    output_dir: Path = typer.Option(  # noqa: B008 - typer option default
-        ...,
+    output_dir: Path | None = typer.Option(  # noqa: B008 - typer option default
+        None,
         "--output-dir",
         "-o",
         help=(
             "Directory for the candidates JSON + decisions template. "
-            "Created if it doesn't exist."
+            "Created if it doesn't exist. Defaults to "
+            "TRELLIS_LEARNING_ARTIFACTS_DIR when set, else <data_dir>/learning: "
+            "the directory the API's Review queue reads."
         ),
     ),
     days: int = typer.Option(30, help="Days of EventLog history to scan"),
@@ -2791,6 +2816,7 @@ def learning_candidates(
     Read-only. Does not mutate the graph; the promote step does that
     after a human review pass.
     """
+    output_dir = _resolve_learning_output_dir(output_dir)
     event_log = get_event_log()
     registry = _build_learning_registry_or_exit()
     with wrap_cli_meta_analysis(

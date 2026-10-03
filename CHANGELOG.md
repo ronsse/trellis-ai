@@ -481,6 +481,23 @@ All notable changes to Trellis will be documented in this file.
   that loses a concurrent purge between its read and its delete still
   fails.
   ([#691](https://github.com/ronsse/trellis-ai/pull/691))
+- **Learning candidates written by the nightly curate reach the Review queue.**
+  `trellis worker curate` and `trellis analyze learning-candidates`
+  required `--output-dir`, and nothing tied it to the directory the API's
+  Review queue reads, so a cron could write every night's candidates where
+  the queue never looked: the queue answered `status: "ok"` with an empty
+  list, and Submit a `409` that named no path. Both writers now default
+  `--output-dir` to the directory the API reads
+  (`TRELLIS_LEARNING_ARTIFACTS_DIR` when set, else `<data_dir>/learning`),
+  through one resolver, `trellis.learning.resolve_learning_artifacts_dir`;
+  an explicit flag still wins. `GET /api/v1/learning/candidates` names
+  that directory in a new `artifacts_dir` field and, when there is nothing
+  to serve, answers `status: "error"` with a `code` and a `hint` naming
+  the missing path. `POST /api/v1/learning/promotions` answers `409` with
+  `detail: {code, message, path}`, including for a malformed artifact,
+  which it answered with a `500`. A cron that passes `--output-dir` must
+  drop the flag, or name the same directory, to feed the queue.
+  ([#693](https://github.com/ronsse/trellis-ai/pull/693))
 
 - **On Postgres, graph reads through `get_subgraph` return node names and
   properties.** Since v0.4.0, `PostgresGraphStore.get_subgraph` left
