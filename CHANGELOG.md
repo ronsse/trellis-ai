@@ -482,6 +482,24 @@ All notable changes to Trellis will be documented in this file.
   fails.
   ([#691](https://github.com/ronsse/trellis-ai/pull/691))
 
+- **On Postgres, graph reads through `get_subgraph` return node names and
+  properties.** Since v0.4.0, `PostgresGraphStore.get_subgraph` left
+  `document_ids` out of its node `SELECT`, so every later column landed one
+  slot off: each node came back with empty `properties` and
+  `document_ids`, shifted timestamps, and its traversal depth as
+  `valid_to`. Every reader on Postgres lost node names: the UI graph view
+  and `GET /api/v1/entities/{id}`, MCP `get_graph`, and graph-axis
+  seeding, which rejected every alias-derived seed (it checks the node's
+  current name) and served seeded graph items with empty excerpts. Those
+  reads now return the whole node, **so packs served on Postgres
+  deployments change**: alias seeds confirm, and seeded graph items carry
+  their names and properties, which also changes their scores.
+  `execute_node_query` read `SELECT *`, which on a `nodes` table created
+  before v0.4.0 returns `document_ids` last and shifted the same way. Every
+  node read now names its columns from one list, and a row whose width
+  disagrees with that list raises instead of shifting. SQLite, Neo4j and
+  ArcadeDB were not affected.
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.

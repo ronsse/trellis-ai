@@ -36,7 +36,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import Barrier
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -49,6 +49,56 @@ if TYPE_CHECKING:
 def _sleep_for_ordering() -> None:
     """Sleep long enough that two SCD-2 operations get distinct timestamps."""
     time.sleep(0.005)
+
+
+# Two nodes whose every payload field is distinguishable, so a read that
+# returns one column in another's place fails on a named field.
+_PAYLOAD_NODES: dict[str, dict[str, Any]] = {
+    "pa": {
+        "node_type": "service",
+        "properties": {"name": "Alpha", "tier": 1},
+        "document_ids": ["doc-pa"],
+    },
+    "pb": {
+        "node_type": "person",
+        "properties": {"name": "Beta"},
+        "document_ids": ["doc-pb1", "doc-pb2"],
+    },
+}
+
+
+def _upsert_payload_nodes(store: GraphStore) -> None:
+    for node_id, spec in _PAYLOAD_NODES.items():
+        store.upsert_node(
+            node_id,
+            spec["node_type"],
+            spec["properties"],
+            document_ids=spec["document_ids"],
+        )
+    store.upsert_edge("pa", "pb", "depends_on")
+
+
+def _assert_current_payload(node: dict[str, Any] | None, node_id: str) -> None:
+    """Assert a current node's whole payload against ``_PAYLOAD_NODES``.
+
+    One comparison with both sides in the message, so a failure shows
+    every field that came back wrong.
+    """
+    spec = _PAYLOAD_NODES[node_id]
+    assert node is not None, f"{node_id} was not returned"
+    expected = {
+        "node_id": node_id,
+        "node_type": spec["node_type"],
+        "node_role": "semantic",
+        "generation_spec": None,
+        "properties": spec["properties"],
+        "document_ids": spec["document_ids"],
+        "valid_to": None,
+    }
+    actual = {key: node[key] for key in expected}
+    assert actual == expected, f"{node_id}: got {actual!r}, want {expected!r}"
+    for key in ("created_at", "updated_at", "valid_from"):
+        assert node[key] is not None, f"{node_id}: {key} is None"
 
 
 class GraphStoreContractTests:
@@ -600,6 +650,45 @@ class GraphStoreContractTests:
         store.upsert_node("x", "service", {})
         with pytest.raises(ValueError, match="depth"):
             store.get_subgraph(["x"], depth=-1)
+
+    @pytest.mark.parametrize("depth", [0, 1])
+    def test_subgraph_returns_the_full_node_payload(
+        self, store: GraphStore, depth: int
+    ) -> None:
+        """Subgraph nodes carry the payload ``upsert_node`` wrote.
+
+        The tests above compare ids only. Depth 0 is the batch existence
+        read ``NamespaceSeedExtractor`` confirms seeds with, and it checks
+        an alias-derived seed against ``properties["name"]``, so a payload
+        that loses its properties loses every alias seed.
+        """
+        _upsert_payload_nodes(store)
+        returned = store.get_subgraph(["pa"], depth=depth)["nodes"]
+        expected = ["pa"] if depth == 0 else ["pa", "pb"]
+        assert sorted(n["node_id"] for n in returned) == expected
+        for node in returned:
+            _assert_current_payload(node, node["node_id"])
+
+    def test_every_node_read_returns_the_full_payload(self, store: GraphStore) -> None:
+        """The point reads and queries return the same payload as the subgraph."""
+        from trellis.stores.base.graph_query import FilterClause, NodeQuery
+
+        _upsert_payload_nodes(store)
+        for node_id, spec in _PAYLOAD_NODES.items():
+            _assert_current_payload(store.get_node(node_id), node_id)
+            history = store.get_node_history(node_id)
+            assert len(history) == 1
+            _assert_current_payload(history[0], node_id)
+            (by_type,) = store.query(node_type=spec["node_type"])
+            _assert_current_payload(by_type, node_id)
+            (by_dsl,) = store.execute_node_query(
+                NodeQuery(filters=(FilterClause("node_id", "eq", node_id),))
+            )
+            _assert_current_payload(by_dsl, node_id)
+        bulk = store.get_nodes_bulk(list(_PAYLOAD_NODES))
+        assert sorted(n["node_id"] for n in bulk) == sorted(_PAYLOAD_NODES)
+        for node in bulk:
+            _assert_current_payload(node, node["node_id"])
 
     # ------------------------------------------------------------------
     # aliases
