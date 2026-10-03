@@ -1961,10 +1961,10 @@ Run one **full curation cycle** (Tier-2). Calls the curation library functions d
 1. **effectiveness feedback** (`run_effectiveness_feedback`) — demote: noise-tag low-value items;
 2. **advisory generation** (`AdvisoryGenerator.generate`);
 3. **advisory fitness loop** (`run_advisory_fitness_loop`) — adjust confidence / suppress weak advisories;
-4. **learning candidates** (`build_learning_observations_from_event_log` → `analyze_learning_observations` → `write_learning_review_artifacts`) — writes promote-half review artifacts to `--output-dir`.
+4. **learning candidates** (`build_learning_observations_from_event_log` → `analyze_learning_observations` → `write_learning_review_artifacts`) — writes promote-half review artifacts to `--output-dir`, by default the directory the API's Review queue reads (see **Learning artifacts directory** under [Review queue](#review-queue-admin-scope)).
 
 ```bash
-trellis worker curate --output-dir DIR [--days N] [--interval SECONDS] \
+trellis worker curate [--output-dir DIR] [--days N] [--interval SECONDS] \
   [--dry-run] [--reconcile-first] \
   [--skip-noise-tags] [--skip-advisories] [--skip-learning] \
   [--no-meta-trace] [--format text|json]
@@ -1972,7 +1972,7 @@ trellis worker curate --output-dir DIR [--days N] [--interval SECONDS] \
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--output-dir` / `-o` | (required) | Directory for the learning-candidate review artifacts. |
+| `--output-dir` / `-o` | `$TRELLIS_LEARNING_ARTIFACTS_DIR`, else `<data_dir>/learning` | Directory for the learning-candidate review artifacts. The default is the directory `GET /api/v1/learning/candidates` reads; pass this only to write somewhere the API does not look. |
 | `--days` | `30` | Days of EventLog history to scan. |
 | `--interval` | (off) | Loop mode: re-run the cycle every N seconds until SIGINT/SIGTERM. Plain sleep — **no scheduler dependency** (APScheduler/Celery deliberately rejected). |
 | `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts written. Each stage that runs still records its meta-Activity but no finding; add `--no-meta-trace` to skip that. |
@@ -2208,7 +2208,7 @@ decide which surfaces are human-gated are described in
 | GET | `/proposals/{id}/preview` | Dry-run a promotion — predict promote/reject, mutate nothing |
 | POST | `/proposals/{id}/promote` | Promote through the governed pipeline (same logic as `trellis metrics promote --commit`) |
 | POST | `/proposals/{id}/reject` | Reject (human-gated); body `{reason?}` |
-| GET | `/learning/candidates` | Serve the most-recent `intent_learning_candidates.json` artifact (empty + `hint` when none found) |
+| GET | `/learning/candidates` | Serve the most-recent `intent_learning_candidates.json` artifact (`status: "error"` + `code` + a `hint` naming the path when there is none to read) |
 | POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}` |
 | GET | `/schema-evolution/candidates` | List latest `WELL_KNOWN_CANDIDATE` event per `candidate_id` |
 | POST | `/schema-evolution/{id}/draft-adr` | Render the promotion-ADR markdown (copyable/downloadable in the UI). **Only** action — there is no promote endpoint; promotion is a one-way ADR commitment |
@@ -2232,11 +2232,20 @@ each with a live count:
 
 **Learning artifacts directory.** `GET /learning/candidates` and `POST
 /learning/promotions` read the `intent_learning_candidates.json` artifact
-that `trellis analyze learning-candidates --output-dir <dir>` writes. The
-server resolves `<dir>` from `TRELLIS_LEARNING_ARTIFACTS_DIR`, falling back
-to `<data_dir>/learning`. When no artifact is found, the list endpoint
-returns an empty list plus a `hint`, and the promote endpoint returns
-`409`.
+that `trellis worker curate` and `trellis analyze learning-candidates`
+write. The writers and the server resolve the directory the same way
+(`trellis.learning.resolve_learning_artifacts_dir`):
+`TRELLIS_LEARNING_ARTIFACTS_DIR` when set, else `<data_dir>/learning`,
+beside `stores/`. A writer run with no `--output-dir` against the API's
+data directory therefore lands where the queue reads; a deployment that
+sets the variable must set it on the writer and the API alike. The list
+response names the directory in `artifacts_dir`. When there is nothing to
+serve, it still answers `200`, but with `status: "error"`, a `code`
+(`learning_artifacts_dir_missing`, `learning_candidates_missing`,
+`learning_candidates_unreadable` or `stores_dir_unconfigured`) and a
+`hint` naming the path, so an unwritten artifact never reads as an empty
+queue. The promote endpoint answers `409` with `detail: {code, message,
+path}` for the same four conditions.
 
 ### Improvement-metrics dashboard (admin scope)
 

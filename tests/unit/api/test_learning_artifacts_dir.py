@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from fastapi.testclient import TestClient
-from typer.testing import CliRunner
 
 import trellis_api.app as app_module
+import trellis_cli.stores as cli_stores
 from trellis.core.path_presence import path_is_present
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -27,7 +28,8 @@ from trellis_api.app import create_app
 from trellis_cli.main import app as cli_app
 from trellis_cli.stores import _reset_registry
 
-runner = CliRunner()
+if TYPE_CHECKING:
+    from tests.structlog_isolation import IsolatedCliRunner
 
 #: The two commands that write the artifact, run with no ``--output-dir``.
 WRITERS = {
@@ -113,7 +115,7 @@ def _seed_graded_packs(stores_dir: Path, rounds: int = 3) -> None:
     registry.close()
 
 
-def _write_without_output_dir(writer: str) -> Path:
+def _write_without_output_dir(runner: IsolatedCliRunner, writer: str) -> Path:
     """Run ``writer`` with no ``--output-dir``; return the artifact it wrote."""
     result = runner.invoke(cli_app, WRITERS[writer])
     assert result.exit_code == 0, result.output
@@ -130,9 +132,9 @@ def _written_ids(candidates_path: Path) -> list[str]:
 
 @pytest.mark.parametrize("writer", sorted(WRITERS))
 def test_writer_without_output_dir_writes_where_the_api_reads(
-    data_dir: Path, writer: str
+    data_dir: Path, cli_runner: IsolatedCliRunner, writer: str
 ) -> None:
-    candidates_path = _write_without_output_dir(writer)
+    candidates_path = _write_without_output_dir(cli_runner, writer)
     written = _written_ids(candidates_path)
     assert len(written) >= 3
 
@@ -160,12 +162,16 @@ def test_writer_without_output_dir_writes_where_the_api_reads(
 
 @pytest.mark.parametrize("writer", sorted(WRITERS))
 def test_override_moves_the_writer_and_the_api_together(
-    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+    data_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cli_runner: IsolatedCliRunner,
+    writer: str,
 ) -> None:
     elsewhere = tmp_path / "elsewhere"
     monkeypatch.setenv("TRELLIS_LEARNING_ARTIFACTS_DIR", str(elsewhere))
 
-    candidates_path = _write_without_output_dir(writer)
+    candidates_path = _write_without_output_dir(cli_runner, writer)
     with TestClient(create_app()) as client:
         served = client.get("/api/v1/learning/candidates").json()
 
@@ -178,13 +184,31 @@ def test_override_moves_the_writer_and_the_api_together(
     )
 
 
-def test_explicit_output_dir_still_wins(data_dir: Path, tmp_path: Path) -> None:
+def test_explicit_output_dir_still_wins(
+    data_dir: Path, tmp_path: Path, cli_runner: IsolatedCliRunner
+) -> None:
     chosen = tmp_path / "chosen"
-    result = runner.invoke(
+    result = cli_runner.invoke(
         cli_app, ["worker", "curate", "--output-dir", str(chosen), "--format", "json"]
     )
     assert result.exit_code == 0, result.output
     assert Path(json.loads(result.stdout)["candidates_path"]).parent == chosen
+    assert not path_is_present(data_dir / "learning")
+
+
+@pytest.mark.parametrize("writer", sorted(WRITERS))
+def test_writer_with_nothing_to_resolve_asks_for_output_dir(
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cli_runner: IsolatedCliRunner,
+    writer: str,
+) -> None:
+    # A registry with no stores_dir and no override: the writer cannot name
+    # the directory the API reads, so it refuses rather than guess one.
+    monkeypatch.setattr(cli_stores, "_registry", StoreRegistry())
+    result = cli_runner.invoke(cli_app, WRITERS[writer])
+    assert result.exit_code == 2
+    assert "--output-dir" in result.output
     assert not path_is_present(data_dir / "learning")
 
 

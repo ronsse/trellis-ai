@@ -839,8 +839,28 @@ components:
       type: object
     LearningCandidateListResponse:
       additionalProperties: false
-      description: Most-recent learning-candidate artifact, or an empty hint.
+      description: 'Most-recent learning-candidate artifact, or why none could be served.
+
+
+        ``status`` is ``"ok"`` when the artifact was read (``candidates`` may
+
+        still be empty) and ``"error"`` when there was none to read; then
+
+        ``code`` says why (``learning_artifacts_dir_missing``,
+
+        ``learning_candidates_missing``, ``learning_candidates_unreadable`` or
+
+        ``stores_dir_unconfigured``) and ``hint`` names the path and how to
+
+        produce the artifact. ``artifacts_dir`` names the directory looked in,
+
+        ``None`` only when none could be resolved.'
       properties:
+        artifacts_dir:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Artifacts Dir
         candidate_count:
           default: 0
           title: Candidate Count
@@ -851,6 +871,11 @@ components:
             type: object
           title: Candidates
           type: array
+        code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Code
         generated_at_utc:
           anyOf:
           - type: string
@@ -2836,15 +2861,21 @@ paths:
       description: 'Serve the most-recent ``intent_learning_candidates.json`` artifact.
 
 
-        The CLI writes this file via ``trellis analyze learning-candidates
+        ``trellis worker curate`` and ``trellis analyze learning-candidates``
 
-        --output-dir <dir>``. We resolve ``<dir>`` from
+        write it, by default to ``TRELLIS_LEARNING_ARTIFACTS_DIR`` when set and
 
-        ``TRELLIS_LEARNING_ARTIFACTS_DIR`` (or ``<data_dir>/learning``). When
+        otherwise to ``<data_dir>/learning``, the directory this route reads;
 
-        no artifact is found we return an empty list plus a ``hint`` telling
+        ``artifacts_dir`` names it. When there is nothing to serve (the
 
-        the operator how to generate one — never a 5xx.'
+        directory or the file is missing, the file is unreadable, or no
+
+        directory can be resolved), the answer is still 200 but carries
+
+        ``status="error"``, a ``code`` saying which, and a ``hint`` naming the
+
+        path, so an unwritten artifact never reads as an empty review queue.'
       operationId: list_learning_candidates_api_v1_learning_candidates_get
       responses:
         '200':
@@ -2865,7 +2896,9 @@ paths:
 
         Builds the decisions payload from the request body, joins it against
 
-        the most-recent candidate artifact via
+        the most-recent candidate artifact (read from the directory
+
+        ``GET /learning/candidates`` serves) via
 
         :func:`trellis.learning.prepare_learning_promotions`, then submits
 
@@ -2890,6 +2923,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/LearningPromotionResponse'
           description: Successful Response
+        '409':
+          description: 'Nothing was promoted: there is no learning-candidate artifact to join the decisions against. `detail.code`
+            says why (`learning_artifacts_dir_missing`, `learning_candidates_missing`, `learning_candidates_unreadable` or
+            `stores_dir_unconfigured`), `detail.path` names the directory or file at fault and `detail.message` how to produce
+            it.'
         '422':
           content:
             application/json:

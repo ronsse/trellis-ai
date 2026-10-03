@@ -20,7 +20,6 @@ from trellis.learning import (
     write_learning_review_artifacts,
 )
 
-
 #: Spelled out rather than imported in the tests that set it, so a rename of
 #: the documented variable fails here instead of moving with the constant.
 _ENV = "TRELLIS_LEARNING_ARTIFACTS_DIR"

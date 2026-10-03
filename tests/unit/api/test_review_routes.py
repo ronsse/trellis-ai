@@ -459,7 +459,9 @@ class TestLearningCandidates:
         assert resp.status_code == 409
         detail = resp.json()["detail"]
         assert detail["code"] == code
-        missing = artifacts / "intent_learning_candidates.json" if make_dir else artifacts
+        missing = (
+            artifacts / "intent_learning_candidates.json" if make_dir else artifacts
+        )
         assert detail["path"] == str(missing)
         assert str(missing) in detail["message"]
 

@@ -284,14 +284,18 @@ edits the decisions file and submits approved promotions through the
 governed mutation pipeline.
 
 ```bash
-# 1. Discover candidates
-trellis analyze learning-candidates --format json > candidates.json
+# 1. Discover candidates: writes intent_learning_candidates.json and
+#    promotion_decisions.template.json to <data_dir>/learning (the directory
+#    the API's Review queue reads); the JSON output names both paths
+trellis analyze learning-candidates --format json
 
-# 2. Operator edits decisions.json, sets `approved: true` on rows to keep
+# 2. Operator copies the template to decisions.json, sets `approved: true`
+#    on rows to keep
 
 # 3. Submit
 trellis curate promote-learning \
-  --candidates candidates.json --decisions decisions.json --format json
+  --candidates <data_dir>/learning/intent_learning_candidates.json \
+  --decisions decisions.json --format json
 ```
 
 `--dry-run` prints the planned mutations without executing them.
