@@ -76,9 +76,9 @@ _TYPE_ASSISTANT = "assistant"
 _TYPE_SUMMARY = "summary"
 
 #: The Trellis MCP tools whose result prints a ``**pack_id:**`` header on
-#: the line after its title (``trellis.mcp.formatters``). ``get_items``
-#: echoes the id of the pack it expands, so its header names a pack the
-#: session was already served. ``get_file_context`` prints no header.
+#: the line after its title (``trellis.retrieve.formatters``). ``get_items``
+#: prints whatever pack id its caller passes, normally that of the pack
+#: whose items it fetches. ``get_file_context`` prints no header.
 _PACK_TOOLS = frozenset(
     {
         "get_context",

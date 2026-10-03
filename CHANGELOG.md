@@ -119,12 +119,12 @@ All notable changes to Trellis will be documented in this file.
   results printed (`get_context`, `search`, `get_objective_context`,
   `get_task_context`, `get_sectioned_context`, `get_items`), with
   `retrieval_results`, `retrieval_errors`, `pack_ids_unparsed` and, for a
-  sub-agent transcript, `parent_session_id`. An empty list means the
-  session never retrieved; no event means it has not been parsed. A
-  re-parse writes only when the join changes. `CaptureReport` gains
-  `pack_joins_recorded`, `pack_joins_unchanged` and `pack_ids_unparsed`.
-  Only the id is read out of a result, and only once it matches the
-  pack-id alphabet.
+  sub-agent transcript, `parent_session_id`. An empty list with
+  `retrieval_results` 0 means the session never retrieved; no event means
+  it has not been parsed. A re-parse writes only when the join changes.
+  `CaptureReport` gains `pack_joins_recorded`, `pack_joins_unchanged` and
+  `pack_ids_unparsed`. Only the id is read out of a result, and only once
+  it matches the pack-id alphabet.
 
 ### Changed
 

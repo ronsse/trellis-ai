@@ -343,8 +343,9 @@ class CaptureReport:
     #: Sessions whose pack join — the ``CAPTURE_SESSION_PACKS`` event naming
     #: the packs a session was served — this sweep wrote, an empty one
     #: included. Every parsed transcript with a turn or a tool call lands
-    #: here or in :attr:`pack_joins_unchanged`. A dry run counts the joins it
-    #: would write and writes none.
+    #: here, in :attr:`pack_joins_unchanged`, or in :attr:`sessions_errored`
+    #: when recording its join raised. A dry run counts the joins it would
+    #: write and writes none.
     pack_joins_recorded: int = 0
     #: Sessions parsed again whose join was already on record as it stands,
     #: so nothing was written: a judge-outage retry, a watermark reset.
