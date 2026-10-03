@@ -54,16 +54,18 @@ The skills install as `/retrieve-before-task`, `/record-after-task`, and
 `/link-evidence`. Together they close the loop without you prompting for it
 every session:
 
-- **Pre-task retrieve** (`retrieve-before-task`): before non-trivial work, the
-  agent calls `get_context` and reasons from prior traces, precedents, and
+- **Pre-task retrieve** (`retrieve-before-task`): before non-trivial work —
+  and again after a pivot, after compaction, and in each dispatched subagent —
+  the agent calls `get_context` and reasons from prior traces, precedents, and
   graph knowledge instead of re-deriving them.
 - **Post-task record** (`record-after-task`): after meaningful work, the agent
-  writes a structured trace via `save_experience` and grades it with
-  `record_feedback` — this is what makes future retrievals useful.
+  writes a structured trace via `save_experience` and grades the packs it was
+  served with `record_feedback`, citing item ids — this is what makes future
+  retrievals useful.
 - **Evidence linking** (`link-evidence`): when the agent learns a durable fact,
-  it stores it via `save_memory` and attaches it to the relevant graph entity
-  with `save_knowledge`, so the fact resurfaces from any future task that
-  touches the same area.
+  it stores it with `save_knowledge`, linked to the graph entity the fact is
+  about, so the fact resurfaces from any future task that touches the same
+  area.
 
 You can install or reinstall the skills on their own at any time with
 `trellis admin install-skills user` (or `project`). It is idempotent — existing

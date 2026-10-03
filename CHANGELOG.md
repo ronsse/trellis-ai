@@ -264,6 +264,26 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The packaged agent skills no longer teach calls the server rejects or
+  ignores.** `record-after-task` showed `"source": "claude-code"` in both
+  example traces; `source` is an enum (`agent | human | workflow | system`)
+  and trace validation is all-or-nothing, so an agent that copied the example
+  lost the whole trace. The skill now documents the trace schema as the server
+  enforces it — the keys a step accepts, `result` as an object, artifacts in
+  top-level `artifacts_produced`, `metadata` and `outcome.metrics` as the home
+  for anything else — and adds grading packs by item id and saving environment
+  facts with `save_knowledge`. `link-evidence` told the reader to pass a
+  `save_memory` document id as `relates_to`, which creates no edge (documents
+  are not graph nodes), and claimed `save_knowledge` updates an existing
+  entity, which it does not: every call creates a node. It now stores the fact
+  and its anchor in one `save_knowledge(content=..., relates_to=...)` call,
+  uses `evidence_ref` for a document that already exists, and says to read the
+  reply for `Edge created` or the `edge not created` warning.
+  `retrieve-before-task` now covers retrieval after a pivot, after compaction
+  (`refresh=True`), in dispatched subagents, and survey-then-fetch with
+  `index=True` and `get_items`, and explains the `Withheld` line. All three
+  skills move to version 1.1.0; an existing install picks them up with
+  `trellis admin install-skills <scope> --force`.
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
   `2`, whatever refused it. A policy refusal, by `deny` or `require_approval`,
