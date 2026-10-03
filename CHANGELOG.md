@@ -499,6 +499,7 @@ All notable changes to Trellis will be documented in this file.
   node read now names its columns from one list, and a row whose width
   disagrees with that list raises instead of shifting. SQLite, Neo4j and
   ArcadeDB were not affected.
+  ([#692](https://github.com/ronsse/trellis-ai/pull/692))
 
 ## [0.9.0] - 2026-05-13
 
