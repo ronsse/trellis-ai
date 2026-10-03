@@ -407,7 +407,9 @@ def tool_results(
     return record
 
 
-def system_note(*, at: float | None, session_id: str = "sess-fake-0001") -> dict[str, Any]:
+def system_note(
+    *, at: float | None, session_id: str = "sess-fake-0001"
+) -> dict[str, Any]:
     """A non-conversational record that still carries a timestamp."""
     return _record(
         "system",
@@ -444,7 +446,9 @@ def worked_session(session_id: str = "sess-worked-0001") -> list[dict[str, Any]]
             usage=usage_block(10, 20, cache_read=100, cache_creation=5),
             **s,
         ),
-        tool_results(result_block("toolu_fake_01", "1 failed", is_error=True), at=5, **s),
+        tool_results(
+            result_block("toolu_fake_01", "1 failed", is_error=True), at=5, **s
+        ),
         *api_message(  # turn 2: a commit that succeeds
             "msg_fake_02",
             bash_block("toolu_fake_02", 'git add -A && git commit -m "fake change"'),
@@ -452,10 +456,14 @@ def worked_session(session_id: str = "sess-worked-0001") -> list[dict[str, Any]]
             usage=usage_block(12, 30, cache_read=110),
             **s,
         ),
-        tool_results(result_block("toolu_fake_02", "[fake 0000000] fake change"), at=8, **s),
+        tool_results(
+            result_block("toolu_fake_02", "[fake 0000000] fake change"), at=8, **s
+        ),
         *api_message(  # turn 3: a commit that fails
             "msg_fake_03",
-            bash_block("toolu_fake_03", "git -c user.name=fake commit --amend --no-edit"),
+            bash_block(
+                "toolu_fake_03", "git -c user.name=fake commit --amend --no-edit"
+            ),
             at=9,
             usage=usage_block(3, 4, cache_read=120),
             **s,
@@ -469,7 +477,7 @@ def worked_session(session_id: str = "sess-worked-0001") -> list[dict[str, Any]]
             "msg_fake_04",
             bash_block(
                 "toolu_fake_04",
-                "git push -u origin fake && gh pr create --title Fake --body-file /fake/b.md",
+                "git push -u origin fake && gh pr create --title Fake --body-file f",
             ),
             at=12,
             usage=usage_block(4, 40, cache_read=130, cache_creation=2),

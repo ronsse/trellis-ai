@@ -8,6 +8,7 @@ never reach the digest.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -961,6 +962,23 @@ class TestSessionOutcome:
         assert (outcome["assistant_turns"], outcome["tool_calls"]) == (1, 2)
         assert _tokens(outcome) == (7, 90, 500, 60)
 
+    def test_a_split_message_keeps_each_fields_largest_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        """A snapshot only grows while the message streams, so the largest
+        value each field reached is the message's total, whichever record
+        carries it and wherever that record sits in the file."""
+        records = api_message(
+            "msg_fake_split",
+            text_block("Fake."),
+            tool_use_block("toolu_fake_r1", "Read", file_path="/fake/a.md"),
+            at=0,
+            usage=usage_block(7, 90, cache_read=500, cache_creation=60),
+        )
+        outcome = self._parse(tmp_path, records[::-1])
+        assert outcome["assistant_turns"] == 1
+        assert _tokens(outcome) == (7, 90, 500, 60)
+
     def test_a_transcript_without_usage_has_null_tokens_not_zero(
         self, tmp_path: Path
     ) -> None:
@@ -984,7 +1002,9 @@ class TestSessionOutcome:
     def test_a_recorded_zero_stays_zero(self, tmp_path: Path) -> None:
         outcome = self._parse(
             tmp_path,
-            api_message("msg_fake_z", text_block("Fake."), at=0, usage=usage_block(0, 0)),
+            api_message(
+                "msg_fake_z", text_block("Fake."), at=0, usage=usage_block(0, 0)
+            ),
         )
         assert outcome["assistant_turns_with_usage"] == 1
         assert _tokens(outcome) == (0, 0, 0, 0)
@@ -1072,9 +1092,7 @@ class TestSessionOutcome:
         stamped_once += api_message("msg_fake_t", text_block("Fake."), at=None)
         assert self._parse(tmp_path, stamped_once)["wall_clock_seconds"] == 0.0
 
-    def test_the_wall_clock_spans_every_stamp_it_can_read(
-        self, tmp_path: Path
-    ) -> None:
+    def test_the_wall_clock_spans_every_stamp_it_can_read(self, tmp_path: Path) -> None:
         """Stamps run backwards in real transcripts, so the span is the
         latest less the earliest, not the last less the first. A stamp with
         no zone is read as UTC; one that does not parse is passed over
@@ -1095,6 +1113,25 @@ class TestSessionOutcome:
         )
         assert outcome["wall_clock_seconds"] == 95.0
         assert outcome["user_turns"] == 3
+
+    @pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs time.tzset")
+    def test_a_stamp_without_a_zone_is_utc_whatever_the_host_zone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read as the host's local time, the stamp below would move the
+        span by the host's offset. CI runs in UTC, where the two readings
+        agree, so the zone is set here, five hours west, not trusted."""
+        naive = prompt("Fake late prompt.", at=None)
+        naive["timestamp"] = "2026-09-30T09:01:30"
+        records = [prompt("Fake start.", at=0), naive]
+        try:
+            with monkeypatch.context() as patch:
+                patch.setenv("TZ", "EST+5")
+                time.tzset()
+                outcome = self._parse(tmp_path, records)
+        finally:
+            time.tzset()
+        assert outcome["wall_clock_seconds"] == 90.0
 
     def test_a_failed_commit_is_not_a_commit(self, tmp_path: Path) -> None:
         outcome = self._parse(
@@ -1130,7 +1167,9 @@ class TestSessionOutcome:
             tmp_path,
             [
                 *api_message(
-                    "msg_fake_pr", bash_block("toolu_fake_pr", "gh pr create --fill"), at=0
+                    "msg_fake_pr",
+                    bash_block("toolu_fake_pr", "gh pr create --fill"),
+                    at=0,
                 ),
                 tool_results(
                     result_block(
@@ -1157,7 +1196,9 @@ class TestSessionOutcome:
                     bash_block("toolu_fake_v", "gh pr view 7 --json url"),
                     tool_use_block("toolu_fake_rd", "Read", file_path="/fake/notes.md"),
                     tool_use_block(
-                        "toolu_fake_sh", "mcp__fake__shell", command="gh pr create --fill"
+                        "toolu_fake_sh",
+                        "mcp__fake__shell",
+                        command="gh pr create --fill",
                     ),
                     at=1,
                 ),
@@ -1165,7 +1206,9 @@ class TestSessionOutcome:
                 tool_results(
                     result_block("toolu_fake_rd", "fake " + FAKE_PR_URL.format(8)), at=2
                 ),
-                tool_results(result_block("toolu_fake_sh", FAKE_PR_URL.format(6)), at=2),
+                tool_results(
+                    result_block("toolu_fake_sh", FAKE_PR_URL.format(6)), at=2
+                ),
             ],
         )
         assert outcome["pr_urls"] == 0
@@ -1205,11 +1248,17 @@ class TestSessionOutcome:
         outcome = self._parse(
             tmp_path,
             [
-                *api_message("msg_fake_cmd", bash_block("toolu_fake_cmd", command), at=0),
+                *api_message(
+                    "msg_fake_cmd", bash_block("toolu_fake_cmd", command), at=0
+                ),
                 tool_results(result_block("toolu_fake_cmd", "fake ok"), at=1),
             ],
         )
-        assert (outcome["commits"], outcome["prs_created"], outcome["prs_merged"]) == made
+        assert (
+            outcome["commits"],
+            outcome["prs_created"],
+            outcome["prs_merged"],
+        ) == made
 
     @pytest.mark.parametrize(
         ("kind", "ended"),
@@ -1252,7 +1301,9 @@ class TestSessionOutcome:
         parent, child = delegating_session("sess-parent-0001")
         root = tmp_path / "projects"
         parent_path = root / "proj" / "sess-parent-0001.jsonl"
-        child_path = root / "proj" / "sess-parent-0001" / "subagents" / "agent-fk1.jsonl"
+        child_path = (
+            root / "proj" / "sess-parent-0001" / "subagents" / "agent-fk1.jsonl"
+        )
         write_transcript(parent_path, parent)
         write_transcript(child_path, child)
 
@@ -1283,9 +1334,7 @@ class TestSessionOutcome:
             assert value is None or type(value) in (int, float, bool), key
         assert json.loads(json.dumps(outcome)) == outcome
 
-    def test_no_command_or_result_text_reaches_the_digest(
-        self, tmp_path: Path
-    ) -> None:
+    def test_no_command_or_result_text_reaches_the_digest(self, tmp_path: Path) -> None:
         """F8: the outcome reads a ``Bash`` command and a result's text in
         memory and keeps neither, on the outcome or anywhere on the digest."""
         path = tmp_path / "proj" / "sess-worked-0001.jsonl"

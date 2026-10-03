@@ -23,18 +23,27 @@ Claude Code writes one JSONL file per session under
 * **``tool_result`` content arrays** — a tool result's ``content`` may be a
   bare string *or* a list of typed blocks. Either way it is raw tool output
   (``op read`` results, env dumps) and is **never** copied into the digest.
-  What survives is its ``is_error`` flag, its ``tool_use_id`` and, for a
-  Trellis retrieval tool's result alone, the pack id printed in its header.
+  What survives is its ``is_error`` flag, its ``tool_use_id``, for a
+  Trellis retrieval tool's result alone the pack id printed in its header,
+  and for a ``Bash`` call that committed or opened or merged a pull request
+  how many pull request URLs it printed.
   The use id is an opaque correlation handle, read because it attributes
   the failure to the call that produced it, which is the difference between
   "this session errored" and "``Bash`` errored 38 times out of 412" (#306).
   The pack id is a generated identifier, kept only once it matches the
   26-character alphabet it is generated in, so nothing else in the result
   rides along with it. See :func:`_collect_pack_ids`.
+* **The session outcome** reads more than names: a ``Bash`` call's command
+  line, to tell a commit or a pull request from any other step, the text of
+  such a call's result, for pull request URLs, and each record's
+  ``timestamp`` and usage. All of it is read in memory and only counts, one
+  duration and two flags survive. See
+  :mod:`~trellis_workers.session_capture.outcome`.
 
 The output is a :class:`~trellis_workers.session_capture.models.SessionDigest`
 that carries only natural-language turns, tool *names* with per-call error
-flags, the pack ids the session was served, and structural signals.
+flags, the pack ids the session was served, the session's outcome as counts,
+and structural signals.
 """
 
 from __future__ import annotations
@@ -54,6 +63,7 @@ from trellis_workers.session_capture.models import (
     ROLE_USER,
     SessionDigest,
 )
+from trellis_workers.session_capture.outcome import OutcomeTally
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -351,8 +361,11 @@ def _collect_tool_names(digest: SessionDigest, content: Any) -> None:
                 )
 
 
-def _handle_record(record: dict[str, Any], digest: SessionDigest) -> None:
-    """Fold one parsed record into *digest*. Never raises on shape."""
+def _handle_record(
+    record: dict[str, Any], digest: SessionDigest, tally: OutcomeTally
+) -> None:
+    """Fold one parsed record into *digest* and *tally*. Never raises on shape."""
+    tally.stamp(record.get("timestamp"))
     record_type = record.get("type")
 
     if record_type == _TYPE_SUMMARY:
@@ -382,9 +395,11 @@ def _handle_record(record: dict[str, Any], digest: SessionDigest) -> None:
         for use_id in errored_ids:
             digest.mark_tool_result(use_id, errored=True)
         _collect_pack_ids(digest, content)
+        tally.user(record, content, _extract_text(content))
     elif record_type == _TYPE_ASSISTANT:
         _add_turns(digest, ROLE_ASSISTANT, content, sidechain=sidechain)
         _collect_tool_names(digest, content)
+        tally.assistant(record, message)
     else:
         digest.unknown_records += 1
 
@@ -397,6 +412,7 @@ def parse_session(path: Path) -> SessionDigest:
     shape is skipped and counted, never fatal.
     """
     digest = SessionDigest(session_id=path.stem, source_path=str(path))
+    tally = OutcomeTally()
     try:
         handle = path.open(encoding="utf-8")
     except OSError:
@@ -415,10 +431,14 @@ def parse_session(path: Path) -> SessionDigest:
                 if not isinstance(record, dict):
                     digest.malformed_lines += 1
                     continue
-                _handle_record(record, digest)
+                _handle_record(record, digest, tally)
             except (json.JSONDecodeError, ValueError, TypeError, KeyError):
                 # SKIP + COUNT: one bad line never aborts a session parse.
                 digest.malformed_lines += 1
+
+    # Over the whole file, before resolve_thread narrows the turns: the
+    # outcome counts what the file did, as its pack ids do.
+    digest.outcome = tally.finish(len(digest.tool_calls))
 
     # Decide which turns are this transcript's conversation before the signal
     # detectors read them: a mixed file keeps its main thread, a dedicated

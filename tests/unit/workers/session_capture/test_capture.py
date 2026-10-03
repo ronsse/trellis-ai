@@ -1801,7 +1801,8 @@ class TestSessionOutcomeJoin:
         assert night2.pack_joins_recorded == 1
         assert _joins(registry)["sess-worked-0001"] == [_join([], results=0)] * 2
         first, second = (
-            join["outcome"] for join in _joins(registry, outcome=True)["sess-worked-0001"]
+            join["outcome"]
+            for join in _joins(registry, outcome=True)["sess-worked-0001"]
         )
         assert first == WORKED_OUTCOME
         assert second == {
