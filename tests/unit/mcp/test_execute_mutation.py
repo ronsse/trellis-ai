@@ -434,6 +434,9 @@ class TestTraceIngestTarget:
                     "source_id": source_id,
                     "target_id": target_id,
                     "edge_kind": "entity_related_to",
+                    # A trace among another operation's args does not make
+                    # that operation a trace write.
+                    "trace": _TRACE,
                 },
             )
         )
