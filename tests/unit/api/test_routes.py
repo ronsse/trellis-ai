@@ -15,7 +15,7 @@ from structlog.testing import capture_logs
 
 import trellis_api.app as app_module
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
-from trellis.errors import StaleStoreWriteError
+from trellis.errors import StaleStoreWriteError, StoreError
 from trellis.schemas.enums import PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.base import VectorStore
@@ -138,6 +138,81 @@ def test_ingest_trace_extraction_failure_does_not_fail_request(client, monkeypat
     monkeypatch.setattr(hook, "result_to_batch", _boom)
     resp = client.post("/api/v1/traces", json=_rich_trace())
     assert resp.status_code == 200
+
+
+# ── a refused or failed trace is neither extracted nor answered 200 ─────
+
+
+@pytest.fixture
+def extraction_calls(monkeypatch):
+    """Trace ids the route handed to ``run_trace_extraction``."""
+    calls: list[str] = []
+
+    def _record(_registry, trace, *, requested_by):
+        calls.append(trace.trace_id)
+
+    monkeypatch.setattr(ingest, "run_trace_extraction", _record)
+    return calls
+
+
+def test_ingest_trace_policy_refusal_answers_400(client, extraction_calls):
+    """A refused trace is not stored, not extracted, and not answered 200.
+
+    The second POST, after the policy is removed, is the control: the same
+    body is stored and extracted, so the refusal is the policy's and the
+    spy sees the route's calls.
+    """
+    policy = Policy(
+        policy_type="mutation",
+        scope=PolicyScope(level="entity_type", value="trace"),
+        rules=[
+            PolicyRule(
+                operation="trace.ingest",
+                condition="synthetic trace refusal",
+                action="deny",
+            )
+        ],
+        enforcement="enforce",
+    )
+    policy_path = app_module._registry.stores_dir / "policies.json"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(
+        json.dumps({"policies": [policy.model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+    body = {**_rich_trace(), "trace_id": "synthetic-refused-trace"}
+    traces = app_module._registry.operational.trace_store
+
+    refused = client.post("/api/v1/traces", json=body)
+
+    assert refused.status_code == 400
+    assert "synthetic trace refusal" in refused.json()["detail"]
+    assert traces.get("synthetic-refused-trace") is None
+    assert extraction_calls == []
+
+    policy_path.unlink()
+    allowed = client.post("/api/v1/traces", json=body)
+
+    assert allowed.status_code == 200
+    assert traces.get("synthetic-refused-trace") is not None
+    assert extraction_calls == ["synthetic-refused-trace"]
+
+
+def test_ingest_trace_store_failure_keeps_409(client, monkeypatch, extraction_calls):
+    """A write the store fails keeps its 409 and is not extracted either."""
+    traces = app_module._registry.operational.trace_store
+
+    def _fail(_trace):
+        msg = "synthetic append failure"
+        raise StoreError(msg)
+
+    monkeypatch.setattr(traces, "append", _fail)
+
+    resp = client.post("/api/v1/traces", json=_rich_trace())
+
+    assert resp.status_code == 409
+    assert "synthetic append failure" in resp.json()["detail"]
+    assert extraction_calls == []
 
 
 # ── embed-on-ingest (TRELLIS_ENABLE_EMBED_ON_INGEST) ────────────────────
