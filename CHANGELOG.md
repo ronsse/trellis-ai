@@ -552,6 +552,7 @@ All notable changes to Trellis will be documented in this file.
   in the Memories view. `GET /api/v1/graph/search` also failed with a `500`
   on every SQLite store: a `sqlite3.Connection` is callable, so the route
   took it for the Postgres store.
+  ([#695](https://github.com/ronsse/trellis-ai/pull/695))
 
 ## [0.9.0] - 2026-05-13
 
