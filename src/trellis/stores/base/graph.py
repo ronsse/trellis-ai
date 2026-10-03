@@ -249,6 +249,10 @@ class GraphStore(ABC):
 
         When updating an existing (current) node, the old version is
         closed (``valid_to`` set) and a new version row is inserted.
+        When no version is current it creates the node, so it re-creates
+        a purged id: a write that lost a race to :meth:`delete_node`
+        brings the node back. :meth:`update_node_if_current` writes only
+        over the version the caller read.
 
         Args:
             node_id: Logical entity ID, or ``None`` to auto-generate.
@@ -447,6 +451,47 @@ class GraphStore(ABC):
         became live first.
 
         Backend failures raise rather than being folded into a status.
+        """
+
+    @abstractmethod
+    def update_node_if_current(
+        self,
+        node_id: str,
+        expected_valid_from: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str,
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        """Write a new version of a node only over the version the caller read.
+
+        ``expected_valid_from`` is the current version's ``valid_from``
+        exactly as :meth:`get_node` returned it. When that version is
+        still current it is closed and a new version is inserted, with
+        ``created_at`` carried forward, as :meth:`upsert_node` does.
+        Otherwise nothing is written and the call returns ``False``: the
+        id has no current version (it never existed, or
+        :meth:`delete_node` purged it), or a later write replaced the
+        version (including a purge followed by a re-create). It never
+        creates a node.
+
+        The check and the write commit together. Of concurrent calls
+        holding the same current token exactly one returns ``True``, and
+        once a :meth:`delete_node` has committed, a call holding a token
+        read before it returns ``False``. Two versions written within one
+        microsecond share a token, which this cannot tell apart.
+
+        Raises:
+            ValueError / TypeError: under the same conditions as
+                :meth:`upsert_node`. Role immutability is checked against
+                the version the call would replace.
+
+        Backend failures raise rather than being reported as ``False``.
+
+        Returns:
+            ``True`` when the new version was written.
         """
 
     @abstractmethod

@@ -478,6 +478,70 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             self._conn.commit()
         return node_id
 
+    def update_node_if_current(
+        self,
+        node_id: str,
+        expected_valid_from: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str,
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        validate_node_role_args(node_role, generation_spec)
+        validate_document_ids(document_ids)
+        now_iso = utc_now().isoformat()
+        conn = self._conn
+        with conn:
+            # The UPDATE opens the transaction, so it takes the write lock
+            # on a fresh snapshot: the token is checked and the version
+            # closed under one lock, which a concurrent writer or a
+            # committed delete_node cannot slip between.
+            cursor = conn.execute(
+                """
+                UPDATE nodes SET valid_to = ?
+                WHERE node_id = ? AND valid_to IS NULL AND valid_from = ?
+                """,
+                (now_iso, node_id, expected_valid_from),
+            )
+            if cursor.rowcount == 0:
+                return False
+            closed = conn.execute(
+                """
+                SELECT node_role, created_at FROM nodes
+                WHERE node_id = ? AND valid_from = ? AND valid_to = ?
+                """,
+                (node_id, expected_valid_from, now_iso),
+            ).fetchone()
+            # Raising inside ``with conn`` rolls the close back.
+            check_node_role_immutable(node_id, dict(closed), node_role)
+            conn.execute(
+                """
+                INSERT INTO nodes
+                    (version_id, node_id, node_type, node_role,
+                     generation_spec_json, document_ids_json,
+                     properties_json, created_at, updated_at,
+                     valid_from, valid_to)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    generate_ulid(),
+                    node_id,
+                    node_type,
+                    node_role,
+                    json.dumps(generation_spec)
+                    if generation_spec is not None
+                    else None,
+                    json.dumps(document_ids) if document_ids is not None else None,
+                    json.dumps(properties),
+                    closed["created_at"],
+                    now_iso,
+                    now_iso,
+                ),
+            )
+        return True
+
     def upsert_nodes_bulk(self, nodes: list[dict[str, Any]]) -> list[str]:
         # ``executemany`` + a single commit, branched on whether any row
         # in the batch already has a current version. The previous

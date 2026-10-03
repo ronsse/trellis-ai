@@ -11,10 +11,13 @@ Note: most openCypher implementations do not support partial uniqueness
 constraints (``UNIQUE ... WHERE valid_to IS NULL``). The "at most one
 current version per ``node_id``" invariant is enforced by the
 close-then-insert transaction rather than by the database. Under
-concurrent writers, a second writer can observe a stale "no current"
-state and create a duplicate current row. Enterprise Neo4j / AuraDB
-users can layer a node key constraint on top; ArcadeDB users rely on
-single-writer discipline at the application layer.
+concurrent ``upsert_node`` writers, a second writer can observe a stale
+"no current" state and create a duplicate current row. Enterprise
+Neo4j / AuraDB users can layer a node key constraint on top; ArcadeDB
+users rely on single-writer discipline at the application layer.
+``update_node_if_current`` is the exception: of concurrent calls holding
+one token exactly one writes, on both engines (measured against
+``neo4j:2025.12`` and ``arcadedata/arcadedb:26.8.1``).
 
 Per-backend subclasses override the **seams**:
 
@@ -472,6 +475,85 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             raise ValueError(msg)
         return node_id
 
+    def update_node_if_current(
+        self,
+        node_id: str,
+        expected_valid_from: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str,
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        validate_node_role_args(node_role, generation_spec)
+        validate_document_ids(document_ids)
+        now = _iso(utc_now())
+        new_props = {
+            "node_id": node_id,
+            "version_id": generate_ulid(),
+            "node_type": node_type,
+            "node_role": node_role,
+            "generation_spec_json": json.dumps(generation_spec)
+            if generation_spec is not None
+            else None,
+            "document_ids_json": json.dumps(document_ids)
+            if document_ids is not None
+            else None,
+            "properties_json": json.dumps(properties or {}),
+            "updated_at": now,
+            "valid_from": now,
+            "valid_to": None,
+        }
+        # ``MATCH``, not ``OPTIONAL MATCH``: no current row, no write.
+        # Setting and removing ``_cas_lock`` writes the row before the
+        # token is re-read (Neo4j's lost-update idiom). Both engines need
+        # it: without it, two writers holding one token both wrote on
+        # Neo4j and on ArcadeDB (measured). On Neo4j the write takes the
+        # row's lock, so a writer that closed or purged the row commits
+        # first and the second WHERE sees it. ArcadeDB takes no lock: the
+        # loser fails, at commit with a code the driver retries or on the
+        # generic engine code that ``_execute_alias_write`` retries, and
+        # the re-run reads committed state. ``datetime()`` on both sides
+        # because ArcadeDB stores the ISO string as a DateTime, which
+        # never equals a string.
+        cypher = """
+        MATCH (old:Node {node_id: $node_id})
+        WHERE old.valid_to IS NULL
+        SET old._cas_lock = true
+        REMOVE old._cas_lock
+        WITH old
+        WHERE old.valid_to IS NULL
+          AND datetime(old.valid_from) = datetime($expected_valid_from)
+          AND (old.node_role IS NULL OR old.node_role = $node_role)
+        SET old.valid_to = $now
+        WITH old, coalesce(old.created_at, $now) AS created_at_carry
+        CREATE (n:Node)
+        SET n = $new_props
+        SET n.created_at = created_at_carry
+        RETURN n.node_id AS node_id
+        """
+
+        def _tx(tx: ManagedTransaction) -> bool:
+            record = tx.run(
+                cypher,
+                node_id=node_id,
+                expected_valid_from=expected_valid_from,
+                node_role=node_role,
+                now=now,
+                new_props=new_props,
+            ).single()
+            return record is not None
+
+        if self._execute_alias_write(_tx):
+            return True
+        # Nothing was written. A role conflict with the version the token
+        # names raises, as in ``upsert_node``; anything else is a refusal.
+        existing = self.get_node(node_id)
+        if existing is not None and existing["valid_from"] == expected_valid_from:
+            check_node_role_immutable(node_id, existing, node_role)
+        return False
+
     def upsert_nodes_bulk(
         self,
         nodes: list[dict[str, Any]],
@@ -732,6 +814,12 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         :func:`_is_alias_claim_contention`). Anything that is not claim
         contention propagates untouched, and exhausting the bound re-raises
         the last error rather than returning a made-up result.
+
+        :meth:`update_node_if_current` runs through here too. It touches no
+        claim, so only a backend that widens the predicate re-runs it:
+        ArcadeDB, where a compare-and-set that lost to a concurrent write
+        can fail on the generic engine code. The re-run reads committed
+        state, so it gives the answer a serialized run would.
         """
         last_error: Exception | None = None
         for _attempt in range(_ALIAS_CLAIM_RETRY_ATTEMPTS):

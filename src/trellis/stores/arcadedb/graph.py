@@ -150,7 +150,11 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         with typed strings built by its own callers: an evaluation fault
         there is a code bug that surfaces identically after three
         attempts, not a data-dependent condition, so the cost is 3x
-        latency on a path that is already broken.
+        latency on a path that is already broken. One caller passes data
+        through: :meth:`update_node_if_current` (whose lost race also
+        arrives here) hands its ``expected_valid_from`` to ``datetime()``,
+        and a malformed one fails on this code, measured. It raises after
+        three attempts instead of one; it never reads as a refusal.
 
         ``gql_status`` is deliberately **not** part of the check. Every
         shape above reports 50N42, the syntax errors included, so it

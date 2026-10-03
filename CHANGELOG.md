@@ -125,6 +125,17 @@ All notable changes to Trellis will be documented in this file.
   `CaptureReport` gains `pack_joins_recorded`, `pack_joins_unchanged` and
   `pack_ids_unparsed`. Only the id is read out of a result, and only once
   it matches the pack-id alphabet.
+- **`GraphStore.update_node_if_current` writes a new node version only over
+  the version its caller read.** The caller passes the `valid_from` that
+  `get_node` returned. While that version is current the call replaces it
+  and returns `True`; once another write has replaced it, or `delete_node`
+  has purged the node, it writes nothing and returns `False`. It never
+  creates a node, so unlike `upsert_node` it cannot bring back an id that a
+  purge removed between a caller's read and its write. Of concurrent calls
+  holding one token exactly one writes, on SQLite, Postgres, Neo4j and
+  ArcadeDB. No caller uses it yet. **Out-of-tree `GraphStore` backends must
+  implement it**: the method is abstract, so a subclass without it no
+  longer instantiates.
 
 ### Changed
 
