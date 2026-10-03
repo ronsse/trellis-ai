@@ -54,9 +54,13 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
             requested_by="api:ingest-trace",
         )
     )
+    if result.status == CommandStatus.REJECTED:
+        # A refusal stored nothing, so it is neither extracted nor
+        # answered "ok". 400, as on /evidence and the curate routes.
+        raise HTTPException(status_code=400, detail=result.message)
     if result.status == CommandStatus.FAILED:
-        # TraceStore.append raises StoreError on duplicate trace_id; the
-        # handler propagates that as a FAILED status. 409 is the closest fit.
+        # The handler raised, e.g. StoreError from append. A duplicate
+        # trace_id never lands here: the handler answers it as success.
         raise HTTPException(status_code=409, detail=result.message)
 
     # Feature-flagged post-ingest trace->graph extraction
