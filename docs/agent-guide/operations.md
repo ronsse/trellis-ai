@@ -2168,6 +2168,8 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | GET | `/search` | `?q=...&domain=...&limit=20&include_chunks=false` | Full-text search. `<parent>#chunk-N` fragment rows are **excluded by default** (#396) — they are slices of documents the same search already ranks, and on the reference deployment 56% of rows are chunks. The exclusion is pushed into the store rather than applied to the response, so the result set refills with the documents the fragments were sliced from instead of simply getting shorter — a short result set still means "that is all there is". Pass `include_chunks=true` for the unfiltered set; the applied setting is echoed on the response. |
 | POST | `/packs` | `{intent, domain?, max_items?, max_tokens?, run_id?, intent_family?}` | Assemble context pack. `run_id` / `intent_family` ride the `PACK_ASSEMBLED` event so the learning loop can credit the run and bucket the intent instead of falling back to `unknown-run` / `general_context`; `intent_family` is derived from `intent` when omitted. |
 | GET | `/entities/{id}` | — | Get entity with subgraph |
+| GET | `/graph/search` | `?q=...&node_type=...&sort=created_at&order=desc&limit=50&offset=0` | Page current graph nodes, with their `total`. `q` matches a substring of the name, `node_id` or `node_type` in any case (ASCII letters only on SQLite), and `%` and `_` are wildcards. The Neo4j and ArcadeDB stores answer `500`. |
+| GET | `/graph/search/facets` | `?q=...` | Count current graph nodes per stored `node_type` under `/graph/search`'s `q`; the counts sum to its `total`. |
 | GET | `/traces` | `?domain=...&limit=20` | List traces |
 | GET | `/traces/{id}` | — | Get trace by ID |
 | GET | `/precedents` | `?domain=...&limit=20` | List precedents |
