@@ -23,11 +23,16 @@ instance are set up here.
 1. **Discover** `~/.claude/projects/**/*.jsonl`; a per-file `(mtime, size)`
    watermark skips unchanged sessions before they are opened.
 2. **Parse** each new/changed file into a *secret-free* digest — natural-language
-   turns (in transcript order, user and assistant interleaved) and tool
-   *names* only. Raw `tool_result` / `toolUseResult` content
+   turns (in transcript order, user and assistant interleaved), tool
+   *names*, and the pack id each Trellis retrieval result prints in its
+   header, kept only when it matches the pack-id alphabet. Raw
+   `tool_result` / `toolUseResult` content
    (where `op`-style secret reads and env dumps live) never enters the digest.
    Malformed lines are skipped and counted; unknown record types, sidechains,
-   and compaction summaries are tolerated.
+   and compaction summaries are tolerated. Each parsed session with a turn or
+   a tool call has its pack ids recorded as one `capture.session_packs` event,
+   an empty list for a session that never retrieved. A re-parse writes a new event only when its payload,
+   retrieval counts included, differs from the session's latest one.
 3. **Trigger** deterministically: sessions with errors or user corrections are
    capture-mandatory (failure-bias); clean sessions are sampled ~1-in-N.
 4. **Distil** triggered sessions with the local model. The judge prompt carries

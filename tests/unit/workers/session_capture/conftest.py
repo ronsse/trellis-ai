@@ -169,3 +169,63 @@ def tool_result_turn(
         "sessionId": session_id,
         "message": {"role": "user", "content": [block]},
     }
+
+
+#: Made-up pack ids in the shape the retrieval formatters print: 26
+#: characters of Crockford base32. Distinct in their last character, so an
+#: assertion naming which ids a session recorded cannot pass on the wrong one.
+PACK_IDS = tuple(f"01FAKEPACK000000000000000{suffix}" for suffix in "ABCDEFGH")
+
+
+def pack_markdown(
+    pack_id: str | None,
+    *,
+    title: str = "# Context for: fake intent about the widget deploy",
+    banner: bool = False,
+) -> str:
+    """A retrieval tool's markdown, laid out as the formatters lay it out.
+
+    Title line, then the ``**pack_id:**`` header when there is a pack, a
+    blank line, then the items. ``banner`` prepends the capture-health
+    warning the MCP server puts above a pack while capture is failing — a
+    blockquote paragraph, never a ``#`` line. Every word of it is synthetic.
+    """
+    lines = [title]
+    if pack_id is not None:
+        lines.append(f"**pack_id:** `{pack_id}`")
+    lines += ["", "## Precedents", "- fake item: the frobnicator boots after migrate"]
+    text = "\n".join(lines)
+    if banner:
+        text = "> **WARNING: memory capture is failing.** Fake banner text.\n\n" + text
+    return text
+
+
+def mcp_envelope(markdown: str) -> str:
+    """The string Claude Code records for a FastMCP tool's result."""
+    return json.dumps({"result": markdown})
+
+
+def pack_result_turn(
+    tool_use_id: str,
+    content: Any,
+    *,
+    is_error: bool = False,
+    session_id: str = "sess-fake-0001",
+) -> dict[str, Any]:
+    """A user record answering one tool call with *content* as given."""
+    return {
+        "type": "user",
+        "uuid": f"u-fake-{tool_use_id}",
+        "sessionId": session_id,
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                    "is_error": is_error,
+                }
+            ],
+        },
+    }

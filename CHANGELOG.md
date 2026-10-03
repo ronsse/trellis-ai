@@ -111,6 +111,20 @@ All notable changes to Trellis will be documented in this file.
   override counts. REST/CLI packs carry `null`, and REST/CLI traces are
   not stamped. An agent's disagreeing value is kept as
   `project_unverified`. New module `trellis.core.project`.
+- **The session-capture sweep records which context packs each Claude Code
+  session was served.** Nothing joined a pack to the session that used it:
+  a pack's `session_id` is a label the agent chooses. Each parsed transcript
+  with a turn or a tool call now gets one `capture.session_packs` event
+  keyed on its session id, naming the pack ids its Trellis retrieval
+  results printed (`get_context`, `search`, `get_objective_context`,
+  `get_task_context`, `get_sectioned_context`, `get_items`), with
+  `retrieval_results`, `retrieval_errors`, `pack_ids_unparsed` and, for a
+  sub-agent transcript, `parent_session_id`. An empty list with
+  `retrieval_results` 0 means the session never retrieved; no event means
+  it has not been parsed. A re-parse writes only when the join changes.
+  `CaptureReport` gains `pack_joins_recorded`, `pack_joins_unchanged` and
+  `pack_ids_unparsed`. Only the id is read out of a result, and only once
+  it matches the pack-id alphabet.
 
 ### Changed
 
