@@ -126,19 +126,20 @@ All notable changes to Trellis will be documented in this file.
   `pack_ids_unparsed`. Only the id is read out of a result, and only once
   it matches the pack-id alphabet.
 - **The `capture.session_packs` join now carries each session's outcome.**
-  The only outcome was the grade the agent gives the pack itself, which
-  cannot be both readout and outcome. The payload gains `outcome`, read
-  from the transcript and from no pack: `tool_calls`, `tool_errors`,
-  `assistant_turns` (one per API message), `assistant_turns_with_usage`,
-  `user_turns`, the four token totals (`null` where no message recorded
-  them, never 0), `wall_clock_seconds`, `commits`, `prs_created`,
+  The payload gains `outcome`, read from the transcript and from no pack,
+  so it can measure a pack the agent's own grade cannot: `tool_calls`,
+  `tool_errors`, `assistant_turns` (one per API message),
+  `assistant_turns_with_usage`, `user_turns` (a person's text, not the
+  harness's notices), the four token totals (`null`, not 0, where no
+  message recorded them), `wall_clock_seconds`, `commits`, `prs_created`,
   `prs_merged` (successful `git commit` / `gh pr create` / `gh pr merge`
   Bash calls), `pr_urls` (distinct PR URLs those calls printed),
   `ended_on_error` and `ended_interrupted`. Counts, one duration and two
-  flags only. A sub-agent transcript has its own outcome and a parent's
-  holds none of it. The outcome is part of the "write only when the join
-  changes" comparison. New module
-  `trellis_workers.session_capture.outcome`.
+  flags only. A record a resumed session writes into its file again counts
+  once; one copied into the new session's file counts in both. A sub-agent
+  transcript has its own outcome and a parent's holds none of it. The
+  outcome is part of the "write only when the join changes" comparison.
+  New module `trellis_workers.session_capture.outcome`.
 
 ### Changed
 

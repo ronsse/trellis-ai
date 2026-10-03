@@ -1114,6 +1114,62 @@ class TestSessionOutcome:
         assert outcome["wall_clock_seconds"] == 95.0
         assert outcome["user_turns"] == 3
 
+    def test_a_user_turn_is_a_persons_text_not_the_harness(
+        self, tmp_path: Path
+    ) -> None:
+        """Claude Code writes a background task's notification and a local
+        command's output as plain user text, on its own account. A slash
+        command and an interrupt marker are a person's doing."""
+        outcome = self._parse(
+            tmp_path,
+            [
+                prompt("Fake task.", at=0),
+                prompt("<command-name>/fake</command-name>", at=1),
+                prompt("<local-command-stdout>fake</local-command-stdout>", at=2),
+                prompt("<local-command-stderr>fake</local-command-stderr>", at=3),
+                prompt("<task-notification>fake</task-notification>", at=4),
+                _interrupt(at=5),
+            ],
+        )
+        assert outcome["user_turns"] == 3
+
+    def test_a_record_written_again_counts_once(self, tmp_path: Path) -> None:
+        """A resumed session writes its history into the file again, each
+        record under the ``uuid`` it had and some harness fields changed.
+        The copy is not new work; a record under a fresh ``uuid`` is, even
+        one saying the same thing."""
+        history = [
+            prompt("Fake task.", at=0),
+            *api_message(
+                "msg_fake_d1",
+                bash_block("toolu_fake_d1", "git commit -m fake"),
+                at=1,
+                usage=usage_block(5, 10),
+            ),
+            tool_results(
+                result_block("toolu_fake_d1", "fake hook refusal", is_error=True),
+                at=2,
+            ),
+            *api_message(
+                "msg_fake_d2",
+                bash_block("toolu_fake_d2", "git commit -m fake && gh pr create"),
+                at=3,
+                usage=usage_block(6, 20),
+            ),
+            tool_results(result_block("toolu_fake_d2", FAKE_PR_URL.format(4)), at=4),
+        ]
+        again = [{**record, "version": "2.0.1"} for record in history]
+        outcome = self._parse(tmp_path, [*history, *again, prompt("Fake task.", at=5)])
+        assert (
+            outcome["tool_calls"],
+            outcome["tool_errors"],
+            outcome["user_turns"],
+            outcome["commits"],
+            outcome["prs_created"],
+        ) == (2, 1, 2, 1, 1)
+        assert outcome["assistant_turns"] == 2
+        assert _tokens(outcome) == (11, 30, 0, 0)
+
     @pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs time.tzset")
     def test_a_stamp_without_a_zone_is_utc_whatever_the_host_zone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

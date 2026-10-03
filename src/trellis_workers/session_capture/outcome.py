@@ -24,9 +24,10 @@ where anyone with the event log can read it.
   recorded" and "none" are different answers. A value that is not an ``int``
   (or is a ``bool``) is not recorded.
 * **User turns** are user records that carry text, less the harness's
-  ``isMeta`` records and compaction summaries. Harness notices that arrive as
-  plain user text (a slash command, an interrupt marker) are counted too: no
-  structural key tells them from a person's prompt.
+  ``isMeta`` records, compaction summaries and the plain text it writes on
+  its own account: a background task's ``<task-notification>`` and a local
+  command's output. A slash command and an interrupt marker are a person's
+  doing and count.
 * **Commits and pull requests** are ``Bash`` calls whose command runs
   ``git commit``, ``gh pr create`` or ``gh pr merge`` (see :func:`_steps`) and
   whose result is not an error, each kind counted once per call. ``pr_urls``
@@ -38,10 +39,13 @@ where anyone with the event log can read it.
   unanswered or an interrupt marker is ``ended_interrupted``.
 
 Every transcript file gets its own outcome over every record in it, sidechain
-records included, as with its pack ids. A sub-agent's work is in its own
-``agent-*.jsonl``, and a parent never reads its ``Agent`` result, which
-reports the sub-agent's totals and prints what it made. So summing a session
-with its sub-agents counts each step once.
+records included, as with its pack ids. A record written into the file again
+under the same ``uuid``, as a resumed session re-appends its history, counts
+once; one copied into another file counts in each, because each file is
+parsed alone. A sub-agent's work is in its own ``agent-*.jsonl``, and a
+parent never reads its ``Agent`` result, which reports the sub-agent's totals
+and prints what it made. So summing a session with its sub-agents counts each
+step once.
 """
 
 from __future__ import annotations
@@ -66,6 +70,14 @@ _SYNTHETIC_MODEL = "<synthetic>"
 
 #: The start of the user text Claude Code writes when a person stops a turn.
 _INTERRUPT_MARKER = "[Request interrupted by user"
+
+#: The starts of the plain user text Claude Code writes on its own account:
+#: a background task finishing, a local command's output.
+_HARNESS_TEXT = (
+    "<task-notification>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+)
 
 #: A GitHub pull request URL as ``gh`` prints one. Counted, never kept.
 _PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
@@ -114,7 +126,8 @@ class SessionOutcome:
     assistant_turns: int = 0
     #: Of :attr:`assistant_turns`, those whose usage recorded a token field.
     assistant_turns_with_usage: int = 0
-    #: User records carrying text, harness notices in plain text included.
+    #: User records carrying a person's text: a prompt, a slash command, an
+    #: interrupt marker.
     user_turns: int = 0
     #: Token totals over the messages that recorded each field, else ``None``.
     input_tokens: int | None = None
@@ -146,13 +159,16 @@ class OutcomeTally:
 
     Parse-time scaffolding. Until a ``Bash`` call's result arrives it holds
     what the call's command would make, keyed by the call's use id, and it
-    holds the pull request URLs it has seen; both stay in memory, and
-    :meth:`finish` returns nothing of them but counts.
+    holds the pull request URLs and record uuids it has seen; all stay in
+    memory, and :meth:`finish` returns nothing of them but counts.
     """
 
     def __init__(self) -> None:
+        self._tool_calls = 0
         self._tool_errors = 0
         self._user_turns = 0
+        #: The ``uuid`` of every record folded; a record under one again is a copy.
+        self._seen: set[str] = set()
         self._made: Counter[str] = Counter()
         self._pr_urls: set[str] = set()
         #: Use id -> the steps its ``Bash`` command would make.
@@ -175,8 +191,29 @@ class OutcomeTally:
         if self._latest is None or moment > self._latest:
             self._latest = moment
 
+    def _first_sight(self, record: dict[str, Any]) -> bool:
+        """Whether *record* is new to this file; a record with no uuid is."""
+        uuid = record.get("uuid")
+        if not isinstance(uuid, str) or not uuid:
+            return True
+        if uuid in self._seen:
+            return False
+        self._seen.add(uuid)
+        return True
+
     def assistant(self, record: dict[str, Any], message: dict[str, Any]) -> None:
         """Fold one assistant record: its turn, its usage, its ``Bash`` calls."""
+        if not self._first_sight(record):
+            return
+        content = message.get("content")
+        uses = [
+            block
+            for block in (content if isinstance(content, list) else [])
+            if isinstance(block, dict) and block.get("type") == "tool_use"
+        ]
+        self._tool_calls += sum(
+            1 for block in uses if isinstance(block.get("name"), str) and block["name"]
+        )
         if record.get("isApiErrorMessage"):
             self._state = _API_ERROR
             return
@@ -195,12 +232,6 @@ class OutcomeTally:
                 value = usage.get(name)
                 if isinstance(value, int) and not isinstance(value, bool):
                     recorded[name] = max(value, recorded.get(name, value))
-        content = message.get("content")
-        uses = [
-            block
-            for block in (content if isinstance(content, list) else [])
-            if isinstance(block, dict) and block.get("type") == "tool_use"
-        ]
         self._state = _TOOL_USE if uses else _REPLY
         for block in uses:
             self._hold(block)
@@ -226,6 +257,8 @@ class OutcomeTally:
 
         *texts* is the record's natural-language text, as the digest reads it.
         """
+        if not self._first_sight(record):
+            return
         if record.get("isMeta") or record.get("isCompactSummary"):
             return
         results = [
@@ -244,7 +277,7 @@ class OutcomeTally:
             if steps and not errored:
                 self._made.update(steps)
                 self._pr_urls.update(_PR_URL.findall(_text_of(block.get("content"))))
-        if texts:
+        if any(not text.startswith(_HARNESS_TEXT) for text in texts):
             self._user_turns += 1
         if any(text.startswith(_INTERRUPT_MARKER) for text in texts):
             self._state = _INTERRUPT
@@ -260,19 +293,15 @@ class OutcomeTally:
         values = [fields[name] for fields in self._usage.values() if name in fields]
         return sum(values) if values else None
 
-    def finish(self, tool_calls: int) -> SessionOutcome:
-        """The outcome of every record folded so far.
-
-        *tool_calls* is the digest's own count of ``tool_use`` blocks, taken
-        rather than counted again so that the two cannot disagree.
-        """
+    def finish(self) -> SessionOutcome:
+        """The outcome of every record folded so far."""
         wall = (
             round(self._latest - self._earliest, 3)
             if self._earliest is not None and self._latest is not None
             else None
         )
         return SessionOutcome(
-            tool_calls=tool_calls,
+            tool_calls=self._tool_calls,
             tool_errors=self._tool_errors,
             assistant_turns=len(self._usage),
             assistant_turns_with_usage=sum(

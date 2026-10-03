@@ -438,7 +438,7 @@ def parse_session(path: Path) -> SessionDigest:
 
     # Over the whole file, before resolve_thread narrows the turns: the
     # outcome counts what the file did, as its pack ids do.
-    digest.outcome = tally.finish(len(digest.tool_calls))
+    digest.outcome = tally.finish()
 
     # Decide which turns are this transcript's conversation before the signal
     # detectors read them: a mixed file keeps its main thread, a dedicated

@@ -7,12 +7,21 @@ CLAUDE.md, or a real transcript.
 
 from __future__ import annotations
 
+import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from trellis.llm.types import LLMResponse
+
+#: A fresh ``uuid`` per record, as Claude Code writes them. The outcome counts
+#: a record once per ``uuid``, so records sharing one would collapse.
+_UUIDS = itertools.count(1)
+
+
+def _uuid(prefix: str) -> str:
+    return f"{prefix}-{next(_UUIDS)}"
 
 
 class FakeLLMClient:
@@ -90,7 +99,7 @@ def write_transcript(path: Path, records: list[dict[str, Any] | str]) -> None:
 def user_turn(text: str, session_id: str = "sess-fake-0001") -> dict[str, Any]:
     return {
         "type": "user",
-        "uuid": "u-fake",
+        "uuid": _uuid("u-fake"),
         "sessionId": session_id,
         "message": {"role": "user", "content": text},
     }
@@ -118,7 +127,7 @@ def assistant_turn(
         )
     return {
         "type": "assistant",
-        "uuid": "a-fake",
+        "uuid": _uuid("a-fake"),
         "sessionId": session_id,
         "message": {"role": "assistant", "content": content},
     }
@@ -139,7 +148,7 @@ def assistant_tools(
     )
     return {
         "type": "assistant",
-        "uuid": "a-fake-multi",
+        "uuid": _uuid("a-fake-multi"),
         "sessionId": session_id,
         "message": {"role": "assistant", "content": content},
     }
@@ -166,7 +175,7 @@ def tool_result_turn(
         block["tool_use_id"] = tool_use_id
     return {
         "type": "user",
-        "uuid": "u-fake-tr",
+        "uuid": _uuid("u-fake-tr"),
         "sessionId": session_id,
         "message": {"role": "user", "content": [block]},
     }
@@ -216,7 +225,7 @@ def pack_result_turn(
     """A user record answering one tool call with *content* as given."""
     return {
         "type": "user",
-        "uuid": f"u-fake-{tool_use_id}",
+        "uuid": _uuid(f"u-fake-{tool_use_id}"),
         "sessionId": session_id,
         "message": {
             "role": "user",
@@ -306,7 +315,7 @@ def _record(
         "version": "2.0.0",
         "gitBranch": "fake-branch",
         "type": record_type,
-        "uuid": f"{record_type}-fake",
+        "uuid": _uuid(f"{record_type}-fake"),
         **fields,
     }
     if at is not None:
