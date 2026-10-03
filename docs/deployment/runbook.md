@@ -285,8 +285,9 @@ governed mutation pipeline.
 
 ```bash
 # 1. Discover candidates: writes intent_learning_candidates.json and
-#    promotion_decisions.template.json to <data_dir>/learning (the directory
-#    the API's Review queue reads); the JSON output names both paths
+#    promotion_decisions.template.json to $TRELLIS_LEARNING_ARTIFACTS_DIR,
+#    else <data_dir>/learning (the directory the API's Review queue reads);
+#    the JSON output names both paths
 trellis analyze learning-candidates --format json
 
 # 2. Operator copies the template to decisions.json, sets `approved: true`

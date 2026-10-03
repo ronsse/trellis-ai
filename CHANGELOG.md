@@ -497,6 +497,7 @@ All notable changes to Trellis will be documented in this file.
   `detail: {code, message, path}`, including for a malformed artifact,
   which it answered with a `500`. A cron that passes `--output-dir` must
   drop the flag, or name the same directory, to feed the queue.
+  ([#693](https://github.com/ronsse/trellis-ai/pull/693))
 
 ## [0.9.0] - 2026-05-13
 
