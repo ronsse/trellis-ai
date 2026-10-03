@@ -449,6 +449,16 @@ All notable changes to Trellis will be documented in this file.
   `ELOOP` or `ENOTDIR` no longer reads as "not found".
   ([#687](https://github.com/ronsse/trellis-ai/pull/687))
 
+- **MCP `execute_mutation`'s `trace.ingest` targets its trace.** The
+  `Command` it built carried no `target_id` or `target_type`, so a policy
+  scoped `entity_type: trace` never matched it, and its
+  `MUTATION_EXECUTED` / `MUTATION_REJECTED` event named no entity. A trace
+  that validates now gets `target_type: "trace"` and its own id, as in
+  `save_experience`, `trellis ingest trace` and `POST /api/v1/traces`. A
+  trace that does not validate goes on untargeted, and the handler refuses
+  it as before. Other operations are unchanged.
+  ([#688](https://github.com/ronsse/trellis-ai/pull/688))
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.

@@ -8,14 +8,18 @@ in parallel.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
+from pydantic import ValidationError
 
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.mcp.server import execute_mutation as _execute_mutation
-from trellis.stores.base.event_log import EventType
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.schemas.trace import Trace
+from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.registry import StoreRegistry
 
 execute_mutation = unwrap_tool(_execute_mutation)
@@ -321,3 +325,152 @@ class TestExecuteMutationErrors:
         payload = json.loads(raw)
         assert payload["status"] == "rejected"
         assert "does not reference an existing entity" in payload["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# trace.ingest targets its trace
+# ---------------------------------------------------------------------------
+
+_TRACE: dict[str, Any] = {
+    "source": "agent",
+    "intent": "exercise the trace target",
+    "context": {"agent_id": "test-agent"},
+}
+
+
+def _ingest(trace: Any) -> dict[str, Any]:
+    return json.loads(execute_mutation(operation="trace.ingest", args={"trace": trace}))
+
+
+def _audit_event(registry: StoreRegistry, command_id: str) -> Event:
+    """Return the executor's one audit event for *command_id*."""
+    (event,) = [
+        event
+        for event_type in (EventType.MUTATION_EXECUTED, EventType.MUTATION_REJECTED)
+        for event in registry.operational.event_log.get_events(
+            event_type=event_type, limit=100
+        )
+        if event.payload.get("command_id") == command_id
+    ]
+    return event
+
+
+def _deny_traces(registry: StoreRegistry, operation: str) -> None:
+    """Declare one enforced ``deny`` rule for *operation*, scoped to traces."""
+    policy = Policy(
+        policy_type="mutation",
+        scope=PolicyScope(level="entity_type", value="trace"),
+        rules=[
+            PolicyRule(operation=operation, condition="synthetic-freeze", action="deny")
+        ],
+        enforcement="enforce",
+    )
+    (registry.stores_dir / "policies.json").write_text(
+        json.dumps({"policies": [policy.model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+
+class TestTraceIngestTarget:
+    """``trace.ingest`` targets its trace, as ``save_experience`` does.
+
+    ``trellis ingest trace`` and ``POST /api/v1/traces`` do the same. The
+    policy gate matches an ``entity_type`` scope on ``target_type``, and the
+    executor's audit event records ``target_type`` and ``target_id``.
+    """
+
+    def test_the_audit_event_names_each_stored_trace(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        traces = [
+            _TRACE,  # the id is minted when the server validates the trace
+            {**_TRACE, "trace_id": "synthetic-trace-1"},
+            Trace.model_validate(_TRACE),
+        ]
+        for trace in traces:
+            payload = _ingest(trace)
+            assert payload["status"] == "success", payload
+            stored = temp_registry.operational.trace_store.get(payload["created_id"])
+            assert stored is not None
+
+            event = _audit_event(temp_registry, payload["command_id"])
+
+            assert (event.event_type, event.entity_type, event.entity_id) == (
+                EventType.MUTATION_EXECUTED,
+                "trace",
+                stored.trace_id,
+            )
+
+    def test_a_policy_scoped_to_traces_refuses_the_ingest(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        _deny_traces(temp_registry, "trace.ingest")
+
+        payload = _ingest(_TRACE)
+
+        assert (payload["status"], payload["message"]) == (
+            "rejected",
+            "Denied by policy: synthetic-freeze",
+        )
+        assert temp_registry.operational.trace_store.count() == 0
+
+    def test_a_policy_scoped_to_traces_leaves_other_operations_alone(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        _deny_traces(temp_registry, "*")
+        graph = temp_registry.knowledge.graph_store
+        source_id = graph.upsert_node(
+            node_id=None, node_type="concept", properties={"name": "src"}
+        )
+        target_id = graph.upsert_node(
+            node_id=None, node_type="concept", properties={"name": "dst"}
+        )
+
+        link = json.loads(
+            execute_mutation(
+                operation="link.create",
+                args={
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "edge_kind": "entity_related_to",
+                    # A trace among another operation's args does not make
+                    # that operation a trace write.
+                    "trace": _TRACE,
+                },
+            )
+        )
+
+        assert link["status"] == "success", link
+        # The same policy is live: it refuses a trace.
+        assert _ingest(_TRACE)["status"] == "rejected"
+
+    @pytest.mark.parametrize(
+        "trace",
+        [
+            {"source": "agent", "intent": "exercise the trace target"},
+            json.dumps(_TRACE),
+            None,
+        ],
+        ids=["missing-field", "json-string", "null"],
+    )
+    def test_an_invalid_trace_is_still_refused_by_the_handler(
+        self, temp_registry: StoreRegistry, trace: Any
+    ) -> None:
+        """A trace that does not validate goes on untargeted.
+
+        A policy scoped to traces does not match it, and the handler refuses
+        it with the trace's own validation error.
+        """
+        _deny_traces(temp_registry, "trace.ingest")
+        with pytest.raises(ValidationError) as refused:
+            Trace.model_validate(trace)
+
+        payload = _ingest(trace)
+
+        assert (payload["status"], payload["message"]) == (
+            "failed",
+            f"Execution failed: {refused.value}",
+        )
+        assert temp_registry.operational.trace_store.count() == 0
+        event = _audit_event(temp_registry, payload["command_id"])
+        assert (event.entity_type, event.entity_id) == (None, None)
