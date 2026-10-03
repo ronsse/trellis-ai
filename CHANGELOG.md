@@ -461,10 +461,11 @@ All notable changes to Trellis will be documented in this file.
 
 - **`POST /api/v1/traces` answers a refused trace with `400`.** A policy
   refusal (`REJECTED`) fell through to the success path: the route ran
-  trace extraction on the trace it had not stored and answered `200`
-  `{"status": "ok"}` with the unstored `trace_id`. It now answers `400`
-  with the refusal's message before extraction, as `POST /api/v1/evidence`
-  and the curate routes do. A failed write keeps its `409`.
+  trace extraction (when enabled) on the trace it had not stored and
+  answered `200` `{"status": "ok"}` with the unstored `trace_id`. It now
+  answers `400` with the refusal's message before extraction, as
+  `POST /api/v1/evidence` and the curate routes do. A failed write keeps
+  its `409`.
   ([#690](https://github.com/ronsse/trellis-ai/pull/690))
 
 ## [0.9.0] - 2026-05-13
