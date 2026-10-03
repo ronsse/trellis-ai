@@ -21,18 +21,29 @@ from trellis_workers.session_capture import capture
 from trellis_workers.session_capture.capture import run_capture
 
 from .conftest import (
+    CHILD_OUTCOME,
     PACK_IDS,
+    PARENT_OUTCOME,
+    WORKED_OUTCOME,
     BrokenLLMClient,
     FakeLLMClient,
+    api_message,
     assistant_tools,
     assistant_turn,
+    bash_block,
     candidates_json,
+    delegating_session,
     good_candidate,
     mcp_envelope,
     pack_markdown,
     pack_result_turn,
+    result_block,
+    text_block,
     tool_result_turn,
+    tool_results,
+    usage_block,
     user_turn,
+    worked_session,
     write_transcript,
 )
 
@@ -1319,13 +1330,21 @@ def _pack_session(
     write_transcript(path, records)
 
 
-def _joins(registry: MagicMock) -> dict[str, list[dict]]:
-    """Every join event's payload, per session, oldest first."""
+def _joins(registry: MagicMock, *, outcome: bool = False) -> dict[str, list[dict]]:
+    """Every join event's payload, per session, oldest first.
+
+    The session outcome rides the same payload. These tests are about pack
+    ids and retrieval counts, so it is left out unless *outcome* asks for
+    it; :class:`TestSessionOutcomeJoin` asserts it.
+    """
     joins: dict[str, list[dict]] = {}
     for event in registry.operational.event_log.get_events(
         event_type=EventType.CAPTURE_SESSION_PACKS, limit=1000
     ):
-        joins.setdefault(event.entity_id, []).append(event.payload)
+        payload = dict(event.payload)
+        if not outcome:
+            payload.pop("outcome", None)
+        joins.setdefault(event.entity_id, []).append(payload)
     return joins
 
 
@@ -1668,3 +1687,155 @@ class TestSessionPackJoin:
             "sess-kept": [_join([B], results=1)],
             "sess-lost": [_join([A], results=1)],
         }
+
+
+class TestSessionOutcomeJoin:
+    """The join carries each session's outcome beside the packs it was served.
+
+    One row per session, so comparing sessions that retrieved with sessions
+    that did not needs no second event type and no join between two. The
+    outcome is part of the payload the "write only on a difference" rule
+    compares.
+    """
+
+    def test_the_join_carries_the_outcome(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        write_transcript(root / "proj" / "sess-worked-0001.jsonl", worked_session())
+
+        report = _sweep(registry, root, tmp_path / "wm.json")
+
+        assert report.pack_joins_recorded == 1
+        (payload,) = _joins(registry, outcome=True)["sess-worked-0001"]
+        assert payload == {**_join([], results=0), "outcome": WORKED_OUTCOME}
+        for key, value in payload["outcome"].items():
+            assert value is None or type(value) in (int, float, bool), key
+
+    def test_a_sub_agent_has_its_own_outcome_and_a_rollup_counts_once(
+        self, tmp_path: Path
+    ) -> None:
+        """Summing a session's join with its sub-agents' (they name it as
+        ``parent_session_id``) counts every step once, because the parent's
+        outcome holds none of its children's."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        parent, child = delegating_session("sess-parent-0001")
+        write_transcript(root / "proj" / "sess-parent-0001.jsonl", parent)
+        write_transcript(
+            root / "proj" / "sess-parent-0001" / "subagents" / "agent-fk1.jsonl", child
+        )
+
+        _sweep(registry, root, tmp_path / "wm.json")
+
+        joins = _joins(registry, outcome=True)
+        assert joins == {
+            "sess-parent-0001": [{**_join([], results=0), "outcome": PARENT_OUTCOME}],
+            "agent-fk1": [
+                {
+                    **_join([], results=0, parent="sess-parent-0001"),
+                    "outcome": CHILD_OUTCOME,
+                }
+            ],
+        }
+        family = [
+            events[-1]["outcome"]
+            for session, events in joins.items()
+            if session == "sess-parent-0001"
+            or events[-1]["parent_session_id"] == "sess-parent-0001"
+        ]
+        assert {
+            key: sum(outcome[key] for outcome in family)
+            for key in ("commits", "prs_created", "pr_urls", "input_tokens")
+        } == {"commits": 1, "prs_created": 1, "pr_urls": 1, "input_tokens": 310}
+
+    def test_an_unchanged_resweep_writes_nothing(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        wm = tmp_path / "wm.json"
+        write_transcript(root / "proj" / "sess-worked-0001.jsonl", worked_session())
+        _sweep(registry, root, wm)
+        wm.unlink()
+
+        again = _sweep(registry, root, wm)
+
+        assert (again.pack_joins_recorded, again.pack_joins_unchanged) == (0, 1)
+        assert len(_joins(registry)["sess-worked-0001"]) == 1
+
+    def test_a_transcript_that_grows_records_its_new_outcome(
+        self, tmp_path: Path
+    ) -> None:
+        """The session grew a commit and retrieved nothing: its pack ids and
+        retrieval counts are as they were, and the outcome alone differs,
+        which is enough to write the join again."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        wm = tmp_path / "wm.json"
+        path = root / "proj" / "sess-worked-0001.jsonl"
+        write_transcript(path, worked_session())
+        _sweep(registry, root, wm)
+        s = {"session_id": "sess-worked-0001"}
+        with path.open("a", encoding="utf-8") as handle:
+            records = [
+                *api_message(
+                    "msg_fake_07",
+                    bash_block("toolu_fake_07", "git commit -am fake"),
+                    at=40,
+                    usage=usage_block(1, 2),
+                    **s,
+                ),
+                tool_results(
+                    result_block("toolu_fake_07", "[fake 0000002] fake"), at=42, **s
+                ),
+                *api_message(
+                    "msg_fake_08",
+                    text_block("Committed."),
+                    at=44,
+                    usage=usage_block(1, 2),
+                    **s,
+                ),
+            ]
+            handle.writelines(json.dumps(record) + "\n" for record in records)
+
+        night2 = _sweep(registry, root, wm)
+
+        assert night2.pack_joins_recorded == 1
+        assert _joins(registry)["sess-worked-0001"] == [_join([], results=0)] * 2
+        first, second = (
+            join["outcome"] for join in _joins(registry, outcome=True)["sess-worked-0001"]
+        )
+        assert first == WORKED_OUTCOME
+        assert second == {
+            **WORKED_OUTCOME,
+            "tool_calls": 7,
+            "assistant_turns": 8,
+            "assistant_turns_with_usage": 8,
+            "input_tokens": 42,
+            "output_tokens": 155,
+            "wall_clock_seconds": 48.0,
+            "commits": 2,
+        }
+
+    def test_a_join_from_before_the_outcome_is_rewritten_with_it(
+        self, tmp_path: Path
+    ) -> None:
+        """A join an older build wrote has no outcome, so the next parse of
+        that session differs from it and writes the join again, outcome
+        included. Only a parse does: a session the watermark skips keeps
+        its outcome-less join."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        write_transcript(root / "proj" / "sess-worked-0001.jsonl", worked_session())
+        registry.operational.event_log.emit(
+            EventType.CAPTURE_SESSION_PACKS,
+            source="worker:session-capture",
+            entity_id="sess-worked-0001",
+            entity_type="capture_session",
+            payload=_join([], results=0),
+        )
+
+        report = _sweep(registry, root, tmp_path / "wm.json")
+
+        assert report.pack_joins_recorded == 1
+        old, new = _joins(registry, outcome=True)["sess-worked-0001"]
+        assert "outcome" not in old
+        assert new == {**_join([], results=0), "outcome": WORKED_OUTCOME}
