@@ -583,7 +583,8 @@ class GraphStore(ABC):
         ``node_type`` contains it, ignoring case: the filter that
         ``GET /graph/search`` applies to ``q``. The SQL backends apply that
         route's ``LIKE``/``ILIKE`` predicate verbatim, so ``%`` and ``_`` in
-        *search* are wildcards there, exactly as they are in the list.
+        *search* are wildcards there, exactly as they are in the list, and
+        SQLite's ``LIKE`` ignores the case of ASCII letters only.
         """
 
     @abstractmethod
