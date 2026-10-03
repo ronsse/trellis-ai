@@ -532,6 +532,27 @@ All notable changes to Trellis will be documented in this file.
   ArcadeDB were not affected.
   ([#692](https://github.com/ronsse/trellis-ai/pull/692))
 
+- **The UI graph page's type chips count every type, and its legend,
+  colours and labels follow the data.** The chips counted only the first
+  500 matches in type order, so when the type that sorts first had 500 or
+  more nodes, it was the only chip offered. They now read a new
+  `GET /api/v1/graph/search/facets`, which counts current nodes per stored
+  `node_type` under the list's `q` through a new
+  `GraphStore.count_nodes_by_type` on every backend, and the active chip
+  follows the filter. The legend lists the types on the canvas
+  with counts, and every entry hides its type; it listed ten fixed
+  lowercase names, and an entry acted only when the canvas held a type
+  matching one of them. A type's colour comes from its stored name: the
+  sixteen canonical types have fixed colours and every other type a stable
+  hashed one, where any type not spelled as one of those ten names was the
+  accent indigo. Search group headers keep the stored case, so `concept`
+  and `Concept` read apart, Activity labels are shortened with the full
+  text on hover, and edge labels reach 5.25:1 contrast (from 2.41:1). A
+  node's detail lists its `document_ids` as links that open each document
+  in the Memories view. `GET /api/v1/graph/search` also failed with a `500`
+  on every SQLite store: a `sqlite3.Connection` is callable, so the route
+  took it for the Postgres store.
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.
