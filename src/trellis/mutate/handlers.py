@@ -582,10 +582,10 @@ class EntityUpdateHandler:
 
         existing = store.get_node(entity_id)
         if existing is None:
-            # Surface as a typed NotFoundError → the executor maps it to a
-            # FAILED CommandResult (StoreError branch) rather than a silent
-            # success. Updating a nonexistent entity is a caller error.
-            raise NotFoundError(entity_type="entity", entity_id=entity_id)
+            # Input to fix, not a store failure: refused like a label on a
+            # missing node (REJECTED, ``code`` the audit reason).
+            msg = f"Node not found: {entity_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
 
         # Partial update: merge caller-supplied properties onto the existing
         # bag, then let an explicit ``name`` win.
@@ -1026,12 +1026,13 @@ class RedactionApplyHandler:
     ``subject_entity_id`` as a property, so property-based queries keep
     serving them after the purge; their ids ride the payload so the
     operator can redact each one individually (they are graph nodes — this
-    same verb applies). A ``target_id`` that is not a graph node raises
-    :class:`~trellis.errors.NotFoundError` (→ ``CommandStatus.FAILED``).
+    same verb applies). A ``target_id`` that is not a graph node is refused
+    (``code="target_not_found"`` → ``CommandStatus.REJECTED``).
 
-    Idempotency: re-redacting a purged id fails with ``NotFoundError``, and
-    a concurrent-purge race is detected via ``delete_node``'s return value
-    so the loser never emits a second audit event; use
+    Idempotency: re-redacting a purged id is refused the same way, and a
+    concurrent-purge race is detected via ``delete_node``'s return value:
+    the loser raises :class:`~trellis.errors.NotFoundError`
+    (→ ``CommandStatus.FAILED``) and never emits a second audit event; use
     ``Command.idempotency_key`` when at-most-once semantics are required. A
     blank ``reason`` is rejected (``code="redaction_reason_required"``) and
     an over-long one too (``code="redaction_reason_too_long"``) — the
@@ -1068,7 +1069,10 @@ class RedactionApplyHandler:
         graph = self._registry.knowledge.graph_store
         node = graph.get_node(target_id)
         if node is None:
-            raise NotFoundError(entity_type="entity", entity_id=target_id)
+            # Input to fix, not a store failure: refused like a label on a
+            # missing node (REJECTED, ``code`` the audit reason, CLI exit 2).
+            msg = f"Node not found: {target_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
 
         entity_type = node["node_type"]
         history = graph.get_node_history(target_id)

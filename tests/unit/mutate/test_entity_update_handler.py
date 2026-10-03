@@ -4,7 +4,7 @@ Covers issue #260: the ``entity.update`` verb shipped in the Operation enum
 with no registered handler, and ``EntityCreateHandler`` did not thread the
 ``document_ids`` graph↔document link. These tests pin the SCD-2 update
 semantics, the carry-forward / replace rules for ``document_ids``, event
-emission, and the not-found failure path.
+emission, and the refusal of an ``entity_id`` that names no node.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from trellis.errors import NotFoundError
+from trellis.errors import ValidationError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.handlers import (
@@ -169,27 +169,48 @@ class TestEntityUpdateHandler:
         assert node["generation_spec"] == spec
         assert node["node_role"] == "curated"
 
-    def test_missing_entity_raises_not_found(self, registry: StoreRegistry) -> None:
+    def test_missing_entity_is_refused(self, registry: StoreRegistry) -> None:
         handler = EntityUpdateHandler(registry)
-        with pytest.raises(NotFoundError):
+        with pytest.raises(ValidationError) as exc_info:
             handler.handle(
                 Command(
                     operation=Operation.ENTITY_UPDATE,
                     args={"entity_id": "nonexistent"},
                 )
             )
+        assert exc_info.value.code == "target_not_found"
+        assert str(exc_info.value) == "Node not found: nonexistent"
 
-    def test_missing_entity_through_executor_is_failed(
+    def test_missing_entity_through_executor_is_rejected(
         self, registry: StoreRegistry
     ) -> None:
+        """A miss is input to fix (REJECTED), not a store failure (FAILED)."""
+        node_id = _create_node(registry)
         executor = build_curate_executor(registry)
-        result = executor.execute(
+        applied = executor.execute(
             Command(
                 operation=Operation.ENTITY_UPDATE,
-                args={"entity_id": "nope"},
+                args={"entity_id": node_id, "properties": {"phase": "2"}},
             )
         )
-        assert result.status == CommandStatus.FAILED
+        missing = executor.execute(
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={"entity_id": "nope", "properties": {"phase": "2"}},
+            )
+        )
+
+        assert applied.status == CommandStatus.SUCCESS
+        assert missing.status == CommandStatus.REJECTED
+        assert missing.message == "Node not found: nope"
+        assert missing.metadata["rejection_reason"] == "target_not_found"
+        rejected = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED
+        )
+        assert [
+            (e.payload["command_id"], e.payload["status"], e.payload["reason"])
+            for e in rejected
+        ] == [(missing.command_id, "rejected", "target_not_found")]
 
     def test_happy_path_through_executor(self, registry: StoreRegistry) -> None:
         node_id = _create_node(registry)
