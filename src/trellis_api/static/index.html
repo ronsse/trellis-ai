@@ -1785,7 +1785,15 @@
             await throwIfAuthRefused(res, key);
             if (!res.ok) {
                 let detail = `${res.status} ${res.statusText}`;
-                try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
+                try {
+                    // `detail` is a string, an object carrying `message`
+                    // (a 409 refusal), or a list (a 422 validation error).
+                    const j = await res.json();
+                    const d = j && j.detail;
+                    if (typeof d === 'string') detail = d;
+                    else if (d && typeof d.message === 'string') detail = d.message;
+                    else if (d) detail = JSON.stringify(d);
+                } catch { /* non-JSON */ }
                 throw new Error(detail);
             }
             return res.json();

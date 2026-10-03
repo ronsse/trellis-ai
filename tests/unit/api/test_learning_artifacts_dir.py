@@ -215,6 +215,25 @@ def test_writer_with_nothing_to_resolve_asks_for_output_dir(
     assert not path_is_present(data_dir / "learning")
 
 
+@pytest.mark.parametrize("writer", sorted(WRITERS))
+def test_tilde_in_output_dir_is_expanded_by_both_writers(
+    data_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cli_runner: IsolatedCliRunner,
+    writer: str,
+) -> None:
+    # A quoted flag, as a cron line or a unit file passes it, reaches the
+    # CLI with its "~" unexpanded. The chdir keeps an unexpanded write out
+    # of the checkout.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    result = cli_runner.invoke(cli_app, [*WRITERS[writer], "--output-dir", "~/review"])
+    assert result.exit_code == 0, result.output
+    written = Path(json.loads(result.stdout)["candidates_path"])
+    assert written.parent == tmp_path / "home" / "review"
+
+
 def test_api_names_the_directory_nothing_was_written_to(data_dir: Path) -> None:
     with TestClient(create_app()) as client:
         served = client.get("/api/v1/learning/candidates").json()

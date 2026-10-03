@@ -367,11 +367,16 @@ class TestLearningCandidates:
         expected_file = tmp_path / "learning" / "intent_learning_candidates.json"
         assert str(expected_file) in data["hint"]
 
-    def test_unreadable_artifact_is_named_on_both_routes(self, client, tmp_path):
+    @pytest.mark.parametrize(
+        "body",
+        ["{not json", "[]", '{"candidates": {}}'],
+        ids=["not-json", "not-an-object", "candidates-not-a-list"],
+    )
+    def test_unreadable_artifact_is_named_on_both_routes(self, client, tmp_path, body):
         artifacts = tmp_path / "learning"
         artifacts.mkdir()
         bad = artifacts / "intent_learning_candidates.json"
-        bad.write_text("{not json", encoding="utf-8")
+        bad.write_text(body, encoding="utf-8")
         data = client.get("/api/v1/learning/candidates").json()
         resp = client.post(
             "/api/v1/learning/promotions",

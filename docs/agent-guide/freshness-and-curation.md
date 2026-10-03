@@ -394,12 +394,12 @@ Two feedback paths exist for historical reasons; see [CLAUDE.md](../../CLAUDE.md
 The selection-side half (effectiveness feedback → advisory generation → advisory fitness → learning candidates) runs as one operational command:
 
 ```bash
-trellis worker curate --output-dir ./review --days 30
+trellis worker curate --days 30
 # or unattended, every 6 hours, until SIGINT/SIGTERM:
-trellis worker curate --output-dir ./review --interval 21600
+trellis worker curate --interval 21600
 ```
 
-It calls the curation library functions directly and writes the promote-half review artifacts to `--output-dir`. **Promotion stays human-gated** — review `promotion_decisions.template.json`, approve rows, then run `trellis curate promote-learning` (Tier-2 of [`../design/adr-autonomy-ladder.md`](../design/adr-autonomy-ladder.md)). `--interval` is a plain-sleep convenience; Trellis introduces no scheduler dependency. See [operations.md](operations.md#trellis-worker-curate) for the full flag table. Per-stage `--skip-*` toggles let you run just the demote half (`--skip-advisories --skip-learning`) or just the promote-half scan.
+It calls the curation library functions directly and writes the promote-half review artifacts to `--output-dir`, by default the directory the API's Review queue reads (`TRELLIS_LEARNING_ARTIFACTS_DIR` when set, else `<data_dir>/learning`). **Promotion stays human-gated** — review `promotion_decisions.template.json`, approve rows, then run `trellis curate promote-learning` (Tier-2 of [`../design/adr-autonomy-ladder.md`](../design/adr-autonomy-ladder.md)). `--interval` is a plain-sleep convenience; Trellis introduces no scheduler dependency. See [operations.md](operations.md#trellis-worker-curate) for the full flag table. Per-stage `--skip-*` toggles let you run just the demote half (`--skip-advisories --skip-learning`) or just the promote-half scan.
 
 > **Running this server-side?** [`../getting-started/running-trellis.md`](../getting-started/running-trellis.md) is the operating runbook for every Trellis process — `admin serve` plus each `worker` command, their autonomy tiers, and the human-in-the-loop steps. For scheduler recipes (cron / systemd / GitHub Actions / K8s CronJob) and a recommended-cadence table, see [`../deployment/scheduled-curation.md`](../deployment/scheduled-curation.md).
 
