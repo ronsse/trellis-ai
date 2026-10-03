@@ -583,7 +583,7 @@ class EntityUpdateHandler:
         existing = store.get_node(entity_id)
         if existing is None:
             # Input to fix, not a store failure: refused like a label on a
-            # missing node (REJECTED, ``code`` the audit reason, CLI exit 2).
+            # missing node (REJECTED, ``code`` the audit reason).
             msg = f"Node not found: {entity_id}"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
 

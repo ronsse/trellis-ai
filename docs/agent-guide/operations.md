@@ -903,7 +903,8 @@ trellis curate redact 01JRK5N7QF --yes --reason "defect-minted entity (#299)" --
 On failure/rejection the JSON is `{"status": "failed"|"rejected", "command_id": ..., "message": ..., "warnings": [...]}` — `command_id` joins the attempt to its audit event.
 
 A `target_id` that names no node, including one already redacted, exits `2`
-with `"status": "rejected"` and the message `Node not found: <target_id>`.
+with the message `Node not found: <target_id>` (`"status": "rejected"` in the
+JSON).
 
 ### `trellis curate feedback`
 
