@@ -459,6 +459,13 @@ All notable changes to Trellis will be documented in this file.
   it as before. Other operations are unchanged.
   ([#688](https://github.com/ronsse/trellis-ai/pull/688))
 
+- **`POST /api/v1/traces` answers a refused trace with `400`.** A policy
+  refusal (`REJECTED`) fell through to the success path: the route ran
+  trace extraction on the trace it had not stored and answered `200`
+  `{"status": "ok"}` with the unstored `trace_id`. It now answers `400`
+  with the refusal's message before extraction, as `POST /api/v1/evidence`
+  and the curate routes do. A failed write keeps its `409`.
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.
