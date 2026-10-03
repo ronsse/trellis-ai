@@ -16,6 +16,7 @@ import typer
 from rich.markup import escape
 
 from trellis.core.error_sanitize import sanitized_error_payload
+from trellis.core.path_presence import UnknownFileIdentity, file_identity
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
@@ -176,13 +177,17 @@ def ingest_corpus(
     exits 5 with status "partial".
     """
     root = Path(path)
-    if not root.exists():
+    # ``file_identity``, not ``path_is_present``: no legible failure sits
+    # downstream of a root whose ``stat`` fails.
+    identity = file_identity(root)
+    if identity is None or isinstance(identity, UnknownFileIdentity):
+        reason = "not found" if identity is None else f"unreadable ({identity.detail})"
         if output_format == "json":
             typer.echo(
-                json.dumps({"status": "error", "message": f"path not found: {path}"})
+                json.dumps({"status": "error", "message": f"path {reason}: {path}"})
             )
         else:
-            console.print(f"[red]Path not found: {escape(path)}[/red]")
+            console.print(f"[red]Path {escape(reason)}: {escape(path)}[/red]")
         raise typer.Exit(code=EXIT_VALIDATION)
 
     extra_metadata = _parse_tags(tag, domain, output_format)

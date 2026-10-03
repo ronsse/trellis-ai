@@ -12,6 +12,12 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from tests.unreadable_paths import (
+    UNREADABLE_PATH_IDS,
+    UNREADABLE_PATH_SHAPES,
+    UnreadablePathShape,
+    unreadable,
+)
 from trellis_cli.exit_codes import EXIT_INTERNAL
 from trellis_cli.main import app
 from trellis_cli.stores import _get_registry
@@ -102,6 +108,28 @@ class TestIngestConversations:
         )
         assert result.exit_code == 2
         assert json.loads(result.stdout.strip())["status"] == "error"
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_an_unreadable_root_exits_2_and_says_why(
+        self, tmp_path: Path, shape: UnreadablePathShape, fmt: str
+    ) -> None:
+        root = tmp_path / "in" / "root"
+        args = [
+            "ingest",
+            "conversations",
+            str(root),
+            *(["--format", "json"] if fmt == "json" else []),
+        ]
+        with unreadable(shape, root):
+            result = runner.invoke(app, args)
+        assert result.exit_code == 2, result.output
+        if fmt == "json":
+            data = json.loads(result.stdout.strip())
+            assert data["status"] == "error"
+            assert shape.message_fragment in data["message"]
+        else:
+            assert shape.message_fragment in " ".join(plain(result.output).split())
 
     def test_text_output_mentions_counts(self, export: Path) -> None:
         result = runner.invoke(app, ["ingest", "conversations", str(export)])

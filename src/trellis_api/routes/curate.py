@@ -1,4 +1,4 @@
-"""Curate routes -- promote, link, label, feedback, entity creation."""
+"""Curate routes -- promote, link, entity and document creation, feedback."""
 
 from __future__ import annotations
 

@@ -29,10 +29,14 @@ Mapping to the typed exception hierarchy in :mod:`trellis.errors`:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from trellis.mutate.commands import CommandResult
+from trellis.errors import (
+    ConfigError,
+    IdempotencyError,
+    PolicyViolationError,
+    StoreError,
+    ValidationError,
+)
+from trellis.mutate.commands import CommandResult, CommandStatus
 
 EXIT_OK = 0
 EXIT_INTERNAL = 1
@@ -83,14 +87,6 @@ def exit_code_for(exc: BaseException) -> int:
     really is "unexpected; file a bug", and dressing it up as an
     actionable code would be the lie this function exists to remove.
     """
-    from trellis.errors import (  # noqa: PLC0415 - avoid an import cycle at module load
-        ConfigError,
-        IdempotencyError,
-        PolicyViolationError,
-        StoreError,
-        ValidationError,
-    )
-
     if isinstance(exc, ValidationError):
         return EXIT_VALIDATION
     if isinstance(exc, PolicyViolationError):
@@ -113,10 +109,6 @@ def refusal_exit_code(result: CommandResult) -> int:
     ``raise`` stays below its format branch
     (``tests/unit/test_format_exit_parity_rule.py``).
     """
-    from trellis.mutate.commands import (  # noqa: PLC0415 - no trellis import at module load
-        CommandStatus,
-    )
-
     if result.status != CommandStatus.REJECTED:
         return EXIT_STORE
     if result.metadata.get("rejection_reason") == "policy_violation":

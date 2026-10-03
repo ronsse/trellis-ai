@@ -11,7 +11,18 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from tests.cli_output import plain
-from trellis.mutate.commands import Command, CommandResult, CommandStatus
+from tests.unreadable_paths import (
+    UNREADABLE_PATH_IDS,
+    UNREADABLE_PATH_SHAPES,
+    UnreadablePathShape,
+    unreadable,
+)
+from trellis.mutate.commands import (
+    Command,
+    CommandBatch,
+    CommandResult,
+    CommandStatus,
+)
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_source import POLICY_FILENAME
 from trellis.schemas.enums import Enforcement, PolicyType
@@ -748,14 +759,15 @@ def _invoke(args: list[str], fmt: str) -> Result:
     return runner.invoke(app, [*args, "--format", "json"] if fmt == "json" else args)
 
 
-def _refuse_trace_ingest(tmp_path: Path, action: str) -> None:
-    """Refuse ``trace.ingest`` at Stage 2, with a condition Rich would eat."""
+def _refuse(tmp_path: Path, action: str, *operations: str) -> None:
+    """Refuse *operations* at Stage 2, with a condition Rich would eat."""
     policy = Policy(
         policy_id="pol-ingest",
         policy_type=PolicyType.MUTATION,
         scope=PolicyScope(level="global"),
         rules=[
-            PolicyRule(operation="trace.ingest", condition="frozen [x]", action=action)
+            PolicyRule(operation=op, condition="frozen [x]", action=action)
+            for op in operations
         ],
         enforcement=Enforcement.ENFORCE,
     )
@@ -815,7 +827,7 @@ class TestIngestTraceExitCodes:
     def test_a_policy_refusal_exits_3(
         self, tmp_path: Path, fmt: str, action: str
     ) -> None:
-        _refuse_trace_ingest(tmp_path, action)
+        _refuse(tmp_path, action, "trace.ingest")
         f = tmp_path / "trace.json"
         f.write_text(_trace_json())
         result = _invoke(["ingest", "trace", str(f)], fmt)
@@ -948,3 +960,134 @@ class TestIngestBatchExitCodes:
         assert result.exit_code == 1, result.output
         if fmt == "json":
             assert json.loads(result.stdout)["error_type"] == "RuntimeError"
+
+
+def _fake_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    outcomes: list[tuple[CommandStatus, dict[str, str]]],
+) -> None:
+    """Answer the batch's commands with *outcomes* in order; the last repeats."""
+    executor = MagicMock(spec=MutationExecutor)
+
+    def _execute_batch(batch: CommandBatch) -> list[CommandResult]:
+        answers = [
+            outcomes[min(i, len(outcomes) - 1)] for i in range(len(batch.commands))
+        ]
+        return [
+            CommandResult(
+                command_id=f"cmd-{i}",
+                status=status,
+                operation=cmd.operation,
+                message=_MESSAGE if i == 0 else f"later {i}",
+                metadata=dict(metadata),
+            )
+            for i, (cmd, (status, metadata)) in enumerate(
+                zip(batch.commands, answers, strict=True)
+            )
+        ]
+
+    executor.execute_batch.side_effect = _execute_batch
+    monkeypatch.setattr(ingest_cli, "build_curate_executor", lambda _reg: executor)
+
+
+_POLICY = {"rejection_reason": "policy_violation"}
+_IMMUTABLE = {"rejection_reason": "immutable_core"}
+
+
+class TestIngestBatchRefusals:
+    """Every write refused exits by the map; a batch that wrote anything exits 0."""
+
+    @_FORMATS
+    @_BATCHES
+    @pytest.mark.parametrize("action", ["deny", "require_approval"])
+    def test_a_policy_refusal_of_every_write_exits_3(
+        self, tmp_path: Path, fmt: str, command: str, action: str
+    ) -> None:
+        _refuse(tmp_path, action, "entity.create", "link.create")
+        result = _invoke(["ingest", command, _batch_input(tmp_path, command)], fmt)
+        assert result.exit_code == 3, result.output
+        if fmt == "json":
+            payload = json.loads(result.stdout)
+            assert payload["status"] == "error"
+            assert "frozen [x]" in payload["message"]
+            assert (payload["nodes"], payload["edges"]) == (0, 0)
+        else:
+            assert "frozen [x]" in plain(result.output)
+            assert "ingested" not in plain(result.output)
+
+    @_FORMATS
+    @_BATCHES
+    @pytest.mark.parametrize(
+        ("outcomes", "code"),
+        [
+            pytest.param([(CommandStatus.REJECTED, _IMMUTABLE)], 2, id="other-refusal"),
+            pytest.param([(CommandStatus.FAILED, {})], 5, id="failed"),
+            pytest.param(
+                [(CommandStatus.REJECTED, _IMMUTABLE), (CommandStatus.FAILED, {})],
+                2,
+                id="first-refusal-decides",
+            ),
+        ],
+    )
+    def test_any_other_refusal_or_a_failure_exits_by_the_map(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        fmt: str,
+        command: str,
+        outcomes: list[tuple[CommandStatus, dict[str, str]]],
+        code: int,
+    ) -> None:
+        _fake_batch(monkeypatch, outcomes)
+        result = _invoke(["ingest", command, _batch_input(tmp_path, command)], fmt)
+        assert result.exit_code == code, result.output
+        if fmt == "json":
+            payload = json.loads(result.stdout)
+            assert (payload["status"], payload["message"]) == ("error", _MESSAGE)
+        else:
+            assert _MESSAGE in plain(result.output)
+
+    @_FORMATS
+    @_BATCHES
+    def test_a_partial_refusal_still_exits_0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fmt: str, command: str
+    ) -> None:
+        """The counts report what landed; one write is not a refused ingest."""
+        _fake_batch(
+            monkeypatch,
+            [(CommandStatus.SUCCESS, {}), (CommandStatus.REJECTED, _POLICY)],
+        )
+        result = _invoke(["ingest", command, _batch_input(tmp_path, command)], fmt)
+        assert result.exit_code == 0, result.output
+        if fmt == "json":
+            payload = json.loads(result.stdout)
+            assert (payload["status"], payload["nodes"]) == ("ingested", 1)
+        else:
+            assert "ingested" in plain(result.output)
+
+    @_FORMATS
+    def test_an_empty_batch_exits_0(self, tmp_path: Path, fmt: str) -> None:
+        """Events that yield no writes refused nothing."""
+        f = tmp_path / "in.json"
+        f.write_text("[]")
+        result = _invoke(["ingest", "openlineage", str(f)], fmt)
+        assert result.exit_code == 0, result.output
+
+
+@_FORMATS
+@pytest.mark.parametrize(
+    "command", ["trace", "evidence", "dbt-manifest", "openlineage"]
+)
+@pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+def test_an_unreadable_path_exits_2_and_says_why(
+    tmp_path: Path, command: str, shape: UnreadablePathShape, fmt: str
+) -> None:
+    with unreadable(shape, tmp_path / "in" / "x.json") as target:
+        result = _invoke(["ingest", command, str(target)], fmt)
+    assert result.exit_code == 2, result.output
+    if fmt == "json":
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert shape.message_fragment in payload["message"]
+    else:
+        assert shape.message_fragment in " ".join(plain(result.output).split())
