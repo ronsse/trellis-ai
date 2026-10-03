@@ -471,7 +471,7 @@ All notable changes to Trellis will be documented in this file.
   Re-redacting an already-redacted id is refused the same way. A redaction
   that loses a concurrent purge between its read and its delete still
   fails.
-  ([#PRNUM](https://github.com/ronsse/trellis-ai/pull/PRNUM))
+  ([#691](https://github.com/ronsse/trellis-ai/pull/691))
 
 ## [0.9.0] - 2026-05-13
 
