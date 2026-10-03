@@ -1149,9 +1149,11 @@ class GraphStoreContractTests:
     def test_update_node_if_current_is_atomic_for_concurrent_writers(
         self, store: GraphStore
     ) -> None:
-        # Twenty races, not one: with the Bolt lock idiom removed, a
-        # single race let both writers through in only 5 of 50 runs on
-        # Neo4j and 8 of 50 on ArcadeDB (measured 2026-10-03).
+        # Twenty races, not one: with the Bolt lock idiom removed, one race
+        # caught the mutant in 5 of 50 runs on Neo4j and twenty races in 50
+        # of 50 (measured 2026-10-03). ArcadeDB's commit check almost always
+        # fails the loser of a simultaneous start, so this misses that mutant
+        # there (0 of 50); over 0-20 ms start offsets both wrote in 4 of 532 races.
         for round_number in range(20):
             node_id = f"n{round_number}"
             results = _race_update_node_if_current(store, node_id)
