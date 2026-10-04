@@ -10,6 +10,8 @@ a malformed confidence floor, is pinned too.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import structlog.testing
 
@@ -339,6 +341,17 @@ class TestPackHoldoutRate:
         """Never to "withhold everything": a typo must not blank every pack."""
         env = {PACK_HOLDOUT_RATE_ENV: raw}
         assert WriteBehaviourConfig.from_env(env).pack_holdout_rate == 0.0
+
+    @pytest.mark.parametrize("raw", ["-0", "-0.0", " -0e3 "])
+    def test_negative_zero_parses_to_zero(self, raw: str) -> None:
+        """Not to ``-0.0``: equal to ``0.0``, but recorded with its sign.
+
+        ``env_flags`` and every ``PACK_ASSEMBLED`` row would carry ``-0.0``.
+        """
+        rate = WriteBehaviourConfig.from_env({PACK_HOLDOUT_RATE_ENV: raw}).as_dict()[
+            "pack_holdout_rate"
+        ]
+        assert (rate, math.copysign(1.0, rate)) == (0.0, 1.0)
 
     def test_a_malformed_value_warns_once_not_once_per_read(self) -> None:
         write_config._parse_pack_holdout_rate.cache_clear()
