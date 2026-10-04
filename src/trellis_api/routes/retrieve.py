@@ -12,6 +12,7 @@ from trellis.retrieve.builder_factory import build_pack_builder
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.schemas.pack import PackBudget, SectionRequest
+from trellis.schemas.trace import Trace
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
     PackRequest,
@@ -416,12 +417,36 @@ def list_traces(
 
 @router.get("/traces/{trace_id}")
 def get_trace(trace_id: str) -> dict[str, Any]:
-    """Get a specific trace by ID."""
+    """Get a trace and what can show each of its evidence refs."""
     registry = get_registry()
     trace = registry.operational.trace_store.get(trace_id)
     if trace is None:
         raise HTTPException(status_code=404, detail=f"Trace not found: {trace_id}")
-    return {"status": "ok", "trace": trace.model_dump(mode="json")}
+    return {
+        "status": "ok",
+        "trace": trace.model_dump(mode="json"),
+        "evidence_links": _evidence_links(registry, trace),
+    }
+
+
+def _evidence_links(registry: Any, trace: Trace) -> dict[str, dict[str, str]]:
+    """Where each evidence ref can be viewed, keyed by its ``evidence_id``.
+
+    The evidence writers (``POST /evidence``, ``trellis ingest evidence``, the
+    demo) store each record as a document under its ``evidence_id``. Failing
+    a document, trace extraction, when it ran, wrote an ``evidence:<id>``
+    graph node. A ref with neither has no entry.
+    """
+    documents = registry.knowledge.document_store
+    graph = registry.knowledge.graph_store
+    links: dict[str, dict[str, str]] = {}
+    for ref in trace.evidence_used:
+        node_id = f"evidence:{ref.evidence_id}"
+        if documents.get(ref.evidence_id) is not None:
+            links[ref.evidence_id] = {"document_id": ref.evidence_id}
+        elif graph.get_node(node_id) is not None:
+            links[ref.evidence_id] = {"entity_id": node_id}
+    return links
 
 
 @router.get("/precedents")

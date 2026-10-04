@@ -692,6 +692,17 @@ All notable changes to Trellis will be documented in this file.
   Postgres graph writes still raise psycopg's own errors.
   ([#702](https://github.com/ronsse/trellis-ai/pull/702))
 
+- **The trace detail's evidence entries link to what can show them.** Each
+  entry linked to `/entities/` followed by the evidence ref as JSON,
+  because an `EvidenceRef` holds only `evidence_id` and `role`, and every
+  click answered 404. `GET /api/v1/traces/{trace_id}` now returns
+  `evidence_links`, naming for each ref the document that holds its
+  evidence record or, failing that, the `evidence:<id>` graph node that
+  trace extraction writes. The entry opens that document in Memories or
+  that node in Graph. A ref with neither, as when nothing ingested its
+  evidence and trace extraction is off (the default), shows its evidence id
+  as text.
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.

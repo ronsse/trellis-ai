@@ -1844,8 +1844,8 @@
         const ID_ACTIONS = {
             confirmPromoteProposal, rejectProposal, promoteProposal,
             draftAdr, copyAdr, downloadAdr,
-            loadTraceDetail, navigateToEntity, loadMemoryDetail,
-            loadEventDetail, navigateToPack, loadPackDetail,
+            loadTraceDetail, navigateToEntity, navigateToDocument,
+            loadMemoryDetail, loadEventDetail, navigateToPack, loadPackDetail,
         };
         document.addEventListener('click', e => {
             const el = e.target instanceof Element && e.target.closest('[data-action]');
@@ -3459,15 +3459,22 @@
                 metaHtml += `<div class="card"><h3>Artifacts</h3><div class="value">${artifacts.length}</div></div>`;
                 metaHtml += '</div>';
 
-                // Evidence links (cross-navigation to graph)
+                // Evidence: the API names what can show each ref, its document
+                // or else its graph node. A ref with neither is text, not a
+                // link that would 404.
                 let evidenceHtml = '';
                 if (evidence.length > 0) {
+                    const links = data.evidence_links || {};
                     evidenceHtml = '<div style="margin-top:1rem"><h4 style="font-size:0.9rem; margin-bottom:0.5rem">Evidence Used</h4>';
                     for (const e of evidence) {
-                        const eid = typeof e === 'string' ? e : (e.item_id || e.entity_id || JSON.stringify(e));
-                        evidenceHtml += `<div class="status-row">
-                            <span class="mono truncate entity-link" data-action="navigateToEntity" data-id="${escHtml(eid)}" title="View in graph">${escHtml(eid)}</span>
-                        </div>`;
+                        const link = links[e.evidence_id] || {};
+                        let entry = `<span class="mono truncate">${escHtml(e.evidence_id)}</span>`;
+                        if (link.document_id) {
+                            entry = `<span class="mono truncate entity-link" data-action="navigateToDocument" data-id="${escHtml(link.document_id)}" title="View the evidence document">${escHtml(e.evidence_id)}</span>`;
+                        } else if (link.entity_id) {
+                            entry = `<span class="mono truncate entity-link" data-action="navigateToEntity" data-id="${escHtml(link.entity_id)}" title="View in graph">${escHtml(e.evidence_id)}</span>`;
+                        }
+                        evidenceHtml += `<div class="status-row">${entry}</div>`;
                     }
                     evidenceHtml += '</div>';
                 }

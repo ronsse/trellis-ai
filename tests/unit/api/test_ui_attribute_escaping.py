@@ -79,10 +79,10 @@ def test_eschtml_encodes_quotes_as_well_as_markup() -> None:
 def test_every_interpolated_attribute_value_is_escaped() -> None:
     page = INDEX_HTML.read_text(encoding="utf-8")
     checked, hits = _unescaped(page)
-    # Counted by hand: 17 title, 13 data-id, 4 data-candidate, 3 id, 3 value
+    # Counted by hand: 17 title, 14 data-id, 4 data-candidate, 3 id, 3 value
     # and 1 data-entity-id.
     assert_hand_read_floor(
-        checked, 41, subject="interpolated attributes other than class and style"
+        checked, 42, subject="interpolated attributes other than class and style"
     )
     listing = "\n".join(hits)
     assert not hits, f"{len(hits)} attribute values skip escHtml:\n{listing}"

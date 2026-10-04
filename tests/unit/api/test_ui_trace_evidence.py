@@ -46,7 +46,8 @@ def test_an_evidence_ref_links_only_to_a_target_the_api_named() -> None:
     # A ref nothing can show is text: nothing to click, so nothing to 404.
     tags = re.findall(r"`(<span[^>]*>)\$\{escHtml\(e\.evidence_id\)\}</span>`", section)
     assert any("data-action" not in tag for tag in tags), tags
-    # The section writes markup, so every value it interpolates is escaped.
-    values = re.findall(r"\$\{([^}]*)\}", section)
-    assert values, "the evidence section interpolates nothing"
-    assert all(v.startswith("escHtml(") for v in values), values
+    # The section writes markup, so each value it takes from the ref or its
+    # link goes in through one escHtml call.
+    values = re.findall(r"\$\{([^}]*\b(?:e|link)\.[^}]*)\}", section)
+    assert values, "the evidence section interpolates nothing from the API"
+    assert all(re.fullmatch(r"escHtml\([\w.]+\)", v) for v in values), values

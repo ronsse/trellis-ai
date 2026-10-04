@@ -4060,7 +4060,7 @@ paths:
       - ingest
   /api/v1/traces/{trace_id}:
     get:
-      description: Get a specific trace by ID.
+      description: Get a trace and what can show each of its evidence refs.
       operationId: get_trace_api_v1_traces__trace_id__get
       parameters:
       - in: path
