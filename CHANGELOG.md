@@ -660,6 +660,7 @@ All notable changes to Trellis will be documented in this file.
   any other database error, raises `StoreError` naming the node, so the
   redaction is `failed` (exit `5` in both formats) and audited. The other
   Postgres graph writes still raise psycopg's own errors.
+  ([#702](https://github.com/ronsse/trellis-ai/pull/702))
 
 ## [0.9.0] - 2026-05-13
 
