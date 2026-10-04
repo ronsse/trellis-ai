@@ -869,7 +869,8 @@ Scope boundaries, stated plainly:
 Prompts for confirmation unless `--yes` is passed (required for scripted use).
 Exit codes follow the `exit_codes` map: `3` (rejected by a policy), `2`
 (rejected otherwise — e.g. blank/over-long reason, or a missing target), `5`
-(failed — e.g. a concurrent purge or a store error), `0` success.
+(failed — e.g. a concurrent purge or a store error), `0` success. On Neo4j
+both of two concurrent purges can succeed, each with its own audit event.
 
 ```bash
 trellis curate redact <target_id> --reason <text> [--yes] [--by <caller>] [--format text|json]

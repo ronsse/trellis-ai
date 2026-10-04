@@ -226,6 +226,92 @@ def _rows_left(dsn: str, node_id: str) -> dict[str, int]:
         }
 
 
+def _write_after_a_freed_page(store: Any, dsn: str, node_id: str) -> None:
+    """Write ``node_id`` on a page after one VACUUM has emptied.
+
+    Padded fillers fill the first pages and the node lands after them. The
+    fillers on page 0 are then deleted and vacuumed, so the free space map
+    sends a new connection's next insert to page 0.
+    """
+    for i in range(150):
+        store.upsert_node(f"filler-{i}", "person", {"pad": "p" * 200})
+    store.upsert_node(node_id, "person", {"phase": "1"})
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "DELETE FROM nodes WHERE node_id LIKE %s AND (ctid::text::point)[0] = 0",
+            ("filler-%",),
+        )
+        conn.execute("VACUUM nodes")
+
+
+def _version_ctids(dsn: str, node_id: str) -> dict[bool, list[tuple[int, int]]]:
+    """Each version's ctid as ``(page, item)``, keyed by whether it is current."""
+    ctids: dict[bool, list[tuple[int, int]]] = {True: [], False: []}
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT ctid::text, valid_to IS NULL FROM nodes WHERE node_id = %s",
+            (node_id,),
+        ).fetchall()
+    for ctid, is_current in rows:
+        page, item = ctid.strip("()").split(",")
+        ctids[is_current].append((int(page), int(item)))
+    return ctids
+
+
+class _OppositeOrderPurges:
+    """Hold two purges of one node at the points where their locks cross.
+
+    :meth:`execute` stands in for ``psycopg.Cursor.execute``. When the
+    thread that built this object gets the result of its ``FOR UPDATE``
+    read, it starts the first purge and waits until that purge's ``DELETE``
+    waits on its lock. The first purge is held before its second
+    ``DELETE FROM nodes`` until another ``DELETE FROM nodes`` waits on a
+    lock. Each ``DeadlockDetected`` is recorded under the thread's name.
+    """
+
+    def __init__(self, store: Any, dsn: str, node_id: str) -> None:
+        self._store = store
+        self._dsn = dsn
+        self._node_id = node_id
+        self._original = psycopg.Cursor.execute
+        self._writer = threading.get_ident()
+        self._first_deletes = 0
+        self.first: threading.Thread | None = None
+        self.first_waited = False
+        self.second_waited = False
+        self.outcome: dict[str, Any] = {}
+        self.deadlocks: list[str] = []
+
+    def purge(self) -> None:
+        name = threading.current_thread().name
+        try:
+            self.outcome[name] = self._store.delete_node(self._node_id)
+        except Exception as exc:
+            self.outcome[name] = exc
+
+    def execute(self, cur: Any, query: Any, params: Any = None, **kwargs: Any) -> Any:
+        thread = threading.current_thread().name
+        sql = str(query)
+        if thread == "purge-1" and sql.startswith("DELETE FROM nodes"):
+            self._first_deletes += 1
+            if self._first_deletes == 2:
+                self.second_waited = _wait_for_lock_wait(self._dsn, "nodes")
+        try:
+            result = self._original(cur, query, params, **kwargs)
+        except psycopg.errors.DeadlockDetected:
+            self.deadlocks.append(thread)
+            raise
+        if (
+            threading.get_ident() == self._writer
+            and self.first is None
+            and "FOR UPDATE" in sql
+        ):
+            self.first = threading.Thread(target=self.purge, name="purge-1")
+            self.first.start()
+            self.first_waited = _wait_for_lock_wait(self._dsn, "nodes")
+        return result
+
+
 class TestPostgresGraphStore:
     @pytest.fixture(autouse=True)
     def _setup(self) -> None:
@@ -338,6 +424,61 @@ class TestPostgresGraphStore:
         assert state["waited"], f"the purge never waited on the {table} lock"
         assert not state["purge"].is_alive()
         assert state["deleted"] is True
+        assert _rows_left(PG_DSN, "n1") == {"nodes": 0, "edges": 0, "entity_aliases": 0}
+
+    def test_a_purge_aborted_as_a_deadlock_victim_runs_again(
+        self, store, monkeypatch
+    ) -> None:
+        # Two purges lock the node's versions in opposite orders. A writer
+        # closes the version the first purge waits on and inserts the new
+        # one on a page VACUUM freed, at a lower ctid than the closed one.
+        # The second purge's scan locks the new version first, then waits
+        # on the closed one, which the first purge holds; the first purge,
+        # held before its second DELETE until the second waits, then waits
+        # on the new version. PostgreSQL aborts one purge as the deadlock
+        # victim, and the store runs it again: it finds the node purged.
+        from trellis.stores.postgres.graph import PostgresGraphStore
+
+        assert PG_DSN is not None
+        _write_after_a_freed_page(store, PG_DSN, "n1")
+        race = _OppositeOrderPurges(store, PG_DSN, "n1")
+        # A new pool's connections have no cached insert block, so the
+        # write's new version goes to the freed page.
+        fresh = PostgresGraphStore(PG_DSN)
+
+        def execute(cur: Any, query: Any, params: Any = None, **kwargs: Any) -> Any:
+            return race.execute(cur, query, params, **kwargs)
+
+        monkeypatch.setattr(psycopg.Cursor, "execute", execute)
+        try:
+            fresh.upsert_node("n1", "person", {"phase": "2"})
+        finally:
+            fresh.close()
+        assert race.first is not None, "the write never took a FOR UPDATE row lock"
+        # Read while the first purge holds the closed version: both show.
+        ctids = _version_ctids(PG_DSN, "n1")
+        second = threading.Thread(target=race.purge, name="purge-2")
+        second.start()
+        race.first.join(timeout=60)
+        second.join(timeout=60)
+
+        assert race.first_waited, "the first purge never waited on the write"
+        assert ctids[True], ctids
+        assert ctids[False], ctids
+        assert min(ctids[True]) < min(ctids[False]), f"not inverted: {ctids}"
+        assert race.second_waited, "the second purge never waited on the first"
+        assert not race.first.is_alive()
+        assert not second.is_alive()
+        assert race.deadlocks in (["purge-1"], ["purge-2"]), race.deadlocks
+        raw = {
+            name: repr(result)
+            for name, result in race.outcome.items()
+            if isinstance(result, psycopg.Error)
+        }
+        assert raw == {}, f"a psycopg error escaped delete_node: {raw}"
+        # The victim's next run finds the node purged by the other.
+        (winner,) = {"purge-1", "purge-2"} - set(race.deadlocks)
+        assert race.outcome == {winner: True, race.deadlocks[0]: False}
         assert _rows_left(PG_DSN, "n1") == {"nodes": 0, "edges": 0, "entity_aliases": 0}
 
     def test_delete_edge(self, store) -> None:
