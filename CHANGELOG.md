@@ -691,6 +691,18 @@ All notable changes to Trellis will be documented in this file.
   redaction is `failed` (exit `5` in both formats) and audited. The other
   Postgres graph writes still raise psycopg's own errors.
   ([#702](https://github.com/ronsse/trellis-ai/pull/702))
+- **A withheld pack's would-be pack reaches `admin` callers only.**
+  `GET /api/v1/events` and `GET /api/v1/packs/{pack_id}` returned a
+  withheld pack's `PACK_ASSEMBLED` row whole to any `read` key, so a
+  caller could fetch back the pack the holdout draw had kept from it. A
+  caller without `admin` now reads the row without `holdout_items`,
+  `holdout_sections` and `holdout_advisory_ids`; `holdout` and
+  `holdout_rate` stay. Admin keys and the shared secret read it whole, as
+  does every caller in auth mode `off` and an anonymous one in
+  `optional`. Serve attribution also drops feedback naming a withheld
+  pack whose row falls before its window or past its scan cap, which it
+  had counted as pack-targeted. `TRELLIS_PACK_HOLDOUT_RATE="-0"` records
+  `0.0`, not `-0.0`.
 
 ## [0.9.0] - 2026-05-13
 
