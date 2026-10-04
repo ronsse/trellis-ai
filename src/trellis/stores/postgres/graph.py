@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
+from trellis.errors import StoreError
 from trellis.schemas.graph import CompactionReport
 from trellis.schemas.well_known import normalize_entity_name
 from trellis.stores.base.edge_provenance import (
@@ -58,6 +59,12 @@ def _pg_text_lit(value: str) -> str:
 def _alias_lock_key(source_system: str, raw_id: str) -> str:
     """Encode an alias tuple as PostgreSQL-safe advisory-lock text."""
     return json.dumps([source_system, raw_id], separators=(",", ":"))
+
+
+#: How many times ``delete_node`` runs a purge that PostgreSQL aborts as a
+#: deadlock victim or on a serialization failure. The abort rolls the whole
+#: purge back, so running it again is safe.
+_PURGE_ATTEMPTS = 3
 
 
 def _delete_until_none(
@@ -1325,24 +1332,63 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     # ------------------------------------------------------------------
 
     def delete_node(self, node_id: str) -> bool:
-        # Each DELETE repeats until it removes nothing, so a version written
-        # by a transaction the DELETE waited on is removed too.
-        with self._conn() as conn, conn.cursor() as cur:
-            _delete_until_none(
-                cur,
-                "DELETE FROM edges WHERE source_id = %s OR target_id = %s",
-                (node_id, node_id),
-            )
-            _delete_until_none(
-                cur, "DELETE FROM entity_aliases WHERE entity_id = %s", (node_id,)
-            )
-            removed = _delete_until_none(
-                cur, "DELETE FROM nodes WHERE node_id = %s", (node_id,)
-            )
-            deleted = removed > 0
-        if deleted:
-            logger.debug("node_deleted", node_id=node_id)
-        return deleted
+        """Purge the node, running the purge again when PostgreSQL aborts it.
+
+        Each DELETE repeats until it removes nothing, so a version written
+        by a transaction the DELETE waited on is removed too. A purge that
+        locks rows in the opposite order to another purge or a writer can be
+        aborted as the deadlock victim. The abort rolls the purge back whole,
+        so it runs again, at most ``_PURGE_ATTEMPTS`` times in all, and a run
+        that finds the node already purged returns ``False``.
+
+        Raises :class:`StoreError` naming the node and the error's type when
+        every attempt is aborted, and at once on any other database error.
+        A lost connection is not retried: the purge may have committed, and
+        a second run would report it as ``False``.
+        """
+        import psycopg  # noqa: PLC0415
+
+        aborted: psycopg.Error | None = None
+        for attempt in range(1, _PURGE_ATTEMPTS + 1):
+            try:
+                with self._conn() as conn, conn.cursor() as cur:
+                    _delete_until_none(
+                        cur,
+                        "DELETE FROM edges WHERE source_id = %s OR target_id = %s",
+                        (node_id, node_id),
+                    )
+                    _delete_until_none(
+                        cur,
+                        "DELETE FROM entity_aliases WHERE entity_id = %s",
+                        (node_id,),
+                    )
+                    removed = _delete_until_none(
+                        cur, "DELETE FROM nodes WHERE node_id = %s", (node_id,)
+                    )
+            except (
+                psycopg.errors.DeadlockDetected,
+                psycopg.errors.SerializationFailure,
+            ) as exc:
+                aborted = exc
+                logger.warning(
+                    "node_delete_aborted",
+                    node_id=node_id,
+                    attempt=attempt,
+                    attempts=_PURGE_ATTEMPTS,
+                    error_type=type(exc).__name__,
+                )
+                continue
+            except psycopg.Error as exc:
+                msg = f"Purge of node {node_id} failed: {type(exc).__name__}"
+                raise StoreError(msg, store="graph") from exc
+            if removed > 0:
+                logger.debug("node_deleted", node_id=node_id)
+            return removed > 0
+        msg = (
+            f"Purge of node {node_id} was aborted in each of {_PURGE_ATTEMPTS} "
+            f"attempts: {type(aborted).__name__}"
+        )
+        raise StoreError(msg, store="graph") from aborted
 
     def delete_edge(self, edge_id: str) -> bool:
         with self._conn() as conn, conn.cursor() as cur:

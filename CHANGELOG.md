@@ -645,6 +645,22 @@ All notable changes to Trellis will be documented in this file.
   add a hover handler.
   ([#700](https://github.com/ronsse/trellis-ai/pull/700))
 
+- **A Postgres purge that cannot finish fails the redaction instead of
+  escaping as a database error.** When PostgreSQL aborted a `delete_node`
+  as a deadlock victim, which happens when it and another purge or a writer
+  lock the same rows in opposite orders, psycopg's `DeadlockDetected` was
+  not a `TrellisError` and escaped `MutationExecutor`:
+  `trellis curate redact` exited `1` with a traceback and no JSON,
+  `POST /api/v1/commands/batch` answered `500`, and no `MUTATION_REJECTED`
+  event was written. The abort rolls the purge back whole, so a purge
+  aborted as a deadlock victim or on a serialization failure now runs
+  again, up to three attempts in all; one that then finds the node already
+  purged returns `False`, so the redaction fails as the loser of a race
+  without a deadlock does. A purge aborted on every attempt, or stopped by
+  any other database error, raises `StoreError` naming the node, so the
+  redaction is `failed` (exit `5` in both formats) and audited. The other
+  Postgres graph writes still raise psycopg's own errors.
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.
