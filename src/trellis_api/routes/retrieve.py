@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Any
 
 import structlog
@@ -14,6 +13,7 @@ from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
+from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
     PackRequest,
@@ -197,157 +197,26 @@ def search_entities(
     offset: int = Query(0, ge=0, description="Offset for pagination"),
 ) -> dict[str, Any]:
     """Search graph nodes by name or type."""
-    registry = get_registry()
-    store = registry.knowledge.graph_store
-
-    # Detect backend by the type of ``_conn``: SQLite stores hold a
-    # ``sqlite3.Connection``; the Postgres store's ``_conn`` is a method
-    # returning a pooled-connection context manager (used as
-    # ``with store._conn() as conn``). Callability cannot tell them apart,
-    # because a ``sqlite3.Connection`` is callable too.
-    if isinstance(getattr(store, "_conn", None), sqlite3.Connection):
-        return _search_entities_sqlite(store, q, node_type, sort, order, limit, offset)
-    return _search_entities_postgres(store, q, node_type, sort, order, limit, offset)
-
-
-def _search_entities_sqlite(
-    store: Any,
-    q: str | None,
-    node_type: str | None,
-    sort: str,
-    order: str,
-    limit: int,
-    offset: int,
-) -> dict[str, Any]:
-    """Search graph nodes using SQLite-compatible SQL."""
-    import json  # noqa: PLC0415
-
-    conditions = ["valid_to IS NULL"]
-    params: list[Any] = []
-
-    if q:
-        conditions.append(
-            "(json_extract(properties_json, '$.name') LIKE ?"
-            " OR node_id LIKE ?"
-            " OR node_type LIKE ?)"
-        )
-        pattern = f"%{q}%"
-        params.extend([pattern, pattern, pattern])
-
-    if node_type:
-        conditions.append("node_type = ?")
-        params.append(node_type)
-
-    where = " AND ".join(conditions)
-
-    # Sort mapping
-    sort_col = {
-        "name": "json_extract(properties_json, '$.name')",
-        "node_type": "node_type",
-    }.get(sort, "created_at")
-    sort_dir = "ASC" if order.lower() == "asc" else "DESC"
-
-    # Count total matching rows
-    count_cursor = store._conn.execute(  # type: ignore[attr-defined]
-        f"SELECT COUNT(*) FROM nodes WHERE {where}",  # noqa: S608
-        params,
+    store = get_registry().knowledge.graph_store
+    # Lenient as ever: an unknown sort is created_at, and any order but asc
+    # (in any case) descends.
+    rows, total = store.search_nodes(
+        search=q,
+        node_type=node_type,
+        sort=sort if sort in NODE_SEARCH_SORTS else "created_at",
+        descending=order.lower() != "asc",
+        limit=limit,
+        offset=offset,
     )
-    total = count_cursor.fetchone()[0]
-
-    # Fetch page
-    params.extend([limit, offset])
-    cursor = store._conn.execute(  # type: ignore[attr-defined]
-        f"SELECT node_id, node_type, properties_json, created_at"  # noqa: S608
-        f" FROM nodes WHERE {where}"
-        f" ORDER BY {sort_col} {sort_dir} LIMIT ? OFFSET ?",
-        params,
-    )
-    rows = cursor.fetchall()
-
-    results = []
-    for r in rows:
-        props = json.loads(r["properties_json"]) if r["properties_json"] else {}
-        results.append(
-            {
-                "entity_id": r["node_id"],
-                "node_type": r["node_type"],
-                "name": props.get("name", r["node_id"]),
-                "properties": props,
-                "created_at": r["created_at"],
-            }
-        )
-    return {
-        "status": "ok",
-        "total": total,
-        "count": len(results),
-        "offset": offset,
-        "results": results,
-    }
-
-
-def _search_entities_postgres(
-    store: Any,
-    q: str | None,
-    node_type: str | None,
-    sort: str,
-    order: str,
-    limit: int,
-    offset: int,
-) -> dict[str, Any]:
-    """Search graph nodes using PostgreSQL-compatible SQL."""
-    conditions = ["valid_to IS NULL"]
-    params: list[Any] = []
-
-    if q:
-        conditions.append(
-            "(properties->>'name' ILIKE %s OR node_id ILIKE %s OR node_type ILIKE %s)"
-        )
-        pattern = f"%{q}%"
-        params.extend([pattern, pattern, pattern])
-
-    if node_type:
-        conditions.append("node_type = %s")
-        params.append(node_type)
-
-    where = " AND ".join(conditions)
-
-    sort_col = {
-        "name": "properties->>'name'",
-        "node_type": "node_type",
-    }.get(sort, "created_at")
-    sort_dir = "ASC" if order.lower() == "asc" else "DESC"
-
-    # Hold one pooled connection across the count + page reads so the
-    # paginated UI sees a consistent snapshot — without this, a node
-    # written between the two queries shifts every subsequent page.
-    count_params = list(params)
-    params.extend([limit, offset])
-    with store._conn() as conn:  # type: ignore[attr-defined]
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT COUNT(*) FROM nodes WHERE {where}",  # noqa: S608
-                count_params,
-            )
-            total = cur.fetchone()[0]
-
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT node_id, node_type, properties, created_at"  # noqa: S608
-                f" FROM nodes WHERE {where}"
-                f" ORDER BY {sort_col} {sort_dir} LIMIT %s OFFSET %s",
-                params,
-            )
-            rows = cur.fetchall()
-
     results = [
         {
-            "entity_id": r[0],
-            "node_type": r[1],
-            "name": (r[2] or {}).get("name", r[0]),
-            "properties": r[2] or {},
-            "created_at": r[3].isoformat() if r[3] else None,
+            "entity_id": row["node_id"],
+            "node_type": row["node_type"],
+            "name": row["properties"].get("name", row["node_id"]),
+            "properties": row["properties"],
+            "created_at": row["created_at"],
         }
-        for r in rows
+        for row in rows
     ]
     return {
         "status": "ok",

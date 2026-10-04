@@ -31,6 +31,7 @@ from trellis.stores.base.graph import (
     check_node_role_immutable,
     validate_document_ids,
     validate_node_role_args,
+    validate_node_search_args,
     validate_subgraph_depth,
     validate_version_token,
 )
@@ -1409,12 +1410,16 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         assert row is not None
         return int(row[0])
 
-    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+    @staticmethod
+    def _node_search_where(search: str | None) -> tuple[str, list[Any]]:
+        """Current nodes matching GET /graph/search's ``q``, and the params.
+
+        The one predicate behind :meth:`count_nodes_by_type` and
+        :meth:`search_nodes`, so the type chips sum to the list's total.
+        """
         where = "valid_to IS NULL"
-        params: list[str] = []
+        params: list[Any] = []
         if search:
-            # GET /graph/search's q predicate, verbatim, so these counts sum
-            # to that route's total for the same q.
             where += (
                 " AND (properties->>'name' ILIKE %s"
                 " OR node_id ILIKE %s"
@@ -1422,6 +1427,10 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             )
             pattern = f"%{search}%"
             params = [pattern, pattern, pattern]
+        return where, params
+
+    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+        where, params = self._node_search_where(search)
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT node_type, COUNT(*) FROM nodes"
@@ -1430,6 +1439,48 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             )
             rows = cur.fetchall()
         return {str(row[0]): int(row[1]) for row in rows}
+
+    def search_nodes(
+        self,
+        *,
+        search: str | None = None,
+        node_type: str | None = None,
+        sort: str = "created_at",
+        descending: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        validate_node_search_args(sort=sort, limit=limit, offset=offset)
+        where, params = self._node_search_where(search)
+        if node_type:
+            where += " AND node_type = %s"
+            params.append(node_type)
+        sort_col = {
+            "name": "properties->>'name'",
+            "node_type": "node_type",
+        }.get(sort, "created_at")
+        sort_dir = "DESC" if descending else "ASC"
+        # Both reads share one pooled connection, but under the default READ
+        # COMMITTED isolation each statement takes its own snapshot, so a
+        # write landing between them can make the count disagree with the
+        # page.
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT COUNT(*) FROM nodes WHERE {where}",
+                    params,
+                )
+                count_row = cur.fetchone()
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {_node_select_list()} FROM nodes"
+                    f" WHERE {where}"
+                    f" ORDER BY {sort_col} {sort_dir} LIMIT %s OFFSET %s",
+                    [*params, limit, offset],
+                )
+                rows = cur.fetchall()
+        assert count_row is not None
+        return [self._node_row_to_dict(row) for row in rows], int(count_row[0])
 
     def count_edges(self) -> int:
         with self._conn() as conn, conn.cursor() as cur:

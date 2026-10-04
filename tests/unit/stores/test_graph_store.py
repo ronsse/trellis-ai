@@ -505,6 +505,7 @@ class TestCompactVersions:
             def delete_edge(self, *a, **k): ...  # type: ignore[override]
             def count_nodes(self): ...  # type: ignore[override]
             def count_nodes_by_type(self, *a, **k): ...  # type: ignore[override]
+            def search_nodes(self, *a, **k): ...  # type: ignore[override]
             def count_edges(self): ...  # type: ignore[override]
             def close(self): ...  # type: ignore[override]
 

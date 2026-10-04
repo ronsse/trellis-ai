@@ -208,6 +208,29 @@ def validate_version_token(expected_valid_from: str) -> None:
         raise ValueError(msg) from None
 
 
+# The orderings GraphStore.search_nodes accepts.
+NODE_SEARCH_SORTS = frozenset({"created_at", "name", "node_type"})
+
+
+def validate_node_search_args(*, sort: str, limit: int, offset: int) -> None:
+    """Refuse a :meth:`GraphStore.search_nodes` page before the query runs.
+
+    Called by every implementation, so each refuses the same arguments:
+    left to the engines, SQLite reads a negative ``LIMIT`` as no limit and
+    a negative ``OFFSET`` as zero, while PostgreSQL refuses both.
+
+    Raises:
+        ValueError: if ``sort`` is not in :data:`NODE_SEARCH_SORTS`, or
+            ``limit`` or ``offset`` is negative.
+    """
+    if sort not in NODE_SEARCH_SORTS:
+        msg = f"sort must be one of {sorted(NODE_SEARCH_SORTS)}, got {sort!r}"
+        raise ValueError(msg)
+    if limit < 0 or offset < 0:
+        msg = f"limit and offset must be >= 0, got limit={limit}, offset={offset}"
+        raise ValueError(msg)
+
+
 def check_node_role_immutable(
     node_id: str,
     existing: dict[str, Any],
@@ -671,12 +694,45 @@ class GraphStore(ABC):
         counted apart; a type with no current node is absent. A non-empty
         *search* keeps only nodes whose ``name`` property, ``node_id`` or
         ``node_type`` contains it, ignoring case: the filter that
-        ``GET /graph/search`` applies to ``q``. The SQL backends apply that
-        route's ``LIKE``/``ILIKE`` predicate verbatim, so ``%`` and ``_`` in
-        *search* are wildcards there, exactly as they are in the list;
-        Postgres also reads a backslash as an escape, and SQLite's ``LIKE``
-        ignores the case of ASCII letters only. The Bolt backends match a
-        plain lowercased substring, so those characters are literal there.
+        :meth:`search_nodes` applies for ``GET /graph/search``'s ``q``. The
+        SQL backends match with ``LIKE``/``ILIKE``, so ``%`` and ``_`` in
+        *search* are wildcards there; Postgres also reads a backslash as an
+        escape, and SQLite's ``LIKE`` ignores the case of ASCII letters
+        only. The Bolt backends match a plain lowercased substring, so those
+        characters are literal there.
+        """
+
+    @abstractmethod
+    def search_nodes(
+        self,
+        *,
+        search: str | None = None,
+        node_type: str | None = None,
+        sort: str = "created_at",
+        descending: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return one page of matching current nodes, and how many match.
+
+        Answers ``GET /graph/search``. A non-empty *search* matches exactly
+        as it does in :meth:`count_nodes_by_type`, and a non-empty
+        *node_type* keeps only nodes of that stored type, so the count
+        equals ``count_nodes_by_type(search=search)`` summed, or its entry
+        for *node_type*. Only current versions (``valid_to IS NULL``) match.
+
+        The page holds rows shaped as :meth:`get_node` returns them, ordered
+        by *sort* (``created_at``, the ``name`` property or ``node_type``),
+        descending unless *descending* is false, then skipped by *offset*
+        and cut at *limit*. Each backend compares names and types its own
+        way, and rows that tie on *sort* come in no specified order.
+
+        Abstract with no default: a backend outside this repository must
+        implement it.
+
+        Raises:
+            ValueError: if *sort* is not in :data:`NODE_SEARCH_SORTS`, or
+                *limit* or *offset* is negative.
         """
 
     @abstractmethod

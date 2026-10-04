@@ -1294,7 +1294,7 @@ class GraphStoreContractTests:
         }
 
     # ------------------------------------------------------------------
-    # search_nodes (GET /graph/search)
+    # Node search (the GET /graph/search list)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1340,12 +1340,9 @@ class GraphStoreContractTests:
             "n-hotel",
         }
         assert total == 5
-        # Each row carries the fields the route renders, as get_node has them.
+        # Each row is the node as get_node returns it.
         for row in rows:
-            node = store.get_node(row["node_id"])
-            assert node is not None
-            for field in ("node_type", "properties", "created_at"):
-                assert row[field] == node[field], (row["node_id"], field)
+            assert row == store.get_node(row["node_id"]), row["node_id"]
         # Defaults: every current node, newest first.
         rows, total = store.search_nodes()
         assert [r["node_id"] for r in rows] == oldest_first[::-1]
@@ -1366,9 +1363,7 @@ class GraphStoreContractTests:
         # A type that survives only on a closed version finds nothing.
         assert store.search_nodes(node_type="legacykind") == ([], 0)
 
-    def test_search_nodes_pages_in_the_requested_order(
-        self, store: GraphStore
-    ) -> None:
+    def test_search_nodes_pages_in_the_requested_order(self, store: GraphStore) -> None:
         self._seed_search_nodes(store)
 
         pages = [
@@ -1401,6 +1396,16 @@ class GraphStoreContractTests:
         rows, total = store.search_nodes(node_type="activity", limit=2, offset=1)
         assert [r["node_id"] for r in rows] == ["n-bravo", "n-alpha"]
         assert total == 3
+
+    def test_search_nodes_refuses_an_unknown_sort_or_a_negative_page(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n-1", "activity", {"name": "one"})
+        with pytest.raises(ValueError, match="sort must be one of"):
+            store.search_nodes(sort="bogus")
+        for page in ({"limit": -1}, {"offset": -1}):
+            with pytest.raises(ValueError, match="must be >= 0"):
+                store.search_nodes(**page)
 
     # ------------------------------------------------------------------
     # node_role + generation_spec
