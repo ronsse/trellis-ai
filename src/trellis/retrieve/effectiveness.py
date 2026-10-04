@@ -28,6 +28,7 @@ from trellis.classify.demotion_gate import (
     screen_noise_candidates,
 )
 from trellis.core.base import TrellisModel
+from trellis.core.pack_holdout import drop_holdout
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.learning.pack_observations import join_pack_feedback
 from trellis.schemas.advisory import DriftPattern
@@ -321,9 +322,10 @@ def analyze_effectiveness(
     # Canonical PACK_ASSEMBLED ⋈ FEEDBACK_RECORDED join (shared with the
     # learning-observation builder, domains report, and metrics
     # timeseries so the join semantics cannot drift between consumers).
-    # ``pack_event_count`` is the raw PACK_ASSEMBLED count for
-    # ``total_packs`` — distinct from ``len(pack_payloads)``, which dedups
-    # by ``entity_id`` and drops falsy ids.
+    # ``pack_event_count`` is the raw count of served (not withheld)
+    # PACK_ASSEMBLED events for ``total_packs`` — distinct from
+    # ``len(pack_payloads)``, which dedups by ``entity_id`` and drops
+    # falsy ids.
     feedback_events, pack_payloads, pack_event_count = join_pack_feedback(
         event_log, since=since, limit=1000
     )
@@ -721,6 +723,9 @@ def analyze_advisory_effectiveness(
         since=since,
         limit=DEFAULT_SCAN_LIMIT,
     ).events
+    # A withheld pack carries no advisories by design: kept, it and its
+    # feedback would land in every advisory's "without" arm.
+    pack_events, feedback_events = drop_holdout(pack_events, feedback_events)
 
     pack_advisories: dict[str, list[str]] = {}
     pack_occurred_at: dict[str, datetime] = {}

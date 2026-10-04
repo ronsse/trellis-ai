@@ -944,6 +944,24 @@ def _flat_context(
         # single most misleading pack this server can return. The note
         # goes here first, before it goes anywhere else.
         empty = empty_message or f"No context found for: {intent}"
+        if builder.holdout_rate > 0:
+            # With the pack holdout on, an empty pack may be a withheld one.
+            # It must still carry the ``pack_id`` header the capture join
+            # reads, and it must read like every other empty pack, so all
+            # empty packs render through the formatter while the rate is
+            # above zero. At rate 0 the one-liner below is unchanged.
+            formatter = (
+                format_pack_as_index_markdown if index else format_pack_as_markdown
+            )
+            result = formatter(
+                [],
+                title or intent,
+                max_tokens=max_tokens,
+                pack_id=pack.pack_id,
+                withholding=withholding,
+                empty_text=empty,
+            )
+            return f"{banner}\n\n{result}" if banner else result
         note = format_withholding_note(withholding)
         if note:
             empty = f"{empty}\n\n{note}"

@@ -121,6 +121,7 @@ Items are tagged with `ContentTags` (4 flat facets: `domain`, `content_type`, `s
 - Document recency comes from `resolve_recency_stamp`: a usable source-clock stamp beats the row clock, and `metadata["recency_clock"]` records which won. Retention keeps the row clock, and chunks carry no source clock (decision-ledger T-6).
 - A rule that must hold for every strategy runs at the collect seam, because the strategy set is open: noise ([`noise.py`](src/trellis/retrieve/noise.py)), archived and superseded. Supersession is pairwise ([`partition_superseded`](src/trellis/retrieve/lifecycle.py)): a loser is withheld only while its successor is a candidate, and it gates enabling `TRELLIS_ENABLE_RECONCILE_ON_WRITE`.
 - Every gate records `rejected_items` via `RejectedItem.from_pack_item`, and the pack states what was withheld above its items ([`withholding.py`](src/trellis/retrieve/withholding.py)). A `debug` log line is not a record: no shipped configuration prints it.
+- A held-out pack (`TRELLIS_PACK_HOLDOUT_RATE`, off by default) is blind by design, the one exception to that; an aggregate `PACK_ASSEMBLED` reader drops its rows with `drop_holdout` ([`pack_holdout.py`](src/trellis/core/pack_holdout.py)).
 - Truncate with `truncate_excerpt`; mark pre-LLM cuts with `elide_text`. The content floor (`ContentFloorConfig`) and graduated disclosure (`body_items`, [`disclosure.py`](src/trellis/retrieve/disclosure.py)) demote rather than drop.
 - A vector row's metadata is an embed-time snapshot, so post-embed writers go through `sync_vector_metadata`.
 - Measure a serving change with `trellis analyze replay` ([`pack_replay.py`](src/trellis/retrieve/pack_replay.py)), counting per `(pack_id, item_id)` serving. Replay cannot evaluate a change to which candidates exist, such as seeding; run both arms.
@@ -150,7 +151,7 @@ The **EventLog is the single authoritative path** for the feedback loop. `trelli
 | CLI `trellis curate feedback --pack-id`, REST `POST /feedback` | `Command(FEEDBACK_RECORD)` → `MutationExecutor` → `FeedbackRecordHandler` | **no** | `{target_id, rating, comment, success}` plus `pack_id` when the caller named one — no `feedback_id`, no item attribution |
 
 - Both families derive `success` from `rating` with `SUCCESS_RATING_THRESHOLD`, so they cannot disagree about a rating.
-- `attribution_rate` keeps its original denominator (DoD-3 reads it); `ServeAttributionReport` reports the pack-targeted rates beside it.
+- `attribution_rate` keeps its original denominator (DoD-3 reads it), less feedback naming a held-out pack; `ServeAttributionReport` reports the pack-targeted rates beside it.
 - Promotion reads per-item fields from `PACK_ASSEMBLED.injected_items[]`. Flat packs only: `build_sectioned` emits no `injected_items[]`, so sectioned packs contribute zero per-item rows to the join.
 
 ### Test Structure

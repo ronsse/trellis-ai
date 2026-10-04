@@ -72,6 +72,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.core.pack_holdout import drop_holdout
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.retrieve.effectiveness import lift_vs_baseline
 from trellis.schemas.advisory import (
@@ -263,16 +264,21 @@ class AdvisoryGenerator:
             limit=DEFAULT_SCAN_LIMIT,
         )
         coverage = merge_coverage(pack_scan.coverage, feedback_scan.coverage)
+        # A withheld pack served nothing, and its row still names the
+        # strategies that ran: mined, its feedback would grade them.
+        pack_events, feedback_events = drop_holdout(
+            pack_scan.events, feedback_scan.events
+        )
 
         # Build joined dataset
-        packs = self._join_packs_feedback(pack_scan.events, feedback_scan.events)
+        packs = self._join_packs_feedback(pack_events, feedback_events)
 
         if not packs:
             return AdvisoryReport(
                 advisories_generated=0,
                 advisories_stored=0,
-                total_packs=len(pack_scan.events),
-                total_feedback=len(feedback_scan.events),
+                total_packs=len(pack_events),
+                total_feedback=len(feedback_events),
                 analysis_window_days=days,
                 coverage=coverage,
             )
@@ -313,8 +319,8 @@ class AdvisoryGenerator:
         return AdvisoryReport(
             advisories_generated=len(advisories),
             advisories_stored=stored,
-            total_packs=len(pack_scan.events),
-            total_feedback=len(feedback_scan.events),
+            total_packs=len(pack_events),
+            total_feedback=len(feedback_events),
             analysis_window_days=days,
             findings_refused_no_comparison_arm=self._refusals["no_comparison_arm"],
             coverage=coverage,

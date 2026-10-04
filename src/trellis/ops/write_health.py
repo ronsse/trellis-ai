@@ -46,6 +46,7 @@ import structlog
 from pydantic import BaseModel, Field, ValidationError
 
 from trellis.core.base import TrellisModel
+from trellis.core.pack_holdout import drop_holdout
 from trellis.feedback.attribution import (
     StrayCitationTally,
     payload_is_attributed,
@@ -624,8 +625,9 @@ class ServeAttributionReport(TrellisModel):
     feedback carrying item attribution (without which the demote half has
     no signal).
 
-    ``attribution_rate`` divides by *every* feedback event, and that
-    denominator mixes two populations with nothing in common (backlog A4).
+    ``attribution_rate`` divides by *every* feedback event (bar those
+    naming a held-out pack, below), and that denominator mixes two
+    populations with nothing in common (backlog A4).
     A caller who names a ``pack_id`` and cites no items lost signal it
     held. A caller grading a trace it produced with no pack in hand held no
     signal to lose: nothing in the payload could ever join, because there
@@ -645,6 +647,11 @@ class ServeAttributionReport(TrellisModel):
     ``feedback_events``: DoD-3 thresholds and the nightly roadmap driver
     read it, and a metric that improves because its denominator was
     quietly narrowed is the failure this decomposition exists to expose.
+    The one exclusion is the pack holdout
+    (:mod:`trellis.core.pack_holdout`): a withheld pack in the window and
+    the feedback naming it are left out of ``packs`` and
+    ``feedback_events``, because that pack served nothing to cite and
+    counting it would read the experiment as a capture regression.
 
     **Citing is not joining, and the ``stray_*`` block is the gap between
     them** (#574). ``pack_attribution_rate`` counts a caller who cited
@@ -880,7 +887,13 @@ def summarize_serve_attribution(
     pack_scan = scan_events(
         event_log, event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
     )
-    for event in pack_scan.events:
+    feedback_scan = scan_events(
+        event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
+    )
+    # The served arm only: a withheld pack carries no injected items, and
+    # it and the feedback naming it would read as a capture regression.
+    pack_events, feedback_events = drop_holdout(pack_scan.events, feedback_scan.events)
+    for event in pack_events:
         packs += 1
         if event.payload.get("injected_items"):
             packs_with_items += 1
@@ -896,10 +909,7 @@ def summarize_serve_attribution(
     feedback = attributed = 0
     pack_targeted = pack_targeted_attributed = 0
     strays = StrayCitationTally()
-    feedback_scan = scan_events(
-        event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
-    )
-    for event in feedback_scan.events:
+    for event in feedback_events:
         feedback += 1
         # Both predicates come from ``trellis.feedback.attribution`` so the
         # health surface and the MCP boundary cannot drift on what

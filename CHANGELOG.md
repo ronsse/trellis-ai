@@ -154,6 +154,17 @@ All notable changes to Trellis will be documented in this file.
   transcript has its own outcome and a parent's holds none of it. The
   outcome is part of the "write only when the join changes" comparison.
   New module `trellis_workers.session_capture.outcome`.
+- **A randomised pack holdout, off by default.** `TRELLIS_PACK_HOLDOUT_RATE`
+  (a write-behaviour knob, default `0`) withholds a whole built pack, items
+  and advisories, when a SHA-256 draw on its `pack_id` falls below the rate.
+  The caller gets an ordinary empty pack with its `pack_id` and nothing that
+  names a holdout. Every `PACK_ASSEMBLED` row now carries `holdout` and
+  `holdout_rate`, flag off included; a withheld row keeps the would-be pack
+  under `holdout_items` (sectioned: `holdout_sections`) and
+  `holdout_advisory_ids`, with `injected_items` empty. The aggregate readers
+  drop withheld packs and the feedback naming them. While the rate is above
+  `0`, an empty flat MCP pack renders with its `pack_id` header. At `0`
+  nothing an agent sees changes. New module `trellis.core.pack_holdout`.
 
 ### Changed
 
