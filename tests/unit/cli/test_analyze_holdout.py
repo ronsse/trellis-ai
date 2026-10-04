@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
+import statistics
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -22,6 +24,7 @@ from tests.unit.analyze._holdout_fixture import (
     INTENT_MARKER,
     MONDAY,
     HoldoutLog,
+    outcome_payload,
     seed_experiment,
 )
 from trellis.analyze.holdout import analyze_holdout
@@ -244,3 +247,141 @@ def test_the_seed_reproduces_the_json_report(log: HoldoutLog) -> None:
 
     assert _payload(first) == _payload(second)
     assert _payload(first)["inference"] != _payload(other)["inference"]
+
+
+#: t(0.975) + t(0.80) at 4, 10 and 16 degrees of freedom, from printed t
+#: tables: the prestudy's MDE formula at N = 6, 12 and 18.
+T_SUM = {6: 3.717410, 12: 3.107197, 18: 2.984647}
+
+
+def test_every_r_figure_is_in_the_json_and_the_text(log: HoldoutLog) -> None:
+    """Four main sessions of three served sub-agent tasks each, flag off.
+
+    12 analysed tasks in 60 days is 6 per 30 days (N 6 / 12 / 18); 4
+    analysed main sessions is 2 per 30 days (N 2 / 4 / 6). Sub-agent turns
+    are 4 + s, 9 + s and 14 + s in session s, and the first sub-agent of
+    each session opens one PR.
+    """
+    for s in range(4):
+        start = MONDAY + timedelta(days=s)
+        main = log.task(start=start, parent=None, arms=(), turns=2 + s, rate=0.0)
+        for sub in range(3):
+            log.task(
+                start=start + timedelta(hours=2 + sub),
+                parent=main,
+                arms=[False],
+                rate=0.0,
+                turns=4 + 5 * sub + s,
+                prs_created=1 if sub == 0 else 0,
+            )
+    log.sweep()
+
+    text, machine = _run()
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    d = _payload(machine)["descriptive"]
+    assert "pr_base_rate" not in d
+    assert d["pr_base_rate_served"] == pytest.approx(1 / 3)
+    assert d["top_parent_share"] == pytest.approx(0.25)
+    sub_turns = [[4 + s, 9 + s, 14 + s] for s in range(4)]
+    residuals = [
+        math.log1p(t) - statistics.fmean(math.log1p(u) for u in turns)
+        for turns in sub_turns
+        for t in turns
+    ]
+    sd = math.sqrt(sum(r * r for r in residuals) / (12 - 4))
+    assert d["outcome_sd_within_parent"] == pytest.approx(sd)
+    horizons = d["mde_by_horizon"]
+    assert [h["days"] for h in horizons] == [30, 60, 90]
+    assert [h["n"] for h in horizons] == pytest.approx([6, 12, 18])
+    expected = [T_SUM[n] * sd * math.sqrt(4 / n) for n in (6, 12, 18)]
+    assert [h["mde"] for h in horizons] == pytest.approx(expected, rel=1e-3)
+    assert [h["ratio"] for h in horizons] == pytest.approx(
+        [math.exp(m) for m in expected], rel=1e-3
+    )
+    assert d["n_for_10pct_effect"] > 18
+    sessions = d["sessions"]
+    counts = ("rolled_up", "reaching_retrieval", "eligible", "analysed")
+    assert [sessions[key] for key in counts] == [4, 4, 4, 4]
+    assert sessions["reaching_retrieval_per_30d"] == pytest.approx(2.0)
+    session_sd = statistics.stdev(math.log1p(29 + 4 * s) for s in range(4))
+    assert sessions["outcome_sd"] == pytest.approx(session_sd)
+    assert [h["n"] for h in sessions["mde_by_horizon"]] == pytest.approx([2, 4, 6])
+    assert set(d["not_measurable"]) == {
+        "post_hoc_share",
+        "cut_off_share_by_arm.withheld",
+    }
+    flat = _flat(text)
+    for label in (
+        "top parent's share of eligible tasks 0.25",
+        "PR base rate (served arm) 0.333",
+        "between-parent share of variance (bias-adjusted",
+        "task MDE (80% power",
+        "30 days: N 6, MDE",
+        "60 days: N 12, MDE",
+        "90 days: N 18, MDE",
+        "N for a 10% effect",
+        "main sessions 4 rolled up",
+        "reaching a retrieval 4 (2 per 30 days)",
+        "main-session MDE",
+        "30 days: N 2, MDE not measurable: N 2 is below 6",
+    ):
+        assert label in flat
+
+
+def test_a_figure_the_rows_cannot_give_reads_not_measurable(
+    log: HoldoutLog,
+) -> None:
+    """Three tasks, one per parent, whose outcomes lack prs_created.
+
+    A within-parent SD needs more tasks than parents, the PR figures need
+    the field, and no task names a main transcript that joined.
+    """
+    for index, parent in enumerate(["parent-a", "parent-b", "parent-c"]):
+        at = MONDAY + timedelta(hours=index)
+        pack = log.pack(at=at, withheld=False, items=2, rate=0.0)
+        outcome = outcome_payload(turns=5 + 3 * index)
+        del outcome["prs_created"]
+        log.join(
+            f"task-{index}",
+            at=at + timedelta(hours=1),
+            pack_ids=[pack],
+            parent=parent,
+            outcome=outcome,
+        )
+    log.sweep()
+
+    text, machine = _run()
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    d = _payload(machine)["descriptive"]
+    spread = "needs more analysed tasks than parent sessions, found 3 across 3"
+    assert d["not_measurable"] == {
+        "outcome_sd_within_parent": spread,
+        "between_parent_share": spread,
+        "n_for_10pct_effect": spread,
+        "post_hoc_share": d["not_measurable"]["post_hoc_share"],
+        "cut_off_share_by_arm.withheld": "no eligible task in the withheld arm",
+        "pr_base_rate_served": "no analysed served-arm task records prs_created",
+        "prs_created_mean": "no analysed task records prs_created",
+    }
+    assert "capture records none of them" in d["not_measurable"]["post_hoc_share"]
+    for key in ("outcome_sd_within_parent", "between_parent_share"):
+        assert d[key] is None
+    assert d["n_for_10pct_effect"] is None
+    assert d["pr_base_rate_served"] is None
+    assert [h["mde"] for h in d["mde_by_horizon"]] == [None, None, None]
+    assert {h["not_measurable"] for h in d["mde_by_horizon"]} == {spread}
+    sessions = d["sessions"]
+    assert (sessions["rolled_up"], sessions["without_main_join"]) == (0, 3)
+    assert sessions["outcome_sd"] is None
+    assert "found 0" in sessions["not_measurable"]["outcome_sd"]
+    flat = _flat(text)
+    assert f"outcome SD within parent not measurable: {spread}" in flat
+    assert (
+        "PR base rate (served arm) not measurable: no analysed served-arm "
+        "task records prs_created" in flat
+    )
+    assert "main-session outcome SD not measurable: needs 2 main sessions" in flat
+    descriptive = flat.split("Descriptive (the [R] re-measure)")[1]
+    assert "n/a" not in descriptive.split("Exclusions")[0]
