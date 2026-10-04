@@ -620,6 +620,7 @@ All notable changes to Trellis will be documented in this file.
   the call. Other attributes that interpolate an id, such as the Memories
   and Events rows' `title`, still use `escHtml`, so a `"` there can still
   add a hover handler.
+  ([#700](https://github.com/ronsse/trellis-ai/pull/700))
 
 ## [0.9.0] - 2026-05-13
 
