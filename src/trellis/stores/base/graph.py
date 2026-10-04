@@ -637,6 +637,14 @@ class GraphStore(ABC):
         (``test_delete_node_purges_all_versions`` and siblings), which any
         new backend must pass.
 
+        The purge removes every version committed before it returns,
+        including one written by a concurrent transaction it waited on: a
+        backend whose delete can wait on a writer's lock repeats each delete
+        until it removes nothing (PostgreSQL, Neo4j). The exception is a new
+        edge or alias row whose writer touched no row the purge holds, which
+        can commit between the purge's last delete and its commit. A write
+        after the purge re-creates the node.
+
         Returns ``True`` if the node existed (i.e. this call performed the
         purge — under concurrent deletion exactly one caller sees ``True``).
         """

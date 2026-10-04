@@ -587,6 +587,20 @@ All notable changes to Trellis will be documented in this file.
   is abstract, so a subclass without it no longer instantiates.
   ([#695](https://github.com/ronsse/trellis-ai/pull/695))
 
+- **`delete_node` also removes a version written by a write it waited on,
+  on Postgres and Neo4j.** A purge whose delete waited on a concurrent
+  write's lock missed the version that write added, so the node, one of its
+  edges or one of its aliases kept a current version while `delete_node`
+  returned `True`. Before this fix it happened in 20 of 20 runs for each of
+  `upsert_node`, `update_node_if_current`, `upsert_edge` and `upsert_alias`
+  on Postgres, and for the node and alias writes on Neo4j, where an edge
+  goes with its node. Each delete now repeats inside the same transaction
+  until it removes nothing. ArcadeDB was not affected: the purge's commit
+  conflicts with the write, and the driver re-runs the purge. A new edge or
+  alias row whose writer touched nothing the purge holds can still commit
+  after the purge's last delete, and a write after the purge still
+  re-creates the node.
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.

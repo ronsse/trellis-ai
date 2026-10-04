@@ -353,6 +353,26 @@ _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
 )
 
 
+def _detach_delete_until_none(tx: ManagedTransaction, cypher: str, nid: str) -> int:
+    """Repeat a ``... DETACH DELETE x RETURN count(x) AS deleted`` statement
+    until it removes no row; return the rows removed.
+
+    Neo4j reads at READ COMMITTED and takes write locks: a DETACH DELETE
+    that waited on a writer's lock matched its rows before the wait, so a
+    version that writer created is invisible to that statement and visible
+    to the next one. ArcadeDB never waits (the conflicting commit fails and
+    the driver re-runs the whole transaction function), so there the
+    repeat finds nothing.
+    """
+    removed = 0
+    while True:
+        record = tx.run(cypher, nid=nid).single()
+        count = int(record["deleted"]) if record else 0
+        if count == 0:
+            return removed
+        removed += count
+
+
 class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
     """Shared SCD-2 + Cypher payload for openCypher-over-Bolt backends.
 
@@ -1540,23 +1560,28 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
 
     def delete_node(self, node_id: str) -> bool:
         def _tx(tx: ManagedTransaction) -> bool:
-            record = tx.run(
-                "MATCH (n:Node {node_id: $nid}) RETURN count(n) AS cnt",
-                nid=node_id,
-            ).single()
-            existed = bool(record and record["cnt"] > 0)
-            # DETACH DELETE cleans up all :EDGE relationships automatically.
-            tx.run(
-                "MATCH (n:Node {node_id: $nid}) DETACH DELETE n", nid=node_id
-            ).consume()
-            tx.run(
-                "MATCH (a:Alias {entity_id: $nid}) DETACH DELETE a", nid=node_id
-            ).consume()
-            tx.run(
-                "MATCH (c:AliasClaim {entity_id: $nid}) DETACH DELETE c",
-                nid=node_id,
-            ).consume()
-            return existed
+            # Each statement repeats until it removes nothing, so a version
+            # written by a transaction it waited on is removed too. DETACH
+            # DELETE cleans up all :EDGE relationships automatically.
+            removed = _detach_delete_until_none(
+                tx,
+                "MATCH (n:Node {node_id: $nid}) DETACH DELETE n "
+                "RETURN count(n) AS deleted",
+                node_id,
+            )
+            _detach_delete_until_none(
+                tx,
+                "MATCH (a:Alias {entity_id: $nid}) DETACH DELETE a "
+                "RETURN count(a) AS deleted",
+                node_id,
+            )
+            _detach_delete_until_none(
+                tx,
+                "MATCH (c:AliasClaim {entity_id: $nid}) DETACH DELETE c "
+                "RETURN count(c) AS deleted",
+                node_id,
+            )
+            return removed > 0
 
         with self._driver.session(database=self._database) as session:
             deleted = bool(session.execute_write(_tx))

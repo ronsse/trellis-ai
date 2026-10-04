@@ -23,7 +23,10 @@ password out of the URL.
 from __future__ import annotations
 
 import os
+import threading
+import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -255,6 +258,95 @@ def test_delete_node_cascades(graph_store):
 def test_delete_nonexistent_returns_false(graph_store):
     assert graph_store.delete_node("nope") is False
     assert graph_store.delete_edge("nope") is False
+
+
+def _wait_for_blocked_delete(store) -> bool:
+    """Poll until a DETACH DELETE transaction is blocked on a lock (20 s cap)."""
+    cypher = (
+        "SHOW TRANSACTIONS YIELD currentQuery, status "
+        "WHERE status STARTS WITH 'Blocked' AND currentQuery CONTAINS 'DETACH DELETE' "
+        "RETURN count(*) AS n"
+    )
+    deadline = time.monotonic() + 20
+    with store._driver.session(database=store._database) as session:
+        while time.monotonic() < deadline:
+            if session.run(cypher).single()["n"]:
+                return True
+            time.sleep(0.005)
+    return False
+
+
+def _rows_left(store, node_id: str) -> dict[str, int]:
+    """Count the rows, any version, each label still holds for a node."""
+    with store._driver.session(database=store._database) as session:
+        return {
+            label: session.run(
+                f"MATCH (x:{label}) WHERE x.{key} = $nid RETURN count(x) AS c",
+                nid=node_id,
+            ).single()["c"]
+            for label, key in (
+                ("Node", "node_id"),
+                ("Alias", "entity_id"),
+                ("AliasClaim", "entity_id"),
+            )
+        }
+
+
+@pytest.mark.parametrize(
+    "write", ["upsert_node", "update_node_if_current", "upsert_alias"]
+)
+def test_delete_node_removes_a_version_written_while_it_waited(
+    graph_store, monkeypatch, write: str
+):
+    # The write's statements run and hold their locks, the purge starts,
+    # and the write commits only once SHOW TRANSACTIONS shows the purge's
+    # DETACH DELETE blocked. The version the write created is invisible to
+    # the statement that waited.
+    import neo4j
+
+    store = graph_store
+    store.upsert_node("n1", "person", {"phase": "1"})
+    store.upsert_alias("n1", "race-sys", f"raw-{write}", raw_name="One")
+    v1 = store.get_node("n1")
+    writes = {
+        "upsert_node": lambda: store.upsert_node("n1", "person", {"phase": "2"}),
+        "update_node_if_current": lambda: store.update_node_if_current(
+            "n1", v1["valid_from"], "person", {"phase": "2"}, node_role="semantic"
+        ),
+        "upsert_alias": lambda: store.upsert_alias(
+            "n1", "race-sys", f"raw-{write}", raw_name="Two"
+        ),
+    }
+    writer = threading.get_ident()
+    original = neo4j.Session.execute_write
+    state: dict[str, Any] = {}
+
+    def purge() -> None:
+        state["deleted"] = store.delete_node("n1")
+
+    def gated(session: Any, transaction_function: Any, *args: Any, **kwargs: Any):
+        if threading.get_ident() != writer:
+            return original(session, transaction_function, *args, **kwargs)
+
+        def held(tx: Any, *a: Any, **k: Any) -> Any:
+            result = transaction_function(tx, *a, **k)
+            if "purge" not in state:
+                state["purge"] = threading.Thread(target=purge)
+                state["purge"].start()
+                state["waited"] = _wait_for_blocked_delete(store)
+            return result
+
+        return original(session, held, *args, **kwargs)
+
+    monkeypatch.setattr(neo4j.Session, "execute_write", gated)
+    writes[write]()
+    assert "purge" in state, "the write never ran a write transaction"
+    state["purge"].join(timeout=30)
+
+    assert state["waited"], "the purge never blocked on the write's lock"
+    assert not state["purge"].is_alive()
+    assert state["deleted"] is True
+    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
 
 
 def test_upsert_and_resolve_alias(graph_store):

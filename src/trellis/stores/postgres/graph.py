@@ -60,6 +60,26 @@ def _alias_lock_key(source_system: str, raw_id: str) -> str:
     return json.dumps([source_system, raw_id], separators=(",", ":"))
 
 
+def _delete_until_none(
+    cur: psycopg.Cursor[Any], sql: str, params: tuple[str, ...]
+) -> int:
+    """Repeat a DELETE until it removes no row; return the rows removed.
+
+    Under READ COMMITTED each statement reads a fresh snapshot. A DELETE
+    that waited on a writer's row lock re-checks only the row it waited
+    for, so a version that writer inserted is invisible to that statement
+    and visible to the next one. The loop ends once the writers already
+    holding those rows have committed: a writer that arrives later blocks
+    on the rows this transaction deleted until it commits.
+    """
+    removed = 0
+    while True:
+        cur.execute(sql, params)
+        if cur.rowcount <= 0:
+            return removed
+        removed += cur.rowcount
+
+
 _CREATE_NODES = """\
 CREATE TABLE IF NOT EXISTS nodes (
     version_id TEXT PRIMARY KEY,
@@ -1303,14 +1323,21 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     # ------------------------------------------------------------------
 
     def delete_node(self, node_id: str) -> bool:
+        # Each DELETE repeats until it removes nothing, so a version written
+        # by a transaction the DELETE waited on is removed too.
         with self._conn() as conn, conn.cursor() as cur:
-            cur.execute(
+            _delete_until_none(
+                cur,
                 "DELETE FROM edges WHERE source_id = %s OR target_id = %s",
                 (node_id, node_id),
             )
-            cur.execute("DELETE FROM entity_aliases WHERE entity_id = %s", (node_id,))
-            cur.execute("DELETE FROM nodes WHERE node_id = %s", (node_id,))
-            deleted = bool(cur.rowcount > 0)
+            _delete_until_none(
+                cur, "DELETE FROM entity_aliases WHERE entity_id = %s", (node_id,)
+            )
+            removed = _delete_until_none(
+                cur, "DELETE FROM nodes WHERE node_id = %s", (node_id,)
+            )
+            deleted = removed > 0
         if deleted:
             logger.debug("node_deleted", node_id=node_id)
         return deleted

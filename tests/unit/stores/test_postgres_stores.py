@@ -9,6 +9,10 @@ All tests are marked with ``@pytest.mark.postgres`` for easy selection.
 
 from __future__ import annotations
 
+import threading
+import time
+from typing import Any
+
 import pytest
 
 from tests.pg_scratch import configured_dsn, require_scratch_database
@@ -192,6 +196,36 @@ class TestPostgresDocumentStore:
 # ======================================================================
 
 
+def _wait_for_lock_wait(dsn: str, table: str) -> bool:
+    """Poll until a ``DELETE FROM <table>`` waits on a lock (20 s cap)."""
+    sql = (
+        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+        " AND wait_event_type = 'Lock' AND query LIKE 'DELETE FROM ' || %s || ' %%'"
+    )
+    deadline = time.monotonic() + 20
+    with psycopg.connect(dsn, autocommit=True) as mon:
+        while time.monotonic() < deadline:
+            row = mon.execute(sql, (table,)).fetchone()
+            if row and row[0]:
+                return True
+            time.sleep(0.005)
+    return False
+
+
+def _rows_left(dsn: str, node_id: str) -> dict[str, int]:
+    """Count the raw rows, any version, each table still holds for a node."""
+    queries = {
+        "nodes": "SELECT count(*) FROM nodes WHERE node_id = %s",
+        "edges": "SELECT count(*) FROM edges WHERE source_id = %s OR target_id = %s",
+        "entity_aliases": "SELECT count(*) FROM entity_aliases WHERE entity_id = %s",
+    }
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        return {
+            table: conn.execute(sql, (node_id,) * sql.count("%s")).fetchone()[0]
+            for table, sql in queries.items()
+        }
+
+
 class TestPostgresGraphStore:
     @pytest.fixture(autouse=True)
     def _setup(self) -> None:
@@ -242,6 +276,69 @@ class TestPostgresGraphStore:
         assert store.delete_node("n1") is True
         assert store.get_node("n1") is None
         assert store.delete_node("n1") is False
+
+    @pytest.mark.parametrize(
+        ("write", "table"),
+        [
+            ("upsert_node", "nodes"),
+            ("update_node_if_current", "nodes"),
+            ("upsert_edge", "edges"),
+            ("upsert_alias", "entity_aliases"),
+        ],
+    )
+    def test_delete_node_removes_a_version_written_while_it_waited(
+        self, store, monkeypatch, write: str, table: str
+    ) -> None:
+        # The write takes its row lock (its ``... FOR UPDATE`` read returns),
+        # the purge starts, and the write commits only once pg_stat_activity
+        # shows the purge's DELETE waiting on that lock. The version the
+        # write inserts is invisible to the DELETE that waited.
+        assert PG_DSN is not None
+        store.upsert_node("n1", "person", {"phase": "1"})
+        store.upsert_node("n2", "person", {})
+        store.upsert_edge("n1", "n2", "knows", {"phase": "1"})
+        store.upsert_alias("n1", "sys", "raw-1", raw_name="One")
+        v1 = store.get_node("n1")
+        writes = {
+            "upsert_node": lambda: store.upsert_node("n1", "person", {"phase": "2"}),
+            "update_node_if_current": lambda: store.update_node_if_current(
+                "n1", v1["valid_from"], "person", {"phase": "2"}, node_role="semantic"
+            ),
+            "upsert_edge": lambda: store.upsert_edge(
+                "n1", "n2", "knows", {"phase": "2"}
+            ),
+            "upsert_alias": lambda: store.upsert_alias(
+                "n1", "sys", "raw-1", raw_name="Two"
+            ),
+        }
+        writer = threading.get_ident()
+        original = psycopg.Cursor.execute
+        state: dict[str, Any] = {}
+
+        def purge() -> None:
+            state["deleted"] = store.delete_node("n1")
+
+        def gated(cur: Any, query: Any, params: Any = None, **kwargs: Any) -> Any:
+            result = original(cur, query, params, **kwargs)
+            if (
+                threading.get_ident() == writer
+                and "purge" not in state
+                and "FOR UPDATE" in str(query)
+            ):
+                state["purge"] = threading.Thread(target=purge)
+                state["purge"].start()
+                state["waited"] = _wait_for_lock_wait(PG_DSN, table)
+            return result
+
+        monkeypatch.setattr(psycopg.Cursor, "execute", gated)
+        writes[write]()
+        assert "purge" in state, "the write never took a FOR UPDATE row lock"
+        state["purge"].join(timeout=30)
+
+        assert state["waited"], f"the purge never waited on the {table} lock"
+        assert not state["purge"].is_alive()
+        assert state["deleted"] is True
+        assert _rows_left(PG_DSN, "n1") == {"nodes": 0, "edges": 0, "entity_aliases": 0}
 
     def test_delete_edge(self, store) -> None:
         store.upsert_node("n1", "person", {})
