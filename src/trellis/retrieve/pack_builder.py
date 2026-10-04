@@ -29,6 +29,14 @@ import structlog
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.base import utc_now
 from trellis.core.hashing import content_hash
+from trellis.core.pack_holdout import (
+    HOLDOUT_ADVISORY_IDS_KEY,
+    HOLDOUT_ITEMS_KEY,
+    HOLDOUT_KEY,
+    HOLDOUT_RATE_KEY,
+    HOLDOUT_SECTIONS_KEY,
+    is_held_out,
+)
 from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.retrieve.concentration import measure_parent_concentration
@@ -454,7 +462,11 @@ class PackBuilder:
         content_floor: ContentFloorConfig | None = None,
         disclosure: DisclosureConfig | None = None,
         project: str | None = None,
+        holdout_rate: float = 0.0,
     ) -> None:
+        if not 0.0 <= holdout_rate <= 1.0:
+            msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
+            raise ValueError(msg)
         self._strategies = strategies or []
         self._event_log = event_log
         self._advisory_store = advisory_store
@@ -505,6 +517,15 @@ class PackBuilder:
         #: Project stamped on every ``PACK_ASSEMBLED`` payload: per process,
         #: not per request, and ``None`` (never absent) when unknown.
         self._project = project
+        #: Share of packs withheld for the pack-effect measurement
+        #: (:mod:`trellis.core.pack_holdout`). ``0.0`` withholds nothing;
+        #: the factory reads it from ``TRELLIS_PACK_HOLDOUT_RATE`` per build.
+        self._holdout_rate = holdout_rate
+
+    @property
+    def holdout_rate(self) -> float:
+        """The share of packs this builder withholds, in ``[0.0, 1.0]``."""
+        return self._holdout_rate
 
     def add_strategy(self, strategy: SearchStrategy) -> None:
         """Add a search strategy."""
@@ -524,7 +545,7 @@ class PackBuilder:
         """
         return [strategy.name for strategy in self._strategies]
 
-    def build(  # noqa: PLR0915
+    def build(  # noqa: PLR0912, PLR0915
         self,
         intent: str,
         *,
@@ -635,6 +656,13 @@ class PackBuilder:
         dedup; ``refresh=True`` remains the re-injection escape hatch.
         The payload carries ``index_mode`` so analyzers can tell the two
         serve shapes apart.
+
+        With a ``holdout_rate`` above zero the assembled pack is drawn for
+        the pack-effect holdout (:func:`~trellis.core.pack_holdout.is_held_out`
+        on its ``pack_id``). A withheld pack is returned empty, in the
+        normal shape and with nothing that names the holdout, and its
+        would-be items are recorded under ``holdout_items`` instead of
+        ``injected_items``; :meth:`build_sectioned` does the same per pack.
         """
         budget = budget or PackBudget()
         all_items: list[PackItem] = []
@@ -864,6 +892,25 @@ class PackBuilder:
             metadata={"withholding": withholding.as_telemetry()},
         )
 
+        telemetry: dict[str, Any] = {
+            "meta_filtered_count": meta_filtered_count,
+            "content_floor": floor_result.as_telemetry(),
+            "disclosure": disclosure_result.as_telemetry(),
+            "parent_concentration": concentration.as_telemetry(),
+            "withholding": withholding.as_telemetry(),
+            "advisories_matched": advisories_matched,
+            "advisories_explored": advisories_explored,
+        }
+        # The pack-effect holdout (:mod:`trellis.core.pack_holdout`), drawn
+        # once the pack id exists and the would-be pack is known. A withheld
+        # caller receives an ordinary empty pack: blind, so nothing in the
+        # response names the holdout, and the would-be pack is recorded
+        # apart from the served one in PACK_ASSEMBLED.
+        withheld_from: Pack | None = None
+        if is_held_out(pack.pack_id, self._holdout_rate):
+            withheld_from, pack = pack, self._withhold_flat(pack)
+            telemetry = self._withheld_flat_telemetry(index_mode=index_mode)
+
         # Optional assembly-time quality evaluation (fail-soft).
         self._attach_quality_report(pack)
 
@@ -872,14 +919,9 @@ class PackBuilder:
             self._emit_telemetry(
                 pack,
                 strategy_failures=strategy_failures,
-                meta_filtered_count=meta_filtered_count,
-                content_floor=floor_result.as_telemetry(),
-                disclosure=disclosure_result.as_telemetry(),
-                parent_concentration=concentration.as_telemetry(),
-                withholding=withholding.as_telemetry(),
                 index_mode=index_mode,
-                advisories_matched=advisories_matched,
-                advisories_explored=advisories_explored,
+                withheld_from=withheld_from,
+                **telemetry,
             )
 
         return pack
@@ -1193,20 +1235,119 @@ class PackBuilder:
             metadata={"withholding": withholding.as_telemetry()},
         )
 
+        telemetry: dict[str, Any] = {
+            "meta_filtered_count": meta_filtered_count,
+            "semantic_dedup_rejected_count": semantic_dedup_rejected_count,
+            "content_floor": floor_result.as_telemetry(),
+            "withholding": withholding.as_telemetry(),
+            "advisories_matched": advisories_matched,
+            "advisories_explored": advisories_explored,
+        }
+        # The pack-effect holdout, drawn as in :meth:`build`: the whole
+        # sectioned pack is withheld or none of it.
+        withheld_from: SectionedPack | None = None
+        if is_held_out(sectioned_pack.pack_id, self._holdout_rate):
+            withheld_from = sectioned_pack
+            sectioned_pack = self._withhold_sectioned(sectioned_pack)
+            telemetry = self._withheld_sectioned_telemetry()
+
         # 5. Emit telemetry
         if self._event_log is not None:
             self._emit_sectioned_telemetry(
                 sectioned_pack,
                 strategy_failures=strategy_failures,
-                meta_filtered_count=meta_filtered_count,
-                semantic_dedup_rejected_count=semantic_dedup_rejected_count,
-                content_floor=floor_result.as_telemetry(),
-                withholding=withholding.as_telemetry(),
-                advisories_matched=advisories_matched,
-                advisories_explored=advisories_explored,
+                withheld_from=withheld_from,
+                **telemetry,
             )
 
         return sectioned_pack
+
+    @staticmethod
+    def _withhold_flat(pack: Pack) -> Pack:
+        """The pack a withheld caller receives: the same pack, emptied.
+
+        Identity and request fields stay (``pack_id``, intent, budget,
+        session, run, intent family). Items and advisories go, and the
+        report and withholding summary are the ones a build that found
+        nothing carries, so the response reads like any greenfield pack.
+        """
+        report = pack.retrieval_report
+        return pack.model_copy(
+            update={
+                "items": [],
+                "advisories": [],
+                "retrieval_report": RetrievalReport(
+                    queries_run=report.queries_run,
+                    duration_ms=report.duration_ms,
+                    strategies_used=list(report.strategies_used),
+                ),
+                "metadata": {"withholding": summarize_withheld([], []).as_telemetry()},
+            }
+        )
+
+    @staticmethod
+    def _withhold_sectioned(pack: SectionedPack) -> SectionedPack:
+        """The sectioned pack a withheld caller receives: every section empty.
+
+        Section names and budgets stay, because the request fixed them;
+        each section's report is the one an empty section carries.
+        """
+        return pack.model_copy(
+            update={
+                "sections": [
+                    PackSection(
+                        name=section.name,
+                        retrieval_report=RetrievalReport(
+                            queries_run=section.retrieval_report.queries_run,
+                            strategies_used=list(
+                                section.retrieval_report.strategies_used
+                            ),
+                        ),
+                        budget=section.budget,
+                    )
+                    for section in pack.sections
+                ],
+                "advisories": [],
+                "metadata": {"withholding": summarize_withheld([], []).as_telemetry()},
+            }
+        )
+
+    def _withheld_flat_telemetry(self, *, index_mode: bool) -> dict[str, Any]:
+        """Telemetry blocks for the empty pack a withheld caller received.
+
+        Each is what this builder computes over an empty item list, so a
+        withheld row's standard keys read as a greenfield pack's; the
+        would-be pack rides the ``holdout_*`` keys instead.
+        """
+        disclosure = apply_disclosure(
+            [], DISCLOSURE_OFF if index_mode else self._disclosure
+        )
+        return {
+            "meta_filtered_count": 0,
+            "content_floor": apply_content_floor(
+                [], self._content_floor
+            ).as_telemetry(),
+            "disclosure": disclosure.as_telemetry(),
+            "parent_concentration": measure_parent_concentration(
+                [], pointer_item_ids=frozenset()
+            ).as_telemetry(),
+            "withholding": summarize_withheld([], []).as_telemetry(),
+            "advisories_matched": 0,
+            "advisories_explored": [],
+        }
+
+    def _withheld_sectioned_telemetry(self) -> dict[str, Any]:
+        """The sectioned counterpart of :meth:`_withheld_flat_telemetry`."""
+        return {
+            "meta_filtered_count": 0,
+            "semantic_dedup_rejected_count": 0,
+            "content_floor": apply_content_floor(
+                [], self._content_floor
+            ).as_telemetry(),
+            "withholding": summarize_withheld([], []).as_telemetry(),
+            "advisories_matched": 0,
+            "advisories_explored": [],
+        }
 
     def _emit_sectioned_telemetry(
         self,
@@ -1219,8 +1360,14 @@ class PackBuilder:
         withholding: dict[str, Any] | None = None,
         advisories_matched: int | None = None,
         advisories_explored: list[str] | None = None,
+        withheld_from: SectionedPack | None = None,
     ) -> None:
         """Emit telemetry event for a sectioned pack.
+
+        ``holdout`` / ``holdout_rate`` and, on a withheld pack's row,
+        ``holdout_sections`` / ``holdout_advisory_ids`` follow the flat
+        path (see :meth:`_emit_telemetry`); ``holdout_sections`` rows have
+        the shape of ``sections``.
 
         ``semantic_dedup_rejected_count`` (#259) mirrors the flat path's
         ``semantic_dedup_rejected`` payload field so near-duplicate
@@ -1249,6 +1396,15 @@ class PackBuilder:
             ],
             per_item_estimates=per_item_estimates,
         )
+        holdout: dict[str, Any] = {
+            HOLDOUT_KEY: withheld_from is not None,
+            HOLDOUT_RATE_KEY: self._holdout_rate,
+        }
+        if withheld_from is not None:
+            holdout[HOLDOUT_SECTIONS_KEY] = self._section_rows(withheld_from.sections)
+            holdout[HOLDOUT_ADVISORY_IDS_KEY] = [
+                a.advisory_id for a in withheld_from.advisories
+            ]
         self._event_log.emit(  # type: ignore[union-attr]
             EventType.PACK_ASSEMBLED,
             source="pack_builder",
@@ -1278,17 +1434,7 @@ class PackBuilder:
                     for section in pack.sections
                     for item in section.items
                 },
-                "sections": [
-                    {
-                        "name": s.name,
-                        "items_count": len(s.items),
-                        "item_ids": [i.item_id for i in s.items],
-                        "injected_advisory_ids": [
-                            list(i.injected_advisory_ids) for i in s.items
-                        ],
-                    }
-                    for s in pack.sections
-                ],
+                "sections": self._section_rows(pack.sections),
                 "advisory_ids": [a.advisory_id for a in pack.advisories],
                 "advisories_matched": (
                     len(pack.advisories)
@@ -1309,9 +1455,25 @@ class PackBuilder:
                     sf.to_event_payload() for sf in (strategy_failures or [])
                 ],
                 "meta_filtered_count": meta_filtered_count,
+                **holdout,
                 **token_budget_fields,
             },
         )
+
+    @staticmethod
+    def _section_rows(sections: Iterable[PackSection]) -> list[dict[str, Any]]:
+        """Per-section ``PACK_ASSEMBLED`` rows: name, count and item ids."""
+        return [
+            {
+                "name": s.name,
+                "items_count": len(s.items),
+                "item_ids": [i.item_id for i in s.items],
+                "injected_advisory_ids": [
+                    list(i.injected_advisory_ids) for i in s.items
+                ],
+            }
+            for s in sections
+        ]
 
     def _attach_quality_report(self, pack: Pack) -> None:
         """Run the optional evaluator and attach its report to the pack.
@@ -1388,8 +1550,19 @@ class PackBuilder:
         index_mode: bool = False,
         advisories_matched: int | None = None,
         advisories_explored: list[str] | None = None,
+        withheld_from: Pack | None = None,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
+
+        ``holdout`` and ``holdout_rate`` ride every row: whether the
+        pack-effect holdout withheld this pack, and the rate in force
+        (:mod:`trellis.core.pack_holdout`), so a row from a build without
+        the flag reads apart from a served one. ``pack`` is what the caller
+        received, so a withheld row's standard keys describe an empty pack
+        and ``injected_items`` is empty: no reader counts a withheld item
+        as served. ``withheld_from``, the pack as built, is recorded under
+        ``holdout_items`` (rows shaped like ``injected_items``) and
+        ``holdout_advisory_ids``.
 
         ``strategy_failures`` (C2 Phase 4) records each strategy that
         raised during this build but did not block assembly because a
@@ -1471,6 +1644,15 @@ class PackBuilder:
                 b.item_tokens for b in report.budget_trace if b.included
             ],
         )
+        holdout: dict[str, Any] = {
+            HOLDOUT_KEY: withheld_from is not None,
+            HOLDOUT_RATE_KEY: self._holdout_rate,
+        }
+        if withheld_from is not None:
+            holdout[HOLDOUT_ITEMS_KEY] = self._injected_item_rows(withheld_from.items)
+            holdout[HOLDOUT_ADVISORY_IDS_KEY] = [
+                a.advisory_id for a in withheld_from.advisories
+            ]
         self._event_log.emit(  # type: ignore[union-attr]
             EventType.PACK_ASSEMBLED,
             source="pack_builder",
@@ -1497,22 +1679,7 @@ class PackBuilder:
                     item.item_id: content_hash(item.excerpt or "")
                     for item in pack.items
                 },
-                "injected_items": [
-                    {
-                        "item_id": item.item_id,
-                        "item_type": item.item_type,
-                        "rank": item.rank,
-                        "selection_reason": item.selection_reason,
-                        "score_breakdown": item.score_breakdown,
-                        "estimated_tokens": item.estimated_tokens,
-                        "strategy_source": item.strategy_source,
-                        "injected_advisory_ids": list(item.injected_advisory_ids),
-                        # title / category / domain_system for the learning
-                        # join — see :func:`_item_attribution`.
-                        **_item_attribution(item),
-                    }
-                    for item in pack.items
-                ],
+                "injected_items": self._injected_item_rows(pack.items),
                 "strategies_used": report.strategies_used,
                 "candidates_found": report.candidates_found,
                 "budget_max_items": pack.budget.max_items,
@@ -1561,9 +1728,30 @@ class PackBuilder:
                 ],
                 "meta_filtered_count": meta_filtered_count,
                 "index_mode": index_mode,
+                **holdout,
                 **token_budget_fields,
             },
         )
+
+    @staticmethod
+    def _injected_item_rows(items: Iterable[PackItem]) -> list[dict[str, Any]]:
+        """Per-item ``PACK_ASSEMBLED`` rows, the shape the learning join reads."""
+        return [
+            {
+                "item_id": item.item_id,
+                "item_type": item.item_type,
+                "rank": item.rank,
+                "selection_reason": item.selection_reason,
+                "score_breakdown": item.score_breakdown,
+                "estimated_tokens": item.estimated_tokens,
+                "strategy_source": item.strategy_source,
+                "injected_advisory_ids": list(item.injected_advisory_ids),
+                # title / category / domain_system for the learning
+                # join — see :func:`_item_attribution`.
+                **_item_attribution(item),
+            }
+            for item in items
+        ]
 
     def _build_token_budget_payload(
         self,

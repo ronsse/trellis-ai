@@ -63,6 +63,7 @@ def format_pack_as_markdown(
     *,
     pack_id: str | None = None,
     withholding: WithholdingSummary | None = None,
+    empty_text: str | None = None,
 ) -> str:
     """Format pack items as concise markdown for LLM consumption.
 
@@ -93,6 +94,9 @@ def format_pack_as_markdown(
         pack_id: Optional pack identifier to surface for citation.
         withholding: What the builder removed and did not serve. Counts and
             reasons only — see :mod:`trellis.retrieve.withholding`.
+        empty_text: Line rendered in place of the item blocks when
+            ``items`` is empty, so an empty pack keeps its ``pack_id``
+            header and citation footer.
 
     Returns:
         Markdown-formatted string within token budget.
@@ -104,6 +108,8 @@ def format_pack_as_markdown(
     if note:
         lines.append(note)
     lines.append("")
+    if not items and empty_text:
+        lines.append(empty_text)
     token_budget = max_tokens - _estimate_tokens(lines[0]) - 10  # reserve overhead
     used = 0
     included = 0
@@ -235,6 +241,7 @@ def format_pack_as_index_markdown(
     *,
     pack_id: str | None = None,
     withholding: WithholdingSummary | None = None,
+    empty_text: str | None = None,
 ) -> str:
     """Format pack items as an id index — one line per item, no bodies.
 
@@ -258,6 +265,7 @@ def format_pack_as_index_markdown(
         withholding: What the builder removed and did not serve. An index
             pack is all pointers, so the distinction it draws — served but
             demoted vs. withheld entirely — matters here most.
+        empty_text: As in :func:`format_pack_as_markdown`.
 
     Returns:
         Markdown-formatted index within token budget.
@@ -269,6 +277,8 @@ def format_pack_as_index_markdown(
     if note:
         lines.append(note)
     lines.append("")
+    if not items and empty_text:
+        lines.append(empty_text)
     token_budget = max_tokens - index_render_overhead_tokens(intent)
     used = 0
     rendered: list[str] = []

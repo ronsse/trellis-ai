@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 import structlog
 
+from trellis.core.write_config import WriteBehaviourConfig
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.rerankers import build_reranker
@@ -56,6 +57,9 @@ SEMANTIC_AXIS = "semantic"
 #: make ``trellis admin write-config`` report something it does not
 #: govern. Same reasoning, and the same shape, as
 #: ``TRELLIS_CAPTURE_WARN_THRESHOLD`` in :mod:`trellis.ops.capture_health`.
+#: The one read-side exception is ``TRELLIS_PACK_HOLDOUT_RATE``, which
+#: lives there because the pack-effect measurement needs the rate in force
+#: stamped into write provenance on every ``PACK_ASSEMBLED`` row.
 #:
 #: It defaults **on** because the alternative is an opt-in nobody opts
 #: into, which leaves #375's defect — an axis that never consults the
@@ -116,6 +120,9 @@ def build_pack_builder(
         # Jaccard per the config's guidance table.
         semantic_dedup=SemanticDedupConfig(),
         project=project,
+        # The pack-effect holdout (``TRELLIS_PACK_HOLDOUT_RATE``), read per
+        # build like every surface's builder, so no surface escapes it.
+        holdout_rate=WriteBehaviourConfig.from_env().pack_holdout_rate,
     )
 
 

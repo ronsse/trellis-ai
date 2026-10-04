@@ -23,6 +23,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.core.pack_holdout import drop_holdout
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventType,
@@ -125,7 +126,9 @@ def analyze_pack_telemetry(  # noqa: PLR0915
         since=since,
         limit=limit,
     )
-    events = scan.events
+    # A withheld pack served nothing and records no rejections: counted, it
+    # would dilute every per-pack rate below.
+    events = drop_holdout(scan.events, ())[0]
 
     total_packs = len(events)
     total_injected = 0

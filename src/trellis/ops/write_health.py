@@ -46,6 +46,7 @@ import structlog
 from pydantic import BaseModel, Field, ValidationError
 
 from trellis.core.base import TrellisModel
+from trellis.core.pack_holdout import drop_holdout
 from trellis.feedback.attribution import (
     StrayCitationTally,
     payload_is_attributed,
@@ -880,7 +881,13 @@ def summarize_serve_attribution(
     pack_scan = scan_events(
         event_log, event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
     )
-    for event in pack_scan.events:
+    feedback_scan = scan_events(
+        event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
+    )
+    # The served arm only: a withheld pack carries no injected items, and
+    # it and the feedback naming it would read as a capture regression.
+    pack_events, feedback_events = drop_holdout(pack_scan.events, feedback_scan.events)
+    for event in pack_events:
         packs += 1
         if event.payload.get("injected_items"):
             packs_with_items += 1
@@ -896,10 +903,7 @@ def summarize_serve_attribution(
     feedback = attributed = 0
     pack_targeted = pack_targeted_attributed = 0
     strays = StrayCitationTally()
-    feedback_scan = scan_events(
-        event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
-    )
-    for event in feedback_scan.events:
+    for event in feedback_events:
         feedback += 1
         # Both predicates come from ``trellis.feedback.attribution`` so the
         # health surface and the MCP boundary cannot drift on what
