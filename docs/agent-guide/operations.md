@@ -1874,6 +1874,62 @@ judgment; `gate_readings` lists every looser reading, so `fails_strict_reading`
 means a looser count would have passed. When a scan truncates, rows older than
 the evidence start are dropped and rates use the covered window.
 
+### `trellis analyze holdout`
+
+Read-only analysis of the pack holdout experiment (`TRELLIS_PACK_HOLDOUT_RATE`,
+see the [`PACK_ASSEMBLED` payload](#pack_assembled-event-payload)). It reads `PACK_ASSEMBLED`,
+`capture.session_packs` and `capture.sweep_completed` and writes nothing, not
+even a meta-trace.
+
+```bash
+trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--itt] \
+    [--permutations N] [--bootstraps N] [--power-sims N] [--planned-mde X] \
+    [--planned-n N] [--settle-hours H] [--seed N] [--limit N] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--days` | `60` | Window length; a task belongs to the window by its first pack |
+| `--until` | now | Window end, ISO-8601 (naive is UTC) |
+| `--rate` | the single rate present | The `holdout_rate` to analyse; several rates in the window without it exit `2` |
+| `--outcome` | `log1p_turns` | `log1p_turns`, `prs_created`, `log1p_tokens`, `commits`, or the guardrails `log1p_commits` and `any_commit` |
+| `--itt` | off | Keep usage-limit cut-offs (the first sensitivity analysis) |
+| `--permutations` | `10000` | Within-stratum permutations for the two-sided p-value |
+| `--bootstraps` | `4000` | Stratified bootstrap replicates for the 95% CI |
+| `--power-sims` | `600` | Simulated experiments per power estimate |
+| `--planned-mde` | `0.33` | Planned MDE in outcome units (the pre-registration's) |
+| `--planned-n` | `114` | Planned analysed tasks (the pre-registration's) |
+| `--settle-hours` | `3` | Hours a completed capture sweep must follow a task's latest join before the task counts as finished |
+| `--seed` | `20261004` | Seed for every random draw, so a report reproduces |
+| `--limit` | `5000` | Max events scanned per event type |
+
+A unit is a finished sub-agent task (its join names a parent session) whose
+first pack is non-empty in its own arm's terms: a withheld row's
+`holdout_items` or `holdout_sections` count. Its arm is that first pack's
+`holdout` (ITT), and tasks with calls in both arms are counted. The funnel
+counts every join that is not a unit, by reason, including first packs from
+builds that write no `holdout` key.
+
+The statistic is the stratum-weighted difference in mean outcome, served minus
+withheld, with weights `n1*n0/(n1+n0)` over strata of parent session x ISO
+week; a stratum holding one arm carries zero weight and is counted. The
+p-value comes from permuting arm labels within strata, the 95% CI from a
+bootstrap that resamples tasks within each stratum, and power from re-running
+the simulation on the analysed outcomes at the realised N. A non-significant
+result reads "no effect larger than the MDE detected", never "no effect".
+
+The descriptive block is reported whatever the flag state: eligible tasks per
+30 days, the outcome's within-parent SD, packs per task, cut-off share by arm,
+between-parent variance share, PR base rate, arm counts and binomial checks of
+the arm ratio (overall and per ISO week; the pre-registration pauses below
+p 0.001). Run with the flag off, it is the pre-registration's re-measure and
+the inference reads "no withheld arm". Two pre-registered quantities need
+fields capture does not record, so the report says so instead of guessing: the
+pre-treatment exclusion (a first retrieval after a commit or a stop-hook
+nudge) is not applied, and the post-hoc share is `null`. Output is counts and
+statistics only, never an id, intent or text. Exit `0` on any report, `2` on
+an invalid option or an unnamed choice between rates, in both formats.
+
 ### `trellis analyze domains`
 
 Read-only usage report for the primary retrieval slice, `domain`. Joins observed

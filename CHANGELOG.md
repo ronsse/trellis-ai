@@ -165,6 +165,23 @@ All notable changes to Trellis will be documented in this file.
   drop withheld packs and the feedback naming them. While the rate is above
   `0`, an empty flat MCP pack renders with its `pack_id` header. At `0`
   nothing an agent sees changes. New module `trellis.core.pack_holdout`.
+- **`trellis analyze holdout` reads the pack holdout experiment.** A
+  read-only command over `PACK_ASSEMBLED` and the capture joins and sweeps;
+  it writes nothing. One unit per finished sub-agent task whose first pack
+  is non-empty, a withheld row's would-be items included, and its arm is
+  that first pack's `holdout` (ITT). Rows from builds without `holdout` are
+  counted and left out, and several rates in the window are refused until
+  `--rate` names one. Usage-limit cut-offs are excluded unless `--itt`; the
+  pre-treatment exclusion is reported as not applied, because capture does
+  not record where the first retrieval fell. The statistic is the
+  stratum-weighted difference, served minus withheld (weights `n1*n0/n`,
+  strata parent session x ISO week), of `log1p(assistant_turns)` or another
+  `--outcome`, with a within-stratum permutation p-value, a stratified
+  bootstrap CI and achieved against planned power (`--planned-mde`,
+  `--planned-n`). A descriptive block, the pre-registration's re-measure, is
+  reported whatever the flag state, and without a withheld arm the
+  inference reads "no withheld arm". Counts and statistics only. New module
+  `trellis.analyze.holdout`.
 
 ### Changed
 
