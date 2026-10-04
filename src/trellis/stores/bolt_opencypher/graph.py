@@ -355,14 +355,15 @@ _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
 
 def _detach_delete_until_none(tx: ManagedTransaction, cypher: str, nid: str) -> int:
     """Repeat a ``... DETACH DELETE x RETURN count(x) AS deleted`` statement
-    until it removes no row; return the rows removed.
+    until it matches no row; return the total of the counts it reported.
 
     Neo4j reads at READ COMMITTED and takes write locks: a DETACH DELETE
     that waited on a writer's lock matched its rows before the wait, so a
     version that writer created is invisible to that statement and visible
-    to the next one. ArcadeDB never waits (the conflicting commit fails and
-    the driver re-runs the whole transaction function), so there the
-    repeat finds nothing.
+    to the next one. A statement's count also includes a row that a
+    concurrent purge removed while it waited. ArcadeDB never waits (the
+    conflicting commit fails and the driver re-runs the whole transaction
+    function), so there the repeat finds nothing.
     """
     removed = 0
     while True:

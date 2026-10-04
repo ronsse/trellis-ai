@@ -591,15 +591,13 @@ All notable changes to Trellis will be documented in this file.
   on Postgres and Neo4j.** A purge whose delete waited on a concurrent
   write's lock missed the version that write added, so the node, one of its
   edges or one of its aliases kept a current version while `delete_node`
-  returned `True`. Before this fix it happened in 20 of 20 runs for each of
-  `upsert_node`, `update_node_if_current`, `upsert_edge` and `upsert_alias`
-  on Postgres, and for the node and alias writes on Neo4j, where an edge
-  goes with its node. Each delete now repeats inside the same transaction
+  returned `True`. Each delete now repeats inside the same transaction
   until it removes nothing. ArcadeDB was not affected: the purge's commit
   conflicts with the write, and the driver re-runs the purge. A new edge or
   alias row whose writer touched nothing the purge holds can still commit
-  after the purge's last delete, and a write after the purge still
-  re-creates the node.
+  after the purge's last delete, and a writer that still calls
+  `upsert_node` after the purge re-creates the node (the handlers that
+  write through `update_node_if_current` refuse a purged node).
   ([#699](https://github.com/ronsse/trellis-ai/pull/699))
 
 ## [0.9.0] - 2026-05-13

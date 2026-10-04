@@ -68,9 +68,11 @@ def _delete_until_none(
     Under READ COMMITTED each statement reads a fresh snapshot. A DELETE
     that waited on a writer's row lock re-checks only the row it waited
     for, so a version that writer inserted is invisible to that statement
-    and visible to the next one. The loop ends once the writers already
-    holding those rows have committed: a writer that arrives later blocks
-    on the rows this transaction deleted until it commits.
+    and visible to the next one. The loop ends at the first statement that
+    finds no row: a writer that locks the newest version before the next
+    statement reaches it adds one more, so sustained writers lengthen the
+    loop, while a writer that reaches a row this transaction deleted waits
+    for it to commit.
     """
     removed = 0
     while True:
