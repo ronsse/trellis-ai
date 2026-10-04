@@ -1,12 +1,9 @@
 """The trace detail links an evidence ref only to a view that can show it.
 
-An ``EvidenceRef`` holds ``evidence_id`` and ``role``. The trace detail read
-``item_id`` or ``entity_id`` from it, found neither, and linked every ref to
-``/entities/`` followed by the ref as JSON, which answered 404. Nor is the
-evidence id a node id: the node is ``evidence:<id>``, and only trace
-extraction writes it. ``GET /traces/{trace_id}`` now names in
-``evidence_links`` what can show each ref, and the page links there or shows
-the evidence id as text.
+An ``EvidenceRef`` holds ``evidence_id`` and ``role``, and the evidence id is
+not a node id: the node is ``evidence:<id>``, and only trace extraction writes
+it. ``GET /traces/{trace_id}`` names in ``evidence_links`` what can show each
+ref, and the page links there or shows the evidence id as text.
 """
 
 from __future__ import annotations
@@ -30,8 +27,9 @@ def _evidence_section(page: str) -> str:
 def test_an_evidence_ref_links_only_to_a_target_the_api_named() -> None:
     section = _evidence_section(INDEX_HTML.read_text(encoding="utf-8"))
     assert "JSON.stringify" not in section
-    # The page reads the key the route writes.
-    assert "data.evidence_links" in section
+    # The page reads the key the route writes, which is null when the route
+    # could not read the knowledge stores.
+    assert "const links = data.evidence_links || {};" in section
     # Each link renders under its own target's guard and carries that id.
     links = re.findall(
         r"if \((link\.\w+)\) \{\s*entry = `[^`]*"

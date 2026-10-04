@@ -616,6 +616,55 @@ def test_get_trace_names_what_can_show_each_evidence_ref(client, monkeypatch):
     }
 
 
+def test_get_trace_links_no_evidence_ref_with_an_empty_id(client, monkeypatch):
+    """Extraction writes ``evidence:`` from an empty ref, one node for all such refs."""
+    monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+    trace = _make_trace(intent="cite an empty ref")
+    trace["evidence_used"] = [{"evidence_id": ""}]
+    resp = client.post("/api/v1/traces", json=trace)
+    assert resp.status_code == 200
+    trace_id = resp.json()["trace_id"]
+    graph = app_module._registry.knowledge.graph_store
+    assert graph.get_node("evidence:") is not None
+
+    resp = client.get(f"/api/v1/traces/{trace_id}")
+    assert resp.status_code == 200
+    assert resp.json()["evidence_links"] == {}
+
+
+def test_get_trace_serves_the_trace_when_its_evidence_links_cannot_be_read(
+    client, monkeypatch
+):
+    """A knowledge store that cannot answer costs the links, not the trace."""
+    trace = _make_trace(intent="cite evidence")
+    trace["evidence_used"] = [{"evidence_id": "syn-ev-doc-01"}]
+    resp = client.post("/api/v1/traces", json=trace)
+    assert resp.status_code == 200
+    trace_id = resp.json()["trace_id"]
+
+    message = "disk I/O error"
+
+    def unreadable(doc_id: str) -> None:
+        raise sqlite3.OperationalError(message)
+
+    documents = app_module._registry.knowledge.document_store
+    monkeypatch.setattr(documents, "get", unreadable)
+    with capture_logs() as logs:
+        resp = client.get(f"/api/v1/traces/{trace_id}")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["trace"]["trace_id"] == trace_id
+    # null, not {}: the links are unknown, not absent.
+    assert body["evidence_links"] is None
+    entry = next(
+        (e for e in logs if e.get("event") == "trace_evidence_links_failed"), None
+    )
+    assert entry is not None, logs
+    assert entry["log_level"] == "warning", entry
+    assert entry["trace_id"] == trace_id
+
+
 def test_create_entity(client):
     resp = client.post(
         "/api/v1/entities",

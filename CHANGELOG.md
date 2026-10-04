@@ -701,7 +701,8 @@ All notable changes to Trellis will be documented in this file.
   trace extraction writes. The entry opens that document in Memories or
   that node in Graph. A ref with neither, as when nothing ingested its
   evidence and trace extraction is off (the default), shows its evidence id
-  as text.
+  as text. A knowledge store that cannot be read costs the links, not the
+  trace: `evidence_links` is then `null`.
   ([#706](https://github.com/ronsse/trellis-ai/pull/706))
 
 ## [0.9.0] - 2026-05-13

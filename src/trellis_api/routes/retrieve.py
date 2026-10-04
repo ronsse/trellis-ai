@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import ValidationError
 
@@ -20,6 +21,8 @@ from trellis_wire.dtos import (
     SectionedPackRequest,
     SectionedPackResponse,
 )
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -417,15 +420,31 @@ def list_traces(
 
 @router.get("/traces/{trace_id}")
 def get_trace(trace_id: str) -> dict[str, Any]:
-    """Get a trace and what can show each of its evidence refs."""
+    """Get a trace and what can show each of its evidence refs.
+
+    ``evidence_links`` maps an ``evidence_id`` to ``{"document_id": ...}``
+    when a document holds that evidence record, else to
+    ``{"entity_id": "evidence:<id>"}`` when that graph node exists. A ref with
+    neither, or with an empty ``evidence_id``, has no entry.
+    ``evidence_links`` is ``null`` when the knowledge stores cannot be read.
+    """
     registry = get_registry()
     trace = registry.operational.trace_store.get(trace_id)
     if trace is None:
         raise HTTPException(status_code=404, detail=f"Trace not found: {trace_id}")
+    links: dict[str, dict[str, str]] | None
+    try:
+        links = _evidence_links(registry, trace)
+    # GRACEFUL-DEGRADATION: the links only point at views of the evidence. A
+    # knowledge store that cannot answer costs the links, never the trace,
+    # which lives in the operational plane.
+    except Exception:
+        logger.warning("trace_evidence_links_failed", trace_id=trace_id, exc_info=True)
+        links = None
     return {
         "status": "ok",
         "trace": trace.model_dump(mode="json"),
-        "evidence_links": _evidence_links(registry, trace),
+        "evidence_links": links,
     }
 
 
@@ -435,12 +454,16 @@ def _evidence_links(registry: Any, trace: Trace) -> dict[str, dict[str, str]]:
     The evidence writers (``POST /evidence``, ``trellis ingest evidence``, the
     demo) store each record as a document under its ``evidence_id``. Failing
     a document, trace extraction, when it ran, wrote an ``evidence:<id>``
-    graph node. A ref with neither has no entry.
+    graph node. A ref with neither has no entry, nor does one with an empty
+    ``evidence_id``: it names no record, and extraction pools every such ref
+    into the one node ``evidence:``.
     """
     documents = registry.knowledge.document_store
     graph = registry.knowledge.graph_store
     links: dict[str, dict[str, str]] = {}
     for ref in trace.evidence_used:
+        if not ref.evidence_id:
+            continue
         node_id = f"evidence:{ref.evidence_id}"
         if documents.get(ref.evidence_id) is not None:
             links[ref.evidence_id] = {"document_id": ref.evidence_id}
