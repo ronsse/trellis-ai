@@ -653,16 +653,27 @@ All notable changes to Trellis will be documented in this file.
   handlers took their id through inline JavaScript: Review's Approve,
   Reject, Confirm approve, Draft ADR, Copy and Download, the Traces,
   Memories, Events and Packs rows, the trace detail's evidence links, the
-  Precedents entity link and Inspect pack. `escHtml` escapes `&`, `<` and
+  Precedents entity link and Inspect pack. `escHtml` escaped `&`, `<` and
   `>` but not quotes, and the browser decodes an attribute before it runs
   an inline handler, so an agent-written trace, document or entity id
   containing `'` ran as script on a click, and one containing `"` added
   its own handler to the element. A template now names the function in
   `data-action` and carries the id in `data-id`, and one listener makes
-  the call. Other attributes that interpolate an id, such as the Memories
-  and Events rows' `title`, still use `escHtml`, so a `"` there can still
-  add a hover handler.
+  the call. `escHtml` now encodes quotes as well (next entry), so a `"`
+  cannot end any other attribute that interpolates an id, such as the
+  Memories and Events rows' `title`.
   ([#700](https://github.com/ronsse/trellis-ai/pull/700))
+- **A `"` in an agent-written value no longer adds attributes on the UI
+  page.** `escHtml` encoded `&`, `<` and `>` but not quotes, and 27
+  attributes, among them the table cells' `title`, the Review page's
+  element ids and the filter options' `value`, took its output between
+  double quotes. A `"` in an id, intent, domain, tag or document text
+  ended the attribute and the rest of the value became attributes of its
+  own, such as an `onmouseover` handler that ran as script on hover.
+  `escHtml` now encodes `"` and `'`, and every attribute value read from
+  the API goes through it. The graph search results now cut an id before
+  escaping it, so the cut no longer splits an entity.
+  ([#703](https://github.com/ronsse/trellis-ai/pull/703))
 
 - **A Postgres purge that cannot finish fails the redaction instead of
   escaping as a database error.** When PostgreSQL aborted a `delete_node`

@@ -1825,17 +1825,15 @@
             return new Date(iso).toLocaleString();
         }
 
+        // Encodes & < > and both quotes: between tags the text stays text, and
+        // inside a quoted attribute a quote cannot end the attribute. An onclick
+        // decodes it first, so ids go through data-id (below). Cut a value
+        // before escaping it; a cut after can split an entity.
         function escHtml(s) {
             if (s == null) return '';
             const d = document.createElement('div');
             d.textContent = String(s);
-            return d.innerHTML;
-        }
-
-        // escHtml leaves quotes as they are, so inside an attribute value a
-        // quote in the text would end the attribute. Use escAttr there.
-        function escAttr(s) {
-            return escHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+            return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
         // An id can be agent-written (entity, document and trace ids are), so
@@ -2249,8 +2247,8 @@
                         <div class="review-kv">baseline: ${escHtml(JSON.stringify(p.baseline_values))}</div>
                         <div class="review-predict" id="predict-${escHtml(p.proposal_id)}" style="display:none"></div>
                         <div class="review-actions">
-                            <button class="btn btn-sm" data-action="confirmPromoteProposal" data-id="${escAttr(p.proposal_id)}">Approve</button>
-                            <button class="btn btn-sm btn-danger" data-action="rejectProposal" data-id="${escAttr(p.proposal_id)}">Reject</button>
+                            <button class="btn btn-sm" data-action="confirmPromoteProposal" data-id="${escHtml(p.proposal_id)}">Approve</button>
+                            <button class="btn btn-sm btn-danger" data-action="rejectProposal" data-id="${escHtml(p.proposal_id)}">Reject</button>
                         </div>
                     </div>`).join('');
             } catch (err) {
@@ -2274,7 +2272,7 @@
                     (pv.effect_size == null ? '' : ` (effect_size ${escHtml(Number(pv.effect_size).toFixed(4))})`);
                 const actions = card.querySelector('.review-actions');
                 actions.innerHTML =
-                    `<button class="btn btn-sm" data-action="promoteProposal" data-id="${escAttr(id)}">Confirm approve</button>` +
+                    `<button class="btn btn-sm" data-action="promoteProposal" data-id="${escHtml(id)}">Confirm approve</button>` +
                     `<button class="btn btn-ghost btn-sm" onclick="loadReviewProposals()">Cancel</button>`;
             } catch (err) {
                 predict.style.display = 'block';
@@ -2388,7 +2386,7 @@
                             ${c.suggested_canonical_name ? `<span>canonical: ${escHtml(c.suggested_canonical_name)}</span>` : ''}
                         </div>
                         <div class="review-actions">
-                            <button class="btn btn-sm" data-action="draftAdr" data-id="${escAttr(c.candidate_id)}">Draft ADR</button>
+                            <button class="btn btn-sm" data-action="draftAdr" data-id="${escHtml(c.candidate_id)}">Draft ADR</button>
                             <span class="review-tooltip" title="Promotion is a one-way ADR commitment: edit well_known.py by hand after the ADR is reviewed. There is deliberately no approve button here.">Why no approve?</span>
                         </div>
                         <div class="adr-panel" id="adr-${escHtml(c.candidate_id)}" style="display:none"></div>
@@ -2411,8 +2409,8 @@
                 controls.className = 'review-actions';
                 controls.style.marginBottom = '0.5rem';
                 controls.innerHTML =
-                    `<button class="btn btn-ghost btn-sm" data-action="copyAdr" data-id="${escAttr(id)}">Copy</button>` +
-                    `<button class="btn btn-ghost btn-sm" data-action="downloadAdr" data-id="${escAttr(id)}">Download</button>`;
+                    `<button class="btn btn-ghost btn-sm" data-action="copyAdr" data-id="${escHtml(id)}">Copy</button>` +
+                    `<button class="btn btn-ghost btn-sm" data-action="downloadAdr" data-id="${escHtml(id)}">Download</button>`;
                 panel.parentNode.insertBefore(controls, panel);
             } catch (err) {
                 panel.textContent = 'Draft ADR failed: ' + err.message;
@@ -3111,11 +3109,11 @@
             const type = nodeTypeOf(r);
             const color = nodeColor(type);
             const created = r.created_at ? timeAgo(r.created_at) : '';
-            return `<div class="srp-item" data-entity-id="${escHtml(id).replace(/"/g, '&quot;')}">
+            return `<div class="srp-item" data-entity-id="${escHtml(id)}">
                 <span style="display:flex; align-items:center; gap:0.4rem; min-width:0">
                     <span class="legend-dot" style="background:${color}; flex-shrink:0"></span>
                     <strong style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis">${escHtml(name)}</strong>
-                    <span class="mono" style="color:var(--text-dim); font-size:0.7rem; flex-shrink:0">${escHtml(id).substring(0, 24)}</span>
+                    <span class="mono" style="color:var(--text-dim); font-size:0.7rem; flex-shrink:0">${escHtml(String(id).substring(0, 24))}</span>
                 </span>
                 <span style="display:flex; align-items:center; gap:0.5rem; flex-shrink:0">
                     <span style="font-size:0.7rem; color:var(--text-dim)">${created}</span>
@@ -3386,7 +3384,7 @@
                 }
 
                 body.innerHTML = traces.map(t => `
-                    <tr class="clickable" data-action="loadTraceDetail" data-id="${escAttr(t.trace_id)}">
+                    <tr class="clickable" data-action="loadTraceDetail" data-id="${escHtml(t.trace_id)}">
                         <td title="${escHtml(fmtDate(t.created_at))}">${escHtml(timeAgo(t.created_at))}</td>
                         <td class="truncate" style="max-width:350px" title="${escHtml(t.intent)}">${escHtml(t.intent)}</td>
                         <td>${sourceBadge(t.source)}</td>
@@ -3468,7 +3466,7 @@
                     for (const e of evidence) {
                         const eid = typeof e === 'string' ? e : (e.item_id || e.entity_id || JSON.stringify(e));
                         evidenceHtml += `<div class="status-row">
-                            <span class="mono truncate entity-link" data-action="navigateToEntity" data-id="${escAttr(eid)}" title="View in graph">${escHtml(eid)}</span>
+                            <span class="mono truncate entity-link" data-action="navigateToEntity" data-id="${escHtml(eid)}" title="View in graph">${escHtml(eid)}</span>
                         </div>`;
                     }
                     evidenceHtml += '</div>';
@@ -3544,7 +3542,7 @@
                         <div class="precedent-meta">
                             ${p.domain ? `<span class="badge badge-accent">${escHtml(p.domain)}</span>` : ''}
                             <span title="${escHtml(fmtDate(p.occurred_at))}">${timeAgo(p.occurred_at)}</span>
-                            ${p.entity_id ? `<span class="mono entity-link" style="font-size:0.7rem" data-action="navigateToEntity" data-id="${escAttr(p.entity_id)}">${escHtml(p.entity_id)}</span>` : ''}
+                            ${p.entity_id ? `<span class="mono entity-link" style="font-size:0.7rem" data-action="navigateToEntity" data-id="${escHtml(p.entity_id)}">${escHtml(p.entity_id)}</span>` : ''}
                         </div>
                     </div>
                 `).join('')}</div>`;
@@ -3590,7 +3588,7 @@
                 }
 
                 body.innerHTML = docs.map(d => `
-                    <tr class="clickable" data-action="loadMemoryDetail" data-id="${escAttr(d.doc_id)}">
+                    <tr class="clickable" data-action="loadMemoryDetail" data-id="${escHtml(d.doc_id)}">
                         <td title="${escHtml(fmtDate(d.created_at))}" style="white-space:nowrap">${escHtml(timeAgo(d.created_at))}</td>
                         <td class="mono truncate" style="max-width:220px; font-size:0.78rem" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
                         <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
@@ -3722,7 +3720,7 @@
                         ? `<span class="mono truncate" style="max-width:200px; display:inline-block; font-size:0.75rem" title="${escHtml(e.entity_id)}">${escHtml(e.entity_id)}</span>`
                         : '<span style="color:var(--text-dim)">-</span>';
                     return `
-                    <tr class="clickable" data-action="loadEventDetail" data-id="${escAttr(e.event_id)}">
+                    <tr class="clickable" data-action="loadEventDetail" data-id="${escHtml(e.event_id)}">
                         <td title="${escHtml(fmtDate(e.occurred_at))}" style="white-space:nowrap">${escHtml(timeAgo(e.occurred_at))}</td>
                         <td><span class="badge ${badge}">${escHtml(e.event_type)}</span></td>
                         <td style="font-size:0.8rem">${escHtml(e.source)}</td>
@@ -3753,7 +3751,7 @@
                 if (!e) { container.innerHTML = ''; return; }
 
                 const packLink = e.event_type === 'pack.assembled' && e.entity_id
-                    ? `<button class="btn btn-ghost btn-sm" data-action="navigateToPack" data-id="${escAttr(e.entity_id)}">Inspect pack</button>`
+                    ? `<button class="btn btn-ghost btn-sm" data-action="navigateToPack" data-id="${escHtml(e.entity_id)}">Inspect pack</button>`
                     : '';
 
                 container.innerHTML = `
@@ -3800,7 +3798,7 @@
                 }
 
                 body.innerHTML = packs.map(p => `
-                    <tr class="clickable" data-action="loadPackDetail" data-id="${escAttr(p.pack_id)}">
+                    <tr class="clickable" data-action="loadPackDetail" data-id="${escHtml(p.pack_id)}">
                         <td title="${escHtml(fmtDate(p.created_at))}" style="white-space:nowrap">${escHtml(timeAgo(p.created_at))}</td>
                         <td class="truncate" style="max-width:320px" title="${escHtml(p.intent)}">${escHtml(p.intent)}</td>
                         <td>${p.domain ? escHtml(p.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
