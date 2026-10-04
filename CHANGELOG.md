@@ -648,12 +648,12 @@ All notable changes to Trellis will be documented in this file.
   page.** `escHtml` encoded `&`, `<` and `>` but not quotes, and 27
   attributes, among them the table cells' `title`, the Review page's
   element ids and the filter options' `value`, took its output between
-  double quotes. A `"` in an id, intent, domain or tag ended the attribute
-  and the rest of the value became attributes of its own, including a
-  `data-action` that a click on the element dispatched. `escHtml` now
-  encodes `"` and `'`, and every interpolated attribute value goes through
-  it. The graph search results now cut an id before escaping it, so the
-  cut no longer splits an entity.
+  double quotes. A `"` in an id, intent, domain, tag or document text
+  ended the attribute and the rest of the value became attributes of its
+  own, such as an `onmouseover` handler that ran as script on hover.
+  `escHtml` now encodes `"` and `'`, and every attribute value read from
+  the API goes through it. The graph search results now cut an id before
+  escaping it, so the cut no longer splits an entity.
   ([#703](https://github.com/ronsse/trellis-ai/pull/703))
 
 ## [0.9.0] - 2026-05-13
