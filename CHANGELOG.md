@@ -724,6 +724,7 @@ All notable changes to Trellis will be documented in this file.
   `REDACTION_APPLIED`, as on Postgres and ArcadeDB. A version a writer
   creates after the purges have taken their locks can still be counted by
   two of them.
+  ([#709](https://github.com/ronsse/trellis-ai/pull/709))
 
 ## [0.9.0] - 2026-05-13
 
