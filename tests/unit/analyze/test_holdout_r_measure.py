@@ -243,11 +243,11 @@ class TestPrBaseRate:
 
 class TestMainSessions:
     def test_rolled_up_sessions_are_counted_and_powered(self, log: HoldoutLog) -> None:
-        """Eight finished sessions S1-S8, each commented with what it adds.
+        """Nine finished sessions S1-S9, each commented with what it adds.
 
-        Reaching a retrieval: 7 (all but S4). A non-empty pack: S1, S2, S6,
-        S7, S8. Analysed (every join carries the outcome): S1, S2, S6, S8,
-        whose rolled turns are 60, 20, 40 and 21.
+        Reaching a retrieval: 8 (all but S4). A non-empty pack: S1, S2, S6,
+        S7, S8, S9. Analysed (every join carries an outcome holding the
+        turns): S1, S2, S6, S8, whose rolled turns are 60, 20, 40 and 21.
         """
 
         def day(index: int) -> datetime:
@@ -277,30 +277,42 @@ class TestMainSessions:
         # S6: the main and its sub were both served.
         s6 = log.task(start=day(5), parent=None, items=1, turns=9)
         log.task(start=day(5) + timedelta(hours=2), parent=s6, items=4, turns=31)
-        # S7: eligible, but the main's join carries no outcome.
-        log.task(start=day(6), parent=None, items=2, with_outcome=False)
+        # S7: eligible, but the main's join carries no outcome; its sub's does.
+        s7 = log.task(start=day(6), parent=None, items=2, with_outcome=False)
+        log.task(start=day(6) + timedelta(hours=2), parent=s7, arms=(), turns=13)
         # S8: three members, two of them served.
         s8 = log.task(start=day(7), parent=None, items=2, turns=7)
         log.task(start=day(7) + timedelta(hours=2), parent=s8, arms=(), turns=11)
         log.task(start=day(7) + timedelta(hours=3), parent=s8, items=1, turns=3)
+        # S9: eligible, but its sub's outcome lacks the turns field.
+        s9 = log.task(start=day(9), parent=None, items=2, turns=7)
+        no_turns = outcome_payload(turns=4)
+        del no_turns["assistant_turns"]
+        log.join(
+            "sub-s9",
+            at=day(9) + timedelta(hours=3),
+            pack_ids=[],
+            parent=s9,
+            outcome=no_turns,
+        )
         # Left out: a sub whose main transcript never joined ...
         log.task(start=day(8), parent="parent-orphan", items=2, turns=5)
         # ... and a session whose sub joined an hour before the only sweep.
         sweep_at = day(12)
-        s9 = log.task(start=day(10), parent=None, items=2, turns=5)
-        log.task(start=sweep_at - timedelta(hours=2, minutes=1), parent=s9, turns=5)
+        s10 = log.task(start=day(10), parent=None, items=2, turns=5)
+        log.task(start=sweep_at - timedelta(hours=2, minutes=1), parent=s10, turns=5)
         # Not counted at all: a session whose latest join is after the window.
-        s10 = log.task(start=day(11), parent=None, items=2, turns=5)
-        log.task(start=UNTIL + timedelta(hours=1), parent=s10, turns=5)
+        s11 = log.task(start=day(11), parent=None, items=2, turns=5)
+        log.task(start=UNTIL + timedelta(hours=1), parent=s11, turns=5)
         log.sweep(at=sweep_at)
 
         report = _analyze(log)
 
         s = report.descriptive.sessions
-        assert (s.rolled_up, s.not_finished, s.without_main_join) == (8, 1, 1)
-        assert (s.reaching_retrieval, s.eligible, s.analysed) == (7, 5, 4)
-        assert s.reaching_retrieval_per_30d == pytest.approx(7 * 30 / DAYS)
-        assert s.eligible_per_30d == pytest.approx(5 * 30 / DAYS)
+        assert (s.rolled_up, s.not_finished, s.without_main_join) == (9, 1, 1)
+        assert (s.reaching_retrieval, s.eligible, s.analysed) == (8, 6, 4)
+        assert s.reaching_retrieval_per_30d == pytest.approx(8 * 30 / DAYS)
+        assert s.eligible_per_30d == pytest.approx(6 * 30 / DAYS)
         assert s.analysed_per_30d == pytest.approx(4 * 30 / DAYS)
         sd = statistics.stdev(math.log1p(turns) for turns in (60, 20, 40, 21))
         assert s.outcome_sd == pytest.approx(sd)
