@@ -654,7 +654,7 @@ All notable changes to Trellis will be documented in this file.
   encodes `"` and `'`, and every interpolated attribute value goes through
   it. The graph search results now cut an id before escaping it, so the
   cut no longer splits an entity.
-  ([#PR](https://github.com/ronsse/trellis-ai/pull/PR))
+  ([#703](https://github.com/ronsse/trellis-ai/pull/703))
 
 ## [0.9.0] - 2026-05-13
 
