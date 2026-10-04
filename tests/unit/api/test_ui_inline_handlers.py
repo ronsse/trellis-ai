@@ -59,7 +59,7 @@ def test_the_scan_catches_each_way_of_writing_one(snippet: str) -> None:
 def test_the_scan_passes_static_handlers_and_data_attributes() -> None:
     page = (
         """<button onclick="loadTraces()">Refresh</button>"""
-        """<tr data-action="loadTraceDetail" data-id="${escAttr(t.trace_id)}">"""
+        """<tr data-action="loadTraceDetail" data-id="${escHtml(t.trace_id)}">"""
     )
     assert len(_HANDLER.findall(page)) == 1
     assert _interpolating(page) == []
@@ -78,9 +78,9 @@ def test_every_data_action_reaches_a_function_with_its_id() -> None:
     assert set(used) == known
     for name in known:
         assert re.search(rf"\bfunction {name}\(", page), name
-    # The id rides next to its action, escaped for an attribute: escHtml
-    # leaves quotes, so one in the id would end data-id.
-    with_id = re.findall(r'data-action="[^"]*" data-id="\$\{escAttr\(', page)
+    # The id rides next to its action, through escHtml: a quote left raw in
+    # the id would end data-id.
+    with_id = re.findall(r'data-action="[^"]*" data-id="\$\{escHtml\(', page)
     assert len(with_id) == len(used)
 
 
