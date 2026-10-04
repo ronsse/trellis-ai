@@ -589,6 +589,7 @@ All notable changes to Trellis will be documented in this file.
   longer lost; after five such attempts the command fails. `label.add`
   and `label.remove` also carry the node's `document_ids` forward, where
   they wrote every new version with none.
+  ([#698](https://github.com/ronsse/trellis-ai/pull/698))
 
 ## [0.9.0] - 2026-05-13
 
