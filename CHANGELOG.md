@@ -735,6 +735,7 @@ All notable changes to Trellis will be documented in this file.
   task's source system at least `--settle-hours` after its latest join, and
   lists the source systems that have one. The funnel counts eligible tasks
   with an unparsed pack id. The inferential statistics are unchanged.
+  ([#707](https://github.com/ronsse/trellis-ai/pull/707))
 
 ## [0.9.0] - 2026-05-13
 
