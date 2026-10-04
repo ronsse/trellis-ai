@@ -1450,8 +1450,9 @@ def _render_holdout(report: HoldoutReport) -> None:
         f"first pack, {f.unfinished} unfinished"
     )
     console.print(
-        f"    eligible {f.eligible} ({f.eligible_with_unparsed_pack_ids} with an "
-        f"unparsed pack id), cut-offs excluded {f.cut_offs_excluded}, outcome "
+        f"    eligible {f.eligible} "
+        f"({escape(str(f.eligible_with_unparsed_pack_ids))} with an unparsed "
+        f"pack id), cut-offs excluded {f.cut_offs_excluded}, outcome "
         f"missing {f.outcome_missing}, analysed {f.analysed}"
     )
     _render_holdout_descriptive(report)
