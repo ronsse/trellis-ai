@@ -606,6 +606,18 @@ All notable changes to Trellis will be documented in this file.
   `label.add` and `label.remove` also carry the node's `document_ids`
   forward, where they wrote every new version with none.
   ([#698](https://github.com/ronsse/trellis-ai/pull/698))
+- **`delete_node` also removes a version written by a write it waited on,
+  on Postgres and Neo4j.** A purge whose delete waited on a concurrent
+  write's lock missed the version that write added, so the node, one of its
+  edges or one of its aliases kept a current version while `delete_node`
+  returned `True`. Each delete now repeats inside the same transaction
+  until it removes nothing. ArcadeDB was not affected: the purge's commit
+  conflicts with the write, and the driver re-runs the purge. A new edge or
+  alias row whose writer touched nothing the purge holds can still commit
+  after the purge's last delete, and a writer that still calls
+  `upsert_node` after the purge re-creates the node (the handlers that
+  write through `update_node_if_current` refuse a purged node).
+  ([#699](https://github.com/ronsse/trellis-ai/pull/699))
 
 ## [0.9.0] - 2026-05-13
 
