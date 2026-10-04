@@ -27,7 +27,8 @@ from tests.unit.analyze._holdout_fixture import (
     outcome_payload,
     seed_experiment,
 )
-from trellis.analyze.holdout import analyze_holdout, n_for_mde
+from trellis.analyze import holdout as holdout_analysis
+from trellis.analyze.holdout import analyze_holdout
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.analyze import holdout
 from trellis_cli.exit_codes import EXIT_OK, EXIT_VALIDATION
@@ -300,7 +301,7 @@ def test_every_r_figure_is_in_the_json_and_the_text(log: HoldoutLog) -> None:
         [math.exp(m) for m in expected], rel=1e-3
     )
     # x0.9 on log1p turns at the within-parent SD, not the total SD.
-    n_10 = n_for_mde(sd, -math.log(0.9))
+    n_10 = holdout_analysis.n_for_mde(sd, -math.log(0.9))
     assert d["n_for_10pct_effect"] == n_10
     sessions = d["sessions"]
     counts = ("rolled_up", "reaching_retrieval", "eligible", "analysed")
