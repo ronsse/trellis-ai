@@ -56,6 +56,11 @@ class TestDeleteNodeRetry:
 
         assert store.delete_node(NODE) is True
         assert _ended(pool) == ["rollback", "commit"]
+        # The abort rolled the edge and alias deletes back too, so the retry
+        # runs the whole purge again.
+        assert [
+            [sql.split()[2] for sql in purge.statements[:3]] for purge in pool.purges()
+        ] == [["edges", "entity_aliases", "nodes"]] * 2
 
     def test_a_serialization_failure_runs_again(self) -> None:
         # The second attempt finds nothing left: a concurrent purge won.
@@ -84,6 +89,7 @@ class TestDeleteNodeRetry:
         assert caught.value.store == "graph"
         assert NODE in caught.value.message
         assert "DeadlockDetected" in caught.value.message
+        assert "deadlock detected" not in caught.value.message
         assert caught.value.__cause__ is aborted[-1]
         assert _ended(pool) == ["rollback"] * pg_graph._PURGE_ATTEMPTS
 
