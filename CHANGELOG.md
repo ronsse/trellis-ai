@@ -702,6 +702,7 @@ All notable changes to Trellis will be documented in this file.
   that node in Graph. A ref with neither, as when nothing ingested its
   evidence and trace extraction is off (the default), shows its evidence id
   as text.
+  ([#706](https://github.com/ronsse/trellis-ai/pull/706))
 
 ## [0.9.0] - 2026-05-13
 
