@@ -212,8 +212,13 @@ class EventType(StrEnum):
     #: memories carry). ``pack_ids`` is empty for a session that never
     #: retrieved; no event means the sweep has not parsed that session.
     #: Nothing else joins a pack to the session that used it, because a
-    #: pack's own ``session_id`` is a label the agent chooses. Written again
-    #: only when the join changes, so a session's latest event is its join.
+    #: pack's own ``session_id`` is a label the agent chooses. ``outcome``
+    #: is what the session did, read from the transcript and from no pack:
+    #: counts, a duration and flags
+    #: (:class:`~trellis_workers.session_capture.outcome.SessionOutcome`); a
+    #: join written before it existed has none. Written again only when the
+    #: join changes, outcome included, so a session's latest event is its
+    #: join.
     CAPTURE_SESSION_PACKS = "capture.session_packs"
 
     # Judged memory operation (north star — the memory system generates its

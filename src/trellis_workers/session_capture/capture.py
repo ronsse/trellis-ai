@@ -5,8 +5,9 @@ One nightly pass over the Claude Code transcript directory:
 #. **Discover** transcript files; **watermark**-skip unchanged ones.
 #. **Parse** each new/changed file into a secret-free digest (F8-safe).
 #. **Join** each parsed session to the context packs it was served: one
-   ``CAPTURE_SESSION_PACKS`` event, written again only when the join
-   changes. Ahead of the trigger, so a sampled-out session is joined too.
+   ``CAPTURE_SESSION_PACKS`` event, carrying the session's outcome too, and
+   written again only when the join changes. Ahead of the trigger, so a
+   sampled-out session is joined too.
 #. **Trigger** deterministically — error/correction sessions are mandatory,
    clean ones sampled.
 #. **Distil** triggered sessions with the local model (fail-closed).
@@ -352,12 +353,21 @@ def _record_pack_join(
     because the event log is append-only. A payload is a plain dict, so no
     ``extra="forbid"`` schema has to grow a field for it.
 
+    The payload's ``outcome`` is the session's
+    :class:`~trellis_workers.session_capture.outcome.SessionOutcome`: what
+    the session did, read from its transcript and from no pack, so sessions
+    that retrieved can be compared with sessions that did not from one row
+    each. A sub-agent's transcript has its own join and its own outcome, and
+    a parent's outcome holds none of its sub-agents' work.
+
     A transcript with no turn and no tool call gets no join: a blank file or
     a workflow journal is not a session, and an empty join there would claim
     one ran without retrieving. Every other parse is compared with the
-    session's latest join and writes only on a difference, so a judge-outage
-    retry or a watermark reset adds nothing while a transcript that grew
-    records its new packs.
+    session's latest join, outcome included, and writes only on a
+    difference, so a judge-outage retry or a watermark reset adds nothing
+    while a transcript that grew records its new packs and outcome. A join
+    written before the outcome existed differs from every new parse, so the
+    session's next parse writes it again with one.
 
     Not fail-soft, unlike :func:`_emit_sweep_completed`: this runs inside
     the per-session boundary, so a failed write leaves the session
@@ -375,6 +385,7 @@ def _record_pack_join(
         "pack_ids_unparsed": digest.pack_ids_unparsed,
         "parent_session_id": parent,
         "source_system": source_system,
+        "outcome": digest.outcome.to_payload(),
     }
     event_log = registry.operational.event_log
     latest = event_log.get_events(
