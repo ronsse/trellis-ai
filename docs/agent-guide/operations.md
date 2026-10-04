@@ -840,8 +840,9 @@ trellis curate label 01JRK5N7QF critical-path --format json
 }
 ```
 
-A `target_id` that names no node exits `2` with `"status": "rejected"` and
-the message `Node not found: <target_id>`, and no label is written.
+A `target_id` that names no node, including one redacted while the command
+runs, exits `2` with `"status": "rejected"` and the message
+`Node not found: <target_id>`, and no label is written.
 
 ### `trellis curate redact`
 
@@ -1661,7 +1662,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `entity.create` | `entity_type`, `name` | Create a new entity |
-| `entity.update` | `entity_id` | Update entity properties |
+| `entity.update` | `entity_id` | Update entity properties. An `entity_id` that names no node, including one redacted while the command runs, is rejected (`target_not_found`). |
 | `entity.merge` | `source_id`, `target_id` | Merge two entities |
 
 **Example -- create entity:**
@@ -1698,8 +1699,8 @@ result = executor.execute(cmd)
 
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
-| `label.add` | `target_id`, `label` | Add a label (also available via CLI). A `target_id` that names no node is rejected (`target_not_found`). |
-| `label.remove` | `target_id`, `label` | Remove a label. A `target_id` that names no node is rejected (`target_not_found`). |
+| `label.add` | `target_id`, `label` | Add a label (also available via CLI). A `target_id` that names no node, including one redacted while the command runs, is rejected (`target_not_found`). |
+| `label.remove` | `target_id`, `label` | Remove a label. A `target_id` that names no node, including one redacted while the command runs, is rejected (`target_not_found`). |
 
 ### Feedback Operations
 
@@ -1712,8 +1713,8 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `redaction.apply` | `target_id`, `reason` | Hard-purge a graph entity: all SCD-2 versions, its edges, aliases, and vector entry. Emits `REDACTION_APPLIED` (counts + id pointers, never content). Also available via `trellis curate redact`. |
-| `retention.prune` | `criteria`, `reason` | Archive low-value derived items. **Phase one is archival, not deletion**: candidates are stamped `Lifecycle.state="archived"` and retrieval stops serving them; content stays in the store, so a wrong prune is walked back by re-stamping. **`dry_run` defaults to `true`** — a run writes nothing unless it is passed `false` (CLI: `--apply`). `criteria` selects `noise_documents` / `unconfirmed_mints` / `lifecycle_states`, with `older_than_days` gating the age-based two only. `lifecycle_states` accepts the whole vocabulary but phase one **cannot select `archived` or `current`** — the first is already archived, the second is an explicit assertion that the item belongs in service — so naming either returns zero by construction. Those states are reported back on `unselectable_lifecycle_states` (in the `RETENTION_PRUNED` payload and the operator message) and skip the scan entirely, so an inert criterion never reads as an empty corpus ([#419](https://github.com/ronsse/trellis-ai/issues/419)). Traces and event-log rows are never candidates (the resolver cannot reach them); confirmed entities are never candidates at any age. Emits `RETENTION_PRUNED` in both modes. See [`adr-retention-prune.md`](../design/adr-retention-prune.md) §6. |
-| `retention.restore` | `item_ids`, `reason` | Return archived items to `Lifecycle.state="current"`. The governed inverse of `retention.prune`, and what makes phase-one archival's reversibility real — direct store writes are forbidden and there is no governed document-update verb. Takes **explicit ids** (they ride the `RETENTION_PRUNED` payload), not criteria: re-deriving the set would re-run the selection that was wrong. Ids that are not archived are skipped, not errors. Emits `RETENTION_RESTORED`. |
+| `retention.prune` | `criteria`, `reason` | Archive low-value derived items. **Phase one is archival, not deletion**: candidates are stamped `Lifecycle.state="archived"` and retrieval stops serving them; content stays in the store, so a wrong prune is walked back by re-stamping. **`dry_run` defaults to `true`** — a run writes nothing unless it is passed `false` (CLI: `--apply`). `criteria` selects `noise_documents` / `unconfirmed_mints` / `lifecycle_states`, with `older_than_days` gating the age-based two only. `lifecycle_states` accepts the whole vocabulary but phase one **cannot select `archived` or `current`** — the first is already archived, the second is an explicit assertion that the item belongs in service — so naming either returns zero by construction. Those states are reported back on `unselectable_lifecycle_states` (in the `RETENTION_PRUNED` payload and the operator message) and skip the scan entirely, so an inert criterion never reads as an empty corpus ([#419](https://github.com/ronsse/trellis-ai/issues/419)). Traces and event-log rows are never candidates (the resolver cannot reach them); confirmed entities are never candidates at any age. A candidate that vanishes before it is written, including a node redacted while the run is in progress, is counted in `skipped`, not re-created. Emits `RETENTION_PRUNED` in both modes. See [`adr-retention-prune.md`](../design/adr-retention-prune.md) §6. |
+| `retention.restore` | `item_ids`, `reason` | Return archived items to `Lifecycle.state="current"`. The governed inverse of `retention.prune`, and what makes phase-one archival's reversibility real — direct store writes are forbidden and there is no governed document-update verb. Takes **explicit ids** (they ride the `RETENTION_PRUNED` payload), not criteria: re-deriving the set would re-run the selection that was wrong. Ids that are not archived or name no item, including a node redacted while the command runs, are skipped (`skipped_ids`), not errors. Emits `RETENTION_RESTORED`. |
 
 ### Batch Execution
 
