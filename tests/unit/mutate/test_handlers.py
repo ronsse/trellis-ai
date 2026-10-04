@@ -287,9 +287,7 @@ _LABEL_EVENTS = {
 class TestLabelOnANodePurgedMidCommand:
     """A purge that commits between the label's read and its write wins.
 
-    The label used to write with ``upsert_node``, which creates a node when
-    none is current, so it re-created the purged node with its pre-purge
-    properties and reported success.
+    The label is refused as on a missing node, and the node stays purged.
     """
 
     @pytest.mark.parametrize(
@@ -331,11 +329,54 @@ class TestLabelOnANodePurgedMidCommand:
         ]
 
 
+class TestLabelRacingAnotherLabel:
+    """A label committed mid-command is kept: the retry rebuilds from it."""
+
+    @pytest.mark.parametrize(
+        ("operation", "label", "labels"),
+        [
+            (Operation.LABEL_ADD, "y", ["x", "z", "y"]),
+            (Operation.LABEL_REMOVE, "x", ["z"]),
+        ],
+        ids=["add", "remove"],
+    )
+    def test_the_rival_label_is_kept(
+        self,
+        registry: StoreRegistry,
+        operation: Operation,
+        label: str,
+        labels: list[str],
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None,
+            node_type="concept",
+            properties={"name": "test", "labels": ["x"]},
+        )
+        executor = build_curate_executor(registry)
+        rival = Command(
+            operation=Operation.LABEL_ADD, args={"target_id": node_id, "label": "z"}
+        )
+        command = Command(
+            operation=operation, args={"target_id": node_id, "label": label}
+        )
+
+        with rival_inside_first_read(registry, executor, node_id, rival) as winner:
+            loser = executor.execute(command)
+
+        assert [result.status for result in winner] == [CommandStatus.SUCCESS]
+        assert loser.status == CommandStatus.SUCCESS
+        node = graph.get_node(node_id)
+        assert node is not None
+        assert node["properties"]["labels"] == labels
+        assert len(graph.get_node_history(node_id)) == 3
+
+
 class TestLabelsKeepTheDocumentLink:
     """A label writes a new version, and the version keeps ``document_ids``.
 
-    Both label handlers wrote without ``document_ids``, which the store reads
-    as "no link", so labelling a node silently cut its document link.
+    A version written without them reads as "no link": the label would cut
+    the node's document link.
     """
 
     @pytest.mark.parametrize(
