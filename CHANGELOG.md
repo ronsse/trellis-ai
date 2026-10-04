@@ -715,6 +715,21 @@ All notable changes to Trellis will be documented in this file.
   trace: `evidence_links` is then `null`.
   ([#706](https://github.com/ronsse/trellis-ai/pull/706))
 
+- **`trellis analyze holdout` prints every figure the pre-registration
+  re-measures, and its PR base rate is the served arm's.** The descriptive
+  block gives the largest parent session's share of eligible tasks
+  (`top_parent_share`), the MDE at 30, 60 and 90 days (`mde_by_horizon`, t
+  at `N - 2` degrees of freedom), the N a 10% effect needs
+  (`n_for_10pct_effect`) and main sessions with their sub-agent tasks rolled
+  up (`sessions`). A figure the rows cannot give reads "not measurable:
+  <reason>" in text and is `null` with its reason in JSON. `pr_base_rate`
+  becomes `pr_base_rate_served`, over the served arm only.
+  `between_parent_share` is bias-adjusted (epsilon-squared, floored at 0),
+  so it never reads above raw eta-squared. The unfinished-tasks note names
+  the sweep it checks for, and the funnel counts eligible tasks with an
+  unparsed pack id. The inferential statistics are unchanged.
+  ([#707](https://github.com/ronsse/trellis-ai/pull/707))
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.

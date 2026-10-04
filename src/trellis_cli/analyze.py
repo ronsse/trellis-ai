@@ -86,9 +86,11 @@ from trellis_cli.stores import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from rich.console import Console
 
-    from trellis.analyze.holdout import HoldoutReport
+    from trellis.analyze.holdout import HoldoutHorizon, HoldoutReport
 
 logger = structlog.get_logger(__name__)
 
@@ -1254,28 +1256,102 @@ def _num(value: float | None, spec: str = ".3g") -> str:
     return "n/a" if value is None else format(value, spec)
 
 
+def _fig(value: float | None, reason: str | None, spec: str = ".3g") -> str:
+    """A figure, or why the evidence cannot give it."""
+    if value is not None:
+        return format(value, spec)
+    return "n/a" if reason is None else f"not measurable: {escape(reason)}"
+
+
+def _per_30_days(value: float | None, reason: str | None) -> str:
+    if value is not None:
+        return f"{_num(value)} per 30 days"
+    return f"per 30 days {_fig(None, reason)}"
+
+
+def _render_horizons(horizons: Sequence[HoldoutHorizon], mean_label: str) -> None:
+    for h in horizons:
+        if h.n is None:
+            console.print(f"      {h.days} days: {_fig(None, h.not_measurable)}")
+            continue
+        line = (
+            f"      {h.days} days: N {_num(h.n, '.4g')}, MDE "
+            f"{_fig(h.mde, h.not_measurable)}"
+        )
+        if h.ratio is not None:
+            line += f" (x{h.ratio:.3g})"
+        elif h.share_of_mean is not None:
+            line += f" ({h.share_of_mean:.0%} of {mean_label})"
+        console.print(line)
+
+
+def _render_holdout_sessions(report: HoldoutReport) -> None:
+    s = report.descriptive.sessions
+    why = s.not_measurable.get
+    reaching = _per_30_days(
+        s.reaching_retrieval_per_30d, why("reaching_retrieval_per_30d")
+    )
+    eligible = _per_30_days(s.eligible_per_30d, why("eligible_per_30d"))
+    analysed = _per_30_days(s.analysed_per_30d, why("analysed_per_30d"))
+    console.print(
+        f"    main sessions {s.rolled_up} rolled up ({s.not_finished} not finished "
+        f"and {s.without_main_join} without a main join left out): reaching a "
+        f"retrieval {s.reaching_retrieval} ({reaching}), with a non-empty pack "
+        f"{s.eligible} ({eligible}), analysed {s.analysed} ({analysed})"
+    )
+    console.print(
+        f"    main-session outcome SD {_fig(s.outcome_sd, why('outcome_sd'))} "
+        "(cut-offs included)"
+    )
+    console.print(
+        "    main-session MDE (same formula, plain SD, N = analysed main sessions "
+        "per 30 days x days / 30):"
+    )
+    _render_horizons(s.mde_by_horizon, "the session mean")
+
+
 def _render_holdout_descriptive(report: HoldoutReport) -> None:
     d = report.descriptive
+    why = d.not_measurable.get
     console.print()
     console.print(f"  [bold]{escape('Descriptive (the [R] re-measure)')}[/bold]")
     console.print(
-        f"    eligible tasks {d.eligible_tasks} ({_num(d.eligible_per_30d)} per 30 "
-        f"days); analysed {d.analysed_tasks} ({_num(d.analysed_per_30d)} per 30 days)"
+        f"    eligible tasks {d.eligible_tasks} "
+        f"({_per_30_days(d.eligible_per_30d, why('eligible_per_30d'))}); analysed "
+        f"{d.analysed_tasks} "
+        f"({_per_30_days(d.analysed_per_30d, why('analysed_per_30d'))})"
+    )
+    across = (
+        f" across {d.parents} parent sessions"
+        if d.between_parent_share is not None
+        else ""
     )
     console.print(
-        f"    outcome SD within parent {_num(d.outcome_sd_within_parent)} (overall "
-        f"{_num(d.outcome_sd_total)}); between-parent share of variance "
-        f"{_num(d.between_parent_share)} across {d.parents} parent sessions"
+        "    outcome SD within parent "
+        f"{_fig(d.outcome_sd_within_parent, why('outcome_sd_within_parent'))} "
+        f"(overall {_fig(d.outcome_sd_total, why('outcome_sd_total'))}); "
+        "between-parent share of variance (bias-adjusted: epsilon-squared, "
+        f"floored at 0) {_fig(d.between_parent_share, why('between_parent_share'))}"
+        f"{across}"
     )
     console.print(
-        f"    packs per task {_num(d.packs_per_task)}; {d.tasks_with_several_packs} "
-        f"tasks with several packs; {d.tasks_with_both_arms} with calls in both arms"
+        "    top parent's share of eligible tasks "
+        f"{_fig(d.top_parent_share, why('top_parent_share'))} (both arms, cut-offs "
+        "included)"
     )
     console.print(
-        f"    cut-off share {_num(d.cut_off_share)} (served "
-        f"{_num(d.cut_off_share_by_arm.served)}, withheld "
-        f"{_num(d.cut_off_share_by_arm.withheld)}); PR base rate "
-        f"{_num(d.pr_base_rate)}, mean PRs created {_num(d.prs_created_mean)}"
+        f"    packs per task {_fig(d.packs_per_task, why('packs_per_task'))}; "
+        f"{d.tasks_with_several_packs} tasks with several packs; "
+        f"{d.tasks_with_both_arms} with calls in both arms"
+    )
+    shares = d.cut_off_share_by_arm
+    console.print(
+        f"    cut-off share {_fig(d.cut_off_share, why('cut_off_share'))} (served "
+        f"{_fig(shares.served, why('cut_off_share_by_arm.served'))}, withheld "
+        f"{_fig(shares.withheld, why('cut_off_share_by_arm.withheld'))}); PR base "
+        f"rate (served arm) {_fig(d.pr_base_rate_served, why('pr_base_rate_served'))}"
+        f", mean PRs created (both arms) "
+        f"{_fig(d.prs_created_mean, why('prs_created_mean'))}"
     )
     console.print(
         f"    served / withheld: eligible {d.eligible_by_arm.served} / "
@@ -1283,13 +1359,24 @@ def _render_holdout_descriptive(report: HoldoutReport) -> None:
         f"{d.cut_offs_by_arm.withheld}, analysed {d.analysed_by_arm.served} / "
         f"{d.analysed_by_arm.withheld}"
     )
-    console.print(f"    post-hoc share n/a: {escape(d.post_hoc_note)}")
+    console.print(f"    post-hoc share {_fig(d.post_hoc_share, why('post_hoc_share'))}")
     for check in d.arm_ratio:
         console.print(
             f"    arm ratio, {escape(check.population)}: {check.withheld} of "
             f"{check.n} withheld against {check.expected_share:g}, binomial p "
             f"{_num(check.p_value, '.4g')}"
         )
+    console.print(
+        f"    task MDE ({report.power.target_power:.0%} power, alpha "
+        f"{report.inference.alpha:g} two-sided, 50/50 split, within-parent SD, "
+        "N = analysed tasks per 30 days x days / 30):"
+    )
+    _render_horizons(d.mde_by_horizon, "the served mean")
+    console.print(
+        "    N for a 10% effect (x0.9 on a log1p outcome, 10% of the served mean "
+        f"otherwise): {_fig(d.n_for_10pct_effect, why('n_for_10pct_effect'), ',')}"
+    )
+    _render_holdout_sessions(report)
 
 
 def _render_holdout_inference(report: HoldoutReport) -> None:
@@ -1368,8 +1455,10 @@ def _render_holdout(report: HoldoutReport) -> None:
         f"first pack, {f.unfinished} unfinished"
     )
     console.print(
-        f"    eligible {f.eligible}, cut-offs excluded {f.cut_offs_excluded}, "
-        f"outcome missing {f.outcome_missing}, analysed {f.analysed}"
+        f"    eligible {f.eligible} "
+        f"({escape(str(f.eligible_with_unparsed_pack_ids))} with an unparsed "
+        f"pack id), cut-offs excluded {f.cut_offs_excluded}, outcome "
+        f"missing {f.outcome_missing}, analysed {f.analysed}"
     )
     _render_holdout_descriptive(report)
     console.print()
