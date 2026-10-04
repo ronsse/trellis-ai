@@ -607,6 +607,20 @@ All notable changes to Trellis will be documented in this file.
   forward, where they wrote every new version with none.
   ([#698](https://github.com/ronsse/trellis-ai/pull/698))
 
+- **A quote in an id no longer runs as script on the UI page.** Thirteen
+  handlers took their id through inline JavaScript: Review's Approve,
+  Reject, Confirm approve, Draft ADR, Copy and Download, the Traces,
+  Memories, Events and Packs rows, the trace detail's evidence links, the
+  Precedents entity link and Inspect pack. `escHtml` escapes `&`, `<` and
+  `>` but not quotes, and the browser decodes an attribute before it runs
+  an inline handler, so an agent-written trace, document or entity id
+  containing `'` ran as script on a click, and one containing `"` added
+  its own handler to the element. A template now names the function in
+  `data-action` and carries the id in `data-id`, and one listener makes
+  the call. Other attributes that interpolate an id, such as the Memories
+  and Events rows' `title`, still use `escHtml`, so a `"` there can still
+  add a hover handler.
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.
