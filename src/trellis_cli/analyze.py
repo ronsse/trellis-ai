@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -73,7 +74,7 @@ from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT
 from trellis.stores.base.parameter import ParameterStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import (
     _get_registry,
@@ -86,6 +87,8 @@ from trellis_cli.stores import (
 
 if TYPE_CHECKING:
     from rich.console import Console
+
+    from trellis.analyze.holdout import HoldoutReport
 
 logger = structlog.get_logger(__name__)
 
@@ -1231,6 +1234,264 @@ def judged_outcomes(
 
     for note in report.notes:
         console.print(f"  [dim]note: {escape(note)}[/dim]")
+
+
+def _parse_window_end(value: str | None) -> datetime | None:
+    """``--until`` as an aware UTC datetime; a naive value is read as UTC."""
+    from trellis.analyze.holdout import HoldoutAnalysisError  # noqa: PLC0415
+
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        message = f"--until must be an ISO-8601 date or time, got {value!r}."
+        raise HoldoutAnalysisError(message) from exc
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _num(value: float | None, spec: str = ".3g") -> str:
+    return "n/a" if value is None else format(value, spec)
+
+
+def _render_holdout_descriptive(report: HoldoutReport) -> None:
+    d = report.descriptive
+    console.print()
+    console.print(f"  [bold]{escape('Descriptive (the [R] re-measure)')}[/bold]")
+    console.print(
+        f"    eligible tasks {d.eligible_tasks} ({_num(d.eligible_per_30d)} per 30 "
+        f"days); analysed {d.analysed_tasks} ({_num(d.analysed_per_30d)} per 30 days)"
+    )
+    console.print(
+        f"    outcome SD within parent {_num(d.outcome_sd_within_parent)} (overall "
+        f"{_num(d.outcome_sd_total)}); between-parent share of variance "
+        f"{_num(d.between_parent_share)} across {d.parents} parent sessions"
+    )
+    console.print(
+        f"    packs per task {_num(d.packs_per_task)}; {d.tasks_with_several_packs} "
+        f"tasks with several packs; {d.tasks_with_both_arms} with calls in both arms"
+    )
+    console.print(
+        f"    cut-off share {_num(d.cut_off_share)} (served "
+        f"{_num(d.cut_off_share_by_arm.served)}, withheld "
+        f"{_num(d.cut_off_share_by_arm.withheld)}); PR base rate "
+        f"{_num(d.pr_base_rate)}, mean PRs created {_num(d.prs_created_mean)}"
+    )
+    console.print(
+        f"    served / withheld: eligible {d.eligible_by_arm.served} / "
+        f"{d.eligible_by_arm.withheld}, cut-offs {d.cut_offs_by_arm.served} / "
+        f"{d.cut_offs_by_arm.withheld}, analysed {d.analysed_by_arm.served} / "
+        f"{d.analysed_by_arm.withheld}"
+    )
+    console.print(f"    post-hoc share n/a: {escape(d.post_hoc_note)}")
+    for check in d.arm_ratio:
+        console.print(
+            f"    arm ratio, {escape(check.population)}: {check.withheld} of "
+            f"{check.n} withheld against {check.expected_share:g}, binomial p "
+            f"{_num(check.p_value, '.4g')}"
+        )
+
+
+def _render_holdout_inference(report: HoldoutReport) -> None:
+    inference = report.inference
+    console.print()
+    console.print(f"  [bold]Inference: {escape(inference.verdict)}[/bold]")
+    console.print(
+        f"    mean served {_num(inference.mean_served)}, withheld "
+        f"{_num(inference.mean_withheld)}"
+    )
+    if inference.p_value is not None:
+        console.print(
+            f"    served minus withheld {_num(inference.difference)}, 95% CI "
+            f"{_num(inference.ci_low)} to {_num(inference.ci_high)} from "
+            f"{inference.bootstraps:,} stratified bootstraps"
+        )
+        console.print(
+            f"    two-sided p {_num(inference.p_value, '.4g')} from "
+            f"{inference.permutations:,} within-stratum permutations"
+        )
+    console.print(
+        f"    strata (parent session x ISO week) {inference.strata}: "
+        f"{inference.strata_both_arms} with both arms, {inference.strata_one_arm} "
+        f"with one arm, whose {inference.tasks_in_one_arm_strata} tasks carry "
+        "zero weight"
+    )
+    power = report.power
+    console.print()
+    console.print(f"  [bold]Power[/bold] ({escape(power.status)})")
+    console.print(
+        f"    planned: MDE {power.planned_mde:g} at N {power.planned_n} for "
+        f"{power.target_power:.0%} power"
+    )
+    console.print(
+        f"    achieved: N {power.realised_n}, SD within parent "
+        f"{_num(power.realised_sd)}; power at the planned MDE "
+        f"{_num(power.power_at_planned_mde)}; MDE at {power.target_power:.0%} "
+        f"power {_num(power.mde_at_target_power)} ({power.sims} simulated "
+        f"experiments of {power.sim_permutations} permutations, withheld share "
+        f"{power.withheld_share:g})"
+    )
+
+
+def _render_holdout(report: HoldoutReport) -> None:
+    rate = "none" if report.rate is None else f"{report.rate:g}"
+    cut_offs = "kept (ITT)" if report.itt else "excluded"
+    console.print(
+        f"[bold]Pack Holdout[/bold] (rate {rate}, outcome "
+        f"{escape(report.outcome)}, cut-offs {cut_offs})"
+    )
+    console.print(
+        f"  window {escape(report.since)} to {escape(report.until)} "
+        f"({report.window_days} days)"
+    )
+    if report.scan.truncated:
+        console.print(
+            f"  [yellow]window[/yellow] evidence covers "
+            f"{report.effective_window_days:g} of {report.window_days} days"
+        )
+    rows = report.rows
+    console.print(
+        f"  PACK_ASSEMBLED rows {rows.scanned}: {rows.without_holdout_key} without "
+        f"a holdout key, {rows.at_rate} at the analysed rate "
+        f"({rows.withheld_at_rate} withheld)"
+    )
+    f = report.funnel
+    console.print()
+    console.print("  [bold]Funnel[/bold]")
+    console.print(
+        f"    {f.joins_scanned} capture joins, {f.sessions} sessions: "
+        f"{f.main_sessions} main sessions, {f.no_outcome} without an outcome, "
+        f"{f.no_retrieval} without a pack, {f.first_pack_not_found} first pack "
+        f"not found, {f.outside_window} outside the window, "
+        f"{f.first_pack_old_build} from a build without the holdout, "
+        f"{f.other_rate} at another rate, {f.empty_first_pack} with an empty "
+        f"first pack, {f.unfinished} unfinished"
+    )
+    console.print(
+        f"    eligible {f.eligible}, cut-offs excluded {f.cut_offs_excluded}, "
+        f"outcome missing {f.outcome_missing}, analysed {f.analysed}"
+    )
+    _render_holdout_descriptive(report)
+    console.print()
+    console.print("  [bold]Exclusions[/bold]")
+    for exclusion in report.exclusions:
+        if not exclusion.applied:
+            state = "not applied"
+        elif exclusion.excluded is None:
+            state = "applied"
+        else:
+            state = f"applied, {exclusion.excluded} excluded"
+        console.print(
+            f"    {escape(exclusion.timing)} ({escape(exclusion.name)}): {state}. "
+            f"{escape(exclusion.note)}"
+        )
+    _render_holdout_inference(report)
+    for note in report.notes:
+        console.print(f"  [dim]note: {escape(note)}[/dim]")
+
+
+@analyze_app.command("holdout")
+def holdout(
+    days: int = typer.Option(
+        60, help="Days of history; a task belongs to the window by its first pack."
+    ),
+    until: str | None = typer.Option(
+        None, "--until", help="Window end, ISO-8601 (default: now; naive is UTC)."
+    ),
+    rate: float | None = typer.Option(
+        None,
+        "--rate",
+        help="The holdout_rate to analyse (default: the single rate present).",
+    ),
+    outcome: str = typer.Option(
+        "log1p_turns",
+        "--outcome",
+        help=(
+            "log1p_turns, prs_created, log1p_tokens or commits; log1p_commits "
+            "and any_commit are the prereg's commit guardrails."
+        ),
+    ),
+    itt: bool = typer.Option(
+        False, "--itt", help="Keep usage-limit cut-offs (first sensitivity analysis)."
+    ),
+    permutations: int = typer.Option(
+        10_000, "--permutations", help="Within-stratum permutations for the p-value."
+    ),
+    bootstraps: int = typer.Option(
+        4_000, "--bootstraps", help="Stratified bootstrap replicates for the 95% CI."
+    ),
+    power_sims: int = typer.Option(
+        600, "--power-sims", help="Simulated experiments per power estimate."
+    ),
+    planned_mde: float = typer.Option(
+        0.33, "--planned-mde", help="Planned MDE in outcome units (prereg: 0.33)."
+    ),
+    planned_n: int = typer.Option(
+        114, "--planned-n", help="Planned analysed tasks (prereg: about 114)."
+    ),
+    settle_hours: float = typer.Option(
+        3.0,
+        "--settle-hours",
+        help=(
+            "Hours a completed capture sweep must follow a task's latest join "
+            "before the task counts as finished."
+        ),
+    ),
+    seed: int = typer.Option(20261004, "--seed", help="Seed for every random draw."),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan per event type. Raise it when the report says "
+            "the evidence covers less than the window."
+        ),
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """The pack holdout experiment's pre-registered analysis. Read-only.
+
+    One unit per finished sub-agent task whose first pack was non-empty in
+    its own arm's terms; the arm is that first pack's holdout (ITT). Reports
+    the descriptive [R] re-measure in every flag state, then the
+    stratum-weighted difference served minus withheld (strata: parent
+    session x ISO week) with a within-stratum permutation p-value, a
+    stratified bootstrap CI and power at the realised N. Counts and
+    statistics only; writes nothing, not even a meta-trace.
+    """
+    from trellis.analyze.holdout import (  # noqa: PLC0415
+        HoldoutAnalysisError,
+        analyze_holdout,
+    )
+
+    try:
+        report = analyze_holdout(
+            get_event_log(),
+            days=days,
+            until=_parse_window_end(until),
+            rate=rate,
+            outcome=outcome,
+            itt=itt,
+            permutations=permutations,
+            bootstraps=bootstraps,
+            power_sims=power_sims,
+            planned_mde=planned_mde,
+            planned_n=planned_n,
+            settle_hours=settle_hours,
+            seed=seed,
+            limit=limit,
+        )
+    except HoldoutAnalysisError as exc:
+        message = str(exc)
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{escape(message)}[/red]")
+        raise typer.Exit(code=EXIT_VALIDATION) from exc
+
+    if output_format == "json":
+        emit_json(report.model_dump())
+        return
+    _render_holdout(report)
 
 
 @analyze_app.command("cost")
