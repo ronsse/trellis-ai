@@ -1263,8 +1263,9 @@ def _rolled_outcome(
     ``None`` when a join carries no outcome. A field that any join lacks,
     or holds as something other than a count, is ``None`` in the sum.
     """
-    outcomes = [payload.get("outcome") for payload in payloads]
-    if not all(isinstance(outcome, Mapping) for outcome in outcomes):
+    found = [payload.get("outcome") for payload in payloads]
+    outcomes = [outcome for outcome in found if isinstance(outcome, Mapping)]
+    if len(outcomes) < len(found):
         return None
     rolled: dict[str, float | None] = {}
     for key in {key for outcome in outcomes for key in outcome}:
