@@ -600,6 +600,7 @@ All notable changes to Trellis will be documented in this file.
   alias row whose writer touched nothing the purge holds can still commit
   after the purge's last delete, and a write after the purge still
   re-creates the node.
+  ([#699](https://github.com/ronsse/trellis-ai/pull/699))
 
 ## [0.9.0] - 2026-05-13
 
