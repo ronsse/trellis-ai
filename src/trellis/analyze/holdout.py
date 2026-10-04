@@ -684,6 +684,8 @@ def _latest_sweeps(events: Sequence[Event]) -> dict[str, datetime]:
             continue
         source = payload.get("source_system")
         if not isinstance(source, str) or not source:
+            if not event.entity_id:
+                continue
             source = event.entity_id.removeprefix("capture:")
         at = _as_utc(event.occurred_at)
         if source not in latest or at > latest[source]:
@@ -858,7 +860,8 @@ def analyze_holdout(
     packs: dict[str, Event] = {}
     rows = _Rows()
     for event in pack_scan.events:
-        packs.setdefault(event.entity_id, event)
+        if event.entity_id:
+            packs.setdefault(event.entity_id, event)
         if evidence_start <= _as_utc(event.occurred_at) < end:
             rows.window.append(event)
     rate, notes = _resolve_rate(rows, rate)
@@ -866,7 +869,8 @@ def analyze_holdout(
     funnel = HoldoutFunnel(joins_scanned=len(join_scan.events))
     latest_joins: dict[str, Event] = {}
     for event in join_scan.events:
-        latest_joins[event.entity_id] = event
+        if event.entity_id:
+            latest_joins[event.entity_id] = event
     sweeps = _latest_sweeps(sweep_scan.events)
     settle = timedelta(hours=settle_hours)
     units: list[_Unit] = []
