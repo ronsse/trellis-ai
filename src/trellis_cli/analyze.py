@@ -1375,11 +1375,12 @@ def _render_holdout(report: HoldoutReport) -> None:
     console.print()
     console.print("  [bold]Exclusions[/bold]")
     for exclusion in report.exclusions:
-        state = (
-            f"applied, {exclusion.excluded} excluded"
-            if exclusion.applied
-            else "not applied"
-        )
+        if not exclusion.applied:
+            state = "not applied"
+        elif exclusion.excluded is None:
+            state = "applied"
+        else:
+            state = f"applied, {exclusion.excluded} excluded"
         console.print(
             f"    {escape(exclusion.timing)} ({escape(exclusion.name)}): {state}. "
             f"{escape(exclusion.note)}"

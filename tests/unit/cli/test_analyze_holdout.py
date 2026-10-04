@@ -8,6 +8,7 @@ writes is synthetic.
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import timedelta
 from pathlib import Path
@@ -23,7 +24,9 @@ from tests.unit.analyze._holdout_fixture import (
     HoldoutLog,
     seed_experiment,
 )
+from trellis.analyze.holdout import analyze_holdout
 from trellis.stores.registry import StoreRegistry
+from trellis_cli.analyze import holdout
 from trellis_cli.exit_codes import EXIT_OK, EXIT_VALIDATION
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
@@ -121,6 +124,52 @@ def test_a_flag_off_store_reports_no_withheld_arm_and_exits_0(
     flat = _flat(text)
     assert "no withheld arm" in flat
     assert "eligible tasks" in flat
+
+
+def test_rules_the_analysis_cannot_apply_are_printed_in_both_formats(
+    log: HoldoutLog,
+) -> None:
+    for index in range(4):
+        log.task(
+            start=MONDAY + timedelta(hours=index),
+            arms=[index % 2 == 1],
+            turns=10 + index,
+            ended_on_error=index == 2,
+        )
+    log.sweep()
+
+    text, machine = _run()
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    payload = _payload(machine)
+    rules = {e["name"]: (e["applied"], e["excluded"]) for e in payload["exclusions"]}
+    assert rules == {
+        "non_ephemeral": (True, None),
+        "pre_treatment": (False, None),
+        "cut_offs": (True, 1),
+    }
+    assert any("brief-length" in note for note in payload["notes"])
+    flat = _flat(text)
+    assert "population (non_ephemeral): applied. Upstream:" in flat
+    assert "pre-treatment (pre_treatment): not applied." in flat
+    assert "post-treatment (cut_offs): applied, 1 excluded." in flat
+    assert "residualised permutation (secondary analysis): not applied" in flat
+
+
+def test_every_cli_default_is_the_library_default() -> None:
+    """The command repeats analyze_holdout's defaults as literals; drift fails here."""
+    library = {
+        name: parameter.default
+        for name, parameter in inspect.signature(analyze_holdout).parameters.items()
+        if parameter.default is not inspect.Parameter.empty
+    }
+    command = {
+        name: parameter.default.default
+        for name, parameter in inspect.signature(holdout).parameters.items()
+        if name != "output_format"
+    }
+
+    assert command == library
 
 
 def test_several_rates_without_rate_exit_2_in_both_formats(log: HoldoutLog) -> None:

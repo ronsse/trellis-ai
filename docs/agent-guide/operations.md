@@ -1923,12 +1923,15 @@ The descriptive block is reported whatever the flag state: eligible tasks per
 between-parent variance share, PR base rate, arm counts and binomial checks of
 the arm ratio (overall and per ISO week; the pre-registration pauses below
 p 0.001). Run with the flag off, it is the pre-registration's re-measure and
-the inference reads "no withheld arm". Two pre-registered quantities need
-fields capture does not record, so the report says so instead of guessing: the
-pre-treatment exclusion (a first retrieval after a commit or a stop-hook
-nudge) is not applied, and the post-hoc share is `null`. Output is counts and
-statistics only, never an id, intent or text. Exit `0` on any report, `2` on
-an invalid option or an unnamed choice between rates, in both formats.
+the inference reads "no withheld arm". The non-ephemeral rule is listed as
+applied upstream, because capture writes no join for a session in an ephemeral
+project. Three pre-registered items need fields capture does not record, so
+the report says so instead of guessing: the pre-treatment exclusion (a first
+retrieval after a commit or a stop-hook nudge) is not applied, the post-hoc
+share is `null`, and a note says the covariate-residualised permutation is not
+applied. Output is counts and statistics only, never an id, intent or text.
+Exit `0` on any report, `2` on an invalid option or an unnamed choice between
+rates, in both formats.
 
 ### `trellis analyze domains`
 

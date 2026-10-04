@@ -158,6 +158,27 @@ class TestPermutationCalibration:
         assert ((share_a > 0.25) & (share_a < 0.55)).all()
         assert (perms != served).any(axis=1).mean() > 0.5
 
+    def test_the_observed_arrangement_counts_once(self) -> None:
+        """A perfect split at 99 permutations gives exactly 1/100, never 0.
+
+        Twenty served tasks score 1 and twenty withheld tasks score 0. Only
+        that arrangement and its mirror reach the observed gap, 2 of
+        C(40, 20) or about 1.4e11, so the draws find neither and p is the
+        +1 term alone.
+        """
+        served = np.repeat([True, False], 20)
+        strata = np.zeros(served.size, dtype=int)
+
+        p = permutation_p_value(
+            served.astype(float),
+            served,
+            strata,
+            np.random.default_rng(0),
+            permutations=99,
+        )
+
+        assert p == pytest.approx(1 / 100)
+
 
 class TestBootstrapInterval:
     def test_tasks_are_redrawn_per_stratum_so_pair_strata_still_vary(self) -> None:
@@ -180,6 +201,49 @@ class TestBootstrapInterval:
         low, high = interval
         assert low < estimate < high
         assert high - low > 0.5
+
+    def test_resamples_never_mix_strata(self) -> None:
+        """Six strata whose baselines sit 10 apart, with noise SD 0.1.
+
+        Drawing inside each stratum keeps the baselines out of every
+        replicate's gap, so the interval is about 0.1 wide. A draw across
+        strata would carry baseline gaps into the arms and span several
+        units.
+        """
+        strata = np.repeat(np.arange(6), 10)
+        served = np.tile([True, False], 30)
+        noise = np.random.default_rng(8).normal(0.0, 0.1, strata.size)
+        y = strata * 10.0 + served * 0.2 + noise
+
+        interval = bootstrap_ci(y, served, strata, np.random.default_rng(9), 2000)
+        estimate = weighted_difference(y, served, strata)
+
+        assert interval is not None
+        assert estimate is not None
+        low, high = interval
+        assert low < estimate < high
+        assert high - low < 0.3
+
+    def test_a_95_percent_interval_spans_about_3_92_standard_errors(self) -> None:
+        """One stratum of 400 tasks per arm, where the bootstrap is near normal.
+
+        A 95% percentile interval spans about 2 x 1.96 = 3.92 standard errors
+        of the difference, a 90% one 3.29 and a 99% one 5.15. Over 30 data
+        and resample seeds the ratio stayed within 3.82-4.01.
+        """
+        served = np.tile([True, False], 400)
+        y = np.random.default_rng(3).normal(0.0, 1.0, served.size) + 0.5 * served
+        standard_error = math.sqrt(
+            y[served].var(ddof=1) / served.sum()
+            + y[~served].var(ddof=1) / (~served).sum()
+        )
+        strata = np.zeros(served.size, dtype=int)
+
+        interval = bootstrap_ci(y, served, strata, np.random.default_rng(4), 4000)
+
+        assert interval is not None
+        low, high = interval
+        assert 3.6 < (high - low) / standard_error < 4.25
 
     def test_no_stratum_with_both_arms_has_no_interval(self) -> None:
         y = np.array([1.0, 2.0, 3.0, 4.0])
@@ -536,6 +600,25 @@ class TestExclusions:
         assert "first retrieval" in pre.note
         assert report.descriptive.post_hoc_share is None
         assert report.descriptive.post_hoc_note
+
+    def test_rules_applied_upstream_or_not_at_all_are_reported(
+        self, log: HoldoutLog
+    ) -> None:
+        """Non-ephemeral is applied by capture; the covariate analysis never runs."""
+        self._seed_cut_offs(log)
+
+        report = _analyze(log)
+
+        population = next(e for e in report.exclusions if e.name == "non_ephemeral")
+        assert population.applied is True
+        assert population.excluded is None
+        assert "ephemeral project" in population.note
+        assert [e.name for e in report.exclusions] == [
+            "non_ephemeral",
+            "pre_treatment",
+            "cut_offs",
+        ]
+        assert sum("brief-length" in note for note in report.notes) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -172,8 +172,10 @@ All notable changes to Trellis will be documented in this file.
   that first pack's `holdout` (ITT). Rows from builds without `holdout` are
   counted and left out, and several rates in the window are refused until
   `--rate` names one. Usage-limit cut-offs are excluded unless `--itt`; the
-  pre-treatment exclusion is reported as not applied, because capture does
-  not record where the first retrieval fell. The statistic is the
+  pre-treatment exclusion and the covariate-residualised permutation are
+  reported as not applied, because capture records neither where the first
+  retrieval fell nor a brief length, and the non-ephemeral rule as applied
+  upstream by capture. The statistic is the
   stratum-weighted difference, served minus withheld (weights `n1*n0/n`,
   strata parent session x ISO week), of `log1p(assistant_turns)` or another
   `--outcome`, with a within-stratum permutation p-value, a stratified

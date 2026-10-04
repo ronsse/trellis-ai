@@ -133,6 +133,14 @@ _POST_HOC_NOTE = (
     "ask's position against stop-hook nudges, commits and the last 10% of "
     "turns, and capture records none of them."
 )
+_NON_EPHEMERAL_NOTE = (
+    "Upstream: session capture writes no join for a session in an ephemeral "
+    "project, so none reaches this analysis or its counts."
+)
+_COVARIATE_NOTE = (
+    "Covariate-residualised permutation (secondary analysis): not applied, "
+    "because capture records no brief-length field."
+)
 
 
 class HoldoutAnalysisError(ValueError):
@@ -181,7 +189,11 @@ class HoldoutFunnel(TrellisModel):
 
 
 class HoldoutExclusion(TrellisModel):
-    """One pre-registered exclusion and what it removed."""
+    """One pre-registered population rule or exclusion, and what it removed.
+
+    ``excluded`` is ``None`` when this analysis cannot count what the rule
+    removed: it was not applied, or it was applied before the rows it reads.
+    """
 
     name: str
     timing: str
@@ -1133,6 +1145,13 @@ def _report(
         funnel=funnel,
         exclusions=[
             HoldoutExclusion(
+                name="non_ephemeral",
+                timing="population",
+                applied=True,
+                excluded=None,
+                note=_NON_EPHEMERAL_NOTE,
+            ),
+            HoldoutExclusion(
                 name="pre_treatment",
                 timing="pre-treatment",
                 applied=False,
@@ -1319,6 +1338,7 @@ def _notes(
         notes.append("Simulated power stays below the target across the shifts tried.")
     if scan.truncated and scan.note:
         notes.append(scan.note)
+    notes.append(_COVARIATE_NOTE)
     return notes
 
 
