@@ -19,7 +19,8 @@ on any Python version recomputes the same arm for a recorded pack.
 ``holdout`` (a bool) and ``holdout_rate`` (the rate in force), so a row
 from a build that predates the flag reads as served by absence.  Readers
 that aggregate over packs drop holdout packs, and the feedback that names
-them, with :func:`drop_holdout`.
+them, with :func:`drop_holdout`.  Surfaces that return a row to a caller
+without the ``admin`` scope pass it through :func:`blind_holdout` first.
 
 Standard library only: aggregate readers in ``trellis.learning`` and
 ``trellis.ops`` import this, and ``trellis.retrieve`` imports them back.
@@ -114,6 +115,43 @@ def drop_holdout(
     ]
 
 
+def unscanned_pack_ids(
+    pack_events: Iterable[Event], feedback_events: Iterable[Event]
+) -> set[str]:
+    """The packs the feedback names that ``pack_events`` holds no row for.
+
+    :func:`drop_holdout` drops feedback on a withheld pack only when that
+    pack's row is among the pack events it is given.  A windowed or capped
+    scan lacks the row of a pack assembled before the window opened, or
+    pushed past the cap, while the feedback naming it is still in the
+    feedback scan.  A reader looks these ids up and passes any withheld
+    row on.  Feedback is keyed as :func:`drop_holdout` keys it.
+    """
+    scanned = {event.entity_id for event in pack_events if event.entity_id}
+    return {
+        key
+        for event in feedback_events
+        if (key := _feedback_pack_key(event)) and key not in scanned
+    }
+
+
+def blind_holdout(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """A ``PACK_ASSEMBLED`` payload as a caller without ``admin`` reads it.
+
+    A withheld row's would-be pack is what the draw kept from the agent,
+    and a caller who can read it gets the pack back.  So every
+    ``holdout_*`` key goes except ``holdout_rate``, and a would-be key
+    added later is hidden by default.  ``holdout`` stays, so the arm is
+    still readable.  Returns a copy.  A payload with no would-be key comes
+    back equal.
+    """
+    return {
+        key: value
+        for key, value in payload.items()
+        if not key.startswith("holdout_") or key == HOLDOUT_RATE_KEY
+    }
+
+
 __all__ = [
     "HOLDOUT_ADVISORY_IDS_KEY",
     "HOLDOUT_HASH_DOMAIN",
@@ -121,8 +159,10 @@ __all__ = [
     "HOLDOUT_KEY",
     "HOLDOUT_RATE_KEY",
     "HOLDOUT_SECTIONS_KEY",
+    "blind_holdout",
     "drop_holdout",
     "holdout_draw",
     "is_held_out",
     "is_holdout",
+    "unscanned_pack_ids",
 ]

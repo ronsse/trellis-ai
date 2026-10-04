@@ -46,7 +46,7 @@ import structlog
 from pydantic import BaseModel, Field, ValidationError
 
 from trellis.core.base import TrellisModel
-from trellis.core.pack_holdout import drop_holdout
+from trellis.core.pack_holdout import drop_holdout, is_holdout, unscanned_pack_ids
 from trellis.feedback.attribution import (
     StrayCitationTally,
     payload_is_attributed,
@@ -648,10 +648,12 @@ class ServeAttributionReport(TrellisModel):
     read it, and a metric that improves because its denominator was
     quietly narrowed is the failure this decomposition exists to expose.
     The one exclusion is the pack holdout
-    (:mod:`trellis.core.pack_holdout`): a withheld pack in the window and
-    the feedback naming it are left out of ``packs`` and
-    ``feedback_events``, because that pack served nothing to cite and
-    counting it would read the experiment as a capture regression.
+    (:mod:`trellis.core.pack_holdout`): a withheld pack in the window is
+    left out of ``packs``, and the feedback naming a withheld pack is left
+    out of ``feedback_events`` wherever the pack's row falls, before the
+    window or past the scan cap included, because that pack served nothing
+    to cite and counting it would read the experiment as a capture
+    regression.
 
     **Citing is not joining, and the ``stray_*`` block is the gap between
     them** (#574). ``pack_attribution_rate`` counts a caller who cited
@@ -892,7 +894,20 @@ def summarize_serve_attribution(
     )
     # The served arm only: a withheld pack carries no injected items, and
     # it and the feedback naming it would read as a capture regression.
-    pack_events, feedback_events = drop_holdout(pack_scan.events, feedback_scan.events)
+    # Feedback in the window can name a pack the scan lacks, one assembled
+    # before the window opened or pushed past the cap, so each such pack is
+    # looked up by id and a withheld one joins the drop.
+    held_unscanned = [
+        event
+        for pack_id in unscanned_pack_ids(pack_scan.events, feedback_scan.events)
+        for event in event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, entity_id=pack_id, limit=1
+        )
+        if is_holdout(event.payload)
+    ]
+    pack_events, feedback_events = drop_holdout(
+        [*pack_scan.events, *held_unscanned], feedback_scan.events
+    )
     for event in pack_events:
         packs += 1
         if event.payload.get("injected_items"):
