@@ -1385,17 +1385,23 @@ class RetentionPruneHandler:
         archived = 0
         skipped = 0
         resynced = 0
+        unfinished: Exception | None = None
         if not dry_run:
-            for candidate in report.candidates:
-                if self._archive(candidate, reason):
-                    archived += 1
-                else:
-                    skipped += 1
-            # Self-healing: an item archived before the vector sync existed
-            # still has a stale snapshot, and the semantic path serves from
-            # that snapshot. Re-running the prune repairs them — no new verb
-            # for what is a one-shot consequence of shipping the sync late.
-            resynced = self._resync_archived(report.already_archived_ids)
+            try:
+                for candidate in report.candidates:
+                    if self._archive(candidate, reason):
+                        archived += 1
+                    else:
+                        skipped += 1
+                # Self-healing: an item archived before the vector sync
+                # existed still has a stale snapshot, and the semantic path
+                # serves from that snapshot. Re-running the prune repairs
+                # them — no new verb for what is a one-shot consequence of
+                # shipping the sync late.
+                resynced = self._resync_archived(report.already_archived_ids)
+            except Exception as exc:
+                # Re-raised after the event: what was archived stays archived.
+                unfinished = exc
 
         by_reason: dict[str, int] = {}
         by_kind: dict[str, int] = {}
@@ -1463,6 +1469,8 @@ class RetentionPruneHandler:
                 " (WARNING: RETENTION_PRUNED audit emit failed; "
                 "payload preserved in operator logs)"
             )
+        if unfinished is not None:
+            raise unfinished
         return command.command_id, message
 
     def _resync_archived(self, item_ids: list[str]) -> int:
@@ -1595,11 +1603,16 @@ class RetentionRestoreHandler:
 
         restored: list[str] = []
         skipped: list[str] = []
-        for item_id in item_ids:
-            if self._restore(item_id):
-                restored.append(item_id)
-            else:
-                skipped.append(item_id)
+        unfinished: Exception | None = None
+        try:
+            for item_id in item_ids:
+                if self._restore(item_id):
+                    restored.append(item_id)
+                else:
+                    skipped.append(item_id)
+        except Exception as exc:
+            # Re-raised after the event: what was restored stays restored.
+            unfinished = exc
 
         payload: dict[str, Any] = {
             "reason": reason,
@@ -1629,6 +1642,8 @@ class RetentionRestoreHandler:
                 exc_info=True,
             )
             message += " (WARNING: RETENTION_RESTORED audit emit failed)"
+        if unfinished is not None:
+            raise unfinished
         return command.command_id, message
 
     def _restore(self, item_id: str) -> bool:

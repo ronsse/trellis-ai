@@ -632,6 +632,90 @@ class TestNodePurgedMidCommand:
         assert event.payload["skipped_ids"] == [purged]
 
 
+class TestANodeThatNeverSettlesFailsTheRun:
+    """The run fails, and the event still records what it wrote first.
+
+    Items written before the failure stay written, and the event is the
+    only record of them.
+    """
+
+    def _node(self, registry: StoreRegistry, properties: dict[str, Any]) -> str:
+        return registry.knowledge.graph_store.upsert_node(
+            node_id=None, node_type="person", properties=properties
+        )
+
+    def _only_the_first_node_settles(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> list[str]:
+        graph = registry.knowledge.graph_store
+        write = graph.update_node_if_current
+        seen: list[str] = []
+
+        def cas(node_id: str, *args: Any, **kwargs: Any) -> bool:
+            seen.append(node_id)
+            return node_id == seen[0] and write(node_id, *args, **kwargs)
+
+        monkeypatch.setattr(graph, "update_node_if_current", cas)
+        return seen
+
+    def test_prune(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        unconfirmed = {EXTRACTION_STATUS_PROPERTY: EXTRACTION_STATUS_UNCONFIRMED}
+        mints = {self._node(registry, {"name": n, **unconfirmed}) for n in "AB"}
+        seen = self._only_the_first_node_settles(registry, monkeypatch)
+        prune = _prune({"unconfirmed_mints": True, "older_than_days": 0}, dry_run=False)
+
+        result = build_curate_executor(registry).execute(prune)
+
+        assert result.status == CommandStatus.FAILED
+        [unsettled] = mints - {seen[0]}
+        assert seen == [seen[0]] + [unsettled] * 5
+        written = graph.get_node(seen[0])
+        assert written is not None
+        assert written["properties"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+        assert len(graph.get_node_history(unsettled)) == 1
+        log = registry.operational.event_log
+        [event] = log.get_events(event_type=EventType.RETENTION_PRUNED)
+        counts = ("candidates", "archived", "skipped")
+        assert [event.payload[key] for key in counts] == [2, 1, 0]
+        [rejected] = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert rejected.payload["command_id"] == event.payload["command_id"]
+        assert rejected.payload["status"] == "failed"
+
+    def test_restore(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        archived = {LIFECYCLE_KEY: {"state": ARCHIVED_STATE}}
+        first = self._node(registry, {"name": "First", **archived})
+        second = self._node(registry, {"name": "Second", **archived})
+        seen = self._only_the_first_node_settles(registry, monkeypatch)
+        restore = Command(
+            operation=Operation.RETENTION_RESTORE,
+            args={"item_ids": [first, second], "reason": "corrective"},
+        )
+
+        result = build_curate_executor(registry).execute(restore)
+
+        assert result.status == CommandStatus.FAILED
+        assert seen == [first] + [second] * 5
+        states = []
+        for node_id in (first, second):
+            node = graph.get_node(node_id)
+            assert node is not None
+            states.append(node["properties"][LIFECYCLE_KEY]["state"])
+        assert states == [CURRENT_STATE, ARCHIVED_STATE]
+        log = registry.operational.event_log
+        [event] = log.get_events(event_type=EventType.RETENTION_RESTORED)
+        assert event.payload["restored_ids"] == [first]
+        assert event.payload["skipped_ids"] == []
+        [rejected] = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert rejected.payload["command_id"] == event.payload["command_id"]
+        assert rejected.payload["status"] == "failed"
+
+
 class TestVectorRowSync:
     """Archival must reach the *vector* row, not just the document store.
 
