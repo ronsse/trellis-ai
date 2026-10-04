@@ -297,7 +297,9 @@ def _parse_pack_holdout_rate(raw: str) -> float:
             value=value,
         )
         return 0.0
-    return value
+    # ``-0`` passes the range check as ``-0.0``: equal to ``0.0``, but
+    # recorded with its sign in ``env_flags`` and on every row.
+    return 0.0 if value == 0.0 else value
 
 
 def _pack_holdout_rate(env: Mapping[str, str]) -> float:

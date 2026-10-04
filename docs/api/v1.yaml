@@ -2474,7 +2474,11 @@ paths:
 
         ``EventLog.get_events`` has no offset — page older history by
 
-        passing the oldest ``occurred_at`` you have as ``until``.'
+        passing the oldest ``occurred_at`` you have as ``until``. On a
+
+        withheld pack''s row, the ``holdout_*`` keys but ``holdout_rate`` (the
+
+        would-be pack) reach ``admin`` callers only.'
       operationId: list_events_api_v1_events_get
       parameters:
       - description: Filter by event type value
@@ -3375,7 +3379,11 @@ paths:
 
         ``FEEDBACK_RECORDED.payload["pack_id"]`` (see
 
-        ``trellis.learning.pack_observations.join_pack_feedback``).'
+        ``trellis.learning.pack_observations.join_pack_feedback``). On a
+
+        withheld pack''s row, the ``holdout_*`` keys but ``holdout_rate`` (the
+
+        would-be pack) reach ``admin`` callers only.'
       operationId: get_pack_api_v1_packs__pack_id__get
       parameters:
       - in: path

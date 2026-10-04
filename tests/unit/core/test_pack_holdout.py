@@ -21,10 +21,17 @@ import pytest
 from tests.integration._live_server import repo_root, repo_src_pythonpath
 from trellis.core import pack_holdout
 from trellis.core.pack_holdout import (
+    HOLDOUT_ADVISORY_IDS_KEY,
+    HOLDOUT_ITEMS_KEY,
+    HOLDOUT_KEY,
+    HOLDOUT_RATE_KEY,
+    HOLDOUT_SECTIONS_KEY,
+    blind_holdout,
     drop_holdout,
     holdout_draw,
     is_held_out,
     is_holdout,
+    unscanned_pack_ids,
 )
 from trellis.stores.base.event_log import Event, EventType
 
@@ -217,3 +224,51 @@ class TestDropHoldout:
         packs, feedback = drop_holdout(packs_in, feedback_in)
         assert packs == packs_in
         assert feedback == feedback_in
+
+
+class TestUnscannedPackIds:
+    """The packs a reader must look up: named by feedback, absent from its scan."""
+
+    def test_feedback_keys_without_a_scanned_row(self) -> None:
+        scanned = [
+            _event(EventType.PACK_ASSEMBLED, PACK_IDS[0], {"holdout": False}),
+            _event(EventType.PACK_ASSEMBLED, PACK_IDS[1], {"holdout": True}),
+        ]
+        feedback = [
+            _event(EventType.FEEDBACK_RECORDED, PACK_IDS[0], {"pack_id": PACK_IDS[0]}),
+            _event(EventType.FEEDBACK_RECORDED, "fb-1", {"pack_id": PACK_IDS[1]}),
+            _event(
+                EventType.FEEDBACK_RECORDED, "fb-2", {"pack_id": f" {PACK_IDS[2]} "}
+            ),
+            _event(
+                EventType.FEEDBACK_RECORDED, PACK_IDS[3], {"target_id": PACK_IDS[3]}
+            ),
+            _event(EventType.FEEDBACK_RECORDED, None, {"rating": 0.9}),
+        ]
+        # Keyed as ``drop_holdout`` keys feedback: the payload's ``pack_id``,
+        # stripped, or failing that the ``entity_id``.
+        assert unscanned_pack_ids(scanned, feedback) == {PACK_IDS[2], PACK_IDS[3]}
+
+
+class TestBlindHoldout:
+    """A non-admin reader keeps the arm and the rate, never the would-be pack."""
+
+    def test_every_holdout_key_but_the_rate_goes(self) -> None:
+        payload = {
+            "intent": "rotate keys",
+            "injected_item_ids": [],
+            HOLDOUT_KEY: True,
+            HOLDOUT_RATE_KEY: 0.25,
+            HOLDOUT_ITEMS_KEY: [{"item_id": "doc-1"}],
+            HOLDOUT_SECTIONS_KEY: [{"name": "reference", "item_ids": ["doc-2"]}],
+            HOLDOUT_ADVISORY_IDS_KEY: ["adv-1"],
+            # A would-be key added later is hidden without an edit here.
+            "holdout_added_later": ["doc-3"],
+        }
+        assert blind_holdout(payload) == {
+            "intent": "rotate keys",
+            "injected_item_ids": [],
+            HOLDOUT_KEY: True,
+            HOLDOUT_RATE_KEY: 0.25,
+        }
+        assert HOLDOUT_ITEMS_KEY in payload  # a copy, not an edit

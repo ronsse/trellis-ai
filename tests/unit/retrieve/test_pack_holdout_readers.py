@@ -46,6 +46,7 @@ from trellis.retrieve.telemetry import analyze_pack_telemetry
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.pack import PackBudget, PackItem, SectionRequest
 from trellis.stores.advisory_store import AdvisoryStore
+from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 _ITEM_SPECS = [
@@ -120,17 +121,21 @@ class _Corpus:
         self.event_log = event_log
         self.advisory_store = advisory_store
         self.feedback_dir = tmp_path / "feedback"
+        self._tmp_path = tmp_path
         self._runs = 0
+        self._scratch_logs = 0
 
-    def _builder(self, rate: float) -> PackBuilder:
+    def _builder(
+        self, rate: float, event_log: SQLiteEventLog | None = None
+    ) -> PackBuilder:
         return PackBuilder(
             strategies=[_strategy()],
-            event_log=self.event_log,
+            event_log=self.event_log if event_log is None else event_log,
             advisory_store=self.advisory_store,
             holdout_rate=rate,
         )
 
-    def _grade(
+    def grade(
         self,
         pack_id: str,
         rating: float,
@@ -164,13 +169,41 @@ class _Corpus:
         pack = self._builder(rate).build(
             "rotate keys", budget=PackBudget(max_items=max_items, max_tokens=4000)
         )
-        self._grade(pack.pack_id, rating, helpful, unhelpful)
+        self.grade(pack.pack_id, rating, helpful, unhelpful)
         return pack.pack_id
 
     def sectioned(self, rate: float, *, rating: float, helpful: Sequence[str]) -> str:
         pack = self._builder(rate).build_sectioned("rotate keys", sections=_SECTIONS)
-        self._grade(pack.pack_id, rating, helpful, [])
+        self.grade(pack.pack_id, rating, helpful, [])
         return pack.pack_id
+
+    def assemble(
+        self, rate: float, *, sectioned: bool = False, days_ago: int = 0
+    ) -> str:
+        """Build one pack, ungraded, its ``PACK_ASSEMBLED`` row ``days_ago`` old.
+
+        A backdated pack is built into a scratch log and its row copied here
+        with ``occurred_at`` moved back: an emitted row is stamped with the
+        emit time, and an event id is unique within one log.
+        """
+        if not days_ago:
+            log = self.event_log
+        else:
+            self._scratch_logs += 1
+            log = SQLiteEventLog(self._tmp_path / f"scratch-{self._scratch_logs}.db")
+        builder = self._builder(rate, log)
+        if sectioned:
+            pack_id = builder.build_sectioned("rotate keys", sections=_SECTIONS).pack_id
+        else:
+            pack_id = builder.build(
+                "rotate keys", budget=PackBudget(max_items=3, max_tokens=4000)
+            ).pack_id
+        if log is not self.event_log:
+            (row,) = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)
+            log.close()
+            moved = datetime.now(tz=UTC) - timedelta(days=days_ago)
+            self.event_log.append(row.model_copy(update={"occurred_at": moved}))
+        return pack_id
 
     def seed(self) -> None:
         """Served history, varied in budget, rating and citations."""
@@ -313,3 +346,62 @@ class TestEveryReaderIgnoresTheHoldoutArm:
             if reader == "generated":
                 continue  # what is mined depends on thresholds, not only counts
             assert after_served[reader] != output, reader
+
+
+def _serve_attribution(corpus: _Corpus, limit: int = 100) -> dict[str, Any]:
+    return summarize_serve_attribution(
+        corpus.event_log, days=7, limit=limit
+    ).model_dump(exclude={"scan"})
+
+
+class TestTheScanWindowHidesNoHoldout:
+    """Feedback on a withheld pack is dropped wherever the pack's row falls.
+
+    Serve attribution scans a window, newest first, under a cap. A withheld
+    pack assembled before the window opened, or pushed past the cap by newer
+    packs, has no row in that scan, yet the feedback naming it can sit
+    inside the window: pack-targeted, and on an empty pack mostly uncited.
+    """
+
+    def test_a_pack_assembled_before_the_window(self, corpus: _Corpus) -> None:
+        corpus.seed()
+        before = _serve_attribution(corpus)
+        held = [
+            corpus.assemble(1.0, days_ago=10),
+            corpus.assemble(1.0, sectioned=True, days_ago=10),
+        ]
+        corpus.grade(held[0], 0.3, [], [])
+        corpus.grade(held[1], 0.9, ["doc-charlie"], [])
+        after_holdout = _serve_attribution(corpus)
+        served = [
+            corpus.assemble(0.0, days_ago=10),
+            corpus.assemble(0.0, sectioned=True, days_ago=10),
+        ]
+        corpus.grade(served[0], 0.3, [], [])
+        corpus.grade(served[1], 0.9, ["doc-charlie"], [])
+        after_served = _serve_attribution(corpus)
+
+        assert (before["packs"], before["pack_targeted_feedback"]) == (4, 4)
+        assert after_holdout == before
+        # Feedback on a served pack from before the window counts, as it
+        # always has: only a withheld pack's feedback is looked past.
+        assert after_served["packs"] == 4
+        assert after_served["pack_targeted_feedback"] == 6
+        assert after_served["pack_targeted_attributed"] == (
+            before["pack_targeted_attributed"] + 1
+        )
+
+    def test_a_pack_pushed_past_the_scan_cap(self, corpus: _Corpus) -> None:
+        held = corpus.assemble(1.0)
+        corpus.flat(0.0, max_items=3, rating=0.9, helpful=["doc-alpha"])
+        corpus.flat(0.0, max_items=2, rating=0.4, helpful=[], unhelpful=["doc-bravo"])
+        corpus.assemble(0.0)
+        corpus.assemble(0.0)
+        before = _serve_attribution(corpus, limit=4)
+        corpus.grade(held, 0.2, [], [])
+        after = summarize_serve_attribution(corpus.event_log, days=7, limit=4)
+
+        # Four newer packs fill the cap, so the withheld one is not scanned.
+        assert after.scan.truncated_event_types == [EventType.PACK_ASSEMBLED.value]
+        assert (before["packs"], before["feedback_events"]) == (4, 2)
+        assert after.model_dump(exclude={"scan"}) == before

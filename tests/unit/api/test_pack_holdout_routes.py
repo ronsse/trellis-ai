@@ -7,12 +7,19 @@ for a corpus that holds nothing — no items, no advisories, an empty
 withholding summary, a greenfield retrieval report — apart from its
 ``pack_id``, and none of it mentions a holdout. ``GET /api/version`` echoes
 the rate in force, as it echoes every write-behaviour knob.
+
+The rows the explore routes read back (``GET /api/v1/events`` and
+``GET /api/v1/packs/{pack_id}``) keep the would-be pack for ``admin``
+callers alone: any other key reads ``holdout`` and ``holdout_rate`` and no
+other ``holdout_*`` key.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,10 +28,18 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+from trellis.auth import (
+    SCOPE_ADMIN,
+    SCOPE_INGEST,
+    SCOPE_MUTATE,
+    SCOPE_READ,
+    generate_api_key,
+)
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis_api.app import create_app
 from trellis_api.routes import retrieve
 from trellis_api.routes import version as version_route
 
@@ -136,9 +151,11 @@ def _seed(registry: StoreRegistry) -> None:
         )
 
 
-def _post(client: TestClient, name: str) -> dict[str, Any]:
+def _post(
+    client: TestClient, name: str, headers: dict[str, str] | None = None
+) -> dict[str, Any]:
     route, body, _flat = _ROUTES[name]
-    response = client.post(route, json=body)
+    response = client.post(route, json=body, headers=headers)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -313,3 +330,145 @@ class TestVersionEchoesTheRate:
             monkeypatch.setenv(RATE_ENV, raw)
         body = client.get("/api/version").json()
         assert body["write_provenance"]["env_flags"]["pack_holdout_rate"] == expected
+
+    def test_negative_zero_is_recorded_as_zero(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``-0`` parses to a float equal to ``0.0`` that serialises as ``-0.0``.
+
+        Equality cannot see the sign, so the recorded values are compared
+        by it: on the ``PACK_ASSEMBLED`` row and in ``env_flags``.
+        """
+        monkeypatch.setenv(RATE_ENV, "-0")
+        pack_id = _post(client, "flat")["pack_id"]
+        version = client.get("/api/version").json()
+        recorded = [
+            _assembled(registry, pack_id)["holdout_rate"],
+            version["write_provenance"]["env_flags"]["pack_holdout_rate"],
+        ]
+        assert recorded == [0.0, 0.0]
+        assert [math.copysign(1.0, rate) for rate in recorded] == [1.0, 1.0]
+
+
+_SHARED_SECRET = "synthetic-holdout-shared-secret"  # noqa: S105 - a test value
+
+#: What a withheld pack's row records beyond a served pack's: the would-be
+#: pack. Flat rows carry the first and last, sectioned rows the last two.
+_WOULD_BE_KEYS = {"holdout_items", "holdout_sections", "holdout_advisory_ids"}
+
+#: Each caller, and whether it holds ``admin``.
+_CALLERS = {
+    "read": False,
+    "every-scope-but-admin": False,
+    "admin": True,
+    "shared-secret": True,
+}
+
+
+@dataclass
+class _Scoped:
+    client: TestClient
+    headers: dict[str, dict[str, str]]
+    held: list[str]
+    served: str
+    #: Each pack's ``PACK_ASSEMBLED`` payload, read from the event log.
+    raw: dict[str, dict[str, Any]]
+
+
+@pytest.fixture
+def scoped(registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch) -> _Scoped:
+    """The full app in ``required`` mode with withheld and served packs.
+
+    One credential per caller: per-key records for the scoped callers and
+    ``TRELLIS_API_KEY`` for the shared secret. The client is not entered as
+    a context manager, because the lifespan would replace the fixture
+    registry with one read from the real config dir (as in ``test_auth``).
+    """
+    monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+    monkeypatch.setenv("TRELLIS_API_KEY", _SHARED_SECRET)
+    headers = {"shared-secret": {"X-API-Key": _SHARED_SECRET}}
+    for caller, scopes in {
+        "read": [SCOPE_READ],
+        "every-scope-but-admin": [SCOPE_READ, SCOPE_INGEST, SCOPE_MUTATE],
+        "admin": [SCOPE_ADMIN],
+    }.items():
+        token, record = generate_api_key(caller, scopes)
+        registry.operational.api_key_store.create(record)
+        headers[caller] = {"X-API-Key": token}
+    client = TestClient(create_app())
+
+    _seed(registry)
+    monkeypatch.setenv(RATE_ENV, "1")
+    held = [_post(client, name, headers["admin"])["pack_id"] for name in _ROUTES]
+    monkeypatch.setenv(RATE_ENV, "0")
+    served = _post(client, "flat", headers["admin"])["pack_id"]
+    raw = {pack_id: _assembled(registry, pack_id) for pack_id in [*held, served]}
+
+    # Each withheld row records a would-be pack, and the served row none.
+    flat, sectioned = (raw[pack_id] for pack_id in held)
+    assert set(flat) & _WOULD_BE_KEYS == {"holdout_items", "holdout_advisory_ids"}
+    assert set(sectioned) & _WOULD_BE_KEYS == {
+        "holdout_sections",
+        "holdout_advisory_ids",
+    }
+    assert all(
+        row[key] for row in (flat, sectioned) for key in _WOULD_BE_KEYS & set(row)
+    )
+    assert not set(raw[served]) & _WOULD_BE_KEYS
+    return _Scoped(client, headers, held, served, raw)
+
+
+def _as_seen(raw: dict[str, Any], *, admin: bool) -> dict[str, Any]:
+    """The payload a caller should read: the would-be pack is admin-only."""
+    return raw if admin else {k: v for k, v in raw.items() if k not in _WOULD_BE_KEYS}
+
+
+class TestOnlyAdminReadsTheWouldBePack:
+    """A key that can read a withheld pack's row must not recover the pack.
+
+    ``holdout`` and ``holdout_rate`` stay readable to every caller; the
+    would-be keys reach ``admin`` callers and the shared secret only, so the
+    operator view is unchanged.
+    """
+
+    @pytest.mark.parametrize("include_payload", [True, False])
+    @pytest.mark.parametrize("caller", sorted(_CALLERS))
+    def test_events_carry_the_would_be_pack_to_admin_only(
+        self, caller: str, include_payload: bool, scoped: _Scoped
+    ) -> None:
+        response = scoped.client.get(
+            "/api/v1/events",
+            params={
+                "event_type": EventType.PACK_ASSEMBLED.value,
+                "include_payload": include_payload,
+            },
+            headers=scoped.headers[caller],
+        )
+        assert response.status_code == 200, response.text
+        rows = {row["entity_id"]: row for row in response.json()["events"]}
+        assert set(rows) == set(scoped.raw)
+        for pack_id, raw in scoped.raw.items():
+            expected = _as_seen(raw, admin=_CALLERS[caller])
+            row = rows[pack_id]
+            if include_payload:
+                assert row["payload"] == expected, (caller, pack_id)
+                assert row["payload"]["holdout"] is (pack_id in scoped.held)
+            else:
+                assert "payload" not in row
+                assert row["payload_keys"] == sorted(expected), (caller, pack_id)
+
+    @pytest.mark.parametrize("caller", sorted(_CALLERS))
+    def test_pack_detail_carries_the_would_be_pack_to_admin_only(
+        self, caller: str, scoped: _Scoped
+    ) -> None:
+        for pack_id, raw in scoped.raw.items():
+            response = scoped.client.get(
+                f"/api/v1/packs/{pack_id}", headers=scoped.headers[caller]
+            )
+            assert response.status_code == 200, response.text
+            payload = response.json()["pack"]["payload"]
+            assert payload == _as_seen(raw, admin=_CALLERS[caller]), (caller, pack_id)
+            assert payload["holdout"] is (pack_id in scoped.held)
