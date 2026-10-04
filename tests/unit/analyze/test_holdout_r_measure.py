@@ -333,14 +333,14 @@ class TestFunnelNotes:
             outcome=outcome_payload(turns=5),
             source_system="codex",
         )
-        log.sweep()  # a claude-code sweep only
+        log.sweep()  # a claude-code sweep only, 4 h after the latest join
 
-        report = _analyze(log)
+        report = _analyze(log, settle_hours=1.5)
 
         assert (report.funnel.unfinished, report.funnel.eligible) == (1, 1)
         note = next(n for n in report.notes if "not finished" in n)
         assert "for their source system" in note
-        assert "at least 3 h after" in note
+        assert "at least 1.5 h after" in note
         assert "completed sweeps found for: claude-code" in note
 
     def test_eligible_tasks_with_an_unparsed_pack_id_are_counted(

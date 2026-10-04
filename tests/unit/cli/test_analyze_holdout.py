@@ -27,7 +27,7 @@ from tests.unit.analyze._holdout_fixture import (
     outcome_payload,
     seed_experiment,
 )
-from trellis.analyze.holdout import analyze_holdout
+from trellis.analyze.holdout import analyze_holdout, n_for_mde
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.analyze import holdout
 from trellis_cli.exit_codes import EXIT_OK, EXIT_VALIDATION
@@ -299,7 +299,9 @@ def test_every_r_figure_is_in_the_json_and_the_text(log: HoldoutLog) -> None:
     assert [h["ratio"] for h in horizons] == pytest.approx(
         [math.exp(m) for m in expected], rel=1e-3
     )
-    assert d["n_for_10pct_effect"] > 18
+    # x0.9 on log1p turns at the within-parent SD, not the total SD.
+    n_10 = n_for_mde(sd, -math.log(0.9))
+    assert d["n_for_10pct_effect"] == n_10
     sessions = d["sessions"]
     counts = ("rolled_up", "reaching_retrieval", "eligible", "analysed")
     assert [sessions[key] for key in counts] == [4, 4, 4, 4]
@@ -320,7 +322,10 @@ def test_every_r_figure_is_in_the_json_and_the_text(log: HoldoutLog) -> None:
         "30 days: N 6, MDE",
         "60 days: N 12, MDE",
         "90 days: N 18, MDE",
-        "N for a 10% effect",
+        (
+            "N for a 10% effect (x0.9 on a log1p outcome, 10% of the served "
+            f"mean otherwise): {n_10:,}"
+        ),
         "main sessions 4 rolled up",
         "reaching a retrieval 4 (2 per 30 days)",
         "main-session MDE",
