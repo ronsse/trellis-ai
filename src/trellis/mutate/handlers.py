@@ -1675,7 +1675,7 @@ class RetentionRestoreHandler:
             # and since #420 ``GraphSearch`` decays off that same column
             # (``retrieve.strategies.GRAPH_RECENCY_CLOCK_FIELD``). So a
             # restored node neither re-enters the graph axis's candidate
-            # window nor gains rank inside it, and ``upsert_node`` needs no
+            # window nor gains rank inside it, and the rewrite needs no
             # ``preserve_updated_at`` equivalent. Fixed reader-side because
             # the writers that actually move a node's ``updated_at`` are the
             # ordinary ones (``entity.update``, extraction upserts), which no
