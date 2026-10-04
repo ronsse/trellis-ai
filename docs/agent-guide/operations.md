@@ -1936,15 +1936,15 @@ the rows cannot give reads "not measurable: <reason>" in text; in JSON it is
 flag off, the block is the pre-registration's re-measure and the inference
 reads "no withheld arm". The funnel also counts eligible tasks whose capture
 reported a pack id it could not parse (`eligible_with_unparsed_pack_ids`),
-because their first parsed pack may not be their first call. The
-non-ephemeral rule is listed as applied upstream, because capture writes no
-join for a session in an ephemeral project. Three pre-registered items need fields capture does not record, so
-the report says so instead of guessing: the pre-treatment exclusion (a first
-retrieval after a commit or a stop-hook nudge) is not applied, the post-hoc
-share is `null`, and a note says the covariate-residualised permutation is not
-applied. Output is counts and statistics only, never an id, intent or text.
-Exit `0` on any report, `2` on an invalid option or an unnamed choice between
-rates, in both formats.
+because their first parsed pack may not be their first call. The non-ephemeral
+rule is listed as applied upstream, because capture writes no join for a
+session in an ephemeral project. Three pre-registered items need fields capture
+does not record, so the report says so instead of guessing: the pre-treatment
+exclusion (a first retrieval after a commit or a stop-hook nudge) is not
+applied, the post-hoc share is `null`, and a note says the
+covariate-residualised permutation is not applied. Output is counts and
+statistics only, never an id, intent or text. Exit `0` on any report, `2` on an
+invalid option or an unnamed choice between rates, in both formats.
 
 ### `trellis analyze domains`
 
