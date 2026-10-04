@@ -23,6 +23,8 @@ Python boundary via :func:`validate_edge_provenance`.
 from __future__ import annotations
 
 import os
+import threading
+from typing import Any
 
 import pytest
 
@@ -64,6 +66,82 @@ def graph_store():
         session.run("MATCH (n) WHERE n:Node OR n:Alias DETACH DELETE n")
     yield store
     store.close()
+
+
+def _rows_left(store, node_id: str) -> dict[str, int]:
+    """Count the rows, any version, each label still holds for a node."""
+    with store._driver.session(database=store._database) as session:
+        return {
+            label: session.run(
+                f"MATCH (x:{label}) WHERE x.{key} = $nid RETURN count(x) AS c",
+                nid=node_id,
+            ).single()["c"]
+            for label, key in (
+                ("Node", "node_id"),
+                ("Alias", "entity_id"),
+                ("AliasClaim", "entity_id"),
+            )
+        }
+
+
+def test_a_purge_whose_commit_lost_to_a_concurrent_purge_reports_no_removal(
+    graph_store, monkeypatch
+):
+    # ArcadeDB never blocks a purge. The second purge's first attempt runs
+    # its statements while the first purge's transaction is open, the first
+    # commits, the second's commit conflicts, and the driver re-runs its
+    # transaction function, which finds nothing left to remove.
+    import neo4j
+
+    store = graph_store
+    store.upsert_node("n1", "person", {"phase": "1"})
+    store.upsert_node("n1", "person", {"phase": "2"})
+    store.upsert_node("n1-peer", "person", {})
+    store.upsert_edge("n1", "n1-peer", "knows")
+    store.upsert_alias("n1", "race-sys", "raw-n1", raw_name="One")
+    first = threading.get_ident()
+    original = neo4j.Session.execute_write
+    second_ran, first_done = threading.Event(), threading.Event()
+    state: dict[str, Any] = {"second_attempts": 0}
+
+    def second() -> None:
+        state["second"] = store.delete_node("n1")
+
+    def gated(session: Any, transaction_function: Any, *args: Any, **kwargs: Any):
+        if "delete_node" not in getattr(transaction_function, "__qualname__", ""):
+            return original(session, transaction_function, *args, **kwargs)
+
+        def held(tx: Any, *a: Any, **k: Any) -> Any:
+            result = transaction_function(tx, *a, **k)
+            if "purge" not in state:
+                state["purge"] = threading.Thread(target=second)
+                state["purge"].start()
+                state["overlapped"] = second_ran.wait(15)
+            return result
+
+        def overlapping(tx: Any, *a: Any, **k: Any) -> Any:
+            result = transaction_function(tx, *a, **k)
+            state["second_attempts"] += 1
+            if state["second_attempts"] == 1:
+                second_ran.set()
+                state["first_committed"] = first_done.wait(15)
+            return result
+
+        wrapper = held if threading.get_ident() == first else overlapping
+        return original(session, wrapper, *args, **kwargs)
+
+    monkeypatch.setattr(neo4j.Session, "execute_write", gated)
+    state["first"] = store.delete_node("n1")
+    first_done.set()
+    assert "purge" in state, "the first purge never ran a delete_node transaction"
+    state["purge"].join(timeout=60)
+
+    assert state["overlapped"], "the second purge never ran inside the first's"
+    assert state["first_committed"]
+    assert state["second_attempts"] >= 2, "the second purge's commit never conflicted"
+    assert not state["purge"].is_alive()
+    assert (state["first"], state["second"]) == (True, False)
+    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
 
 
 class TestArcadeDBEdgeProvenance:
