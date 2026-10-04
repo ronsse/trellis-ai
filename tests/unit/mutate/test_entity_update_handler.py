@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from tests.unit.mutate._purge_race import redaction, rival_inside_first_read
 from trellis.errors import ValidationError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
@@ -226,6 +227,119 @@ class TestEntityUpdateHandler:
         node = registry.knowledge.graph_store.get_node(node_id)
         assert node is not None
         assert node["properties"]["phase"] == "2"
+
+
+class TestEntityUpdateRacingAnotherWrite:
+    """A write that commits between the handler's read and its write wins."""
+
+    @pytest.mark.parametrize(
+        "args",
+        [{"properties": {"phase": "2"}}, {"name": "Renamed"}],
+        ids=["properties", "name"],
+    )
+    def test_purged_mid_command_is_refused_and_stays_purged(
+        self, registry: StoreRegistry, args: dict[str, Any]
+    ) -> None:
+        executor = build_curate_executor(registry)
+        graph = registry.knowledge.graph_store
+        created = executor.execute(
+            Command(
+                operation=Operation.ENTITY_CREATE,
+                args={"entity_type": "person", "name": "Original"},
+            )
+        )
+        node_id = created.created_id
+        assert node_id is not None
+        assert len(graph.get_aliases(node_id)) == 1
+        update = Command(
+            operation=Operation.ENTITY_UPDATE, args={"entity_id": node_id, **args}
+        )
+
+        with rival_inside_first_read(
+            registry, executor, node_id, redaction(node_id)
+        ) as rival:
+            loser = executor.execute(update)
+
+        [purge] = rival
+        assert purge.status == CommandStatus.SUCCESS
+        assert loser.status == CommandStatus.REJECTED
+        assert loser.message == f"Node not found: {node_id}"
+        assert loser.metadata["rejection_reason"] == "target_not_found"
+        assert graph.get_node(node_id) is None
+        assert graph.get_node_history(node_id) == []
+        assert graph.get_aliases(node_id) == []
+        events = registry.operational.event_log
+        assert events.get_events(event_type=EventType.ENTITY_UPDATED) == []
+        rejected = events.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert [(e.payload["command_id"], e.payload["reason"]) for e in rejected] == [
+            (loser.command_id, "target_not_found")
+        ]
+
+    def test_an_update_committed_mid_command_is_kept(
+        self, registry: StoreRegistry
+    ) -> None:
+        node_id = _create_node(registry)
+        executor = build_curate_executor(registry)
+        graph = registry.knowledge.graph_store
+        first = Command(
+            operation=Operation.ENTITY_UPDATE,
+            args={"entity_id": node_id, "properties": {"owner": "rival"}},
+        )
+        second = Command(
+            operation=Operation.ENTITY_UPDATE,
+            args={"entity_id": node_id, "properties": {"phase": "2"}},
+        )
+
+        with rival_inside_first_read(registry, executor, node_id, first) as rival:
+            result = executor.execute(second)
+
+        [committed] = rival
+        assert committed.status == CommandStatus.SUCCESS
+        assert result.status == CommandStatus.SUCCESS
+        node = graph.get_node(node_id)
+        assert node is not None
+        assert node["properties"] == {
+            "name": "Original",
+            "owner": "rival",
+            "phase": "2",
+        }
+        assert len(graph.get_node_history(node_id)) == 3
+
+    def test_a_node_that_never_settles_fails_after_five_attempts(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        node_id = _create_node(registry)
+        executor = build_curate_executor(registry)
+        graph = registry.knowledge.graph_store
+        attempts: list[str] = []
+
+        def always_stale(nid: str, *args: Any, **kwargs: Any) -> bool:
+            attempts.append(nid)
+            if len(attempts) > 100:
+                msg = "retry is unbounded"
+                raise RuntimeError(msg)
+            return False
+
+        monkeypatch.setattr(graph, "update_node_if_current", always_stale)
+        result = executor.execute(
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={"entity_id": node_id, "properties": {"phase": "2"}},
+            )
+        )
+
+        assert result.status == CommandStatus.FAILED
+        assert attempts == [node_id] * 5
+        node = graph.get_node(node_id)
+        assert node is not None
+        assert node["properties"] == {"name": "Original"}
+        assert len(graph.get_node_history(node_id)) == 1
+        events = registry.operational.event_log
+        assert events.get_events(event_type=EventType.ENTITY_UPDATED) == []
+        rejected = events.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert [(e.payload["command_id"], e.payload["status"]) for e in rejected] == [
+            (result.command_id, "failed")
+        ]
 
 
 class TestEntityCreateDocumentIds:

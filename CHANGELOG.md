@@ -136,7 +136,7 @@ All notable changes to Trellis will be documented in this file.
   ArcadeDB; a concurrent `upsert_node` is not checked against the token, and
   on Neo4j the two can leave two current versions. A token that is not a
   timestamp string raises `TypeError` or `ValueError` before anything is
-  read, on every backend. No caller uses it yet. **Out-of-tree `GraphStore`
+  read, on every backend. **Out-of-tree `GraphStore`
   backends must implement it**: the method is abstract, so a subclass
   without it no longer instantiates.
 - **The `capture.session_packs` join now carries each session's outcome.**
@@ -587,6 +587,25 @@ All notable changes to Trellis will be documented in this file.
   is abstract, so a subclass without it no longer instantiates.
   ([#695](https://github.com/ronsse/trellis-ai/pull/695))
 
+- **A label, entity update or retention write that loses to a redaction
+  no longer brings the node back.** A `redaction.apply` that committed
+  between `label.add`, `label.remove`, `entity.update`, `retention.prune`
+  or `retention.restore` reading a node and writing its next version was
+  undone: the node came back with its pre-redaction properties, and an
+  `entity.update` that set a name bound its alias again. All five now
+  write through `GraphStore.update_node_if_current` against the version
+  they read. A node purged in between is refused as a missing one is
+  (`rejected`, reason `target_not_found`, no `LABEL_*` or `ENTITY_UPDATED`
+  event and no alias); the retention verbs count it as skipped (`skipped`,
+  and restore's `skipped_ids`). A version that another write replaced in
+  between is re-read and the change applied again, so none of the five
+  overwrites a write that landed after its read (writers that still call
+  `upsert_node` are not checked). After five such attempts the command
+  fails, and a retention run that fails part-way still emits
+  `RETENTION_PRUNED` or `RETENTION_RESTORED` for what it wrote first.
+  `label.add` and `label.remove` also carry the node's `document_ids`
+  forward, where they wrote every new version with none.
+  ([#698](https://github.com/ronsse/trellis-ai/pull/698))
 - **`delete_node` also removes a version written by a write it waited on,
   on Postgres and Neo4j.** A purge whose delete waited on a concurrent
   write's lock missed the version that write added, so the node, one of its
