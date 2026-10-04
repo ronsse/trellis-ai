@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.mutate._purge_race import redaction, rival_inside_first_read
 from trellis.errors import ValidationError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
@@ -275,6 +276,142 @@ class TestLabelOnAMissingNode:
 
         assert [r.status for r in results] == [CommandStatus.REJECTED]
         assert registry.knowledge.graph_store.query(node_type="concept") == []
+
+
+_LABEL_EVENTS = {
+    Operation.LABEL_ADD: EventType.LABEL_ADDED,
+    Operation.LABEL_REMOVE: EventType.LABEL_REMOVED,
+}
+
+
+class TestLabelOnANodePurgedMidCommand:
+    """A purge that commits between the label's read and its write wins.
+
+    The label is refused as on a missing node, and the node stays purged.
+    """
+
+    @pytest.mark.parametrize(
+        ("operation", "label"),
+        [(Operation.LABEL_ADD, "y"), (Operation.LABEL_REMOVE, "x")],
+        ids=str,
+    )
+    def test_refused_and_the_node_stays_purged(
+        self, registry: StoreRegistry, operation: Operation, label: str
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None,
+            node_type="concept",
+            properties={"name": "test", "labels": ["x"]},
+        )
+        executor = build_curate_executor(registry)
+        command = Command(
+            operation=operation, args={"target_id": node_id, "label": label}
+        )
+
+        with rival_inside_first_read(
+            registry, executor, node_id, redaction(node_id)
+        ) as rival:
+            loser = executor.execute(command)
+
+        [purge] = rival
+        assert purge.status == CommandStatus.SUCCESS
+        assert loser.status == CommandStatus.REJECTED
+        assert loser.message == f"Node not found: {node_id}"
+        assert loser.metadata["rejection_reason"] == "target_not_found"
+        assert graph.get_node(node_id) is None
+        assert graph.get_node_history(node_id) == []
+        log = registry.operational.event_log
+        assert log.get_events(event_type=_LABEL_EVENTS[operation]) == []
+        rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert [(e.payload["command_id"], e.payload["reason"]) for e in rejected] == [
+            (loser.command_id, "target_not_found")
+        ]
+
+
+class TestLabelRacingAnotherLabel:
+    """A label committed mid-command is kept: the retry rebuilds from it."""
+
+    @pytest.mark.parametrize(
+        ("operation", "label", "labels"),
+        [
+            (Operation.LABEL_ADD, "y", ["x", "z", "y"]),
+            (Operation.LABEL_REMOVE, "x", ["z"]),
+        ],
+        ids=["add", "remove"],
+    )
+    def test_the_rival_label_is_kept(
+        self,
+        registry: StoreRegistry,
+        operation: Operation,
+        label: str,
+        labels: list[str],
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None,
+            node_type="concept",
+            properties={"name": "test", "labels": ["x"]},
+        )
+        executor = build_curate_executor(registry)
+        rival = Command(
+            operation=Operation.LABEL_ADD, args={"target_id": node_id, "label": "z"}
+        )
+        command = Command(
+            operation=operation, args={"target_id": node_id, "label": label}
+        )
+
+        with rival_inside_first_read(registry, executor, node_id, rival) as winner:
+            loser = executor.execute(command)
+
+        assert [result.status for result in winner] == [CommandStatus.SUCCESS]
+        assert loser.status == CommandStatus.SUCCESS
+        node = graph.get_node(node_id)
+        assert node is not None
+        assert node["properties"]["labels"] == labels
+        assert len(graph.get_node_history(node_id)) == 3
+
+
+class TestLabelsKeepTheDocumentLink:
+    """A label writes a new version, and the version keeps ``document_ids``.
+
+    A version written without them reads as "no link": the label would cut
+    the node's document link.
+    """
+
+    @pytest.mark.parametrize(
+        ("operation", "label", "labels_after"),
+        [
+            (Operation.LABEL_ADD, "y", ["x", "y"]),
+            (Operation.LABEL_REMOVE, "x", []),
+        ],
+        ids=str,
+    )
+    def test_document_ids_survive(
+        self,
+        registry: StoreRegistry,
+        operation: Operation,
+        label: str,
+        labels_after: list[str],
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None,
+            node_type="concept",
+            properties={"name": "test", "labels": ["x"]},
+            document_ids=["doc-a", "doc-b"],
+        )
+
+        result = build_curate_executor(registry).execute(
+            Command(operation=operation, args={"target_id": node_id, "label": label})
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        node = graph.get_node(node_id)
+        assert node is not None
+        assert node["properties"]["labels"] == labels_after
+        assert node["document_ids"] == ["doc-a", "doc-b"]
+        assert len(graph.get_node_history(node_id)) == 2
 
 
 class TestFeedbackRecordHandler:
