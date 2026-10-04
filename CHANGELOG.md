@@ -726,6 +726,7 @@ All notable changes to Trellis will be documented in this file.
   are literal there; SQLite and PostgreSQL answer as before. **Out-of-tree
   `GraphStore` backends must implement `search_nodes`**: the method is
   abstract, so a subclass without it no longer instantiates.
+  ([#708](https://github.com/ronsse/trellis-ai/pull/708))
 
 ## [0.9.0] - 2026-05-13
 
