@@ -571,6 +571,51 @@ def test_get_trace_by_id(client):
     assert data["trace"]["intent"] == "get by id"
 
 
+def test_get_trace_names_what_can_show_each_evidence_ref(client, monkeypatch):
+    """The evidence document first, else the ``evidence:<id>`` graph node.
+
+    Only trace extraction writes the node, and it is off by default, so a ref
+    can have neither. That ref gets no entry, and the UI shows it as text.
+    """
+    doc_id = "syn-ev-doc-01"
+    resp = client.post(
+        "/api/v1/evidence",
+        json={
+            "evidence_id": doc_id,
+            "evidence_type": "snippet",
+            "content": "synthetic evidence",
+            "source_origin": "test",
+        },
+    )
+    assert resp.status_code == 200
+
+    def ingest(*evidence_ids: str) -> str:
+        trace = _make_trace(intent="cite evidence")
+        trace["evidence_used"] = [{"evidence_id": e} for e in evidence_ids]
+        resp = client.post("/api/v1/traces", json=trace)
+        assert resp.status_code == 200
+        return resp.json()["trace_id"]
+
+    def links(trace_id: str) -> dict:
+        resp = client.get(f"/api/v1/traces/{trace_id}")
+        assert resp.status_code == 200
+        return resp.json()["evidence_links"]
+
+    monkeypatch.delenv("TRELLIS_ENABLE_TRACE_EXTRACTION", raising=False)
+    plain = ingest(doc_id, "syn-ev-none-01")
+    monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+    extracted = ingest(doc_id, "syn-ev-node-01")
+
+    assert links(plain) == {doc_id: {"document_id": doc_id}}
+    # Extraction wrote a node for both refs; the document still wins.
+    graph = app_module._registry.knowledge.graph_store
+    assert graph.get_node(f"evidence:{doc_id}") is not None
+    assert links(extracted) == {
+        doc_id: {"document_id": doc_id},
+        "syn-ev-node-01": {"entity_id": "evidence:syn-ev-node-01"},
+    }
+
+
 def test_create_entity(client):
     resp = client.post(
         "/api/v1/entities",
