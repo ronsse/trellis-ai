@@ -136,7 +136,7 @@ All notable changes to Trellis will be documented in this file.
   ArcadeDB; a concurrent `upsert_node` is not checked against the token, and
   on Neo4j the two can leave two current versions. A token that is not a
   timestamp string raises `TypeError` or `ValueError` before anything is
-  read, on every backend. No caller uses it yet. **Out-of-tree `GraphStore`
+  read, on every backend. **Out-of-tree `GraphStore`
   backends must implement it**: the method is abstract, so a subclass
   without it no longer instantiates.
 
@@ -571,6 +571,24 @@ All notable changes to Trellis will be documented in this file.
   `GraphStore` backends must implement `count_nodes_by_type`**: the method
   is abstract, so a subclass without it no longer instantiates.
   ([#695](https://github.com/ronsse/trellis-ai/pull/695))
+
+- **A label, entity update or retention write that loses to a redaction
+  no longer brings the node back.** `label.add`, `label.remove`,
+  `entity.update`, `retention.prune` and `retention.restore` read a node,
+  then wrote its next version with `upsert_node`, which creates a node
+  when none is current. A `redaction.apply` that committed between the
+  read and the write was undone: the purged node came back with its
+  pre-redaction properties, and an `entity.update` that set a name bound
+  its alias again. All five now write through
+  `GraphStore.update_node_if_current` against the version they read. A
+  node purged in between is refused as a missing one is (`rejected`,
+  reason `target_not_found`, no `LABEL_*` or `ENTITY_UPDATED` event and
+  no alias); the retention verbs report it as skipped (`skipped`,
+  `skipped_ids`). A version that another write replaced in between is
+  re-read and the change applied again, so a concurrent update is no
+  longer lost; after five such attempts the command fails. `label.add`
+  and `label.remove` also carry the node's `document_ids` forward, where
+  they wrote every new version with none.
 
 ## [0.9.0] - 2026-05-13
 

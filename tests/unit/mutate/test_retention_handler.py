@@ -28,6 +28,7 @@ from typing import Any, get_args
 import pytest
 
 from tests.document_recency import fake_document_clock, keyword_recency_ratio
+from tests.unit.mutate._purge_race import redaction, rival_inside_first_read
 from trellis.errors import ValidationError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
@@ -559,6 +560,76 @@ class TestRestore:
                 )
             )
         assert exc.value.code == "retention_restore_ids_required"
+
+
+class TestNodePurgedMidCommand:
+    """A purge that commits between a node's read and its rewrite stands.
+
+    The purged id is skipped, as an id that vanished before the read is;
+    the bystander in the same command is still written.
+    """
+
+    def _node(self, registry: StoreRegistry, properties: dict[str, Any]) -> str:
+        return registry.knowledge.graph_store.upsert_node(
+            node_id=None, node_type="person", properties=properties
+        )
+
+    def test_prune_skips_it(self, registry: StoreRegistry) -> None:
+        graph = registry.knowledge.graph_store
+        unconfirmed = {EXTRACTION_STATUS_PROPERTY: EXTRACTION_STATUS_UNCONFIRMED}
+        purged = self._node(registry, {"name": "Purged Mint", **unconfirmed})
+        kept = self._node(registry, {"name": "Kept Mint", **unconfirmed})
+        executor = build_curate_executor(registry)
+        prune = _prune({"unconfirmed_mints": True, "older_than_days": 0}, dry_run=False)
+
+        with rival_inside_first_read(
+            registry, executor, purged, redaction(purged)
+        ) as rival:
+            result = executor.execute(prune)
+
+        [purge] = rival
+        assert purge.status == CommandStatus.SUCCESS
+        assert result.status == CommandStatus.SUCCESS
+        assert graph.get_node(purged) is None
+        assert graph.get_node_history(purged) == []
+        node = graph.get_node(kept)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+        [event] = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_PRUNED
+        )
+        counts = ("candidates", "archived", "skipped")
+        assert [event.payload[key] for key in counts] == [2, 1, 1]
+
+    def test_restore_skips_it(self, registry: StoreRegistry) -> None:
+        graph = registry.knowledge.graph_store
+        archived = {LIFECYCLE_KEY: {"state": ARCHIVED_STATE}}
+        purged = self._node(registry, {"name": "Purged", **archived})
+        kept = self._node(registry, {"name": "Kept", **archived})
+        executor = build_curate_executor(registry)
+        restore = Command(
+            operation=Operation.RETENTION_RESTORE,
+            args={"item_ids": [purged, kept], "reason": "corrective"},
+        )
+
+        with rival_inside_first_read(
+            registry, executor, purged, redaction(purged)
+        ) as rival:
+            result = executor.execute(restore)
+
+        [purge] = rival
+        assert purge.status == CommandStatus.SUCCESS
+        assert result.status == CommandStatus.SUCCESS
+        assert graph.get_node(purged) is None
+        assert graph.get_node_history(purged) == []
+        node = graph.get_node(kept)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == CURRENT_STATE
+        [event] = registry.operational.event_log.get_events(
+            event_type=EventType.RETENTION_RESTORED
+        )
+        assert event.payload["restored_ids"] == [kept]
+        assert event.payload["skipped_ids"] == [purged]
 
 
 class TestVectorRowSync:
