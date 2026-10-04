@@ -7,6 +7,7 @@ under the same ``q`` the list applies, so its counts sum to the list's
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -83,6 +84,56 @@ def test_search_lists_current_nodes_on_a_sqlite_store(
     ]
 
 
+def test_search_pages_by_offset_and_normalises_sort_and_order(
+    client: TestClient, store: GraphStore
+) -> None:
+    # Created in this order, which is not the order of their names.
+    for node_id, name in [
+        ("n-1", "delta"),
+        ("n-2", "alpha"),
+        ("n-3", "echo"),
+        ("n-4", "charlie"),
+        ("n-5", "bravo"),
+    ]:
+        store.upsert_node(node_id, "Activity", {"name": name})
+        time.sleep(0.005)
+    store.upsert_node("n-6", "concept", {"name": "aardvark"})
+
+    def page(**params: str) -> dict[str, Any]:
+        resp = client.get(SEARCH, params={"node_type": "Activity", **params})
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    pages = [page(sort="name", order="asc", limit="2", offset=o) for o in "024"]
+
+    assert [[r["name"] for r in p["results"]] for p in pages] == [
+        ["alpha", "bravo"],
+        ["charlie", "delta"],
+        ["echo"],
+    ]
+    assert [(p["total"], p["count"], p["offset"]) for p in pages] == [
+        (5, 2, 0),
+        (5, 2, 2),
+        (5, 1, 4),
+    ]
+    # order ignores case and anything but asc descends; an unknown sort is
+    # created_at.
+    by_name = ["n-2", "n-5", "n-4", "n-1", "n-3"]
+    assert [r["entity_id"] for r in page(sort="name", order="ASC")["results"]] == (
+        by_name
+    )
+    assert [
+        r["entity_id"] for r in page(sort="name", order="sideways")["results"]
+    ] == by_name[::-1]
+    assert [r["entity_id"] for r in page(sort="bogus", order="asc")["results"]] == [
+        "n-1",
+        "n-2",
+        "n-3",
+        "n-4",
+        "n-5",
+    ]
+
+
 def test_facets_count_every_type_beyond_one_list_page(
     client: TestClient, store: GraphStore
 ) -> None:
@@ -153,7 +204,7 @@ def test_facets_honour_q_as_the_list_does(
     assert nothing["total"] == 0
 
 
-@pytest.mark.parametrize("q", ["", "%", "_", " ", "É"])
+@pytest.mark.parametrize("q", ["", "%", "_", "\\", " ", "É", "é", "ß"])
 def test_facets_agree_with_the_list_on_wildcards_blanks_and_case(
     client: TestClient, store: GraphStore, q: str
 ) -> None:
@@ -161,10 +212,12 @@ def test_facets_agree_with_the_list_on_wildcards_blanks_and_case(
     store.upsert_node("n_2", "concept", {"name": "snake_case name"})
     store.upsert_node("n-3", "Concept", {"name": "Éclair widget"})
     store.upsert_node("n-4", "Person", {"name": "plain"})
+    store.upsert_node("n-5", "Person", {"name": "back\\slash"})
+    store.upsert_node("n-6", "Place", {"name": "Straße café"})
 
     body = _facets(client, q=q)
 
-    # What %, _ and non-ASCII case match differs by backend; the facet
+    # What %, _, \ and non-ASCII case match differs by backend; the facet
     # applies the list's own predicate, so the two agree.
     total = _list_total(client, q=q)
     assert total > 0
