@@ -346,6 +346,11 @@ class TestFlatWithheld:
             "doc-charlie",
         ]
         assert row["injected_items"] == []
+        greenfield = _builder(event_log, None, 0.0, items=[]).build(
+            "rotate keys", budget=_BUDGET, index_mode=True
+        )
+        natural = _payload(event_log, greenfield.pack_id)
+        assert row["disclosure"] == natural["disclosure"]
 
     def test_the_arm_is_the_draw_on_the_packs_own_id(
         self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore

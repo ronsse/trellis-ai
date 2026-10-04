@@ -151,7 +151,7 @@ The **EventLog is the single authoritative path** for the feedback loop. `trelli
 | CLI `trellis curate feedback --pack-id`, REST `POST /feedback` | `Command(FEEDBACK_RECORD)` → `MutationExecutor` → `FeedbackRecordHandler` | **no** | `{target_id, rating, comment, success}` plus `pack_id` when the caller named one — no `feedback_id`, no item attribution |
 
 - Both families derive `success` from `rating` with `SUCCESS_RATING_THRESHOLD`, so they cannot disagree about a rating.
-- `attribution_rate` keeps its original denominator (DoD-3 reads it); `ServeAttributionReport` reports the pack-targeted rates beside it.
+- `attribution_rate` keeps its original denominator (DoD-3 reads it), less feedback naming a held-out pack; `ServeAttributionReport` reports the pack-targeted rates beside it.
 - Promotion reads per-item fields from `PACK_ASSEMBLED.injected_items[]`. Flat packs only: `build_sectioned` emits no `injected_items[]`, so sectioned packs contribute zero per-item rows to the join.
 
 ### Test Structure

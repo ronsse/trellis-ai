@@ -20,6 +20,7 @@ every output to move, so the equality is not vacuous.
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -30,6 +31,7 @@ from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import record_feedback
 from trellis.learning.pack_observations import (
     build_learning_observations_from_event_log,
+    join_pack_events_with_coverage,
 )
 from trellis.ops.write_health import summarize_serve_attribution
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
@@ -251,6 +253,12 @@ class TestNoServeIsCounted:
             helpful=["doc-alpha", "doc-bravo"],
             unhelpful=["doc-charlie"],
         )
+        # The shared join drops the feedback too, not only the pack it names.
+        since = datetime.now(tz=UTC) - timedelta(days=1)
+        feedback, packs, pack_count, _ = join_pack_events_with_coverage(
+            corpus.event_log, since=since, limit=100
+        )
+        assert (feedback, packs, pack_count) == ([], {}, 0)
         assert build_learning_observations_from_event_log(corpus.event_log) == []
         held = analyze_effectiveness(corpus.event_log, min_appearances=1)
         assert (held.total_packs, held.total_feedback, held.item_scores) == (0, 0, [])

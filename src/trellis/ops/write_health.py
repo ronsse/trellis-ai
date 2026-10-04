@@ -625,8 +625,9 @@ class ServeAttributionReport(TrellisModel):
     feedback carrying item attribution (without which the demote half has
     no signal).
 
-    ``attribution_rate`` divides by *every* feedback event, and that
-    denominator mixes two populations with nothing in common (backlog A4).
+    ``attribution_rate`` divides by *every* feedback event (bar those
+    naming a held-out pack, below), and that denominator mixes two
+    populations with nothing in common (backlog A4).
     A caller who names a ``pack_id`` and cites no items lost signal it
     held. A caller grading a trace it produced with no pack in hand held no
     signal to lose: nothing in the payload could ever join, because there
@@ -646,6 +647,11 @@ class ServeAttributionReport(TrellisModel):
     ``feedback_events``: DoD-3 thresholds and the nightly roadmap driver
     read it, and a metric that improves because its denominator was
     quietly narrowed is the failure this decomposition exists to expose.
+    The one exclusion is the pack holdout
+    (:mod:`trellis.core.pack_holdout`): a withheld pack in the window and
+    the feedback naming it are left out of ``packs`` and
+    ``feedback_events``, because that pack served nothing to cite and
+    counting it would read the experiment as a capture regression.
 
     **Citing is not joining, and the ``stray_*`` block is the gap between
     them** (#574). ``pack_attribution_rate`` counts a caller who cited
