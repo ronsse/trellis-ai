@@ -48,6 +48,15 @@ ran), and a shift added to the served arm, each tested with
 are parameters, defaulting to the pre-registration's (MDE 0.33 log at
 N about 114).
 
+**The [R] re-measure.** The descriptive block reprints each figure the
+pre-registration took from the prestudy and marks [R], computed the
+prestudy's way: the analytic MDE ``(t(0.975) + t(0.80)) * SD * sqrt(4 / N)``
+with t at ``N - 2`` degrees of freedom (:func:`analytic_mde`), at 30, 60 and
+90 days of analysed tasks at the measured rate; the N a 10% effect needs;
+the largest parent session's share of eligible tasks; and the same counts
+and MDE for main sessions with their sub-agent tasks rolled up. A figure the
+rows cannot give is ``None``, and ``not_measurable`` says what is missing.
+
 **Output** is counts and statistics only. No pack id, session id, intent or
 item text leaves this module, and a non-significant result reads
 :data:`NO_EFFECT_VERDICT`, never "no effect".
@@ -60,6 +69,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from statistics import NormalDist
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -122,17 +132,27 @@ _SOURCE_SYSTEM_DEFAULT = "claude-code"
 _PAIR = 2
 #: The pre-registration's 50/50 split, simulated when no rate in (0, 1) ran.
 _PLANNED_SHARE = 0.5
+#: Days of evidence the pre-registration's MDE table reads.
+HORIZON_DAYS = (30, 60, 90)
+#: The analytic MDE needs ``N - 2 >= 4`` degrees of freedom; the prestudy
+#: leaves it undefined below.
+MIN_FORMULA_N = 6
+#: The pre-registration's "10% effect".
+_TEN_PERCENT = 0.1
+_EMPTY_WINDOW = "the evidence window is empty"
+_NO_ELIGIBLE = "no eligible task"
 
 _PRE_TREATMENT_NOTE = (
     "Not applied: capture records neither the first retrieval's position in "
     "the transcript nor a commit or stop-hook nudge before it, so a first "
     "retrieval made after the work cannot be told apart."
 )
-_POST_HOC_NOTE = (
-    "Not measurable from capture rows: the post-hoc rule needs the first "
-    "ask's position against stop-hook nudges, commits and the last 10% of "
-    "turns, and capture records none of them."
+_POST_HOC_MISSING = (
+    "the post-hoc rule needs the first ask's position against stop-hook "
+    "nudges, commits and the last 10% of turns, and capture records none of "
+    "them"
 )
+_POST_HOC_NOTE = f"Not measurable from capture rows: {_POST_HOC_MISSING}."
 _NON_EPHEMERAL_NOTE = (
     "Upstream: session capture writes no join for a session in an ephemeral "
     "project, so none reaches this analysis or its counts."
@@ -168,7 +188,10 @@ class HoldoutFunnel(TrellisModel):
     Each stage counts the sessions it removes, in order, so the counts
     from ``main_sessions`` to ``unfinished`` plus ``eligible`` sum to
     ``sessions``, and ``eligible`` minus ``cut_offs_excluded`` and
-    ``outcome_missing`` is ``analysed``.
+    ``outcome_missing`` is ``analysed``. ``eligible_with_unparsed_pack_ids``
+    is not a stage: it counts the eligible tasks whose join reports a pack
+    id the capture could not parse, so their first parsed pack may not be
+    their first call.
     """
 
     joins_scanned: int = 0
@@ -186,6 +209,7 @@ class HoldoutFunnel(TrellisModel):
     cut_offs_excluded: int = 0
     outcome_missing: int = 0
     analysed: int = 0
+    eligible_with_unparsed_pack_ids: int = 0
 
 
 class HoldoutExclusion(TrellisModel):
@@ -222,8 +246,66 @@ class ArmRatioCheck(TrellisModel):
     p_value: float
 
 
+class HoldoutHorizon(TrellisModel):
+    """The analytic MDE after ``days`` of evidence at the measured rate.
+
+    ``n`` is the measured count per 30 days scaled to ``days``. ``ratio`` is
+    ``exp(mde)``, the multiplicative change a log1p outcome's MDE stands
+    for; ``share_of_mean`` is ``mde`` over the mean it is compared with, for
+    an outcome on its own scale. ``not_measurable`` says why ``mde`` is
+    ``None``.
+    """
+
+    days: int
+    n: float | None
+    mde: float | None
+    ratio: float | None
+    share_of_mean: float | None
+    not_measurable: str | None
+
+
+class HoldoutSessions(TrellisModel):
+    """Main sessions with their sub-agent tasks rolled up (the prestudy's unit).
+
+    A main session is its own join plus every join naming it as parent,
+    dated by the latest of those joins; one dated outside the window is not
+    counted. One whose main transcript never joined, or with a join no
+    completed sweep has settled, is counted and left out. Of the rest,
+    ``reaching_retrieval`` made a retrieval call (a parsed pack id or a
+    retrieval result), ``eligible`` got a non-empty pack in its own arm's
+    terms, and ``analysed`` is eligible with an outcome on every join,
+    summed field by field. Cut-offs are kept, as in the prestudy.
+    ``outcome_sd`` is the plain SD of the analysed sessions' outcomes.
+    """
+
+    rolled_up: int
+    not_finished: int
+    without_main_join: int
+    reaching_retrieval: int
+    reaching_retrieval_per_30d: float | None
+    eligible: int
+    eligible_per_30d: float | None
+    analysed: int
+    analysed_per_30d: float | None
+    outcome_sd: float | None
+    mde_by_horizon: list[HoldoutHorizon]
+    not_measurable: dict[str, str] = Field(default_factory=dict)
+
+
 class HoldoutDescriptive(TrellisModel):
-    """The pre-registration's [R] re-measure, reported in every flag state."""
+    """The pre-registration's [R] re-measure, reported in every flag state.
+
+    ``between_parent_share`` is bias-adjusted (epsilon-squared: one minus
+    the within-parent variance over the total variance), floored at 0, as
+    in the prestudy. ``pr_base_rate_served`` counts served-arm tasks only;
+    ``prs_created_mean`` is over both arms. ``top_parent_share`` is the
+    largest parent session's share of eligible tasks, both arms and
+    cut-offs included. ``mde_by_horizon`` uses the within-parent SD and N
+    from analysed tasks per 30 days; ``n_for_10pct_effect`` is the N that
+    MDE formula needs for x0.9 on a log1p outcome, or for 10% of the
+    served-arm mean otherwise. ``not_measurable`` maps each ``None``
+    figure to what the rows lack.
+    """
 
     eligible_tasks: int
     eligible_per_30d: float | None
@@ -239,13 +321,18 @@ class HoldoutDescriptive(TrellisModel):
     post_hoc_note: str
     cut_off_share: float | None
     cut_off_share_by_arm: ArmShares
-    pr_base_rate: float | None
+    pr_base_rate_served: float | None
     prs_created_mean: float | None
     eligible_by_arm: ArmCounts
     cut_offs_by_arm: ArmCounts
     analysed_by_arm: ArmCounts
     tasks_with_both_arms: int
     arm_ratio: list[ArmRatioCheck]
+    top_parent_share: float | None
+    mde_by_horizon: list[HoldoutHorizon]
+    n_for_10pct_effect: int | None
+    sessions: HoldoutSessions
+    not_measurable: dict[str, str] = Field(default_factory=dict)
 
 
 class HoldoutInference(TrellisModel):
@@ -591,6 +678,62 @@ def binomial_two_sided(k: int, n: int, p: float) -> float:
     return min(1.0, math.fsum(math.exp(value) for value in log_pmf if value <= bound))
 
 
+def _t_quantile(p: float, df: float) -> float:
+    """Student's t quantile by the Cornish-Fisher expansion, without SciPy.
+
+    Four terms in ``1/df`` around the normal quantile: within 0.04% of the
+    exact quantile at 4 degrees of freedom, the fewest :func:`analytic_mde`
+    uses, and closer as ``df`` grows.
+    """
+    z = NormalDist().inv_cdf(p)
+    g1 = (z**3 + z) / 4
+    g2 = (5 * z**5 + 16 * z**3 + 3 * z) / 96
+    g3 = (3 * z**7 + 19 * z**5 + 17 * z**3 - 15 * z) / 384
+    g4 = (79 * z**9 + 776 * z**7 + 1482 * z**5 - 1920 * z**3 - 945 * z) / 92160
+    return z + g1 / df + g2 / df**2 + g3 / df**3 + g4 / df**4
+
+
+def analytic_mde(sd: float, n: float) -> float | None:
+    """The prestudy's MDE: ``(t(0.975) + t(0.80)) * sd * sqrt(4 / n)``.
+
+    The two-sample formula for ``n`` units split 50/50, two-sided at
+    :data:`ALPHA` with :data:`TARGET_POWER`, its t quantiles at ``n - 2``
+    degrees of freedom. ``None`` below :data:`MIN_FORMULA_N` units, where
+    the prestudy leaves it undefined.
+    """
+    if n < MIN_FORMULA_N:
+        return None
+    df = n - _PAIR
+    multiplier = _t_quantile(1 - ALPHA / 2, df) + _t_quantile(TARGET_POWER, df)
+    return multiplier * sd * math.sqrt(4 / n)
+
+
+def n_for_mde(sd: float, effect: float) -> int:
+    """The smallest N whose :func:`analytic_mde` at ``sd`` is at most ``effect``.
+
+    Raises:
+        ValueError: ``effect`` is not positive.
+    """
+    if effect <= 0:
+        message = f"effect must be positive, got {effect:g}"
+        raise ValueError(message)
+
+    def reaches(n: int) -> bool:
+        mde = analytic_mde(sd, n)
+        return mde is not None and mde <= effect
+
+    low, high = MIN_FORMULA_N - 1, MIN_FORMULA_N
+    while not reaches(high):
+        low, high = high, 2 * high
+    while high - low > 1:
+        middle = (low + high) // 2
+        if reaches(middle):
+            high = middle
+        else:
+            low = middle
+    return high
+
+
 # ---------------------------------------------------------------------------
 # Units
 # ---------------------------------------------------------------------------
@@ -703,6 +846,20 @@ def _latest_sweeps(events: Sequence[Event]) -> dict[str, datetime]:
         if source not in latest or at > latest[source]:
             latest[source] = at
     return latest
+
+
+def _pack_ids(payload: Mapping[str, Any]) -> list[str]:
+    """The pack ids a join parsed, in call order."""
+    return [p for p in payload.get("pack_ids") or [] if isinstance(p, str) and p]
+
+
+def _finished(join: Event, sweeps: Mapping[str, datetime], settle: timedelta) -> bool:
+    """A completed sweep for the join's source system ran ``settle`` after it."""
+    source = (join.payload or {}).get("source_system")
+    swept = sweeps.get(
+        source if isinstance(source, str) and source else _SOURCE_SYSTEM_DEFAULT
+    )
+    return swept is not None and swept >= _as_utc(join.occurred_at) + settle
 
 
 def _find_pack(
@@ -893,6 +1050,17 @@ def analyze_holdout(
         )
         if unit is not None:
             units.append(unit)
+    sessions = _sessions(
+        event_log,
+        latest_joins,
+        packs,
+        sweeps,
+        settle,
+        evidence_start,
+        end,
+        effective_days,
+        outcome,
+    )
 
     return _report(
         units=units,
@@ -901,6 +1069,7 @@ def analyze_holdout(
         scan=scan,
         notes=notes,
         sweeps=sweeps,
+        sessions=sessions,
         options={
             "days": days,
             "since": since,
@@ -941,7 +1110,7 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
     if not isinstance(outcome, Mapping):
         funnel.no_outcome += 1
         return None
-    pack_ids = [p for p in payload.get("pack_ids") or [] if isinstance(p, str) and p]
+    pack_ids = _pack_ids(payload)
     if not pack_ids:
         funnel.no_retrieval += 1
         return None
@@ -963,14 +1132,12 @@ def _unit(  # noqa: PLR0911 - one return per funnel stage
     if _pack_size(first_payload) <= 0:
         funnel.empty_first_pack += 1
         return None
-    source = payload.get("source_system")
-    swept = sweeps.get(
-        source if isinstance(source, str) and source else _SOURCE_SYSTEM_DEFAULT
-    )
-    if swept is None or swept < _as_utc(join.occurred_at) + settle:
+    if not _finished(join, sweeps, settle):
         funnel.unfinished += 1
         return None
     funnel.eligible += 1
+    if (_count(payload.get("pack_ids_unparsed")) or 0) > 0:
+        funnel.eligible_with_unparsed_pack_ids += 1
     arms = {
         is_holdout(packs[p].payload)
         for p in pack_ids
@@ -1003,7 +1170,12 @@ def _arm_counts(units: Sequence[_Unit]) -> ArmCounts:
 def _parent_spread(
     values: npt.NDArray[np.float64], parents: Sequence[str]
 ) -> tuple[float | None, float | None, float | None]:
-    """SD within parent, SD overall and the between-parent share of variance."""
+    """SD within parent, SD overall and the between-parent share of variance.
+
+    The share is bias-adjusted as in the prestudy: epsilon-squared, one
+    minus the within-parent variance (on ``n - groups`` degrees of freedom)
+    over the total variance (on ``n - 1``), floored at 0.
+    """
     n = values.size
     if n < _PAIR:
         return None, None, None
@@ -1014,8 +1186,288 @@ def _parent_spread(
     ss_total = float(((values - values.mean()) ** 2).sum())
     sd_within = math.sqrt(ss_within / (n - groups)) if n > groups else None
     sd_total = math.sqrt(ss_total / (n - 1))
-    share = (ss_total - ss_within) / ss_total if ss_total > 0 else None
+    share = (
+        max(0.0, 1 - sd_within**2 / sd_total**2)
+        if sd_within is not None and sd_total > 0
+        else None
+    )
     return sd_within, sd_total, share
+
+
+def _log_scale(outcome: str) -> bool:
+    """Whether the outcome is a log1p count, whose MDE reads as a ratio."""
+    return outcome.startswith("log1p_")
+
+
+def _horizons(
+    per_30d: float | None,
+    sd: float | None,
+    mean: float | None,
+    *,
+    log_scale: bool,
+    sd_reason: str,
+) -> list[HoldoutHorizon]:
+    """The analytic MDE after each of :data:`HORIZON_DAYS` days of evidence."""
+    horizons: list[HoldoutHorizon] = []
+    for days in HORIZON_DAYS:
+        n = None if per_30d is None else per_30d * days / 30
+        mde = None if sd is None or n is None else analytic_mde(sd, n)
+        reason = None
+        if sd is None:
+            reason = sd_reason
+        elif n is None:
+            reason = _EMPTY_WINDOW
+        elif mde is None:
+            reason = f"N {n:.3g} is below {MIN_FORMULA_N}, the formula's minimum"
+        horizons.append(
+            HoldoutHorizon(
+                days=days,
+                n=n,
+                mde=mde,
+                ratio=math.exp(mde) if mde is not None and log_scale else None,
+                share_of_mean=(
+                    mde / mean if mde is not None and not log_scale and mean else None
+                ),
+                not_measurable=reason,
+            )
+        )
+    return horizons
+
+
+def _n_for_ten_percent(
+    sd: float | None, mean: float | None, *, log_scale: bool, sd_reason: str
+) -> tuple[int | None, str]:
+    """N for a 10% effect: x0.9 on a log1p outcome, else 10% of ``mean``."""
+    if sd is None:
+        return None, sd_reason
+    if log_scale:
+        return n_for_mde(sd, -math.log(1 - _TEN_PERCENT)), ""
+    if mean is None:
+        return None, "no analysed task in the served arm"
+    if mean <= 0:
+        return None, "the served mean is 0, so 10% of it is zero"
+    return n_for_mde(sd, _TEN_PERCENT * mean), ""
+
+
+def _reasons(figures: Mapping[str, tuple[object, str]]) -> dict[str, str]:
+    """Each ``None`` figure's reason, keyed by the figure's name."""
+    return {name: why for name, (value, why) in figures.items() if value is None}
+
+
+def _rolled_outcome(
+    payloads: Sequence[Mapping[str, Any]],
+    read: Callable[[Mapping[str, Any]], float | None],
+) -> float | None:
+    """The joins' outcomes summed field by field, then read.
+
+    ``None`` when a join carries no outcome. A field that any join lacks,
+    or holds as something other than a count, is ``None`` in the sum.
+    """
+    outcomes = [payload.get("outcome") for payload in payloads]
+    if not all(isinstance(outcome, Mapping) for outcome in outcomes):
+        return None
+    rolled: dict[str, float | None] = {}
+    for key in {key for outcome in outcomes for key in outcome}:
+        counts = [_count(outcome.get(key)) for outcome in outcomes]
+        known = [count for count in counts if count is not None]
+        rolled[key] = math.fsum(known) if len(known) == len(counts) else None
+    return read(rolled)
+
+
+def _non_empty_pack(
+    event_log: EventLog, packs: dict[str, Event], payload: Mapping[str, Any]
+) -> bool:
+    """Whether a pack the join parsed held items, or would have if withheld."""
+    for pack_id in _pack_ids(payload):
+        pack = _find_pack(event_log, packs, pack_id)
+        if pack is not None and _pack_size(pack.payload or {}) > 0:
+            return True
+    return False
+
+
+def _sessions(
+    event_log: EventLog,
+    joins: Mapping[str, Event],
+    packs: dict[str, Event],
+    sweeps: Mapping[str, datetime],
+    settle: timedelta,
+    start: datetime,
+    end: datetime,
+    window_days: float,
+    outcome: str,
+) -> HoldoutSessions:
+    """Main sessions with their sub-agent tasks rolled up (:class:`HoldoutSessions`)."""
+    groups: dict[str, list[Event]] = {}
+    for session_id, join in joins.items():
+        parent = (join.payload or {}).get("parent_session_id")
+        key = parent if isinstance(parent, str) and parent else session_id
+        groups.setdefault(key, []).append(join)
+    rolled_up = not_finished = without_main_join = reaching = eligible = 0
+    values: list[float] = []
+    for key, members in groups.items():
+        if not start <= max(_as_utc(m.occurred_at) for m in members) < end:
+            continue
+        if key not in {m.entity_id for m in members}:
+            without_main_join += 1
+            continue
+        if not all(_finished(m, sweeps, settle) for m in members):
+            not_finished += 1
+            continue
+        rolled_up += 1
+        payloads = [m.payload or {} for m in members]
+        if any(
+            _pack_ids(p) or (_count(p.get("retrieval_results")) or 0) > 0
+            for p in payloads
+        ):
+            reaching += 1
+        if not any(_non_empty_pack(event_log, packs, p) for p in payloads):
+            continue
+        eligible += 1
+        value = _rolled_outcome(payloads, OUTCOMES[outcome])
+        if value is not None:
+            values.append(value)
+    sd = float(np.std(values, ddof=1)) if len(values) >= _PAIR else None
+    sd_reason = (
+        "needs 2 main sessions with a non-empty pack whose joins all carry the "
+        f"outcome, found {len(values)}"
+    )
+    reaching_per_30d = _per_30d(reaching, window_days)
+    eligible_per_30d = _per_30d(eligible, window_days)
+    analysed_per_30d = _per_30d(len(values), window_days)
+    return HoldoutSessions(
+        rolled_up=rolled_up,
+        not_finished=not_finished,
+        without_main_join=without_main_join,
+        reaching_retrieval=reaching,
+        reaching_retrieval_per_30d=reaching_per_30d,
+        eligible=eligible,
+        eligible_per_30d=eligible_per_30d,
+        analysed=len(values),
+        analysed_per_30d=analysed_per_30d,
+        outcome_sd=sd,
+        mde_by_horizon=_horizons(
+            analysed_per_30d,
+            sd,
+            float(np.mean(values)) if values else None,
+            log_scale=_log_scale(outcome),
+            sd_reason=sd_reason,
+        ),
+        not_measurable=_reasons(
+            {
+                "reaching_retrieval_per_30d": (reaching_per_30d, _EMPTY_WINDOW),
+                "eligible_per_30d": (eligible_per_30d, _EMPTY_WINDOW),
+                "analysed_per_30d": (analysed_per_30d, _EMPTY_WINDOW),
+                "outcome_sd": (sd, sd_reason),
+            }
+        ),
+    )
+
+
+def _descriptive(
+    *,
+    units: Sequence[_Unit],
+    analysed: Sequence[_Unit],
+    y: npt.NDArray[np.float64],
+    served: npt.NDArray[np.bool_],
+    arm_ratio: list[ArmRatioCheck],
+    sessions: HoldoutSessions,
+    options: Mapping[str, Any],
+) -> HoldoutDescriptive:
+    """The [R] re-measure over the eligible and the analysed tasks."""
+    window_days: float = options["effective_days"]
+    parents = [unit.parent for unit in analysed]
+    sd_within, sd_total, between = _parent_spread(y, parents)
+    spread_reason = (
+        "needs more analysed tasks than parent sessions, found "
+        f"{len(analysed)} across {len(set(parents))}"
+    )
+    cut_offs = [unit for unit in units if unit.cut_off]
+    eligible_by_arm = _arm_counts(units)
+    cut_offs_by_arm = _arm_counts(cut_offs)
+    shares = ArmShares(
+        served=_share(cut_offs_by_arm.served, eligible_by_arm.served),
+        withheld=_share(cut_offs_by_arm.withheld, eligible_by_arm.withheld),
+    )
+    prs = [(unit, _count(unit.outcome.get("prs_created"))) for unit in analysed]
+    prs_known = [value for _, value in prs if value is not None]
+    prs_served = [v for unit, v in prs if v is not None and not unit.withheld]
+    pr_base_rate = _share(sum(v >= 1 for v in prs_served), len(prs_served))
+    prs_mean = sum(prs_known) / len(prs_known) if prs_known else None
+    by_parent = Counter(unit.parent for unit in units)
+    top_share = _share(max(by_parent.values()), len(units)) if units else None
+    packs_per_task = sum(unit.packs for unit in units) / len(units) if units else None
+    cut_off_share = _share(len(cut_offs), len(units))
+    eligible_per_30d = _per_30d(len(units), window_days)
+    analysed_per_30d = _per_30d(len(analysed), window_days)
+    log_scale = _log_scale(options["outcome"])
+    served_mean = float(y[served].mean()) if served.any() else None
+    n_10, n_10_reason = _n_for_ten_percent(
+        sd_within, served_mean, log_scale=log_scale, sd_reason=spread_reason
+    )
+    figures: dict[str, tuple[object, str]] = {
+        "eligible_per_30d": (eligible_per_30d, _EMPTY_WINDOW),
+        "analysed_per_30d": (analysed_per_30d, _EMPTY_WINDOW),
+        "outcome_sd_within_parent": (sd_within, spread_reason),
+        "outcome_sd_total": (sd_total, f"needs 2 analysed tasks, found {y.size}"),
+        "between_parent_share": (
+            between,
+            spread_reason
+            if sd_within is None
+            else "every analysed outcome is equal, so there is no variance to share",
+        ),
+        "top_parent_share": (top_share, _NO_ELIGIBLE),
+        "packs_per_task": (packs_per_task, _NO_ELIGIBLE),
+        "post_hoc_share": (None, _POST_HOC_MISSING),
+        "cut_off_share": (cut_off_share, _NO_ELIGIBLE),
+        "cut_off_share_by_arm.served": (
+            shares.served,
+            "no eligible task in the served arm",
+        ),
+        "cut_off_share_by_arm.withheld": (
+            shares.withheld,
+            "no eligible task in the withheld arm",
+        ),
+        "pr_base_rate_served": (
+            pr_base_rate,
+            "no analysed served-arm task records prs_created",
+        ),
+        "prs_created_mean": (prs_mean, "no analysed task records prs_created"),
+        "n_for_10pct_effect": (n_10, n_10_reason),
+    }
+    return HoldoutDescriptive(
+        eligible_tasks=len(units),
+        eligible_per_30d=eligible_per_30d,
+        analysed_tasks=len(analysed),
+        analysed_per_30d=analysed_per_30d,
+        outcome_sd_within_parent=sd_within,
+        outcome_sd_total=sd_total,
+        between_parent_share=between,
+        parents=len(set(parents)),
+        packs_per_task=packs_per_task,
+        tasks_with_several_packs=sum(unit.packs > 1 for unit in units),
+        post_hoc_share=None,
+        post_hoc_note=_POST_HOC_NOTE,
+        cut_off_share=cut_off_share,
+        cut_off_share_by_arm=shares,
+        pr_base_rate_served=pr_base_rate,
+        prs_created_mean=prs_mean,
+        eligible_by_arm=eligible_by_arm,
+        cut_offs_by_arm=cut_offs_by_arm,
+        analysed_by_arm=_arm_counts(analysed),
+        tasks_with_both_arms=sum(unit.both_arms for unit in units),
+        arm_ratio=arm_ratio,
+        top_parent_share=top_share,
+        mde_by_horizon=_horizons(
+            analysed_per_30d,
+            sd_within,
+            served_mean,
+            log_scale=log_scale,
+            sd_reason=spread_reason,
+        ),
+        n_for_10pct_effect=n_10,
+        sessions=sessions,
+        not_measurable=_reasons(figures),
+    )
 
 
 def _arm_ratio(
@@ -1070,6 +1522,7 @@ def _report(
     scan: ScanCoverage,
     notes: list[str],
     sweeps: Mapping[str, datetime],
+    sessions: HoldoutSessions,
     options: dict[str, Any],
 ) -> HoldoutReport:
     rate: float | None = options["rate"]
@@ -1086,40 +1539,16 @@ def _report(
     served = np.array([not unit.withheld for unit in analysed], dtype=bool)
     strata = np.array([unit.stratum for unit in analysed], dtype=str)
 
-    sd_within, sd_total, between = _parent_spread(y, [unit.parent for unit in analysed])
-    prs = [_count(unit.outcome.get("prs_created")) for unit in analysed]
-    prs_known = [value for value in prs if value is not None]
-    eligible_by_arm = _arm_counts(units)
-    cut_offs_by_arm = _arm_counts(cut_offs)
     effective_days: float = options["effective_days"]
     arm_ratio = _arm_ratio(rows, units, rate)
-    descriptive = HoldoutDescriptive(
-        eligible_tasks=len(units),
-        eligible_per_30d=_per_30d(len(units), effective_days),
-        analysed_tasks=len(analysed),
-        analysed_per_30d=_per_30d(len(analysed), effective_days),
-        outcome_sd_within_parent=sd_within,
-        outcome_sd_total=sd_total,
-        between_parent_share=between,
-        parents=len({unit.parent for unit in analysed}),
-        packs_per_task=(
-            sum(unit.packs for unit in units) / len(units) if units else None
-        ),
-        tasks_with_several_packs=sum(unit.packs > 1 for unit in units),
-        post_hoc_share=None,
-        post_hoc_note=_POST_HOC_NOTE,
-        cut_off_share=_share(len(cut_offs), len(units)),
-        cut_off_share_by_arm=ArmShares(
-            served=_share(cut_offs_by_arm.served, eligible_by_arm.served),
-            withheld=_share(cut_offs_by_arm.withheld, eligible_by_arm.withheld),
-        ),
-        pr_base_rate=_share(sum(v >= 1 for v in prs_known), len(prs_known)),
-        prs_created_mean=sum(prs_known) / len(prs_known) if prs_known else None,
-        eligible_by_arm=eligible_by_arm,
-        cut_offs_by_arm=cut_offs_by_arm,
-        analysed_by_arm=_arm_counts(analysed),
-        tasks_with_both_arms=sum(unit.both_arms for unit in units),
+    descriptive = _descriptive(
+        units=units,
+        analysed=analysed,
+        y=y,
+        served=served,
         arm_ratio=arm_ratio,
+        sessions=sessions,
+        options=options,
     )
 
     rngs = [
@@ -1128,9 +1557,26 @@ def _report(
     ]
     inference = _inference(y, served, strata, rngs[0], rngs[1], options)
     power = _power(
-        y, served, strata, rngs[2], inference.difference, sd_within, rate, options
+        y,
+        served,
+        strata,
+        rngs[2],
+        inference.difference,
+        descriptive.outcome_sd_within_parent,
+        rate,
+        options,
     )
-    notes = notes + _notes(rows, funnel, rate, sweeps, arm_ratio, power, scan)
+    notes = notes + _notes(
+        rows,
+        funnel,
+        rate,
+        sweeps,
+        arm_ratio,
+        power,
+        scan,
+        options["settle_hours"],
+        sessions,
+    )
     return HoldoutReport(
         window_days=options["days"],
         effective_window_days=round(effective_days, 2),
@@ -1293,6 +1739,8 @@ def _notes(
     arm_ratio: Sequence[ArmRatioCheck],
     power: HoldoutPower,
     scan: ScanCoverage,
+    settle_hours: float,
+    sessions: HoldoutSessions,
 ) -> list[str]:
     notes: list[str] = []
     keyed = sum(HOLDOUT_KEY in (e.payload or {}) for e in rows.window)
@@ -1319,12 +1767,27 @@ def _notes(
         )
     if not sweeps:
         notes.append(
-            "No completed capture sweep was found, so no task counts as finished."
+            "No completed, non-dry-run capture sweep was found, so no task "
+            "counts as finished."
         )
     elif funnel.unfinished:
         notes.append(
-            f"{funnel.unfinished} tasks are not finished yet: no completed capture "
-            "sweep ran far enough after their latest join. They are left out."
+            f"{funnel.unfinished} tasks are not finished yet: no completed, "
+            "non-dry-run capture sweep for their source system ran at least "
+            f"{settle_hours:g} h after their latest join (completed sweeps found "
+            f"for: {', '.join(sorted(sweeps))}). They are left out."
+        )
+    if funnel.eligible_with_unparsed_pack_ids:
+        notes.append(
+            f"{funnel.eligible_with_unparsed_pack_ids} eligible tasks reported a "
+            "pack id the capture could not parse, so the first parsed pack, "
+            "which sets the arm, may not be the task's first call."
+        )
+    if sessions.not_finished or sessions.without_main_join:
+        notes.append(
+            "Main sessions left out of the session figures: "
+            f"{sessions.not_finished} not finished yet, "
+            f"{sessions.without_main_join} with no join for the main transcript."
         )
     failing = [
         check.population for check in arm_ratio if check.p_value < ARM_RATIO_PAUSE_P
@@ -1347,6 +1810,8 @@ __all__ = [
     "ARM_RATIO_PAUSE_P",
     "DEFAULT_OUTCOME",
     "DETECTED_VERDICT",
+    "HORIZON_DAYS",
+    "MIN_FORMULA_N",
     "NO_BOTH_ARM_STRATUM",
     "NO_EFFECT_VERDICT",
     "NO_SERVED_ARM",
@@ -1362,13 +1827,17 @@ __all__ = [
     "HoldoutDescriptive",
     "HoldoutExclusion",
     "HoldoutFunnel",
+    "HoldoutHorizon",
     "HoldoutInference",
     "HoldoutPower",
     "HoldoutReport",
     "HoldoutRows",
+    "HoldoutSessions",
+    "analytic_mde",
     "analyze_holdout",
     "binomial_two_sided",
     "bootstrap_ci",
+    "n_for_mde",
     "permutation_p_value",
     "permute_within_strata",
     "simulate_power",

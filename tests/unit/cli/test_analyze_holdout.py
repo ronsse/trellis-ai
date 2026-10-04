@@ -249,9 +249,9 @@ def test_the_seed_reproduces_the_json_report(log: HoldoutLog) -> None:
     assert _payload(first)["inference"] != _payload(other)["inference"]
 
 
-#: t(0.975) + t(0.80) at 4, 10 and 16 degrees of freedom, from printed t
-#: tables: the prestudy's MDE formula at N = 6, 12 and 18.
-T_SUM = {6: 3.717410, 12: 3.107197, 18: 2.984647}
+#: Exact t(0.975) + t(0.80) at 4, 10 and 16 degrees of freedom, to six
+#: decimals: the prestudy's MDE multiplier at N = 6, 12 and 18.
+T_SUM = {6: 3.717410, 12: 3.107197, 18: 2.984572}
 
 
 def test_every_r_figure_is_in_the_json_and_the_text(log: HoldoutLog) -> None:

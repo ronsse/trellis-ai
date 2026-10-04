@@ -29,9 +29,9 @@ from trellis.stores.sqlite.event_log import SQLiteEventLog
 #: Small resampling counts keep each analysis well under a second.
 FAST = {"permutations": 999, "bootstraps": 400, "power_sims": 40}
 
-#: t(0.975) + t(0.80) at 4, 10 and 16 degrees of freedom, summed from
-#: printed t tables: the prestudy's MDE formula at N = 6, 12 and 18.
-T_SUM = {6: 3.717410, 12: 3.107197, 18: 2.984647}
+#: Exact t(0.975) + t(0.80) at 4, 10 and 16 degrees of freedom, to six
+#: decimals: the prestudy's MDE multiplier at N = 6, 12 and 18.
+T_SUM = {6: 3.717410, 12: 3.107197, 18: 2.984572}
 
 
 @pytest.fixture
@@ -310,9 +310,7 @@ class TestMainSessions:
         assert horizons[0].not_measurable == "N 2 is below 6, the formula's minimum"
         assert horizons[1].not_measurable == "N 4 is below 6, the formula's minimum"
         assert horizons[2].mde == pytest.approx(_exact_mde(sd, 6), rel=1e-3)
-        assert horizons[2].ratio == pytest.approx(
-            math.exp(_exact_mde(sd, 6)), rel=1e-3
-        )
+        assert horizons[2].ratio == pytest.approx(math.exp(_exact_mde(sd, 6)), rel=1e-3)
         assert any("no join for the main transcript" in n for n in report.notes)
 
 
