@@ -716,25 +716,18 @@ All notable changes to Trellis will be documented in this file.
   ([#706](https://github.com/ronsse/trellis-ai/pull/706))
 
 - **`trellis analyze holdout` prints every figure the pre-registration
-  re-measures, and its PR base rate is the served arm's.** Five [R] figures
-  were missing from the descriptive block, so they could not be checked
-  before sign-off: the largest parent session's share of eligible tasks,
-  main sessions reaching a retrieval per 30 days, the main-session MDE, the
-  N a 10% effect needs, and the MDE at 30, 60 and 90 days. Each is now in
-  text and JSON (`top_parent_share`, `sessions`, `n_for_10pct_effect`,
-  `mde_by_horizon`), computed as the prestudy did with t quantiles at
-  `N - 2` degrees of freedom, and a figure the rows cannot give reads "not
-  measurable: <reason>" instead of being left out. The PR base rate counted
-  both arms; it now counts the served arm only, under the key
-  `pr_base_rate_served` (with the flag off every task is served, so the
-  value does not change). `between_parent_share` was raw eta-squared, which
-  overstates the share; it is now bias-adjusted (epsilon-squared, floored
-  at 0), as in the prestudy. The note on unfinished tasks said no sweep
-  "ran far enough" even when no sweep for the task's source system existed;
-  it now names what is checked: a completed, non-dry-run sweep for the
-  task's source system at least `--settle-hours` after its latest join, and
-  lists the source systems that have one. The funnel counts eligible tasks
-  with an unparsed pack id. The inferential statistics are unchanged.
+  re-measures, and its PR base rate is the served arm's.** The descriptive
+  block gives the largest parent session's share of eligible tasks
+  (`top_parent_share`), the MDE at 30, 60 and 90 days (`mde_by_horizon`, t
+  at `N - 2` degrees of freedom), the N a 10% effect needs
+  (`n_for_10pct_effect`) and main sessions with their sub-agent tasks rolled
+  up (`sessions`). A figure the rows cannot give reads "not measurable:
+  <reason>" in text and is `null` with its reason in JSON. `pr_base_rate`
+  becomes `pr_base_rate_served`, over the served arm only.
+  `between_parent_share` is bias-adjusted (epsilon-squared, floored at 0),
+  so it never reads above raw eta-squared. The unfinished-tasks note names
+  the sweep it checks for, and the funnel counts eligible tasks with an
+  unparsed pack id. The inferential statistics are unchanged.
   ([#707](https://github.com/ronsse/trellis-ai/pull/707))
 
 ## [0.9.0] - 2026-05-13

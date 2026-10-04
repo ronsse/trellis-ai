@@ -268,14 +268,18 @@ class HoldoutSessions(TrellisModel):
     """Main sessions with their sub-agent tasks rolled up (the prestudy's unit).
 
     A main session is its own join plus every join naming it as parent,
-    dated by the latest of those joins; one dated outside the window is not
+    dated by when capture wrote the latest of those joins (the prestudy
+    dated a session by its start); one dated outside the window is not
     counted. One whose main transcript never joined, or with a join no
     completed sweep has settled, is counted and left out. Of the rest,
     ``reaching_retrieval`` made a retrieval call (a parsed pack id or a
     retrieval result), ``eligible`` got a non-empty pack in its own arm's
     terms, and ``analysed`` is eligible with an outcome on every join,
-    summed field by field. Cut-offs are kept, as in the prestudy.
-    ``outcome_sd`` is the plain SD of the analysed sessions' outcomes.
+    summed field by field. Every pack counts whatever its rate, and one
+    from a build before #701, which records no holdout, counts as served;
+    the task figures keep only the analysed rate's rows. Cut-offs are kept,
+    as in the prestudy. ``outcome_sd`` is the plain SD of the analysed
+    sessions' outcomes.
     """
 
     rolled_up: int
@@ -297,7 +301,9 @@ class HoldoutDescriptive(TrellisModel):
 
     ``between_parent_share`` is bias-adjusted (epsilon-squared: one minus
     the within-parent variance over the total variance), floored at 0, as
-    in the prestudy. ``pr_base_rate_served`` counts served-arm tasks only;
+    in the prestudy, and taken over the analysed tasks like the SDs it
+    compares; the prestudy's also counted cut-offs, as ``itt`` does.
+    ``pr_base_rate_served`` counts served-arm tasks only;
     ``prs_created_mean`` is over both arms. ``top_parent_share`` is the
     largest parent session's share of eligible tasks, both arms and
     cut-offs included. ``mde_by_horizon`` uses the within-parent SD and N
@@ -1748,12 +1754,14 @@ def _notes(
     if rows.window and not keyed:
         notes.append(
             "No PACK_ASSEMBLED row in the window records a holdout: the build "
-            "that wrote them predates #701, so nothing here is an experiment row."
+            "that wrote them predates #701, so nothing here is an experiment row. "
+            "The main-session figures count them all the same."
         )
     elif len(rows.window) > keyed:
         notes.append(
             f"{len(rows.window) - keyed} PACK_ASSEMBLED rows record no holdout "
-            "(builds before #701); they are not experiment rows and are left out."
+            "(builds before #701); they are not experiment rows, so the task "
+            "figures leave them out, but the main-session figures count them."
         )
     if rate == 0.0:
         notes.append(

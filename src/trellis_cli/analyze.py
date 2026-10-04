@@ -1321,13 +1321,18 @@ def _render_holdout_descriptive(report: HoldoutReport) -> None:
         f"{d.analysed_tasks} "
         f"({_per_30_days(d.analysed_per_30d, why('analysed_per_30d'))})"
     )
+    across = (
+        f" across {d.parents} parent sessions"
+        if d.between_parent_share is not None
+        else ""
+    )
     console.print(
         "    outcome SD within parent "
         f"{_fig(d.outcome_sd_within_parent, why('outcome_sd_within_parent'))} "
         f"(overall {_fig(d.outcome_sd_total, why('outcome_sd_total'))}); "
         "between-parent share of variance (bias-adjusted: epsilon-squared, "
-        f"floored at 0) {_fig(d.between_parent_share, why('between_parent_share'))} "
-        f"across {d.parents} parent sessions"
+        f"floored at 0) {_fig(d.between_parent_share, why('between_parent_share'))}"
+        f"{across}"
     )
     console.print(
         "    top parent's share of eligible tasks "

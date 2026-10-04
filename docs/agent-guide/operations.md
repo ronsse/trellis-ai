@@ -1929,7 +1929,10 @@ PR base rate (`pr_base_rate_served`), the analytic MDE at 30, 60 and 90 days
 tasks per 30 days x days / 30), the N a 10% effect needs (`n_for_10pct_effect`),
 and under `sessions` the main sessions with their sub-agent tasks rolled up:
 how many reach a retrieval per 30 days, their outcome SD and their MDE at the
-same horizons. It also gives arm counts and binomial checks of the arm ratio
+same horizons. A main session is dated by when capture wrote its latest join,
+and it counts every pack whatever its rate, including those from builds that
+write no `holdout` key, where the task figures keep only the analysed rate's.
+It also gives arm counts and binomial checks of the arm ratio
 (overall and per ISO week; the pre-registration pauses below p 0.001). A figure
 the rows cannot give reads "not measurable: <reason>" in text; in JSON it is
 `null` and the nearest `not_measurable` field names the reason. Run with the

@@ -325,6 +325,37 @@ class TestMainSessions:
         assert horizons[2].ratio == pytest.approx(math.exp(_exact_mde(sd, 6)), rel=1e-3)
         assert any("no join for the main transcript" in n for n in report.notes)
 
+    def test_a_session_counts_packs_from_any_build_and_rate(
+        self, log: HoldoutLog
+    ) -> None:
+        """Three sessions, each with one served sub-agent task.
+
+        S1's sub got its pack from a build that records no holdout and S2's
+        at rate 0.25, so the task figures at rate 0.5 leave both tasks out;
+        the session figures count all three sessions.
+        """
+        for day, (arm, rate) in enumerate([(None, 0.5), (False, 0.25), (False, 0.5)]):
+            start = MONDAY + timedelta(days=day)
+            main = log.task(start=start, parent=None, arms=(), turns=10 + day)
+            log.task(
+                start=start + timedelta(hours=2),
+                parent=main,
+                arms=[arm],
+                rate=rate,
+                turns=20 + day,
+            )
+        log.sweep()
+
+        report = _analyze(log, rate=0.5)
+
+        f = report.funnel
+        assert (f.first_pack_old_build, f.other_rate, f.eligible) == (1, 1, 1)
+        s = report.descriptive.sessions
+        counts = (s.rolled_up, s.reaching_retrieval, s.eligible, s.analysed)
+        assert counts == (3, 3, 3, 3)
+        note = next(n for n in report.notes if "record no holdout" in n)
+        assert "the main-session figures count them" in note
+
 
 # ---------------------------------------------------------------------------
 # Funnel notes (#704 gate follow-up 5)

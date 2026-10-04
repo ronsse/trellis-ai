@@ -319,6 +319,10 @@ def test_every_r_figure_is_in_the_json_and_the_text(log: HoldoutLog) -> None:
         "top parent's share of eligible tasks 0.25",
         "PR base rate (served arm) 0.333",
         "between-parent share of variance (bias-adjusted",
+        (
+            "floored at 0) "
+            f"{format(d['between_parent_share'], '.3g')} across 4 parent sessions"
+        ),
         "task MDE (80% power",
         "30 days: N 6, MDE",
         "60 days: N 12, MDE",
@@ -384,6 +388,8 @@ def test_a_figure_the_rows_cannot_give_reads_not_measurable(
     assert "found 0" in sessions["not_measurable"]["outcome_sd"]
     flat = _flat(text)
     assert f"outcome SD within parent not measurable: {spread}" in flat
+    # The reason gives the counts, so no parent-session suffix follows it.
+    assert f"floored at 0) not measurable: {spread} top parent's share" in flat
     assert (
         "PR base rate (served arm) not measurable: no analysed served-arm "
         "task records prs_created" in flat
