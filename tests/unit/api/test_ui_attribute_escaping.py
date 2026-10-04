@@ -5,7 +5,7 @@ escHtml serialised its text through the DOM, which encodes ``&``, ``<`` and
 agent-written value ended the attribute, and the rest of the value became
 attributes of its own: a document id could add a ``data-action`` to its row's
 cell, and a click on the cell dispatched it. escHtml now encodes both quotes,
-and every interpolated attribute value goes through it.
+and every attribute value read from the API goes through it.
 """
 
 from __future__ import annotations
@@ -86,6 +86,16 @@ def test_every_interpolated_attribute_value_is_escaped() -> None:
     )
     listing = "\n".join(hits)
     assert not hits, f"{len(hits)} attribute values skip escHtml:\n{listing}"
+
+
+def test_the_search_results_cut_an_id_before_escaping_it() -> None:
+    # Cut after escHtml, `&quot;` can end as `&q`, which renders as text.
+    page = INDEX_HTML.read_text(encoding="utf-8")
+    body = re.search(
+        r"function renderSearchItem\(r\) \{\n(.*?)\n\s*\}\n", page, re.DOTALL
+    )
+    assert body is not None, "function renderSearchItem not found in index.html"
+    assert "${escHtml(String(id).substring(0, 24))}" in body.group(1)
 
 
 @pytest.mark.parametrize(
