@@ -72,7 +72,7 @@ def test_every_data_action_reaches_a_function_with_its_id() -> None:
     known = {name.strip() for name in block.group(1).split(",") if name.strip()}
     used = re.findall(r'data-action="([^"]*)"', page)
 
-    assert_hand_read_floor(len(used), 13, subject="data-action attributes")
+    assert_hand_read_floor(len(used), 14, subject="data-action attributes")
     # A name the listener lacks is a dead button; a key no template uses is
     # a stale entry.
     assert set(used) == known

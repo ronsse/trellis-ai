@@ -4068,7 +4068,18 @@ paths:
       - ingest
   /api/v1/traces/{trace_id}:
     get:
-      description: Get a specific trace by ID.
+      description: 'Get a trace and what can show each of its evidence refs.
+
+
+        ``evidence_links`` maps an ``evidence_id`` to ``{"document_id": ...}``
+
+        when a document holds that evidence record, else to
+
+        ``{"entity_id": "evidence:<id>"}`` when that graph node exists. A ref with
+
+        neither, or with an empty ``evidence_id``, has no entry.
+
+        ``evidence_links`` is ``null`` when the knowledge stores cannot be read.'
       operationId: get_trace_api_v1_traces__trace_id__get
       parameters:
       - in: path
