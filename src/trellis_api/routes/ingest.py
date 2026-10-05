@@ -49,7 +49,7 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
     registry = get_registry()
     executor = build_curate_executor(registry)
     # Read before the write: the handler answers a stored trace_id as a
-    # success that stores nothing, and its result does not say which.
+    # success that stores nothing, and only its message says which.
     already_ingested = trace_already_ingested(registry, trace.trace_id)
     result = executor.execute(
         Command(
