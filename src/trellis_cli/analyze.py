@@ -1581,8 +1581,9 @@ def holdout(
     the descriptive [R] re-measure in every flag state, then the
     stratum-weighted difference served minus withheld (strata: parent
     session x ISO week) with a within-stratum permutation p-value, a
-    stratified bootstrap CI and power at the realised N. Counts and
-    statistics only; writes nothing, not even a meta-trace.
+    stratified bootstrap CI and power at the realised N, and the
+    guardrails per arm, which decide nothing. Counts and statistics only;
+    writes nothing, not even a meta-trace.
     """
     from trellis.analyze.holdout import (  # noqa: PLC0415
         HoldoutAnalysisError,

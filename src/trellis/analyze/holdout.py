@@ -71,10 +71,10 @@ interval or verdict. PRs created and whether the task committed (each left
 out when it is the primary), log1p commits, tool errors (covariate grade)
 and the re-call rate, the share of tasks whose join parsed a second pack id
 (a manipulation check), are each averaged over the primary's analysed
-tasks; the cut-off rate is over every eligible task, because the analysed
-set excludes the cut-offs unless ``itt`` keeps them. A guardrail whose
-field no task in an arm carries is ``None`` there, with the missing field
-named.
+tasks; the cut-off rate is over every eligible task, read as the exclusion
+reads it, because the analysed set excludes the cut-offs unless ``itt``
+keeps them. Any other guardrail whose field no task in an arm carries is
+``None`` there, with the missing field named.
 
 **Output** is counts and statistics only. No pack id, session id, intent or
 item text leaves this module, and a non-significant result reads
@@ -401,10 +401,12 @@ class HoldoutPower(TrellisModel):
 
 
 class HoldoutGuardrailArm(TrellisModel):
-    """One arm's guardrail: the mean over the ``n`` tasks carrying its field.
+    """One arm's guardrail: the mean over the ``n`` tasks it reads.
 
     ``missing`` counts the arm's tasks in the guardrail's task set that
-    lack the field; ``not_measurable`` says why ``value`` is ``None``.
+    lack its field, never for the cut-off rate, which reads a task without
+    the field as not cut off; ``not_measurable`` says why ``value`` is
+    ``None``.
     """
 
     n: int
@@ -1001,27 +1003,16 @@ def _task_window_start(
 
 
 def _task_window_note(
-    *,
-    days: int,
-    since: datetime,
-    start: datetime,
-    task_start: datetime,
-    task_days: float,
-    rate: float | None,
+    *, days: int, truncated: bool, task_start: datetime, task_days: float, rate: float
 ) -> str:
     """Why the task figures divide by fewer days than the window holds."""
-    if task_start > start and rate is not None:
-        before = "the window" if start == since else "the scanned part of the window"
-        reason = (
-            f"the window's first row at rate {rate:g} was written then, and no "
-            f"pack row before {before} shows that rate running as it opened"
-        )
-    else:
-        reason = "the scan covers only that part of the window"
+    before = "the scanned part of the window" if truncated else "the window"
     return (
         "The task figures per 30 days and the task MDE horizons divide by the "
         f"{round(task_days, 2):g} days from {task_start.isoformat()} to the window "
-        f"end, not by the {days}-day window: {reason}."
+        f"end, not by the {days}-day window: the window's first row at rate "
+        f"{rate:g} was written then, and no pack row before {before} shows that "
+        "rate running as it opened."
     )
 
 
@@ -1163,12 +1154,11 @@ def analyze_holdout(
     rate, notes = _resolve_rate(rows, rate)
     task_start = _task_window_start(event_log, rows, rate, evidence_start)
     task_days = max((end - task_start).total_seconds(), 0.0) / _DAY_SECONDS
-    if task_days < days:
+    if task_start > evidence_start and rate is not None:
         notes.append(
             _task_window_note(
                 days=days,
-                since=since,
-                start=evidence_start,
+                truncated=evidence_start > since,
                 task_start=task_start,
                 task_days=task_days,
                 rate=rate,
@@ -1629,8 +1619,11 @@ _ELIGIBLE_TASKS = "eligible tasks, cut-offs included"
 _GUARDRAIL_NOTE = (
     "Reported, never decisive: no p-value and no verdict. Each value is the "
     "arm's mean over the n tasks that carry its field. The cut-off rate "
-    "counts every eligible task, cut-offs included; every other guardrail "
-    "uses the primary's analysed tasks."
+    "counts every eligible task, cut-offs included, and reads a task without "
+    "the field as not cut off, as the exclusion does; every other guardrail "
+    "uses the primary's analysed tasks. The re-call rate counts a task whose "
+    "join parsed a second pack id: a later retrieval that errored or printed "
+    "no pack id the capture could parse does not count."
 )
 
 
@@ -1650,14 +1643,7 @@ def _from_outcome(name: str) -> Callable[[_Unit], float | None]:
     return lambda unit: read(unit.outcome)
 
 
-def _ended_on_error(unit: _Unit) -> float | None:
-    value = unit.outcome.get("ended_on_error")
-    return float(value) if isinstance(value, bool) else None
-
-
-#: The pre-registration's guardrails. The re-call rate counts a task that
-#: parsed a second pack id; a pack id the capture could not parse is not
-#: counted.
+#: The pre-registration's guardrails.
 _GUARDRAILS = (
     _Guardrail(
         "prs_created",
@@ -1681,7 +1667,7 @@ _GUARDRAILS = (
         "cut_off_rate",
         "cut-off rate",
         "outcome.ended_on_error",
-        _ended_on_error,
+        lambda unit: float(unit.cut_off),
         eligible=True,
     ),
     _Guardrail(

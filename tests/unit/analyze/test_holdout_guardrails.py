@@ -187,6 +187,97 @@ class TestGuardrails:
         assert recall.served.value == pytest.approx(0.2)
         assert recall.withheld.value == pytest.approx(0.75)
 
+    def test_a_retrieval_the_capture_could_not_parse_is_not_a_re_call(
+        self, log: HoldoutLog
+    ) -> None:
+        """One parsed pack id and two unparsed ones per task: no re-call."""
+        for index, withheld in enumerate([False, True]):
+            at = MONDAY + timedelta(hours=index)
+            pack = log.pack(at=at, withheld=withheld, items=2)
+            log.join(
+                f"task-unparsed-{index}",
+                at=at + timedelta(hours=1),
+                pack_ids=[pack],
+                parent="parent-a",
+                outcome=outcome_payload(turns=8 + index),
+                retrieval_results=3,
+                pack_ids_unparsed=2,
+            )
+        log.sweep()
+
+        report = _analyze(log)
+
+        recall = _measures(report)["recall_rate"]
+        assert recall.withheld is not None
+        assert (recall.served.value, recall.withheld.value) == (0.0, 0.0)
+        assert (
+            "a later retrieval that errored or printed no pack id the capture "
+            "could parse does not count" in report.guardrails.note
+        )
+
+    def test_the_cut_off_rate_reads_ended_on_error_as_the_exclusion_does(
+        self, log: HoldoutLog
+    ) -> None:
+        """Served: a cut-off, a join without the field and one with a non-bool.
+
+        Only ``True`` is a cut-off to the exclusion, so the guardrail counts
+        all three served tasks, 1 of 3, as the descriptive share does.
+        Withheld: 0 of 2.
+        """
+        layout: list[tuple[bool, object]] = [
+            (False, True),
+            (False, None),
+            (False, "yes"),
+            (True, False),
+            (True, None),
+        ]
+        for index, (withheld, ended) in enumerate(layout):
+            at = MONDAY + timedelta(hours=index)
+            pack = log.pack(at=at, withheld=withheld, items=2)
+            outcome = outcome_payload(turns=5 + index)
+            if ended is None:
+                del outcome["ended_on_error"]
+            else:
+                outcome["ended_on_error"] = ended
+            log.join(
+                f"task-eoe-{index}",
+                at=at + timedelta(hours=1),
+                pack_ids=[pack],
+                parent="parent-a",
+                outcome=outcome,
+            )
+        log.sweep()
+
+        report = _analyze(log)
+
+        cut_offs = _measures(report)["cut_off_rate"]
+        assert cut_offs.withheld is not None
+        assert (cut_offs.served.n, cut_offs.served.missing) == (3, 0)
+        assert (cut_offs.withheld.n, cut_offs.withheld.missing) == (2, 0)
+        assert cut_offs.served.value == pytest.approx(1 / 3)
+        assert cut_offs.withheld.value == pytest.approx(0.0)
+        shares = report.descriptive.cut_off_share_by_arm
+        assert cut_offs.served.value == pytest.approx(shares.served)
+        assert cut_offs.withheld.value == pytest.approx(shares.withheld)
+        assert report.funnel.cut_offs_excluded == 1
+
+    def test_a_store_with_every_task_withheld_names_the_empty_arm(
+        self, log: HoldoutLog
+    ) -> None:
+        for index in range(2):
+            log.task(
+                start=MONDAY + timedelta(hours=index), arms=[True], turns=6 + index
+            )
+        log.sweep()
+
+        guardrails = _analyze(log).guardrails
+
+        assert guardrails.status == holdout.NO_SERVED_ARM
+        prs = guardrails.measures[0]
+        assert prs.served.not_measurable == "no analysed task in the served arm"
+        assert prs.withheld is not None
+        assert prs.withheld.n == 2
+
     def test_a_flag_off_store_shows_the_served_arm_only(self, log: HoldoutLog) -> None:
         """Rate 0: PRs 1, 0, 0 across three served tasks."""
         for index in range(3):
@@ -261,10 +352,17 @@ class TestTaskWindow:
         assert len(span) == 1
         assert "40 days from 2026-08-19T00:00:00+00:00" in span[0]
 
+    @pytest.mark.parametrize("old_build", [False, True], ids=["alone", "after-old"])
     def test_a_store_keyed_throughout_keeps_the_whole_window(
-        self, log: HoldoutLog
+        self, log: HoldoutLog, old_build: bool
     ) -> None:
-        """Rate 0.5 was written before the window opened: 5 and 4 per 30 days."""
+        """Rate 0.5 was written before the window opened: 5 and 4 per 30 days.
+
+        Only the newest pack row before the window is read, so an older row
+        from a build without the key changes nothing.
+        """
+        if old_build:
+            log.pack(at=WINDOW_START - timedelta(days=10), withheld=None, items=1)
         log.deployed_before_window()
         seed_late_build(log, early_arm=False)
 
@@ -279,3 +377,17 @@ class TestTaskWindow:
         assert not any("not by the 60-day window" in n for n in report.notes)
         assert report.task_window_since == report.since
         assert report.task_window_days == pytest.approx(60.0)
+
+    def test_a_truncated_scan_spans_the_scanned_part_without_a_window_note(
+        self, log: HoldoutLog
+    ) -> None:
+        """The scan's own note reports the truncation; nothing repeats it."""
+        log.deployed_before_window()
+        seed_late_build(log, early_arm=False)
+
+        report = _analyze(log, rate=0.5, limit=6)
+
+        assert report.scan.truncated
+        assert report.task_window_since > report.since
+        assert report.task_window_days == report.effective_window_days
+        assert not any("not by the 60-day window" in n for n in report.notes)
