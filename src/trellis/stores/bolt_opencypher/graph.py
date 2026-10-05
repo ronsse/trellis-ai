@@ -1743,13 +1743,21 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             ):
                 matched.setdefault(str(node["node_id"]), node)
         rows = list(matched.values())
+        # node_id ends each key, as GraphStore.search_nodes states: the stable
+        # sort alone would leave rows that tie in created_at order.
         if sort == "name":
             rows.sort(
-                key=lambda node: _node_search_name(node["properties"]),
+                key=lambda node: (
+                    _node_search_name(node["properties"]),
+                    str(node["node_id"]),
+                ),
                 reverse=descending,
             )
         elif sort == "node_type":
-            rows.sort(key=lambda node: str(node["node_type"]), reverse=descending)
+            rows.sort(
+                key=lambda node: (str(node["node_type"]), str(node["node_id"])),
+                reverse=descending,
+            )
         return rows[offset : offset + limit], len(rows)
 
     def count_edges(self) -> int:

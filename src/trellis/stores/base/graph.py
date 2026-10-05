@@ -722,10 +722,13 @@ class GraphStore(ABC):
         for *node_type*. Only current versions (``valid_to IS NULL``) match.
 
         The page holds rows shaped as :meth:`get_node` returns them, ordered
-        by *sort* (``created_at``, the ``name`` property or ``node_type``),
-        descending unless *descending* is false, then skipped by *offset*
-        and cut at *limit*. Each backend compares names and types its own
-        way, and rows that tie on *sort* come in no specified order.
+        by *sort* (``created_at``, the ``name`` property or ``node_type``)
+        and then by ``node_id``, both descending unless *descending* is
+        false, then skipped by *offset* and cut at *limit*. A current
+        ``node_id`` is unique, so rows that tie on *sort* still have one
+        order: while the graph does not change, walking every page shows
+        each match once, and the ascending walk is the descending one
+        reversed. Each backend compares names, types and ids its own way.
 
         Abstract with no default: a backend outside this repository must
         implement it.

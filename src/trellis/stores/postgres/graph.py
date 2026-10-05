@@ -1475,7 +1475,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 cur.execute(
                     f"SELECT {_node_select_list()} FROM nodes"
                     f" WHERE {where}"
-                    f" ORDER BY {sort_col} {sort_dir} LIMIT %s OFFSET %s",
+                    f" ORDER BY {sort_col} {sort_dir}, node_id {sort_dir}"
+                    " LIMIT %s OFFSET %s",
                     [*params, limit, offset],
                 )
                 rows = cur.fetchall()
