@@ -380,9 +380,9 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
     def delete(self, item_id: str) -> bool:
         # Removes the embedding from the current version only — the
         # node itself stays. Historical versions retain their
-        # embeddings (queryable via ``GraphStore.get_node_history``
-        # but excluded from vector search by the ``valid_to IS NULL``
-        # filter).
+        # embeddings on their rows (no GraphStore read returns them,
+        # and the ``valid_to IS NULL`` filter excludes them from
+        # vector search).
         def _tx(tx: Any) -> bool:
             record = tx.run(
                 "MATCH (n:Node {node_id: $id}) "
