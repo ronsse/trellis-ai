@@ -353,6 +353,78 @@ def test_delete_node_removes_a_version_written_while_it_waited(
     assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
 
 
+def test_delete_node_removes_a_version_written_after_it_took_its_locks(
+    graph_store, monkeypatch
+):
+    # A first write holds its locks until the purge's lock statement waits
+    # on it. The purge pauses before its Node delete until a second write
+    # has closed the version the first created, and that write commits only
+    # once the Node delete waits on it. The version the second write created
+    # is invisible to that delete, so only the delete's repeat removes it.
+    import neo4j
+
+    store = graph_store
+    store.upsert_node("n1", "person", {"phase": "1"})
+    writer = threading.get_ident()
+    original = neo4j.Session.execute_write
+    paused, resume = threading.Event(), threading.Event()
+    state: dict[str, Any] = {}
+
+    class PauseBeforeNodeDelete:
+        def __init__(self, tx: Any) -> None:
+            self._tx = tx
+
+        def run(self, query: str, *args: Any, **kwargs: Any) -> Any:
+            node_delete = "MATCH (n:Node {node_id: $nid}) DETACH DELETE"
+            if query.startswith(node_delete) and not paused.is_set():
+                paused.set()
+                resume.wait(20)
+            return self._tx.run(query, *args, **kwargs)
+
+    def purge() -> None:
+        state["deleted"] = store.delete_node("n1")
+
+    def start_purge() -> None:
+        state["purge"] = threading.Thread(target=purge)
+        state["purge"].start()
+        state["locking"] = _wait_for_blocked_purge(store)
+
+    def resume_purge() -> None:
+        resume.set()
+        state["deleting"] = _wait_for_blocked_purge(store)
+
+    def gated(session: Any, transaction_function: Any, *args: Any, **kwargs: Any):
+        if threading.get_ident() == writer:
+
+            def held(tx: Any, *a: Any, **k: Any) -> Any:
+                result = transaction_function(tx, *a, **k)
+                state.pop("hold", lambda: None)()
+                return result
+
+            return original(session, held, *args, **kwargs)
+        if "delete_node" in getattr(transaction_function, "__qualname__", ""):
+
+            def pausing(tx: Any, *a: Any, **k: Any) -> Any:
+                return transaction_function(PauseBeforeNodeDelete(tx), *a, **k)
+
+            return original(session, pausing, *args, **kwargs)
+        return original(session, transaction_function, *args, **kwargs)
+
+    monkeypatch.setattr(neo4j.Session, "execute_write", gated)
+    state["hold"] = start_purge
+    store.upsert_node("n1", "person", {"phase": "2"})
+    assert paused.wait(20), "the purge never reached its Node delete"
+    state["hold"] = resume_purge
+    store.upsert_node("n1", "person", {"phase": "3"})
+    state["purge"].join(timeout=30)
+
+    assert state["locking"], "the purge never blocked on the first write's lock"
+    assert state["deleting"], "the Node delete never blocked on the second write"
+    assert not state["purge"].is_alive()
+    assert state["deleted"] is True
+    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+
+
 def _seed_purge_target(store, node_id: str) -> None:
     """Two versions, an edge and an alias: rows of every kind a purge removes."""
     store.upsert_node(node_id, "person", {"phase": "1"})
@@ -362,13 +434,17 @@ def _seed_purge_target(store, node_id: str) -> None:
     store.upsert_alias(node_id, "race-sys", f"raw-{node_id}", raw_name="One")
 
 
-def _hold_first_purge(monkeypatch, store, second: Any) -> dict[str, Any]:
+def _hold_first_purge(
+    monkeypatch, store, second: Any, *, at_node_delete: bool = False
+) -> dict[str, Any]:
     """Hold this thread's first ``delete_node`` transaction open.
 
     Its statements run and hold their locks, ``second`` starts on another
     thread, and the transaction commits only once SHOW TRANSACTIONS shows a
-    purge statement blocked behind it. The returned dict carries that
-    thread (``"purge"``) and whether the gate saw the block (``"waited"``).
+    purge statement blocked behind it. With ``at_node_delete`` the hold
+    comes before its Node delete instead, so only the statements ahead of
+    that delete hold locks. The returned dict carries that thread
+    (``"purge"``) and whether the gate saw the block (``"waited"``).
     """
     import neo4j
 
@@ -376,17 +452,31 @@ def _hold_first_purge(monkeypatch, store, second: Any) -> dict[str, Any]:
     original = neo4j.Session.execute_write
     state: dict[str, Any] = {}
 
+    def start_second() -> None:
+        if "purge" not in state:
+            state["purge"] = threading.Thread(target=second)
+            state["purge"].start()
+            state["waited"] = _wait_for_blocked_purge(store)
+
+    class StartSecondAtNodeDelete:
+        def __init__(self, tx: Any) -> None:
+            self._tx = tx
+
+        def run(self, query: str, *args: Any, **kwargs: Any) -> Any:
+            if query.startswith("MATCH (n:Node {node_id: $nid}) DETACH DELETE"):
+                start_second()
+            return self._tx.run(query, *args, **kwargs)
+
     def gated(session: Any, transaction_function: Any, *args: Any, **kwargs: Any):
         purging = "delete_node" in getattr(transaction_function, "__qualname__", "")
         if threading.get_ident() != first or not purging:
             return original(session, transaction_function, *args, **kwargs)
 
         def held(tx: Any, *a: Any, **k: Any) -> Any:
+            if at_node_delete:
+                return transaction_function(StartSecondAtNodeDelete(tx), *a, **k)
             result = transaction_function(tx, *a, **k)
-            if "purge" not in state:
-                state["purge"] = threading.Thread(target=second)
-                state["purge"].start()
-                state["waited"] = _wait_for_blocked_purge(store)
+            start_second()
             return result
 
         return original(session, held, *args, **kwargs)
@@ -395,12 +485,19 @@ def _hold_first_purge(monkeypatch, store, second: Any) -> dict[str, Any]:
     return state
 
 
+@pytest.mark.parametrize(
+    "at_node_delete",
+    [False, True],
+    ids=["held_after_its_statements", "held_before_its_node_delete"],
+)
 def test_a_purge_that_waited_on_a_concurrent_purge_reports_no_removal(
-    graph_store, monkeypatch
+    graph_store, monkeypatch, at_node_delete: bool
 ):
     # The second purge blocks behind the first and goes on only once the
     # first has committed, when every row is gone. It removed nothing, so
-    # it reports False, as the loser does on Postgres.
+    # it reports False, as the loser does on Postgres. Held before its Node
+    # delete, the first purge holds only the locks its lock statement took,
+    # so that statement must run in the delete's transaction.
     store = graph_store
     _seed_purge_target(store, "n1")
     outcome: dict[str, Any] = {}
@@ -408,7 +505,7 @@ def test_a_purge_that_waited_on_a_concurrent_purge_reports_no_removal(
     def second() -> None:
         outcome["second"] = store.delete_node("n1")
 
-    state = _hold_first_purge(monkeypatch, store, second)
+    state = _hold_first_purge(monkeypatch, store, second, at_node_delete=at_node_delete)
     outcome["first"] = store.delete_node("n1")
     assert "purge" in state, "the first purge never ran a delete_node transaction"
     state["purge"].join(timeout=30)

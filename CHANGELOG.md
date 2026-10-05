@@ -722,8 +722,8 @@ All notable changes to Trellis will be documented in this file.
   node's rows before it counts, so the purge that waited finds nothing and
   returns `False`, and its redaction is `failed` with no second
   `REDACTION_APPLIED`, as on Postgres and ArcadeDB. A version a writer
-  creates after the purges have taken their locks can still be counted by
-  two of them.
+  creates after one of the purges has taken its locks can still be counted
+  by both.
   ([#709](https://github.com/ronsse/trellis-ai/pull/709))
 
 ## [0.9.0] - 2026-05-13
