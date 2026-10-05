@@ -779,6 +779,22 @@ All notable changes to Trellis will be documented in this file.
   too. The schema still accepts the ref, so stored traces load unchanged,
   and an `evidence:` node already in a graph stays until it is removed.
   ([#712](https://github.com/ronsse/trellis-ai/pull/712))
+- **A Bolt purge that cannot finish fails the redaction instead of
+  escaping as a driver error.** On Neo4j and ArcadeDB, an error the neo4j
+  driver raised during `delete_node`, such as a lost connection or a
+  server `ClientError`, was not a `TrellisError` and escaped
+  `MutationExecutor`: `trellis curate redact` exited `1` with a traceback
+  and no JSON, and no `MUTATION_REJECTED` event was written. The driver
+  still runs the purge again on an error it can retry. When it gives up,
+  or the error is one it does not retry, the purge raises `StoreError`
+  naming the node and the error's type, without the server's message, so
+  the redaction is `failed` (exit `5` in both formats) and audited. A
+  connection lost while the commit was outstanding (`IncompleteCommit`)
+  is reported as an unknown outcome, because the purge may have
+  committed. The other Bolt graph writes still raise the driver's own
+  errors, as do the Bolt calls a redaction makes before its purge, such
+  as opening the graph store and its reads.
+  ([#713](https://github.com/ronsse/trellis-ai/pull/713))
 
 ## [0.9.0] - 2026-05-13
 

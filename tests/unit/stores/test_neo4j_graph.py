@@ -260,6 +260,37 @@ def test_delete_nonexistent_returns_false(graph_store):
     assert graph_store.delete_edge("nope") is False
 
 
+def test_a_purge_the_server_refuses_is_a_store_error(graph_store):
+    """The server's refusal ends the purge as ``StoreError``, without its text.
+
+    The server refuses every statement against a database it does not have
+    with ``Neo.ClientError.Database.DatabaseNotFound``, and its message names
+    the database.
+    """
+    from neo4j.exceptions import ClientError
+
+    from trellis.errors import StoreError
+    from trellis.stores.bolt_opencypher.graph import BoltOpenCypherGraphStore
+
+    absent = "absentdb"
+    store = BoltOpenCypherGraphStore(
+        driver=graph_store._driver,
+        database=absent,
+        owns_driver=False,
+        init_schema=False,
+    )
+
+    with pytest.raises(StoreError) as caught:
+        store.delete_node("n1")
+
+    refusal = caught.value.__cause__
+    assert isinstance(refusal, ClientError)
+    assert refusal.code == "Neo.ClientError.Database.DatabaseNotFound"
+    assert absent in str(refusal)
+    assert "Purge of node n1 failed: ClientError" in caught.value.message
+    assert absent not in caught.value.message
+
+
 def _wait_for_blocked_purge(store) -> bool:
     """Poll until a ``delete_node`` statement is blocked on a lock (20 s cap).
 
