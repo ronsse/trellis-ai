@@ -1,12 +1,13 @@
 """What a failed handler writes to the operator log.
 
-A typed handler failure (a ``TrellisError``) is logged as its type, its message
-and the command it belongs to, without the chained traceback. The chained cause
-is where a backend's own text lives: the Postgres and Bolt purges (#702, #713)
-raise ``StoreError(<type-only message>) from <driver error>`` because a server's
+A typed handler failure (a ``StoreError``, or another ``TrellisError`` that
+fails the command) is logged as its type, its message and the command it
+belongs to, without the chained traceback. The chained cause is where a
+backend's own text lives: the Postgres and Bolt purges (#702, #713) raise
+``StoreError(<type-only message>) from <driver error>`` because a server's
 message can carry query text and values, and a rendered traceback prints that
-cause. An untyped exception is logged with its full traceback, which is how the
-bug behind it gets found.
+cause. An unexpected exception (a ``RuntimeError``, say) is logged with its
+full traceback, which is how the bug behind it gets found.
 
 The log is read as a deployment renders it, through the real processor chains:
 ``configure_stderr_logging`` (CLI and MCP server) and the API's
@@ -17,9 +18,7 @@ traceback text only appears when a chain's ``format_exc_info`` renders it.
 
 from __future__ import annotations
 
-import io
 import logging
-import sys
 from typing import TYPE_CHECKING, NoReturn
 from unittest.mock import MagicMock, call
 
@@ -109,13 +108,11 @@ def _isolate_logging(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 def _rendered_log(
-    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     configure: Callable[[], None],
     handler: CommandHandler,
 ) -> str:
     """Everything *configure*'s chain writes to stderr while *handler* fails."""
-    stderr = io.StringIO()
-    monkeypatch.setattr(sys, "stderr", stderr)
     configure()
     MutationExecutor(
         event_log=MagicMock(), handlers={Operation.ENTITY_CREATE: handler}
@@ -126,14 +123,14 @@ def _rendered_log(
             command_id=_COMMAND_ID,
         )
     )
-    return stderr.getvalue()
+    return capsys.readouterr().err
 
 
 @pytest.mark.parametrize("configure", _CHAINS)
 def test_a_typed_failure_logs_its_message_and_not_its_cause(
-    monkeypatch: pytest.MonkeyPatch, configure: Callable[[], None]
+    capsys: pytest.CaptureFixture[str], configure: Callable[[], None]
 ) -> None:
-    out = _rendered_log(monkeypatch, configure, _MappedDriverFailure())
+    out = _rendered_log(capsys, configure, _MappedDriverFailure())
 
     assert "handler_typed_error" in out
     assert "StoreError" in out
@@ -144,9 +141,9 @@ def test_a_typed_failure_logs_its_message_and_not_its_cause(
 
 @pytest.mark.parametrize("configure", _CHAINS)
 def test_an_unexpected_failure_keeps_its_traceback(
-    monkeypatch: pytest.MonkeyPatch, configure: Callable[[], None]
+    capsys: pytest.CaptureFixture[str], configure: Callable[[], None]
 ) -> None:
-    out = _rendered_log(monkeypatch, configure, _Panic())
+    out = _rendered_log(capsys, configure, _Panic())
 
     assert "handler_failed_unexpected" in out
     assert "Traceback (most recent call last)" in out

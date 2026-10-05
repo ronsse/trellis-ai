@@ -825,16 +825,13 @@ All notable changes to Trellis will be documented in this file.
   this way.
   ([#714](https://github.com/ronsse/trellis-ai/pull/714))
 - **A typed handler failure is logged without its chained traceback.**
-  `MutationExecutor` logged a `TrellisError` raised by a handler,
-  `StoreError` included, with its traceback, so the log on stderr of the
-  CLI, the MCP server and the API carried the chained cause. For a
-  Postgres or Bolt purge that cause is the driver error whose server text
-  the `StoreError` message leaves out (#702, #713). `handler_typed_error`
-  is now logged at error level with the exception's type, its message as
-  `error`, the command id and the operation, and no traceback. An
-  exception that is not a `TrellisError` is still logged with its
-  traceback, as `handler_failed_unexpected`. The `failed` result and the
-  `MUTATION_REJECTED` event are unchanged.
+  `handler_typed_error` is logged without a traceback, so the stderr log
+  of the CLI, the MCP server and the API no longer prints the driver error
+  that a Postgres or Bolt purge chains to its `StoreError`, whose server
+  text can include query text and values. The line gains the exception's
+  message as `error`, beside its type, the command id and the operation.
+  `handler_failed_unexpected` keeps its traceback; the `failed` result and
+  the `MUTATION_REJECTED` event are unchanged.
   ([#718](https://github.com/ronsse/trellis-ai/pull/718))
 
 ## [0.9.0] - 2026-05-13
