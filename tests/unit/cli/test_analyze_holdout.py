@@ -26,6 +26,9 @@ from tests.unit.analyze._holdout_fixture import (
     HoldoutLog,
     outcome_payload,
     seed_experiment,
+    seed_guardrails,
+    seed_late_build,
+    seed_missing_tool_errors,
 )
 from trellis.analyze import holdout as holdout_analysis
 from trellis.analyze.holdout import analyze_holdout
@@ -263,6 +266,7 @@ def test_every_r_figure_is_in_the_json_and_the_text(log: HoldoutLog) -> None:
     are 4 + s, 9 + s and 14 + s in session s, and the first sub-agent of
     each session opens one PR.
     """
+    log.deployed_before_window(rate=0.0)
     for s in range(4):
         start = MONDAY + timedelta(days=s)
         main = log.task(start=start, parent=None, arms=(), turns=2 + s, rate=0.0)
@@ -397,3 +401,154 @@ def test_a_figure_the_rows_cannot_give_reads_not_measurable(
     assert "main-session outcome SD not measurable: needs 2 main sessions" in flat
     descriptive = flat.split("Descriptive (the [R] re-measure)")[1]
     assert "n/a" not in descriptive.split("Exclusions")[0]
+
+
+def _guardrail_block(result: Result) -> str:
+    """The text report's guardrails block, up to the first report note."""
+    after = _flat(result).split("Guardrails (reported, never decisive")[1]
+    return after.split("note:")[0]
+
+
+def _guardrails(result: Result) -> dict[str, dict[str, Any]]:
+    block = _payload(result)["guardrails"]
+    return {measure["name"]: measure for measure in block["measures"]}
+
+
+def test_guardrails_are_printed_per_arm_in_both_formats(log: HoldoutLog) -> None:
+    """The hand store of ``tests/unit/analyze/test_holdout_guardrails.py``."""
+    seed_guardrails(log)
+
+    text, machine = _run()
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    assert _payload(machine)["guardrails"]["status"] == "ok"
+    rows = _guardrails(machine)
+    assert rows["prs_created"]["served"] == {
+        "n": 4,
+        "value": pytest.approx(0.75),
+        "missing": 0,
+        "not_measurable": None,
+    }
+    assert rows["cut_off_rate"]["task_set"] == "eligible tasks, cut-offs included"
+    assert rows["cut_off_rate"]["withheld"]["n"] == 6
+    assert rows["cut_off_rate"]["withheld"]["value"] == pytest.approx(1 / 3)
+    assert rows["recall_rate"]["withheld"]["value"] == pytest.approx(0.75)
+    flat = _flat(text)
+    assert "Guardrails (reported, never decisive: no p-value, no verdict)" in flat
+    block = _guardrail_block(text)
+    for line in (
+        (
+            "PRs created per task (analysed tasks): served 0.75 (n 4), withheld "
+            "0.25 (n 4)"
+        ),
+        (
+            "share of tasks with a commit (analysed tasks): served 0.5 (n 4), "
+            "withheld 0.25 (n 4)"
+        ),
+        (
+            f"mean log1p commits (analysed tasks): served {3 * math.log(2) / 4:.3g} "
+            f"(n 4), withheld {math.log(3) / 4:.3g} (n 4)"
+        ),
+        (
+            "cut-off rate (eligible tasks, cut-offs included): served 0.2 (n 5), "
+            "withheld 0.333 (n 6)"
+        ),
+        (
+            "tool errors per task, covariate grade (analysed tasks): served 1.75 "
+            "(n 4), withheld 2.25 (n 4)"
+        ),
+        (
+            "re-call rate after the first retrieval, a manipulation check "
+            "(analysed tasks): served 0.5 (n 4), withheld 0.75 (n 4)"
+        ),
+    ):
+        assert line in block
+
+
+def test_a_guardrail_field_the_join_lacks_reads_not_measurable_in_both_formats(
+    log: HoldoutLog,
+) -> None:
+    seed_missing_tool_errors(log)
+
+    text, machine = _run()
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    rows = _guardrails(machine)
+    assert len(rows) == 6
+    errors = rows["tool_errors"]
+    assert errors["served"] == {
+        "n": 0,
+        "value": None,
+        "missing": 3,
+        "not_measurable": "outcome.tool_errors missing",
+    }
+    assert errors["withheld"] == {
+        "n": 2,
+        "value": pytest.approx(2.0),
+        "missing": 1,
+        "not_measurable": None,
+    }
+    assert (
+        "tool errors per task, covariate grade (analysed tasks): served not "
+        "measurable: outcome.tool_errors missing (n 0), withheld 2 (n 2, 1 "
+        "without outcome.tool_errors)" in _guardrail_block(text)
+    )
+
+
+def test_a_flag_off_store_shows_the_guardrails_for_the_served_arm_only(
+    log: HoldoutLog,
+) -> None:
+    """Rate 0: commits 0, 1, 2 and 3, so 3 of 4 tasks committed."""
+    for index in range(4):
+        log.task(
+            start=MONDAY + timedelta(hours=index),
+            parent="parent-a" if index % 2 else "parent-b",
+            rate=0.0,
+            turns=5 + index,
+            commits=index,
+        )
+    log.sweep()
+
+    text, machine = _run()
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    assert _payload(machine)["guardrails"]["status"] == "no withheld arm"
+    rows = _guardrails(machine)
+    assert [row["withheld"] for row in rows.values()] == [None] * 6
+    assert {row["served"]["n"] for row in rows.values()} == {4}
+    flat = _flat(text)
+    assert (
+        "Guardrails (reported, never decisive: no p-value, no verdict): no "
+        "withheld arm" in flat
+    )
+    block = _guardrail_block(text)
+    assert "share of tasks with a commit (analysed tasks): served 0.75 (n 4)" in block
+    assert "), withheld" not in block
+    assert "served arm only" in block
+
+
+def test_the_task_window_is_printed_in_both_formats(log: HoldoutLog) -> None:
+    """Rows at rate 0.5 start 20 days into the window: 10 and 8 tasks in 40 days."""
+    seed_late_build(log)
+
+    text, machine = _run()
+
+    assert text.exit_code == machine.exit_code == EXIT_OK
+    payload = _payload(machine)
+    assert payload["window_days"] == 60
+    assert payload["task_window_since"] == "2026-08-19T00:00:00+00:00"
+    assert payload["task_window_days"] == pytest.approx(40.0)
+    d = payload["descriptive"]
+    assert d["eligible_per_30d"] == pytest.approx(7.5)
+    assert d["analysed_per_30d"] == pytest.approx(6.0)
+    assert d["sessions"]["analysed_per_30d"] == pytest.approx(1.0)
+    assert "whole 60-day window" in d["sessions"]["note"]
+    assert any("not by the 60-day window" in note for note in payload["notes"])
+    flat = _flat(text)
+    assert (
+        "task window 2026-08-19T00:00:00+00:00 to 2026-09-28T00:00:00+00:00 "
+        "(40 days)" in flat
+    )
+    assert "eligible tasks 10 (7.5 per 30 days); analysed 8 (6 per 30 days)" in flat
+    assert "whole 60-day window" in flat
+    assert "not by the 60-day window" in flat
