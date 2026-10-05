@@ -841,6 +841,7 @@ All notable changes to Trellis will be documented in this file.
   `search_nodes` with a `node_type`, now read every current node, as
   `search_nodes` already did, so each takes about as long as an untyped
   search: 0.2 s at 5,000 nodes, where they took 0.01 s and 0.08 s.
+  ([#719](https://github.com/ronsse/trellis-ai/pull/719))
 
 ## [0.9.0] - 2026-05-13
 
