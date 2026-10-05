@@ -795,6 +795,11 @@ All notable changes to Trellis will be documented in this file.
   errors, as do the Bolt calls a redaction makes before its purge, such
   as opening the graph store and its reads.
   ([#713](https://github.com/ronsse/trellis-ai/pull/713))
+- **Trace extraction mints no graph node for an empty `artifact_id`.** Such a
+  ref, including a whitespace-only one, gets no node or edge and is logged at
+  info as `trace_extraction_artifact_id_empty`, so unrelated traces are no
+  longer neighbours through the node `artifact:`. An existing one stays.
+  ([#715](https://github.com/ronsse/trellis-ai/pull/715))
 
 ## [0.9.0] - 2026-05-13
 

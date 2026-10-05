@@ -333,3 +333,42 @@ class TestBlankEvidenceRef:
             {"evidence:syn-ev-b"},
         ]
         assert graph.get_node("evidence:") is None
+
+
+class TestBlankArtifactRef:
+    """An empty ``artifact_id`` must not make unrelated traces neighbours."""
+
+    async def test_traces_with_an_empty_ref_share_no_node(
+        self, registry: StoreRegistry
+    ) -> None:
+        traces = [
+            Trace.model_validate(
+                {
+                    "source": "agent",
+                    "intent": "produce artifacts",
+                    "artifacts_produced": [
+                        {"artifact_id": "", "artifact_type": "file"},
+                        {"artifact_id": f"syn-art-{n}", "artifact_type": "file"},
+                    ],
+                    "context": {},
+                }
+            )
+            for n in ("a", "b")
+        ]
+        for trace in traces:
+            await _extract_into(registry, trace)
+
+        graph = registry.knowledge.graph_store
+
+        def neighbours(trace: Trace) -> set[str]:
+            node_id = f"trace:{trace.trace_id}"
+            return {
+                e["target_id"] if e["source_id"] == node_id else e["source_id"]
+                for e in graph.get_edges(node_id, direction="both")
+            }
+
+        assert [neighbours(t) for t in traces] == [
+            {"artifact:syn-art-a"},
+            {"artifact:syn-art-b"},
+        ]
+        assert graph.get_node("artifact:") is None
