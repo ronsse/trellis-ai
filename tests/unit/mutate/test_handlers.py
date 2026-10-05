@@ -98,6 +98,30 @@ class TestTraceIngestHandler:
         )
         assert len(events) == 1
 
+    def test_a_blank_trace_id_is_refused(self, registry: StoreRegistry) -> None:
+        """A whitespace-only id is refused as ``trace_id_empty``; nothing is stored.
+
+        Assigned after validation, which ``Trace`` does not re-check, the id
+        reaches the handler with its whitespace intact.
+        """
+        trace = self._trace()
+        trace.trace_id = " \t "
+        result = build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.TRACE_INGEST,
+                args={"trace": trace},
+                target_type="trace",
+            )
+        )
+
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata.get("rejection_reason") == "trace_id_empty"
+        assert registry.operational.trace_store.count() == 0
+        events = registry.operational.event_log
+        rejected = events.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert [e.payload.get("reason") for e in rejected] == ["trace_id_empty"]
+        assert events.get_events(event_type=EventType.TRACE_INGESTED) == []
+
 
 class TestPrecedentPromoteHandler:
     def test_emits_event(self, registry: StoreRegistry) -> None:
