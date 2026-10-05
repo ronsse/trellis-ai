@@ -835,6 +835,7 @@ All notable changes to Trellis will be documented in this file.
   exception that is not a `TrellisError` is still logged with its
   traceback, as `handler_failed_unexpected`. The `failed` result and the
   `MUTATION_REJECTED` event are unchanged.
+  ([#718](https://github.com/ronsse/trellis-ai/pull/718))
 
 ## [0.9.0] - 2026-05-13
 
