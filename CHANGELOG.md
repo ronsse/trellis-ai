@@ -795,7 +795,6 @@ All notable changes to Trellis will be documented in this file.
   errors, as do the Bolt calls a redaction makes before its purge, such
   as opening the graph store and its reads.
   ([#713](https://github.com/ronsse/trellis-ai/pull/713))
-
 - **`GET /api/v1/graph/search` pages no longer skip or repeat rows that
   tie.** The route pages with `LIMIT`/`OFFSET`, and on PostgreSQL rows that
   tie on the sort key had no stable order between queries, so walking every
@@ -805,8 +804,10 @@ All notable changes to Trellis will be documented in this file.
   reversed. By design, a page holding ties can differ from the same request
   before this change on any backend, because each backend broke ties its
   own way: PostgreSQL in no fixed order, SQLite by ascending `node_id` in
-  either direction (by write order for `node_type`), and Neo4j and ArcadeDB
-  by `created_at` for a tie on `name` or `node_type`.
+  either direction (for `node_type`, in write order, reversed when
+  descending), and Neo4j and ArcadeDB by `created_at` for a tie on `name`
+  or `node_type`.
+  ([#714](https://github.com/ronsse/trellis-ai/pull/714))
 
 ## [0.9.0] - 2026-05-13
 
