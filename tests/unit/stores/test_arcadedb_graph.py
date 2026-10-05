@@ -30,6 +30,8 @@ import pytest
 
 pytest.importorskip("neo4j")
 
+from tests.unit.stores import bolt_duplicate_current
+
 URI = os.environ.get("TRELLIS_TEST_ARCADEDB_URI", "")
 USER = os.environ.get("TRELLIS_TEST_ARCADEDB_USER", "root")
 PASSWORD = os.environ.get("TRELLIS_TEST_ARCADEDB_PASSWORD", "")
@@ -500,3 +502,18 @@ class TestAliasContentionClassification:
             graph_store, "MATCH (n {x: $nope}) RETURN n", in_transaction=False
         )
         assert not graph_store._is_alias_write_contention(exc)
+
+
+class TestDuplicateCurrentRow:
+    """One node_id with two current rows, as concurrent upserts can leave."""
+
+    def test_every_read_shows_the_newest_version(self, graph_store):
+        bolt_duplicate_current.check_every_read_shows_the_newest_version(graph_store)
+
+    def test_type_counts_follow_the_shown_version(self, graph_store):
+        bolt_duplicate_current.check_type_counts_follow_the_shown_version(graph_store)
+
+    def test_equal_stamps_pick_the_greater_version_id(self, graph_store):
+        bolt_duplicate_current.check_equal_stamps_pick_the_greater_version_id(
+            graph_store
+        )

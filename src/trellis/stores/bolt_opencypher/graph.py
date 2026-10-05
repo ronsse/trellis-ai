@@ -20,7 +20,11 @@ AuraDB users can layer a node key constraint on top; ArcadeDB users
 rely on single-writer discipline at the application layer. Among
 ``update_node_if_current`` calls holding one token exactly one writes,
 on both engines (measured against ``neo4j:2025.12`` and
-``arcadedata/arcadedb:26.8.1``).
+``arcadedata/arcadedb:26.8.1``). Where a node has two current rows,
+``get_node``, ``search_nodes`` and ``count_nodes_by_type`` show the one
+with the later ``valid_from``, or the greater ``version_id`` between
+equal stamps (:func:`_one_version_per_node`), so a search hit, its type
+count and ``get_node`` on its id agree whichever way the search is sorted.
 
 Per-backend subclasses override the **seams**:
 
@@ -80,7 +84,7 @@ from trellis.stores.base.graph_query import (
 from trellis.stores.bolt_opencypher.base import BoltSessionRunner
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from neo4j import Driver, ManagedTransaction
 
@@ -218,6 +222,36 @@ def _matches_node_search(
     """
     haystacks = (_node_search_name(properties), str(node_id), str(node_type))
     return any(needle in h.lower() for h in haystacks)
+
+
+def _version_rank(props: dict[str, Any]) -> tuple[datetime, str]:
+    """Rank one of a node's rows against another: the higher one is shown.
+
+    The later ``valid_from`` ranks higher, and between equal stamps the
+    greater ``version_id``, so no choice rests on the order a query
+    returned the rows in. The stamps are parsed, not compared as text,
+    because text order follows time order only while both share one
+    spelling.
+    """
+    return datetime.fromisoformat(str(props["valid_from"])), str(props["version_id"])
+
+
+def _one_version_per_node(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the row :func:`_version_rank` ranks highest for each ``node_id``.
+
+    Concurrent writers can leave a node two current rows (the module
+    docstring). ``get_node``, ``search_nodes`` and ``count_nodes_by_type``
+    pick through here, so they show the same version of a node, whichever
+    order their queries return its rows in. The kept rows stay in their
+    input order, so an ordered query's order survives.
+    """
+    rows = list(rows)
+    kept: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        held = kept.get(row["node_id"])
+        if held is None or _version_rank(row) > _version_rank(held):
+            kept[row["node_id"]] = row
+    return [row for row in rows if kept[row["node_id"]] is row]
 
 
 def _edge_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
@@ -816,10 +850,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             f"MATCH (n:Node {{node_id: $node_id}}) WHERE {where} "
             f"RETURN {_NODE_WITHOUT_EMBEDDING}"
         )
-        record = self._run_read_single(cypher, node_id=node_id, **params)
-        if record is None:
-            return None
-        return _node_props_to_dict(dict(record["n"]))
+        records = self._run_read_list(cypher, node_id=node_id, **params)
+        shown = _one_version_per_node(dict(r["n"]) for r in records)
+        return _node_props_to_dict(shown[0]) if shown else None
 
     def get_nodes_bulk(
         self,
@@ -1702,32 +1735,27 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         return int(record["cnt"]) if record else 0
 
     def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
-        if not search:
-            cypher = (
-                "MATCH (n:Node) WHERE n.valid_to IS NULL "
-                "RETURN n.node_type AS node_type, "
-                "count(DISTINCT n.node_id) AS cnt"
-            )
-            return {
-                str(r["node_type"]): int(r["cnt"]) for r in self._run_read_list(cypher)
-            }
         # The name lives inside properties_json, which json.dumps wrote with
         # non-ASCII escaped, so a Cypher CONTAINS on that string would miss
         # non-ASCII names and decoding it in Cypher needs APOC. Match
-        # client-side instead, as query() does for property filters.
+        # client-side instead, as query() does for property filters. The rows
+        # come back whole even with no search, so a node with two current rows
+        # counts once, under the type of the version search_nodes shows.
         cypher = (
-            "MATCH (n:Node) WHERE n.valid_to IS NULL "
-            "RETURN n.node_id AS node_id, n.node_type AS node_type, "
-            "n.properties_json AS properties_json"
+            f"MATCH (n:Node) WHERE n.valid_to IS NULL RETURN {_NODE_WITHOUT_EMBEDDING}"
         )
-        needle = search.lower()
-        matched: dict[str, str] = {}
-        for r in self._run_read_list(cypher):
-            props = json.loads(r["properties_json"] or "{}")
-            if _matches_node_search(r["node_id"], r["node_type"], props, needle):
-                matched[str(r["node_id"])] = str(r["node_type"])
+        needle = search.lower() if search else None
         counts: dict[str, int] = {}
-        for node_type in matched.values():
+        for row in _one_version_per_node(
+            dict(r["n"]) for r in self._run_read_list(cypher)
+        ):
+            if needle is not None:
+                props = json.loads(row.get("properties_json") or "{}")
+                if not _matches_node_search(
+                    row["node_id"], row["node_type"], props, needle
+                ):
+                    continue
+            node_type = str(row["node_type"])
             counts[node_type] = counts.get(node_type, 0) + 1
         return counts
 
@@ -1742,27 +1770,28 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
         validate_node_search_args(sort=sort, limit=limit, offset=offset)
-        where = "n.valid_to IS NULL"
-        params: dict[str, Any] = {}
-        if node_type:
-            where += " AND n.node_type = $node_type"
-            params["node_type"] = node_type
         direction = "DESC" if descending else "ASC"
         # Matched client-side for the reason count_nodes_by_type gives, so
-        # each call reads every current node (of node_type, when given).
+        # each call reads every current node. node_type is matched there too,
+        # after one version per node is picked, so a node whose current rows
+        # differ in type is listed only under the type of the version shown.
         cypher = (
-            f"MATCH (n:Node) WHERE {where} RETURN {_NODE_WITHOUT_EMBEDDING} "
+            "MATCH (n:Node) WHERE n.valid_to IS NULL "
+            f"RETURN {_NODE_WITHOUT_EMBEDDING} "
             f"ORDER BY n.created_at {direction}, n.node_id {direction}"
         )
         needle = search.lower() if search else None
-        matched: dict[str, dict[str, Any]] = {}
-        for r in self._run_read_list(cypher, **params):
-            node = _node_props_to_dict(dict(r["n"]))
+        rows: list[dict[str, Any]] = []
+        for props in _one_version_per_node(
+            dict(r["n"]) for r in self._run_read_list(cypher)
+        ):
+            if node_type and props["node_type"] != node_type:
+                continue
+            node = _node_props_to_dict(props)
             if needle is None or _matches_node_search(
                 node["node_id"], node["node_type"], node["properties"], needle
             ):
-                matched.setdefault(str(node["node_id"]), node)
-        rows = list(matched.values())
+                rows.append(node)
         # node_id ends each key, as GraphStore.search_nodes states: the stable
         # sort alone would leave rows that tie in created_at order.
         if sort == "name":

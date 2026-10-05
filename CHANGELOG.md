@@ -824,6 +824,23 @@ All notable changes to Trellis will be documented in this file.
   for a `created_at` sort on Neo4j and ArcadeDB, which already broke ties
   this way.
   ([#714](https://github.com/ronsse/trellis-ai/pull/714))
+- **On Neo4j and ArcadeDB, a node with two current rows reads as one
+  version.** Concurrent writers can leave a node two current rows.
+  `search_nodes` kept whichever row came first in `created_at` order, in
+  the direction of the sort, so an ascending and a descending search could
+  show different versions, and its `node_type` filter could list the node
+  under both types. `get_node` showed whichever row the engine returned
+  first. `count_nodes_by_type` counted the node under each type its rows
+  carried, or, with a search, under the type of the matching row it read
+  last, so the graph page's type chips could sum past the list's total.
+  All three now show the row with the later `valid_from`, or the greater
+  `version_id` between equal stamps, so a search hit, its type count and
+  `get_node` on its id agree, and a search matches only the name of the
+  version shown. The race itself is unchanged, as are `get_nodes_bulk`,
+  `query` and `get_subgraph`. `count_nodes_by_type` without a search, and
+  `search_nodes` with a `node_type`, now read every current node, as
+  `search_nodes` already did, so each takes about as long as an untyped
+  search: 0.2 s at 5,000 nodes, where they took 0.01 s and 0.08 s.
 
 ## [0.9.0] - 2026-05-13
 
