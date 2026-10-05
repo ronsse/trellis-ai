@@ -1585,9 +1585,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         """Purge the node in one managed transaction.
 
         The driver runs the transaction again on an error it can retry,
-        until ``max_transaction_retry_time`` runs out. Raises
-        :class:`StoreError` naming the node and the error's type when the
-        driver gives up, and at once on an error it does not retry. A
+        until ``max_transaction_retry_time`` runs out. A ``DriverError`` or
+        ``Neo4jError`` that ends the purge, retried or not, is raised as
+        :class:`StoreError` naming the node and the error's type. A
         connection lost while the commit was outstanding leaves the purge's
         outcome unknown, and the message says so.
         """
