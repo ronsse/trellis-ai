@@ -869,8 +869,7 @@ Scope boundaries, stated plainly:
 Prompts for confirmation unless `--yes` is passed (required for scripted use).
 Exit codes follow the `exit_codes` map: `3` (rejected by a policy), `2`
 (rejected otherwise — e.g. blank/over-long reason, or a missing target), `5`
-(failed — e.g. a concurrent purge or a store error), `0` success. On Neo4j
-both of two concurrent purges can succeed, each with its own audit event.
+(failed — e.g. a concurrent purge or a store error), `0` success.
 
 ```bash
 trellis curate redact <target_id> --reason <text> [--yes] [--by <caller>] [--format text|json]
@@ -1919,20 +1918,35 @@ bootstrap that resamples tasks within each stratum, and power from re-running
 the simulation on the analysed outcomes at the realised N. A non-significant
 result reads "no effect larger than the MDE detected", never "no effect".
 
-The descriptive block is reported whatever the flag state: eligible tasks per
-30 days, the outcome's within-parent SD, packs per task, cut-off share by arm,
-between-parent variance share, PR base rate, arm counts and binomial checks of
-the arm ratio (overall and per ISO week; the pre-registration pauses below
-p 0.001). Run with the flag off, it is the pre-registration's re-measure and
-the inference reads "no withheld arm". The non-ephemeral rule is listed as
-applied upstream, because capture writes no join for a session in an ephemeral
-project. Three pre-registered items need fields capture does not record, so
-the report says so instead of guessing: the pre-treatment exclusion (a first
-retrieval after a commit or a stop-hook nudge) is not applied, the post-hoc
-share is `null`, and a note says the covariate-residualised permutation is not
-applied. Output is counts and statistics only, never an id, intent or text.
-Exit `0` on any report, `2` on an invalid option or an unnamed choice between
-rates, in both formats.
+The descriptive block is reported whatever the flag state, and it prints every
+figure the pre-registration marks [R]: eligible and analysed tasks per 30 days,
+the outcome's within-parent SD, the between-parent share of variance
+(bias-adjusted: epsilon-squared, floored at 0), the largest parent session's
+share of eligible tasks, packs per task, cut-off share by arm, the served arm's
+PR base rate (`pr_base_rate_served`), the analytic MDE at 30, 60 and 90 days
+(`mde_by_horizon`: 80% power, t at `N - 2` degrees of freedom, `N` = analysed
+tasks per 30 days x days / 30), the N a 10% effect needs (`n_for_10pct_effect`),
+and under `sessions` the main sessions with their sub-agent tasks rolled up:
+how many reach a retrieval per 30 days, their outcome SD and their MDE at the
+same horizons. A main session is dated by when capture wrote its latest join,
+and it counts every pack whatever its rate, including those from builds that
+write no `holdout` key, where the task figures keep only the analysed rate's.
+It also gives arm counts and binomial checks of the arm ratio
+(overall and per ISO week; the pre-registration pauses below p 0.001). A figure
+the rows cannot give reads "not measurable: <reason>" in text; in JSON it is
+`null` and the nearest `not_measurable` field names the reason. Run with the
+flag off, the block is the pre-registration's re-measure and the inference
+reads "no withheld arm". The funnel also counts eligible tasks whose capture
+reported a pack id it could not parse (`eligible_with_unparsed_pack_ids`),
+because their first parsed pack may not be their first call. The non-ephemeral
+rule is listed as applied upstream, because capture writes no join for a
+session in an ephemeral project. Three pre-registered items need fields capture
+does not record, so the report says so instead of guessing: the pre-treatment
+exclusion (a first retrieval after a commit or a stop-hook nudge) is not
+applied, the post-hoc share is `null`, and a note says the
+covariate-residualised permutation is not applied. Output is counts and
+statistics only, never an id, intent or text. Exit `0` on any report, `2` on an
+invalid option or an unnamed choice between rates, in both formats.
 
 ### `trellis analyze domains`
 

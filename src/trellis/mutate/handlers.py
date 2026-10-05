@@ -1054,15 +1054,15 @@ class RedactionApplyHandler:
     Idempotency: re-redacting a purged id is refused the same way, and a
     concurrent-purge race is detected via ``delete_node``'s return value:
     the loser raises :class:`~trellis.errors.NotFoundError`
-    (→ ``CommandStatus.FAILED``) and never emits a second
-    ``REDACTION_APPLIED``, except on Neo4j, where both of two concurrent
-    purges can report the purge and each emits one (see
-    ``GraphStore.delete_node``). Use ``Command.idempotency_key`` when
-    at-most-once semantics are required. A
-    blank ``reason`` is rejected (``code="redaction_reason_required"``) and
-    an over-long one too (``code="redaction_reason_too_long"``) — the
-    recorded justification is the point of governed redaction, and it must
-    stay short and content-free.
+    (→ ``CommandStatus.FAILED``) and emits no second
+    ``REDACTION_APPLIED``. Both succeed, each emitting one, only when
+    ``delete_node`` returns ``True`` to both (see ``GraphStore.delete_node``).
+    Use ``Command.idempotency_key`` when at-most-once semantics are
+    required. A blank ``reason`` is rejected
+    (``code="redaction_reason_required"``) and an over-long one too
+    (``code="redaction_reason_too_long"``) — the recorded justification is
+    the point of governed redaction, and it must stay short and
+    content-free.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:

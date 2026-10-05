@@ -381,7 +381,8 @@ def _detach_delete_until_none(tx: ManagedTransaction, cypher: str, nid: str) -> 
     that waited on a writer's lock matched its rows before the wait, so a
     version that writer created is invisible to that statement and visible
     to the next one. A statement's count also includes a row that a
-    concurrent purge removed while it waited. ArcadeDB never waits (the
+    concurrent purge removed while it waited, so ``delete_node`` locks the
+    node's rows before its first count. ArcadeDB never waits (the
     conflicting commit fails and the driver re-runs the whole transaction
     function), so there the repeat finds nothing.
     """
@@ -1581,6 +1582,18 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
 
     def delete_node(self, node_id: str) -> bool:
         def _tx(tx: ManagedTransaction) -> bool:
+            # Take the write locks on the node's rows before counting. A
+            # statement that waits on a concurrent purge's lock still counts
+            # the rows it matched before the wait; this one waits instead,
+            # and the delete below matches only what that purge left. (A
+            # property SET on a row removed while it waited is a no-op; a
+            # label SET raises EntityNotFound.) A version created after
+            # this statement holds no lock of ours, so two purges can still
+            # both count it.
+            tx.run(
+                "MATCH (n:Node {node_id: $nid}) SET n.node_id = n.node_id",
+                nid=node_id,
+            ).consume()
             # Each statement repeats until it removes nothing, so a version
             # written by a transaction it waited on is removed too. DETACH
             # DELETE cleans up all :EDGE relationships automatically.

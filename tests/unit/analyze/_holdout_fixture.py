@@ -159,15 +159,23 @@ class HoldoutLog:
         pack_ids: Sequence[str],
         parent: str | None,
         outcome: dict[str, Any] | None,
+        retrieval_results: int | None = None,
+        pack_ids_unparsed: int = 0,
+        source_system: str = SOURCE_SYSTEM,
     ) -> None:
-        """Append one ``CAPTURE_SESSION_PACKS`` join for ``task_id``."""
+        """Append one ``CAPTURE_SESSION_PACKS`` join for ``task_id``.
+
+        ``retrieval_results`` defaults to one result per pack id.
+        """
         payload: dict[str, Any] = {
             "pack_ids": list(pack_ids),
-            "retrieval_results": len(pack_ids),
+            "retrieval_results": (
+                len(pack_ids) if retrieval_results is None else retrieval_results
+            ),
             "retrieval_errors": 0,
-            "pack_ids_unparsed": 0,
+            "pack_ids_unparsed": pack_ids_unparsed,
             "parent_session_id": parent,
-            "source_system": SOURCE_SYSTEM,
+            "source_system": source_system,
         }
         if outcome is not None:
             payload["outcome"] = outcome

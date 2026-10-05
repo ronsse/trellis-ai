@@ -714,6 +714,32 @@ All notable changes to Trellis will be documented in this file.
   as text. A knowledge store that cannot be read costs the links, not the
   trace: `evidence_links` is then `null`.
   ([#706](https://github.com/ronsse/trellis-ai/pull/706))
+- **On Neo4j, the loser of two concurrent purges of one node fails.**
+  `GraphStore.delete_node` returned `True` to both purges, because a
+  `DETACH DELETE` that waited on the other purge's lock still counted the
+  rows it had matched before the wait. Both redactions reported `success`
+  and each wrote a `REDACTION_APPLIED` event. The Bolt purge now locks the
+  node's rows before it counts, so the purge that waited finds nothing and
+  returns `False`, and its redaction is `failed` with no second
+  `REDACTION_APPLIED`, as on Postgres and ArcadeDB. A version a writer
+  creates after one of the purges has taken its locks can still be counted
+  by both.
+  ([#709](https://github.com/ronsse/trellis-ai/pull/709))
+
+- **`trellis analyze holdout` prints every figure the pre-registration
+  re-measures, and its PR base rate is the served arm's.** The descriptive
+  block gives the largest parent session's share of eligible tasks
+  (`top_parent_share`), the MDE at 30, 60 and 90 days (`mde_by_horizon`, t
+  at `N - 2` degrees of freedom), the N a 10% effect needs
+  (`n_for_10pct_effect`) and main sessions with their sub-agent tasks rolled
+  up (`sessions`). A figure the rows cannot give reads "not measurable:
+  <reason>" in text and is `null` with its reason in JSON. `pr_base_rate`
+  becomes `pr_base_rate_served`, over the served arm only.
+  `between_parent_share` is bias-adjusted (epsilon-squared, floored at 0),
+  so it never reads above raw eta-squared. The unfinished-tasks note names
+  the sweep it checks for, and the funnel counts eligible tasks with an
+  unparsed pack id. The inferential statistics are unchanged.
+  ([#707](https://github.com/ronsse/trellis-ai/pull/707))
 
 - **`GET /api/v1/graph/search` answers on Neo4j and ArcadeDB.** The route
   picked its SQL by probing the store's private `_conn`, so on either Bolt

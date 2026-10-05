@@ -662,7 +662,9 @@ class TestDescriptive:
     def test_descriptive_values_match_a_hand_computation(self, log: HoldoutLog) -> None:
         """Commits: parent-a [1, 3], parent-b [4, 6, 8], plus one cut-off.
 
-        Within-parent SS 2 + 8 = 10 on 5 - 2 df; total SS 29.2 on 4 df.
+        Within-parent SS 2 + 8 = 10 on 5 - 2 df; total SS 29.2 on 4 df. The
+        between-parent share is bias-adjusted, as in the prestudy: one minus
+        the within variance over the total variance, 1 - (10/3) / (29.2/4).
         """
         layout = [
             ("parent-a", 1, 2, 1),  # parent, commits, packs, prs_created
@@ -698,12 +700,12 @@ class TestDescriptive:
         assert d.analysed_per_30d == pytest.approx(5 * 30 / DAYS)
         assert d.outcome_sd_within_parent == pytest.approx(math.sqrt(10 / 3))
         assert d.outcome_sd_total == pytest.approx(math.sqrt(29.2 / 4))
-        assert d.between_parent_share == pytest.approx(1 - 10 / 29.2)
+        assert d.between_parent_share == pytest.approx(1 - (10 / 3) / (29.2 / 4))
         assert d.parents == 2
         assert d.packs_per_task == pytest.approx(7 / 6)
         assert d.tasks_with_several_packs == 1
         assert d.cut_off_share == pytest.approx(1 / 6)
-        assert d.pr_base_rate == pytest.approx(2 / 5)
+        assert d.pr_base_rate_served == pytest.approx(2 / 5)
         assert d.prs_created_mean == pytest.approx(3 / 5)
 
     def test_outcomes_read_the_captured_fields(self, log: HoldoutLog) -> None:
