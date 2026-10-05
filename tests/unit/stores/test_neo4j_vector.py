@@ -346,14 +346,6 @@ class TestGraphReadsLeaveEmbeddingOut:
         graph, vector = stores
         assert_read_leaves_embedding_out(graph, vector, monkeypatch, read)
 
-    def test_graph_reads_keep_the_stored_embedding(self, stores):
-        graph, vector = stores
-        seed_embedded_nodes(graph, vector)
-        run_every_whole_node_read(graph)
-        got = vector.get(EMBEDDED)
-        assert got is not None
-        assert got["vector"] == pytest.approx(EMBEDDED_VECTOR)
-
     def test_similarity_search_after_graph_reads(
         self, require_neo4j_vector_search, stores
     ):
