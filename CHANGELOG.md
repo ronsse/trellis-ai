@@ -740,6 +740,20 @@ All notable changes to Trellis will be documented in this file.
   the sweep it checks for, and the funnel counts eligible tasks with an
   unparsed pack id. The inferential statistics are unchanged.
   ([#707](https://github.com/ronsse/trellis-ai/pull/707))
+
+- **`GET /api/v1/graph/search` answers on Neo4j and ArcadeDB.** The route
+  picked its SQL by probing the store's private `_conn`, so on either Bolt
+  store every request answered `500`. It now calls a new
+  `GraphStore.search_nodes`, which returns one page of matching current
+  nodes and how many match, natively on SQLite, PostgreSQL and the shared
+  Bolt store. Its count equals `count_nodes_by_type` for the same `q`, so
+  the graph page's type chips sum to the list's total on every backend. On
+  Neo4j and ArcadeDB `q` is a plain substring in any case, so `%` and `_`
+  are literal there; SQLite and PostgreSQL answer as before. **Out-of-tree
+  `GraphStore` backends must implement `search_nodes`**: the method is
+  abstract, so a subclass without it no longer instantiates.
+  ([#708](https://github.com/ronsse/trellis-ai/pull/708))
+
 - **A Bolt purge that cannot finish fails the redaction instead of
   escaping as a driver error.** On Neo4j and ArcadeDB, an error the neo4j
   driver raised during `delete_node`, such as a lost connection or a
@@ -756,19 +770,6 @@ All notable changes to Trellis will be documented in this file.
   errors, as do the reads and the vector delete a redaction runs on Bolt
   stores before its purge.
   ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
-
-- **`GET /api/v1/graph/search` answers on Neo4j and ArcadeDB.** The route
-  picked its SQL by probing the store's private `_conn`, so on either Bolt
-  store every request answered `500`. It now calls a new
-  `GraphStore.search_nodes`, which returns one page of matching current
-  nodes and how many match, natively on SQLite, PostgreSQL and the shared
-  Bolt store. Its count equals `count_nodes_by_type` for the same `q`, so
-  the graph page's type chips sum to the list's total on every backend. On
-  Neo4j and ArcadeDB `q` is a plain substring in any case, so `%` and `_`
-  are literal there; SQLite and PostgreSQL answer as before. **Out-of-tree
-  `GraphStore` backends must implement `search_nodes`**: the method is
-  abstract, so a subclass without it no longer instantiates.
-  ([#708](https://github.com/ronsse/trellis-ai/pull/708))
 
 ## [0.9.0] - 2026-05-13
 
