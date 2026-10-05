@@ -800,13 +800,11 @@ All notable changes to Trellis will be documented in this file.
   tie on the sort key had no stable order between queries, so walking every
   page never showed some nodes and showed others twice. `search_nodes` now
   breaks ties by `node_id`, in the direction of the sort, on every backend,
-  so each match appears once and a descending walk is the ascending one
-  reversed. By design, a page holding ties can differ from the same request
-  before this change on any backend, because each backend broke ties its
-  own way: PostgreSQL in no fixed order, SQLite by ascending `node_id` in
-  either direction (for `node_type`, in write order, reversed when
-  descending), and Neo4j and ArcadeDB by `created_at` for a tie on `name`
-  or `node_type`.
+  so while the graph does not change each match appears once and a
+  descending walk is the ascending one reversed. A page holding ties can
+  differ from the same request before this change, on every backend except
+  for a `created_at` sort on Neo4j and ArcadeDB, which already broke ties
+  this way.
   ([#714](https://github.com/ronsse/trellis-ai/pull/714))
 
 ## [0.9.0] - 2026-05-13
