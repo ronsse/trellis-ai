@@ -198,8 +198,8 @@ def search_entities(
 ) -> dict[str, Any]:
     """Search graph nodes by name or type."""
     store = get_registry().knowledge.graph_store
-    # Lenient as ever: an unknown sort is created_at, and any order but asc
-    # (in any case) descends.
+    # Lenient: an unknown sort is created_at, and any order but asc (in any
+    # case) descends.
     rows, total = store.search_nodes(
         search=q,
         node_type=node_type,

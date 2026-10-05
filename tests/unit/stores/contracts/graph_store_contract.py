@@ -1343,6 +1343,9 @@ class GraphStoreContractTests:
         # Each row is the node as get_node returns it.
         for row in rows:
             assert row == store.get_node(row["node_id"]), row["node_id"]
+        # A haystack's case does not matter either: only the name "Charlie" matches.
+        rows, total = store.search_nodes(search="charlie")
+        assert ([r["node_id"] for r in rows], total) == (["widget-c"], 1)
         # Defaults: every current node, newest first.
         rows, total = store.search_nodes()
         assert [r["node_id"] for r in rows] == oldest_first[::-1]
