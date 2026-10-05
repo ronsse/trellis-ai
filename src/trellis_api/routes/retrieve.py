@@ -324,8 +324,8 @@ def _evidence_links(registry: Any, trace: Trace) -> dict[str, dict[str, str]]:
     demo) store each record as a document under its ``evidence_id``. Failing
     a document, trace extraction, when it ran, wrote an ``evidence:<id>``
     graph node. A ref with neither has no entry, nor does one with an empty
-    ``evidence_id``: it names no record, and extraction pools every such ref
-    into the one node ``evidence:``.
+    ``evidence_id``: it names no record, even where a graph holds a node
+    ``evidence:``.
     """
     documents = registry.knowledge.document_store
     graph = registry.knowledge.graph_store

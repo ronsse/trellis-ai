@@ -480,6 +480,53 @@ class TestIdNormalization:
             assert normalize_slug(once) == once
 
 
+def _evidence_trace(evidence_ids: tuple[str, ...]) -> Trace:
+    return Trace.model_validate(
+        {
+            "source": "agent",
+            "intent": "cite evidence",
+            "evidence_used": [{"evidence_id": e} for e in evidence_ids],
+            "context": {"agent_id": "a1"},
+        }
+    )
+
+
+class TestBlankEvidenceRef:
+    """A blank ``evidence_id`` names no record, so it gets no node and no edge.
+
+    Minted, every such ref of every trace would share the one node
+    ``evidence:`` and make unrelated traces graph neighbours through it.
+    """
+
+    # The schema strips whitespace, so the whitespace-only id arrives empty.
+    # The blank refs come first, so a loop that stops at one loses the real
+    # refs. Inner spaces do not make an id blank.
+    _IDS = ("", " \t\n ", "syn-ev-01", "syn ev 02")
+
+    async def test_blank_refs_mint_no_node_and_no_edge(self) -> None:
+        trace = _evidence_trace(self._IDS)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        evidence = [
+            e.entity_id for e in result.entities if e.entity_id.startswith("evidence:")
+        ]
+        assert evidence == ["evidence:syn-ev-01", "evidence:syn ev 02"]
+        used = [(e.source_id, e.target_id) for e in result.edges if e.edge_kind == USED]
+        activity = f"trace:{trace.trace_id}"
+        assert used == [
+            (activity, "evidence:syn-ev-01"),
+            (activity, "evidence:syn ev 02"),
+        ]
+
+    async def test_skipped_ref_is_logged(self) -> None:
+        """As with a punctuation-only name, the logs explain the missing node."""
+        trace = _evidence_trace(self._IDS)
+        with patch("trellis.extract.trace.logger") as log:
+            await TraceExtractor().extract(trace, source_hint="trace")
+        calls = log.info.call_args_list
+        assert [c.args for c in calls] == [("trace_extraction_evidence_id_empty",)] * 2
+        assert [c.kwargs for c in calls] == [{"trace_id": trace.trace_id}] * 2
+
+
 class TestNodeRole:
     async def test_tool_nodes_are_structural(self) -> None:
         """So the pack builder's existing structural filter can drop them."""

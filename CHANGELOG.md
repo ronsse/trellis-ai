@@ -184,6 +184,22 @@ All notable changes to Trellis will be documented in this file.
   reported whatever the flag state, and without a withheld arm the
   inference reads "no withheld arm". Counts and statistics only. New module
   `trellis.analyze.holdout`.
+- **`trellis analyze holdout` reports the guardrails by arm, and divides
+  task rates by the span their rows can occupy.** A `guardrails` block gives
+  each pre-registered guardrail per arm with its n and no p-value or
+  verdict: PRs created and any commit (each left out when it is the
+  primary), log1p commits, tool errors and the re-call rate after the first
+  retrieval over the primary's analysed tasks, and the cut-off rate over
+  every eligible task, cut-offs included, read as the exclusion reads it.
+  Any other field the capture join lacks reads "not measurable", and with
+  no withheld arm the block shows the served arm only. The task figures per
+  30 days and the task MDE horizons divide by the task window
+  (`task_window_since`, `task_window_days`), from the window's first row at
+  the analysed rate unless that rate was already running as the window
+  opened, so a window that opens before the holdout build was deployed does
+  not read the rate low and the MDE high. The main-session figures keep the
+  whole window and say so. Existing JSON keys and the inferential
+  statistics are unchanged.
 
 ### Changed
 
@@ -754,6 +770,15 @@ All notable changes to Trellis will be documented in this file.
   abstract, so a subclass without it no longer instantiates.
   ([#708](https://github.com/ronsse/trellis-ai/pull/708))
 
+- **Trace extraction mints no graph node for an evidence ref with an empty
+  `evidence_id`.** Every such ref of every trace became the one node
+  `evidence:`, with a `used` edge from each trace, so unrelated traces were
+  graph neighbours through it. The ref is now skipped, writing neither node
+  nor edge, and the extractor logs `trace_extraction_evidence_id_empty` at
+  info. The schema strips whitespace, so a whitespace-only id is skipped
+  too. The schema still accepts the ref, so stored traces load unchanged,
+  and an `evidence:` node already in a graph stays until it is removed.
+  ([#712](https://github.com/ronsse/trellis-ai/pull/712))
 - **A Bolt purge that cannot finish fails the redaction instead of
   escaping as a driver error.** On Neo4j and ArcadeDB, an error the neo4j
   driver raised during `delete_node`, such as a lost connection or a

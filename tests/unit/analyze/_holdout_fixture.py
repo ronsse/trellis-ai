@@ -28,6 +28,10 @@ MONDAY = datetime(2026, 8, 3, 9, 0, tzinfo=UTC)
 #: on 2026-07-30, before :data:`MONDAY`.
 UNTIL = datetime(2026, 9, 28, tzinfo=UTC)
 DAYS = 60
+#: Where the :data:`DAYS`-day window ending at :data:`UNTIL` opens.
+WINDOW_START = UNTIL - timedelta(days=DAYS)
+#: 20 days into that window: :func:`seed_late_build`'s first row at rate 0.5.
+KEYED_FROM = WINDOW_START + timedelta(days=20)
 
 
 def outcome_payload(
@@ -37,11 +41,12 @@ def outcome_payload(
     prs_created: int = 0,
     commits: int = 0,
     tokens: int | None = 10_000,
+    tool_errors: int = 0,
 ) -> dict[str, Any]:
     """A ``SessionOutcome.to_payload()`` dict, every field present."""
     return {
         "tool_calls": turns,
-        "tool_errors": 0,
+        "tool_errors": tool_errors,
         "assistant_turns": turns,
         "assistant_turns_with_usage": turns,
         "user_turns": 1,
@@ -151,6 +156,17 @@ class HoldoutLog:
         )
         return pack_id
 
+    def deployed_before_window(self, *, rate: float = 0.5) -> str:
+        """A served row at ``rate`` a day before the window opens.
+
+        The holdout build was already writing that rate when the window
+        opened, so the task figures divide by the whole window. The scan
+        starts at the window, so the row is in no count.
+        """
+        return self.pack(
+            at=WINDOW_START - timedelta(days=1), withheld=False, items=1, rate=rate
+        )
+
     def join(
         self,
         task_id: str,
@@ -206,6 +222,7 @@ class HoldoutLog:
         prs_created: int = 0,
         commits: int = 0,
         tokens: int | None = 10_000,
+        tool_errors: int = 0,
         sectioned: bool = False,
         with_outcome: bool = True,
     ) -> str:
@@ -235,6 +252,7 @@ class HoldoutLog:
                 prs_created=prs_created,
                 commits=commits,
                 tokens=tokens,
+                tool_errors=tool_errors,
             )
             if with_outcome
             else None
@@ -310,3 +328,96 @@ def seed_experiment(
                 )
                 written += 1
     return written
+
+
+#: :func:`seed_guardrails`' tasks in arm order: PRs created, commits, tool
+#: errors, each pack call's ``withheld`` value, and whether it was cut off.
+GUARDRAIL_TASKS: tuple[tuple[int, int, int, tuple[bool, ...], bool], ...] = (
+    (1, 0, 2, (False,), False),
+    (0, 3, 0, (False, False), False),
+    (2, 1, 4, (False,), False),
+    (0, 0, 1, (False, True, False), False),
+    (5, 9, 9, (False, False), True),
+    (0, 0, 3, (True, True), False),
+    (1, 2, 5, (True, False), False),
+    (0, 0, 0, (True, True, True), False),
+    (0, 0, 1, (True,), False),
+    (0, 0, 0, (True,), True),
+    (0, 0, 0, (True,), True),
+)
+
+
+def seed_guardrails(log: HoldoutLog) -> None:
+    """:data:`GUARDRAIL_TASKS` at rate 0.5 in one parent session and one week.
+
+    Five served tasks, one of them cut off, and six withheld, two of them
+    cut off; each task's arm is its first call's. Turns differ by task.
+    """
+    for index, (prs, commits, errors, arms, cut_off) in enumerate(GUARDRAIL_TASKS):
+        log.task(
+            start=MONDAY + timedelta(hours=index),
+            arms=arms,
+            turns=10 + index,
+            prs_created=prs,
+            commits=commits,
+            tool_errors=errors,
+            ended_on_error=cut_off,
+        )
+    log.sweep()
+
+
+def seed_missing_tool_errors(log: HoldoutLog) -> None:
+    """Six tasks at rate 0.5, of which only two withheld ones record tool errors.
+
+    Served: three tasks whose outcomes lack ``tool_errors``. Withheld: tool
+    errors 1 and 3, and a third task lacking the field.
+    """
+    layout = [(False, None), (False, None), (False, None)]
+    layout += [(True, 1), (True, 3), (True, None)]
+    for index, (withheld, errors) in enumerate(layout):
+        at = MONDAY + timedelta(hours=index)
+        pack = log.pack(at=at, withheld=withheld, items=2)
+        outcome = outcome_payload(turns=5 + 2 * index, tool_errors=errors or 0)
+        if errors is None:
+            del outcome["tool_errors"]
+        log.join(
+            f"task-te-{index}",
+            at=at + timedelta(hours=1),
+            pack_ids=[pack],
+            parent="parent-a",
+            outcome=outcome,
+        )
+    log.sweep()
+
+
+def seed_late_build(
+    log: HoldoutLog, *, early_arm: bool | None = None, early_rate: float = 0.5
+) -> None:
+    """A rate-0.5 build whose first row in the window is :data:`KEYED_FROM`.
+
+    Main session A, 5 days into the window, got one pack written with
+    ``early_arm`` at ``early_rate`` (by default by a build that records no
+    holdout). Main session B's own pack at :data:`KEYED_FROM` is then the
+    window's first row at rate 0.5, and its ten sub-agent tasks follow an
+    hour apart: odd ones withheld, the last two cut off, every one with
+    different turns. That is 10 eligible and 8 analysed tasks in one parent
+    session and one ISO week, and 2 main sessions, all finished by one sweep.
+    """
+    log.task(
+        start=WINDOW_START + timedelta(days=5),
+        parent=None,
+        arms=[early_arm],
+        items=2,
+        rate=early_rate,
+        turns=6,
+    )
+    main = log.task(start=KEYED_FROM, parent=None, arms=[False], items=2, turns=4)
+    for index in range(1, 11):
+        log.task(
+            start=KEYED_FROM + timedelta(hours=index),
+            parent=main,
+            arms=[index % 2 == 1],
+            turns=10 + 3 * index,
+            ended_on_error=index > 8,
+        )
+    log.sweep()
