@@ -619,8 +619,7 @@ def test_get_trace_names_what_can_show_each_evidence_ref(client, monkeypatch):
 def test_get_trace_links_no_evidence_ref_with_an_empty_id(client):
     """An empty ref names no record, so it has no entry.
 
-    That holds where a graph still has the node ``evidence:``, into which an
-    older trace extractor pooled every such ref.
+    That holds where a graph has the node ``evidence:``.
     """
     graph = app_module._registry.knowledge.graph_store
     graph.upsert_node("evidence:", "Dataset", {})

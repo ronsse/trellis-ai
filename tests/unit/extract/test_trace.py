@@ -499,8 +499,9 @@ class TestBlankEvidenceRef:
     """
 
     # The schema strips whitespace, so the whitespace-only id arrives empty.
-    # The blank refs come first, so a loop that stops at one loses the real ref.
-    _IDS = ("", " \t\n ", "syn-ev-01")
+    # The blank refs come first, so a loop that stops at one loses the real
+    # refs. Inner spaces do not make an id blank.
+    _IDS = ("", " \t\n ", "syn-ev-01", "syn ev 02")
 
     async def test_blank_refs_mint_no_node_and_no_edge(self) -> None:
         trace = _evidence_trace(self._IDS)
@@ -508,9 +509,13 @@ class TestBlankEvidenceRef:
         evidence = [
             e.entity_id for e in result.entities if e.entity_id.startswith("evidence:")
         ]
-        assert evidence == ["evidence:syn-ev-01"]
+        assert evidence == ["evidence:syn-ev-01", "evidence:syn ev 02"]
         used = [(e.source_id, e.target_id) for e in result.edges if e.edge_kind == USED]
-        assert used == [(f"trace:{trace.trace_id}", "evidence:syn-ev-01")]
+        activity = f"trace:{trace.trace_id}"
+        assert used == [
+            (activity, "evidence:syn-ev-01"),
+            (activity, "evidence:syn ev 02"),
+        ]
 
     async def test_skipped_ref_is_logged(self) -> None:
         """As with a punctuation-only name, the logs explain the missing node."""

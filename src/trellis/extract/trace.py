@@ -35,8 +35,7 @@ Entities
 * **File / CreativeWork** — each ``artifacts_produced`` ref
   (``artifact:<artifact_id>``); type derived from ``artifact_type``.
 * **Dataset** — each ``evidence_used`` ref (``evidence:<evidence_id>``).
-  A ref whose ``evidence_id`` is empty names no record and is skipped,
-  rather than pooled into one ``evidence:`` node for every trace.
+  A ref whose ``evidence_id`` is empty names no record and is skipped.
 
 ID normalization
 ----------------
