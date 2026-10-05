@@ -1427,6 +1427,9 @@ class GraphStoreContractTests:
                 ]
             )
             _sleep_for_ordering()
+        # The created_at leg tests ties only while each write has one stamp.
+        rows, _ = store.search_nodes(limit=120)
+        assert len({r["created_at"] for r in rows}) == 2
         sort_keys: dict[str, Any] = {
             "name": name,
             "node_type": node_type,

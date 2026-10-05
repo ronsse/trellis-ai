@@ -796,6 +796,18 @@ All notable changes to Trellis will be documented in this file.
   as opening the graph store and its reads.
   ([#713](https://github.com/ronsse/trellis-ai/pull/713))
 
+- **`GET /api/v1/graph/search` pages no longer skip or repeat rows that
+  tie.** The route pages with `LIMIT`/`OFFSET`, and on PostgreSQL rows that
+  tie on the sort key had no stable order between queries, so walking every
+  page never showed some nodes and showed others twice. `search_nodes` now
+  breaks ties by `node_id`, in the direction of the sort, on every backend,
+  so each match appears once and a descending walk is the ascending one
+  reversed. By design, a page holding ties can differ from the same request
+  before this change on any backend, because each backend broke ties its
+  own way: PostgreSQL in no fixed order, SQLite by ascending `node_id` in
+  either direction (by write order for `node_type`), and Neo4j and ArcadeDB
+  by `created_at` for a tie on `name` or `node_type`.
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.
