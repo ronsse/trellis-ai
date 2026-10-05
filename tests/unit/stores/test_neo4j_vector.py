@@ -17,6 +17,15 @@ import pytest
 
 pytest.importorskip("neo4j")
 
+from tests.unit.stores.bolt_embedding_reads import (
+    EMBEDDED,
+    EMBEDDED_VECTOR,
+    WHOLE_NODE_READS,
+    assert_read_leaves_embedding_out,
+    run_every_whole_node_read,
+    seed_embedded_nodes,
+)
+
 URI = os.environ.get("TRELLIS_TEST_NEO4J_URI", "")
 USER = os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j")
 PASSWORD = os.environ.get("TRELLIS_TEST_NEO4J_PASSWORD", "")
@@ -322,6 +331,37 @@ class TestQuery:
         # the old version (now closed) keeps the embedding on disk.
         graph.upsert_node("n1", "doc", {"v": 2})
         assert vector.query(_vec(1, 0, 0), top_k=5) == []
+
+
+# ---------------------------------------------------------------------------
+# Graph reads leave the embedding out
+# ---------------------------------------------------------------------------
+
+
+class TestGraphReadsLeaveEmbeddingOut:
+    """Whole-node graph reads do not fetch the embedding stored on the row."""
+
+    @pytest.mark.parametrize("read", sorted(WHOLE_NODE_READS))
+    def test_whole_node_read_skips_embedding(self, stores, monkeypatch, read):
+        graph, vector = stores
+        assert_read_leaves_embedding_out(graph, vector, monkeypatch, read)
+
+    def test_graph_reads_keep_the_stored_embedding(self, stores):
+        graph, vector = stores
+        seed_embedded_nodes(graph, vector)
+        run_every_whole_node_read(graph)
+        got = vector.get(EMBEDDED)
+        assert got is not None
+        assert got["vector"] == pytest.approx(EMBEDDED_VECTOR)
+
+    def test_similarity_search_after_graph_reads(
+        self, require_neo4j_vector_search, stores
+    ):
+        graph, vector = stores
+        seed_embedded_nodes(graph, vector)
+        run_every_whole_node_read(graph)
+        results = vector.query(EMBEDDED_VECTOR, top_k=1)
+        assert [r["item_id"] for r in results] == [EMBEDDED]
 
 
 # ---------------------------------------------------------------------------
