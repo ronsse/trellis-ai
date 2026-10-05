@@ -824,6 +824,12 @@ All notable changes to Trellis will be documented in this file.
   for a `created_at` sort on Neo4j and ArcadeDB, which already broke ties
   this way.
   ([#714](https://github.com/ronsse/trellis-ai/pull/714))
+- **A trace with a blank `trace_id` is refused.** An empty or whitespace-only
+  id is rejected as `trace_id_empty` and nothing is stored:
+  `POST /api/v1/traces` answers 400, `trellis ingest trace` exits `2`, and
+  MCP `save_experience` raises the refusal. Omit the id to have one
+  generated. A trace already stored under `""` stays.
+  ([#717](https://github.com/ronsse/trellis-ai/pull/717))
 - **A typed handler failure is logged without its chained traceback.**
   `handler_typed_error` is logged without a traceback, so the stderr log
   of the CLI, the MCP server and the API no longer prints the driver error
