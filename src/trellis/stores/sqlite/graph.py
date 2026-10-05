@@ -30,6 +30,7 @@ from trellis.stores.base.graph import (
     check_node_role_immutable,
     validate_document_ids,
     validate_node_role_args,
+    validate_node_search_args,
     validate_subgraph_depth,
     validate_version_token,
 )
@@ -1382,12 +1383,16 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         assert row is not None
         return int(row["cnt"])
 
-    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+    @staticmethod
+    def _node_search_where(search: str | None) -> tuple[str, list[Any]]:
+        """Current nodes matching GET /graph/search's ``q``, and the params.
+
+        The one predicate behind :meth:`count_nodes_by_type` and
+        :meth:`search_nodes`, so the type chips sum to the list's total.
+        """
         where = "valid_to IS NULL"
-        params: list[str] = []
+        params: list[Any] = []
         if search:
-            # GET /graph/search's q predicate, verbatim, so these counts sum
-            # to that route's total for the same q.
             where += (
                 " AND (json_extract(properties_json, '$.name') LIKE ?"
                 " OR node_id LIKE ?"
@@ -1395,12 +1400,49 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             )
             pattern = f"%{search}%"
             params = [pattern, pattern, pattern]
+        return where, params
+
+    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+        where, params = self._node_search_where(search)
         cursor = self._conn.execute(
             "SELECT node_type, COUNT(*) AS cnt FROM nodes"
             f" WHERE {where} GROUP BY node_type",
             params,
         )
         return {row["node_type"]: int(row["cnt"]) for row in cursor.fetchall()}
+
+    def search_nodes(
+        self,
+        *,
+        search: str | None = None,
+        node_type: str | None = None,
+        sort: str = "created_at",
+        descending: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        validate_node_search_args(sort=sort, limit=limit, offset=offset)
+        where, params = self._node_search_where(search)
+        if node_type:
+            where += " AND node_type = ?"
+            params.append(node_type)
+        sort_col = {
+            "name": "json_extract(properties_json, '$.name')",
+            "node_type": "node_type",
+        }.get(sort, "created_at")
+        sort_dir = "DESC" if descending else "ASC"
+        count_row = self._conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {where}",
+            params,
+        ).fetchone()
+        assert count_row is not None
+        cursor = self._conn.execute(
+            f"SELECT * FROM nodes WHERE {where}"
+            f" ORDER BY {sort_col} {sort_dir} LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        )
+        rows = [self._node_row_to_dict(row) for row in cursor.fetchall()]
+        return rows, int(count_row[0])
 
     def count_edges(self) -> int:
         cursor = self._conn.execute(

@@ -1294,6 +1294,123 @@ class GraphStoreContractTests:
         }
 
     # ------------------------------------------------------------------
+    # Node search (the GET /graph/search list)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _seed_search_nodes(store: GraphStore) -> list[str]:
+        """Seed eight current nodes; return their ids oldest first.
+
+        Distinct first letters and lowercase types sort the same under any
+        collation. Two nodes also keep a closed version that the search
+        must not see: ``n-golf`` matched ``widget`` before a rename, and
+        ``n-hotel`` moved from ``legacykind`` to ``concept``.
+        """
+        seed: list[tuple[str, str, dict[str, Any]]] = [
+            ("n-alpha", "activity", {"name": "Alpha widget"}),
+            ("n-bravo", "activity", {"name": "Bravo"}),
+            ("widget-c", "concept", {"name": "Charlie"}),
+            ("n-delta", "widgetkind", {"name": "Delta"}),
+            ("n-echo", "service", {"name": "Echo widget", "tier": 2}),
+            ("n-foxtrot", "service", {}),
+            ("n-golf", "activity", {"name": "Golf widget"}),
+            ("n-hotel", "legacykind", {"name": "Hotel widget"}),
+        ]
+        for node_id, node_type, props in seed:
+            store.upsert_node(node_id, node_type, props)
+            _sleep_for_ordering()
+        store.upsert_node("n-golf", "activity", {"name": "Golf"})
+        store.upsert_node("n-hotel", "concept", {"name": "Hotel widget"})
+        return [node_id for node_id, _, _ in seed]
+
+    def test_search_nodes_total_matches_count_nodes_by_type(
+        self, store: GraphStore
+    ) -> None:
+        oldest_first = self._seed_search_nodes(store)
+
+        rows, total = store.search_nodes(search="WIDGET")
+
+        # Name, node_id and node_type match in any case; closed versions
+        # neither match nor count.
+        assert {r["node_id"] for r in rows} == {
+            "n-alpha",
+            "widget-c",
+            "n-delta",
+            "n-echo",
+            "n-hotel",
+        }
+        assert total == 5
+        # Each row is the node as get_node returns it.
+        for row in rows:
+            assert row == store.get_node(row["node_id"]), row["node_id"]
+        # A haystack's case does not matter either: only the name "Charlie" matches.
+        rows, total = store.search_nodes(search="charlie")
+        assert ([r["node_id"] for r in rows], total) == (["widget-c"], 1)
+        # Defaults: every current node, newest first.
+        rows, total = store.search_nodes()
+        assert [r["node_id"] for r in rows] == oldest_first[::-1]
+        assert total == 8 == store.count_nodes()
+        # The total equals count_nodes_by_type for the same search, whole and
+        # per type, so the graph page's chips sum to the list's total.
+        for search in ("WIDGET", "", "hotel", "no-node-has-this"):
+            counts = store.count_nodes_by_type(search=search)
+            assert store.search_nodes(search=search, limit=1)[1] == sum(
+                counts.values()
+            ), search
+            for node_type, count in counts.items():
+                typed, typed_total = store.search_nodes(
+                    search=search, node_type=node_type
+                )
+                assert typed_total == count == len(typed), (search, node_type)
+                assert {r["node_type"] for r in typed} == {node_type}
+        # A type that survives only on a closed version finds nothing.
+        assert store.search_nodes(node_type="legacykind") == ([], 0)
+
+    def test_search_nodes_pages_in_the_requested_order(self, store: GraphStore) -> None:
+        self._seed_search_nodes(store)
+
+        pages = [
+            store.search_nodes(
+                search="widget", sort="name", descending=False, limit=2, offset=o
+            )
+            for o in (0, 2, 4, 6)
+        ]
+
+        assert [[r["node_id"] for r in rows] for rows, _ in pages] == [
+            ["n-alpha", "widget-c"],
+            ["n-delta", "n-echo"],
+            ["n-hotel"],
+            [],
+        ]
+        assert [total for _, total in pages] == [5, 5, 5, 5]
+        rows, _ = store.search_nodes(search="widget", sort="name", descending=True)
+        assert [r["node_id"] for r in rows] == [
+            "n-hotel",
+            "n-echo",
+            "n-delta",
+            "widget-c",
+            "n-alpha",
+        ]
+        types = ["activity"] * 3 + ["concept"] * 2 + ["service"] * 2 + ["widgetkind"]
+        rows, _ = store.search_nodes(sort="node_type", descending=False)
+        assert [r["node_type"] for r in rows] == types
+        rows, _ = store.search_nodes(sort="node_type", descending=True)
+        assert [r["node_type"] for r in rows] == types[::-1]
+        rows, total = store.search_nodes(node_type="activity", limit=2, offset=1)
+        assert [r["node_id"] for r in rows] == ["n-bravo", "n-alpha"]
+        assert total == 3
+
+    def test_search_nodes_refuses_an_unknown_sort_or_a_negative_page(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n-1", "activity", {"name": "one"})
+        with pytest.raises(ValueError, match="sort must be one of"):
+            store.search_nodes(sort="bogus")
+        for page in ({"limit": -1}, {"offset": -1}):
+            with pytest.raises(ValueError, match="must be >= 0"):
+                store.search_nodes(**page)
+
+    # ------------------------------------------------------------------
     # node_role + generation_spec
     # ------------------------------------------------------------------
 

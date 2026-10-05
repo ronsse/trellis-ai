@@ -67,6 +67,7 @@ from trellis.stores.base.graph import (
     check_node_role_immutable,
     validate_document_ids,
     validate_node_role_args,
+    validate_node_search_args,
     validate_subgraph_depth,
     validate_version_token,
 )
@@ -186,6 +187,25 @@ def _node_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
         "valid_from": props.get("valid_from"),
         "valid_to": props.get("valid_to"),
     }
+
+
+def _node_search_name(properties: Any) -> str:
+    """The ``name`` text GET /graph/search matches and sorts by, or ``""``."""
+    name = properties.get("name") if isinstance(properties, dict) else None
+    return "" if name is None else str(name)
+
+
+def _matches_node_search(
+    node_id: Any, node_type: Any, properties: Any, needle: str
+) -> bool:
+    """Whether a node matches GET /graph/search's ``q``, lowercased as *needle*.
+
+    A plain substring of the name, ``node_id`` or ``node_type`` in any
+    case, so ``%``, ``_`` and a backslash are literal. Shared by
+    ``count_nodes_by_type`` and ``search_nodes`` so their counts agree.
+    """
+    haystacks = (_node_search_name(properties), str(node_id), str(node_type))
+    return any(needle in h.lower() for h in haystacks)
 
 
 def _edge_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
@@ -1656,18 +1676,53 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         matched: dict[str, str] = {}
         for r in self._run_read_list(cypher):
             props = json.loads(r["properties_json"] or "{}")
-            name = props.get("name") if isinstance(props, dict) else None
-            haystacks = (
-                "" if name is None else str(name),
-                str(r["node_id"]),
-                str(r["node_type"]),
-            )
-            if any(needle in h.lower() for h in haystacks):
+            if _matches_node_search(r["node_id"], r["node_type"], props, needle):
                 matched[str(r["node_id"])] = str(r["node_type"])
         counts: dict[str, int] = {}
         for node_type in matched.values():
             counts[node_type] = counts.get(node_type, 0) + 1
         return counts
+
+    def search_nodes(
+        self,
+        *,
+        search: str | None = None,
+        node_type: str | None = None,
+        sort: str = "created_at",
+        descending: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        validate_node_search_args(sort=sort, limit=limit, offset=offset)
+        where = "n.valid_to IS NULL"
+        params: dict[str, Any] = {}
+        if node_type:
+            where += " AND n.node_type = $node_type"
+            params["node_type"] = node_type
+        direction = "DESC" if descending else "ASC"
+        # Matched client-side for the reason count_nodes_by_type gives, so
+        # each call reads every current node (of node_type, when given).
+        cypher = (
+            f"MATCH (n:Node) WHERE {where} "
+            f"RETURN n ORDER BY n.created_at {direction}, n.node_id {direction}"
+        )
+        needle = search.lower() if search else None
+        matched: dict[str, dict[str, Any]] = {}
+        for r in self._run_read_list(cypher, **params):
+            node = _node_props_to_dict(dict(r["n"]))
+            if needle is None or _matches_node_search(
+                node["node_id"], node["node_type"], node["properties"], needle
+            ):
+                matched.setdefault(str(node["node_id"]), node)
+        rows = list(matched.values())
+        if sort == "name":
+            rows.sort(
+                key=lambda node: _node_search_name(node["properties"]),
+                reverse=descending,
+            )
+        elif sort == "node_type":
+            rows.sort(key=lambda node: str(node["node_type"]), reverse=descending)
+        return rows[offset : offset + limit], len(rows)
 
     def count_edges(self) -> int:
         cypher = "MATCH ()-[r:EDGE]->() WHERE r.valid_to IS NULL RETURN count(r) AS cnt"
