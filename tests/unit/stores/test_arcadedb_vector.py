@@ -29,6 +29,15 @@ import pytest
 
 pytest.importorskip("neo4j")
 
+from tests.unit.stores.bolt_embedding_reads import (
+    EMBEDDED,
+    EMBEDDED_VECTOR,
+    WHOLE_NODE_READS,
+    assert_read_leaves_embedding_out,
+    run_every_whole_node_read,
+    seed_embedded_nodes,
+)
+
 URI = os.environ.get("TRELLIS_TEST_ARCADEDB_URI", "")
 USER = os.environ.get("TRELLIS_TEST_ARCADEDB_USER", "root")
 PASSWORD = os.environ.get("TRELLIS_TEST_ARCADEDB_PASSWORD", "")
@@ -273,3 +282,25 @@ def test_get_node_without_embedding_returns_none(stores):
     graph, vector = stores
     _make_node(graph, "no_vec")
     assert vector.get("no_vec") is None
+
+
+# ----------------------------------------------------------------------
+# Graph reads leave the embedding out
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("read", sorted(WHOLE_NODE_READS))
+def test_whole_node_read_skips_embedding(stores, monkeypatch, read):
+    graph, vector = stores
+    assert_read_leaves_embedding_out(graph, vector, monkeypatch, read)
+
+
+def test_similarity_search_after_graph_reads(stores):
+    graph, vector = stores
+    seed_embedded_nodes(graph, vector)
+    run_every_whole_node_read(graph)
+    got = vector.get(EMBEDDED)
+    assert got is not None
+    assert got["vector"] == pytest.approx(EMBEDDED_VECTOR)
+    results = vector.query(EMBEDDED_VECTOR, top_k=1)
+    assert [r["item_id"] for r in results] == [EMBEDDED]

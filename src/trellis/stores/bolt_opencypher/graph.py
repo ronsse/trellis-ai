@@ -162,6 +162,17 @@ def _temporal_predicate_in_list(as_of: datetime | None, var: str) -> str:
     )
 
 
+#: What every whole-node read returns in place of ``n``. A shape-#2 vector
+#: store (Neo4j, ArcadeDB) keeps its ``embedding`` on these ``(:Node)``
+#: rows, and no GraphStore method returns it (:func:`_node_props_to_dict`
+#: reads named keys), so the projection keeps the vector off the wire.
+#: Both engines answer it with the key present and ``None``, which the
+#: conversion never reads. A read with a ``LIMIT`` sorts and limits ``n``
+#: in a ``WITH`` before projecting, so the engine builds a map only for
+#: the rows it returns.
+_NODE_WITHOUT_EMBEDDING = "n {.*, embedding: null} AS n"
+
+
 def _node_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
     """Convert a Bolt :Node's raw properties into the GraphStore dict shape.
 
@@ -785,7 +796,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         if not node_ids:
             return {}
         cypher = (
-            "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL RETURN n"
+            "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL "
+            f"RETURN {_NODE_WITHOUT_EMBEDDING}"
         )
         records = session.execute_read(lambda tx: list(tx.run(cypher, ids=node_ids)))
         result: dict[str, dict[str, Any]] = {}
@@ -800,7 +812,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         as_of: datetime | None = None,
     ) -> dict[str, Any] | None:
         where, params = _temporal_where(as_of, "n")
-        cypher = f"MATCH (n:Node {{node_id: $node_id}}) WHERE {where} RETURN n"
+        cypher = (
+            f"MATCH (n:Node {{node_id: $node_id}}) WHERE {where} "
+            f"RETURN {_NODE_WITHOUT_EMBEDDING}"
+        )
         record = self._run_read_single(cypher, node_id=node_id, **params)
         if record is None:
             return None
@@ -814,13 +829,17 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         if not node_ids:
             return []
         where, params = _temporal_where(as_of, "n")
-        cypher = f"MATCH (n:Node) WHERE n.node_id IN $ids AND {where} RETURN n"
+        cypher = (
+            f"MATCH (n:Node) WHERE n.node_id IN $ids AND {where} "
+            f"RETURN {_NODE_WITHOUT_EMBEDDING}"
+        )
         records = self._run_read_list(cypher, ids=node_ids, **params)
         return [_node_props_to_dict(dict(r["n"])) for r in records]
 
     def get_node_history(self, node_id: str) -> list[dict[str, Any]]:
         cypher = (
-            "MATCH (n:Node {node_id: $node_id}) RETURN n ORDER BY n.valid_from DESC"
+            "MATCH (n:Node {node_id: $node_id}) "
+            f"RETURN {_NODE_WITHOUT_EMBEDDING} ORDER BY n.valid_from DESC"
         )
         records = self._run_read_list(cypher, node_id=node_id)
         return [_node_props_to_dict(dict(r["n"])) for r in records]
@@ -1020,11 +1039,11 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                         entity_id=winner,
                     )
                 owner_record = tx.run(
-                    """
-                    MATCH (n:Node {node_id: $winner})
+                    f"""
+                    MATCH (n:Node {{node_id: $winner}})
                     WHERE n.valid_to IS NULL
                     SET n.node_id = n.node_id
-                    RETURN n
+                    RETURN {_NODE_WITHOUT_EMBEDDING}
                     """,
                     winner=winner,
                 ).single()
@@ -1559,7 +1578,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         cypher = (
             "MATCH (n:Node) WHERE "
             + " AND ".join(conditions)
-            + " RETURN n ORDER BY n.created_at DESC LIMIT $limit"
+            + " WITH n ORDER BY n.created_at DESC LIMIT $limit"
+            + f" RETURN {_NODE_WITHOUT_EMBEDDING}"
         )
         params["limit"] = limit * 4 if properties else limit
 
@@ -1731,8 +1751,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # Matched client-side for the reason count_nodes_by_type gives, so
         # each call reads every current node (of node_type, when given).
         cypher = (
-            f"MATCH (n:Node) WHERE {where} "
-            f"RETURN n ORDER BY n.created_at {direction}, n.node_id {direction}"
+            f"MATCH (n:Node) WHERE {where} RETURN {_NODE_WITHOUT_EMBEDDING} "
+            f"ORDER BY n.created_at {direction}, n.node_id {direction}"
         )
         needle = search.lower() if search else None
         matched: dict[str, dict[str, Any]] = {}
@@ -1783,15 +1803,15 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         uses; semantics match.
         """
         cypher_parts, cypher_params, py_predicates = self._compile_node_query(query)
-        cypher = (
-            "MATCH (n:Node) WHERE "
-            + " AND ".join(cypher_parts)
-            + " RETURN n ORDER BY n.created_at DESC"
-        )
         # Over-fetch when py_predicates are present to compensate for
         # client-side trimming.
         fetch_limit = query.limit * 10 if py_predicates else query.limit
-        cypher += f" LIMIT {int(fetch_limit)}"
+        cypher = (
+            "MATCH (n:Node) WHERE "
+            + " AND ".join(cypher_parts)
+            + f" WITH n ORDER BY n.created_at DESC LIMIT {int(fetch_limit)}"
+            + f" RETURN {_NODE_WITHOUT_EMBEDDING}"
+        )
 
         records = self._run_read_list(cypher, **cypher_params)
         results: list[dict[str, Any]] = []

@@ -396,9 +396,9 @@ class ArcadeDBVectorStore(VectorStore):
     def delete(self, item_id: str) -> bool:
         # Like the Neo4j vector store: clear the embedding (and metadata)
         # on the current version; the node itself stays. Historical
-        # versions retain their embeddings (queryable via
-        # ``GraphStore.get_node_history`` but excluded from vector search
-        # by the ``valid_to IS NULL`` filter).
+        # versions retain their embeddings on their rows (no GraphStore
+        # read returns them, and the ``valid_to IS NULL`` filter
+        # excludes them from vector search).
         #
         # ArcadeDB's UPDATE only counts rows whose values actually
         # changed, so requiring ``embedding IS NOT NULL`` in the WHERE

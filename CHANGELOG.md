@@ -350,6 +350,19 @@ All notable changes to Trellis will be documented in this file.
   in-memory only (never persisted), so the swap has no compatibility impact;
   similarity behavior is statistically equivalent.
   ([#255](https://github.com/ronsse/trellis-ai/issues/255))
+- **Bolt graph reads no longer fetch the node embedding.** On Neo4j and
+  ArcadeDB the vector store keeps each node's embedding on its graph row,
+  and every graph read that returned whole nodes shipped that vector over
+  the wire and decoded it in the driver, although no `GraphStore` method
+  returns it. `get_node`, `get_nodes_bulk`, `get_node_history`,
+  `get_subgraph`, `query`, `search_nodes`, `execute_node_query` and the
+  reads inside `upsert_nodes_bulk` and `bind_alias_if_absent` now leave it
+  out. At 10,000 nodes with 1536-float embeddings, one `search_nodes` call
+  took 0.8 s on ArcadeDB and 1.0 s on Neo4j instead of 10 s, and one
+  `get_subgraph` call returning 1,001 nodes took 0.14 to 0.23 s instead of
+  1.1 to 1.2 s. Returned values, stored rows and vector search are
+  unchanged.
+  ([#716](https://github.com/ronsse/trellis-ai/pull/716))
 
 ### Fixed
 
