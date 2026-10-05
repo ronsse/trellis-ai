@@ -527,6 +527,60 @@ class TestBlankEvidenceRef:
         assert [c.kwargs for c in calls] == [{"trace_id": trace.trace_id}] * 2
 
 
+def _artifact_trace(artifact_ids: tuple[str, ...]) -> Trace:
+    return Trace.model_validate(
+        {
+            "source": "agent",
+            "intent": "produce artifacts",
+            "artifacts_produced": [
+                {"artifact_id": a, "artifact_type": "file"} for a in artifact_ids
+            ],
+            "context": {"agent_id": "a1"},
+        }
+    )
+
+
+class TestBlankArtifactRef:
+    """A blank ``artifact_id`` names no record, so it gets no node and no edge.
+
+    Minted, every such ref of every trace would share the one node
+    ``artifact:``, whose ``wasGeneratedBy`` edges would make unrelated
+    traces graph neighbours through it.
+    """
+
+    # The schema strips whitespace, so the whitespace-only id arrives empty.
+    # The blank refs come first, so a loop that stops at one loses the real
+    # refs. Inner spaces do not make an id blank.
+    _IDS = ("", " \t\n ", "syn-art-01", "syn art 02")
+
+    async def test_blank_refs_mint_no_node_and_no_edge(self) -> None:
+        trace = _artifact_trace(self._IDS)
+        result = await TraceExtractor().extract(trace, source_hint="trace")
+        artifacts = [
+            e.entity_id for e in result.entities if e.entity_id.startswith("artifact:")
+        ]
+        assert artifacts == ["artifact:syn-art-01", "artifact:syn art 02"]
+        generated = [
+            (e.source_id, e.target_id)
+            for e in result.edges
+            if e.edge_kind == WAS_GENERATED_BY
+        ]
+        activity = f"trace:{trace.trace_id}"
+        assert generated == [
+            ("artifact:syn-art-01", activity),
+            ("artifact:syn art 02", activity),
+        ]
+
+    async def test_skipped_ref_is_logged(self) -> None:
+        """As with an empty evidence id, the logs explain the missing node."""
+        trace = _artifact_trace(self._IDS)
+        with patch("trellis.extract.trace.logger") as log:
+            await TraceExtractor().extract(trace, source_hint="trace")
+        calls = log.info.call_args_list
+        assert [c.args for c in calls] == [("trace_extraction_artifact_id_empty",)] * 2
+        assert [c.kwargs for c in calls] == [{"trace_id": trace.trace_id}] * 2
+
+
 class TestNodeRole:
     async def test_tool_nodes_are_structural(self) -> None:
         """So the pack builder's existing structural filter can drop them."""

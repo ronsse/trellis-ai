@@ -34,6 +34,7 @@ Entities
   ``NodeRole.STRUCTURAL`` — see "Node role" below.
 * **File / CreativeWork** — each ``artifacts_produced`` ref
   (``artifact:<artifact_id>``); type derived from ``artifact_type``.
+  A ref whose ``artifact_id`` is empty names no record and is skipped.
 * **Dataset** — each ``evidence_used`` ref (``evidence:<evidence_id>``).
   A ref whose ``evidence_id`` is empty names no record and is skipped.
 
@@ -601,6 +602,16 @@ class _DraftBuilder:
 
     def _build_artifacts(self, activity_id: str) -> None:
         for ref in self._trace.artifacts_produced:
+            # An empty id names no record, as in _build_evidence (the schema
+            # strips whitespace, so a blank id arrives empty). Minted, it
+            # would be ``artifact:``, one node shared by every such ref of
+            # every trace.
+            if not ref.artifact_id:
+                logger.info(
+                    "trace_extraction_artifact_id_empty",
+                    trace_id=self._trace.trace_id,
+                )
+                continue
             entity_type = (
                 FILE
                 if ref.artifact_type.lower() in _FILE_ARTIFACT_TYPES
