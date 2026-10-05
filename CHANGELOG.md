@@ -800,6 +800,17 @@ All notable changes to Trellis will be documented in this file.
   info as `trace_extraction_artifact_id_empty`, so unrelated traces are no
   longer neighbours through the node `artifact:`. An existing one stays.
   ([#715](https://github.com/ronsse/trellis-ai/pull/715))
+- **`GET /api/v1/graph/search` pages no longer skip or repeat rows that
+  tie.** The route pages with `LIMIT`/`OFFSET`, and on PostgreSQL rows that
+  tie on the sort key had no stable order between queries, so walking every
+  page never showed some nodes and showed others twice. `search_nodes` now
+  breaks ties by `node_id`, in the direction of the sort, on every backend,
+  so while the graph does not change each match appears once and a
+  descending walk is the ascending one reversed. A page holding ties can
+  differ from the same request before this change, on every backend except
+  for a `created_at` sort on Neo4j and ArcadeDB, which already broke ties
+  this way.
+  ([#714](https://github.com/ronsse/trellis-ai/pull/714))
 
 ## [0.9.0] - 2026-05-13
 
