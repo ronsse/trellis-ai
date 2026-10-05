@@ -57,6 +57,25 @@ the largest parent session's share of eligible tasks; and the same counts
 and MDE for main sessions with their sub-agent tasks rolled up. A figure the
 rows cannot give is ``None``, and ``not_measurable`` says what is missing.
 
+**The task window.** Only rows at the analysed rate make tasks, so the task
+figures per 30 days, and the horizons built on them, divide by the span
+those rows can occupy: from the window's first row at the analysed rate to
+the window end, or the whole window when the newest pack row before it was
+already at that rate. A window that opens before the holdout build was
+deployed would otherwise read the rate low and the MDE high. The
+main-session figures count packs from every build, so they keep the whole
+window.
+
+**Guardrails** are reported per arm and decide nothing: no p-value,
+interval or verdict. PRs created and whether the task committed (each left
+out when it is the primary), log1p commits, tool errors (covariate grade)
+and the re-call rate, the share of tasks whose join parsed a second pack id
+(a manipulation check), are each averaged over the primary's analysed
+tasks; the cut-off rate is over every eligible task, read as the exclusion
+reads it, because the analysed set excludes the cut-offs unless ``itt``
+keeps them. Any other guardrail whose field no task in an arm carries is
+``None`` there, with the missing field named.
+
 **Output** is counts and statistics only. No pack id, session id, intent or
 item text leaves this module, and a non-significant result reads
 :data:`NO_EFFECT_VERDICT`, never "no effect".
@@ -279,7 +298,9 @@ class HoldoutSessions(TrellisModel):
     from a build before #701, which records no holdout, counts as served;
     the task figures keep only the analysed rate's rows. Cut-offs are kept,
     as in the prestudy. ``outcome_sd`` is the plain SD of the analysed
-    sessions' outcomes.
+    sessions' outcomes. Because every build's packs count, the figures per
+    30 days and the MDE horizons divide by the whole window the scan
+    covers, not by the task window, and ``note`` says so.
     """
 
     rolled_up: int
@@ -293,6 +314,7 @@ class HoldoutSessions(TrellisModel):
     analysed_per_30d: float | None
     outcome_sd: float | None
     mde_by_horizon: list[HoldoutHorizon]
+    note: str
     not_measurable: dict[str, str] = Field(default_factory=dict)
 
 
@@ -306,11 +328,12 @@ class HoldoutDescriptive(TrellisModel):
     ``pr_base_rate_served`` counts served-arm tasks only;
     ``prs_created_mean`` is over both arms. ``top_parent_share`` is the
     largest parent session's share of eligible tasks, both arms and
-    cut-offs included. ``mde_by_horizon`` uses the within-parent SD and N
-    from analysed tasks per 30 days; ``n_for_10pct_effect`` is the N that
-    MDE formula needs for x0.9 on a log1p outcome, or for 10% of the
-    served-arm mean otherwise. ``not_measurable`` maps each ``None``
-    figure to what the rows lack.
+    cut-offs included. The figures per 30 days divide by the task window
+    (``HoldoutReport.task_window_days``). ``mde_by_horizon`` uses the
+    within-parent SD and N from analysed tasks per 30 days;
+    ``n_for_10pct_effect`` is the N that MDE formula needs for x0.9 on a
+    log1p outcome, or for 10% of the served-arm mean otherwise.
+    ``not_measurable`` maps each ``None`` figure to what the rows lack.
     """
 
     eligible_tasks: int
@@ -377,12 +400,53 @@ class HoldoutPower(TrellisModel):
     sim_permutations: int
 
 
+class HoldoutGuardrailArm(TrellisModel):
+    """One arm's guardrail: the mean over the ``n`` tasks it reads.
+
+    ``missing`` counts the arm's tasks in the guardrail's task set that
+    lack its field, never for the cut-off rate, which reads a task without
+    the field as not cut off; ``not_measurable`` says why ``value`` is
+    ``None``.
+    """
+
+    n: int
+    value: float | None
+    missing: int
+    not_measurable: str | None
+
+
+class HoldoutGuardrail(TrellisModel):
+    """A pre-registered guardrail per arm, with no test attached.
+
+    ``reads`` names the join field it is computed from and ``task_set``
+    the tasks it averages over. ``withheld`` is ``None`` when no eligible
+    task is in the withheld arm.
+    """
+
+    name: str
+    label: str
+    reads: str
+    task_set: str
+    served: HoldoutGuardrailArm
+    withheld: HoldoutGuardrailArm | None
+
+
+class HoldoutGuardrails(TrellisModel):
+    """The pre-registration's guardrails: reported per arm, never decisive."""
+
+    status: str
+    note: str
+    measures: list[HoldoutGuardrail]
+
+
 class HoldoutReport(TrellisModel):
     status: str = "ok"
     window_days: int
     effective_window_days: float
     since: str
     until: str
+    task_window_since: str
+    task_window_days: float
     rate: float | None
     outcome: str
     itt: bool
@@ -394,6 +458,7 @@ class HoldoutReport(TrellisModel):
     descriptive: HoldoutDescriptive
     inference: HoldoutInference
     power: HoldoutPower
+    guardrails: HoldoutGuardrails
     scan: ScanCoverage
     notes: list[str] = Field(default_factory=list)
 
@@ -904,6 +969,53 @@ def _resolve_rate(rows: _Rows, rate: float | None) -> tuple[float | None, list[s
     return next(iter(present)), []
 
 
+def _keyed_at(payload: Mapping[str, Any] | None, rate: float) -> bool:
+    """Whether a pack row records a holdout and was written at ``rate``."""
+    return HOLDOUT_KEY in (payload or {}) and _matches_rate(payload or {}, rate)
+
+
+def _task_window_start(
+    event_log: EventLog, rows: _Rows, rate: float | None, start: datetime
+) -> datetime:
+    """Where tasks at ``rate`` can begin: ``start``, or the first row at it.
+
+    When the newest pack row before ``start`` was already at ``rate``, the
+    build writing that rate was running as the window opened, so the whole
+    window counts. Otherwise tasks begin with the window's first row at
+    ``rate``. ``until`` is inclusive, hence the microsecond.
+    """
+    if rate is None:
+        return start
+    before = event_log.get_events(
+        event_type=EventType.PACK_ASSEMBLED,
+        until=start - timedelta(microseconds=1),
+        order="desc",
+        limit=1,
+    )
+    if before and _keyed_at(before[0].payload, rate):
+        return start
+    at_rate = [
+        _as_utc(event.occurred_at)
+        for event in rows.window
+        if _keyed_at(event.payload, rate)
+    ]
+    return min(at_rate, default=start)
+
+
+def _task_window_note(
+    *, days: int, truncated: bool, task_start: datetime, task_days: float, rate: float
+) -> str:
+    """Why the task figures divide by fewer days than the window holds."""
+    before = "the scanned part of the window" if truncated else "the window"
+    return (
+        "The task figures per 30 days and the task MDE horizons divide by the "
+        f"{round(task_days, 2):g} days from {task_start.isoformat()} to the window "
+        f"end, not by the {days}-day window: the window's first row at rate "
+        f"{rate:g} was written then, and no pack row before {before} shows that "
+        "rate running as it opened."
+    )
+
+
 # ---------------------------------------------------------------------------
 # The analysis
 # ---------------------------------------------------------------------------
@@ -1040,6 +1152,18 @@ def analyze_holdout(
         if evidence_start <= _as_utc(event.occurred_at) < end:
             rows.window.append(event)
     rate, notes = _resolve_rate(rows, rate)
+    task_start = _task_window_start(event_log, rows, rate, evidence_start)
+    task_days = max((end - task_start).total_seconds(), 0.0) / _DAY_SECONDS
+    if task_start > evidence_start and rate is not None:
+        notes.append(
+            _task_window_note(
+                days=days,
+                truncated=evidence_start > since,
+                task_start=task_start,
+                task_days=task_days,
+                rate=rate,
+            )
+        )
 
     funnel = HoldoutFunnel(joins_scanned=len(join_scan.events))
     latest_joins: dict[str, Event] = {}
@@ -1081,6 +1205,8 @@ def analyze_holdout(
             "since": since,
             "end": end,
             "effective_days": effective_days,
+            "task_since": task_start,
+            "task_days": task_days,
             "rate": rate,
             "outcome": outcome,
             "itt": itt,
@@ -1359,6 +1485,11 @@ def _sessions(
             log_scale=_log_scale(outcome),
             sd_reason=sd_reason,
         ),
+        note=(
+            "Main sessions count packs from every build and rate, so their "
+            "figures per 30 days and MDE horizons divide by the whole "
+            f"{round(window_days, 2):g}-day window, not by the task window."
+        ),
         not_measurable=_reasons(
             {
                 "reaching_retrieval_per_30d": (reaching_per_30d, _EMPTY_WINDOW),
@@ -1381,7 +1512,7 @@ def _descriptive(
     options: Mapping[str, Any],
 ) -> HoldoutDescriptive:
     """The [R] re-measure over the eligible and the analysed tasks."""
-    window_days: float = options["effective_days"]
+    window_days: float = options["task_days"]
     parents = [unit.parent for unit in analysed]
     sd_within, sd_total, between = _parent_spread(y, parents)
     spread_reason = (
@@ -1475,6 +1606,145 @@ def _descriptive(
         sessions=sessions,
         not_measurable=_reasons(figures),
     )
+
+
+# ---------------------------------------------------------------------------
+# Guardrails
+# ---------------------------------------------------------------------------
+
+#: Guardrails left out when they are the primary outcome.
+_UNLESS_PRIMARY = frozenset({"prs_created", "any_commit"})
+_ANALYSED_TASKS = "analysed tasks"
+_ELIGIBLE_TASKS = "eligible tasks, cut-offs included"
+_GUARDRAIL_NOTE = (
+    "Reported, never decisive: no p-value and no verdict. Each value is the "
+    "arm's mean over the n tasks that carry its field. The cut-off rate "
+    "counts every eligible task, cut-offs included, and reads a task without "
+    "the field as not cut off, as the exclusion does; every other guardrail "
+    "uses the primary's analysed tasks. The re-call rate counts a task whose "
+    "join parsed a second pack id: a later retrieval that errored or printed "
+    "no pack id the capture could parse does not count."
+)
+
+
+@dataclass(frozen=True)
+class _Guardrail:
+    name: str
+    label: str
+    reads: str
+    read: Callable[[_Unit], float | None]
+    #: Averaged over every eligible task, cut-offs included, rather than
+    #: over the primary's analysed tasks.
+    eligible: bool = False
+
+
+def _from_outcome(name: str) -> Callable[[_Unit], float | None]:
+    read = OUTCOMES[name]
+    return lambda unit: read(unit.outcome)
+
+
+#: The pre-registration's guardrails.
+_GUARDRAILS = (
+    _Guardrail(
+        "prs_created",
+        "PRs created per task",
+        "outcome.prs_created",
+        _from_outcome("prs_created"),
+    ),
+    _Guardrail(
+        "any_commit",
+        "share of tasks with a commit",
+        "outcome.commits",
+        _from_outcome("any_commit"),
+    ),
+    _Guardrail(
+        "log1p_commits",
+        "mean log1p commits",
+        "outcome.commits",
+        _from_outcome("log1p_commits"),
+    ),
+    _Guardrail(
+        "cut_off_rate",
+        "cut-off rate",
+        "outcome.ended_on_error",
+        lambda unit: float(unit.cut_off),
+        eligible=True,
+    ),
+    _Guardrail(
+        "tool_errors",
+        "tool errors per task, covariate grade",
+        "outcome.tool_errors",
+        lambda unit: _count(unit.outcome.get("tool_errors")),
+    ),
+    _Guardrail(
+        "recall_rate",
+        "re-call rate after the first retrieval, a manipulation check",
+        "pack_ids",
+        lambda unit: float(unit.packs > 1),
+    ),
+)
+
+
+def _guardrail_arm(
+    spec: _Guardrail, pool: Sequence[_Unit], *, withheld: bool
+) -> HoldoutGuardrailArm:
+    """``spec`` over the tasks of ``pool`` in one arm."""
+    arm = [unit for unit in pool if unit.withheld == withheld]
+    values = [value for value in map(spec.read, arm) if value is not None]
+    reason = None
+    if not arm:
+        task_set = "eligible" if spec.eligible else "analysed"
+        side = "withheld" if withheld else "served"
+        reason = f"no {task_set} task in the {side} arm"
+    elif not values:
+        reason = f"{spec.reads} missing"
+    return HoldoutGuardrailArm(
+        n=len(values),
+        value=math.fsum(values) / len(values) if values else None,
+        missing=len(arm) - len(values),
+        not_measurable=reason,
+    )
+
+
+def _guardrails(
+    units: Sequence[_Unit], analysed: Sequence[_Unit], outcome: str
+) -> HoldoutGuardrails:
+    """Each guardrail per arm over its task set (:class:`HoldoutGuardrails`)."""
+    withheld = sum(unit.withheld for unit in units)
+    if not units:
+        status = NO_TASKS
+    elif not withheld:
+        status = NO_WITHHELD_ARM
+    elif withheld == len(units):
+        status = NO_SERVED_ARM
+    else:
+        status = "ok"
+    notes = [_GUARDRAIL_NOTE]
+    if outcome in _UNLESS_PRIMARY:
+        notes.append(f"{outcome} is the primary outcome, so it is not repeated here.")
+    if not withheld:
+        notes.append(
+            "No eligible task is in the withheld arm, so each guardrail shows "
+            "the served arm only."
+        )
+    measures: list[HoldoutGuardrail] = []
+    for spec in _GUARDRAILS:
+        if spec.name == outcome and spec.name in _UNLESS_PRIMARY:
+            continue
+        pool = units if spec.eligible else analysed
+        measures.append(
+            HoldoutGuardrail(
+                name=spec.name,
+                label=spec.label,
+                reads=spec.reads,
+                task_set=_ELIGIBLE_TASKS if spec.eligible else _ANALYSED_TASKS,
+                served=_guardrail_arm(spec, pool, withheld=False),
+                withheld=(
+                    _guardrail_arm(spec, pool, withheld=True) if withheld else None
+                ),
+            )
+        )
+    return HoldoutGuardrails(status=status, note=" ".join(notes), measures=measures)
 
 
 def _arm_ratio(
@@ -1589,6 +1859,8 @@ def _report(
         effective_window_days=round(effective_days, 2),
         since=options["since"].isoformat(),
         until=options["end"].isoformat(),
+        task_window_since=options["task_since"].isoformat(),
+        task_window_days=round(options["task_days"], 2),
         rate=rate,
         outcome=options["outcome"],
         itt=itt,
@@ -1625,6 +1897,7 @@ def _report(
         descriptive=descriptive,
         inference=inference,
         power=power,
+        guardrails=_guardrails(units, analysed, options["outcome"]),
         scan=scan,
         notes=notes,
     )
@@ -1836,6 +2109,9 @@ __all__ = [
     "HoldoutDescriptive",
     "HoldoutExclusion",
     "HoldoutFunnel",
+    "HoldoutGuardrail",
+    "HoldoutGuardrailArm",
+    "HoldoutGuardrails",
     "HoldoutHorizon",
     "HoldoutInference",
     "HoldoutPower",

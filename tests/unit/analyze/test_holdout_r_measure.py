@@ -103,6 +103,7 @@ def _seed_hand_store(log: HoldoutLog) -> None:
     (ln 2 / 3 ln 2), commits alternating 6 / 10. parent-a also holds the
     two cut-offs, so it has 10 of the 14 eligible tasks.
     """
+    log.deployed_before_window(rate=0.0)
     rows = [("parent-a", (3, 15)[i % 2], (2, 4)[i % 2], False) for i in range(8)]
     rows += [("parent-b", (1, 7)[i % 2], (6, 10)[i % 2], False) for i in range(4)]
     rows += [("parent-a", 40, 50, True)] * 2
