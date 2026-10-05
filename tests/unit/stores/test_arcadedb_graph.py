@@ -144,6 +144,35 @@ def test_a_purge_whose_commit_lost_to_a_concurrent_purge_reports_no_removal(
     assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
 
 
+def test_a_purge_the_server_refuses_is_a_store_error(graph_store):
+    """The server's refusal ends the purge as ``StoreError``, without its text.
+
+    ArcadeDB refuses a transaction against a database it does not have, and
+    its message names the database.
+    """
+    from neo4j.exceptions import Neo4jError
+
+    from trellis.errors import StoreError
+    from trellis.stores.bolt_opencypher.graph import BoltOpenCypherGraphStore
+
+    absent = "absentdb"
+    store = BoltOpenCypherGraphStore(
+        driver=graph_store._driver,
+        database=absent,
+        owns_driver=False,
+        init_schema=False,
+    )
+
+    with pytest.raises(StoreError) as caught:
+        store.delete_node("n1")
+
+    refusal = caught.value.__cause__
+    assert isinstance(refusal, Neo4jError)
+    assert absent in str(refusal)
+    assert f"Purge of node n1 failed: {type(refusal).__name__}" in caught.value.message
+    assert absent not in caught.value.message
+
+
 class TestArcadeDBEdgeProvenance:
     """Round-trip the five provenance fields through a real ArcadeDB.
 

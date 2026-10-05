@@ -16,8 +16,8 @@ no attempt is left the last such error is raised. Any other exception, and
 an error the driver does not retry, ends the call at once. The driver bounds
 the retries by ``max_transaction_retry_time``; the fake by ``attempts``.
 
-Every transaction is kept on :attr:`FakeBoltDriver.transactions` with the
-statements it ran and how it ended.
+Every transaction is kept on :attr:`FakeBoltDriver.transactions` with how it
+ended.
 """
 
 from __future__ import annotations
@@ -91,16 +91,14 @@ class FakeSession:
 
 
 class FakeTransaction:
-    """One transaction: the statements it ran and how it ended."""
+    """One transaction, and how it ended."""
 
     def __init__(self, outcome: Outcome) -> None:
         self._outcome = outcome
         self._node_rows = outcome if isinstance(outcome, int) else 1
-        self.statements: list[str] = []
         self.ended: str | None = None
 
     def run(self, cypher: str, **_params: Any) -> FakeResult:
-        self.statements.append(cypher)
         if not cypher.startswith("MATCH (n:Node") or "DETACH DELETE" not in cypher:
             return FakeResult(0)
         if isinstance(self._outcome, Exception):

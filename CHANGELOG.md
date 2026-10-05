@@ -767,8 +767,8 @@ All notable changes to Trellis will be documented in this file.
   connection lost while the commit was outstanding (`IncompleteCommit`)
   is reported as an unknown outcome, because the purge may have
   committed. The other Bolt graph writes still raise the driver's own
-  errors, as do the reads and the vector delete a redaction runs on Bolt
-  stores before its purge.
+  errors, as do the Bolt calls a redaction makes before its purge, such
+  as opening the graph store and its reads.
   ([#713](https://github.com/ronsse/trellis-ai/pull/713))
 
 ## [0.9.0] - 2026-05-13

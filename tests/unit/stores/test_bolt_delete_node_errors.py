@@ -5,6 +5,7 @@ driver runs it again on an error it can retry, such as a ``TransientError``
 or a lost connection, until ``max_transaction_retry_time`` runs out. When the
 driver gives up, or the error is one it does not retry, the store raises
 ``StoreError`` naming the node and the error's type, never the server's text.
+An exception that is not the driver's own is raised unchanged.
 ``MutationExecutor`` catches ``StoreError``, so the redaction is FAILED and
 audited instead of escaping the executor as a driver error.
 
@@ -13,7 +14,8 @@ the purge may have committed, so the message says its outcome is unknown.
 
 No database is needed: ``FakeBoltDriver`` scripts what each purge
 transaction's ``DETACH DELETE`` of the ``Node`` rows does, and
-``TestWithTheRealDriver`` points the real driver at a port nothing listens on.
+``TestWithTheRealDriver`` uses the real driver, pointed at a port nothing
+listens on or already closed.
 """
 
 from __future__ import annotations
@@ -102,6 +104,16 @@ class TestDeleteNodeErrors:
         assert SERVER_TEXT not in caught.value.message
         assert _ended(driver) == ["rollback"]
 
+    def test_an_error_from_outside_the_driver_is_raised_unchanged(self) -> None:
+        bug = RuntimeError(SERVER_TEXT)
+        store, driver = _store(bug)
+
+        with pytest.raises(RuntimeError) as caught:
+            store.delete_node(NODE)
+
+        assert caught.value is bug
+        assert _ended(driver) == ["rollback"]
+
     @pytest.mark.parametrize(
         "error_type", [TransientError, ServiceUnavailable, SessionExpired]
     )
@@ -130,6 +142,7 @@ class TestDeleteNodeErrors:
         with pytest.raises(StoreError) as caught:
             store.delete_node(NODE)
 
+        assert caught.value.store == "graph"
         assert caught.value.__cause__ is lost
         assert NODE in caught.value.message
         assert "outcome is unknown: IncompleteCommit" in caught.value.message
@@ -163,6 +176,22 @@ class TestWithTheRealDriver:
         assert str(port) in str(caught.value.__cause__)
         assert "failed: ServiceUnavailable" in caught.value.message
         assert str(port) not in caught.value.message
+
+    def test_a_closed_driver_is_a_store_error(self) -> None:
+        # ``Driver.session()`` refuses a closed driver, before any transaction.
+        driver = neo4j.GraphDatabase.driver(
+            "bolt://127.0.0.1:1", auth=("neo4j", "unused")
+        )
+        driver.close()
+        store = BoltOpenCypherGraphStore(
+            driver=driver, database="neo4j", owns_driver=False, init_schema=False
+        )
+
+        with pytest.raises(StoreError) as caught:
+            store.delete_node(NODE)
+
+        assert isinstance(caught.value.__cause__, DriverError)
+        assert "failed: DriverError" in caught.value.message
 
 
 class TestThroughTheExecutor:
