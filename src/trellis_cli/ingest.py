@@ -22,7 +22,10 @@ from trellis.core.vector_metadata import resolve_vector_store
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
-from trellis.extract.trace_ingest_hook import run_trace_extraction
+from trellis.extract.trace_ingest_hook import (
+    run_trace_extraction,
+    trace_already_ingested,
+)
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     Command,
@@ -114,6 +117,9 @@ def ingest_trace(
     # Persist via the governed mutation pipeline
     registry = _get_registry()
     executor = build_curate_executor(registry)
+    # Read before the write: the handler answers a stored trace_id as a
+    # success that stores nothing, and its result does not say which.
+    already_ingested = trace_already_ingested(registry, trace.trace_id)
     result = executor.execute(
         Command(
             operation=Operation.TRACE_INGEST,
@@ -138,9 +144,15 @@ def ingest_trace(
 
     # Feature-flagged post-ingest trace->graph extraction
     # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs the deterministic
-    # TraceExtractor through the governed MutationExecutor. Never blocks
-    # ingest success -- failures are logged and swallowed inside the hook.
-    extraction = run_trace_extraction(registry, trace, requested_by="cli:ingest-trace")
+    # TraceExtractor through the governed MutationExecutor, and only for a
+    # trace this call stored: a duplicate's agent and artifacts would land
+    # on the stored trace's node. Never blocks ingest success -- failures
+    # are logged and swallowed inside the hook.
+    extraction = (
+        None
+        if already_ingested
+        else run_trace_extraction(registry, trace, requested_by="cli:ingest-trace")
+    )
 
     if output_format == "json":
         payload: dict[str, object] = {
@@ -148,10 +160,16 @@ def ingest_trace(
             "trace_id": trace.trace_id,
             "source": trace.source,
             "intent": trace.intent,
+            "already_ingested": already_ingested,
         }
         if extraction is not None:
             payload["extraction"] = extraction
         emit_json(payload)
+    elif already_ingested:
+        console.print(
+            f"[yellow]Trace already ingested[/yellow]: {escape(trace.trace_id)}"
+        )
+        console.print("  Traces are immutable: nothing was stored or extracted.")
     else:
         console.print(f"[green]Trace ingested[/green]: {escape(trace.trace_id)}")
         console.print(f"  Source: {trace.source}")

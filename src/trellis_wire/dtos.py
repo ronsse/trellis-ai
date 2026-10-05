@@ -83,6 +83,11 @@ class IngestResponse(WireModel):
     status: str = "ok"
     trace_id: str | None = None
     evidence_id: str | None = None
+    #: Set by ``POST /traces``: ``True`` when the store already held the
+    #: ``trace_id``, so this call stored and extracted nothing (traces are
+    #: immutable). ``None`` on ``POST /evidence``, and from a server that
+    #: predates the field.
+    already_ingested: bool | None = None
 
 
 # -- Retrieve --

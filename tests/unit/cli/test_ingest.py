@@ -265,9 +265,9 @@ class TestIngestTraceDuplicate:
     ) -> None:
         """The second trace's agent and artifact never reach ``trace:<id>``.
 
-        The duplicate still exits 0 and keeps the documented success keys,
-        adding ``already_ingested``; ``source`` and ``intent`` echo what was
-        submitted.
+        The duplicate still exits 0 and keeps the documented success keys;
+        ``already_ingested`` tells the two calls apart, and ``source`` and
+        ``intent`` echo what was submitted.
         """
         monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
         from trellis_cli.stores import get_graph_store
@@ -288,7 +288,7 @@ class TestIngestTraceDuplicate:
         assert graph_state(graph, "syn-dup-cli") == after_first
         assert graph.get_node("agent:syn-agent-second") is None
         assert graph.get_node("artifact:syn-art-second") is None
-        assert "already_ingested" not in json.loads(first.stdout)
+        assert json.loads(first.stdout)["already_ingested"] is False
         assert json.loads(second.stdout) == {
             "status": "ingested",
             "trace_id": "syn-dup-cli",
@@ -331,7 +331,7 @@ class TestIngestTraceDuplicate:
         graph = get_graph_store()
         data = json.loads(result.stdout)
         assert result.exit_code == 0
-        assert "already_ingested" not in data
+        assert data["already_ingested"] is False
         assert data["extraction"]["executed"] is True
         assert graph.get_node(f"trace:{trace_id}") is not None
         assert graph.get_node("agent:syn-agent-fresh") is not None

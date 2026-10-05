@@ -839,6 +839,16 @@ All notable changes to Trellis will be documented in this file.
   `handler_failed_unexpected` keeps its traceback; the `failed` result and
   the `MUTATION_REJECTED` event are unchanged.
   ([#718](https://github.com/ronsse/trellis-ai/pull/718))
+- **A trace submitted under a stored `trace_id` is no longer extracted onto
+  the stored trace.** Such a submission stores nothing, since traces are
+  immutable, but with `TRELLIS_ENABLE_TRACE_EXTRACTION` on the three ingest
+  surfaces still extracted it, attaching its agent and artifacts to the
+  stored trace's `trace:<id>` node. They now skip extraction for an id the
+  trace store already holds and say so, still succeeding:
+  `POST /api/v1/traces` and `trellis ingest trace --format json` answer
+  `"already_ingested": true`, and the CLI text and MCP `save_experience`
+  reply `Trace already ingested: <id>`. Re-extract a stored trace with
+  `trellis extract traces`. Nodes and edges already attached stay.
 
 ## [0.9.0] - 2026-05-13
 
