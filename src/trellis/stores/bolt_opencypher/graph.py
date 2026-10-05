@@ -165,12 +165,11 @@ def _temporal_predicate_in_list(as_of: datetime | None, var: str) -> str:
 #: What every whole-node read returns in place of ``n``. A shape-#2 vector
 #: store (Neo4j, ArcadeDB) keeps its ``embedding`` on these ``(:Node)``
 #: rows, and no GraphStore method returns it (:func:`_node_props_to_dict`
-#: reads named keys), so ``RETURN n`` only paid to ship and decode the
-#: vector. Both engines answer the projection with the key present and
-#: ``None``, which the conversion never reads. A read with a ``LIMIT``
-#: sorts and limits ``n`` in a ``WITH`` before projecting: an ``ORDER BY``
-#: after ``AS n`` sorts the projected maps, so the engine would build one
-#: for every candidate row instead of for the rows it returns.
+#: reads named keys), so the projection keeps the vector off the wire.
+#: Both engines answer it with the key present and ``None``, which the
+#: conversion never reads. A read with a ``LIMIT`` sorts and limits ``n``
+#: in a ``WITH`` before projecting, so the engine builds a map only for
+#: the rows it returns.
 _NODE_WITHOUT_EMBEDDING = "n {.*, embedding: null} AS n"
 
 

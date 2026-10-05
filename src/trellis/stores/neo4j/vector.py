@@ -28,9 +28,9 @@ Trade-offs vs. shape #1 (separate ``:VectorItem`` label):
 * Couples the two stores on Neo4j (other backends keep their split).
 * Updating a node via ``GraphStore.upsert_node`` creates a new version
   row that does NOT inherit the prior embedding. Callers that update
-  content must re-embed afterwards. The old (closed) version still
-  carries its embedding for audit / time-travel reads, but the
-  ``query`` path filters them out via ``valid_to IS NULL``.
+  content must re-embed afterwards. The old (closed) version keeps its
+  embedding on its row; no ``GraphStore`` read returns it, and the
+  ``query`` path filters it out via ``valid_to IS NULL``.
 """
 
 from __future__ import annotations
