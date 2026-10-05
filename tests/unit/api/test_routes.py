@@ -215,6 +215,40 @@ def test_ingest_trace_store_failure_keeps_409(client, monkeypatch, extraction_ca
     assert extraction_calls == []
 
 
+def test_ingest_trace_blank_trace_id_answers_400(client, monkeypatch):
+    """A blank trace_id is refused each time: 400, not stored, not extracted.
+
+    Accepted, the first was stored under "" with the graph node ``trace:``,
+    and the second answered 200 "ok", stored nothing and grafted its entities
+    onto that node. The named trace after them is the control: extraction is
+    on, so the empty graph is the refusal's.
+    """
+    monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+    traces = app_module._registry.operational.trace_store
+    graph = app_module._registry.knowledge.graph_store
+
+    blank = [
+        client.post(
+            "/api/v1/traces",
+            json={**_rich_trace(), "intent": intent, "trace_id": trace_id},
+        )
+        for trace_id, intent in (("", "syn first"), (" \t ", "syn second"))
+    ]
+
+    assert [resp.status_code for resp in blank] == [400, 400]
+    assert all("trace_id must not be empty" in r.json()["detail"] for r in blank)
+    assert traces.count() == 0
+    assert graph.count_nodes() == 0
+
+    named = client.post(
+        "/api/v1/traces", json={**_rich_trace(), "trace_id": "syn-trace-named"}
+    )
+
+    assert named.status_code == 200
+    assert traces.get("syn-trace-named") is not None
+    assert graph.get_node("trace:syn-trace-named") is not None
+
+
 # ── embed-on-ingest (TRELLIS_ENABLE_EMBED_ON_INGEST) ────────────────────
 
 #: Dotted path handed to TRELLIS_EMBEDDING_FN; the registry resolves it

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -97,6 +98,82 @@ class TestTraceIngestHandler:
             entity_id=trace.trace_id,
         )
         assert len(events) == 1
+
+    @staticmethod
+    def _blank_id_trace(shape: str, intent: str) -> Trace | dict[str, Any]:
+        """A synthetic trace whose ``trace_id`` is blank, as *shape* sends it.
+
+        The schema strips whitespace when it validates, so ``unstripped`` (an
+        id assigned after validation, which ``Trace`` does not re-check) is the
+        one shape that reaches the handler with its whitespace intact.
+        """
+        body = {"source": "agent", "intent": intent, "context": {"agent_id": "a1"}}
+        if shape == "dict":
+            return {**body, "trace_id": ""}
+        if shape == "stripped":
+            return Trace.model_validate({**body, "trace_id": " \t "})
+        trace = Trace.model_validate(body)
+        trace.trace_id = " \t "
+        return trace
+
+    @pytest.mark.parametrize("shape", ["dict", "stripped", "unstripped"])
+    def test_a_blank_trace_id_is_refused(
+        self, registry: StoreRegistry, shape: str
+    ) -> None:
+        """A blank id is refused before anything is stored, every time.
+
+        Stored under "", the first blank-id trace would make each later one an
+        "already ingested" success that stores nothing.
+        """
+        executor = build_curate_executor(registry)
+        results = [
+            executor.execute(
+                Command(
+                    operation=Operation.TRACE_INGEST,
+                    args={"trace": self._blank_id_trace(shape, intent)},
+                    target_type="trace",
+                )
+            )
+            for intent in ("syn first", "syn second")
+        ]
+
+        assert [r.status for r in results] == [CommandStatus.REJECTED] * 2
+        assert [r.metadata.get("rejection_reason") for r in results] == [
+            "trace_id_empty"
+        ] * 2
+        assert registry.operational.trace_store.count() == 0
+        events = registry.operational.event_log
+        rejected = events.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert [e.payload.get("reason") for e in rejected] == ["trace_id_empty"] * 2
+        assert events.get_events(event_type=EventType.TRACE_INGESTED) == []
+
+    def test_a_named_and_a_generated_trace_id_still_ingest(
+        self, registry: StoreRegistry
+    ) -> None:
+        executor = build_curate_executor(registry)
+        body = {"source": "agent", "intent": "syn task", "context": {"agent_id": "a1"}}
+        named = Trace.model_validate({**body, "trace_id": "syn-trace-named"})
+        generated = Trace.model_validate(body)
+
+        results = [
+            executor.execute(
+                Command(
+                    operation=Operation.TRACE_INGEST,
+                    args={"trace": trace},
+                    target_id=trace.trace_id,
+                    target_type="trace",
+                )
+            )
+            for trace in (named, generated)
+        ]
+
+        assert [r.status for r in results] == [CommandStatus.SUCCESS] * 2
+        assert [r.created_id for r in results] == [
+            "syn-trace-named",
+            generated.trace_id,
+        ]
+        assert len(generated.trace_id) == 26  # the schema's ULID default
+        assert registry.operational.trace_store.count() == 2
 
 
 class TestPrecedentPromoteHandler:

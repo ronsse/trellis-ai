@@ -800,6 +800,13 @@ All notable changes to Trellis will be documented in this file.
   info as `trace_extraction_artifact_id_empty`, so unrelated traces are no
   longer neighbours through the node `artifact:`. An existing one stays.
   ([#715](https://github.com/ronsse/trellis-ai/pull/715))
+- **A trace with a blank `trace_id` is refused.** An empty or whitespace-only
+  id was stored as `""`, and each later blank-id trace was answered as
+  already ingested: a success that stored nothing. Ingest now refuses it as
+  `trace_id_empty` and stores nothing: `POST /api/v1/traces` answers 400,
+  `trellis ingest trace` exits `2`, and MCP `save_experience` raises the
+  refusal. Omitting the id still generates one, and a stored trace with an
+  empty id still loads.
 
 ## [0.9.0] - 2026-05-13
 
