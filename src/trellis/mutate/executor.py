@@ -320,17 +320,25 @@ class MutationExecutor:
         except (StoreError, TrellisError) as exc:
             # Typed Trellis failures other than the rejection set
             # above: backend/store errors, generic TrellisErrors,
-            # MutationErrors. Emit FAILED audit event with the
-            # exception type attached so consumers can branch on
-            # ``error_type`` rather than parsing the stringified
-            # message, then return a structured FAILED CommandResult
-            # so batch processing (SEQUENTIAL / CONTINUE_ON_ERROR)
-            # can keep going. The store name and code are bound on
-            # the structlog event for operator correlation.
+            # MutationErrors. Log the exception type as ``error_type``
+            # so operators can filter on it rather than parse the
+            # message, emit a FAILED audit event, then return a
+            # structured FAILED CommandResult so batch processing
+            # (SEQUENTIAL / CONTINUE_ON_ERROR) can keep going. The
+            # store name and code are bound on the structlog event for
+            # operator correlation.
+            #
+            # The message is logged and the traceback is not. The
+            # Postgres and Bolt purges raise ``StoreError(<type-only
+            # message>) from <driver error>`` because a server's text
+            # can carry query text and values (#702, #713), and
+            # rendering exc_info would print that chained cause. The
+            # untyped path below keeps its traceback.
             store_name = getattr(exc, "store", None)
-            log.exception(
+            log.error(  # noqa: TRY400 — no traceback on purpose; see above
                 "handler_typed_error",
                 error_type=type(exc).__name__,
+                error=str(exc),
                 error_code=getattr(exc, "code", None),
                 store=store_name,
             )
