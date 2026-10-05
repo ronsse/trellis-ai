@@ -824,6 +824,12 @@ All notable changes to Trellis will be documented in this file.
   for a `created_at` sort on Neo4j and ArcadeDB, which already broke ties
   this way.
   ([#714](https://github.com/ronsse/trellis-ai/pull/714))
+- **A trace with a blank `trace_id` is refused.** An empty or whitespace-only
+  id is rejected as `trace_id_empty` and nothing is stored:
+  `POST /api/v1/traces` answers 400, `trellis ingest trace` exits `2`, and
+  MCP `save_experience` raises the refusal. Omit the id to have one
+  generated. A trace already stored under `""` stays.
+  ([#717](https://github.com/ronsse/trellis-ai/pull/717))
 - **On Neo4j and ArcadeDB, a node with two current rows reads as one
   version.** Concurrent writers can leave a node two current rows.
   `search_nodes` kept whichever row came first in `created_at` order, in

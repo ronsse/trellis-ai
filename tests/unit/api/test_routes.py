@@ -18,6 +18,7 @@ from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import StaleStoreWriteError, StoreError
 from trellis.schemas.enums import PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.schemas.trace import Trace
 from trellis.stores.base import VectorStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -212,6 +213,22 @@ def test_ingest_trace_store_failure_keeps_409(client, monkeypatch, extraction_ca
 
     assert resp.status_code == 409
     assert "synthetic append failure" in resp.json()["detail"]
+    assert extraction_calls == []
+
+
+def test_ingest_trace_blank_trace_id_answers_400(client, extraction_calls):
+    """A blank trace_id is refused, not answered as the trace stored under "".
+
+    Nothing is stored and nothing is extracted.
+    """
+    traces = app_module._registry.operational.trace_store
+    traces.append(Trace.model_validate({**_rich_trace(), "trace_id": ""}))
+
+    resp = client.post("/api/v1/traces", json={**_rich_trace(), "trace_id": " \t "})
+
+    assert resp.status_code == 400
+    assert "trace_id must not be empty" in resp.json()["detail"]
+    assert traces.count() == 1
     assert extraction_calls == []
 
 

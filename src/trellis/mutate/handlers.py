@@ -281,6 +281,12 @@ class TraceIngestHandler:
     handler returns the existing id without re-emitting an event. Combined
     with ``Command.idempotency_key`` (executor-level FIFO + EventLog-backed
     cross-restart check), repeated submissions are safe.
+
+    A blank ``trace_id`` (empty or whitespace-only) is refused with
+    ``ValidationError`` code ``trace_id_empty`` before the store is read.
+    Stored under ``""``, it would make every later blank-id trace "already
+    ingested". The check sits here, not on ``Trace``, so a stored trace with
+    an empty id still loads.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -289,6 +295,9 @@ class TraceIngestHandler:
     def handle(self, command: Command) -> tuple[str | None, str]:
         raw = command.args["trace"]
         trace = raw if isinstance(raw, Trace) else Trace.model_validate(raw)
+        if not trace.trace_id.strip():
+            msg = "trace_id must not be empty; omit it to have one generated"
+            raise ValidationError(msg, errors=[msg], code="trace_id_empty")
 
         store = self._registry.operational.trace_store
         if store.get(trace.trace_id) is not None:
