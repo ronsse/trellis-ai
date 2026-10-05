@@ -807,6 +807,7 @@ All notable changes to Trellis will be documented in this file.
   `get_subgraph` call returning 1,001 nodes took 0.14 to 0.23 s instead of
   1.1 to 1.2 s. Returned values, stored rows and vector search are
   unchanged.
+  ([#716](https://github.com/ronsse/trellis-ai/pull/716))
 
 ## [0.9.0] - 2026-05-13
 
