@@ -754,6 +754,16 @@ All notable changes to Trellis will be documented in this file.
   abstract, so a subclass without it no longer instantiates.
   ([#708](https://github.com/ronsse/trellis-ai/pull/708))
 
+- **Trace extraction mints no graph node for an evidence ref with an empty
+  `evidence_id`.** Every such ref of every trace became the one node
+  `evidence:`, with a `used` edge from each trace, so unrelated traces were
+  graph neighbours through it. The ref is now skipped, writing neither node
+  nor edge, and the extractor logs `trace_extraction_evidence_id_empty` at
+  info. The schema strips whitespace, so a whitespace-only id is skipped
+  too. The schema still accepts the ref, so stored traces load unchanged,
+  and an `evidence:` node already in a graph stays until it is removed.
+  ([#712](https://github.com/ronsse/trellis-ai/pull/712))
+
 ## [0.9.0] - 2026-05-13
 
 The second wave of the **self-improvement program** scoped in [`docs/design/plan-self-improvement-program.md`](docs/design/plan-self-improvement-program.md). 27 PRs landed across Items 1, 2, 6, 7 Cohort 1, all 8 phases of the C2 silent-fallback cleanup, and 7 follow-ups. Item 7 Cohort 2 (sandboxed Claude Code spawn) remains deferred per the plan.
