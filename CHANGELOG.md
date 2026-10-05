@@ -818,6 +818,7 @@ All notable changes to Trellis will be documented in this file.
   `trellis ingest trace` exits `2`, and MCP `save_experience` raises the
   refusal. Omitting the id still generates one, and a stored trace with an
   empty id still loads.
+  ([#717](https://github.com/ronsse/trellis-ai/pull/717))
 
 ## [0.9.0] - 2026-05-13
 
