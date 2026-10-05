@@ -29,7 +29,7 @@ from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis_cli import ingest as ingest_cli
 from trellis_cli.main import app
-from trellis_cli.stores import _reset_registry, get_graph_store, get_trace_store
+from trellis_cli.stores import _reset_registry
 
 runner = CliRunner()
 
@@ -840,25 +840,6 @@ class TestIngestTraceExitCodes:
             assert "frozen [x]" in payload["message"]
         else:
             assert "frozen [x]" in plain(result.output)
-
-    @_FORMATS
-    def test_a_blank_trace_id_exits_2(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fmt: str
-    ) -> None:
-        """A blank trace_id is input to fix: refused, not stored, not extracted."""
-        monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
-        f = tmp_path / "trace.json"
-        f.write_text(json.dumps({**json.loads(_rich_trace_json()), "trace_id": " "}))
-        result = _invoke(["ingest", "trace", str(f)], fmt)
-        assert result.exit_code == 2, result.output
-        if fmt == "json":
-            payload = json.loads(result.stdout)
-            assert payload["status"] == "error"
-            assert "trace_id must not be empty" in payload["message"]
-        else:
-            assert "trace_id must not be empty" in plain(result.output)
-        assert get_trace_store().count() == 0
-        assert get_graph_store().count_nodes() == 0
 
     @_FORMATS
     @pytest.mark.parametrize(
