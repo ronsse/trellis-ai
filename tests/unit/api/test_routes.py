@@ -616,16 +616,19 @@ def test_get_trace_names_what_can_show_each_evidence_ref(client, monkeypatch):
     }
 
 
-def test_get_trace_links_no_evidence_ref_with_an_empty_id(client, monkeypatch):
-    """Extraction writes ``evidence:`` from an empty ref, one node for all such refs."""
-    monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+def test_get_trace_links_no_evidence_ref_with_an_empty_id(client):
+    """An empty ref names no record, so it has no entry.
+
+    That holds where a graph still has the node ``evidence:``, into which an
+    older trace extractor pooled every such ref.
+    """
+    graph = app_module._registry.knowledge.graph_store
+    graph.upsert_node("evidence:", "Dataset", {})
     trace = _make_trace(intent="cite an empty ref")
     trace["evidence_used"] = [{"evidence_id": ""}]
     resp = client.post("/api/v1/traces", json=trace)
     assert resp.status_code == 200
     trace_id = resp.json()["trace_id"]
-    graph = app_module._registry.knowledge.graph_store
-    assert graph.get_node("evidence:") is not None
 
     resp = client.get(f"/api/v1/traces/{trace_id}")
     assert resp.status_code == 200

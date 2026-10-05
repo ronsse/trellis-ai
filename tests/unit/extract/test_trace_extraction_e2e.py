@@ -294,3 +294,42 @@ class TestEvidenceLands:
         assert properties[FILES_TOUCHED_PROPERTY] == ["src/a.py"]
         assert properties[FILES_READ_PROPERTY] == ["src/b.py"]
         assert properties[COMMANDS_RUN_PROPERTY] == ["pytest -q"]
+
+
+class TestBlankEvidenceRef:
+    """An empty ``evidence_id`` must not make unrelated traces neighbours."""
+
+    async def test_traces_with_an_empty_ref_share_no_node(
+        self, registry: StoreRegistry
+    ) -> None:
+        traces = [
+            Trace.model_validate(
+                {
+                    "source": "agent",
+                    "intent": "cite evidence",
+                    "evidence_used": [
+                        {"evidence_id": ""},
+                        {"evidence_id": f"syn-ev-{n}"},
+                    ],
+                    "context": {},
+                }
+            )
+            for n in ("a", "b")
+        ]
+        for trace in traces:
+            await _extract_into(registry, trace)
+
+        graph = registry.knowledge.graph_store
+
+        def neighbours(trace: Trace) -> set[str]:
+            node_id = f"trace:{trace.trace_id}"
+            return {
+                e["target_id"] if e["source_id"] == node_id else e["source_id"]
+                for e in graph.get_edges(node_id, direction="both")
+            }
+
+        assert [neighbours(t) for t in traces] == [
+            {"evidence:syn-ev-a"},
+            {"evidence:syn-ev-b"},
+        ]
+        assert graph.get_node("evidence:") is None
