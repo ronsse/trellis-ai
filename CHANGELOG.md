@@ -769,7 +769,7 @@ All notable changes to Trellis will be documented in this file.
   committed. The other Bolt graph writes still raise the driver's own
   errors, as do the reads and the vector delete a redaction runs on Bolt
   stores before its purge.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#713](https://github.com/ronsse/trellis-ai/pull/713))
 
 ## [0.9.0] - 2026-05-13
 
