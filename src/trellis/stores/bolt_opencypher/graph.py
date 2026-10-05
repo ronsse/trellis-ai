@@ -167,7 +167,10 @@ def _temporal_predicate_in_list(as_of: datetime | None, var: str) -> str:
 #: rows, and no GraphStore method returns it (:func:`_node_props_to_dict`
 #: reads named keys), so ``RETURN n`` only paid to ship and decode the
 #: vector. Both engines answer the projection with the key present and
-#: ``None``, which the conversion never reads.
+#: ``None``, which the conversion never reads. A read with a ``LIMIT``
+#: sorts and limits ``n`` in a ``WITH`` before projecting: an ``ORDER BY``
+#: after ``AS n`` sorts the projected maps, so the engine would build one
+#: for every candidate row instead of for the rows it returns.
 _NODE_WITHOUT_EMBEDDING = "n {.*, embedding: null} AS n"
 
 
@@ -1576,8 +1579,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         cypher = (
             "MATCH (n:Node) WHERE "
             + " AND ".join(conditions)
+            + " WITH n ORDER BY n.created_at DESC LIMIT $limit"
             + f" RETURN {_NODE_WITHOUT_EMBEDDING}"
-            + " ORDER BY n.created_at DESC LIMIT $limit"
         )
         params["limit"] = limit * 4 if properties else limit
 
@@ -1793,15 +1796,15 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         uses; semantics match.
         """
         cypher_parts, cypher_params, py_predicates = self._compile_node_query(query)
-        cypher = (
-            "MATCH (n:Node) WHERE "
-            + " AND ".join(cypher_parts)
-            + f" RETURN {_NODE_WITHOUT_EMBEDDING} ORDER BY n.created_at DESC"
-        )
         # Over-fetch when py_predicates are present to compensate for
         # client-side trimming.
         fetch_limit = query.limit * 10 if py_predicates else query.limit
-        cypher += f" LIMIT {int(fetch_limit)}"
+        cypher = (
+            "MATCH (n:Node) WHERE "
+            + " AND ".join(cypher_parts)
+            + f" WITH n ORDER BY n.created_at DESC LIMIT {int(fetch_limit)}"
+            + f" RETURN {_NODE_WITHOUT_EMBEDDING}"
+        )
 
         records = self._run_read_list(cypher, **cypher_params)
         results: list[dict[str, Any]] = []
