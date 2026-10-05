@@ -645,11 +645,11 @@ class GraphStore(ABC):
         can commit between the purge's last delete and its commit. An
         ``upsert_node`` after the purge re-creates the node.
 
-        Returns ``True`` if the node existed (i.e. this call performed the
-        purge). Under concurrent deletion exactly one caller sees ``True``,
-        except on Neo4j: a purge that waited on another purge's lock counts
-        the rows it matched before the wait, so both callers can see
-        ``True``.
+        Returns ``True`` if this call removed a version of the node. Two
+        concurrent purges both see ``True`` only if a writer creates a
+        version while one of them runs, and each has then removed one; on
+        Neo4j both can instead count one version, created after one of them
+        took its locks.
         """
 
     @abstractmethod

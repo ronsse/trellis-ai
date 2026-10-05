@@ -426,6 +426,60 @@ class TestPostgresGraphStore:
         assert state["deleted"] is True
         assert _rows_left(PG_DSN, "n1") == {"nodes": 0, "edges": 0, "entity_aliases": 0}
 
+    def test_delete_node_removes_the_versions_two_writes_made_in_turn(
+        self, store, monkeypatch
+    ) -> None:
+        # A first write takes its row lock and commits once the purge's first
+        # nodes DELETE waits on it. The purge pauses before its second nodes
+        # DELETE until a second write has locked the version the first
+        # inserted, and that write commits once the second DELETE waits on
+        # it. The version the second write inserts is invisible to that
+        # DELETE, so only a third statement removes it.
+        assert PG_DSN is not None
+        store.upsert_node("n1", "person", {"phase": "1"})
+        writer = threading.get_ident()
+        original = psycopg.Cursor.execute
+        paused, resume = threading.Event(), threading.Event()
+        state: dict[str, Any] = {"node_deletes": 0}
+
+        def purge() -> None:
+            state["deleted"] = store.delete_node("n1")
+
+        def start_purge() -> None:
+            state["purge"] = threading.Thread(target=purge)
+            state["purge"].start()
+            state["first_waited"] = _wait_for_lock_wait(PG_DSN, "nodes")
+
+        def resume_purge() -> None:
+            resume.set()
+            state["second_waited"] = _wait_for_lock_wait(PG_DSN, "nodes")
+
+        def gated(cur: Any, query: Any, params: Any = None, **kwargs: Any) -> Any:
+            mine = threading.get_ident() == writer
+            if not mine and str(query).startswith("DELETE FROM nodes"):
+                state["node_deletes"] += 1
+                if state["node_deletes"] == 2:
+                    paused.set()
+                    resume.wait(20)
+            result = original(cur, query, params, **kwargs)
+            if mine and "FOR UPDATE" in str(query):
+                state.pop("hold", lambda: None)()
+            return result
+
+        monkeypatch.setattr(psycopg.Cursor, "execute", gated)
+        state["hold"] = start_purge
+        store.upsert_node("n1", "person", {"phase": "2"})
+        assert paused.wait(20), "the purge never reached its second nodes DELETE"
+        state["hold"] = resume_purge
+        store.upsert_node("n1", "person", {"phase": "3"})
+        state["purge"].join(timeout=30)
+
+        assert state["first_waited"], "the first DELETE never waited on the first write"
+        assert state["second_waited"], "the second DELETE never waited on the second"
+        assert not state["purge"].is_alive()
+        assert state["deleted"] is True
+        assert _rows_left(PG_DSN, "n1") == {"nodes": 0, "edges": 0, "entity_aliases": 0}
+
     def test_a_purge_aborted_as_a_deadlock_victim_runs_again(
         self, store, monkeypatch
     ) -> None:

@@ -441,10 +441,8 @@ def redact(
         # a policy refusal is EXIT_POLICY, any other REJECTED (a blank
         # reason, or a target id that names no node) EXIT_VALIDATION, and
         # FAILED on this path is a store outcome such as a concurrent purge
-        # or a backend error (EXIT_STORE). On Neo4j both of two concurrent
-        # purges can succeed, so neither is FAILED. ``command_id`` rides the
-        # JSON so a failed attempt still joins to its MUTATION_REJECTED
-        # audit event.
+        # or a backend error (EXIT_STORE). ``command_id`` rides the JSON so
+        # a failed attempt still joins to its MUTATION_REJECTED audit event.
         if output_format == "json":
             emit_json(
                 {

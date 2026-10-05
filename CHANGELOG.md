@@ -714,6 +714,17 @@ All notable changes to Trellis will be documented in this file.
   as text. A knowledge store that cannot be read costs the links, not the
   trace: `evidence_links` is then `null`.
   ([#706](https://github.com/ronsse/trellis-ai/pull/706))
+- **On Neo4j, the loser of two concurrent purges of one node fails.**
+  `GraphStore.delete_node` returned `True` to both purges, because a
+  `DETACH DELETE` that waited on the other purge's lock still counted the
+  rows it had matched before the wait. Both redactions reported `success`
+  and each wrote a `REDACTION_APPLIED` event. The Bolt purge now locks the
+  node's rows before it counts, so the purge that waited finds nothing and
+  returns `False`, and its redaction is `failed` with no second
+  `REDACTION_APPLIED`, as on Postgres and ArcadeDB. A version a writer
+  creates after one of the purges has taken its locks can still be counted
+  by both.
+  ([#709](https://github.com/ronsse/trellis-ai/pull/709))
 
 - **`trellis analyze holdout` prints every figure the pre-registration
   re-measures, and its PR base rate is the served arm's.** The descriptive
