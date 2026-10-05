@@ -666,6 +666,7 @@ class TestDescriptive:
         between-parent share is bias-adjusted, as in the prestudy: one minus
         the within variance over the total variance, 1 - (10/3) / (29.2/4).
         """
+        log.deployed_before_window(rate=0.0)
         layout = [
             ("parent-a", 1, 2, 1),  # parent, commits, packs, prs_created
             ("parent-a", 3, 1, 0),

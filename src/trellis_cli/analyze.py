@@ -90,7 +90,11 @@ if TYPE_CHECKING:
 
     from rich.console import Console
 
-    from trellis.analyze.holdout import HoldoutHorizon, HoldoutReport
+    from trellis.analyze.holdout import (
+        HoldoutGuardrailArm,
+        HoldoutHorizon,
+        HoldoutReport,
+    )
 
 logger = structlog.get_logger(__name__)
 
@@ -1308,6 +1312,7 @@ def _render_holdout_sessions(report: HoldoutReport) -> None:
         "per 30 days x days / 30):"
     )
     _render_horizons(s.mde_by_horizon, "the session mean")
+    console.print(f"    [dim]{escape(s.note)}[/dim]")
 
 
 def _render_holdout_descriptive(report: HoldoutReport) -> None:
@@ -1420,6 +1425,33 @@ def _render_holdout_inference(report: HoldoutReport) -> None:
     )
 
 
+def _guardrail_arm(arm: HoldoutGuardrailArm, reads: str) -> str:
+    """One arm's guardrail value with its n and any tasks lacking the field."""
+    detail = f"n {arm.n}"
+    if arm.value is not None and arm.missing:
+        detail += f", {arm.missing} without {escape(reads)}"
+    return f"{_fig(arm.value, arm.not_measurable)} ({detail})"
+
+
+def _render_holdout_guardrails(report: HoldoutReport) -> None:
+    block = report.guardrails
+    status = "" if block.status == "ok" else f": {escape(block.status)}"
+    console.print()
+    console.print(
+        "  [bold]Guardrails[/bold] (reported, never decisive: no p-value, no "
+        f"verdict){status}"
+    )
+    for guardrail in block.measures:
+        line = (
+            f"    {escape(guardrail.label)} ({escape(guardrail.task_set)}): served "
+            f"{_guardrail_arm(guardrail.served, guardrail.reads)}"
+        )
+        if guardrail.withheld is not None:
+            line += f", withheld {_guardrail_arm(guardrail.withheld, guardrail.reads)}"
+        console.print(line)
+    console.print(f"    [dim]{escape(block.note)}[/dim]")
+
+
 def _render_holdout(report: HoldoutReport) -> None:
     rate = "none" if report.rate is None else f"{report.rate:g}"
     cut_offs = "kept (ITT)" if report.itt else "excluded"
@@ -1430,6 +1462,10 @@ def _render_holdout(report: HoldoutReport) -> None:
     console.print(
         f"  window {escape(report.since)} to {escape(report.until)} "
         f"({report.window_days} days)"
+    )
+    console.print(
+        f"  task window {escape(report.task_window_since)} to "
+        f"{escape(report.until)} ({report.task_window_days:g} days)"
     )
     if report.scan.truncated:
         console.print(
@@ -1475,6 +1511,7 @@ def _render_holdout(report: HoldoutReport) -> None:
             f"{escape(exclusion.note)}"
         )
     _render_holdout_inference(report)
+    _render_holdout_guardrails(report)
     for note in report.notes:
         console.print(f"  [dim]note: {escape(note)}[/dim]")
 

@@ -1931,6 +1931,11 @@ how many reach a retrieval per 30 days, their outcome SD and their MDE at the
 same horizons. A main session is dated by when capture wrote its latest join,
 and it counts every pack whatever its rate, including those from builds that
 write no `holdout` key, where the task figures keep only the analysed rate's.
+So the session figures per 30 days divide by the whole window, and the task
+figures and the task MDE horizons by the task window (`task_window_since` to
+the window end, `task_window_days`): it opens at the window's first row at the
+analysed rate unless the newest pack row before the window was already at that
+rate, and a note says when it is shorter than `--days`.
 It also gives arm counts and binomial checks of the arm ratio
 (overall and per ISO week; the pre-registration pauses below p 0.001). A figure
 the rows cannot give reads "not measurable: <reason>" in text; in JSON it is
@@ -1944,7 +1949,12 @@ session in an ephemeral project. Three pre-registered items need fields capture
 does not record, so the report says so instead of guessing: the pre-treatment
 exclusion (a first retrieval after a commit or a stop-hook nudge) is not
 applied, the post-hoc share is `null`, and a note says the
-covariate-residualised permutation is not applied. Output is counts and
+covariate-residualised permutation is not applied. The guardrails block
+(`guardrails`) gives each pre-registered guardrail per arm with its n and no
+p-value or verdict: PRs created and any commit (each left out when it is the
+primary), log1p commits, tool errors and the re-call rate (tasks whose capture
+parsed a second pack id) over the primary's analysed tasks, and the cut-off
+rate over every eligible task, cut-offs included. Output is counts and
 statistics only, never an id, intent or text. Exit `0` on any report, `2` on an
 invalid option or an unnamed choice between rates, in both formats.
 

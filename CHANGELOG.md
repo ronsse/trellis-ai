@@ -184,6 +184,22 @@ All notable changes to Trellis will be documented in this file.
   reported whatever the flag state, and without a withheld arm the
   inference reads "no withheld arm". Counts and statistics only. New module
   `trellis.analyze.holdout`.
+- **`trellis analyze holdout` reports the guardrails by arm, and divides
+  task rates by the span their rows can occupy.** A `guardrails` block gives
+  each pre-registered guardrail per arm with its n and no p-value or
+  verdict: PRs created and any commit (each left out when it is the
+  primary), log1p commits, tool errors and the re-call rate after the first
+  retrieval over the primary's analysed tasks, and the cut-off rate over
+  every eligible task, cut-offs included. A field the capture join lacks
+  reads "not measurable", and with no withheld arm the block shows the
+  served arm only. The task figures per 30 days and the task MDE horizons
+  divided by the whole `--days` window, so a window opening before the
+  holdout build was deployed read the rate low and the MDE high; they now
+  divide by the task window (`task_window_since`, `task_window_days`), from
+  the window's first row at the analysed rate unless that rate was already
+  running as the window opened. The main-session figures keep the whole
+  window and say so. Existing JSON keys and the inferential statistics are
+  unchanged.
 
 ### Changed
 
