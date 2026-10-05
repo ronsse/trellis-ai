@@ -51,6 +51,7 @@ import structlog
 
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
+from trellis.errors import StoreError
 from trellis.schemas.graph import CompactionReport
 from trellis.schemas.well_known import normalize_entity_name
 from trellis.stores.base.edge_provenance import (
@@ -1581,6 +1582,21 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
     # ------------------------------------------------------------------
 
     def delete_node(self, node_id: str) -> bool:
+        """Purge the node in one managed transaction.
+
+        The driver runs the transaction again on an error it can retry,
+        until ``max_transaction_retry_time`` runs out. Raises
+        :class:`StoreError` naming the node and the error's type when the
+        driver gives up, and at once on an error it does not retry. A
+        connection lost while the commit was outstanding leaves the purge's
+        outcome unknown, and the message says so.
+        """
+        from neo4j.exceptions import (  # noqa: PLC0415
+            DriverError,
+            IncompleteCommit,
+            Neo4jError,
+        )
+
         def _tx(tx: ManagedTransaction) -> bool:
             # Take the write locks on the node's rows before counting. A
             # statement that waits on a concurrent purge's lock still counts
@@ -1617,8 +1633,20 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             )
             return removed > 0
 
-        with self._driver.session(database=self._database) as session:
-            deleted = bool(session.execute_write(_tx))
+        # Outside ``_tx``: the driver retries only its own errors, so a
+        # StoreError raised in there would end the retries.
+        try:
+            with self._driver.session(database=self._database) as session:
+                deleted = bool(session.execute_write(_tx))
+        except IncompleteCommit as exc:
+            msg = (
+                f"Purge of node {node_id} lost its connection during the commit, "
+                f"so its outcome is unknown: {type(exc).__name__}"
+            )
+            raise StoreError(msg, store="graph") from exc
+        except (DriverError, Neo4jError) as exc:
+            msg = f"Purge of node {node_id} failed: {type(exc).__name__}"
+            raise StoreError(msg, store="graph") from exc
         if deleted:
             logger.debug("node_deleted", node_id=node_id)
         return deleted
