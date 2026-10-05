@@ -1400,6 +1400,53 @@ class GraphStoreContractTests:
         assert [r["node_id"] for r in rows] == ["n-bravo", "n-alpha"]
         assert total == 3
 
+    def test_search_nodes_breaks_ties_by_node_id_on_every_page(
+        self, store: GraphStore
+    ) -> None:
+        # 120 nodes in two bulk writes: a write stamps one created_at on all
+        # of its nodes, and two names and two types make the rest of the
+        # rows tie too. The older write holds the higher ids and each write
+        # goes in shuffled, so neither write order nor insertion order is
+        # the node_id order that breaks the ties.
+        def name(i: int) -> str:
+            return "bravo" if i % 2 else "alpha"
+
+        def node_type(i: int) -> str:
+            return "concept" if i % 3 else "activity"
+
+        ids = [f"tie-{i:03d}" for i in range(120)]
+        for batch in (range(60, 120), range(60)):
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": ids[i],
+                        "node_type": node_type(i),
+                        "properties": {"name": name(i)},
+                    }
+                    for i in (batch[37 * k % 60] for k in range(60))
+                ]
+            )
+            _sleep_for_ordering()
+        sort_keys: dict[str, Any] = {
+            "name": name,
+            "node_type": node_type,
+            "created_at": lambda i: i < 60,  # the newer write
+        }
+
+        for sort, key in sort_keys.items():
+            ascending = [ids[i] for i in sorted(range(120), key=lambda i: (key(i), i))]
+            for descending, expected in ((False, ascending), (True, ascending[::-1])):
+                walked: list[str] = []
+                for offset in range(0, 120, 7):
+                    rows, total = store.search_nodes(
+                        sort=sort, descending=descending, limit=7, offset=offset
+                    )
+                    assert total == 120
+                    walked += [r["node_id"] for r in rows]
+                # Every page together shows each node once, in the stated order.
+                assert sorted(walked) == ids, (sort, descending)
+                assert walked == expected, (sort, descending)
+
     def test_search_nodes_refuses_an_unknown_sort_or_a_negative_page(
         self, store: GraphStore
     ) -> None:

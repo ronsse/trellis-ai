@@ -1438,7 +1438,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         assert count_row is not None
         cursor = self._conn.execute(
             f"SELECT * FROM nodes WHERE {where}"
-            f" ORDER BY {sort_col} {sort_dir} LIMIT ? OFFSET ?",
+            f" ORDER BY {sort_col} {sort_dir}, node_id {sort_dir} LIMIT ? OFFSET ?",
             [*params, limit, offset],
         )
         rows = [self._node_row_to_dict(row) for row in cursor.fetchall()]
