@@ -575,6 +575,31 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         raise typer.Exit(code=refusal_exit_code(refusal))
 
 
+def _print_backfill(
+    summary: dict[str, Any], results: list[CommandResult], *, since: int, failed: bool
+) -> None:
+    """Print ``extract traces`` text output: drafts, then what the writes answered."""
+    console.print(
+        f"[red]Trace backfill failed ({since} days)[/red]"
+        if failed
+        else f"[green]Trace backfill ({since} days)[/green]"
+    )
+    console.print(f"  Traces scanned:  {summary['traces_scanned']}")
+    drafts = f"{summary['total_entities']} entities, {summary['total_edges']} edges"
+    if summary["dry_run"]:
+        console.print(f"  Would extract:        {drafts}")
+        console.print("  [yellow]dry-run -- no mutations executed[/yellow]")
+    else:
+        console.print(f"  Drafts:          {drafts}")
+        _print_results(results, width=17)
+    for row in summary["per_trace"]:
+        if row["entities"] or row["edges"]:
+            console.print(
+                f"    - {escape(row['trace_id'])} ({row['domain'] or '-'}): "
+                f"{row['entities']} entities, {row['edges']} edges"
+            )
+
+
 @extract_app.command("traces")
 def traces(
     since: int = typer.Option(
@@ -673,30 +698,7 @@ def traces(
     if output_format == "json":
         print(json.dumps({**_run_status(refusal, "backfilled"), **summary}))
     else:
-        console.print(
-            f"[green]Trace backfill ({since} days)[/green]"
-            if refusal is None
-            else f"[red]Trace backfill failed ({since} days)[/red]"
-        )
-        console.print(f"  Traces scanned:  {summary['traces_scanned']}")
-        if dry_run:
-            console.print(
-                f"  Would extract:        {total_entities} entities, "
-                f"{total_edges} edges"
-            )
-            console.print("  [yellow]dry-run -- no mutations executed[/yellow]")
-        else:
-            console.print(
-                f"  Drafts:          {total_entities} entities, {total_edges} edges"
-            )
-        for row in per_trace:
-            if row["entities"] or row["edges"]:
-                console.print(
-                    f"    - {escape(row['trace_id'])} ({row['domain'] or '-'}): "
-                    f"{row['entities']} entities, {row['edges']} edges"
-                )
-        if not dry_run:
-            _print_results(results, width=17)
+        _print_backfill(summary, results, since=since, failed=refusal is not None)
     if refusal is not None:
         raise typer.Exit(code=refusal_exit_code(refusal))
 
