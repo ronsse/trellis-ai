@@ -1022,6 +1022,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         # side post-filtering on the (source, target, edge_type)
         # triplet is cheap at this scale. ``_pre_validate_edges_bulk``
         # already rejected in-batch duplicate triplets.
+        triplets = {
+            (spec["source_id"], spec["target_id"], spec["edge_type"]) for spec in edges
+        }
         sources = {spec["source_id"] for spec in edges}
         # Single connection for the bulk pre-fetch + UPDATE + INSERT so
         # the SCD-2 close-and-reinsert is transactional across all edges
@@ -1039,25 +1042,20 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                     (list(sources),),
                 )
                 existing_edges: dict[tuple[str, str, str], tuple[Any, ...]] = {
-                    (r[1], r[2], r[3]): r for r in cur.fetchall()
+                    (r[1], r[2], r[3]): r
+                    for r in cur.fetchall()
+                    if (r[1], r[2], r[3]) in triplets
                 }
 
             now = utc_now()
             edge_ids: list[str] = []
             insert_rows: list[tuple[Any, ...]] = []
-            # Only the priors whose triplet the batch actually names get
-            # closed below — ``existing_edges`` also holds other current
-            # edges that merely share a source with the batch, which must
-            # stay open (#745 F1). Keyed by edge_id to tolerate the batch
-            # naming the same triplet via more than one spec.
-            priors_to_close: dict[str, str] = {}
             for i, spec in enumerate(edges):
                 key = (spec["source_id"], spec["target_id"], spec["edge_type"])
                 prior = existing_edges.get(key)
                 if prior is not None:
                     edge_id = str(prior[0])
                     created_at = prior[4]
-                    priors_to_close[edge_id] = edge_id
                 else:
                     edge_id = generate_ulid()
                     created_at = now
@@ -1087,11 +1085,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 )
 
             with conn.cursor() as cur:
-                if priors_to_close:
+                if existing_edges:
                     cur.execute(
                         "UPDATE edges SET valid_to = %s "
                         "WHERE edge_id = ANY(%s) AND valid_to IS NULL",
-                        (now, list(priors_to_close)),
+                        (now, [str(prior[0]) for prior in existing_edges.values()]),
                     )
                 cur.executemany(
                     """

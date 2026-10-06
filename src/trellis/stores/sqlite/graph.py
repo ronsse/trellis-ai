@@ -1050,11 +1050,14 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # Pull existing current edges for the (source, target, type)
         # triplets in this batch in one shot. The single-row method
         # uses three-column equality; the bulk path replicates that by
-        # encoding the triplet as a delimited key client-side after
+        # keeping the rows whose triplet the batch names, after
         # one bulk fetch keyed on ``source_id IN (...)``. Choosing
         # source_id over (source, target) for the IN clause keeps the
         # query simple — the indexed ``edges_lookup_idx`` covers it
         # and post-filtering in Python is cheap at this scale.
+        triplets = {
+            (spec["source_id"], spec["target_id"], spec["edge_type"]) for spec in edges
+        }
         sources = {spec["source_id"] for spec in edges}
         placeholders = ",".join("?" for _ in sources)
         cursor = self._conn.execute(
@@ -1068,24 +1071,18 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         existing_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
         for row in cursor.fetchall():
             key = (row["source_id"], row["target_id"], row["edge_type"])
-            existing_edges[key] = dict(row)
+            if key in triplets:
+                existing_edges[key] = dict(row)
 
         now_iso = utc_now().isoformat()
         edge_ids: list[str] = []
         insert_rows: list[tuple[Any, ...]] = []
-        # Only the priors whose triplet the batch actually names get
-        # closed below — ``existing_edges`` also holds other current
-        # edges that merely share a source with the batch, which must
-        # stay open (#745 F1). Keyed by edge_id to tolerate the batch
-        # naming the same triplet via more than one spec.
-        priors_to_close: dict[str, str] = {}
         for i, spec in enumerate(edges):
             key = (spec["source_id"], spec["target_id"], spec["edge_type"])
             prior = existing_edges.get(key)
             if prior is not None:
                 edge_id = str(prior["edge_id"])
                 created_at = prior["created_at"]
-                priors_to_close[edge_id] = edge_id
             else:
                 edge_id = generate_ulid()
                 created_at = now_iso
@@ -1116,16 +1113,14 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
 
         conn = self._conn
         with conn:  # one transaction: a failed row rolls back the whole batch
-            # Close only the priors of the triplets this batch names.
-            # ``IN`` against the indexed ``edge_id`` column for that subset
-            # — not every current edge fetched above, which also covers
-            # other current edges sharing a source with the batch (#745 F1).
-            if priors_to_close:
-                edge_id_placeholders = ",".join("?" for _ in priors_to_close)
+            # Close any prior current edges in one shot. ``IN`` against
+            # the indexed ``edge_id`` column for the subset we found.
+            if existing_edges:
+                edge_id_placeholders = ",".join("?" for _ in existing_edges)
                 conn.execute(
                     f"UPDATE edges SET valid_to = ? "
                     f"WHERE edge_id IN ({edge_id_placeholders}) AND valid_to IS NULL",
-                    (now_iso, *priors_to_close),
+                    (now_iso, *(prior["edge_id"] for prior in existing_edges.values())),
                 )
             conn.executemany(
                 """

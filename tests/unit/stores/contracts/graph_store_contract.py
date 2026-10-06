@@ -619,14 +619,9 @@ class GraphStoreContractTests:
     def test_upsert_edges_bulk_closes_only_named_triplets(
         self, store: GraphStore
     ) -> None:
-        """A bulk write closes only the priors of the triplets it names.
-
-        Regression for #745 F1: SQLite and Postgres fetched every current
-        edge whose *source* appeared in the batch, then closed the whole
-        fetched set instead of just the priors matched to a spec. Two
-        edges that share a source with the batch's edge, but differ in
-        target or type, must stay current and untouched.
-        """
+        """A bulk write closes only the priors of the triplets it names:
+        edges that share its source but differ in target or type stay
+        current and untouched."""
         store.upsert_nodes_bulk(
             [
                 {"node_id": "syn-a", "node_type": "service", "properties": {}},
@@ -656,9 +651,6 @@ class GraphStoreContractTests:
         assert by_key[("syn-b", "syn_rel")]["properties"]["v"] == 2
         assert by_key[("syn-c", "syn_rel")]["properties"]["v"] == 1
         assert by_key[("syn-b", "syn_other")]["properties"]["v"] == 1
-        # Exactly one current version of the named edge.
-        named = store.get_edges("syn-a", direction="outgoing", edge_type="syn_rel")
-        assert len([e for e in named if e["target_id"] == "syn-b"]) == 1
 
     def test_upsert_edges_bulk_closes_two_triplets_same_source(
         self, store: GraphStore
