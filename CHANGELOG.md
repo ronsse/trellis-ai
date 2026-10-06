@@ -1154,6 +1154,7 @@ All notable changes to Trellis will be documented in this file.
   print it unwrapped, as the root error boundary does, and the terminal
   still wraps it on screen. Text, colour, JSON output and exit codes are
   unchanged, and a message with its own newlines keeps them.
+  ([#750](https://github.com/ronsse/trellis-ai/pull/750))
 
 ## [0.9.0] - 2026-05-13
 
