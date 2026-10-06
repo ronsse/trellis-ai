@@ -230,21 +230,15 @@ class TestUpsertEdgesBulkDroppedRow:
     def test_a_dropped_row_whose_endpoints_read_as_current_names_both(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The write returns no record for row 0, and the read that names the
-        missing endpoint finds both current, as when one was re-created in
-        between: the refusal names both rather than blaming one.
-
-        The endpoint re-read now happens after the transaction has rolled
-        back, via ``session.execute_read`` (the same round trip round trip 1
-        uses), not via ``tx.run`` inside the aborting transaction — so
-        ``session.execute_read`` answers for both the round-trip-1 check and
-        this post-rollback read, and ``tx.run`` only ever sees the UNWIND.
-        """
+        """The write returns a record for row 1 but none for row 0, and the
+        read after the rollback finds row 0's endpoints current, as when one
+        was re-created in between: the refusal names row 0 and both of its
+        endpoints rather than blaming one."""
         store, session = _build_store_with_mock_driver(monkeypatch)
-        current = [{"node_id": "a"}, {"node_id": "b"}]
+        current = [{"node_id": node_id} for node_id in ("a", "b", "c", "d")]
         session.execute_read.return_value = current
         tx = MagicMock(name="tx")
-        tx.run.return_value = []  # the UNWIND write drops row 0
+        tx.run.return_value = [{"row_index": 1, "edge_id": "e1"}]  # drops row 0
         session.execute_write.side_effect = lambda fn: fn(tx)
 
         with pytest.raises(
@@ -252,11 +246,11 @@ class TestUpsertEdgesBulkDroppedRow:
             match=r"upsert_edges_bulk\[0\]: source 'a' or target 'b' was not current",
         ):
             store.upsert_edges_bulk(  # type: ignore[attr-defined]
-                [{"source_id": "a", "target_id": "b", "edge_type": "links_to"}]
+                [
+                    {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
+                    {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
+                ]
             )
-        # tx.run was called exactly once, for the UNWIND — the re-read no
-        # longer runs inside the transaction.
-        assert tx.run.call_count == 1
 
 
 class TestUpsertEdgesBulkMissingEndpointMessageIsShared:

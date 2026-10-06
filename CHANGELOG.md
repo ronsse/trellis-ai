@@ -1196,21 +1196,17 @@ All notable changes to Trellis will be documented in this file.
   left that source's other current edges with no open version. Neo4j and
   ArcadeDB already closed by exact triplet and are unchanged.
   ([#752](https://github.com/ronsse/trellis-ai/pull/752))
-- **ArcadeDB `upsert_edges_bulk` no longer leaks a raw driver error when a
-  dropped row's endpoint is recreated while the write's transaction is
-  still open.** #746 re-read a dropped row's endpoints inside that same
-  transaction to build its `ValueError`. On ArcadeDB, if another writer
-  recreated the endpoint between the write and that re-read, next to a row
-  the write did commit, the re-read raised
-  `neo4j.exceptions.DatabaseError: Record #... not found` instead of the
-  documented `ValueError`; Neo4j was unaffected. The transaction function
-  now raises a private sentinel naming the row instead of re-reading
-  in-transaction; the managed-transaction retry logic never retries it
-  (it is neither a `DriverError` nor a `Neo4jError`), so the rollback runs
-  once and the endpoints are re-read fresh afterward, on the same session.
-  Round trip 1's up-front check and this post-rollback re-read now report
-  a missing endpoint through one shared message helper, so the two
-  cannot drift apart. SQLite and Postgres are unchanged.
+- **ArcadeDB `upsert_edges_bulk` raises its documented `ValueError`, not a
+  raw driver error, when a dropped row's endpoint is re-created mid-call.**
+  #746 re-read a dropped row's endpoints inside the write's still-open
+  transaction. On ArcadeDB, when another writer re-created one of them
+  after the write, beside a row the write had written, that re-read raised
+  `neo4j.exceptions.DatabaseError: Record #... not found`. The endpoints
+  are now re-read after the transaction rolls back: the error names the
+  endpoint that is still missing, or both when both are current again, and
+  no edge of the batch is written. Neo4j already raised the `ValueError`;
+  SQLite and Postgres are unchanged.
+  ([#754](https://github.com/ronsse/trellis-ai/pull/754))
 
 ## [0.9.0] - 2026-05-13
 

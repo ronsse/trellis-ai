@@ -30,7 +30,7 @@ import pytest
 
 pytest.importorskip("neo4j")
 
-from neo4j._sync.work.transaction import ManagedTransaction
+from neo4j import ManagedTransaction
 
 from tests.unit.stores import bolt_duplicate_current
 
@@ -339,14 +339,11 @@ def test_upsert_edges_bulk_refuses_a_dropped_row_beside_a_duplicated_edge(
 def test_upsert_edges_bulk_raises_valueerror_when_endpoint_recreated_mid_write(
     graph_store, monkeypatch
 ):
-    """Gate #746 follow-up 1: row 1's target is purged after the endpoint
-    check (so the write's UNWIND drops it) and another writer recreates it
-    inside the still-open transaction, right after the UNWIND runs and
-    beside row 0, which the UNWIND did write. On ArcadeDB the in-transaction
-    re-read used to raise a bare driver ``DatabaseError`` for this shape
-    instead of the documented ``ValueError`` (gate g746 item 5); the
-    endpoints are now re-read after the rollback instead, so both engines
-    raise the same ``ValueError`` and the batch commits nothing."""
+    """Row 1's target is purged after the endpoint check, so the write
+    drops row 1, and another writer re-creates it right after the UNWIND,
+    while the transaction that wrote row 0 is still open. The call raises
+    the documented ``ValueError``, not a raw driver error, and writes no
+    edge."""
     for node_id in ("a", "b", "c", "d"):
         graph_store.upsert_node(node_id, "s", {})
     _purge_after_endpoint_check(graph_store, monkeypatch, "d")
