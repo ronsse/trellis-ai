@@ -22,6 +22,7 @@ outbox.
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -388,6 +389,7 @@ class TestWhatTheGuardCatches:
             pytest.param(ConnectionError("refused"), id="oserror_subclass"),
             pytest.param(ValueError("bad payload"), id="value_error"),
             pytest.param(TypeError("bad payload"), id="type_error"),
+            pytest.param(sqlite3.OperationalError("locked"), id="sqlite3_error"),
         ],
     )
     def test_a_backend_that_raises_any_of_these_degrades(self, exc) -> None:

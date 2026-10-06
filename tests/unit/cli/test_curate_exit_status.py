@@ -30,7 +30,6 @@ from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis_cli import curate as curate_cli
 from trellis_cli.main import app
-from trellis_cli.stores import _get_registry
 
 runner = CliRunner()
 
@@ -175,13 +174,6 @@ class TestEntity:
         output = plain(result.output)
         assert MESSAGE in output
         assert "Entity created" not in output
-
-    def test_failed_json_from_a_real_sqlite_refusal(self, stores_dir: Path) -> None:
-        """A real FAILED on the default stores: SQLite refuses the graph write."""
-        _get_registry().knowledge.graph_store._conn.execute("PRAGMA query_only = ON")
-        result = runner.invoke(app, [*_ENTITY, "--format", "json"])
-        assert result.exit_code == 5, repr(result.exception)
-        assert json.loads(result.stdout.strip())["status"] == "failed"
 
 
 class TestExecuteCommand:

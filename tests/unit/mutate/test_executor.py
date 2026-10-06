@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -482,6 +483,11 @@ class TestIdempotencyKeyRecordedOnlyOnSuccess:
                 RuntimeError("syn panic"),
                 CommandStatus.FAILED,
                 id="untyped-failed",
+            ),
+            pytest.param(
+                sqlite3.IntegrityError("syn constraint"),
+                CommandStatus.FAILED,
+                id="sqlite-failed",
             ),
         ],
     )
