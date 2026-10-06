@@ -34,7 +34,7 @@ import typer
 from rich.markup import escape
 
 from trellis.core.base import utc_now
-from trellis.core.error_sanitize import sanitized_error_payload
+from trellis.core.error_sanitize import sanitize_error_message, sanitized_error_payload
 from trellis.extract.commands import (
     batch_draft_counts,
     reconcile_node_roles,
@@ -45,10 +45,11 @@ from trellis.extract.registry import ExtractorRegistry
 from trellis.extract.sources import SourceEntry, load_sources
 from trellis.extract.trace_ingest_hook import extract_trace_batch
 from trellis.mutate import build_curate_executor
+from trellis.mutate.commands import CommandResult, CommandStatus
 from trellis.schemas.extraction import ExtractionResult
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.exit_codes import EXIT_INTERNAL, refusal_exit_code
 from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
 
@@ -244,6 +245,56 @@ def _emit_refresh_event(
         )
 
 
+#: The answers under which a command wrote nothing. ``DUPLICATE`` is not one:
+#: it answers the replay of a write that already landed.
+_REFUSED = (CommandStatus.REJECTED, CommandStatus.FAILED)
+
+
+def _command_counts(results: list[CommandResult]) -> dict[str, int]:
+    """Count a run's command results by status, under the REST extract route's names."""
+    return {
+        "succeeded": sum(1 for r in results if r.status == CommandStatus.SUCCESS),
+        "failed": sum(1 for r in results if r.status == CommandStatus.FAILED),
+        "rejected": sum(1 for r in results if r.status == CommandStatus.REJECTED),
+        "duplicates": sum(1 for r in results if r.status == CommandStatus.DUPLICATE),
+    }
+
+
+def _run_refusal(results: list[CommandResult]) -> CommandResult | None:
+    """Return the first result when every command was refused or failed, else ``None``.
+
+    The rule ``trellis ingest dbt-manifest`` follows (#687): a run that wrote
+    anything exits 0 and counts its failures, and a run with no commands is
+    not a refusal.
+    """
+    if results and all(r.status in _REFUSED for r in results):
+        return results[0]
+    return None
+
+
+def _run_status(refusal: CommandResult | None, done: str) -> dict[str, str]:
+    """The JSON status for a run, from the flag that sets its exit."""
+    if refusal is None:
+        return {"status": done}
+    return {"status": "error", "message": sanitize_error_message(refusal.message)}
+
+
+def _print_results(results: list[CommandResult], *, width: int) -> None:
+    """Print a run's command counts, and its first failure when it has one."""
+    counts = _command_counts(results)
+    console.print(
+        f"  {'Commands:':<{width}}{counts['succeeded']} succeeded, "
+        f"{counts['failed']} failed, {counts['rejected']} rejected, "
+        f"{counts['duplicates']} duplicates"
+    )
+    first = next((r for r in results if r.status in _REFUSED), None)
+    if first is not None:
+        console.print(
+            f"  [yellow]{counts['failed'] + counts['rejected']} failed or "
+            f"rejected; first: {escape(first.message)}[/yellow]"
+        )
+
+
 def _run_refresh(
     registry: StoreRegistry,
     *,
@@ -251,10 +302,11 @@ def _run_refresh(
     raw_input: Any,
     source_hint: str,
     source_name: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[CommandResult]]:
     """Core refresh logic: extract, snapshot, execute, diff, emit.
 
-    Returns a summary dict suitable for direct JSON serialization.
+    Returns a summary dict suitable for direct JSON serialization, and the
+    batch's command results.
     """
     ext_registry = ExtractorRegistry()
     ext_registry.register(extractor)  # type: ignore[arg-type]
@@ -271,7 +323,7 @@ def _run_refresh(
     before_snapshot = _snapshot_entities(registry, entity_ids)
     batch = result_to_batch(result, requested_by=f"cli:extract-refresh:{source_name}")
     executor = build_curate_executor(registry)
-    executor.execute_batch(batch)
+    results = executor.execute_batch(batch)
     after_snapshot = _snapshot_entities(registry, entity_ids)
 
     new_entities = 0
@@ -306,7 +358,7 @@ def _run_refresh(
             extractor_used=result.extractor_used,
         )
 
-    return {
+    summary: dict[str, Any] = {
         "source": source_name,
         "extractor_used": result.extractor_used,
         "tier": result.tier,
@@ -315,15 +367,17 @@ def _run_refresh(
         "changed_entities": changed_entities,
         "unchanged_entities": unchanged_entities,
         "edges_emitted": len(result.edges),
+        **_command_counts(results),
         "diffs": diffs,
     }
+    return summary, results
 
 
 def _refresh_entry(
     entry: SourceEntry,
     *,
     sources_root: Path,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[CommandResult]]:
     """Run refresh for a single SourceEntry."""
     if entry.endpoint is not None:
         # Endpoint-form sources are pushed at the REST API, not pulled by
@@ -400,6 +454,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         raise typer.Exit(code=EXIT_INTERNAL)
 
     summary: dict[str, Any]
+    results: list[CommandResult]
     if source is not None:
         sources_path = Path(sources_file)
         if not sources_path.exists():
@@ -423,7 +478,9 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             )
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
-            summary = _refresh_entry(entry, sources_root=sources_path.parent.resolve())
+            summary, results = _refresh_entry(
+                entry, sources_root=sources_path.parent.resolve()
+            )
         except typer.Exit:
             raise
         except typer.BadParameter as exc:
@@ -460,7 +517,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             extractor = _resolve_extractor(extractor_type)
             raw_input = _read_raw_input(type_path, extractor_type)
             registry = _get_registry()
-            summary = _run_refresh(
+            summary, results = _run_refresh(
                 registry,
                 extractor=extractor,
                 raw_input=raw_input,
@@ -479,33 +536,43 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
                 console.print(f"[red]Refresh failed: {escape(str(exc))}[/red]")
             raise typer.Exit(code=EXIT_INTERNAL) from None
 
+    # A batch whose every command was refused or failed is a failed refresh,
+    # not an "unchanged" one.
+    refusal = _run_refusal(results)
     if output_format == "json":
         # Use plain print to avoid Rich's word-wrapping on long JSON, which
         # injects newlines mid-value and breaks downstream parsers.
-        print(json.dumps({"status": "refreshed", **summary}))
-        return
-
-    console.print(f"[green]Refreshed {summary['source']}[/green]")
-    console.print(f"  Extractor: {summary['extractor_used']} ({summary['tier']})")
-    console.print(f"  Entities scanned:  {summary['entities_scanned']}")
-    console.print(f"  New:               {summary['new_entities']}")
-    console.print(f"  Changed:           {summary['changed_entities']}")
-    console.print(f"  Unchanged:         {summary['unchanged_entities']}")
-    console.print(f"  Edges emitted:     {summary['edges_emitted']}")
-    if summary["diffs"]:
-        console.print()
-        console.print("  Per-entity diffs:")
-        for d in summary["diffs"]:
-            console.print(f"    - {escape(d['entity_id'])} ({d['entity_type']})")
-            diff = d["diff"]
-            if diff.get("new_entity"):
-                console.print("      [cyan]new entity[/cyan]")
-            for key in diff.get("added", {}):
-                console.print(f"      [green]+[/green] {key}")
-            for key in diff.get("removed", {}):
-                console.print(f"      [red]-[/red] {key}")
-            for key, (b, a) in (diff.get("changed") or {}).items():
-                console.print(f"      [yellow]~[/yellow] {key}: {b!r} -> {a!r}")
+        print(json.dumps({**_run_status(refusal, "refreshed"), **summary}))
+    else:
+        source_name = escape(summary["source"])
+        console.print(
+            f"[green]Refreshed {source_name}[/green]"
+            if refusal is None
+            else f"[red]Refresh of {source_name} failed[/red]"
+        )
+        console.print(f"  Extractor: {summary['extractor_used']} ({summary['tier']})")
+        console.print(f"  Entities scanned:  {summary['entities_scanned']}")
+        console.print(f"  New:               {summary['new_entities']}")
+        console.print(f"  Changed:           {summary['changed_entities']}")
+        console.print(f"  Unchanged:         {summary['unchanged_entities']}")
+        console.print(f"  Edges emitted:     {summary['edges_emitted']}")
+        _print_results(results, width=19)
+        if summary["diffs"]:
+            console.print()
+            console.print("  Per-entity diffs:")
+            for d in summary["diffs"]:
+                console.print(f"    - {escape(d['entity_id'])} ({d['entity_type']})")
+                diff = d["diff"]
+                if diff.get("new_entity"):
+                    console.print("      [cyan]new entity[/cyan]")
+                for key in diff.get("added", {}):
+                    console.print(f"      [green]+[/green] {key}")
+                for key in diff.get("removed", {}):
+                    console.print(f"      [red]-[/red] {key}")
+                for key, (b, a) in (diff.get("changed") or {}).items():
+                    console.print(f"      [yellow]~[/yellow] {key}: {b!r} -> {a!r}")
+    if refusal is not None:
+        raise typer.Exit(code=refusal_exit_code(refusal))
 
 
 @extract_app.command("traces")
@@ -540,7 +607,9 @@ def traces(
     optional ``--domain``) and runs each through
     :func:`trellis.extract.trace_ingest_hook.extract_trace_batch` — the
     same extraction core the live ingest hook uses — then executes the
-    governed batch. Reports per-trace draft counts.
+    governed batch. Reports per-trace draft counts and the batches' command
+    results by status. A run whose every command was refused or failed exits
+    by the first such result, as ``trellis ingest dbt-manifest`` does.
 
     With ``--dry-run`` the drafts are tallied and printed but no batch is
     executed -- useful to preview the graph a backfill would create.
@@ -564,6 +633,7 @@ def traces(
     executor = build_curate_executor(registry)
 
     per_trace: list[dict[str, Any]] = []
+    results: list[CommandResult] = []
     total_entities = 0
     total_edges = 0
 
@@ -586,32 +656,49 @@ def traces(
             }
         )
         if not dry_run and batch is not None:
-            executor.execute_batch(batch)
+            results.extend(executor.execute_batch(batch))
 
+    # The draft totals say what extraction proposed; the command counts say
+    # what the writes answered. A dry run executes nothing and counts none.
     summary: dict[str, Any] = {
         "traces_scanned": len(stored_traces),
         "total_entities": total_entities,
         "total_edges": total_edges,
+        **({} if dry_run else _command_counts(results)),
         "dry_run": dry_run,
         "per_trace": per_trace,
     }
 
+    refusal = _run_refusal(results)
     if output_format == "json":
-        print(json.dumps({"status": "backfilled", **summary}))
-        return
-
-    verb = "Would extract" if dry_run else "Extracted"
-    console.print(f"[green]Trace backfill ({since} days)[/green]")
-    console.print(f"  Traces scanned:  {summary['traces_scanned']}")
-    console.print(f"  {verb}:        {total_entities} entities, {total_edges} edges")
-    if dry_run:
-        console.print("  [yellow]dry-run -- no mutations executed[/yellow]")
-    for row in per_trace:
-        if row["entities"] or row["edges"]:
+        print(json.dumps({**_run_status(refusal, "backfilled"), **summary}))
+    else:
+        console.print(
+            f"[green]Trace backfill ({since} days)[/green]"
+            if refusal is None
+            else f"[red]Trace backfill failed ({since} days)[/red]"
+        )
+        console.print(f"  Traces scanned:  {summary['traces_scanned']}")
+        if dry_run:
             console.print(
-                f"    - {escape(row['trace_id'])} ({row['domain'] or '-'}): "
-                f"{row['entities']} entities, {row['edges']} edges"
+                f"  Would extract:        {total_entities} entities, "
+                f"{total_edges} edges"
             )
+            console.print("  [yellow]dry-run -- no mutations executed[/yellow]")
+        else:
+            console.print(
+                f"  Drafts:          {total_entities} entities, {total_edges} edges"
+            )
+        for row in per_trace:
+            if row["entities"] or row["edges"]:
+                console.print(
+                    f"    - {escape(row['trace_id'])} ({row['domain'] or '-'}): "
+                    f"{row['entities']} entities, {row['edges']} edges"
+                )
+        if not dry_run:
+            _print_results(results, width=17)
+    if refusal is not None:
+        raise typer.Exit(code=refusal_exit_code(refusal))
 
 
 if __name__ == "__main__":  # pragma: no cover
