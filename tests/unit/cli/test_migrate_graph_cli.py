@@ -32,10 +32,8 @@ from trellis_cli.exit_codes import EXIT_STORE
 #: What a real read-only SQLite file raises on a write.
 _READONLY_DB = "attempt to write a readonly database"
 
-#: A synthetic row value shaped like the opaque token a real Postgres/
-#: Neo4j/ArcadeDB duplicate-key message quotes (``DETAIL: Key (col)=(...)
-#: already exists.``) — 40+ chars of ``[A-Za-z0-9+_-]`` trips the
-#: sanitizer's long-opaque-token heuristic. Synthetic, not a real secret.
+#: A PostgreSQL duplicate-key text quoting a synthetic row value, which
+#: ``sanitize_error_message`` suppresses.
 _SYNTHETIC_SECRET = "synthetic-secret-a1b2c3d4e5f6a1b2c3d4e5f6"  # noqa: S105 — test placeholder, not a real credential
 _SYNTHETIC_STORE_ERROR = (
     'duplicate key value violates unique constraint "node_pkey" DETAIL: '
@@ -462,17 +460,8 @@ class TestFailedMigrationExitsTheSameWayOnBothSurfaces:
 
 
 class TestStoreFailureTextIsSanitized:
-    """#753 follow-up 2: a destination store's own failure text reaches
-    stdout unsanitized on every rendering path, while every other CLI
-    failure path routes ``str(exc)`` through ``sanitize_error_message``
-    first.
-
-    ``_SYNTHETIC_STORE_ERROR`` reproduces the ``DETAIL: Key (col)=(...)
-    already exists.`` shape a real Postgres/Neo4j/ArcadeDB duplicate-key
-    violation quotes, with a 41-char opaque token standing in for the
-    row value — long enough to trip the sanitizer's existing
-    long-opaque-token heuristic (no sanitizer pattern is added here).
-    """
+    """Every rendering of a destination store's failure text goes through
+    ``sanitize_error_message``; the JSON payload carries no traceback."""
 
     @staticmethod
     def _seeded_configs(
@@ -481,15 +470,17 @@ class TestStoreFailureTextIsSanitized:
         *,
         message: str = _SYNTHETIC_STORE_ERROR,
     ) -> tuple[Path, Path]:
-        """Seed the source store, THEN patch writes to fail.
+        """Seed two source nodes, THEN patch writes to fail.
 
         Seeding the source also calls ``upsert_node``, so the patch must
         land after seeding or it breaks setup instead of the migration.
+        Two nodes, so a sanitizer applied to one entry only is caught.
         """
         src_config, src_db = _write_sqlite_config(tmp_path, "src")
         dst_config, _ = _write_sqlite_config(tmp_path, "dst")
         src = SQLiteGraphStore(db_path=src_db)
         src.upsert_node("n1", node_type="X", properties={})
+        src.upsert_node("n2", node_type="X", properties={})
         src.close()
 
         def _refuse_write(*_args: object, **_kwargs: object) -> None:
@@ -522,32 +513,6 @@ class TestStoreFailureTextIsSanitized:
         assert SUPPRESSED_MARKER in output
         assert result.exit_code == EXIT_STORE
 
-    def test_fail_fast_abort_line_is_sanitized_under_format_json(
-        self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """``MigrationStepError`` is caught and rendered before the
-        ``--format`` branch is reached, so ``--format json`` does not
-        change this path — re-measured, not assumed."""
-        src_config, dst_config = self._seeded_configs(tmp_path, monkeypatch)
-
-        result = runner.invoke(
-            admin_app,
-            [
-                "migrate-graph",
-                "--from-config",
-                str(src_config),
-                "--to-config",
-                str(dst_config),
-                "--format",
-                "json",
-            ],
-        )
-
-        output = plain(result.output)
-        assert _SYNTHETIC_SECRET not in output
-        assert SUPPRESSED_MARKER in output
-        assert result.exit_code == EXIT_STORE
-
     def test_continue_on_error_text_list_is_sanitized(
         self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -567,7 +532,7 @@ class TestStoreFailureTextIsSanitized:
 
         output = plain(result.output)
         assert _SYNTHETIC_SECRET not in output
-        assert SUPPRESSED_MARKER in output
+        assert output.count(SUPPRESSED_MARKER) == 2
         assert result.exit_code == EXIT_STORE
 
     def test_continue_on_error_json_errors_and_step_failures_are_sanitized(
@@ -590,28 +555,25 @@ class TestStoreFailureTextIsSanitized:
         )
 
         payload = json.loads(result.stdout)
+        assert _SYNTHETIC_SECRET not in result.stdout
         assert payload["status"] == "error"
-        assert payload["errors"], "the failed step must survive into the payload"
-        assert payload["errors"][0]["message"] == SUPPRESSED_MARKER
-        assert payload["step_failures"], "structured failures must survive too"
-        assert payload["step_failures"][0]["message"] == SUPPRESSED_MARKER
+        assert [e["message"] for e in payload["errors"]] == [SUPPRESSED_MARKER] * 2
+        failures = sorted(payload["step_failures"], key=lambda f: f["entity_id"])
+        assert failures == [
+            {
+                "step": "upsert_node",
+                "entity_id": node_id,
+                "error_class": "IntegrityError",
+                "message": SUPPRESSED_MARKER,
+            }
+            for node_id in ("n1", "n2")
+        ]
         assert result.exit_code == EXIT_STORE
-        # step_failures[].traceback is a raw traceback.format_exception()
-        # string whose last line repeats the same leaking message, and it
-        # is just as user-facing (stdout, --format json) as the message
-        # field above — the sanitizer is all-or-nothing, so a leaking
-        # traceback is replaced wholesale with the marker, never partially
-        # redacted.
-        assert _SYNTHETIC_SECRET not in payload["step_failures"][0]["traceback"]
-        assert payload["step_failures"][0]["traceback"] == SUPPRESSED_MARKER
 
     def test_a_clean_failure_message_renders_unchanged(
         self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A failure whose text the sanitizer leaves alone (no leak
-        heuristic trips) must render exactly as it did before this
-        change — sanitizing is not a license to also truncate or alter
-        clean operator-facing text."""
+        """A message no leak heuristic flags passes through unchanged."""
         src_config, dst_config = self._seeded_configs(
             tmp_path, monkeypatch, message=_READONLY_DB
         )
@@ -631,14 +593,6 @@ class TestStoreFailureTextIsSanitized:
         )
 
         payload = json.loads(result.stdout)
-        assert payload["errors"][0]["message"] == f"IntegrityError: {_READONLY_DB}"
-        assert payload["step_failures"][0]["message"] == _READONLY_DB
-        # Not asserted here: whether step_failures[].traceback itself
-        # renders unchanged for this message. traceback.format_exception()
-        # embeds the absolute source-file path of every frame, so whether
-        # it trips the long-opaque-token heuristic depends on the
-        # checkout's own path length, not on this message's content — this
-        # worktree's directory name is exactly 40 chars and trips it
-        # on its own. That is a property of the shared sanitizer, not of
-        # this message, and is noted as a finding in the PR body rather
-        # than pinned to a path-length-dependent assertion here.
+        clean = f"IntegrityError: {_READONLY_DB}"
+        assert [e["message"] for e in payload["errors"]] == [clean] * 2
+        assert [f["message"] for f in payload["step_failures"]] == [_READONLY_DB] * 2

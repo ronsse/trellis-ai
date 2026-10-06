@@ -1236,25 +1236,17 @@ All notable changes to Trellis will be documented in this file.
   store compared in Python, is refused too. A `None`, list or dict value is
   still compared in Python and does not raise.
   ([#743](https://github.com/ronsse/trellis-ai/issues/743) follow-up 3)
-- **`trellis admin migrate-graph` sanitizes the destination store's own
-  failure text before printing it.** The `Migration aborted:` line
-  (`MigrationStepError`, which embeds the wrapped exception's `str()`),
-  `--continue-on-error`'s text `Errors:` list, and its `--format json`
-  `errors[].message`, `step_failures[].message` and
-  `step_failures[].traceback` all printed `str(exc)` (or, for
-  `traceback`, a full `traceback.format_exception()`) verbatim — a
-  duplicate-key or constraint violation from Postgres, Neo4j or ArcadeDB
-  can quote the row value that tripped it (#747/#753), so it reached
-  stdout unsanitized while every other CLI failure path routes that text
-  through `sanitize_error_message` first. All five now do too;
-  `report.errors`/`report.step_failures` keep the raw text for library
-  callers. `sanitize_error_message` is all-or-nothing, so a leaking
-  traceback is replaced wholesale with the marker rather than partially
-  redacted; whether a given traceback trips the sanitizer's
-  long-opaque-token heuristic also depends on the checkout path's own
-  length (any 40+ char path component, not just injected secrets, trips
-  it), which is a property of the shared sanitizer rather than of this
-  change.
+- **`trellis admin migrate-graph` sanitizes a destination store's failure
+  text before printing it.** The `Migration aborted:` line,
+  `--continue-on-error`'s `Errors:` list, and the `--format json`
+  `errors[].message` and `step_failures[].message` printed the store's
+  exception text verbatim, which can quote the row value behind a
+  duplicate-key or constraint violation. All four now go through
+  `sanitize_error_message`, and the payload drops
+  `step_failures[].traceback`, which repeats every chained exception's
+  text. `MigrationReport` keeps the raw text, as does the
+  `--continue-on-error` error log on stderr.
+  ([#757](https://github.com/ronsse/trellis-ai/pull/757))
 
 ## [0.9.0] - 2026-05-13
 

@@ -1801,13 +1801,8 @@ def migrate_graph(
                 console.print(f"[red]{escape(str(exc))}[/red]")
                 raise typer.Exit(code=EXIT_INTERNAL) from exc
             except MigrationStepError as exc:
-                # str(exc) embeds the destination store's own exception
-                # text, which for Postgres/Neo4j/ArcadeDB can quote the
-                # row value that tripped the failure (#753). Route it
-                # through the same sanitizer every other CLI failure
-                # path uses before it reaches stdout; the full text is
-                # still on the ``logger.error`` call inside the
-                # migrator, for operators.
+                # str(exc) embeds the destination store's own error
+                # text, which can quote the row value that tripped it.
                 sanitized = escape(sanitize_error_message(str(exc)))
                 console.print(f"[red]Migration aborted: {sanitized}[/red]")
                 console.print(
@@ -1840,27 +1835,19 @@ def migrate_graph(
         from dataclasses import asdict  # noqa: PLC0415
 
         # Errors are list[tuple] which json doesn't serialize directly.
-        # ``report.errors``/``report.step_failures`` keep str(exc)
-        # verbatim for library callers (#437's JSON contract, and the
-        # in-memory report is not this command's rendering), so
-        # sanitizing happens only in the payload dicts built here.
+        # The report keeps the raw text for library callers; only this
+        # payload, which reaches stdout, is sanitized.
         payload = asdict(report)
         payload["errors"] = [
             {"target": target, "message": sanitize_error_message(msg)}
             for target, msg in payload["errors"]
         ]
-        # step_failures already serialize cleanly via asdict (dataclass);
-        # their ``message`` field is the same raw str(exc) as above, and
-        # ``traceback`` is a full traceback.format_exception() string
-        # whose last line repeats that same message — an equally
-        # user-facing stdout surface, so it goes through the same
-        # sanitizer. sanitize_error_message is all-or-nothing (it
-        # returns the marker on any hit, never a partial redaction), so
-        # a leaking traceback is replaced wholesale and a clean one
-        # renders unchanged.
+        # The traceback is dropped, not sanitized: it repeats the text of
+        # every chained exception, and a sanitized traceback is either the
+        # marker or its first 500 characters, which can quote a cause.
         for failure in payload["step_failures"]:
             failure["message"] = sanitize_error_message(failure["message"])
-            failure["traceback"] = sanitize_error_message(failure["traceback"])
+            del failure["traceback"]
         # ``status`` is the house contract for --format json callers
         # (docs/design/adr-cli-exit-codes.md), and it is derived from the
         # same ``failed`` flag as the exit code so the two cannot
@@ -1879,8 +1866,7 @@ def migrate_graph(
             for target, msg in report.errors:
                 # ``target`` is the legacy graph key the migration choked
                 # on — an identifier the operator re-runs against. ``msg``
-                # is str(exc) from the destination store and goes through
-                # the same sanitizer as the JSON branch below.
+                # is sanitized as in the JSON branch above.
                 sanitized_msg = escape(sanitize_error_message(msg))
                 console.print(f"  [red]{escape(target)}[/red]: {sanitized_msg}")
 
