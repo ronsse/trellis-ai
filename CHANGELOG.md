@@ -1094,6 +1094,7 @@ All notable changes to Trellis will be documented in this file.
   refusal already does, so the batch counts it under `rejected`, MCP answers
   `"rejected"` and the exit code is `2`. Its message, audit event and
   warnings are unchanged. No CLI command builds such a command today.
+  ([#744](https://github.com/ronsse/trellis-ai/pull/744))
 
 ## [0.9.0] - 2026-05-13
 
