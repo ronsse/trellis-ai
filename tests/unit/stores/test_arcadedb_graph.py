@@ -519,3 +519,14 @@ class TestDuplicateCurrentRow:
         bolt_duplicate_current.check_equal_stamps_pick_the_greater_version_id(
             graph_store
         )
+
+    def test_upsert_node_heals_a_duplicate(self, graph_store):
+        bolt_duplicate_current.check_upsert_node_heals_a_duplicate(graph_store)
+
+    def test_upsert_nodes_bulk_heals_a_duplicate(self, graph_store):
+        bolt_duplicate_current.check_upsert_nodes_bulk_heals_a_duplicate(graph_store)
+
+    def test_update_node_if_current_heals_a_duplicate(self, graph_store):
+        bolt_duplicate_current.check_update_node_if_current_heals_a_duplicate(
+            graph_store
+        )

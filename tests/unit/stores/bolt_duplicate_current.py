@@ -1,4 +1,4 @@
-"""Bolt graph reads of a ``node_id`` that has two current rows.
+"""Bolt graph reads and writes of a ``node_id`` that has two current rows.
 
 Shared by ``test_neo4j_graph.py`` and ``test_arcadedb_graph.py``. The Bolt
 backends hold "at most one current row per ``node_id``" in the
@@ -8,14 +8,16 @@ can leave two (the module docstring of
 directly, as that race would, then requires ``get_node``, ``search_nodes``
 in either direction and ``count_nodes_by_type`` to show one version of the
 node: the one with the latest ``valid_from``, or the greater ``version_id``
-when the stamps are equal.
+when the stamps are equal. The write checks require the next write to
+continue that version and close both rows, leaving one current row.
 
 The duplicates are built so that rival rules pick the other row. A later
 stamp carries the smaller ``version_id`` and an earlier stamp the greater,
 so ranking by ``version_id`` first fails. A duplicate's ``created_at`` moves
 with its ``valid_from``, as when both writers create a node's first
 version, so keeping the first row in ``created_at`` order fails in one sort
-direction.
+direction, and a write that carries ``created_at`` over from the hidden
+row is seen.
 """
 
 from __future__ import annotations
@@ -212,3 +214,189 @@ def check_equal_stamps_pick_the_greater_version_id(store: Any) -> None:
     assert counts == {"kind-a": 2, "kind-b": 1}, counts
     counts = store.count_nodes_by_type(search="second")
     assert counts == {"kind-b": 1}, counts
+
+
+#: Duplicates for the write checks: ``(node_id, shift, greater_version_id,
+#: created_at_shift, copy_is_shown)``. The copy is shown for a later stamp
+#: with the smaller ``version_id``, or an equal stamp with the greater; the
+#: original is shown against an earlier stamp with the greater. The equal
+#: stamps get an earlier ``created_at`` so the two rows still differ in it.
+WRITE_DUPLICATES = (
+    ("dup-later", LATER, False, None, True),
+    ("dup-earlier", EARLIER, True, None, False),
+    ("dup-tie", SAME, True, EARLIER, True),
+)
+
+
+def _row_name(row: dict[str, Any]) -> str:
+    return str(json.loads(row["properties_json"])["name"])
+
+
+def _instant(stamp: Any) -> datetime:
+    """A stored stamp as a datetime, however the engine spells it.
+
+    ArcadeDB returns a stamp written from a parameter as it was sent, and
+    one carried over in Cypher (``created_at``) in its ``Z`` spelling.
+    """
+    return datetime.fromisoformat(str(stamp))
+
+
+def _current_rows(store: Any, node_id: str) -> list[dict[str, Any]]:
+    """Every current row of *node_id*, as stored."""
+    with store._driver.session(database=store._database) as session:
+        records = session.run(
+            "MATCH (n:Node {node_id: $node_id}) WHERE n.valid_to IS NULL "
+            "RETURN n {.*, embedding: null} AS n",
+            node_id=node_id,
+        ).data()
+    return [record["n"] for record in records]
+
+
+def _duplicated(
+    store: Any,
+    node_id: str,
+    *,
+    shift: timedelta,
+    greater_version_id: bool,
+    created_at_shift: timedelta | None,
+    copy_is_shown: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Give *node_id* two current rows; return the shown row, then the hidden.
+
+    The two rows differ in ``created_at``, the field a write carries over.
+    """
+    store.upsert_node(node_id, "kind-a", {"name": f"{node_id} original"})
+    add_current_row(
+        store,
+        node_id,
+        name=f"{node_id} copy",
+        shift=shift,
+        greater_version_id=greater_version_id,
+        created_at_shift=created_at_shift,
+    )
+    rows = {_row_name(row): row for row in _current_rows(store, node_id)}
+    shown_name = f"{node_id} copy" if copy_is_shown else f"{node_id} original"
+    assert store.get_node(node_id)["properties"]["name"] == shown_name
+    shown = rows.pop(shown_name)
+    (hidden,) = rows.values()
+    assert _instant(shown["created_at"]) != _instant(hidden["created_at"]), node_id
+    return shown, hidden
+
+
+def _all_duplicated(store: Any) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+    return {
+        node_id: _duplicated(
+            store,
+            node_id,
+            shift=shift,
+            greater_version_id=greater,
+            created_at_shift=created_at_shift,
+            copy_is_shown=copy_is_shown,
+        )
+        for node_id, shift, greater, created_at_shift, copy_is_shown in (
+            WRITE_DUPLICATES
+        )
+    }
+
+
+def _assert_healed(
+    store: Any,
+    node_id: str,
+    *,
+    name: str,
+    shown: dict[str, Any],
+    hidden: dict[str, Any],
+) -> None:
+    """*node_id* has one current row, named *name*, that continues *shown*.
+
+    The new row carries ``created_at`` over from the shown row, and the
+    history holds both earlier rows closed where the new one starts.
+    """
+    current = _current_rows(store, node_id)
+    assert [_row_name(row) for row in current] == [name], (node_id, current)
+    (new,) = current
+    assert _instant(new["created_at"]) == _instant(shown["created_at"]), (
+        node_id,
+        new,
+        shown,
+    )
+    history = store.get_node_history(node_id)
+    closed = sorted(
+        (version["properties"]["name"], _instant(version["valid_to"]))
+        for version in history
+        if version["valid_to"] is not None
+    )
+    starts = _instant(new["valid_from"])
+    expected = sorted((_row_name(row), starts) for row in (shown, hidden))
+    assert closed == expected, (node_id, closed)
+    assert len(history) == 3, (node_id, history)
+
+
+def check_upsert_node_heals_a_duplicate(store: Any) -> None:
+    """``upsert_node`` closes both current rows and writes one version."""
+    for node_id, (shown, hidden) in _all_duplicated(store).items():
+        name = f"{node_id} healed"
+        assert store.upsert_node(node_id, "kind-a", {"name": name}) == node_id
+        _assert_healed(store, node_id, name=name, shown=shown, hidden=hidden)
+
+
+def check_upsert_nodes_bulk_heals_a_duplicate(store: Any) -> None:
+    """``upsert_nodes_bulk`` heals duplicated nodes written beside plain ones.
+
+    Each duplicate is built twice. One node gets new content; the other
+    (``-hidden``) gets exactly its hidden row's content, which differs from
+    the shown version and so is a write, not an unchanged no-op.
+    """
+    store.upsert_node("plain-old", "kind-a", {"name": "plain old"})
+    duplicated = _all_duplicated(store)
+    for node_id, shift, greater, created_at_shift, copy_is_shown in WRITE_DUPLICATES:
+        duplicated[f"{node_id}-hidden"] = _duplicated(
+            store,
+            f"{node_id}-hidden",
+            shift=shift,
+            greater_version_id=greater,
+            created_at_shift=created_at_shift,
+            copy_is_shown=copy_is_shown,
+        )
+    names = {"plain-old": "plain old updated", "plain-new": "plain new"}
+    for node_id, (_, hidden) in duplicated.items():
+        names[node_id] = _row_name(hidden) if node_id.endswith("-hidden") else node_id
+    written = store.upsert_nodes_bulk(
+        [
+            {"node_id": node_id, "node_type": "kind-a", "properties": {"name": name}}
+            for node_id, name in names.items()
+        ]
+    )
+    assert written == list(names)
+    for node_id, (shown, hidden) in duplicated.items():
+        _assert_healed(store, node_id, name=names[node_id], shown=shown, hidden=hidden)
+    for node_id in ("plain-old", "plain-new"):
+        rows = _current_rows(store, node_id)
+        assert [_row_name(row) for row in rows] == [names[node_id]], node_id
+
+
+def check_update_node_if_current_heals_a_duplicate(store: Any) -> None:
+    """The compare-and-set checks the shown version and closes both rows.
+
+    A token naming the hidden row is refused and writes nothing. (With
+    equal stamps the two rows share one token, which names the shown row.)
+    """
+    for node_id, (shown, hidden) in _all_duplicated(store).items():
+        if _instant(hidden["valid_from"]) != _instant(shown["valid_from"]):
+            refused = store.update_node_if_current(
+                node_id,
+                str(hidden["valid_from"]),
+                "kind-a",
+                {"name": "via the hidden token"},
+                node_role="semantic",
+            )
+            assert refused is False, node_id
+            rows = sorted(_row_name(row) for row in _current_rows(store, node_id))
+            assert rows == sorted(_row_name(row) for row in (shown, hidden))
+        token = store.get_node(node_id)["valid_from"]
+        name = f"{node_id} healed"
+        written = store.update_node_if_current(
+            node_id, token, "kind-a", {"name": name}, node_role="semantic"
+        )
+        assert written is True, node_id
+        _assert_healed(store, node_id, name=name, shown=shown, hidden=hidden)
