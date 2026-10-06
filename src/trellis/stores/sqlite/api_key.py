@@ -49,25 +49,25 @@ class SQLiteApiKeyStore(SQLiteStoreBase, ApiKeyStore):
     # -- mutations -----------------------------------------------------------
 
     def create(self, record: ApiKeyRecord) -> ApiKeyRecord:
-        cur = self._conn.cursor()
+        conn = self._conn
         try:
-            cur.execute(
-                "INSERT INTO trellis_api_keys ("
-                "key_id, name, scopes, secret_hash, created_at, revoked_at"
-                ") VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    record.key_id,
-                    record.name,
-                    json.dumps(list(record.scopes)),
-                    record.secret_hash,
-                    record.created_at.isoformat(),
-                    record.revoked_at.isoformat() if record.revoked_at else None,
-                ),
-            )
+            with conn:  # commits on success, rolls back on an exception
+                conn.execute(
+                    "INSERT INTO trellis_api_keys ("
+                    "key_id, name, scopes, secret_hash, created_at, revoked_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        record.key_id,
+                        record.name,
+                        json.dumps(list(record.scopes)),
+                        record.secret_hash,
+                        record.created_at.isoformat(),
+                        record.revoked_at.isoformat() if record.revoked_at else None,
+                    ),
+                )
         except sqlite3.IntegrityError as exc:
             msg = f"API key already exists: {record.key_id}"
             raise StoreError(msg, store="api_key") from exc
-        self._conn.commit()
         logger.info(
             "api_key.created",
             key_id=record.key_id,
