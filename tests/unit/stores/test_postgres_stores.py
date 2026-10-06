@@ -12,6 +12,7 @@ from __future__ import annotations
 import threading
 import time
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -1008,6 +1009,158 @@ class TestPostgresEventLog:
         assert len(baseline) == 2
         assert [e.event_id for e in none_filtered] == [e.event_id for e in baseline]
         assert [e.event_id for e in empty_filtered] == [e.event_id for e in baseline]
+
+
+def _drop_the_events_table(store: Any) -> type[Exception]:
+    """Make every statement fail inside the cursor, as a server error does.
+
+    The drop goes through ``_clean_tables`` and its scratch-database check.
+    """
+    _clean_tables(store._dsn)
+    return psycopg.errors.UndefinedTable
+
+
+def _close_the_pool(store: Any) -> type[Exception]:
+    """Make every call fail on pool entry, where a ``PoolTimeout`` is raised."""
+    from psycopg_pool import PoolClosed
+
+    store._pool.close()
+    return PoolClosed
+
+
+_BROKEN_EVENT_LOGS = [
+    pytest.param(_drop_the_events_table, id="table-dropped"),
+    pytest.param(_close_the_pool, id="pool-closed"),
+]
+
+
+class TestPostgresEventLogDriverErrors:
+    """A psycopg error in the event log is raised as a type-only ``StoreError``.
+
+    The executor catches ``StoreError`` around Stage 3's idempotency read and
+    Stage 5's audit append. A raw ``psycopg.Error`` is outside both catches:
+    a keyed command raised out of ``execute`` instead of failing closed, and
+    an unkeyed one raised after its handler had written. The message names
+    the operation and the error's type, not the server's text, as the purges
+    do (#702, #713); the psycopg error stays on ``__cause__``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self) -> None:
+        assert PG_DSN is not None
+        _clean_tables(PG_DSN)
+
+    @pytest.fixture
+    def store(self):
+        from trellis.stores.postgres.event_log import PostgresEventLog
+
+        assert PG_DSN is not None
+        s = PostgresEventLog(PG_DSN)
+        yield s
+        s.close()
+
+    @staticmethod
+    def _executor(store: Any) -> tuple[Any, MagicMock]:
+        from trellis.mutate.commands import Operation
+        from trellis.mutate.executor import MutationExecutor
+
+        handler = MagicMock()
+        handler.handle.return_value = ("syn-node-1", "ok")
+        executor = MutationExecutor(
+            event_log=store, handlers={Operation.ENTITY_CREATE: handler}
+        )
+        return executor, handler
+
+    @staticmethod
+    def _command(idempotency_key: str | None) -> Any:
+        from trellis.mutate.commands import Command, Operation
+
+        return Command(
+            operation=Operation.ENTITY_CREATE,
+            args={"entity_type": "service", "name": "syn-entity"},
+            idempotency_key=idempotency_key,
+        )
+
+    @pytest.mark.parametrize(
+        "operation", ["append", "has_idempotency_key", "get_events", "count"]
+    )
+    @pytest.mark.parametrize("break_log", _BROKEN_EVENT_LOGS)
+    def test_a_driver_error_is_raised_as_a_type_only_store_error(
+        self, store, break_log, operation: str
+    ) -> None:
+        from trellis.errors import StoreError
+        from trellis.stores.base.event_log import Event, EventType
+
+        event = Event(
+            event_type=EventType.ENTITY_CREATED,
+            source="syn-source",
+            entity_id="syn-entity-1",
+        )
+        calls = {
+            "append": lambda: store.append(event),
+            "has_idempotency_key": lambda: store.has_idempotency_key("syn-key-1"),
+            "get_events": store.get_events,
+            "count": store.count,
+        }
+        cause_type = break_log(store)
+
+        with pytest.raises(StoreError) as caught:
+            calls[operation]()
+
+        expected = f"Event log {operation} failed: {cause_type.__name__}"
+        assert str(caught.value) == expected
+        assert caught.value.store == "event_log"
+        assert type(caught.value.__cause__) is cause_type
+
+    @pytest.mark.parametrize("break_log", _BROKEN_EVENT_LOGS)
+    def test_a_keyed_command_fails_closed(self, store, break_log) -> None:
+        """Stage 3's read fails, so the handler does not run.
+
+        The rejection event goes to the same broken log, so the result also
+        says that its audit record is missing.
+        """
+        from trellis.mutate.commands import CommandStatus
+        from trellis.mutate.executor import AUDIT_EMIT_FAILED_MARKER
+
+        executor, handler = self._executor(store)
+        cause_type = break_log(store)
+
+        result = executor.execute(self._command("syn-key-1"))
+
+        assert (result.status, result.message) == (
+            CommandStatus.FAILED,
+            "Idempotency check failed: StoreError",
+        )
+        [warning] = result.warnings
+        assert warning.startswith(f"{AUDIT_EMIT_FAILED_MARKER}: the mutation.rejected")
+        assert f"(StoreError: Event log append failed: {cause_type.__name__})." in (
+            warning
+        )
+        handler.handle.assert_not_called()
+
+    @pytest.mark.parametrize("break_log", _BROKEN_EVENT_LOGS)
+    def test_an_unkeyed_command_reports_its_write_and_the_missing_audit(
+        self, store, break_log
+    ) -> None:
+        """The handler has written, so the result is SUCCESS with a warning."""
+        from trellis.mutate.commands import CommandStatus
+        from trellis.mutate.executor import AUDIT_EMIT_FAILED_MARKER
+
+        executor, handler = self._executor(store)
+        cause_type = break_log(store)
+
+        result = executor.execute(self._command(None))
+
+        assert (result.status, result.created_id) == (
+            CommandStatus.SUCCESS,
+            "syn-node-1",
+        )
+        [warning] = result.warnings
+        assert warning.startswith(f"{AUDIT_EMIT_FAILED_MARKER}: the mutation.executed")
+        assert f"(StoreError: Event log append failed: {cause_type.__name__})." in (
+            warning
+        )
+        handler.handle.assert_called_once()
 
 
 # ======================================================================

@@ -962,7 +962,7 @@ All notable changes to Trellis will be documented in this file.
   payload and exits `5` instead of a traceback and `1`, and
   `POST /api/v1/commands/batch` answers `200` with the command `failed`
   instead of `500`. The key is not recorded, so a retry runs once the log
-  can be read. A Postgres event log's driver errors still escape.
+  can be read.
   ([#728](https://github.com/ronsse/trellis-ai/pull/728))
 - **`trellis extract traces` and `extract refresh` report what their batch
   answered.** Both discarded the results of the governed batch they ran: a
@@ -980,6 +980,23 @@ All notable changes to Trellis will be documented in this file.
   keys and values verbatim, instead of deleting bracketed text or exiting
   `1` on a closing tag such as `[/x]`.
   ([#730](https://github.com/ronsse/trellis-ai/pull/730))
+- **A Postgres event log's driver errors are raised as `StoreError`, and a
+  failed SQLite event-log append no longer holds the write lock.**
+  `PostgresEventLog.append`, `has_idempotency_key`, `get_events` and
+  `count` let a psycopg error escape, such as a `PoolTimeout` taking a
+  connection or an `OperationalError` from a statement, so a keyed command
+  raised out of `MutationExecutor.execute` instead of failing closed and an
+  unkeyed one raised after its handler had written. They now raise
+  `StoreError` with the message `Event log <method> failed: <exception
+  type>`, leaving out the server's text: a keyed command answers `failed`
+  with `Idempotency check failed: StoreError`, and an unkeyed one reports
+  its write with a warning that its audit event is missing.
+  `SQLiteEventLog.append` now rolls back an INSERT that fails, such as on a
+  duplicate `event_id`. The transaction had stayed open, so every other
+  connection's write to that database waited out its 10-second busy
+  timeout and failed with `database is locked` until the connection's next
+  commit.
+  ([#733](https://github.com/ronsse/trellis-ai/pull/733))
 
 ## [0.9.0] - 2026-05-13
 
