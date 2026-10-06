@@ -77,14 +77,6 @@ SEEDED_DOCUMENTS: Rows = [
     ("fts", "syn-d1", "syn v1"),
     ("fts", "syn-d2", "syn v2"),
 ]
-DOCUMENTS_AFTER_NEXT_WRITE: Rows = [
-    ("doc", "syn-d1", "syn v1"),
-    ("doc", "syn-d2", "syn v2"),
-    ("doc", "syn-d3", "syn v3"),
-    ("fts", "syn-d1", "syn v1"),
-    ("fts", "syn-d2", "syn v2"),
-    ("fts", "syn-d3", "syn v3"),
-]
 
 
 def _ddl(db_path: Path, *statements: str) -> None:
@@ -181,8 +173,7 @@ class Site:
     """A store write, a way to make it fail, and the rows it leaves.
 
     ``seeded`` is what ``rows`` reads after ``seed``, and ``written`` what it
-    reads after ``call`` succeeds. A write of several statements also names
-    the store's next write, and the rows committed after it.
+    reads after ``call`` succeeds.
     """
 
     store: Callable[[Path], Any]
@@ -194,8 +185,6 @@ class Site:
     written: Rows
     error: type[sqlite3.Error] = sqlite3.IntegrityError
     message: str = FORCED
-    next_write: Callable[[Any], object] | None = None
-    after_next_write: Rows | None = None
 
 
 SITES: dict[str, Site] = {
@@ -207,8 +196,6 @@ SITES: dict[str, Site] = {
         rows=NODES,
         seeded=[("syn-n1", '{"v": 1}', 1)],
         written=[("syn-n1", '{"v": 1}', 0), ("syn-n1", '{"v": 2}', 1)],
-        next_write=lambda st: st.upsert_node("syn-n9", "syn-type", {}),
-        after_next_write=[("syn-n1", '{"v": 1}', 1), ("syn-n9", "{}", 1)],
     ),
     "graph.upsert_nodes_bulk": Site(
         store=SQLiteGraphStore,
@@ -231,8 +218,6 @@ SITES: dict[str, Site] = {
             ("syn-n3", "{}", 1),
             ("syn-n4", "{}", 1),
         ],
-        next_write=lambda st: st.upsert_node("syn-n9", "syn-type", {}),
-        after_next_write=[("syn-n1", '{"v": 1}', 1), ("syn-n9", "{}", 1)],
     ),
     "graph.upsert_alias": Site(
         store=SQLiteGraphStore,
@@ -242,8 +227,6 @@ SITES: dict[str, Site] = {
         rows=ALIASES,
         seeded=[("syn-raw1", "syn-ent1", 1)],
         written=[("syn-raw1", "syn-ent1", 0), ("syn-raw1", "syn-ent2", 1)],
-        next_write=lambda st: st.upsert_alias("syn-ent1", "syn-sys", "syn-raw9"),
-        after_next_write=[("syn-raw1", "syn-ent1", 1), ("syn-raw9", "syn-ent1", 1)],
     ),
     "graph.upsert_edge": Site(
         store=SQLiteGraphStore,
@@ -257,11 +240,6 @@ SITES: dict[str, Site] = {
         written=[
             ("syn-a", "syn-b", '{"v": 1}', 0),
             ("syn-a", "syn-b", '{"v": 2}', 1),
-        ],
-        next_write=lambda st: st.upsert_edge("syn-b", "syn-c", "syn-rel"),
-        after_next_write=[
-            ("syn-a", "syn-b", '{"v": 1}', 1),
-            ("syn-b", "syn-c", "{}", 1),
         ],
     ),
     "graph.upsert_edges_bulk": Site(
@@ -290,11 +268,6 @@ SITES: dict[str, Site] = {
             ("syn-b", "syn-c", "{}", 1),
             ("syn-c", "syn-a", "{}", 1),
         ],
-        next_write=lambda st: st.upsert_edge("syn-c", "syn-b", "syn-rel"),
-        after_next_write=[
-            ("syn-a", "syn-b", '{"v": 1}', 1),
-            ("syn-c", "syn-b", "{}", 1),
-        ],
     ),
     "graph.delete_node": Site(
         store=SQLiteGraphStore,
@@ -304,8 +277,6 @@ SITES: dict[str, Site] = {
         rows=GRAPH,
         seeded=[("alias", "syn-raw1"), *SEEDED_GRAPH],
         written=[("node", "syn-b"), ("node", "syn-c")],
-        next_write=lambda st: st.upsert_node("syn-d", "syn-type", {}),
-        after_next_write=[("alias", "syn-raw1"), *SEEDED_GRAPH, ("node", "syn-d")],
     ),
     "graph.delete_edge": Site(
         store=SQLiteGraphStore,
@@ -331,8 +302,6 @@ SITES: dict[str, Site] = {
         ],
         error=sqlite3.DatabaseError,
         message=r"^not authorized$",
-        next_write=lambda st: st.put("syn-d3", "syn v3"),
-        after_next_write=DOCUMENTS_AFTER_NEXT_WRITE,
     ),
     "document.delete": Site(
         store=SQLiteDocumentStore,
@@ -344,8 +313,6 @@ SITES: dict[str, Site] = {
         written=[("doc", "syn-d2", "syn v2"), ("fts", "syn-d2", "syn v2")],
         error=sqlite3.DatabaseError,
         message=r"^not authorized$",
-        next_write=lambda st: st.put("syn-d3", "syn v3"),
-        after_next_write=DOCUMENTS_AFTER_NEXT_WRITE,
     ),
     "vector.upsert": Site(
         store=SQLiteVectorStore,
@@ -403,9 +370,6 @@ SITES: dict[str, Site] = {
     ),
 }
 
-#: The writes that issue more than one statement.
-PARTWAY = [name for name, site in SITES.items() if site.next_write is not None]
-
 
 @contextmanager
 def _seeded(site: Site, db_path: Path) -> Iterator[Any]:
@@ -419,7 +383,11 @@ def _seeded(site: Site, db_path: Path) -> Iterator[Any]:
 
 @pytest.mark.parametrize("name", list(SITES))
 def test_a_failed_write_holds_no_write_lock(name: str, tmp_path: Path) -> None:
-    """A failed write is rolled back, not left holding the write lock."""
+    """A failed write is rolled back, not left holding the write lock.
+
+    A write of several statements is made to fail after its first, so with
+    nothing pending and no row changed, none of it was kept.
+    """
     site = SITES[name]
     db_path = tmp_path / "store.db"
     with _seeded(site, db_path) as store:
@@ -433,29 +401,6 @@ def test_a_failed_write_holds_no_write_lock(name: str, tmp_path: Path) -> None:
         assert store._conn.in_transaction is False
         write_at_once(db_path, "INSERT INTO syn_probe (x) VALUES (?)", (1,))
         assert committed_rows(db_path, site.rows) == site.seeded
-
-
-@pytest.mark.parametrize("name", PARTWAY)
-def test_a_write_failing_partway_writes_none_of_it(name: str, tmp_path: Path) -> None:
-    """A write of several statements is one transaction: a failure writes none.
-
-    The statements before the failure would otherwise stay pending on the
-    store's connection, for its next commit to write.
-    """
-    site = SITES[name]
-    db_path = tmp_path / "store.db"
-    with _seeded(site, db_path) as store:
-        site.force(store, db_path)
-
-        with pytest.raises(site.error, match=site.message) as err:
-            site.call(store)
-
-        assert type(err.value) is site.error
-        assert committed_rows(db_path, site.rows) == site.seeded
-        store._conn.set_authorizer(None)  # a trigger fires on its own id only
-        assert site.next_write is not None
-        site.next_write(store)
-        assert committed_rows(db_path, site.rows) == site.after_next_write
 
 
 @pytest.mark.parametrize("name", list(SITES))
