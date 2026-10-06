@@ -190,35 +190,75 @@ def test_upsert_edge_missing_endpoints_raises(graph_store, source_id, target_id)
     assert graph_store.count_edges() == 0
 
 
-@pytest.mark.parametrize("vanished", ["source", "target"])
-def test_upsert_edges_bulk_drops_a_row_whose_endpoint_vanished(
-    graph_store, monkeypatch, vanished
-):
-    """An endpoint purged between ``upsert_edges_bulk``'s endpoint check and
-    its write: the write drops that row, whose returned id is ``""``, and
-    adds no edge or vertex."""
-    graph_store.upsert_node("a", "s", {})
-    graph_store.upsert_node("b", "s", {})
-    gone = "a" if vanished == "source" else "b"
-    check = graph_store._fetch_current_node_id_set
+def _purge_after_endpoint_check(store, monkeypatch, gone: str) -> None:
+    """Purge ``gone`` once ``upsert_edges_bulk``'s endpoint check has found
+    it current, so the write runs without it."""
+    check = store._fetch_current_node_id_set
 
     def check_then_purge(session, node_ids):
         found = check(session, node_ids)
-        assert graph_store.delete_node(gone)
+        assert store.delete_node(gone)
         return found
 
-    monkeypatch.setattr(graph_store, "_fetch_current_node_id_set", check_then_purge)
+    monkeypatch.setattr(store, "_fetch_current_node_id_set", check_then_purge)
 
-    def counts():
-        with graph_store._driver.session(database=graph_store._database) as session:
-            nodes = session.run("MATCH (n) RETURN count(n) AS c").single()["c"]
-            rels = session.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
-        return nodes, rels
 
-    nodes, rels = counts()
+def _raw_counts(store) -> tuple[int, int]:
+    """Count every vertex and relationship, whatever its label."""
+    with store._driver.session(database=store._database) as session:
+        nodes = session.run("MATCH (n) RETURN count(n) AS c").single()["c"]
+        rels = session.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
+    return nodes, rels
+
+
+@pytest.mark.parametrize("vanished", ["source", "target"])
+def test_upsert_edges_bulk_refuses_a_row_whose_endpoint_vanished(
+    graph_store, monkeypatch, vanished
+):
+    """An endpoint purged between ``upsert_edges_bulk``'s endpoint check and
+    its write fails the call with ValueError naming the row and the
+    endpoint, and adds no edge or vertex."""
+    graph_store.upsert_node("a", "s", {})
+    graph_store.upsert_node("b", "s", {})
+    gone = "a" if vanished == "source" else "b"
+    _purge_after_endpoint_check(graph_store, monkeypatch, gone)
+    nodes, rels = _raw_counts(graph_store)
     edge = {"source_id": "a", "target_id": "b", "edge_type": "links_to"}
-    assert graph_store.upsert_edges_bulk([edge]) == [""]
-    assert counts() == (nodes - 1, rels)
+    with pytest.raises(
+        ValueError,
+        match=rf"upsert_edges_bulk\[0\]: {vanished} '{gone}' has no current version",
+    ):
+        graph_store.upsert_edges_bulk([edge])
+    assert _raw_counts(graph_store) == (nodes - 1, rels)
+
+
+def test_upsert_edges_bulk_refuses_a_dropped_row_beside_a_duplicated_edge(
+    graph_store, monkeypatch
+):
+    """Row 0's edge has two current versions, so the write returns a record
+    for each: as many records as rows, though row 1, whose target was purged
+    after the endpoint check, wrote nothing. The call names row 1, and its
+    transaction rolls back, so row 0's edge gains no version."""
+    for node_id in ("a", "b", "c", "d"):
+        graph_store.upsert_node(node_id, "s", {})
+    graph_store.upsert_edge("a", "b", "links_to")
+    with graph_store._driver.session(database=graph_store._database) as session:
+        session.run(
+            "MATCH (s:Node {node_id: 'a'})-[r:EDGE]->(t:Node {node_id: 'b'}) "
+            "CREATE (s)-[copy:EDGE]->(t) SET copy = properties(r)"
+        ).consume()
+    _purge_after_endpoint_check(graph_store, monkeypatch, "d")
+    nodes, rels = _raw_counts(graph_store)
+    assert rels == 2
+    edges = [
+        {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
+        {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
+    ]
+    with pytest.raises(
+        ValueError, match=r"upsert_edges_bulk\[1\]: target 'd' has no current version"
+    ):
+        graph_store.upsert_edges_bulk(edges)
+    assert _raw_counts(graph_store) == (nodes - 1, rels)
 
 
 def test_delete_edge(graph_store):

@@ -1155,6 +1155,17 @@ All notable changes to Trellis will be documented in this file.
   marker, the truncation, the payload shape and every caller are
   unchanged.
   ([#747](https://github.com/ronsse/trellis-ai/pull/747))
+- **Neo4j and ArcadeDB `upsert_edges_bulk` refuses a row whose endpoint
+  stops being current during the call.** The method checks that every
+  source and target is current, then writes the batch in a second round
+  trip. A row whose endpoint stopped being current between the two, as
+  when another writer deletes it, wrote nothing and came back as `""` in
+  the returned ids, while the batch's other rows were written. The write
+  now checks that it wrote every row it was sent and raises `ValueError`
+  naming the first missing row's index and endpoint, as the endpoint check
+  does, and the raise rolls the write's transaction back, so no row of the
+  batch is written. A call whose endpoints stay current is unchanged.
+  ([#746](https://github.com/ronsse/trellis-ai/pull/746))
 - **A CLI failure line is no longer hard-wrapped at the console width.**
   Sixteen `except Exception` arms in `trellis extract refresh`,
   `extract traces`, `ingest` (trace, evidence, dbt-manifest, openlineage,
