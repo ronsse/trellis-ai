@@ -1229,6 +1229,13 @@ All notable changes to Trellis will be documented in this file.
   no edge of the batch is written. Neo4j already raised the `ValueError`;
   SQLite and Postgres are unchanged.
   ([#754](https://github.com/ronsse/trellis-ai/pull/754))
+- **`SQLiteDocumentStore.search` refuses a scalar metadata filter on a
+  NUL-holding key with the `ValueError` the SQLite graph and vector stores
+  raise**, before any SQL runs, where it raised a raw
+  `sqlite3.OperationalError`. A key that also holds `"` or `\`, which the
+  store compared in Python, is refused too. A `None`, list or dict value is
+  still compared in Python and does not raise.
+  ([#743](https://github.com/ronsse/trellis-ai/issues/743) follow-up 3)
 - **`trellis admin migrate-graph` sanitizes the destination store's own
   failure text before printing it.** The `Migration aborted:` line
   (`MigrationStepError`, which embeds the wrapped exception's `str()`),

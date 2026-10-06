@@ -20,7 +20,7 @@ from trellis.stores.base.document import (
     encode_filter_value,
 )
 from trellis.stores.base.tag_filters import normalize_facet_filter
-from trellis.stores.sqlite.base import SQLiteStoreBase
+from trellis.stores.sqlite.base import SQLiteStoreBase, reject_nul_key
 
 logger = structlog.get_logger(__name__)
 
@@ -171,7 +171,13 @@ def _bindable_json_path(key: str) -> str | None:
     key as written. Keys holding either character are handed to
     :func:`_metadata_matches` instead, which compares the parsed object in
     Python, needs no path and matches on every SQLite release.
+
+    Raises:
+        ValueError: *key* holds a NUL character, even alongside a ``"`` or a
+            ``\``. :func:`~trellis.stores.sqlite.base.reject_nul_key` raises
+            it, with the message the graph and vector stores give.
     """
+    reject_nul_key(key)
     return None if '"' in key or "\\" in key else f'$."{key}"'
 
 
