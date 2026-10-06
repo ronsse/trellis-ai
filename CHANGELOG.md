@@ -1166,6 +1166,30 @@ All notable changes to Trellis will be documented in this file.
   does, and the raise rolls the write's transaction back, so no row of the
   batch is written. A call whose endpoints stay current is unchanged.
   ([#746](https://github.com/ronsse/trellis-ai/pull/746))
+- **`trellis.testing.in_memory_client` answers a `TrellisError` and a
+  `NaN`-echoing validation error the way `create_app()` does.** The
+  testing shim behind it and `in_memory_async_client` registered none of
+  `create_app`'s exception handlers, so a `TrellisError` raised in a route
+  reached the test as that exception, and a validation error echoing `NaN`
+  raised `ValueError`. Both now answer production's status and body (the
+  shim's `request_id` is null), so the SDK raises `TrellisClientError` for
+  a `ConfigError`'s 409 and `TrellisServerError` for any other
+  `TrellisError`'s 500. An untyped exception still raises into the test.
+  Both apps register the handlers from
+  `trellis_api.app.register_exception_handlers`.
+  ([#749](https://github.com/ronsse/trellis-ai/pull/749))
+- **A `feedback.record` command refuses a rating outside `[0.0, 1.0]`.**
+  `OperationRegistry.validate` checked only that `rating` was present, so
+  `POST /api/v1/commands/batch` and MCP `execute_mutation` — the two
+  surfaces that build a `Command` straight from caller args — could pass
+  NaN, +/-Infinity, a negative value, a value above `1.0`, a bool, `null`
+  or a string straight through to `FeedbackRecordHandler`, which recorded it
+  verbatim. `POST /api/v1/feedback` and `trellis curate feedback` already
+  bound `rating` before building the `Command` and are unaffected. A bad
+  rating on `feedback.record` now fails Stage 1 the same way a missing arg
+  does: `REJECTED` with `metadata["rejection_reason"] = "validate"`, one
+  `mutation.rejected` event, nothing recorded. No other operation changes.
+  ([#751](https://github.com/ronsse/trellis-ai/pull/751))
 - **SQLite and Postgres `upsert_edges_bulk` closes only the prior versions
   of the triplets a batch names.** It closed every current edge from a
   batch entry's source, so upserting one `(source, target, edge_type)` edge

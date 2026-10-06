@@ -324,6 +324,24 @@ class TestExecuteMutationErrors:
             "Validation failed: Missing required args: edge_kind, target_id"
         )
 
+    def test_feedback_record_refuses_an_out_of_range_rating(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """A ``feedback.record`` rating of 5.0 is rejected and nothing is recorded.
+
+        ``execute_mutation`` passes caller ``args`` straight into the ``Command``.
+        """
+        raw = execute_mutation(
+            operation="feedback.record",
+            args={"target_id": "t1", "rating": 5.0},
+        )
+        payload = json.loads(raw)
+        assert payload["status"] == "rejected"
+        assert "rating" in payload["message"].lower()
+        assert not temp_registry.operational.event_log.get_events(
+            event_type=EventType.FEEDBACK_RECORDED, limit=5
+        )
+
     def test_handler_failure_surfaces_rejected_status(
         self, temp_registry: StoreRegistry
     ) -> None:
