@@ -42,6 +42,7 @@ import structlog
 
 from trellis.stores.base.registry import RegistryContext
 from trellis.stores.base.vector import VectorStore
+from trellis.stores.bolt_opencypher.base import open_errors_as_store_error
 from trellis.stores.neo4j.base import (
     DriverConfig,
     Neo4jSessionRunner,
@@ -144,7 +145,9 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
         self._m = m
         self._ef_construction = ef_construction
         self._quantization = quantization
-        self._init_schema()
+        # The index DDL is the store's first round trip.
+        with open_errors_as_store_error("vector"):
+            self._init_schema()
         logger.info(
             "neo4j_vector_store_initialized",
             dimensions=dimensions,

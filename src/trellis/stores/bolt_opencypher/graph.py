@@ -87,7 +87,10 @@ from trellis.stores.base.graph_query import (
     RANGE_OP_GLYPH,
     check_doc_link_clause,
 )
-from trellis.stores.bolt_opencypher.base import BoltSessionRunner
+from trellis.stores.bolt_opencypher.base import (
+    BoltSessionRunner,
+    open_errors_as_store_error,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -481,12 +484,18 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         built the driver themselves (``close()`` will then close it),
         or ``owns_driver=False`` when the registry shared a driver
         across the graph + vector pair (``close()`` is a no-op).
+
+        The schema statements are the store's first round trip, so an
+        unreachable server or refused credentials fail here: a
+        ``DriverError`` or ``Neo4jError`` is raised as :class:`StoreError`
+        naming the error's type.
         """
         self._driver: Driver = driver
         self._database = database
         self._owns_driver = owns_driver
         if init_schema:
-            self._init_schema()
+            with open_errors_as_store_error("graph"):
+                self._init_schema()
 
     # ------------------------------------------------------------------
     # Schema

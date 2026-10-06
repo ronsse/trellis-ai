@@ -536,12 +536,12 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
 
         Each statement is ``IF NOT EXISTS`` so calling this against an
         already-migrated database is a no-op. Failures bubble up as
-        ``RuntimeError`` from :func:`execute_sql` — the registry will
+        ``StoreError`` from :func:`execute_sql` — the registry will
         surface them at boot rather than as opaque errors on first
         write.
         """
         for stmt in _ARCADEDB_EDGE_PROVENANCE_SCHEMA:
-            execute_sql(http_url, user, password, database, stmt)
+            execute_sql(http_url, user, password, database, stmt, store="graph")
         logger.info(
             "arcadedb_edge_provenance_schema_migrated",
             database=database,
