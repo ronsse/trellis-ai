@@ -394,6 +394,59 @@ class GraphStoreContractTests:
         assert store.count_nodes() == before
         assert store.get_node("fresh-row-0") is None
 
+    @pytest.mark.parametrize("existing", [False, True], ids=["new_id", "existing_id"])
+    def test_upsert_nodes_bulk_rejects_a_repeated_node_id(
+        self, store: GraphStore, existing: bool
+    ) -> None:
+        """A ``node_id`` given twice in one call is refused before any write.
+
+        One call writes one version per node. The refusal names the second
+        occurrence, as ``test_upsert_edges_bulk_rejects_duplicate_triplets``
+        does for a repeated edge, and leaves the node, new or existing, and
+        the rest of the batch unwritten.
+        """
+        if existing:
+            store.upsert_node("rep-a", "service", {"v": "old"})
+            _sleep_for_ordering()
+        history_before = store.get_node_history("rep-a")
+        before = store.count_nodes()
+        with pytest.raises(ValueError, match=r"upsert_nodes_bulk\[2\].*duplicate"):
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": "rep-a",
+                        "node_type": "service",
+                        "properties": {"v": "first"},
+                    },
+                    {"node_id": "rep-b", "node_type": "service", "properties": {}},
+                    {
+                        "node_id": "rep-a",
+                        "node_type": "service",
+                        "properties": {"v": "second"},
+                    },
+                ]
+            )
+        assert store.count_nodes() == before
+        assert store.get_node("rep-b") is None
+        assert store.get_node_history("rep-a") == history_before
+
+    def test_upsert_nodes_bulk_assigns_each_empty_node_id(
+        self, store: GraphStore
+    ) -> None:
+        """A ``None`` or ``""`` ``node_id`` is auto-assigned, so two of each
+        in one call are four new nodes, not a repeated id."""
+        ids = store.upsert_nodes_bulk(
+            [
+                {"node_id": None, "node_type": "service", "properties": {}},
+                {"node_id": None, "node_type": "service", "properties": {}},
+                {"node_id": "", "node_type": "service", "properties": {}},
+                {"node_id": "", "node_type": "service", "properties": {}},
+            ]
+        )
+        assert len(set(ids)) == 4
+        assert all(ids)
+        assert all(store.get_node(node_id) is not None for node_id in ids)
+
     # ------------------------------------------------------------------
     # edges
     # ------------------------------------------------------------------

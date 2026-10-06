@@ -365,7 +365,9 @@ class GraphStore(ABC):
         (:func:`validate_node_role_args`, :func:`validate_document_ids`,
         :func:`check_node_role_immutable`) runs against every row
         *before any write*. If any row fails validation, no rows are
-        written. Pass-through implementations should call
+        written. A ``node_id`` given twice in one call is refused the
+        same way, by a :class:`ValueError` naming the second
+        occurrence's index. Pass-through implementations should call
         :meth:`_pre_validate_nodes_bulk` to honor this contract.
         Backends with single-statement bulk paths (Neo4j) extend the
         guarantee to write-time failures via a single transaction;
@@ -878,6 +880,7 @@ class GraphStore(ABC):
             except (ValueError, TypeError) as exc:
                 msg = f"upsert_nodes_bulk[{i}]: {exc}"
                 raise type(exc)(msg) from exc
+        self._reject_repeated_node_ids(nodes)
 
         # Role immutability requires an existing-row lookup. Only rows
         # with an explicit node_id can collide; auto-assigned IDs are
@@ -899,6 +902,32 @@ class GraphStore(ABC):
             except ValueError as exc:
                 msg = f"upsert_nodes_bulk[{i}]: {exc}"
                 raise ValueError(msg) from exc
+
+    @staticmethod
+    def _reject_repeated_node_ids(nodes: list[dict[str, Any]]) -> None:
+        """Reject a ``node_id`` given twice in one bulk call, before any write.
+
+        One call writes one version per node. Without this check the SQL
+        backends' one-current-row unique index would fail the statement
+        mid-batch, and a Bolt statement, which has no such index, would
+        write both versions as current rows. The error names the second
+        occurrence's index, as :meth:`_pre_validate_edges_bulk` does for a
+        repeated edge. A missing, ``None`` or empty ``node_id`` is
+        auto-assigned, so it never repeats.
+        """
+        seen: set[str] = set()
+        for i, spec in enumerate(nodes):
+            node_id = spec.get("node_id")
+            if not node_id:
+                continue
+            if node_id in seen:
+                msg = (
+                    f"upsert_nodes_bulk[{i}]: duplicate node_id={node_id!r} in "
+                    "batch; deduplicate before calling, since one call writes "
+                    "one version per node"
+                )
+                raise ValueError(msg)
+            seen.add(node_id)
 
     @staticmethod
     def _pre_validate_edges_bulk(edges: list[dict[str, Any]]) -> None:

@@ -999,6 +999,15 @@ All notable changes to Trellis will be documented in this file.
   before this fix, stays current, and the race that leaves the two rows is
   unchanged. Writes between nodes with one current row are unchanged.
   ([#732](https://github.com/ronsse/trellis-ai/pull/732))
+- **`upsert_nodes_bulk` refuses a `node_id` given twice in one call.** On
+  Neo4j and ArcadeDB such a call wrote one version per occurrence and left
+  the node with two current rows. On SQLite and Postgres it failed the
+  one-current-row unique index with `sqlite3.IntegrityError` or psycopg's
+  `UniqueViolation`, and SQLite kept the batch's writes before the failing
+  row pending on its connection, so the store's next commit saved them.
+  Every backend now raises `ValueError` naming the second occurrence's
+  index before it writes anything, as `upsert_edges_bulk` does for a
+  repeated edge. A call that names each `node_id` once is unchanged.
 
 ## [0.9.0] - 2026-05-13
 
