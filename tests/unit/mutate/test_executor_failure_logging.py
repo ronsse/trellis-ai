@@ -204,14 +204,21 @@ def test_a_failed_idempotency_read_logs_its_type_and_not_its_cause(
 
 
 @pytest.mark.parametrize(
-    ("handler", "message"),
+    ("handler", "message", "result_message"),
     [
-        pytest.param(_MappedDriverFailure(), _TYPED_MESSAGE, id="typed"),
-        pytest.param(_Panic(), _PANIC_MESSAGE, id="unexpected"),
+        pytest.param(
+            _MappedDriverFailure(),
+            _TYPED_MESSAGE,
+            f"Execution failed: {_TYPED_MESSAGE}",
+            id="typed",
+        ),
+        pytest.param(
+            _Panic(), _PANIC_MESSAGE, "Execution failed: RuntimeError", id="unexpected"
+        ),
     ],
 )
 def test_a_handler_failure_returns_failed_and_audits_one_rejection(
-    handler: CommandHandler, message: str
+    handler: CommandHandler, message: str, result_message: str
 ) -> None:
     """The FAILED result and the MUTATION_REJECTED event a failure produces.
 
@@ -243,7 +250,7 @@ def test_a_handler_failure_returns_failed_and_audits_one_rejection(
         "operation": "entity.create",
         "target_id": None,
         "created_id": None,
-        "message": f"Execution failed: {message}",
+        "message": result_message,
         "warnings": [],
         "metadata": {},
     }

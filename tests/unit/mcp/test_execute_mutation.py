@@ -16,6 +16,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from pydantic import ValidationError
 
 from tests.unit.mcp.conftest import unwrap_tool
+from trellis.errors import ConfigError
 from trellis.mcp.server import execute_mutation as _execute_mutation
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.trace import Trace
@@ -258,7 +259,8 @@ class TestExecuteMutationErrors:
     ) -> None:
         """Unexpected executor exceptions surface as INTERNAL_ERROR with
         the original cause chained via ``from`` and the command_id in
-        ``data`` for correlation."""
+        ``data`` for correlation. The message names the exception by its
+        type alone, because its text can be a driver's."""
         import trellis.mcp.server as server_mod
 
         class _ExplodingExecutor:
@@ -277,8 +279,8 @@ class TestExecuteMutationErrors:
             )
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
-        assert "execution failed" in err.error.message.lower()
-        assert "fake executor outage" in err.error.message
+        assert err.error.message == "execution failed: RuntimeError"
+        assert "fake executor outage" not in str(err.error.data)
         # ``from exc`` preserves the original cause.
         assert isinstance(excinfo.value.__cause__, RuntimeError)
         assert str(excinfo.value.__cause__) == "fake executor outage"
@@ -286,6 +288,25 @@ class TestExecuteMutationErrors:
         assert err.error.data["operation"] == "link.create"
         assert "command_id" in err.error.data
         assert err.error.data["error_class"] == "RuntimeError"
+
+    def test_a_trellis_error_keeps_its_text(self, temp_registry: StoreRegistry) -> None:
+        """A damaged policy file fails ``build_curate_executor`` with a
+        ``ConfigError``, whose text names the file and the fix. Its message
+        is what it was before untyped text was dropped."""
+        (temp_registry.stores_dir / "policies.json").write_text(
+            '{"polices": []}', encoding="utf-8"
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            execute_mutation(
+                operation="link.create",
+                args={"source_id": "a", "target_id": "b", "edge_kind": "k"},
+            )
+        err = excinfo.value
+        assert err.error.code == INTERNAL_ERROR
+        assert isinstance(err.__cause__, ConfigError)
+        assert err.error.message == f"execution failed: {err.__cause__}"
+        assert "policies.json" in err.error.message
 
     def test_missing_required_arg_returns_validation_error(
         self, temp_registry: StoreRegistry
@@ -479,17 +500,17 @@ class TestTraceIngestTarget:
         """A trace that does not validate goes on untargeted.
 
         A policy scoped to traces does not match it, and the handler refuses
-        it with the trace's own validation error.
+        it, naming the trace's validation error by its type.
         """
         _deny_traces(temp_registry, "trace.ingest")
-        with pytest.raises(ValidationError) as refused:
+        with pytest.raises(ValidationError):
             Trace.model_validate(trace)
 
         payload = _ingest(trace)
 
         assert (payload["status"], payload["message"]) == (
             "failed",
-            f"Execution failed: {refused.value}",
+            "Execution failed: ValidationError",
         )
         assert temp_registry.operational.trace_store.count() == 0
         event = _audit_event(temp_registry, payload["command_id"])

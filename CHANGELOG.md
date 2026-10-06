@@ -1131,6 +1131,20 @@ All notable changes to Trellis will be documented in this file.
   `"rejected"` and the exit code is `2`. Its message, audit event and
   warnings are unchanged. No CLI command builds such a command today.
   ([#744](https://github.com/ronsse/trellis-ai/pull/744))
+- **A failed command's message names a non-Trellis exception by its type
+  alone.** When a handler raises an exception outside the Trellis hierarchy,
+  such as the `sqlite3.Error` a SQLite store lets out, the FAILED result's
+  message, which REST, MCP and the CLI return to the caller, reads
+  `Execution failed: IntegrityError` instead of carrying the exception's
+  text, because a driver's text can carry query text and values. MCP
+  `execute_mutation` names an exception that escapes the executor, such as
+  a Postgres driver error, the same way. A Trellis error keeps its message,
+  and the operator log, the audit event and every status are unchanged.
+  A `ValueError` is named by its type even when Trellis's own code raised
+  it: an invalid trace sent to the `trace.ingest` operation now reads
+  `Execution failed: ValidationError`, without the field detail, and an
+  `entity.create` that would change an existing node's `node_role` reads
+  `Execution failed: ValueError`.
 
 ## [0.9.0] - 2026-05-13
 
