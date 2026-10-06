@@ -14,6 +14,19 @@ file, whose OS message depends on the temp path, so those cases patch
 ``Path.read_text`` for the one input file. ``extract refresh``, ``extract
 traces``' query and ``admin migrate-provenance`` had no test that reaches
 the arm, so their cases patch a call inside it.
+
+Four more sites share the same exposure without being in this module's
+first sweep: ``admin.py``'s ``_load_graph_store_from_yaml`` (an
+``except Exception`` arm the #666 PR's ``admin.py`` hunks do not touch)
+and three plain validation prints of a long path --
+``ingest.py``'s ``_fail`` (shared by four ``ingest`` subcommands) and the
+"path not found" line in ``ingest_conversations.py`` and
+``ingest_corpus.py``. The three path sites pass the long synthetic
+message as the CLI's own path argument, so it is echoed back verbatim and
+the case needs no patch beyond a missing file. The YAML site's printed
+line interpolates the real config path ahead of the message, which none
+of this module's other sites do, so its ``prefix`` is a callable that
+resolves against the test's own ``tmp_path`` instead of a literal string.
 """
 
 from __future__ import annotations
@@ -37,6 +50,7 @@ from tests.unit.cli.test_extract_traces import (
 )
 from tests.unit.cli.test_ingest import _batch_input
 from trellis.stores.sqlite.trace import SQLiteTraceStore
+from trellis_cli import admin as admin_cli
 from trellis_cli import admin_migrate_provenance as migrate_cli
 from trellis_cli import ingest as ingest_cli
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
@@ -52,6 +66,9 @@ _LONG = (
 )
 
 Arrange = Callable[[Path, pytest.MonkeyPatch], list[str]]
+#: A site's expected text ahead of ``_LONG``: a literal, or -- for the one
+#: site that interpolates a real path -- a function of ``tmp_path``.
+Prefix = str | Callable[[Path], str]
 
 
 @pytest.fixture(autouse=True)
@@ -158,7 +175,45 @@ def _proposals(*command: str) -> Arrange:
     return arrange
 
 
+def _trace_not_found(_tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """``ingest trace`` on a missing file, through the shared ``_fail``."""
+    return ["ingest", "trace", _LONG]
+
+
+def _conversations_not_found(
+    _tmp_path: Path, _monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    return ["ingest", "conversations", _LONG]
+
+
+def _corpus_not_found(_tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    return ["ingest", "corpus", _LONG]
+
+
+#: Name of the ``--from-config`` file ``_migrate_graph_yaml`` writes, shared
+#: with ``_yaml_prefix`` so the two agree on the path the site prints.
+_YAML_CONFIG_NAME = "from.yaml"
+
+
+def _migrate_graph_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    # ``yaml.safe_load`` only needs to raise to reach the arm; the reason
+    # printed comes from ``describe_yaml_error``, patched directly so the
+    # case controls it exactly like every other site's message, rather
+    # than fixing a PyYAML wording to the test.
+    monkeypatch.setattr("yaml.safe_load", _raise)
+    monkeypatch.setattr(admin_cli, "describe_yaml_error", lambda _exc: _LONG)
+    config = tmp_path / _YAML_CONFIG_NAME
+    config.write_text("graph:\n  backend: sqlite\n")
+    other = tmp_path / "to.yaml"
+    return ["admin", "migrate-graph", "-f", str(config), "-t", str(other)]
+
+
+def _yaml_prefix(tmp_path: Path) -> str:
+    return f"Invalid YAML in {tmp_path / _YAML_CONFIG_NAME}: "
+
+
 _STORE_ERROR = f"store error: {_DriverError.__name__}: "
+_PATH_NOT_FOUND = "Path not found: "
 
 _SITES = [
     pytest.param(
@@ -221,6 +276,21 @@ _SITES = [
         EXIT_STORE,
         id="show-proposal",
     ),
+    pytest.param(
+        _trace_not_found, "File not found: ", EXIT_VALIDATION, id="trace-not-found"
+    ),
+    pytest.param(
+        _conversations_not_found,
+        _PATH_NOT_FOUND,
+        EXIT_VALIDATION,
+        id="conversations-not-found",
+    ),
+    pytest.param(
+        _corpus_not_found, _PATH_NOT_FOUND, EXIT_VALIDATION, id="corpus-not-found"
+    ),
+    pytest.param(
+        _migrate_graph_yaml, _yaml_prefix, EXIT_VALIDATION, id="migrate-graph-yaml"
+    ),
 ]
 
 
@@ -229,7 +299,7 @@ def test_a_long_failure_message_prints_as_one_line(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     arrange: Arrange,
-    prefix: str,
+    prefix: Prefix,
     exit_code: int,
 ) -> None:
     # Rich's width when no standard stream is a terminal, pinned so a run
@@ -238,4 +308,5 @@ def test_a_long_failure_message_prints_as_one_line(
     result = runner.invoke(app, arrange(tmp_path, monkeypatch))
     assert result.exit_code == exit_code, result.output
     assert isinstance(result.exception, SystemExit), repr(result.exception)
-    assert plain(result.output).splitlines() == [f"{prefix}{_LONG}"]
+    resolved_prefix = prefix(tmp_path) if callable(prefix) else prefix
+    assert plain(result.output).splitlines() == [f"{resolved_prefix}{_LONG}"]

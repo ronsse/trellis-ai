@@ -187,7 +187,9 @@ def ingest_corpus(
                 json.dumps({"status": "error", "message": f"path {reason}: {path}"})
             )
         else:
-            console.print(f"[red]Path {escape(reason)}: {escape(path)}[/red]")
+            console.print(
+                f"[red]Path {escape(reason)}: {escape(path)}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_VALIDATION)
 
     extra_metadata = _parse_tags(tag, domain, output_format)

@@ -1229,6 +1229,14 @@ All notable changes to Trellis will be documented in this file.
   no edge of the batch is written. Neo4j already raised the `ValueError`;
   SQLite and Postgres are unchanged.
   ([#754](https://github.com/ronsse/trellis-ai/pull/754))
+- **Four more CLI failure lines are no longer hard-wrapped at the console
+  width.** The same exposure #750 fixed for 16 sites also applied to
+  `admin migrate-graph`'s "Invalid YAML in ..." arm and to the shared
+  "File not found" / "Path not found" print used by `ingest trace`,
+  `ingest evidence`, `ingest dbt-manifest`, `ingest openlineage`,
+  `ingest conversations` and `ingest corpus`. They now print unwrapped the
+  same way. Text, colour, JSON output and exit codes are unchanged.
+  ([#PLACEHOLDER](https://github.com/ronsse/trellis-ai/pull/PLACEHOLDER))
 
 ## [0.9.0] - 2026-05-13
 
