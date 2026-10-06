@@ -830,6 +830,15 @@ All notable changes to Trellis will be documented in this file.
   MCP `save_experience` raises the refusal. Omit the id to have one
   generated. A trace already stored under `""` stays.
   ([#717](https://github.com/ronsse/trellis-ai/pull/717))
+- **A typed handler failure is logged without its chained traceback.**
+  `handler_typed_error` is logged without a traceback, so the stderr log
+  of the CLI, the MCP server and the API no longer prints the driver error
+  that a Postgres or Bolt purge chains to its `StoreError`, whose server
+  text can include query text and values. The line gains the exception's
+  message as `error`, beside its type, the command id and the operation.
+  `handler_failed_unexpected` keeps its traceback; the `failed` result and
+  the `MUTATION_REJECTED` event are unchanged.
+  ([#718](https://github.com/ronsse/trellis-ai/pull/718))
 - **On Neo4j and ArcadeDB, a node with two current rows reads as one
   version.** Concurrent writers can leave a node two current rows, and
   `get_node`, `search_nodes` and `count_nodes_by_type` did not agree on
