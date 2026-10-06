@@ -951,6 +951,7 @@ All notable changes to Trellis will be documented in this file.
   which `PackBuilder` records as that axis's strategy failure. A dotted key
   such as `a.b`, which only SQLite read as a nested path, is refused too. No
   REST, MCP, SDK or CLI route passes a caller-chosen key to these filters.
+  ([#729](https://github.com/ronsse/trellis-ai/pull/729))
 
 ## [0.9.0] - 2026-05-13
 
