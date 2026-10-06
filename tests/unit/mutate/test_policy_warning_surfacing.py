@@ -47,11 +47,20 @@ WARNING_TEXT = "Policy warning (pol-warn): unusual write"
 
 
 class _RecordingEventLog:
-    """EventLog capturing emitted events, with a settable idempotency answer."""
+    """EventLog capturing emitted events, with a settable idempotency answer.
 
-    def __init__(self, *, known_key: str | None = None) -> None:
+    ``read_error`` makes the idempotency read raise instead of answering.
+    """
+
+    def __init__(
+        self,
+        *,
+        known_key: str | None = None,
+        read_error: Exception | None = None,
+    ) -> None:
         self.events: list[dict[str, Any]] = []
         self._known_key = known_key
+        self._read_error = read_error
 
     def emit(
         self,
@@ -65,6 +74,8 @@ class _RecordingEventLog:
         self.events.append({"event_type": event_type, "payload": dict(payload or {})})
 
     def has_idempotency_key(self, key: str) -> bool:
+        if self._read_error is not None:
+            raise self._read_error
         return self._known_key is not None and key == self._known_key
 
 
@@ -116,6 +127,7 @@ OUTCOMES: list[tuple[str, CommandStatus, bool]] = [
     ("policy_deny", CommandStatus.REJECTED, True),
     ("duplicate_in_memory", CommandStatus.DUPLICATE, True),
     ("duplicate_persisted", CommandStatus.DUPLICATE, True),
+    ("idempotency_read_failed", CommandStatus.FAILED, True),
     # The only post-gate branch that emits nothing at all -- a pre-existing
     # gap in the audit trail, out of scope here. The result still carries the
     # warnings, which is the half this module is about.
@@ -130,7 +142,12 @@ OUTCOMES: list[tuple[str, CommandStatus, bool]] = [
 def _run(outcome: str, *, gate: DefaultPolicyGate | None) -> tuple[Any, list[dict]]:
     """Drive ``execute`` to one named outcome; return its result and events."""
     log = _RecordingEventLog(
-        known_key="seen-elsewhere" if outcome == "duplicate_persisted" else None
+        known_key="seen-elsewhere" if outcome == "duplicate_persisted" else None,
+        read_error=(
+            StoreError("event log down", store="event_log")
+            if outcome == "idempotency_read_failed"
+            else None
+        ),
     )
     raises: Exception | None = {
         "handler_validation_error": ValidationError("bad", code="orphan_edge"),
@@ -151,7 +168,7 @@ def _run(outcome: str, *, gate: DefaultPolicyGate | None) -> tuple[Any, list[dic
         executor.execute(_cmd(idempotency_key="k1"))
         log.events.clear()
         result = executor.execute(_cmd(idempotency_key="k1"))
-    elif outcome == "duplicate_persisted":
+    elif outcome in ("duplicate_persisted", "idempotency_read_failed"):
         result = executor.execute(_cmd(idempotency_key="seen-elsewhere"))
     else:
         result = executor.execute(_cmd())

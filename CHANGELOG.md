@@ -941,6 +941,21 @@ All notable changes to Trellis will be documented in this file.
   most nodes pass. The race that leaves the two rows is unchanged, as are
   edges written to such a node.
   ([#726](https://github.com/ronsse/trellis-ai/pull/726))
+- **A keyed command whose idempotency check cannot read the event log
+  fails instead of escaping.** Before running a command that carries an
+  idempotency key, the executor asks the event log whether the key has
+  already succeeded, and an error from that read escaped
+  `MutationExecutor`: `trellis admin backfill-name-aliases --format json`
+  exited `1` with a traceback and no JSON, `POST /api/v1/commands/batch`
+  answered `500`, and no `mutation.rejected` event was written. A
+  `TrellisError` or `sqlite3.Error` from the read, such as for a malformed
+  event row, now answers `failed` with the message
+  `Idempotency check failed: <exception type>` and one `mutation.rejected`
+  event with `reason: idempotency_check_failed`, and the handler does not
+  run: the backfill exits `5` with its JSON payload, and the batch route
+  answers `200` with the command `failed`. The key is not recorded, so a
+  retry runs once the log can be read. A Postgres event log's driver
+  errors still escape.
 
 ## [0.9.0] - 2026-05-13
 

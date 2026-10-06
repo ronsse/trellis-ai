@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 
 from typer.testing import CliRunner
@@ -12,6 +13,7 @@ from trellis.schemas.enums import PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.policy_store import PolicyStore
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
@@ -228,3 +230,49 @@ class TestBackfillNameAliasesCommand:
         assert payload["status"] == "error"
         assert payload["failed"] == 1
         assert payload["failures"][0]["reason"] == "policy"
+
+    def test_unreadable_event_log_exits_store_with_json(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Each alias command sets an idempotency key, so the executor reads
+        the event log before writing. A ``mutation.executed`` row whose
+        payload is not JSON makes that read raise a real
+        ``sqlite3.OperationalError``; appends still work.
+        """
+        stores_dir = _seed(
+            tmp_path,
+            monkeypatch,
+            [("syn-alpha", "Syn Alpha"), ("syn-beta", "Syn Beta")],
+        )
+        events_db = stores_dir / "events.db"
+        SQLiteEventLog(events_db).close()
+        conn = sqlite3.connect(events_db)
+        conn.execute(
+            "INSERT INTO events (event_id, event_type, source, occurred_at,"
+            " recorded_at, payload_json) VALUES ('syn-corrupt',"
+            " 'mutation.executed', 'syn', '2026-01-01T00:00:00+00:00',"
+            " '2026-01-01T00:00:00+00:00', 'not json')"
+        )
+        conn.commit()
+
+        result = runner.invoke(
+            app,
+            ["admin", "backfill-name-aliases", "--format", "json"],
+        )
+
+        assert result.exit_code == 5, result.output
+        payload = json.loads(result.stdout)
+        assert (payload["status"], payload["bound"], payload["failed"]) == (
+            "error",
+            0,
+            2,
+        )
+        assert sorted(
+            (f["stage"], f["reason"], f["entity_id"]) for f in payload["failures"]
+        ) == [("bind", "store", "syn-alpha"), ("bind", "store", "syn-beta")]
+        reasons = conn.execute(
+            "SELECT json_extract(payload_json, '$.reason') FROM events"
+            " WHERE event_type = 'mutation.rejected'"
+        ).fetchall()
+        conn.close()
+        assert reasons == [("idempotency_check_failed",)] * 2

@@ -71,7 +71,8 @@ _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
     sqlite3.Error,
 )
 
-# Exception classes the audit-emit guard in ``_emit_event`` catches. Same
+# Exception classes the audit-emit guard in ``_emit_event`` catches, and
+# Stage 3's persisted idempotency read, a call on the same event log. Same
 # enumerate-don't-bare-except discipline as the tuple above, and for the same
 # reason: a broad ``except Exception`` here would be flagged by the
 # silent-fallback audit, and correctly — the guard does not swallow the
@@ -243,9 +244,9 @@ class MutationExecutor:
                 )
 
         # Stage 3: Idempotency Check
-        duplicate = self._check_idempotency(command, log, policy_warnings)
-        if duplicate is not None:
-            return duplicate
+        idempotency_outcome = self._check_idempotency(command, log, policy_warnings)
+        if idempotency_outcome is not None:
+            return idempotency_outcome
 
         # Stage 4: Execute
         handler = self._handlers.get(command.operation)
@@ -546,9 +547,12 @@ class MutationExecutor:
         Returns ``None`` when the command is not a replay, without recording
         its key: :meth:`execute` records it only once the handler has
         succeeded, so a refused or failed command leaves the key free for a
-        corrected retry. ``policy_warnings`` is threaded in rather
-        than recomputed: a duplicate is an outcome reachable after Stage 2,
-        so it carries the warnings like every other one.
+        corrected retry. Returns a FAILED result, with a ``mutation.rejected``
+        event whose ``reason`` is ``idempotency_check_failed``, when the
+        event log raises instead of answering whether the key was seen.
+        ``policy_warnings`` is threaded in rather than recomputed: both
+        results are outcomes reachable after Stage 2, so they carry the
+        warnings like every other one.
         """
         if not command.idempotency_key:
             return None
@@ -572,10 +576,42 @@ class MutationExecutor:
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
 
-        # Check persisted events for cross-restart deduplication
-        if self._event_log is not None and self._event_log.has_idempotency_key(
-            command.idempotency_key,
-        ):
+        if self._event_log is None:
+            return None
+
+        # Check persisted events for cross-restart deduplication. The read
+        # fails closed: running the handler without an answer could write
+        # the command twice, which is what this stage exists to prevent. It
+        # catches what ``_emit_event`` catches from the same event log. The
+        # message and the log line name the exception's type, not its text,
+        # as the typed store errors do (#702, #713), so the line carries no
+        # traceback; if the rejection event cannot be written either,
+        # ``_emit_event``'s own traceback chains this one. The key is not
+        # recorded, so a retry once the event log recovers runs.
+        try:
+            persisted = self._event_log.has_idempotency_key(command.idempotency_key)
+        except _AUDIT_EMIT_FAILURE as exc:
+            message = f"Idempotency check failed: {type(exc).__name__}"
+            log.error(  # noqa: TRY400 — no traceback on purpose; see above
+                "idempotency_check_failed",
+                key=command.idempotency_key,
+                error_type=type(exc).__name__,
+            )
+            audit = self._emit_rejection(
+                command,
+                reason="idempotency_check_failed",
+                message=message,
+                policy_warnings=policy_warnings,
+            )
+            return CommandResult(
+                command_id=command.command_id,
+                status=CommandStatus.FAILED,
+                operation=command.operation,
+                message=message,
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
+            )
+
+        if persisted:
             self._record_idempotency_key(command.idempotency_key)
             message = f"Duplicate command (persisted): {command.idempotency_key}"
             log.info("duplicate_command_persisted", key=command.idempotency_key)
@@ -606,9 +642,9 @@ class MutationExecutor:
         """Emit a uniform :attr:`EventType.MUTATION_REJECTED` event.
 
         Called from every rejection stage (``immutable_core`` / ``validate``
-        / ``policy_violation`` / ``idempotency_replay``) so the audit trail
-        is symmetric — one event per rejection, ``reason`` discriminates the
-        stage.
+        / ``policy_violation`` / ``idempotency_replay`` /
+        ``idempotency_check_failed``) so the audit trail is symmetric — one
+        event per rejection, ``reason`` discriminates the stage.
 
         ``policy_warnings`` is forwarded by every caller downstream of
         Stage 2 — see the rule stated there. Stage 1 (``validate``) is the
