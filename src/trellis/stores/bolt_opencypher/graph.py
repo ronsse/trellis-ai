@@ -1468,10 +1468,11 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         ]
 
         # The endpoint pre-check + UNWIND write share one session.
-        # Endpoint validation stays a separate round trip because the
-        # bulk path promises a precise per-index error when an endpoint
-        # is missing — collapsing it into the UNWIND would silently drop
-        # the row instead. Existing-edge state, by contrast, is no
+        # Endpoint validation stays a separate round trip so a missing
+        # endpoint is refused, with its index, before the write runs. The
+        # UNWIND drops a row whose endpoint is not current; the check
+        # after it covers an endpoint that stops being current between
+        # the two round trips. Existing-edge state, by contrast, is no
         # longer pre-fetched: the single-row ``upsert_edge`` already
         # carries ``edge_id`` and ``created_at`` forward via ``coalesce``
         # inside one Cypher round trip, and the bulk path now does the
@@ -1480,8 +1481,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         with self._driver.session(database=self._database) as session:
             # Round trip 1 — validate that every source + target has a
             # current version. Done up front so a bad row gets a precise
-            # error pointing at its index, not a silent drop in the
-            # UNWIND.
+            # error pointing at its index before the write runs.
             endpoint_ids = sorted(
                 {spec["source_id"] for spec in edges}
                 | {spec["target_id"] for spec in edges}
@@ -1505,7 +1505,11 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # new versions in a single UNWIND. Each row's endpoints are
             # narrowed to the rows they show, as in ``upsert_edge``;
             # grouping by ``row`` yields nothing for a row whose endpoint
-            # has no current row, so the MATCH drops it.
+            # has no current row, so the MATCH drops it. ``_tx`` compares
+            # the rows written with the rows sent and refuses the call
+            # naming the first dropped row; the raise inside the
+            # transaction function rolls the transaction back, so no row
+            # of the batch is written.
             # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
             # across versions, matching the single-row method's collapsed
             # pattern.
@@ -1539,7 +1543,40 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             SET new.created_at = created_at_carry
             RETURN row.row_index AS row_index, edge_id_carry AS edge_id
             """
-            records = session.execute_write(lambda tx: list(tx.run(cypher, rows=rows)))
+
+            def _tx(tx: ManagedTransaction) -> list[Any]:
+                records = list(tx.run(cypher, rows=rows))
+                # Compare row indices, not counts: an edge with two current
+                # versions returns a record for each, which would hide a
+                # dropped row from a count.
+                written = {int(r["row_index"]) for r in records}
+                for i, spec in enumerate(edges):
+                    if i in written:
+                        continue
+                    ids = [spec["source_id"], spec["target_id"]]
+                    current = {
+                        r["node_id"]
+                        for r in tx.run(
+                            "MATCH (n:Node) WHERE n.node_id IN $ids "
+                            "AND n.valid_to IS NULL RETURN n.node_id AS node_id",
+                            ids=ids,
+                        )
+                    }
+                    for end, node_id in zip(("source", "target"), ids, strict=True):
+                        if node_id not in current:
+                            msg = (
+                                f"upsert_edges_bulk[{i}]: {end} {node_id!r} "
+                                "has no current version"
+                            )
+                            raise ValueError(msg)
+                    msg = (
+                        f"upsert_edges_bulk[{i}]: source {ids[0]!r} or target "
+                        f"{ids[1]!r} was not current when the write ran"
+                    )
+                    raise ValueError(msg)
+                return records
+
+            records = session.execute_write(_tx)
 
         # UNWIND iteration order isn't guaranteed; reorder by
         # ``row_index`` so the returned IDs line up with the input list.
