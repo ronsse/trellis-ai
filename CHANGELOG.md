@@ -1129,6 +1129,7 @@ All notable changes to Trellis will be documented in this file.
   Such text is now replaced with the sanitizer's static marker. The
   marker, the truncation, the payload shape and every caller are
   unchanged.
+  ([#747](https://github.com/ronsse/trellis-ai/pull/747))
 
 ## [0.9.0] - 2026-05-13
 
