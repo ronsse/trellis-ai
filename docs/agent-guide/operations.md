@@ -922,7 +922,7 @@ trellis curate feedback <target_id> <rating> [--comment <text>] [--pack-id <id>]
 | Argument/Option | Required | Default | Description |
 |-----------------|----------|---------|-------------|
 | `target_id` | **Yes** | -- | Trace or precedent ID |
-| `rating` | **Yes** | -- | Rating as float (0.0 to 1.0 by convention) |
+| `rating` | **Yes** | -- | Rating, 0.0 to 1.0 inclusive. Anything else, NaN included, exits 2 and records nothing |
 | `--comment` | No | `null` | Optional text comment |
 | `--pack-id` | No | `null` | Context pack the feedback is about — the join key |
 | `--format` | No | `text` | Output format |

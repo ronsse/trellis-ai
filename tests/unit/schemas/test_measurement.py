@@ -63,6 +63,16 @@ class TestMeasurementValueTypes:
         m = Measurement(**{**_valid_kwargs(), "metric_value": value})  # type: ignore[arg-type]
         assert m.metric_value == value
 
+    def test_metric_value_refuses_nan(self) -> None:
+        with pytest.raises(ValidationError, match="not NaN"):
+            Measurement(**{**_valid_kwargs(), "metric_value": float("nan")})  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf")])
+    def test_metric_value_accepts_infinity(self, value: float) -> None:
+        """Refusing Infinity is an open owner decision; this pins today's answer."""
+        m = Measurement(**{**_valid_kwargs(), "metric_value": value})  # type: ignore[arg-type]
+        assert m.metric_value == value
+
     def test_unit_optional(self) -> None:
         m = Measurement(**{**_valid_kwargs(), "unit": "percent"})  # type: ignore[arg-type]
         assert m.unit == "percent"

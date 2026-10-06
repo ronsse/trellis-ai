@@ -1105,6 +1105,20 @@ All notable changes to Trellis will be documented in this file.
   still reaches the root boundary and exits by its type, and batches
   already written for earlier traces stay written.
   ([#742](https://github.com/ronsse/trellis-ai/pull/742))
+- **A validation error that echoes `NaN` or `Infinity` from the request
+  body answers 422, not 500; `POST /api/v1/feedback` and `trellis curate
+  feedback` hold `rating` to 0.0–1.0, and `Measurement` refuses NaN.**
+  Python's `json` module parses both bare tokens, and FastAPI's default 422
+  echoes the rejected value back, which Starlette cannot render, so a
+  validation error echoing one answered `500 internal_error` and logged a
+  traceback. The API's 422 handler now writes a non-finite number as its
+  token and is otherwise FastAPI's own, byte for byte. `POST
+  /api/v1/feedback` holds `rating` to 0.0–1.0 inclusive, as `POST
+  /api/v1/packs/{pack_id}/feedback` and the MCP tool already did, and
+  `trellis curate feedback` refuses anything else, NaN included, with exit
+  2. `Measurement.metric_value` refuses NaN, so `measurement.record`
+  refuses it from every surface; `Infinity` is still accepted.
+  ([#741](https://github.com/ronsse/trellis-ai/pull/741))
 
 ## [0.9.0] - 2026-05-13
 

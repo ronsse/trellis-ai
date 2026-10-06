@@ -1,6 +1,6 @@
 """Request middleware — request-ID correlation and structured error envelope.
 
-Two pieces wired into the FastAPI app from :func:`create_app`:
+Four pieces wired into the FastAPI app from :func:`create_app`:
 
 * :func:`request_id_middleware` reads ``X-Request-ID`` from the
   incoming request (or mints a fresh ULID), binds it onto the
@@ -23,15 +23,26 @@ Two pieces wired into the FastAPI app from :func:`create_app`:
   This handler keeps the same envelope keys and fills them with what the
   exception already knows.
 
+* :func:`request_validation_error_handler` replaces FastAPI's default
+  422 handler. The default echoes the rejected value as
+  ``detail[].input``, and Starlette renders JSON with
+  ``allow_nan=False``, so an error echoing ``NaN`` or ``Infinity`` (both
+  of which Python's ``json`` module parses) makes that 422 raise and the
+  catch-all answer ``500 internal_error``. This handler writes a
+  non-finite float as its token.
+
 Health and version probes pass through the middleware too; the
 overhead is a ULID + a contextvar bind, both microsecond-scale.
 """
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from trellis.core.error_sanitize import sanitize_error_message
@@ -104,6 +115,42 @@ async def unhandled_exception_handler(
         },
         headers={REQUEST_ID_HEADER: request_id} if request_id else {},
     )
+
+
+def _json_safe_float(value: float) -> float | str:
+    """A non-finite float as the token the caller sent; any other unchanged.
+
+    The spellings are the ones Python's ``json`` module parsed, and the
+    ones pydantic writes under ``ser_json_inf_nan="strings"``.
+    """
+    if math.isnan(value):
+        return "NaN"
+    if math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
+    return value
+
+
+async def request_validation_error_handler(
+    request: Request,  # noqa: ARG001 — Starlette's handler signature; the 422 needs nothing from it
+    exc: Exception,
+) -> JSONResponse:
+    """FastAPI's 422, with a non-finite float written as its token.
+
+    The same status and body as FastAPI's
+    ``request_validation_exception_handler`` — ``{"detail": [...]}`` from
+    ``exc.errors()`` through ``jsonable_encoder`` — with one difference: a
+    non-finite float anywhere in the errors, at any depth, is rendered as
+    its token. A missing-field error echoes the whole body as its
+    ``input``, so a non-finite number anywhere in a body missing a field
+    reaches the renderer, not only one in the field that failed. A finite
+    float is returned unchanged, so every finite case is FastAPI's own
+    response, byte for byte (``tests/unit/api/test_non_finite_body.py``).
+    """
+    # Registered only for RequestValidationError; the check narrows the
+    # type Starlette's handler signature widens.
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+    detail = jsonable_encoder(errors, custom_encoder={float: _json_safe_float})
+    return JSONResponse(status_code=422, content={"detail": detail})
 
 
 #: Status for a :class:`~trellis.errors.ConfigError` reaching the boundary.
