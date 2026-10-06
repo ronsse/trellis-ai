@@ -990,7 +990,14 @@ All notable changes to Trellis will be documented in this file.
   `StoreError` with the message `Event log <method> failed: <exception
   type>`, leaving out the server's text: a keyed command answers `failed`
   with `Idempotency check failed: StoreError`, and an unkeyed one reports
-  its write with a warning that its audit event is missing.
+  its write with a warning that its audit event is missing. A handler's
+  own event write fails the same way, so a trace ingest whose event
+  cannot be written answers `failed` with `Execution failed: Event log
+  append failed: <exception type>`, and `POST /api/v1/traces` answers `409`
+  instead of `500`, with the trace written either way.
+  `GET /api/v1/events` answers `500` with `code: store_error` instead of
+  `internal_error`, and `trellis analyze health --format json` prints a
+  JSON error payload and exits `5` instead of a traceback and `1`.
   `SQLiteEventLog.append` now rolls back an INSERT that fails, such as on a
   duplicate `event_id`. The transaction had stayed open, so every other
   connection's write to that database waited out its 10-second busy

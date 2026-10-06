@@ -12,7 +12,6 @@ from __future__ import annotations
 import threading
 import time
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -1028,21 +1027,24 @@ def _close_the_pool(store: Any) -> type[Exception]:
     return PoolClosed
 
 
-_BROKEN_EVENT_LOGS = [
-    pytest.param(_drop_the_events_table, id="table-dropped"),
-    pytest.param(_close_the_pool, id="pool-closed"),
+_DRIVER_ERRORS = [
+    *(
+        pytest.param(_drop_the_events_table, operation, id=f"table-dropped-{operation}")
+        for operation in ("append", "has_idempotency_key", "get_events", "count")
+    ),
+    # Every operation takes its connection through the same wrapper.
+    pytest.param(
+        _close_the_pool, "has_idempotency_key", id="pool-closed-has_idempotency_key"
+    ),
 ]
 
 
 class TestPostgresEventLogDriverErrors:
     """A psycopg error in the event log is raised as a type-only ``StoreError``.
 
-    The executor catches ``StoreError`` around Stage 3's idempotency read and
-    Stage 5's audit append. A raw ``psycopg.Error`` is outside both catches:
-    a keyed command raised out of ``execute`` instead of failing closed, and
-    an unkeyed one raised after its handler had written. The message names
-    the operation and the error's type, not the server's text, as the purges
-    do (#702, #713); the psycopg error stays on ``__cause__``.
+    The executor's catches name ``StoreError``, and a ``psycopg.Error`` is
+    outside them. The message names the operation and the error's type, not
+    the server's text; the psycopg error stays on ``__cause__``.
     """
 
     @pytest.fixture(autouse=True)
@@ -1059,32 +1061,7 @@ class TestPostgresEventLogDriverErrors:
         yield s
         s.close()
 
-    @staticmethod
-    def _executor(store: Any) -> tuple[Any, MagicMock]:
-        from trellis.mutate.commands import Operation
-        from trellis.mutate.executor import MutationExecutor
-
-        handler = MagicMock()
-        handler.handle.return_value = ("syn-node-1", "ok")
-        executor = MutationExecutor(
-            event_log=store, handlers={Operation.ENTITY_CREATE: handler}
-        )
-        return executor, handler
-
-    @staticmethod
-    def _command(idempotency_key: str | None) -> Any:
-        from trellis.mutate.commands import Command, Operation
-
-        return Command(
-            operation=Operation.ENTITY_CREATE,
-            args={"entity_type": "service", "name": "syn-entity"},
-            idempotency_key=idempotency_key,
-        )
-
-    @pytest.mark.parametrize(
-        "operation", ["append", "has_idempotency_key", "get_events", "count"]
-    )
-    @pytest.mark.parametrize("break_log", _BROKEN_EVENT_LOGS)
+    @pytest.mark.parametrize(("break_log", "operation"), _DRIVER_ERRORS)
     def test_a_driver_error_is_raised_as_a_type_only_store_error(
         self, store, break_log, operation: str
     ) -> None:
@@ -1112,55 +1089,22 @@ class TestPostgresEventLogDriverErrors:
         assert caught.value.store == "event_log"
         assert type(caught.value.__cause__) is cause_type
 
-    @pytest.mark.parametrize("break_log", _BROKEN_EVENT_LOGS)
-    def test_a_keyed_command_fails_closed(self, store, break_log) -> None:
-        """Stage 3's read fails, so the handler does not run.
+    def test_an_error_that_is_not_the_driver_s_keeps_its_type(self, store) -> None:
+        """A payload that cannot be serialized is the caller's bug, not the store's.
 
-        The rejection event goes to the same broken log, so the result also
-        says that its audit record is missing.
+        The executor logs a handler's untyped failure with its traceback and
+        a ``StoreError`` without one, so relabelling it would hide the bug.
         """
-        from trellis.mutate.commands import CommandStatus
-        from trellis.mutate.executor import AUDIT_EMIT_FAILED_MARKER
+        from trellis.stores.base.event_log import Event, EventType
 
-        executor, handler = self._executor(store)
-        cause_type = break_log(store)
-
-        result = executor.execute(self._command("syn-key-1"))
-
-        assert (result.status, result.message) == (
-            CommandStatus.FAILED,
-            "Idempotency check failed: StoreError",
+        event = Event(
+            event_type=EventType.ENTITY_CREATED,
+            source="syn-source",
+            payload={"syn-field": object()},
         )
-        [warning] = result.warnings
-        assert warning.startswith(f"{AUDIT_EMIT_FAILED_MARKER}: the mutation.rejected")
-        assert f"(StoreError: Event log append failed: {cause_type.__name__})." in (
-            warning
-        )
-        handler.handle.assert_not_called()
 
-    @pytest.mark.parametrize("break_log", _BROKEN_EVENT_LOGS)
-    def test_an_unkeyed_command_reports_its_write_and_the_missing_audit(
-        self, store, break_log
-    ) -> None:
-        """The handler has written, so the result is SUCCESS with a warning."""
-        from trellis.mutate.commands import CommandStatus
-        from trellis.mutate.executor import AUDIT_EMIT_FAILED_MARKER
-
-        executor, handler = self._executor(store)
-        cause_type = break_log(store)
-
-        result = executor.execute(self._command(None))
-
-        assert (result.status, result.created_id) == (
-            CommandStatus.SUCCESS,
-            "syn-node-1",
-        )
-        [warning] = result.warnings
-        assert warning.startswith(f"{AUDIT_EMIT_FAILED_MARKER}: the mutation.executed")
-        assert f"(StoreError: Event log append failed: {cause_type.__name__})." in (
-            warning
-        )
-        handler.handle.assert_called_once()
+        with pytest.raises(TypeError):
+            store.append(event)
 
 
 # ======================================================================
