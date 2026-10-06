@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 import sqlite3
 import threading
 import time
@@ -248,3 +249,29 @@ class SQLiteStoreBase:
             db_path=str(self._db_path),
             connections_closed=len(connections),
         )
+
+
+_PLAIN_JSON_KEY = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def json_key_path(key: str) -> str:
+    """Return the JSON path ``$.<key>`` for one plain object key, or raise.
+
+    The graph and vector stores splice this path into SQL text as a string
+    literal, ``json_extract(<column>, '$.<key>')``, so the key is checked
+    before it gets there: a ``'`` would close the literal and the rest of the
+    key would be read as SQL, and a ``.`` or ``[`` would turn one key into a
+    nested path. Only ``[A-Za-z0-9_-]+`` passes.
+
+    Raises:
+        ValueError: *key* is empty or holds any other character, the same
+            error the graph store's DSL compiler raises for a field or
+            operator it cannot compile.
+    """
+    if not _PLAIN_JSON_KEY.fullmatch(key):
+        msg = (
+            f"Filter key {key!r} is not a plain JSON object key: "
+            "use letters, digits, '_' or '-'"
+        )
+        raise ValueError(msg)
+    return f"$.{key}"

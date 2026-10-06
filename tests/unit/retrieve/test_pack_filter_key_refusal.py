@@ -1,0 +1,102 @@
+"""A pack's filter key reaches the SQLite stores' SQL only if it is a plain key.
+
+``PackBuilder.build(filters=...)`` forwards a key it does not own to the
+graph store's ``query(properties=...)`` and the vector store's
+``query(filters=...)``, and both stores build a JSON path into SQL text from
+it. Before they checked the key, ``team') OR 1=1 OR ('`` served every node and
+vector the two axes could see, with no failure recorded, and ``te'am`` failed
+both axes with ``sqlite3.OperationalError``. Now both axes record the refusal
+as a ``ValueError`` and serve nothing for it, while a plain key still filters.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.strategies import GraphSearch, KeywordSearch, SemanticSearch
+from trellis.schemas.pack import Pack
+from trellis.stores.base.event_log import EventType
+from trellis.stores.registry import StoreRegistry
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+TAUTOLOGY_KEY = "team') OR 1=1 OR ('"
+SYNTAX_ERROR_KEY = "te'am"
+TEXT = "how to fix the cache layer"
+
+
+def _embed(text: str) -> list[float]:
+    """Deterministic 3-d toy embedding — enough for ordering, not meaning."""
+    return [1.0, (sum(ord(c) for c in text) % 97) / 97.0, 0.5]
+
+
+@pytest.fixture
+def registry(tmp_path: Path) -> Iterator[StoreRegistry]:
+    stores_dir = tmp_path / "stores"
+    stores_dir.mkdir()
+    reg = StoreRegistry(stores_dir=stores_dir)
+    reg.knowledge.graph_store.upsert_node(
+        node_id="node-1",
+        node_type="service",
+        properties={"name": "cache service", "owner_team": "data"},
+    )
+    reg.knowledge.document_store.put("doc-1", TEXT, {"title": "cache doc"})
+    reg.knowledge.vector_store.upsert(
+        "vec-1", _embed(TEXT), metadata={"excerpt": TEXT, "owner_team": "data"}
+    )
+    yield reg
+    reg.close()
+
+
+def _build(
+    registry: StoreRegistry, filters: dict[str, Any]
+) -> tuple[Pack, dict[str, Any]]:
+    """Build a three-axis pack; return it with its ``PACK_ASSEMBLED`` payload."""
+    event_log = registry.operational.event_log
+    builder = PackBuilder(
+        strategies=[
+            KeywordSearch(registry.knowledge.document_store),
+            SemanticSearch(registry.knowledge.vector_store, _embed),
+            GraphSearch(registry.knowledge.graph_store),
+        ],
+        event_log=event_log,
+    )
+    pack = builder.build("fix the cache layer", filters=filters)
+    (event,) = event_log.get_events(
+        event_type=EventType.PACK_ASSEMBLED, entity_id=pack.pack_id
+    )
+    return pack, event.payload or {}
+
+
+@pytest.mark.parametrize(
+    "key", [TAUTOLOGY_KEY, SYNTAX_ERROR_KEY], ids=["tautology", "syntax-error"]
+)
+def test_a_bad_key_fails_both_store_axes_with_a_value_error(
+    registry: StoreRegistry, key: str
+) -> None:
+    pack, payload = _build(registry, {key: "platform"})
+
+    assert [item.item_id for item in pack.items] == []
+    assert pack.retrieval_report.strategies_used == ["keyword"]
+    failures = {f["strategy"]: f for f in payload["strategy_failures"]}
+    assert set(failures) == {"semantic", "graph"}
+    for failure in failures.values():
+        assert failure["error_class"] == "ValueError"
+        assert "not a plain JSON object key" in failure["message"]
+
+
+@pytest.mark.parametrize(
+    ("value", "served"), [("data", ["node-1", "vec-1"]), ("platform", [])]
+)
+def test_a_plain_key_still_filters_both_store_axes(
+    registry: StoreRegistry, value: str, served: list[str]
+) -> None:
+    pack, payload = _build(registry, {"owner_team": value})
+
+    assert sorted(item.item_id for item in pack.items) == served
+    assert payload["strategy_failures"] == []
