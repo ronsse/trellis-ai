@@ -280,7 +280,7 @@ def generate_proposals_command(
         if output_format == "json":
             print(json.dumps({"error": "store_error", "message": message}))
         else:
-            console.print(f"[red]store error: {escape(message)}[/red]")
+            console.print(f"[red]store error: {escape(message)}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_STORE) from exc
 
     if output_format == "json":
@@ -342,7 +342,7 @@ def list_proposals_command(
         if output_format == "json":
             print(json.dumps({"error": "store_error", "message": message}))
         else:
-            console.print(f"[red]store error: {escape(message)}[/red]")
+            console.print(f"[red]store error: {escape(message)}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_STORE) from exc
 
     rows = [_event_to_listing_row(event) for event in events]
@@ -406,7 +406,7 @@ def show_proposal_command(
         if output_format == "json":
             print(json.dumps({"error": "store_error", "message": message}))
         else:
-            console.print(f"[red]store error: {escape(message)}[/red]")
+            console.print(f"[red]store error: {escape(message)}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_STORE) from exc
 
     if not matches:

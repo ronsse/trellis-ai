@@ -116,7 +116,9 @@ def ingest_trace(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Invalid trace: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Invalid trace: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     # Persist via the governed mutation pipeline
@@ -205,7 +207,9 @@ def ingest_evidence(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Invalid evidence: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Invalid evidence: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     # Persist to document store
@@ -395,7 +399,10 @@ def ingest_dbt_manifest(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Could not read manifest: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Could not read manifest: {escape(str(exc))}[/red]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     from trellis_workers.extract import DbtManifestExtractor  # noqa: PLC0415
@@ -416,7 +423,9 @@ def ingest_dbt_manifest(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]dbt ingest failed: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]dbt ingest failed: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=exit_code_for(exc)) from None
     refusal = outcome.refusal
 
@@ -475,7 +484,10 @@ def ingest_openlineage(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Could not read events file: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Could not read events file: {escape(str(exc))}[/red]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     from trellis_workers.extract import OpenLineageExtractor  # noqa: PLC0415
@@ -496,7 +508,10 @@ def ingest_openlineage(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]OpenLineage ingest failed: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]OpenLineage ingest failed: {escape(str(exc))}[/red]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=exit_code_for(exc)) from None
     refusal = outcome.refusal
 
