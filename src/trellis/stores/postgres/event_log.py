@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.errors import StoreError
 from trellis.stores.base.event_log import Event, EventLog, EventOrder, EventType
 from trellis.stores.postgres.base import PostgresStoreBase
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    import psycopg
 
 logger = structlog.get_logger(__name__)
 
@@ -76,12 +83,33 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
             for idx_sql in _CREATE_INDEXES:
                 cur.execute(idx_sql)
 
+    @contextmanager
+    def _mapped_conn(self, operation: str) -> Iterator[psycopg.Connection]:
+        """Yield a :meth:`_conn` connection; raise a psycopg error as ``StoreError``.
+
+        The executor catches ``StoreError`` around its idempotency read and
+        its audit append, and a ``psycopg.Error`` is outside that catch. The
+        ``try`` sits outside ``_conn`` so that failing to get a connection
+        (a ``PoolTimeout``) and a failed commit are raised the same way as a
+        failed statement. The message names the operation and the error's
+        type, not the server's text, which can carry query text and values;
+        the psycopg error stays on ``__cause__``.
+        """
+        import psycopg  # noqa: PLC0415
+
+        try:
+            with self._conn() as conn:
+                yield conn
+        except psycopg.Error as exc:
+            msg = f"Event log {operation} failed: {type(exc).__name__}"
+            raise StoreError(msg, store="event_log") from exc
+
     # ------------------------------------------------------------------
     # Append
     # ------------------------------------------------------------------
 
     def append(self, event: Event) -> None:
-        with self._conn() as conn, conn.cursor() as cur:
+        with self._mapped_conn("append") as conn, conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO events
@@ -114,7 +142,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
 
     def has_idempotency_key(self, key: str) -> bool:
         """Efficient single-row check for an idempotency key."""
-        with self._conn() as conn, conn.cursor() as cur:
+        with self._mapped_conn("has_idempotency_key") as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM events WHERE event_type = %s "
                 "AND payload->>'idempotency_key' = %s LIMIT 1",
@@ -172,7 +200,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         )
         params.append(limit)
 
-        with self._conn() as conn, conn.cursor() as cur:
+        with self._mapped_conn("get_events") as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
         return [self._row_to_event(row) for row in rows]
@@ -200,7 +228,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         where = " AND ".join(clauses) if clauses else "1=1"
         sql = f"SELECT COUNT(*) FROM events WHERE {where}"
 
-        with self._conn() as conn, conn.cursor() as cur:
+        with self._mapped_conn("count") as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
         return int(row[0]) if row else 0

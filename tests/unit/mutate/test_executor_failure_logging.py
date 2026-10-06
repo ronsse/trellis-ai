@@ -151,6 +151,49 @@ def test_an_unexpected_failure_keeps_its_traceback(
     assert _COMMAND_ID in out
 
 
+def _refuse_the_read(key: str) -> NoReturn:
+    """Fail an idempotency read as an event log that maps driver errors does."""
+    try:
+        _driver_call()
+    except _DriverError as exc:
+        msg = "Event log has_idempotency_key failed: _DriverError"
+        raise StoreError(msg, store="event_log") from exc
+
+
+@pytest.mark.parametrize("configure", _CHAINS)
+def test_a_failed_idempotency_read_logs_its_type_and_not_its_cause(
+    capsys: pytest.CaptureFixture[str], configure: Callable[[], None]
+) -> None:
+    """Stage 3's ``idempotency_check_failed`` line carries no traceback.
+
+    The read's error is chained to the driver's, so a rendered traceback
+    would print the server's text.
+    """
+    configure()
+    event_log = MagicMock()
+    event_log.has_idempotency_key.side_effect = _refuse_the_read
+    handler = MagicMock()
+
+    result = MutationExecutor(
+        event_log=event_log, handlers={Operation.ENTITY_CREATE: handler}
+    ).execute(
+        Command(
+            operation=Operation.ENTITY_CREATE,
+            args={"entity_type": "service", "name": "synthetic"},
+            command_id=_COMMAND_ID,
+            idempotency_key="idem-synthetic-2",
+        )
+    )
+    out = capsys.readouterr().err
+
+    assert result.status == CommandStatus.FAILED
+    handler.handle.assert_not_called()
+    [line] = [ln for ln in out.splitlines() if "idempotency_check_failed" in ln]
+    assert "StoreError" in line
+    assert "idem-synthetic-2" in line
+    assert _SERVER_TEXT not in out
+
+
 @pytest.mark.parametrize(
     ("handler", "message"),
     [

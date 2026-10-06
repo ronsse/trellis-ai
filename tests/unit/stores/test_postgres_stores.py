@@ -1070,6 +1070,103 @@ class TestPostgresEventLog:
         assert [e.event_id for e in empty_filtered] == [e.event_id for e in baseline]
 
 
+def _drop_the_events_table(store: Any) -> type[Exception]:
+    """Make every statement fail inside the cursor, as a server error does.
+
+    The drop goes through ``_clean_tables`` and its scratch-database check.
+    """
+    _clean_tables(store._dsn)
+    return psycopg.errors.UndefinedTable
+
+
+def _close_the_pool(store: Any) -> type[Exception]:
+    """Make every call fail on pool entry, where a ``PoolTimeout`` is raised."""
+    from psycopg_pool import PoolClosed
+
+    store._pool.close()
+    return PoolClosed
+
+
+_DRIVER_ERRORS = [
+    *(
+        pytest.param(_drop_the_events_table, operation, id=f"table-dropped-{operation}")
+        for operation in ("append", "has_idempotency_key", "get_events", "count")
+    ),
+    # Every operation takes its connection through the same wrapper.
+    pytest.param(
+        _close_the_pool, "has_idempotency_key", id="pool-closed-has_idempotency_key"
+    ),
+]
+
+
+class TestPostgresEventLogDriverErrors:
+    """A psycopg error in the event log is raised as a type-only ``StoreError``.
+
+    The executor's catches name ``StoreError``, and a ``psycopg.Error`` is
+    outside them. The message names the operation and the error's type, not
+    the server's text; the psycopg error stays on ``__cause__``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self) -> None:
+        assert PG_DSN is not None
+        _clean_tables(PG_DSN)
+
+    @pytest.fixture
+    def store(self):
+        from trellis.stores.postgres.event_log import PostgresEventLog
+
+        assert PG_DSN is not None
+        s = PostgresEventLog(PG_DSN)
+        yield s
+        s.close()
+
+    @pytest.mark.parametrize(("break_log", "operation"), _DRIVER_ERRORS)
+    def test_a_driver_error_is_raised_as_a_type_only_store_error(
+        self, store, break_log, operation: str
+    ) -> None:
+        from trellis.errors import StoreError
+        from trellis.stores.base.event_log import Event, EventType
+
+        event = Event(
+            event_type=EventType.ENTITY_CREATED,
+            source="syn-source",
+            entity_id="syn-entity-1",
+        )
+        calls = {
+            "append": lambda: store.append(event),
+            "has_idempotency_key": lambda: store.has_idempotency_key("syn-key-1"),
+            "get_events": store.get_events,
+            "count": store.count,
+        }
+        cause_type = break_log(store)
+
+        with pytest.raises(StoreError) as caught:
+            calls[operation]()
+
+        expected = f"Event log {operation} failed: {cause_type.__name__}"
+        assert str(caught.value) == expected
+        assert caught.value.store == "event_log"
+        assert type(caught.value.__cause__) is cause_type
+
+    def test_an_error_that_is_not_the_driver_s_keeps_its_type(self, store) -> None:
+        """A payload that cannot be serialized is the caller's bug, not the store's.
+
+        The executor logs a handler's untyped failure with its traceback and
+        a ``StoreError`` without one, so relabelling it would hide the bug.
+        """
+        from trellis.stores.base.event_log import Event, EventType
+
+        event = Event(
+            event_type=EventType.ENTITY_CREATED,
+            source="syn-source",
+            payload={"syn-field": object()},
+        )
+
+        with pytest.raises(TypeError):
+            store.append(event)
+
+
 # ======================================================================
 # Connection pool — concurrent throughput
 # ======================================================================
