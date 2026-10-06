@@ -34,7 +34,7 @@ import typer
 from rich.markup import escape
 
 from trellis.core.base import utc_now
-from trellis.core.error_sanitize import sanitize_error_message, sanitized_error_payload
+from trellis.core.error_sanitize import sanitized_error_payload
 from trellis.extract.commands import (
     batch_draft_counts,
     reconcile_node_roles,
@@ -49,7 +49,12 @@ from trellis.mutate.commands import CommandResult, CommandStatus
 from trellis.schemas.extraction import ExtractionResult
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.exit_codes import EXIT_INTERNAL, refusal_exit_code
+from trellis_cli.exit_codes import (
+    EXIT_INTERNAL,
+    BatchOutcome,
+    batch_outcome,
+    refusal_exit_code,
+)
 from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
 
@@ -245,11 +250,6 @@ def _emit_refresh_event(
         )
 
 
-#: The answers under which a command wrote nothing. ``DUPLICATE`` is not one:
-#: it answers the replay of a write that already landed.
-_REFUSED = (CommandStatus.REJECTED, CommandStatus.FAILED)
-
-
 def _command_counts(results: list[CommandResult]) -> dict[str, int]:
     """Count a run's command results by status, under the REST extract route's names."""
     return {
@@ -260,34 +260,16 @@ def _command_counts(results: list[CommandResult]) -> dict[str, int]:
     }
 
 
-def _run_refusal(results: list[CommandResult]) -> CommandResult | None:
-    """Return the first result when every command was refused or failed, else ``None``.
-
-    The rule ``trellis ingest dbt-manifest`` follows (#687): a run that wrote
-    anything exits 0 and counts its failures, and a run with no commands is
-    not a refusal.
-    """
-    if results and all(r.status in _REFUSED for r in results):
-        return results[0]
-    return None
-
-
-def _run_status(refusal: CommandResult | None, done: str) -> dict[str, str]:
-    """The JSON status for a run, from the flag that sets its exit."""
-    if refusal is None:
-        return {"status": done}
-    return {"status": "error", "message": sanitize_error_message(refusal.message)}
-
-
-def _print_results(results: list[CommandResult], *, width: int) -> None:
-    """Print a run's command counts, and its first failure when it has one."""
+def _print_results(
+    results: list[CommandResult], first: CommandResult | None, *, width: int
+) -> None:
+    """Print a run's command counts, then *first*, its first failure, if any."""
     counts = _command_counts(results)
     console.print(
         f"  {'Commands:':<{width}}{counts['succeeded']} succeeded, "
         f"{counts['failed']} failed, {counts['rejected']} rejected, "
         f"{counts['duplicates']} duplicates"
     )
-    first = next((r for r in results if r.status in _REFUSED), None)
     if first is not None:
         console.print(
             f"  [yellow]{counts['failed'] + counts['rejected']} failed or "
@@ -537,12 +519,13 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # A batch whose every command was refused or failed is a failed refresh,
-    # not an "unchanged" one.
-    refusal = _run_refusal(results)
+    # not an "unchanged" one. A partial one names its first failure.
+    outcome = batch_outcome(results, done="refreshed", name_partial=True)
+    refusal = outcome.refusal
     if output_format == "json":
         # Use plain print to avoid Rich's word-wrapping on long JSON, which
         # injects newlines mid-value and breaks downstream parsers.
-        print(json.dumps({**_run_status(refusal, "refreshed"), **summary}))
+        print(json.dumps({**outcome.status, **summary}))
     else:
         source_name = escape(summary["source"])
         console.print(
@@ -556,7 +539,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         console.print(f"  Changed:           {summary['changed_entities']}")
         console.print(f"  Unchanged:         {summary['unchanged_entities']}")
         console.print(f"  Edges emitted:     {summary['edges_emitted']}")
-        _print_results(results, width=19)
+        _print_results(results, outcome.first_failure, width=19)
         if summary["diffs"]:
             console.print()
             console.print("  Per-entity diffs:")
@@ -581,12 +564,16 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
 
 
 def _print_backfill(
-    summary: dict[str, Any], results: list[CommandResult], *, since: int, failed: bool
+    summary: dict[str, Any],
+    results: list[CommandResult],
+    outcome: BatchOutcome,
+    *,
+    since: int,
 ) -> None:
     """Print ``extract traces`` text output: drafts, then what the writes answered."""
     console.print(
         f"[red]Trace backfill failed ({since} days)[/red]"
-        if failed
+        if outcome.refusal is not None
         else f"[green]Trace backfill ({since} days)[/green]"
     )
     console.print(f"  Traces scanned:  {summary['traces_scanned']}")
@@ -596,7 +583,7 @@ def _print_backfill(
         console.print("  [yellow]dry-run -- no mutations executed[/yellow]")
     else:
         console.print(f"  Drafts:          {drafts}")
-        _print_results(results, width=17)
+        _print_results(results, outcome.first_failure, width=17)
     for row in summary["per_trace"]:
         if row["entities"] or row["edges"]:
             console.print(
@@ -699,11 +686,12 @@ def traces(
         "per_trace": per_trace,
     }
 
-    refusal = _run_refusal(results)
+    outcome = batch_outcome(results, done="backfilled", name_partial=True)
+    refusal = outcome.refusal
     if output_format == "json":
-        print(json.dumps({**_run_status(refusal, "backfilled"), **summary}))
+        print(json.dumps({**outcome.status, **summary}))
     else:
-        _print_backfill(summary, results, since=since, failed=refusal is not None)
+        _print_backfill(summary, results, outcome, since=since)
     if refusal is not None:
         raise typer.Exit(code=refusal_exit_code(refusal))
 

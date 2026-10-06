@@ -28,6 +28,7 @@ from trellis.stores.base.graph import (
     AliasBindStatus,
     GraphStore,
     check_node_role_immutable,
+    node_search_like_pattern,
     validate_document_ids,
     validate_node_role_args,
     validate_node_search_args,
@@ -1397,11 +1398,11 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         params: list[Any] = []
         if search:
             where += (
-                " AND (json_extract(properties_json, '$.name') LIKE ?"
-                " OR node_id LIKE ?"
-                " OR node_type LIKE ?)"
+                " AND (json_extract(properties_json, '$.name') LIKE ? ESCAPE '\\'"
+                " OR node_id LIKE ? ESCAPE '\\'"
+                " OR node_type LIKE ? ESCAPE '\\')"
             )
-            pattern = f"%{search}%"
+            pattern = node_search_like_pattern(search)
             params = [pattern, pattern, pattern]
         return where, params
 

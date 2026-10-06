@@ -30,7 +30,6 @@ from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     Command,
     CommandBatch,
-    CommandResult,
     CommandStatus,
     Operation,
 )
@@ -39,7 +38,13 @@ from trellis.schemas.evidence import Evidence
 from trellis.schemas.extraction import ExtractionResult
 from trellis.schemas.trace import Trace
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.exit_codes import EXIT_VALIDATION, exit_code_for, refusal_exit_code
+from trellis_cli.exit_codes import (
+    EXIT_VALIDATION,
+    BatchOutcome,
+    batch_outcome,
+    exit_code_for,
+    refusal_exit_code,
+)
 from trellis_cli.ingest_conversations import ingest_conversations
 from trellis_cli.ingest_corpus import ingest_corpus
 from trellis_cli.output import build_console, emit_json
@@ -258,11 +263,11 @@ def _run_extraction(
 def _execute_batch(
     registry: StoreRegistry,
     batch: CommandBatch,
-) -> tuple[int, int, CommandResult | None]:
-    """Submit the batch and return ``(nodes_created, edges_created, refusal)``.
+) -> tuple[int, int, BatchOutcome]:
+    """Submit the batch and return ``(nodes_created, edges_created, outcome)``.
 
-    ``refusal`` is the first result when every command was refused or failed,
-    and ``None`` otherwise, so a partial refusal or an empty batch exits 0.
+    ``outcome`` reads the results by :func:`batch_outcome`, so a partial
+    refusal or an empty batch exits 0.
     """
     results = build_curate_executor(registry).execute_batch(batch)
     nodes = sum(
@@ -275,19 +280,7 @@ def _execute_batch(
         for r in results
         if r.operation == Operation.LINK_CREATE and r.status == CommandStatus.SUCCESS
     )
-    refused = [
-        r for r in results if r.status in (CommandStatus.REJECTED, CommandStatus.FAILED)
-    ]
-    if results and len(refused) == len(results):
-        return nodes, edges, refused[0]
-    return nodes, edges, None
-
-
-def _batch_status(refusal: CommandResult | None) -> dict[str, str]:
-    """The JSON status for a batch ingest, from the flag that sets its exit."""
-    if refusal is None:
-        return {"status": "ingested"}
-    return {"status": "error", "message": sanitize_error_message(refusal.message)}
+    return nodes, edges, batch_outcome(results, done="ingested")
 
 
 def _index_dbt_descriptions(
@@ -415,7 +408,7 @@ def ingest_dbt_manifest(
             raw_input=manifest,
             source_hint="dbt-manifest",
         )
-        nodes, edges, refusal = _execute_batch(
+        nodes, edges, outcome = _execute_batch(
             registry,
             result_to_batch(result, requested_by="cli:dbt-manifest"),
         )
@@ -425,6 +418,7 @@ def ingest_dbt_manifest(
         else:
             console.print(f"[red]dbt ingest failed: {escape(str(exc))}[/red]")
         raise typer.Exit(code=exit_code_for(exc)) from None
+    refusal = outcome.refusal
 
     doc_count, embedded = _index_dbt_descriptions(registry, result)
 
@@ -439,7 +433,7 @@ def ingest_dbt_manifest(
         "embedded": embedded,
     }
     if output_format == "json":
-        emit_json({**_batch_status(refusal), **counts})
+        emit_json({**outcome.status, **counts})
     else:
         console.print(
             "[green]dbt manifest ingested[/green]"
@@ -494,7 +488,7 @@ def ingest_openlineage(
             raw_input=events,
             source_hint="openlineage",
         )
-        nodes, edges, refusal = _execute_batch(
+        nodes, edges, outcome = _execute_batch(
             registry,
             result_to_batch(result, requested_by="cli:openlineage"),
         )
@@ -504,10 +498,11 @@ def ingest_openlineage(
         else:
             console.print(f"[red]OpenLineage ingest failed: {escape(str(exc))}[/red]")
         raise typer.Exit(code=exit_code_for(exc)) from None
+    refusal = outcome.refusal
 
     counts = {"nodes": nodes, "edges": edges}
     if output_format == "json":
-        emit_json({**_batch_status(refusal), **counts})
+        emit_json({**outcome.status, **counts})
     else:
         console.print(
             "[green]OpenLineage events ingested[/green]"

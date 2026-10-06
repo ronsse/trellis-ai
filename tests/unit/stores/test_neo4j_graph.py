@@ -190,6 +190,37 @@ def test_upsert_edge_missing_endpoints_raises(graph_store, source_id, target_id)
     assert graph_store.count_edges() == 0
 
 
+@pytest.mark.parametrize("vanished", ["source", "target"])
+def test_upsert_edges_bulk_drops_a_row_whose_endpoint_vanished(
+    graph_store, monkeypatch, vanished
+):
+    """An endpoint purged between ``upsert_edges_bulk``'s endpoint check and
+    its write: the write drops that row, whose returned id is ``""``, and
+    adds no edge or vertex."""
+    graph_store.upsert_node("a", "s", {})
+    graph_store.upsert_node("b", "s", {})
+    gone = "a" if vanished == "source" else "b"
+    check = graph_store._fetch_current_node_id_set
+
+    def check_then_purge(session, node_ids):
+        found = check(session, node_ids)
+        assert graph_store.delete_node(gone)
+        return found
+
+    monkeypatch.setattr(graph_store, "_fetch_current_node_id_set", check_then_purge)
+
+    def counts():
+        with graph_store._driver.session(database=graph_store._database) as session:
+            nodes = session.run("MATCH (n) RETURN count(n) AS c").single()["c"]
+            rels = session.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
+        return nodes, rels
+
+    nodes, rels = counts()
+    edge = {"source_id": "a", "target_id": "b", "edge_type": "links_to"}
+    assert graph_store.upsert_edges_bulk([edge]) == [""]
+    assert counts() == (nodes - 1, rels)
+
+
 def test_delete_edge(graph_store):
     graph_store.upsert_node("a", "s", {})
     graph_store.upsert_node("b", "s", {})
