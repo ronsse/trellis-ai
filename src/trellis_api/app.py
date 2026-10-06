@@ -66,12 +66,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
 
 
 def register_exception_handlers(app: FastAPI) -> None:
-    """Register the three handlers that give every response its shape.
+    """Register the three handlers that shape an error response.
 
     Shared by :func:`create_app` and the in-process testing shim
-    (:func:`trellis.testing.inmemory._build_app`) so a test built on the
-    shim sees the same status and body a production request would —
-    neither a raw traceback nor FastAPI's default 422 shape (#741).
+    (:func:`trellis.testing.inmemory._build_app`), so a ``TrellisError`` or
+    a request validation error answers the same status and body from both,
+    except the shim's null ``request_id``. An untyped exception still raises
+    into a shim test: Starlette re-raises it after sending the 500, and the
+    shim's clients propagate it.
     """
     # Translate uncaught exceptions into a structured 500 envelope so
     # responses don't leak internal types or stack frames.

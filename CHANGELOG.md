@@ -1155,17 +1155,18 @@ All notable changes to Trellis will be documented in this file.
   marker, the truncation, the payload shape and every caller are
   unchanged.
   ([#747](https://github.com/ronsse/trellis-ai/pull/747))
-- **`trellis.testing.in_memory_client` answers the same status and body
-  `create_app()` does for a `TrellisError`, a finite validation error, and
-  the #741 `NaN`-echoing shape.** The in-process testing shim
-  (`trellis.testing.inmemory._build_app`) built a bare `FastAPI` with the
-  routers but none of `create_app`'s three exception handlers, so a test
-  written against it saw a raw traceback or a 500 where production answers
-  a structured `409`, and FastAPI's default 422 shape — including a crash
-  on an echoed `NaN` — where production answers the #741 fix. Both apps now
-  register the structured-500, `TrellisError`, and non-finite-422 handlers
-  from one function, `trellis_api.app.register_exception_handlers`; no
-  other shim behaviour (middleware, lifespan, routes) changed.
+- **`trellis.testing.in_memory_client` answers a `TrellisError` and a
+  `NaN`-echoing validation error the way `create_app()` does.** The
+  testing shim behind it and `in_memory_async_client` registered none of
+  `create_app`'s exception handlers, so a `TrellisError` raised in a route
+  reached the test as that exception, and a validation error echoing `NaN`
+  raised `ValueError`. Both now answer production's status and body (the
+  shim's `request_id` is null), so the SDK raises `TrellisClientError` for
+  a `ConfigError`'s 409 and `TrellisServerError` for any other
+  `TrellisError`'s 500. An untyped exception still raises into the test.
+  Both apps register the handlers from
+  `trellis_api.app.register_exception_handlers`.
+  ([#749](https://github.com/ronsse/trellis-ai/pull/749))
 
 ## [0.9.0] - 2026-05-13
 

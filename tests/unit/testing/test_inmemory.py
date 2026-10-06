@@ -1,27 +1,11 @@
 """Parity between the in-process testing shim and the real API app.
 
-``trellis.testing.in_memory_client`` (and the lower-level
-:func:`trellis.testing.inmemory._build_app` it wraps) mounts the same
-routers as :func:`trellis_api.app.create_app`, but until #741 follow-up 5
-it registered none of the three exception handlers ``create_app`` wires
-up: the structured 500 envelope (:func:`unhandled_exception_handler`),
-the typed-error mapping for :class:`~trellis.errors.TrellisError`
-(:func:`trellis_error_handler`, #459/#443), and the non-finite-body 422
-fix (:func:`request_validation_error_handler`, #741). An adopter writing
-tests against the shim saw a raw traceback, FastAPI's default 422 shape,
-and an unmapped ``TrellisError`` — none of which production ever answers.
-
-:func:`trellis_api.app.register_exception_handlers` is now the one place
-both apps register them from. This module pins:
-
-* the shim's status/body equal ``create_app()``'s for three request
-  shapes (a TrellisError subclass escaping a route, a finite validation
-  error, and the #741 NaN-echoing shape) — each assertion also pins the
-  *correct* value independently of the other side, so a mutant that
-  breaks both apps identically (dropping a line from the shared
-  function itself) still fails a test rather than only disagreeing with
-  itself;
-* both apps register exactly the same exception-handler keys.
+``trellis.testing.in_memory_client`` serves the app
+:func:`trellis.testing.inmemory._build_app` builds, which mounts
+:func:`trellis_api.app.create_app`'s routers and, through
+:func:`trellis_api.app.register_exception_handlers`, its exception
+handlers. A ``TrellisError`` and a ``NaN``-echoing validation error (#741)
+answer the same status and body from both apps.
 
 Every id here is synthetic.
 """
@@ -31,12 +15,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from fastapi.exceptions import RequestValidationError, WebSocketRequestValidationError
 from fastapi.testclient import TestClient
-from starlette.exceptions import HTTPException
 
 import trellis_api.app as app_module
-from trellis.errors import TrellisError
 from trellis.stores.registry import StoreRegistry
 from trellis.testing.inmemory import _build_app
 from trellis_api.app import create_app
@@ -44,17 +25,6 @@ from trellis_api.app import create_app
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
-
-#: The complete set create_app and the shim must both register: FastAPI's
-#: own defaults (HTTPException, the two validation-error types) plus the
-#: three ``register_exception_handlers`` adds.
-_EXPECTED_HANDLER_KEYS = {
-    Exception,
-    HTTPException,
-    RequestValidationError,
-    WebSocketRequestValidationError,
-    TrellisError,
-}
 
 
 @pytest.fixture
@@ -70,9 +40,12 @@ def registry(
 
 
 def _shim_client(registry: StoreRegistry) -> TestClient:
-    """The shim app, as ``in_memory_client`` builds it."""
-    app = _build_app(registry)
-    return TestClient(app, raise_server_exceptions=False)
+    """The shim's app, raising server exceptions as ``in_memory_client`` does.
+
+    An exception no handler answers raises into the test rather than coming
+    back as a 500, so a missing handler fails loudly here.
+    """
+    return TestClient(_build_app(registry))
 
 
 def _prod_client(registry: StoreRegistry) -> TestClient:
@@ -95,7 +68,7 @@ def _reset_registry_global() -> Iterator[None]:
 
 
 class TestTrellisErrorParity:
-    """A ``TrellisError`` subclass escaping a route maps to 409, not 500.
+    """A ``ConfigError`` escaping a route answers 409 from both apps.
 
     ``GET /api/version`` re-reads ``TRELLIS_OPS_DETAIL`` on every request
     (unlike the eager, startup-only validation ``create_app`` also does)
@@ -123,10 +96,8 @@ class TestTrellisErrorParity:
         shim_resp = shim_client.get("/api/version")
         prod_resp = prod_client.get("/api/version")
 
-        # Each side's own correctness, so a mutant that drops this handler
-        # from the shared function (breaking both identically) still
-        # fails here rather than only passing an equality check against
-        # an equally-broken sibling.
+        # Each side's own value, so a handler dropped from the shared
+        # function, which breaks both apps alike, still fails here.
         assert prod_resp.status_code == 409
         assert shim_resp.status_code == 409
 
@@ -135,11 +106,10 @@ class TestTrellisErrorParity:
         assert prod_body["code"] == "config_error"
         assert shim_body["code"] == "config_error"
 
-        # request_id differs by construction: the shim doesn't install the
-        # request-id middleware (explicitly out of scope for this change —
-        # see trellis/testing/inmemory.py), so it is always null there
-        # where create_app's is a minted ULID. Compare everything else
-        # directly rather than pinning the envelope as a literal twice.
+        # request_id differs by construction: the shim installs no
+        # request-id middleware, so it is null there and a minted ULID from
+        # create_app. Compare everything else directly rather than pinning
+        # the envelope as a literal twice.
         for body in (shim_body, prod_body):
             body.pop("request_id")
         assert shim_body == prod_body
@@ -148,24 +118,14 @@ class TestTrellisErrorParity:
 class TestValidationErrorParity:
     """FastAPI body validation on a typed route (``POST /api/v1/packs``)."""
 
-    def test_finite_error_matches_and_is_422(self, registry: StoreRegistry) -> None:
-        body = {"intent": "test-intent-finite", "max_items": "not-a-number"}
-
-        shim_resp = _shim_client(registry).post("/api/v1/packs", json=body)
-        prod_resp = _prod_client(registry).post("/api/v1/packs", json=body)
-
-        assert prod_resp.status_code == 422
-        assert shim_resp.status_code == 422
-        assert shim_resp.json() == prod_resp.json()
-
     def test_nan_echoing_error_matches_and_is_422_not_500(
         self, registry: StoreRegistry
     ) -> None:
         """The #741 shape: a bare ``NaN`` token the rejected value echoes.
 
-        Before this handler is wired, FastAPI's default handler tries to
-        JSON-encode the echoed ``NaN`` with ``allow_nan=False`` and raises,
-        so the catch-all (where one exists) answers 500.
+        FastAPI's default 422 handler raises on encoding the echoed ``NaN``,
+        so without ``request_validation_error_handler`` this request raises
+        ``ValueError`` through the shim and answers 500 from ``create_app``.
         """
         raw = b'{"intent": "test-intent-nan", "max_items": NaN}'
         headers = {"content-type": "application/json"}
@@ -186,23 +146,12 @@ class TestValidationErrorParity:
         assert error["input"] == "NaN"
 
 
-def test_create_app_and_shim_register_the_same_handler_keys(
+def test_create_app_and_shim_register_the_same_handlers(
     registry: StoreRegistry,
 ) -> None:
-    """Both apps register exactly the handler-key set this module expects.
+    """Both apps map every exception type to the same handler.
 
-    Asserted against the independent, hand-written ``_EXPECTED_HANDLER_KEYS``
-    (not just against each other), so a mutant that drops one handler from
-    the *shared* function — which would break both apps identically —
-    still fails this test instead of agreeing with its equally-broken
-    sibling.
+    A handler added to or replaced in one app alone fails here; one dropped
+    from both fails the tests above or ``tests/unit/api/test_boundary_errors.py``.
     """
-    shim_app = _build_app(registry)
-    prod_app = create_app()
-
-    shim_keys = set(shim_app.exception_handlers)
-    prod_keys = set(prod_app.exception_handlers)
-
-    assert shim_keys == _EXPECTED_HANDLER_KEYS
-    assert prod_keys == _EXPECTED_HANDLER_KEYS
-    assert shim_keys == prod_keys
+    assert _build_app(registry).exception_handlers == create_app().exception_handlers
