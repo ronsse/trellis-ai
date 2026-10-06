@@ -29,6 +29,7 @@ from trellis.stores.base.graph import (
     AliasBindStatus,
     GraphStore,
     check_node_role_immutable,
+    node_search_like_pattern,
     validate_document_ids,
     validate_node_role_args,
     validate_node_search_args,
@@ -1409,11 +1410,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         params: list[Any] = []
         if search:
             where += (
-                " AND (properties->>'name' ILIKE %s"
-                " OR node_id ILIKE %s"
-                " OR node_type ILIKE %s)"
+                " AND (properties->>'name' ILIKE %s ESCAPE '\\'"
+                " OR node_id ILIKE %s ESCAPE '\\'"
+                " OR node_type ILIKE %s ESCAPE '\\')"
             )
-            pattern = f"%{search}%"
+            pattern = node_search_like_pattern(search)
             params = [pattern, pattern, pattern]
         return where, params
 
@@ -1483,13 +1484,16 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     # ------------------------------------------------------------------
 
     def execute_node_query(self, query: Any) -> list[dict[str, Any]]:
-        """Compile :class:`NodeQuery` to a Postgres SELECT.
+        """Compile :class:`NodeQuery` to a Postgres SELECT and run it.
 
-        Supports the full Phase 1 operator surface (``eq`` / ``in`` /
-        ``exists``) on:
-
-        * ``node_type`` / ``node_role`` (column comparison)
-        * ``properties.<key>`` (via JSONB ``->>`` path extractor)
+        * ``node_type`` / ``node_role`` / ``node_id``: ``eq``, ``in``,
+          ``exists`` and the range ops compare the column; ``contains``
+          is refused.
+        * ``document_ids``: ``exists`` only.
+        * ``properties.<key>``: ``eq`` / ``in`` by JSONB containment
+          (``@>``), ``exists`` by key existence (``?``), ``contains`` by
+          membership of the array at the key, and the range ops compare
+          the value cast to ``numeric``. Every op binds the key.
         """
         sql, params = self._compile_node_query(query)
         with self._conn() as conn, conn.cursor() as cur:

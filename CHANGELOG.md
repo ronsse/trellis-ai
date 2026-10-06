@@ -1034,6 +1034,16 @@ All notable changes to Trellis will be documented in this file.
   reaches the API's catch-all still logs its traceback; response bodies and
   command results are unchanged.
   ([#734](https://github.com/ronsse/trellis-ai/pull/734))
+- **A graph search for text holding `%`, `_` or `\` matches that text
+  literally on SQLite and Postgres.** `GET /graph/search`'s `q`, and the
+  facet counts under it, reach the graph store's `search_nodes` and
+  `count_nodes_by_type`, which the SQLite and Postgres stores matched as a
+  `LIKE` / `ILIKE` pattern: `%` and `_` were wildcards, so `q=a_b` also
+  listed a node named `axb` and `q=%` listed every node, and on Postgres a
+  backslash escaped the next character, so `back\slash` found `backslash`
+  and not itself. Both stores now escape the three characters and name `\`
+  as the `ESCAPE` character, so they match as the Neo4j and ArcadeDB stores
+  already did. ([#737](https://github.com/ronsse/trellis-ai/pull/737))
 
 ## [0.9.0] - 2026-05-13
 
