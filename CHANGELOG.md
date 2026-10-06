@@ -953,6 +953,7 @@ All notable changes to Trellis will be documented in this file.
   another refusal, `5` for a failure) with `"status": "error"` and that
   failure's `message`, as `trellis ingest dbt-manifest` does; a run that
   wrote anything still exits `0`. Dry runs are unchanged.
+  ([#730](https://github.com/ronsse/trellis-ai/pull/730))
 
 ## [0.9.0] - 2026-05-13
 
