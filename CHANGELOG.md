@@ -1166,6 +1166,18 @@ All notable changes to Trellis will be documented in this file.
   does, and the raise rolls the write's transaction back, so no row of the
   batch is written. A call whose endpoints stay current is unchanged.
   ([#746](https://github.com/ronsse/trellis-ai/pull/746))
+- **`trellis.testing.in_memory_client` answers a `TrellisError` and a
+  `NaN`-echoing validation error the way `create_app()` does.** The
+  testing shim behind it and `in_memory_async_client` registered none of
+  `create_app`'s exception handlers, so a `TrellisError` raised in a route
+  reached the test as that exception, and a validation error echoing `NaN`
+  raised `ValueError`. Both now answer production's status and body (the
+  shim's `request_id` is null), so the SDK raises `TrellisClientError` for
+  a `ConfigError`'s 409 and `TrellisServerError` for any other
+  `TrellisError`'s 500. An untyped exception still raises into the test.
+  Both apps register the handlers from
+  `trellis_api.app.register_exception_handlers`.
+  ([#749](https://github.com/ronsse/trellis-ai/pull/749))
 - **The error sanitizer suppresses Neo4j and ArcadeDB duplicate-constraint
   values over Bolt.** Neo4j's uniqueness-violation text quotes the row
   inline: `` Node(<n>) already exists with label `<Label>` and property
