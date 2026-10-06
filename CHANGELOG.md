@@ -1089,10 +1089,10 @@ All notable changes to Trellis will be documented in this file.
   driver error the executor does not turn into a result, left the CLI as a
   Python traceback with nothing on stdout, so a `--format json` caller had
   no JSON to parse. The loop now reports it as `extract refresh` reports
-  its run: the sanitized error payload in JSON or one line in text, then
-  exit `1`, as before. A `TrellisError` still reaches the root boundary and
-  exits by its type, and batches already written for earlier traces stay
-  written.
+  its run: the sanitized error payload in JSON or `Trace backfill failed:`
+  and the message in text, then exit `1`, as before. A `TrellisError`
+  still reaches the root boundary and exits by its type, and batches
+  already written for earlier traces stay written.
   ([#742](https://github.com/ronsse/trellis-ai/pull/742))
 
 ## [0.9.0] - 2026-05-13

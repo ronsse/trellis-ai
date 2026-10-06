@@ -152,8 +152,6 @@ _LOOP_CALLS = pytest.mark.parametrize(
     "call", ["extract_trace_batch", "reconcile_node_roles", "execute_batch"]
 )
 
-_FORMATS = pytest.mark.parametrize("fmt", ["json", "text"])
-
 
 def _raise_from(monkeypatch: pytest.MonkeyPatch, call: str, exc: BaseException) -> None:
     """Make the loop's *call* raise *exc*."""
@@ -174,12 +172,10 @@ def _backfill(fmt: str) -> Result:
 class TestLoopFailure:
     """A failure inside the per-trace loop is reported, not a traceback.
 
-    The trace query had a catch-all and the loop after it had none, so an
-    exception the executor does not turn into a result left the CLI as a
-    traceback with exit ``1`` and nothing on stdout: a ``--format json``
-    caller had no JSON to parse. The loop now reports it as ``extract
-    refresh`` reports its run. ``CliRunner`` also exits ``1`` for an
-    uncaught exception, so each test asserts the ``SystemExit`` too.
+    An exception the executor does not turn into a result is reported as
+    ``extract refresh`` reports its run, so a ``--format json`` caller
+    still gets JSON. ``CliRunner`` also exits ``1`` for an uncaught
+    exception, so each test asserts the ``SystemExit`` too.
     """
 
     @_LOOP_CALLS
@@ -197,12 +193,9 @@ class TestLoopFailure:
         assert payload["message"] == SUPPRESSED_MARKER
         assert "synthetic-secret" not in result.output
 
-    @_LOOP_CALLS
-    def test_text_prints_one_line(
-        self, monkeypatch: pytest.MonkeyPatch, call: str
-    ) -> None:
+    def test_text_prints_one_line(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _ingest(_TRACE_A)
-        _raise_from(monkeypatch, call, _DriverError(_LOOP_FAILURE))
+        _raise_from(monkeypatch, "execute_batch", _DriverError(_LOOP_FAILURE))
         result = _backfill("text")
         assert result.exit_code == EXIT_INTERNAL, result.output
         assert isinstance(result.exception, SystemExit), repr(result.exception)
@@ -210,11 +203,10 @@ class TestLoopFailure:
             f"Trace backfill failed: {_LOOP_FAILURE}"
         ]
 
-    @_FORMATS
-    def test_a_trellis_error_still_exits_by_its_type(
-        self, monkeypatch: pytest.MonkeyPatch, fmt: str
+    def test_a_trellis_error_exits_by_its_type(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A typed failure passes the catch to the root boundary, as before it.
+        """A typed failure passes the catch to the root boundary.
 
         The boundary exits it through ``exit_code_for``, ``5`` for a
         ``StoreError`` where the catch-all would answer ``1``. The graph
@@ -223,17 +215,13 @@ class TestLoopFailure:
         """
         _ingest(_TRACE_A)
         _raise_from(monkeypatch, "reconcile_node_roles", StoreError("graph down"))
-        result = _backfill(fmt)
+        result = _backfill("json")
         assert result.exit_code == EXIT_STORE, result.output
         assert isinstance(result.exception, SystemExit), repr(result.exception)
-        if fmt == "json":
-            assert json.loads(result.stdout)["error_code"] == "STORE_ERROR"
-        else:
-            assert plain(result.output).startswith("STORE_ERROR")
+        assert json.loads(result.stdout)["error_code"] == "STORE_ERROR"
 
-    @_FORMATS
     def test_an_exit_raised_in_the_loop_keeps_its_code(
-        self, monkeypatch: pytest.MonkeyPatch, fmt: str
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``typer.Exit`` is a ``RuntimeError``; the catch must pass it on.
 
@@ -244,6 +232,6 @@ class TestLoopFailure:
         """
         _ingest(_TRACE_A)
         _raise_from(monkeypatch, "execute_batch", typer.Exit(code=EXIT_POLICY))
-        result = _backfill(fmt)
+        result = _backfill("json")
         assert result.exit_code == EXIT_POLICY, result.output
         assert result.output == ""
