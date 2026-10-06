@@ -60,6 +60,14 @@ _MIXED = [
     (CommandStatus.SUCCESS, {}),
 ]
 
+#: A write that landed, a refusal, then failures (the last answer repeats).
+#: Only the refusal carries ``_MESSAGE`` (see :func:`_fake_batch`).
+_TWO_FAILURES = [
+    (CommandStatus.SUCCESS, {}),
+    (CommandStatus.REJECTED, _POLICY),
+    (CommandStatus.FAILED, {}),
+]
+
 #: The domain is printed per trace; Rich would delete its ``[ops]``.
 _TRACE: dict = {
     "source": "agent",
@@ -138,21 +146,26 @@ def _fake_batch(
 ) -> MagicMock:
     """Answer each batch's commands with *outcomes* in order; the last repeats.
 
-    Nothing is written. A refused or failed command carries *message*.
+    Nothing is written. The first refused or failed command carries *message*
+    and a later one ``later {i}``, so a test can tell which one a run names.
     """
     executor = MagicMock(spec=MutationExecutor)
 
     def _execute_batch(batch: CommandBatch) -> list[CommandResult]:
         results = []
+        named = False
         for i, cmd in enumerate(batch.commands):
             status, metadata = outcomes[min(i, len(outcomes) - 1)]
-            refused = status in (CommandStatus.REJECTED, CommandStatus.FAILED)
+            text = "done"
+            if status in (CommandStatus.REJECTED, CommandStatus.FAILED):
+                text = f"later {i}" if named else message
+                named = True
             results.append(
                 CommandResult(
                     command_id=f"cmd-{i}",
                     status=status,
                     operation=cmd.operation,
-                    message=message if refused else "done",
+                    message=text,
                     metadata=dict(metadata),
                 )
             )
@@ -182,6 +195,14 @@ def _counts(
         f"{succeeded} succeeded, {failed} failed, {rejected} rejected, "
         f"{duplicates} duplicates"
     )
+
+
+def _named(result: Result) -> str:
+    """The failure a text run names: what follows ``first:`` on its failures line."""
+    assert result.exit_code == 0, result.output
+    match = re.search(r"; first: (.*)$", plain(result.output), re.MULTILINE)
+    assert match, result.output
+    return match.group(1)
 
 
 class TestExtractTracesReportsTheBatch:
@@ -292,10 +313,24 @@ class TestExtractTracesReportsTheBatch:
             )
         else:
             out = plain(result.output)
+            assert "Trace backfill (7 days)" in out
             drafts = _text_drafts(out)
             assert drafts >= 2
             assert _counts(succeeded=drafts - 1, rejected=1) in out
             assert _MESSAGE in out
+
+    def test_a_mixed_backfill_names_in_json_the_failure_its_text_names(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The message sits top-level, as in a refused ``ingest`` payload."""
+        _ingest_trace()
+        _fake_batch(monkeypatch, _TWO_FAILURES)
+        named = _named(_invoke(["extract", "traces"], "text"))
+        result = _invoke(["extract", "traces"], "json")
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "backfilled"
+        assert payload["message"] == named == _MESSAGE
 
     @_FORMATS
     def test_duplicates_are_not_failures(
@@ -418,8 +453,21 @@ class TestExtractRefreshReportsTheBatch:
             assert (payload["succeeded"], payload["rejected"]) == (2, 1)
         else:
             out = plain(result.output)
+            assert "Refreshed" in out
             assert _counts(succeeded=2, rejected=1) in out
             assert _MESSAGE in out
+
+    def test_a_mixed_refresh_names_in_json_the_failure_its_text_names(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The message sits top-level, as in a refused ``ingest`` payload."""
+        _fake_batch(monkeypatch, _TWO_FAILURES)
+        named = _named(_invoke(_refresh_args(tmp_path), "text"))
+        result = _invoke(_refresh_args(tmp_path), "json")
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "refreshed"
+        assert payload["message"] == named == _MESSAGE
 
     @_FORMATS
     def test_duplicates_are_not_failures(

@@ -1044,6 +1044,15 @@ All notable changes to Trellis will be documented in this file.
   and not itself. Both stores now escape the three characters and name `\`
   as the `ESCAPE` character, so they match as the Neo4j and ArcadeDB stores
   already did. ([#737](https://github.com/ronsse/trellis-ai/pull/737))
+- **A partial `trellis extract traces` or `extract refresh` run names its
+  first failure in JSON, as its text does.** The JSON of a run with some
+  writes refused or failed carries the first one's sanitized `message` beside
+  `"status": "backfilled"` or `"refreshed"`; it named a failure only when
+  every write was refused or failed. Exit codes are unchanged. The batch rule
+  these two share with `trellis ingest dbt-manifest` and `openlineage` is now
+  one function, `trellis_cli.exit_codes.batch_outcome`, rather than a copy in
+  each module, and those commands' output is otherwise unchanged.
+  ([#736](https://github.com/ronsse/trellis-ai/pull/736))
 
 ## [0.9.0] - 2026-05-13
 
