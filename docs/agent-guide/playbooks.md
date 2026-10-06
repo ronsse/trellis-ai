@@ -206,7 +206,7 @@ trellis curate feedback 01JRK5N7QF8GHTM2XVZP3CWD9E 0.4 \
 
 ### If It Fails
 
-- **Validation error:** Ensure `rating` is a valid float.
+- **Validation error:** `rating` must be a number from 0.0 to 1.0 inclusive. Anything else, NaN included, exits 2 and records nothing.
 - **No handler:** The feedback handler may not be registered. This is a system configuration issue.
 
 ---

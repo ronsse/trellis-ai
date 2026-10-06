@@ -9,6 +9,7 @@ from pathlib import Path
 
 import structlog
 from fastapi import Depends, FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -20,6 +21,7 @@ from trellis.stores.registry import StoreRegistry
 from trellis_api.auth import require_scope, warn_if_unauthenticated
 from trellis_api.middleware import (
     request_id_middleware,
+    request_validation_error_handler,
     trellis_error_handler,
     unhandled_exception_handler,
 )
@@ -140,6 +142,11 @@ def create_app() -> FastAPI:
     # covered the day it is added, rather than the day someone remembers
     # a roster (#443).
     app.add_exception_handler(TrellisError, trellis_error_handler)
+
+    # Over FastAPI's default 422 handler, which could not render a body
+    # holding ``NaN`` or ``Infinity`` and so turned a caller's malformed
+    # body into a 500. Same response for every other body.
+    app.add_exception_handler(RequestValidationError, request_validation_error_handler)
 
     # OpenTelemetry + Prometheus — no-op when the ``observability``
     # extra isn't installed or ``TRELLIS_DISABLE_OBSERVABILITY`` is set.

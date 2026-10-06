@@ -577,7 +577,18 @@ def feedback(
     only; the per-item ``helpful_item_ids`` / ``unhelpful_item_ids``
     attribution the promote half of the loop consumes is carried by the
     MCP ``record_feedback`` tool and ``POST /packs/{pack_id}/feedback``.
+
+    ``rating`` is held to the MCP tool's inclusive range. Typer parses
+    ``nan`` and ``inf`` as floats, and NaN fails every comparison, so the
+    check is written as "inside the range" rather than "outside it".
     """
+    if not 0.0 <= rating <= 1.0:
+        message = f"rating must be between 0.0 and 1.0, got {rating}"
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{message}[/red]")
+        raise typer.Exit(code=EXIT_VALIDATION)
     args: dict[str, object] = {"target_id": target_id, "rating": rating}
     if comment:
         args["comment"] = comment

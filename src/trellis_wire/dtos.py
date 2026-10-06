@@ -232,7 +232,10 @@ class FeedbackRequest(WireRequestModel):
     """Request to record feedback on a target."""
 
     target_id: str
-    rating: float
+    #: Explicit 0.0-1.0 score. Bounded here because it lands at
+    #: ``payload["rating"]``, the key the fitness loops threshold against —
+    #: the MCP surface enforces the same range.
+    rating: float = Field(ge=0.0, le=1.0)
     comment: str | None = None
     pack_id: str | None = None  # Link feedback to a context pack
 

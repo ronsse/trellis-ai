@@ -30,6 +30,7 @@ from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis_cli import curate as curate_cli
 from trellis_cli.main import app
+from trellis_cli.stores import _get_registry
 
 runner = CliRunner()
 
@@ -333,3 +334,53 @@ class TestBeforeACommandIsBuilt:
         result = runner.invoke(app, [*_ENTITY, "--properties", "{bad"])
         assert result.exit_code == 2, result.output
         assert "Invalid JSON for --properties" in plain(result.output)
+
+
+def _feedback(rating: str, *, json_format: bool) -> list[str]:
+    """``curate feedback`` argv; ``--`` lets a negative rating stay positional."""
+    fmt = ["--format", "json"] if json_format else []
+    return ["curate", "feedback", *fmt, "--", "t1", rating]
+
+
+def _refusal(rating: str) -> str:
+    return f"rating must be between 0.0 and 1.0, got {float(rating)}"
+
+
+class TestFeedbackRating:
+    """``feedback`` refuses a rating outside [0.0, 1.0] before writing anything.
+
+    The range is the MCP ``record_feedback`` tool's, inclusive at both ends.
+    ``nan`` compares false to both bounds, so it is refused with the range
+    rather than slipping past a pair of ``<`` / ``>`` tests.
+    """
+
+    @pytest.mark.parametrize("rating", ["nan", "inf", "-inf", "-0.1", "1.1"])
+    def test_refused_json(self, stores_dir: Path, rating: str) -> None:
+        result = runner.invoke(app, _feedback(rating, json_format=True))
+        assert result.exit_code == 2, result.output
+        assert json.loads(result.stdout.strip()) == {
+            "status": "error",
+            "message": _refusal(rating),
+        }
+        assert _get_registry().operational.event_log.count() == 0
+
+    @pytest.mark.parametrize("rating", ["nan", "inf", "-inf", "-0.1", "1.1"])
+    def test_refused_text(self, stores_dir: Path, rating: str) -> None:
+        result = runner.invoke(app, _feedback(rating, json_format=False))
+        assert result.exit_code == 2, result.output
+        assert _refusal(rating) in plain(result.output)
+        assert _get_registry().operational.event_log.count() == 0
+
+    @pytest.mark.parametrize("rating", ["0.0", "0.5", "1.0"])
+    def test_in_range_json(self, stores_dir: Path, rating: str) -> None:
+        result = runner.invoke(app, _feedback(rating, json_format=True))
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout.strip())["status"] == "success"
+        assert _get_registry().operational.event_log.count() > 0
+
+    @pytest.mark.parametrize("rating", ["0.0", "0.5", "1.0"])
+    def test_in_range_text(self, stores_dir: Path, rating: str) -> None:
+        result = runner.invoke(app, _feedback(rating, json_format=False))
+        assert result.exit_code == 0, result.output
+        assert "Command executed" in plain(result.output)
+        assert _get_registry().operational.event_log.count() > 0
