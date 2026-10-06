@@ -238,7 +238,7 @@ def _shown_row(rows: str) -> str:
     query returns rows in. Concurrent writers can leave a node two current
     rows (the module docstring). The reads that pick through
     :func:`_one_version_per_node` show this row, and the node writes
-    continue it, so a write carries over what every read showed. Neo4j
+    continue it, so a write carries over what those reads showed. Neo4j
     compares the stamps as text, which is time order for the one spelling
     every write uses (``_iso(utc_now())``, aware UTC); ArcadeDB reads them
     as datetimes. Neither comparison can raise.
@@ -524,11 +524,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # only runs when the write is legal, every current row is
         # closed, and ``coalesce`` carries ``created_at`` forward from
         # the shown row. Collecting the rows first keeps the CREATE to
-        # one per call: one per matched row reused one ``version_id``,
-        # so a node with two current rows failed the unique constraint
-        # on every later write. Previously this path made a separate
-        # ``get_node`` call to fetch the prior version — measured at
-        # ~50% of total upsert latency on AuraDB Free.
+        # one per call: a CREATE per matched row would reuse one
+        # ``version_id`` and fail the unique constraint. A separate
+        # ``get_node`` call for the prior version would cost ~50% of
+        # total upsert latency (measured on AuraDB Free).
         now = _iso(utc_now())
         new_props = {
             "node_id": node_id,
@@ -628,7 +627,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # fails, at commit with a code the driver retries or on the
         # generic engine code that ``_execute_alias_write`` retries, and
         # the re-run reads committed state. The token is compared with
-        # the shown row (``_shown_row``), the version every read returns,
+        # the shown row (``_shown_row``), the version ``get_node`` returns,
         # and a write closes every current row, as ``upsert_node`` does.
         # ``datetime()`` on both sides because ArcadeDB stores the ISO
         # string as a DateTime, which never equals a string.
