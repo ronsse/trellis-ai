@@ -80,6 +80,7 @@ SEARCH_ISSUING_TESTS = frozenset(
         "test_provisioning_alone_stores_no_vector",
         "test_query_filter_by_int_metadata",
         "test_query_filter_by_str_metadata",
+        "test_query_filter_key_is_one_flat_key_as_written",
         "test_query_filter_no_match_returns_empty",
         "test_query_filter_on_unknown_key_returns_empty",
         "test_query_filter_returns_matches_ranked_below_non_matches",

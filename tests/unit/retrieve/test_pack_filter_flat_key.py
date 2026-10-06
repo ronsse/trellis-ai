@@ -1,9 +1,10 @@
-"""A pack filter key that is not a plain JSON object key fails the SQLite store axes.
+"""A pack filter key reaches the SQLite store axes as one flat key, as written.
 
 ``PackBuilder.build(filters=...)`` forwards a key it does not own to the graph
 store's ``query(properties=...)`` and the vector store's ``query(filters=...)``.
-Both raise ``ValueError`` for a key outside ``[A-Za-z0-9_-]+``, and the pack
-records that as each axis's strategy failure while the keyword axis still runs.
+#729 refused a key outside ``[A-Za-z0-9_-]+`` there, so the pack recorded both
+axes as strategy failures. Both stores now bind the key, so the key that would
+have injected a tautology selects exactly the rows that carry it.
 """
 
 from __future__ import annotations
@@ -37,14 +38,26 @@ def registry(tmp_path: Path) -> Iterator[StoreRegistry]:
     stores_dir = tmp_path / "stores"
     stores_dir.mkdir()
     reg = StoreRegistry(stores_dir=stores_dir)
-    reg.knowledge.graph_store.upsert_node(
+    graph = reg.knowledge.graph_store
+    graph.upsert_node(
         node_id="node-1",
         node_type="service",
-        properties={"name": "cache service", "owner_team": "data"},
+        properties={"name": "cache service", TAUTOLOGY_KEY: "data"},
+    )
+    graph.upsert_node(
+        node_id="node-2",
+        node_type="service",
+        properties={"name": "cache layer", TAUTOLOGY_KEY: "platform"},
     )
     reg.knowledge.document_store.put("doc-1", TEXT, {"title": "cache doc"})
-    reg.knowledge.vector_store.upsert(
-        "vec-1", _embed(TEXT), metadata={"excerpt": TEXT, "owner_team": "data"}
+    vectors = reg.knowledge.vector_store
+    vectors.upsert(
+        "vec-1", _embed(TEXT), metadata={"excerpt": TEXT, TAUTOLOGY_KEY: "data"}
+    )
+    vectors.upsert(
+        "vec-2",
+        _embed("cache layer fix"),
+        metadata={"excerpt": "cache layer fix", TAUTOLOGY_KEY: "platform"},
     )
     yield reg
     reg.close()
@@ -70,15 +83,11 @@ def _build(
     return pack, event.payload or {}
 
 
-def test_a_bad_key_fails_both_store_axes_with_a_value_error(
+def test_the_injection_key_selects_the_rows_that_carry_it(
     registry: StoreRegistry,
 ) -> None:
     pack, payload = _build(registry, {TAUTOLOGY_KEY: "platform"})
 
-    assert [item.item_id for item in pack.items] == []
-    assert pack.retrieval_report.strategies_used == ["keyword"]
-    failures = {f["strategy"]: f for f in payload["strategy_failures"]}
-    assert set(failures) == {"semantic", "graph"}
-    for failure in failures.values():
-        assert failure["error_class"] == "ValueError"
-        assert "not a plain JSON object key" in failure["message"]
+    assert payload["strategy_failures"] == []
+    assert pack.retrieval_report.strategies_used == ["keyword", "semantic", "graph"]
+    assert sorted(item.item_id for item in pack.items) == ["node-2", "vec-2"]
