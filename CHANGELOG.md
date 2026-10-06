@@ -1236,7 +1236,7 @@ All notable changes to Trellis will be documented in this file.
   `ingest evidence`, `ingest dbt-manifest`, `ingest openlineage`,
   `ingest conversations` and `ingest corpus`. They now print unwrapped the
   same way. Text, colour, JSON output and exit codes are unchanged.
-  ([#PLACEHOLDER](https://github.com/ronsse/trellis-ai/pull/PLACEHOLDER))
+  ([#758](https://github.com/ronsse/trellis-ai/pull/758))
 
 ## [0.9.0] - 2026-05-13
 
