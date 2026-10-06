@@ -167,7 +167,7 @@ def _run_stage5_success(log):
 
 
 EMIT_SITES = [
-    ("stage1_validate", _run_stage1_validate, CommandStatus.FAILED),
+    ("stage1_validate", _run_stage1_validate, CommandStatus.REJECTED),
     ("stage2_policy", _run_stage2_policy, CommandStatus.REJECTED),
     (
         "stage3_duplicate_in_memory",

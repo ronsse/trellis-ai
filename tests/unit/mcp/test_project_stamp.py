@@ -220,7 +220,7 @@ class TestExecuteMutation:
         payload = json.loads(execute_mutation(operation="trace.ingest", args={}))
 
         assert (payload["status"], payload["message"]) == (
-            "failed",
+            "rejected",
             "Validation failed: Missing required args: trace",
         )
         assert temp_registry.operational.trace_store.count() == 0
