@@ -251,6 +251,21 @@ class SQLiteStoreBase:
         )
 
 
+def reject_nul_key(key: str) -> None:
+    """Raise ``ValueError`` if *key* holds a NUL character.
+
+    No SQLite JSON path can name such a key (see :func:`json_key_path`). The
+    graph, vector and document stores call this before building one from a
+    filter key, so each refuses it with the same message.
+    """
+    if "\x00" in key:
+        msg = (
+            f"Filter key {key!r} holds a NUL character, "
+            "which a SQLite JSON path cannot name"
+        )
+        raise ValueError(msg)
+
+
 def json_key_path(key: str) -> str:
     """Return the JSON path naming *key* as one object member: ``$."<key>"``.
 
@@ -275,11 +290,6 @@ def json_key_path(key: str) -> str:
             store's DSL compiler raises the same error for a field or
             operator it cannot compile.
     """
-    if "\x00" in key:
-        msg = (
-            f"Filter key {key!r} holds a NUL character, "
-            "which a SQLite JSON path cannot name"
-        )
-        raise ValueError(msg)
+    reject_nul_key(key)
     escaped = json.dumps(key)[1:-1].replace('\\"', "\\u0022")
     return f'$."{escaped}"'

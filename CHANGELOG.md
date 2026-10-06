@@ -1218,6 +1218,24 @@ All notable changes to Trellis will be documented in this file.
   The marker and every other pattern, caller and payload shape are
   unchanged.
   ([#753](https://github.com/ronsse/trellis-ai/pull/753))
+- **ArcadeDB `upsert_edges_bulk` raises its documented `ValueError`, not a
+  raw driver error, when a dropped row's endpoint is re-created mid-call.**
+  #746 re-read a dropped row's endpoints inside the write's still-open
+  transaction. On ArcadeDB, when another writer re-created one of them
+  after the write, beside a row the write had written, that re-read raised
+  `neo4j.exceptions.DatabaseError: Record #... not found`. The endpoints
+  are now re-read after the transaction rolls back: the error names the
+  endpoint that is still missing, or both when both are current again, and
+  no edge of the batch is written. Neo4j already raised the `ValueError`;
+  SQLite and Postgres are unchanged.
+  ([#754](https://github.com/ronsse/trellis-ai/pull/754))
+- **`SQLiteDocumentStore.search` refuses a scalar metadata filter on a
+  NUL-holding key with the `ValueError` the SQLite graph and vector stores
+  raise**, before any SQL runs, where it raised a raw
+  `sqlite3.OperationalError`. A key that also holds `"` or `\`, which the
+  store compared in Python, is refused too. A `None`, list or dict value is
+  still compared in Python and does not raise.
+  ([#743](https://github.com/ronsse/trellis-ai/issues/743) follow-up 3)
 - **A failed command names a non-Trellis exception by its type alone.** The
   FAILED message that REST, MCP and the CLI return reads, for example,
   `Execution failed: IntegrityError` instead of the exception's text, which a
