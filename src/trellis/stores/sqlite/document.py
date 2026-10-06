@@ -20,7 +20,7 @@ from trellis.stores.base.document import (
     encode_filter_value,
 )
 from trellis.stores.base.tag_filters import normalize_facet_filter
-from trellis.stores.sqlite.base import SQLiteStoreBase
+from trellis.stores.sqlite.base import SQLiteStoreBase, reject_nul_key
 
 logger = structlog.get_logger(__name__)
 
@@ -171,7 +171,16 @@ def _bindable_json_path(key: str) -> str | None:
     key as written. Keys holding either character are handed to
     :func:`_metadata_matches` instead, which compares the parsed object in
     Python, needs no path and matches on every SQLite release.
+
+    Raises:
+        ValueError: *key* holds a NUL character — the same check and
+            message :func:`~trellis.stores.sqlite.base.json_key_path` raises
+            for the graph and vector stores, applied before a path is built
+            here so a scalar filter on such a key fails the same way on
+            every store instead of reaching SQLite as a raw
+            ``sqlite3.OperationalError`` (#743 follow-up 3).
     """
+    reject_nul_key(key)
     return None if '"' in key or "\\" in key else f'$."{key}"'
 
 

@@ -251,6 +251,24 @@ class SQLiteStoreBase:
         )
 
 
+def reject_nul_key(key: str) -> None:
+    """Raise ``ValueError`` if *key* holds a NUL character.
+
+    Shared by :func:`json_key_path` (the graph and vector stores) and the
+    document store's own ``_bindable_json_path``: a raw NUL ends a SQLite
+    JSON path where SQLite reads it and ``\\u0000`` decodes to the same
+    terminator, so every caller that would otherwise build one must refuse
+    first, with the same message, rather than let a malformed path reach
+    SQLite as a distinct driver error per store.
+    """
+    if "\x00" in key:
+        msg = (
+            f"Filter key {key!r} holds a NUL character, "
+            "which a SQLite JSON path cannot name"
+        )
+        raise ValueError(msg)
+
+
 def json_key_path(key: str) -> str:
     """Return the JSON path naming *key* as one object member: ``$."<key>"``.
 
@@ -275,11 +293,6 @@ def json_key_path(key: str) -> str:
             store's DSL compiler raises the same error for a field or
             operator it cannot compile.
     """
-    if "\x00" in key:
-        msg = (
-            f"Filter key {key!r} holds a NUL character, "
-            "which a SQLite JSON path cannot name"
-        )
-        raise ValueError(msg)
+    reject_nul_key(key)
     escaped = json.dumps(key)[1:-1].replace('\\"', "\\u0022")
     return f'$."{escaped}"'

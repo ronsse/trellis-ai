@@ -1196,6 +1196,16 @@ All notable changes to Trellis will be documented in this file.
   left that source's other current edges with no open version. Neo4j and
   ArcadeDB already closed by exact triplet and are unchanged.
   ([#752](https://github.com/ronsse/trellis-ai/pull/752))
+- **`SQLiteDocumentStore.search`'s metadata filters refuse a NUL-holding key
+  the same way the SQLite graph and vector stores do.** Its scalar branch
+  built a JSON path without the NUL check `json_key_path` uses for `query(...)`
+  on those two stores, so the same key reached SQLite as a path and came back
+  as a raw `sqlite3.OperationalError` instead of the `ValueError` the other
+  two raise. It now shares the check (`reject_nul_key`, factored out of
+  `json_key_path`) and raises before any SQL runs. A `None`, list or dict
+  filter value never reaches a JSON path on this store — they are compared in
+  Python — so a NUL key there still does not raise, as before.
+  ([#743](https://github.com/ronsse/trellis-ai/issues/743) follow-up 3)
 
 ## [0.9.0] - 2026-05-13
 

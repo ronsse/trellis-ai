@@ -25,6 +25,7 @@ import pytest
 
 from trellis.stores.base.graph_query import EdgeQuery, FilterClause, NodeQuery
 from trellis.stores.sqlite.base import SQLiteStoreBase
+from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis.stores.sqlite.vector import SQLiteVectorStore
 
@@ -165,6 +166,24 @@ def vector_store(tmp_path: Path) -> Iterator[SQLiteVectorStore]:
     store.close()
 
 
+@pytest.fixture
+def document_store(tmp_path: Path) -> Iterator[SQLiteDocumentStore]:
+    """Two "hello" documents: one plain key, one holding a ``"``."""
+    store = SQLiteDocumentStore(tmp_path / "documents.db")
+    store.put(
+        "doc-a",
+        "hello world",
+        metadata={"owner_team": "platform", 'owner"team': "platform"},
+    )
+    store.put("doc-b", "hello world", metadata={"owner_team": "data"})
+    yield store
+    store.close()
+
+
+def _doc_ids(rows: list[dict[str, Any]]) -> set[str]:
+    return {row["doc_id"] for row in rows}
+
+
 def _node_ids(rows: list[dict[str, Any]]) -> set[str]:
     return {row["node_id"] for row in rows}
 
@@ -286,3 +305,62 @@ class TestVectorQuery:
             )
         assert {row["item_id"] for row in rows} == {"vec-a"}
         _assert_bound(seen)
+
+
+class TestDocumentSearchNulKey:
+    """``SQLiteDocumentStore.search(filters=...)``: NUL parity with query().
+
+    #743 follow-up 3.
+
+    ``search`` builds its own JSON path (``_bindable_json_path``) rather than
+    binding through :func:`json_key_path`, so before this fix a NUL key for a
+    scalar value reached SQLite and came back as a raw
+    ``sqlite3.OperationalError`` instead of the ``ValueError`` the graph and
+    vector stores raise for the same mistake. ``None``/list/dict values never
+    reach a JSON path in any of the three stores (document and vector compare
+    them in Python; only the graph store's ``None`` branch also binds a
+    path), so a NUL key there is not a SQLite path at all and must not raise.
+    """
+
+    @pytest.mark.parametrize(
+        "value", ["platform", 7, 1.5, True], ids=["str", "int", "float", "bool"]
+    )
+    def test_a_nul_is_refused_before_sql(
+        self, document_store: SQLiteDocumentStore, value: object
+    ) -> None:
+        with (
+            _statements(document_store) as seen,
+            pytest.raises(ValueError, match="NUL"),
+        ):
+            document_store.search("hello", filters={"a\x00b": value})
+        assert seen == []
+
+    def test_a_nul_key_with_a_none_value_matches_every_row_lacking_it(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """Neither document holds ``a\\x00b``, so each reads as ``None`` there."""
+        rows = document_store.search("hello", filters={"a\x00b": None})
+        assert _doc_ids(rows) == {"doc-a", "doc-b"}
+
+    @pytest.mark.parametrize("value", [["platform"], {"x": 1}], ids=["list", "dict"])
+    def test_a_nul_key_with_a_container_value_matches_no_row(
+        self, document_store: SQLiteDocumentStore, value: object
+    ) -> None:
+        rows = document_store.search("hello", filters={"a\x00b": value})
+        assert rows == []
+
+
+class TestDocumentSearchUnaffectedByTheNulCheck:
+    """A plain key and a key holding ``"`` behave exactly as before the fix."""
+
+    def test_a_flat_key_filters_by_equality(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        rows = document_store.search("hello", filters={"owner_team": "platform"})
+        assert _doc_ids(rows) == {"doc-a"}
+
+    def test_a_quote_key_still_falls_back_to_the_python_comparison(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        rows = document_store.search("hello", filters={'owner"team': "platform"})
+        assert _doc_ids(rows) == {"doc-a"}
