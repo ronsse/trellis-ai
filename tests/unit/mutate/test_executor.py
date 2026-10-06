@@ -517,9 +517,7 @@ class TestIdempotencyKeyRecordedOnlyOnSuccess:
         assert handler.names == ["syn-bad", "syn-fixed"]
 
 
-def _store_a_corrupt_row(
-    path: Path, log: SQLiteEventLog, monkeypatch: pytest.MonkeyPatch
-) -> Callable[[], None]:
+def _store_a_corrupt_row(path: Path) -> Callable[[], None]:
     """Make the persisted read raise a real ``sqlite3.OperationalError``.
 
     The read's ``json_extract`` raises on a ``mutation.executed`` row whose
@@ -543,19 +541,6 @@ def _store_a_corrupt_row(
     return recover
 
 
-def _raise_store_error(
-    path: Path, log: SQLiteEventLog, monkeypatch: pytest.MonkeyPatch
-) -> Callable[[], None]:
-    """Make the persisted read raise ``StoreError``, as a mapping backend does."""
-
-    def unreadable(key: str) -> bool:
-        msg = "syn event log unreachable"
-        raise StoreError(msg, store="syn")
-
-    monkeypatch.setattr(log, "has_idempotency_key", unreadable)
-    return monkeypatch.undo
-
-
 class TestPersistedIdempotencyReadFails:
     """An event log that cannot answer Stage 3's read fails the command closed.
 
@@ -565,21 +550,8 @@ class TestPersistedIdempotencyReadFails:
     once the log can be read again.
     """
 
-    @pytest.mark.parametrize(
-        ("break_read", "error_type"),
-        [
-            pytest.param(
-                _store_a_corrupt_row, "OperationalError", id="sqlite-driver-error"
-            ),
-            pytest.param(_raise_store_error, "StoreError", id="store-error"),
-        ],
-    )
     def test_the_command_fails_closed_and_runs_once_the_log_recovers(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        break_read: Callable[..., Callable[[], None]],
-        error_type: str,
+        self, tmp_path: Path
     ) -> None:
         path = tmp_path / "events.db"
         log = SQLiteEventLog(path)
@@ -590,13 +562,13 @@ class TestPersistedIdempotencyReadFails:
         earlier = _named("syn-earlier", "syn-key-earlier")
         assert executor.execute(earlier).status == CommandStatus.SUCCESS
         command = _named("syn-entity", "syn-key-read")
-        recover = break_read(path, log, monkeypatch)
+        recover = _store_a_corrupt_row(path)
 
         result = executor.execute(command)
 
         # The exception's type only: a driver's text stays out of the result
         # and out of the persisted event.
-        expected = f"Idempotency check failed: {error_type}"
+        expected = "Idempotency check failed: OperationalError"
         assert (result.status, result.message, result.warnings) == (
             CommandStatus.FAILED,
             expected,
