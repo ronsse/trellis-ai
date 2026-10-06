@@ -231,7 +231,7 @@ class TestStage1IsTheOneException:
         )
         result = executor.execute(Command(operation=Operation.ENTITY_CREATE, args={}))
 
-        assert result.status == CommandStatus.FAILED
+        assert result.status == CommandStatus.REJECTED
         assert result.warnings == []
         assert "policy_warnings" not in log.events[-1]["payload"]
         assert log.events[-1]["payload"]["reason"] == "validate"

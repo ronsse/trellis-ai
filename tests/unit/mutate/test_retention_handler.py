@@ -112,7 +112,7 @@ class TestRegistration:
         result = build_curate_executor(registry).execute(
             Command(operation=Operation.RETENTION_PRUNE, args={})
         )
-        assert result.status == CommandStatus.FAILED
+        assert result.status == CommandStatus.REJECTED
         assert "Missing required args" in (result.message or "")
         assert "criteria" in (result.message or "")
 

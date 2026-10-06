@@ -1119,6 +1119,18 @@ All notable changes to Trellis will be documented in this file.
   2. `Measurement.metric_value` refuses NaN, so `measurement.record`
   refuses it from every surface; `Infinity` is still accepted.
   ([#741](https://github.com/ronsse/trellis-ai/pull/741))
+- **A command missing a required arg is refused, not failed.**
+  `MutationExecutor`'s Stage 1 arg check audited its refusal as
+  `mutation.rejected` with reason `validate` but returned `FAILED` with no
+  `rejection_reason`, so `POST /api/v1/commands/batch` counted a caller's
+  malformed command under `failed` (HTTP 200 either way), MCP
+  `execute_mutation` answered `"status": "failed"`, and `refusal_exit_code`
+  mapped the result to `5`. It now returns `REJECTED` with
+  `metadata["rejection_reason"] = "validate"`, as Stage 1's `immutable_core`
+  refusal already does, so the batch counts it under `rejected`, MCP answers
+  `"rejected"` and the exit code is `2`. Its message, audit event and
+  warnings are unchanged. No CLI command builds such a command today.
+  ([#744](https://github.com/ronsse/trellis-ai/pull/744))
 
 ## [0.9.0] - 2026-05-13
 

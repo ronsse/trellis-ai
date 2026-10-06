@@ -57,7 +57,7 @@ class TestMutationExecutor:
         # missing required args
         cmd = Command(operation=Operation.ENTITY_CREATE, args={})
         result = executor.execute(cmd)
-        assert result.status == CommandStatus.FAILED
+        assert result.status == CommandStatus.REJECTED
         assert "Validation failed" in result.message
 
     def test_policy_rejection(self) -> None:
@@ -159,7 +159,7 @@ class TestMutationExecutor:
         # Missing required args triggers validate-stage rejection
         result = executor.execute(Command(operation=Operation.ENTITY_CREATE, args={}))
 
-        assert result.status == CommandStatus.FAILED
+        assert result.status == CommandStatus.REJECTED
         event_log.emit.assert_called_once()
         event_type, source = event_log.emit.call_args.args
         assert event_type.value == "mutation.rejected"
@@ -655,16 +655,16 @@ class TestBatchExecution:
         batch = CommandBatch(
             commands=[
                 _cmd(),
-                # will fail validation
+                # will be refused by validation
                 Command(operation=Operation.ENTITY_CREATE, args={}),
                 _cmd(),  # should not execute
             ],
             strategy=BatchStrategy.STOP_ON_ERROR,
         )
         results = executor.execute_batch(batch)
-        assert len(results) == 2  # stopped after failure
+        assert len(results) == 2  # stopped after the refusal
         assert results[0].status == CommandStatus.SUCCESS
-        assert results[1].status == CommandStatus.FAILED
+        assert results[1].status == CommandStatus.REJECTED
 
     @pytest.mark.parametrize("source", ["policy_gate", "handler"])
     def test_batch_stop_on_error_stops_on_a_rejection(self, source: str) -> None:
@@ -706,7 +706,7 @@ class TestBatchExecution:
         batch = CommandBatch(
             commands=[
                 _cmd(),
-                # will fail validation
+                # will be refused by validation
                 Command(operation=Operation.ENTITY_CREATE, args={}),
                 _cmd(),
             ],
@@ -715,7 +715,7 @@ class TestBatchExecution:
         results = executor.execute_batch(batch)
         assert len(results) == 3  # all attempted
         assert results[0].status == CommandStatus.SUCCESS
-        assert results[1].status == CommandStatus.FAILED
+        assert results[1].status == CommandStatus.REJECTED
         assert results[2].status == CommandStatus.SUCCESS
 
 
