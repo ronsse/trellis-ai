@@ -1207,15 +1207,12 @@ All notable changes to Trellis will be documented in this file.
   still wraps it on screen. Text, colour, JSON output and exit codes are
   unchanged, and a message with its own newlines keeps them.
   ([#750](https://github.com/ronsse/trellis-ai/pull/750))
-- **`SQLiteDocumentStore.search`'s metadata filters refuse a NUL-holding key
-  the same way the SQLite graph and vector stores do.** Its scalar branch
-  built a JSON path without the NUL check `json_key_path` uses for `query(...)`
-  on those two stores, so the same key reached SQLite as a path and came back
-  as a raw `sqlite3.OperationalError` instead of the `ValueError` the other
-  two raise. It now shares the check (`reject_nul_key`, factored out of
-  `json_key_path`) and raises before any SQL runs. A `None`, list or dict
-  filter value never reaches a JSON path on this store — they are compared in
-  Python — so a NUL key there still does not raise, as before.
+- **`SQLiteDocumentStore.search` refuses a scalar metadata filter on a
+  NUL-holding key with the `ValueError` the SQLite graph and vector stores
+  raise**, before any SQL runs, where it raised a raw
+  `sqlite3.OperationalError`. A key that also holds `"` or `\`, which the
+  store compared in Python, is refused too. A `None`, list or dict value is
+  still compared in Python and does not raise.
   ([#743](https://github.com/ronsse/trellis-ai/issues/743) follow-up 3)
 
 ## [0.9.0] - 2026-05-13

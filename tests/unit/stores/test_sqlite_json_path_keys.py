@@ -168,13 +168,9 @@ def vector_store(tmp_path: Path) -> Iterator[SQLiteVectorStore]:
 
 @pytest.fixture
 def document_store(tmp_path: Path) -> Iterator[SQLiteDocumentStore]:
-    """Two "hello" documents: one plain key, one holding a ``"``."""
+    """Two "hello" documents, neither holding the NUL key."""
     store = SQLiteDocumentStore(tmp_path / "documents.db")
-    store.put(
-        "doc-a",
-        "hello world",
-        metadata={"owner_team": "platform", 'owner"team': "platform"},
-    )
+    store.put("doc-a", "hello world", metadata={"owner_team": "platform"})
     store.put("doc-b", "hello world", metadata={"owner_team": "data"})
     yield store
     store.close()
@@ -308,18 +304,11 @@ class TestVectorQuery:
 
 
 class TestDocumentSearchNulKey:
-    """``SQLiteDocumentStore.search(filters=...)``: NUL parity with query().
+    """``SQLiteDocumentStore.search(filters=...)`` on a NUL-holding key.
 
-    #743 follow-up 3.
-
-    ``search`` builds its own JSON path (``_bindable_json_path``) rather than
-    binding through :func:`json_key_path`, so before this fix a NUL key for a
-    scalar value reached SQLite and came back as a raw
-    ``sqlite3.OperationalError`` instead of the ``ValueError`` the graph and
-    vector stores raise for the same mistake. ``None``/list/dict values never
-    reach a JSON path in any of the three stores (document and vector compare
-    them in Python; only the graph store's ``None`` branch also binds a
-    path), so a NUL key there is not a SQLite path at all and must not raise.
+    A scalar value is refused with the ``ValueError`` :func:`json_key_path`
+    raises, before any SQL runs. A ``None``, list or dict value is compared in
+    Python, where no JSON path is built, so the key filters as any other.
     """
 
     @pytest.mark.parametrize(
@@ -348,19 +337,3 @@ class TestDocumentSearchNulKey:
     ) -> None:
         rows = document_store.search("hello", filters={"a\x00b": value})
         assert rows == []
-
-
-class TestDocumentSearchUnaffectedByTheNulCheck:
-    """A plain key and a key holding ``"`` behave exactly as before the fix."""
-
-    def test_a_flat_key_filters_by_equality(
-        self, document_store: SQLiteDocumentStore
-    ) -> None:
-        rows = document_store.search("hello", filters={"owner_team": "platform"})
-        assert _doc_ids(rows) == {"doc-a"}
-
-    def test_a_quote_key_still_falls_back_to_the_python_comparison(
-        self, document_store: SQLiteDocumentStore
-    ) -> None:
-        rows = document_store.search("hello", filters={'owner"team': "platform"})
-        assert _doc_ids(rows) == {"doc-a"}

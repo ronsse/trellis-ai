@@ -173,12 +173,9 @@ def _bindable_json_path(key: str) -> str | None:
     Python, needs no path and matches on every SQLite release.
 
     Raises:
-        ValueError: *key* holds a NUL character — the same check and
-            message :func:`~trellis.stores.sqlite.base.json_key_path` raises
-            for the graph and vector stores, applied before a path is built
-            here so a scalar filter on such a key fails the same way on
-            every store instead of reaching SQLite as a raw
-            ``sqlite3.OperationalError`` (#743 follow-up 3).
+        ValueError: *key* holds a NUL character, even alongside a ``"`` or a
+            ``\``. :func:`~trellis.stores.sqlite.base.reject_nul_key` raises
+            it, with the message the graph and vector stores give.
     """
     reject_nul_key(key)
     return None if '"' in key or "\\" in key else f'$."{key}"'
