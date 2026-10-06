@@ -388,11 +388,12 @@ class GraphStore(ABC):
         one write transaction, so a write-time failure leaves none of
         the batch's rows.
 
-        On backends with network round-trip cost (Neo4j), implementations
-        SHOULD consolidate the work into a small constant number of
-        round trips per batch — typically one fetch of existing rows
-        plus one UNWIND-style upsert. On in-process backends a simple
-        loop over :meth:`upsert_node` is acceptable.
+        On backends with network round-trip cost (Neo4j, ArcadeDB),
+        implementations SHOULD consolidate the work into a small constant
+        number of round trips per batch — typically one fetch of existing
+        rows plus one UNWIND-style upsert. On in-process backends, round
+        trips cost little either way, but the batch is still written in
+        one transaction, as described above.
 
         Args:
             nodes: List of node-spec dicts. Order is preserved in the
@@ -878,9 +879,9 @@ class GraphStore(ABC):
         so a bad row raises before anything is written, which honors the
         ABC's atomicity-of-validation contract.
 
-        Backends with a single-statement bulk path (Neo4j) inline the
-        same validation in their own pre-pass and don't need this
-        helper — using it would require a redundant
+        Backends with a single-statement bulk path (Neo4j, ArcadeDB)
+        inline the same validation in their own pre-pass and don't need
+        this helper — using it would require a redundant
         :meth:`get_nodes_bulk` round trip.
 
         Errors are tagged with the offending row index so callers can

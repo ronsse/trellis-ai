@@ -1166,6 +1166,16 @@ All notable changes to Trellis will be documented in this file.
   does, and the raise rolls the write's transaction back, so no row of the
   batch is written. A call whose endpoints stay current is unchanged.
   ([#746](https://github.com/ronsse/trellis-ai/pull/746))
+- **`upsert_edges_bulk` on SQLite and Postgres closed every current edge
+  sharing a batch entry's source, not just the prior versions of the
+  triplets the batch named.** A batch upserting one `(source, target,
+  edge_type)` edge silently closed every other current edge from that same
+  source — including ones the batch never mentioned — leaving them with no
+  open version. The per-entry version/edge-id lookup already matched on the
+  full triplet; only the closing `UPDATE` used the broader source-matched
+  set. It now closes only the prior versions of the triplets the batch
+  names. Neo4j and ArcadeDB, which already close by exact triplet match,
+  are unchanged.
 
 ## [0.9.0] - 2026-05-13
 

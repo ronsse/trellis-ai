@@ -1045,12 +1045,19 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             now = utc_now()
             edge_ids: list[str] = []
             insert_rows: list[tuple[Any, ...]] = []
+            # Only the priors whose triplet the batch actually names get
+            # closed below — ``existing_edges`` also holds other current
+            # edges that merely share a source with the batch, which must
+            # stay open (#745 F1). Keyed by edge_id to tolerate the batch
+            # naming the same triplet via more than one spec.
+            priors_to_close: dict[str, str] = {}
             for i, spec in enumerate(edges):
                 key = (spec["source_id"], spec["target_id"], spec["edge_type"])
                 prior = existing_edges.get(key)
                 if prior is not None:
                     edge_id = str(prior[0])
                     created_at = prior[4]
+                    priors_to_close[edge_id] = edge_id
                 else:
                     edge_id = generate_ulid()
                     created_at = now
@@ -1080,11 +1087,11 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 )
 
             with conn.cursor() as cur:
-                if existing_edges:
+                if priors_to_close:
                     cur.execute(
                         "UPDATE edges SET valid_to = %s "
                         "WHERE edge_id = ANY(%s) AND valid_to IS NULL",
-                        (now, [str(prior[0]) for prior in existing_edges.values()]),
+                        (now, list(priors_to_close)),
                     )
                 cur.executemany(
                     """
