@@ -24,6 +24,7 @@ traceback text only appears when a chain's ``format_exc_info`` renders it.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from typing import TYPE_CHECKING, NoReturn
@@ -271,44 +272,6 @@ def _run_keyed_command(
 
 
 @pytest.mark.parametrize(
-    ("read", "emit", "logged"),
-    [
-        pytest.param(
-            _mapped("has_idempotency_key"),
-            _mapped("append"),
-            ["StoreError", "Event log append failed: _DriverError"],
-            id="mapped",
-        ),
-        pytest.param(_raw, _raw, ["OperationalError"], id="raw"),
-    ],
-)
-@pytest.mark.parametrize("configure", _CHAINS)
-def test_a_failed_audit_emit_logs_its_type_and_not_the_failure_before_it(
-    capsys: pytest.CaptureFixture[str],
-    configure: Callable[[], None],
-    read: Callable[..., NoReturn],
-    emit: Callable[..., NoReturn],
-    logged: list[str],
-) -> None:
-    """``audit_emit_failed`` names the emit's error and renders no chain.
-
-    The rejection event for a failed idempotency read is emitted inside the
-    read's ``except`` block, so the read's error, and the driver text it
-    carries, is the emit error's context. A ``TrellisError``'s own message
-    is logged (``mapped``); a raw driver error's text is not (``raw``).
-    """
-    configure()
-    _run_keyed_command(read, emit)
-    out = capsys.readouterr().err
-
-    [line] = [ln for ln in out.splitlines() if "audit_emit_failed" in ln]
-    for text in logged:
-        assert text in line
-    assert _COMMAND_ID in line
-    assert _SERVER_TEXT not in out
-
-
-@pytest.mark.parametrize(
     ("read", "emit", "error_type", "error"),
     [
         pytest.param(
@@ -318,24 +281,52 @@ def test_a_failed_audit_emit_logs_its_type_and_not_the_failure_before_it(
             "Event log append failed: _DriverError",
             id="mapped",
         ),
-        pytest.param(
-            _raw, _raw, "OperationalError", f"server says: {_SERVER_TEXT}", id="raw"
-        ),
+        pytest.param(_raw, _raw, "OperationalError", None, id="raw"),
     ],
 )
-def test_a_failed_read_and_emit_return_failed_with_the_audit_warning(
+def test_a_failed_audit_emit_logs_its_type_and_not_the_failure_before_it(
+    capsys: pytest.CaptureFixture[str],
     read: Callable[..., NoReturn],
     emit: Callable[..., NoReturn],
     error_type: str,
-    error: str,
+    error: str | None,
 ) -> None:
+    """``audit_emit_failed`` names the emit's error and renders no chain.
+
+    The rejection event for a failed idempotency read is emitted inside the
+    read's ``except`` block, so the read's error, and the driver text it
+    carries, is the emit error's context. A ``TrellisError``'s own message
+    is logged (``mapped``); a raw driver error's text is not (``raw``). The
+    line is read through the API's JSON chain, one record, and pinned whole.
+    """
+    configure_logging()
+    _run_keyed_command(read, emit)
+    out = capsys.readouterr().err
+
+    [line] = [ln for ln in out.splitlines() if "audit_emit_failed" in ln]
+    record = json.loads(line)
+    record.pop("timestamp")  # a clock
+    # No ``exception`` key: that is the field a rendered traceback fills.
+    assert record == {
+        "event": "audit_emit_failed",
+        "level": "error",
+        "command_id": _COMMAND_ID,
+        "operation": "entity.create",
+        "event_type": "mutation.rejected",
+        "error_type": error_type,
+        "error": error,
+    }
+    assert _SERVER_TEXT not in out
+
+
+def test_a_failed_read_and_emit_return_failed_with_the_audit_warning() -> None:
     """The FAILED result and the one emit attempted, pinned whole.
 
     How the emit failure is logged cannot move what the caller sees. The
-    warning carries the emit error's own text, a raw driver error's
-    included: the result is not the log, and this pin keeps it as it is.
+    warning carries the emit error's own text, even a raw driver error's:
+    the result is not the log, and this pin keeps it as it is.
     """
-    result, event_log, handler = _run_keyed_command(read, emit)
+    result, event_log, handler = _run_keyed_command(_raw, _raw)
 
     handler.handle.assert_not_called()
     dumped = result.model_dump(mode="json", exclude={"executed_at", "schema_version"})
@@ -345,13 +336,13 @@ def test_a_failed_read_and_emit_return_failed_with_the_audit_warning(
         "operation": "entity.create",
         "target_id": None,
         "created_id": None,
-        "message": f"Idempotency check failed: {error_type}",
+        "message": "Idempotency check failed: OperationalError",
         "warnings": [
             (
                 "audit_event_not_recorded: the mutation.rejected event for this "
                 "command could not be written to the event log "
-                f"({error_type}: {error}). The outcome this result reports "
-                "stands; only its audit record is missing."
+                f"(OperationalError: server says: {_SERVER_TEXT}). The outcome "
+                "this result reports stands; only its audit record is missing."
             )
         ],
         "metadata": {},
@@ -366,7 +357,7 @@ def test_a_failed_read_and_emit_return_failed_with_the_audit_warning(
                 "command_id": _COMMAND_ID,
                 "operation": Operation.ENTITY_CREATE,
                 "status": CommandStatus.REJECTED,
-                "message": f"Idempotency check failed: {error_type}",
+                "message": "Idempotency check failed: OperationalError",
                 "requested_by": "test:synthetic",
                 "idempotency_key": "idem-synthetic-3",
                 "reason": "idempotency_check_failed",

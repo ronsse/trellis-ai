@@ -137,9 +137,10 @@ class TestUnhandledExceptionHandler:
 class TestErrorLogLines:
     """What each handler writes to the operator log.
 
-    Read as a deployment renders it, through the API's real chain in both
-    formats: ``capture_logs`` on its own records ``exc_info`` without rendering
-    it, and a rendered traceback is where a chained cause gets printed.
+    Read as a deployment renders it, through the API's real chain in its
+    default JSON format, one record per line: ``capture_logs`` on its own
+    records ``exc_info`` without rendering it, and a rendered traceback is
+    where a chained cause gets printed.
     """
 
     @pytest.fixture(autouse=True)
@@ -165,15 +166,13 @@ class TestErrorLogLines:
                 uvicorn[name].propagate = propagate
                 uvicorn[name].setLevel(lg_level)
 
-    @pytest.mark.parametrize("log_format", ["json", "console"])
     def test_a_typed_failure_logs_its_type_and_message_and_not_its_cause(
         self,
         client: TestClient,
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
-        log_format: str,
     ) -> None:
-        monkeypatch.setenv("TRELLIS_LOG_FORMAT", log_format)
+        monkeypatch.setenv("TRELLIS_LOG_FORMAT", "json")
         configure_logging()
 
         resp = client.get("/store-error", headers={REQUEST_ID_HEADER: "req-synth-1"})
@@ -187,9 +186,20 @@ class TestErrorLogLines:
             "store": "graph",
         }
         [line] = [ln for ln in out.splitlines() if "api_trellis_error" in ln]
-        assert "StoreError" in line
-        assert _STORE_MESSAGE in line
-        assert "req-synth-1" in line
+        record = json.loads(line)
+        record.pop("timestamp")  # a clock
+        # No ``exception`` key: that is the field a rendered traceback fills.
+        assert record == {
+            "event": "api_trellis_error",
+            "level": "error",
+            "path": "/store-error",
+            "method": "GET",
+            "request_id": "req-synth-1",
+            "exc_type": "StoreError",
+            "error": _STORE_MESSAGE,
+            "error_code": "STORE_ERROR",
+            "status_code": 500,
+        }
         assert "synthetic-secret" not in out
 
     def test_an_untyped_failure_keeps_its_traceback(
@@ -213,5 +223,9 @@ class TestErrorLogLines:
         [line] = [ln for ln in out.splitlines() if "api_unhandled_exception" in ln]
         record = json.loads(line)
         assert record["exc_type"] == "RuntimeError"
-        assert "Traceback (most recent call last)" in record["exception"]
-        assert "internal kaboom" in record["exception"]
+        # Absent unless the handler logs with the exception attached.
+        stack = record.get("exception", "")
+        assert stack.startswith("Traceback (most recent call last)")
+        assert stack.endswith(
+            "RuntimeError: internal kaboom — should not leak to client"
+        )

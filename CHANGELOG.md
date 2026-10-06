@@ -1002,14 +1002,13 @@ All notable changes to Trellis will be documented in this file.
 - **Two error log lines no longer print a driver's text.**
   `api_trellis_error`, the REST API's line for a typed Trellis failure, and
   `audit_emit_failed`, the executor's line for an audit event it could not
-  write, were logged with a traceback, and a rendered traceback prints the
-  exception's chain. A store that maps a driver failure raises a type-only
-  `StoreError` chained from the driver's exception, whose text can carry
-  query text and values (#702, #713), and an emit inside an `except` block
-  chains the failure it was auditing. Both lines now carry the exception's
-  type and, when Trellis wrote it, its message under `error`, with no
-  traceback. An untyped failure that reaches the API's catch-all still logs
-  its traceback, and response bodies and command results are unchanged.
+  write, carry the exception's type and, when Trellis wrote it, its message
+  under `error`, instead of a traceback. A traceback prints the exception's
+  chain: the driver exception a type-only `StoreError` is chained from, whose
+  text can carry query text and values (#702, #713), and for an emit inside
+  an `except` block, the failure it was auditing. An untyped failure that
+  reaches the API's catch-all still logs its traceback; response bodies and
+  command results are unchanged.
   ([#734](https://github.com/ronsse/trellis-ai/pull/734))
 
 ## [0.9.0] - 2026-05-13
