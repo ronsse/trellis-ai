@@ -14,7 +14,8 @@ The last four are also read ``as_of`` an instant both rows are valid, and a
 listing's ``limit`` counts nodes; a filtered listing ``as_of`` an instant
 before the two rows shows the version valid then. The write checks require
 the next write to continue that version and close both rows, leaving one
-current row.
+current row. The edge write checks require an edge from or to such a node
+to get one current version per write, hanging off the row the reads show.
 
 The duplicates are built so that rival rules pick the other row. A later
 stamp carries the smaller ``version_id`` and an earlier stamp the greater,
@@ -31,6 +32,7 @@ import json
 import time
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from typing import Any
 
 from trellis.stores.base.graph import NODE_SEARCH_SORTS
@@ -618,3 +620,156 @@ def check_update_node_if_current_heals_a_duplicate(store: Any) -> None:
         )
         assert written is True, node_id
         _assert_healed(store, node_id, name=name, shown=shown, hidden=hidden)
+
+
+def _edge_ends(
+    store: Any, duplicated_end: str
+) -> tuple[list[tuple[str, str]], dict[str, str]]:
+    """Write the edge checks' nodes; return the edges to write and the shown rows.
+
+    ``plain-a`` and ``plain-b`` have one current row each and
+    WRITE_DUPLICATES's nodes two. Each duplicated node is the
+    *duplicated_end* (``source`` or ``target``) of one edge, and those edges
+    are listed between the plain nodes' edges, one each way. The rows map
+    each node to the ``version_id`` of the row the reads show.
+    """
+    store.upsert_node("plain-a", "kind-a", {"name": "plain a"})
+    store.upsert_node("plain-b", "kind-b", {"name": "plain b"})
+    rows = {
+        node_id: shown["version_id"]
+        for node_id, (shown, _) in _all_duplicated(store).items()
+    }
+    for node_id in ("plain-a", "plain-b"):
+        (row,) = _current_rows(store, node_id)
+        rows[node_id] = row["version_id"]
+    duplicated_edges = [
+        (node_id, "plain-b") if duplicated_end == "source" else ("plain-a", node_id)
+        for node_id, *_ in WRITE_DUPLICATES
+    ]
+    return [("plain-a", "plain-b"), *duplicated_edges, ("plain-b", "plain-a")], rows
+
+
+def _edge_versions(store: Any, source_id: str, target_id: str) -> list[dict[str, Any]]:
+    """Every stored version of the edges from *source_id* to *target_id*.
+
+    Each also names the node rows it hangs off by their ``version_id``, as
+    ``source_row`` and ``target_row``.
+    """
+    with store._driver.session(database=store._database) as session:
+        result = session.run(
+            "MATCH (s:Node {node_id: $source_id})-[r:EDGE]->"
+            "(t:Node {node_id: $target_id}) "
+            "RETURN r, s.version_id AS source_row, t.version_id AS target_row",
+            source_id=source_id,
+            target_id=target_id,
+        )
+        return [
+            {
+                **dict(record["r"]),
+                "source_row": record["source_row"],
+                "target_row": record["target_row"],
+            }
+            for record in result
+        ]
+
+
+def _step(version: dict[str, Any]) -> int:
+    """Which write of the checks stored an edge version."""
+    return int(json.loads(version["properties_json"])["step"])
+
+
+def _assert_one_current_edge(
+    store: Any,
+    source_id: str,
+    target_id: str,
+    *,
+    edge_id: str,
+    step: int,
+    rows: dict[str, str],
+) -> None:
+    """The edge has one current version, from write *step*, served once.
+
+    That version hangs off the row of each end named in *rows*. Each
+    earlier write left one version of the same edge, closed where the next
+    one starts, and every version keeps the first one's ``created_at``.
+    ``get_edges`` from either end returns the edge once.
+    """
+    versions = _edge_versions(store, source_id, target_id)
+    current = [version for version in versions if version.get("valid_to") is None]
+    shape = [
+        (
+            version["edge_id"],
+            _step(version),
+            version["source_row"],
+            version["target_row"],
+        )
+        for version in current
+    ]
+    expected = [(edge_id, step, rows[source_id], rows[target_id])]
+    assert shape == expected, (source_id, target_id, shape)
+    closed = sorted(
+        (version for version in versions if version.get("valid_to") is not None),
+        key=_step,
+    )
+    earlier = [(version["edge_id"], _step(version)) for version in closed]
+    assert earlier == [(edge_id, n) for n in range(1, step)], (source_id, target_id)
+    for older, newer in pairwise([*closed, *current]):
+        assert _instant(older["valid_to"]) == _instant(newer["valid_from"])
+        assert _instant(older["created_at"]) == _instant(newer["created_at"])
+    for node_id, direction in ((source_id, "outgoing"), (target_id, "incoming")):
+        served = [
+            (edge["source_id"], edge["target_id"], edge["properties"])
+            for edge in store.get_edges(node_id, direction)
+            if edge["edge_id"] == edge_id
+        ]
+        assert served == [(source_id, target_id, {"step": step})], (node_id, served)
+
+
+def check_upsert_edge_writes_one_version(store: Any, duplicated_end: str) -> None:
+    """``upsert_edge`` writes one version when one end has two current rows.
+
+    Each edge is written twice. After each write it has one current
+    version, hanging off the row each end shows; the second write closes
+    the first version and returns its ``edge_id``.
+    """
+    edges, rows = _edge_ends(store, duplicated_end)
+    for source_id, target_id in edges:
+        edge_id = store.upsert_edge(source_id, target_id, "relates_to", {"step": 1})
+        _assert_one_current_edge(
+            store, source_id, target_id, edge_id=edge_id, step=1, rows=rows
+        )
+        again = store.upsert_edge(source_id, target_id, "relates_to", {"step": 2})
+        assert again == edge_id, (source_id, target_id, again)
+        _assert_one_current_edge(
+            store, source_id, target_id, edge_id=edge_id, step=2, rows=rows
+        )
+
+
+def check_upsert_edges_bulk_writes_one_version(store: Any, duplicated_end: str) -> None:
+    """``upsert_edges_bulk`` writes one version of each edge, as ``upsert_edge``.
+
+    The edges at a duplicated node go in one call beside edges between plain
+    nodes, twice. Each call leaves every edge one current version and
+    returns the ``edge_id`` of each in input order, the same both times.
+    """
+    edges, rows = _edge_ends(store, duplicated_end)
+    edge_ids: list[str] = []
+    for step in (1, 2):
+        written = store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "edge_type": "relates_to",
+                    "properties": {"step": step},
+                }
+                for source_id, target_id in edges
+            ]
+        )
+        edge_ids = edge_ids or written
+        assert written == edge_ids, (step, written)
+        assert len(set(written)) == len(edges), written
+        for (source_id, target_id), edge_id in zip(edges, written, strict=True):
+            _assert_one_current_edge(
+                store, source_id, target_id, edge_id=edge_id, step=step, rows=rows
+            )

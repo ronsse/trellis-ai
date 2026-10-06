@@ -980,6 +980,15 @@ All notable changes to Trellis will be documented in this file.
   keys and values verbatim, instead of deleting bracketed text or exiting
   `1` on a closing tag such as `[/x]`.
   ([#730](https://github.com/ronsse/trellis-ai/pull/730))
+- **On Neo4j and ArcadeDB, an edge written from or to a node with two
+  current rows gets one version.** `upsert_edge` and `upsert_edges_bulk`
+  created the edge once per current row of each endpoint, so such a node
+  left two current versions of the edge, `get_edges` returned it twice, and
+  `upsert_edge` raised the driver's "found multiple" warning. Both now
+  attach the new version to the row `get_node` shows for each endpoint. An
+  edge version already current on the hidden row, such as one written
+  before this fix, stays current, and the race that leaves the two rows is
+  unchanged. Writes between nodes with one current row are unchanged.
 
 ## [0.9.0] - 2026-05-13
 

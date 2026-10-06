@@ -243,6 +243,17 @@ def test_a_lost_commit_the_purge_did_not_make_is_a_failed_purge(
     assert _rows_left(store, "n1") == seeded
 
 
+@pytest.mark.parametrize(
+    ("source_id", "target_id"),
+    [("ghost_a", "ghost_b"), ("ghost_a", "a"), ("a", "ghost_b")],
+)
+def test_upsert_edge_missing_endpoints_raises(graph_store, source_id, target_id):
+    graph_store.upsert_node("a", "s", {})
+    with pytest.raises(ValueError, match="no current version"):
+        graph_store.upsert_edge(source_id, target_id, "links_to")
+    assert graph_store.count_edges() == 0
+
+
 class TestArcadeDBEdgeProvenance:
     """Round-trip the five provenance fields through a real ArcadeDB.
 
@@ -597,6 +608,18 @@ class TestDuplicateCurrentRow:
     def test_update_node_if_current_heals_a_duplicate(self, graph_store):
         bolt_duplicate_current.check_update_node_if_current_heals_a_duplicate(
             graph_store
+        )
+
+    @pytest.mark.parametrize("duplicated_end", ["source", "target"])
+    def test_upsert_edge_writes_one_version(self, graph_store, duplicated_end):
+        bolt_duplicate_current.check_upsert_edge_writes_one_version(
+            graph_store, duplicated_end
+        )
+
+    @pytest.mark.parametrize("duplicated_end", ["source", "target"])
+    def test_upsert_edges_bulk_writes_one_version(self, graph_store, duplicated_end):
+        bolt_duplicate_current.check_upsert_edges_bulk_writes_one_version(
+            graph_store, duplicated_end
         )
 
     def test_get_nodes_bulk_shows_one_version(self, graph_store):
