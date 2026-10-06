@@ -941,6 +941,17 @@ All notable changes to Trellis will be documented in this file.
   most nodes pass. The race that leaves the two rows is unchanged, as are
   edges written to such a node.
   ([#726](https://github.com/ronsse/trellis-ai/pull/726))
+- **A SQLite graph or vector filter key that is not a plain JSON object key
+  is refused instead of running as SQL.** The SQLite graph store's
+  `query(properties=...)` and `properties.<key>` query filters, on nodes and
+  edges, and the SQLite vector store's `query(filters=...)` spliced the key
+  into SQL text as a JSON path, so a `'` in it closed the literal: one such
+  key matched every row and another raised `sqlite3.OperationalError`. A key
+  outside `[A-Za-z0-9_-]+` now raises `ValueError` before any statement runs,
+  which `PackBuilder` records as that axis's strategy failure. A dotted key
+  such as `a.b`, which only SQLite read as a nested path, is refused too. No
+  REST, MCP, SDK or CLI route passes a caller-chosen key to these filters.
+  ([#729](https://github.com/ronsse/trellis-ai/pull/729))
 
 ## [0.9.0] - 2026-05-13
 
