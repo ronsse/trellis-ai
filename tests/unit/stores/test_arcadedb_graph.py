@@ -296,6 +296,7 @@ class TestArcadeDBEdgeProvenance:
         would still reject the value. We exercise this by issuing the
         write via ArcadeDB SQL, bypassing the Cypher path.
         """
+        from trellis.errors import StoreError
         from trellis.stores.arcadedb.base import execute_sql
 
         graph_store.upsert_node("a", "service", {})
@@ -304,7 +305,7 @@ class TestArcadeDBEdgeProvenance:
         graph_store.upsert_edge("a", "b", "depends_on", confidence=0.5)
         # Try to UPDATE the confidence to an out-of-range value via
         # raw SQL. ArcadeDB's MIN/MAX constraint should reject this.
-        with pytest.raises(RuntimeError):
+        with pytest.raises(StoreError):
             execute_sql(
                 HTTP_URL,
                 USER,
@@ -327,6 +328,7 @@ class TestArcadeDBEdgeProvenance:
         ``confidence`` write at the server boundary even when the
         Python validator is bypassed.
         """
+        from trellis.errors import StoreError
         from trellis.stores.arcadedb.base import execute_sql
         from trellis.stores.registry import StoreRegistry
 
@@ -354,7 +356,7 @@ class TestArcadeDBEdgeProvenance:
             # installed via the registry path. Pre-fix, this UPDATE
             # would succeed because the property was auto-created
             # untyped on first write.
-            with pytest.raises(RuntimeError):
+            with pytest.raises(StoreError):
                 execute_sql(
                     HTTP_URL,
                     USER,
