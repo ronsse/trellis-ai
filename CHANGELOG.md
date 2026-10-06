@@ -1179,16 +1179,15 @@ All notable changes to Trellis will be documented in this file.
   `trellis_api.app.register_exception_handlers`.
   ([#749](https://github.com/ronsse/trellis-ai/pull/749))
 - **The error sanitizer suppresses Neo4j and ArcadeDB duplicate-constraint
-  values over Bolt.** Neo4j's uniqueness-violation text quotes the row
-  inline: `` Node(<n>) already exists with label `<Label>` and property
-  `<prop>` = '<value>' `` (gql_status `22N79`). ArcadeDB raises the same
-  shape of leak inside a managed transaction, even with the value passed
-  as a bound parameter: `` Duplicated key [<value>] found on index
-  '<Label>[<prop>]' already assigned to record #<rid> `` (gql_status
-  `50N42`). Neither had a `DETAIL` line for #747's PostgreSQL pattern to
-  match, so both passed through `sanitize_error_message` verbatim. Both
-  are now replaced with the sanitizer's static marker. The marker and
-  every other pattern, caller and payload shape are unchanged.
+  values over Bolt.** Neo4j's uniqueness-violation text quotes the value:
+  `` Node(<n>) already exists with label `<Label>` and property
+  `<prop>` = '<value>' `` (gql_status `22N79`). So does ArcadeDB's, raised
+  inside a managed transaction even with the value passed as a bound
+  parameter: `` Duplicated key [<value>] found on index '<Label>[<prop>]'
+  already assigned to record #<rid> `` (gql_status `50N42`). Both passed
+  through `sanitize_error_message` verbatim and now get its static marker.
+  The marker and every other pattern, caller and payload shape are
+  unchanged.
   ([#753](https://github.com/ronsse/trellis-ai/pull/753))
 
 ## [0.9.0] - 2026-05-13

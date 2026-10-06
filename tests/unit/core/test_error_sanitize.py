@@ -178,14 +178,15 @@ class TestSuppression:
             (
                 "{neo4j_code: Neo.ClientError.Schema.ConstraintValidationFailed} "
                 "{message: Node(1) already exists with label `AliasClaim` and "
-                "property `claim_key` = 'synthetic-system|synthetic-raw-id'} "
+                'property `claim_key` = \'["synthetic-system","synthetic-raw-id"]\'} '
                 "{gql_status: 22N79}"
             ),
             # ArcadeDB 26.8.1 over Bolt, raised inside a managed transaction
             # with the value passed as a bound parameter (as the Bolt store
             # itself issues writes) against an already-committed duplicate
             # (gql_status 50N42). The index name carries the label and
-            # property; the record id varies per run.
+            # property; the record id varies per run. An alias claim key is
+            # the store's JSON array, so that value holds its own brackets.
             (
                 "{neo4j_code: Neo.ClientError.Transaction.TransactionNotFound} "
                 "{message: Duplicated key [synthetic-version-dup] found on "
@@ -194,9 +195,9 @@ class TestSuppression:
             ),
             (
                 "{neo4j_code: Neo.ClientError.Transaction.TransactionNotFound} "
-                "{message: Duplicated key [synthetic-system|synthetic-raw-id] "
+                '{message: Duplicated key [["synthetic-system","synthetic-raw-id"]] '
                 "found on index 'AliasClaim[claim_key]' already assigned to "
-                "record #9:0} {gql_status: 50N42}"
+                "record #9:1} {gql_status: 50N42}"
             ),
         ],
         ids=[
@@ -210,9 +211,7 @@ class TestSuppression:
         assert sanitize_error_message(msg) == SUPPRESSED_MARKER
 
     def test_already_exists_without_quoted_value_passes_through(self) -> None:
-        # Near-miss: a Trellis-authored message that mentions "already
-        # exists" and even echoes the Neo4j "with label ... and property"
-        # wording, but never reaches a quoted value — must stay clean.
+        # The Neo4j wording up to the property name, with no quoted value.
         msg = (
             "entity_type 'precedent' already exists with label `Tag` and "
             "property `name` is already set"

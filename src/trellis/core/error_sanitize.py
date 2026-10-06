@@ -63,16 +63,13 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     # contains (...)." (NOT NULL and CHECK). English wording only: a server
     # with another lc_messages translates both.
     re.compile(r"\bKey \(.*?\)=\(|\bFailing row contains \("),
-    # Bolt (Neo4j, ArcadeDB) duplicate-constraint texts quote the row value
-    # inline, no DETAIL line to strip: Neo4j's "Node(<n>) already exists
-    # with label `<Label>` and property `<prop>` = '<value>'" (gql_status
-    # 22N79), and ArcadeDB's in-transaction "Duplicated key [<value>] found
-    # on index '<Label>[<prop>]' already assigned to record #<rid>"
-    # (gql_status 50N42, over Bolt with bound parameters).
-    re.compile(
-        r"\balready exists with label `[^`]*` and property `[^`]*` = '"
-        r"|\bDuplicated key \[[^\]]*\] found on index '"
-    ),
+    # Neo4j's uniqueness violation quotes the value: "Node(<n>) already
+    # exists with label `<Label>` and property `<prop>` = '<value>'".
+    re.compile(r"\balready exists with label `[^`]*` and property `[^`]*` = '"),
+    # ArcadeDB's, over Bolt: "Duplicated key [<value>] found on index
+    # '<Label>[<prop>]' ...". The prefix alone, because the value can hold
+    # its own "]": an alias claim key is a JSON array.
+    re.compile(r"\bDuplicated key \["),
 )
 
 _LONG_TOKEN_RUN = re.compile(
