@@ -163,6 +163,61 @@ class TestSuppression:
     def test_postgres_row_values_suppressed(self, msg: str) -> None:
         assert sanitize_error_message(msg) == SUPPRESSED_MARKER
 
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            # Neo4j 2025.12 ``str(Neo4jError)`` over Bolt, captured against
+            # Trellis's own constraint DDL with synthetic values (gql_status
+            # 22N79). One per declared constraint label.
+            (
+                "{neo4j_code: Neo.ClientError.Schema.ConstraintValidationFailed} "
+                "{message: Node(0) already exists with label `Node` and "
+                "property `version_id` = 'synthetic-version-dup'} "
+                "{gql_status: 22N79}"
+            ),
+            (
+                "{neo4j_code: Neo.ClientError.Schema.ConstraintValidationFailed} "
+                "{message: Node(1) already exists with label `AliasClaim` and "
+                'property `claim_key` = \'["synthetic-system","synthetic-raw-id"]\'} '
+                "{gql_status: 22N79}"
+            ),
+            # ArcadeDB 26.8.1 over Bolt, raised inside a managed transaction
+            # with the value passed as a bound parameter (as the Bolt store
+            # itself issues writes) against an already-committed duplicate
+            # (gql_status 50N42). The index name carries the label and
+            # property; the record id varies per run. An alias claim key is
+            # the store's JSON array, so that value holds its own brackets.
+            (
+                "{neo4j_code: Neo.ClientError.Transaction.TransactionNotFound} "
+                "{message: Duplicated key [synthetic-version-dup] found on "
+                "index 'Node[version_id]' already assigned to record #1:0} "
+                "{gql_status: 50N42}"
+            ),
+            (
+                "{neo4j_code: Neo.ClientError.Transaction.TransactionNotFound} "
+                '{message: Duplicated key [["synthetic-system","synthetic-raw-id"]] '
+                "found on index 'AliasClaim[claim_key]' already assigned to "
+                "record #9:1} {gql_status: 50N42}"
+            ),
+        ],
+        ids=[
+            "neo4j-node-version-unique",
+            "neo4j-alias-claim-unique",
+            "arcadedb-node-tx",
+            "arcadedb-alias-claim-tx",
+        ],
+    )
+    def test_bolt_duplicate_constraint_values_suppressed(self, msg: str) -> None:
+        assert sanitize_error_message(msg) == SUPPRESSED_MARKER
+
+    def test_already_exists_without_quoted_value_passes_through(self) -> None:
+        # The Neo4j wording up to the property name, with no quoted value.
+        msg = (
+            "entity_type 'precedent' already exists with label `Tag` and "
+            "property `name` is already set"
+        )
+        assert sanitize_error_message(msg) == msg
+
 
 class TestBounding:
     def test_long_clean_message_truncated(self) -> None:
