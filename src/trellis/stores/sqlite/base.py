@@ -265,7 +265,7 @@ def json_key_path(key: str) -> str:
     3.46. SQLite 3.45, 3.46 and 3.53 decode the escapes on both sides, and
     releases before 3.45 compare the label with the stored text as written,
     so the one spelling matches on each, save that before 3.45 a key holding
-    a ``"`` matches nothing under any spelling. ``json.dumps`` also escapes a
+    a ``"`` matches nothing under it. ``json.dumps`` also escapes a
     lone surrogate, which sqlite3 cannot bind raw.
 
     Raises:

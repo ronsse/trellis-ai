@@ -164,16 +164,13 @@ def _bindable_json_path(key: str) -> str | None:
     Inside the quotes a ``"`` ends the label and a ``\`` starts an escape
     sequence, so such a key misses, names another key or raises a bad-path
     error. :func:`~trellis.stores.sqlite.base.json_key_path` spells both on
-    SQLite 3.45 and later, but before 3.45 a key holding a ``"`` matches
-    nothing under any spelling.
+    SQLite 3.45 and later, but before 3.45 its spelling of a key holding a
+    ``"`` matches nothing.
 
-    The backslash case was a live backend divergence, found by the #455
-    review gate: Postgres binds the key directly (``metadata -> %s``) and
-    matched the same document, inside the change (#409) whose whole point is
-    that the two backends cannot disagree about what a filter means. Keys
-    holding either character are handed to :func:`_metadata_matches`
-    instead, which compares the parsed object in Python, needs no path and
-    matches on every SQLite release.
+    Postgres binds the key directly (``metadata -> %s``) and matches such a
+    key as written. Keys holding either character are handed to
+    :func:`_metadata_matches` instead, which compares the parsed object in
+    Python, needs no path and matches on every SQLite release.
     """
     return None if '"' in key or "\\" in key else f'$."{key}"'
 
