@@ -1714,7 +1714,7 @@ result = executor.execute(cmd)
 
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
-| `feedback.record` | `target_id`, `rating` | Record feedback (also available via CLI) |
+| `feedback.record` | `target_id`, `rating` | Record feedback (also available via CLI). A `rating` that is not a number from 0.0 to 1.0 inclusive, NaN included, is rejected (`validate`). |
 
 ### Maintenance Operations
 
