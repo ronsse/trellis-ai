@@ -473,7 +473,9 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             if output_format == "json":
                 print(json.dumps(sanitized_error_payload(exc)))
             else:
-                console.print(f"[red]Refresh failed: {escape(str(exc))}[/red]")
+                console.print(
+                    f"[red]Refresh failed: {escape(str(exc))}[/red]", soft_wrap=True
+                )
             raise typer.Exit(code=EXIT_INTERNAL) from None
     else:
         # --type path
@@ -516,7 +518,9 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             if output_format == "json":
                 print(json.dumps(sanitized_error_payload(exc)))
             else:
-                console.print(f"[red]Refresh failed: {escape(str(exc))}[/red]")
+                console.print(
+                    f"[red]Refresh failed: {escape(str(exc))}[/red]", soft_wrap=True
+                )
             raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # A batch whose every command was refused or failed is a failed refresh,
@@ -645,7 +649,9 @@ def traces(  # noqa: PLR0912 - per-format failure report, as in refresh
         if output_format == "json":
             print(json.dumps(sanitized_error_payload(exc)))
         else:
-            console.print(f"[red]Trace query failed: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Trace query failed: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     executor = build_curate_executor(registry)
@@ -690,7 +696,9 @@ def traces(  # noqa: PLR0912 - per-format failure report, as in refresh
         if output_format == "json":
             print(json.dumps(sanitized_error_payload(exc)))
         else:
-            console.print(f"[red]Trace backfill failed: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Trace backfill failed: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # The draft totals say what extraction proposed; the command counts say

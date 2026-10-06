@@ -1196,6 +1196,17 @@ All notable changes to Trellis will be documented in this file.
   left that source's other current edges with no open version. Neo4j and
   ArcadeDB already closed by exact triplet and are unchanged.
   ([#752](https://github.com/ronsse/trellis-ai/pull/752))
+- **A CLI failure line is no longer hard-wrapped at the console width.**
+  Sixteen `except Exception` arms in `trellis extract refresh`,
+  `extract traces`, `ingest` (trace, evidence, dbt-manifest, openlineage,
+  conversations, corpus), `admin migrate-provenance` and the admin proposal
+  commands print `<what failed>: <message>` in text mode. Rich hard-wrapped
+  that line at the console width, 80 columns when no standard stream is a
+  terminal, so a caller reading one line got part of the message. They now
+  print it unwrapped, as the root error boundary does, and the terminal
+  still wraps it on screen. Text, colour, JSON output and exit codes are
+  unchanged, and a message with its own newlines keeps them.
+  ([#750](https://github.com/ronsse/trellis-ai/pull/750))
 - **The error sanitizer suppresses Neo4j and ArcadeDB duplicate-constraint
   values over Bolt.** Neo4j's uniqueness-violation text quotes the value:
   `` Node(<n>) already exists with label `<Label>` and property
