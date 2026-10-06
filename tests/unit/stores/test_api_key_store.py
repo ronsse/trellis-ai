@@ -6,11 +6,13 @@ The Postgres section mirrors the gating in ``test_postgres_stores.py``:
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
 
 from tests.pg_scratch import configured_dsn, require_scratch_database
+from tests.unit.stores.sqlite_write_lock import committed_rows, write_at_once
 from trellis.errors import StoreError
 from trellis.stores.base.api_key import ApiKeyRecord
 from trellis.stores.sqlite.api_key import SQLiteApiKeyStore
@@ -59,6 +61,38 @@ class TestSQLiteApiKeyStore:
         store.create(_record())
         with pytest.raises(StoreError, match="already exists"):
             store.create(_record())
+
+    def test_a_create_commits_at_once(self, store, tmp_path) -> None:
+        store.create(_record("synkey000001"))
+
+        rows = committed_rows(
+            tmp_path / "api_keys.db", "SELECT key_id FROM trellis_api_keys"
+        )
+        assert rows == [("synkey000001",)]
+
+    def test_a_failed_create_holds_no_write_lock(self, store, tmp_path) -> None:
+        """A duplicate create is rolled back, not left holding the write lock."""
+        store.create(_record("synkey000001"))
+
+        with pytest.raises(
+            StoreError, match=r"^API key already exists: synkey000001$"
+        ) as err:
+            store.create(_record("synkey000001", name="syn-duplicate"))
+
+        assert err.value.store == "api_key"
+        assert isinstance(err.value.__cause__, sqlite3.IntegrityError)
+        assert store._conn.in_transaction is False
+        write_at_once(
+            tmp_path / "api_keys.db",
+            "INSERT INTO trellis_api_keys (key_id, name, secret_hash, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            ("synkey000002", "syn-other", "b" * 64, "2026-01-01T00:00:00+00:00"),
+        )
+        rows = committed_rows(
+            tmp_path / "api_keys.db",
+            "SELECT key_id FROM trellis_api_keys ORDER BY key_id",
+        )
+        assert rows == [("synkey000001",), ("synkey000002",)]
 
     def test_list_newest_first(self, store: SQLiteApiKeyStore) -> None:
         store.create(
