@@ -378,15 +378,15 @@ class GraphStore(ABC):
         *before any write*. If any row fails validation, no rows are
         written. A ``node_id`` given twice in one call is refused the
         same way, by a :class:`ValueError` naming the second
-        occurrence's index. Pass-through implementations should call
-        :meth:`_pre_validate_nodes_bulk` to honor this contract.
-        Backends with single-statement bulk paths (Neo4j) extend the
-        guarantee to write-time failures via a single transaction;
-        pass-through backends (SQLite, Postgres) loop over
-        :meth:`upsert_node` after pre-validation, so a mid-batch IO
-        failure can leave a partial commit. Callers needing strict
-        write-time atomicity should drive the bulk call inside their
-        own transaction.
+        occurrence's index. An implementation that does not inline these
+        checks should call :meth:`_pre_validate_nodes_bulk` to honor this
+        contract; SQLite and Postgres do. Every shipped backend also
+        writes the batch in one transaction: SQLite and Postgres run the
+        ``UPDATE`` that closes current versions and one ``executemany``
+        ``INSERT`` in a transaction that an error rolls back, and the
+        Bolt backends (Neo4j, ArcadeDB) run one ``UNWIND`` statement in
+        one write transaction, so a write-time failure leaves none of
+        the batch's rows.
 
         On backends with network round-trip cost (Neo4j), implementations
         SHOULD consolidate the work into a small constant number of
@@ -870,13 +870,13 @@ class GraphStore(ABC):
     def _pre_validate_nodes_bulk(self, nodes: list[dict[str, Any]]) -> None:
         """Run every per-row validator against ``nodes`` before any write.
 
-        Pass-through bulk implementations (SQLite, Postgres) loop over
-        :meth:`upsert_node` after this call. Without it, validators that
-        live inside :meth:`upsert_node` (``validate_node_role_args``,
-        ``validate_document_ids``, ``check_node_role_immutable``) would
-        only fire mid-loop — by which point earlier rows have already
-        been committed. Calling this helper up-front honors the ABC's
-        atomicity-of-validation contract.
+        SQLite and Postgres call this before their one bulk write (an
+        ``UPDATE`` closing any current versions plus one ``executemany``
+        ``INSERT``), which skips the checks :meth:`upsert_node` runs per
+        row (``validate_node_role_args``, ``validate_document_ids``,
+        ``check_node_role_immutable``). This pre-pass runs those checks,
+        so a bad row raises before anything is written, which honors the
+        ABC's atomicity-of-validation contract.
 
         Backends with a single-statement bulk path (Neo4j) inline the
         same validation in their own pre-pass and don't need this
