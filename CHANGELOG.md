@@ -952,7 +952,10 @@ All notable changes to Trellis will be documented in this file.
   is refused or fails exits by the first one (`3` for a policy, `2` for
   another refusal, `5` for a failure) with `"status": "error"` and that
   failure's `message`, as `trellis ingest dbt-manifest` does; a run that
-  wrote anything still exits `0`. Dry runs are unchanged.
+  wrote anything still exits `0`. A dry run's JSON and exit are unchanged.
+  The text output prints a trace's domain and a refresh diff's entity type,
+  keys and values verbatim, instead of deleting bracketed text or exiting
+  `1` on a closing tag such as `[/x]`.
   ([#730](https://github.com/ronsse/trellis-ai/pull/730))
 
 ## [0.9.0] - 2026-05-13

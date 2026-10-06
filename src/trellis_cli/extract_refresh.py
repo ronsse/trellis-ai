@@ -561,16 +561,21 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             console.print()
             console.print("  Per-entity diffs:")
             for d in summary["diffs"]:
-                console.print(f"    - {escape(d['entity_id'])} ({d['entity_type']})")
+                console.print(
+                    f"    - {escape(d['entity_id'])} ({escape(d['entity_type'])})"
+                )
                 diff = d["diff"]
                 if diff.get("new_entity"):
                     console.print("      [cyan]new entity[/cyan]")
                 for key in diff.get("added", {}):
-                    console.print(f"      [green]+[/green] {key}")
+                    console.print(f"      [green]+[/green] {escape(key)}")
                 for key in diff.get("removed", {}):
-                    console.print(f"      [red]-[/red] {key}")
+                    console.print(f"      [red]-[/red] {escape(key)}")
                 for key, (b, a) in (diff.get("changed") or {}).items():
-                    console.print(f"      [yellow]~[/yellow] {key}: {b!r} -> {a!r}")
+                    console.print(
+                        f"      [yellow]~[/yellow] {escape(key)}: "
+                        f"{escape(repr(b))} -> {escape(repr(a))}"
+                    )
     if refusal is not None:
         raise typer.Exit(code=refusal_exit_code(refusal))
 
@@ -595,7 +600,7 @@ def _print_backfill(
     for row in summary["per_trace"]:
         if row["entities"] or row["edges"]:
             console.print(
-                f"    - {escape(row['trace_id'])} ({row['domain'] or '-'}): "
+                f"    - {escape(row['trace_id'])} ({escape(row['domain'] or '-')}): "
                 f"{row['entities']} entities, {row['edges']} edges"
             )
 

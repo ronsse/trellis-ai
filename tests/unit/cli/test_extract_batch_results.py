@@ -21,6 +21,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from tests.cli_output import plain
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.mutate.commands import CommandBatch, CommandResult, CommandStatus
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_source import POLICY_FILENAME
@@ -41,15 +42,15 @@ _FORMATS = pytest.mark.parametrize("fmt", ["json", "text"])
 
 _POLICY = {"rejection_reason": "policy_violation"}
 
-#: Every command in the run answers *status*; the run exits *code*.
+#: Every command in the run answers *status*; the run exits *code*. The
+#: policy refusal (``3``) runs through the real executor in the denied tests.
 _WROTE_NOTHING = pytest.mark.parametrize(
     ("status", "metadata", "code"),
     [
-        (CommandStatus.REJECTED, _POLICY, EXIT_POLICY),
         (CommandStatus.REJECTED, {"rejection_reason": "orphan_edge"}, EXIT_VALIDATION),
         (CommandStatus.FAILED, {}, EXIT_STORE),
     ],
-    ids=["policy", "validation", "failed"],
+    ids=["validation", "failed"],
 )
 
 #: The answers of a run with one refusal among writes that landed.
@@ -59,11 +60,12 @@ _MIXED = [
     (CommandStatus.SUCCESS, {}),
 ]
 
+#: The domain is printed per trace; Rich would delete its ``[ops]``.
 _TRACE: dict = {
     "source": "agent",
     "intent": "fix the import",
     "steps": [{"step_type": "tool_call", "name": "grep"}],
-    "context": {"agent_id": "a1", "domain": "backend"},
+    "context": {"agent_id": "a1", "domain": "data[ops]"},
 }
 
 #: Three dbt models: three entity writes, no edges.
@@ -132,10 +134,11 @@ def _deny_writes(tmp_path: Path) -> None:
 def _fake_batch(
     monkeypatch: pytest.MonkeyPatch,
     outcomes: list[tuple[CommandStatus, dict[str, str]]],
+    message: str = _MESSAGE,
 ) -> MagicMock:
     """Answer each batch's commands with *outcomes* in order; the last repeats.
 
-    Nothing is written. A refused or failed command carries ``_MESSAGE``.
+    Nothing is written. A refused or failed command carries *message*.
     """
     executor = MagicMock(spec=MutationExecutor)
 
@@ -149,7 +152,7 @@ def _fake_batch(
                     command_id=f"cmd-{i}",
                     status=status,
                     operation=cmd.operation,
-                    message=_MESSAGE if refused else "done",
+                    message=message if refused else "done",
                     metadata=dict(metadata),
                 )
             )
@@ -200,6 +203,7 @@ class TestExtractTracesReportsTheBatch:
             assert (payload["succeeded"], payload["rejected"]) == (0, _drafts(payload))
         else:
             out = plain(result.output)
+            assert "Trace backfill failed (7 days)" in out
             assert "Extracted" not in out
             drafts = _text_drafts(out)
             assert drafts > 0
@@ -231,6 +235,22 @@ class TestExtractTracesReportsTheBatch:
             assert _counts(**{key: _text_drafts(out)}) in out
             assert _MESSAGE in out
 
+    def test_the_first_refusal_sets_the_exit_and_a_sanitized_message(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """JSON output is an artifact, so a store error's credentials stay out."""
+        _ingest_trace()
+        _fake_batch(
+            monkeypatch,
+            [(CommandStatus.FAILED, {}), (CommandStatus.REJECTED, _POLICY)],
+            message="no route to postgres://ops:pw@db:5432/kb",
+        )
+        result = _invoke(["extract", "traces"], "json")
+        assert result.exit_code == EXIT_STORE, result.output
+        payload = json.loads(result.stdout)
+        assert payload["message"] == SUPPRESSED_MARKER
+        assert (payload["failed"], payload["rejected"]) == (1, _drafts(payload) - 1)
+
     @_FORMATS
     def test_a_clean_backfill_reports_backfilled_and_its_writes(self, fmt: str) -> None:
         _ingest_trace()
@@ -247,10 +267,11 @@ class TestExtractTracesReportsTheBatch:
             )
         else:
             out = plain(result.output)
-            assert "Trace backfill" in out
+            assert "Trace backfill (7 days)" in out
             drafts = _text_drafts(out)
             assert drafts > 0
             assert _counts(succeeded=drafts) in out
+            assert "(data[ops]): " in out
 
     @_FORMATS
     def test_a_mixed_backfill_reports_both_counts_and_exits_0(
@@ -365,7 +386,7 @@ class TestExtractRefreshReportsTheBatch:
             assert _MESSAGE in out
 
     @_FORMATS
-    def test_a_clean_refresh_is_unchanged_and_reports_its_writes(
+    def test_a_clean_refresh_reports_refreshed_and_its_writes(
         self, tmp_path: Path, fmt: str
     ) -> None:
         result = _invoke(_refresh_args(tmp_path), fmt)
@@ -417,3 +438,30 @@ class TestExtractRefreshReportsTheBatch:
             )
         else:
             assert _counts(duplicates=3) in plain(result.output)
+
+    def test_diff_lines_print_types_keys_and_values_verbatim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rich would delete each ``[ops]`` and die on ``[/x]``."""
+        run_refresh = extract_cli._run_refresh
+
+        def _bracketed(*args: object, **kwargs: object) -> tuple[dict, list]:
+            summary, results = run_refresh(*args, **kwargs)
+            diff = {
+                "added": {"a[ops]": 1},
+                "removed": {"r[ops]": 1},
+                "changed": {"c[ops]": ["v[ops]", "see [/x]"]},
+            }
+            summary["diffs"] = [
+                {"entity_id": "model.p.m0", "entity_type": "t[ops]", "diff": diff}
+            ]
+            return summary, results
+
+        monkeypatch.setattr(extract_cli, "_run_refresh", _bracketed)
+        result = _invoke(_refresh_args(tmp_path), "text")
+        assert result.exit_code == 0, result.output
+        out = plain(result.output)
+        assert "model.p.m0 (t[ops])" in out
+        assert "+ a[ops]" in out
+        assert "- r[ops]" in out
+        assert "~ c[ops]: 'v[ops]' -> 'see [/x]'" in out
