@@ -1094,6 +1094,17 @@ All notable changes to Trellis will be documented in this file.
   raises, keeps its message, and the warning's prefix, the rest of its text
   and every status are unchanged.
   ([#740](https://github.com/ronsse/trellis-ai/pull/740))
+- **A failure inside `trellis extract traces`' per-trace loop is reported,
+  not left as a traceback.** An untyped exception from extracting a trace,
+  reconciling its node roles or executing its batch, such as a database
+  driver error the executor does not turn into a result, left the CLI as a
+  Python traceback with nothing on stdout, so a `--format json` caller had
+  no JSON to parse. The loop now reports it as `extract refresh` reports
+  its run: the sanitized error payload in JSON or `Trace backfill failed:`
+  and the message in text, then exit `1`, as before. A `TrellisError`
+  still reaches the root boundary and exits by its type, and batches
+  already written for earlier traces stay written.
+  ([#742](https://github.com/ronsse/trellis-ai/pull/742))
 - **A validation error that echoes `NaN` or `Infinity` from the request
   body answers 422, not 500; `POST /api/v1/feedback` and `trellis curate
   feedback` hold `rating` to 0.0–1.0, and `Measurement` refuses NaN.**
