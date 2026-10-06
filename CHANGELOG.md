@@ -999,6 +999,17 @@ All notable changes to Trellis will be documented in this file.
   before this fix, stays current, and the race that leaves the two rows is
   unchanged. Writes between nodes with one current row are unchanged.
   ([#732](https://github.com/ronsse/trellis-ai/pull/732))
+- **Two error log lines no longer print a driver's text.**
+  `api_trellis_error`, the REST API's line for a typed Trellis failure, and
+  `audit_emit_failed`, the executor's line for an audit event it could not
+  write, were logged with a traceback, and a rendered traceback prints the
+  exception's chain. A store that maps a driver failure raises a type-only
+  `StoreError` chained from the driver's exception, whose text can carry
+  query text and values (#702, #713), and an emit inside an `except` block
+  chains the failure it was auditing. Both lines now carry the exception's
+  type and, when Trellis wrote it, its message under `error`, with no
+  traceback. An untyped failure that reaches the API's catch-all still logs
+  its traceback, and response bodies and command results are unchanged.
 
 ## [0.9.0] - 2026-05-13
 

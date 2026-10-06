@@ -2,24 +2,49 @@
 
 from __future__ import annotations
 
+import json
+import logging
+from typing import TYPE_CHECKING, NoReturn
+
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from tests.structlog_isolation import reset_structlog_global_state
+from trellis.errors import StoreError, TrellisError
+from trellis_api.logging import _UVICORN_LOGGERS, configure_logging
 from trellis_api.middleware import (
     REQUEST_ID_HEADER,
     request_id_middleware,
+    trellis_error_handler,
     unhandled_exception_handler,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+#: A unique violation's DETAIL names the key's value. This one is synthetic,
+#: and nothing else in this module contains ``synthetic-secret``.
+_DETAIL = "DETAIL: Key (name)=(synthetic-secret) already exists"
+_STORE_MESSAGE = "Alias bind for node-synthetic-1 failed: _DriverError"
+
+
+class _DriverError(Exception):
+    """A backend driver's own exception, outside the Trellis hierarchy."""
+
+
+def _driver_call() -> NoReturn:
+    raise _DriverError(_DETAIL)
 
 
 @pytest.fixture
 def app() -> FastAPI:
-    """Bare app with both middleware pieces wired but no routers."""
+    """Bare app with the middleware and both handlers wired but no routers."""
     application = FastAPI()
     application.add_middleware(BaseHTTPMiddleware, dispatch=request_id_middleware)
     application.add_exception_handler(Exception, unhandled_exception_handler)
+    application.add_exception_handler(TrellisError, trellis_error_handler)
 
     @application.get("/echo")
     def echo() -> dict[str, str]:
@@ -35,6 +60,15 @@ def app() -> FastAPI:
         # FastAPI handles HTTPException itself; verify we don't
         # accidentally swallow it into the generic 500 envelope.
         raise HTTPException(status_code=418, detail="i am a teapot")
+
+    @application.get("/store-error")
+    def store_error() -> None:
+        # A type-only StoreError chained from the driver's error, the shape
+        # a store that maps a driver failure raises (#702, #713).
+        try:
+            _driver_call()
+        except _DriverError as exc:
+            raise StoreError(_STORE_MESSAGE, store="graph") from exc
 
     return application
 
@@ -98,3 +132,86 @@ class TestUnhandledExceptionHandler:
         assert body["detail"] == "i am a teapot"
         # Default FastAPI shape, NOT our envelope.
         assert "code" not in body
+
+
+class TestErrorLogLines:
+    """What each handler writes to the operator log.
+
+    Read as a deployment renders it, through the API's real chain in both
+    formats: ``capture_logs`` on its own records ``exc_info`` without rendering
+    it, and a rendered traceback is where a chained cause gets printed.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_logging(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        """Leave no configured chain, root handler or uvicorn wiring behind."""
+        monkeypatch.setenv("TRELLIS_LOG_LEVEL", "INFO")
+        root = logging.getLogger()
+        root_state = (list(root.handlers), root.level)
+        uvicorn = {name: logging.getLogger(name) for name in _UVICORN_LOGGERS}
+        uvicorn_state = {
+            name: (list(lg.handlers), lg.propagate, lg.level)
+            for name, lg in uvicorn.items()
+        }
+        reset_structlog_global_state()
+        try:
+            yield
+        finally:
+            reset_structlog_global_state()
+            root.handlers, level = root_state
+            root.setLevel(level)
+            for name, (handlers, propagate, lg_level) in uvicorn_state.items():
+                uvicorn[name].handlers = handlers
+                uvicorn[name].propagate = propagate
+                uvicorn[name].setLevel(lg_level)
+
+    @pytest.mark.parametrize("log_format", ["json", "console"])
+    def test_a_typed_failure_logs_its_type_and_message_and_not_its_cause(
+        self,
+        client: TestClient,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        log_format: str,
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_LOG_FORMAT", log_format)
+        configure_logging()
+
+        resp = client.get("/store-error", headers={REQUEST_ID_HEADER: "req-synth-1"})
+        out = capsys.readouterr().err
+
+        assert resp.status_code == 500
+        assert resp.json() == {
+            "code": "store_error",
+            "message": _STORE_MESSAGE,
+            "request_id": "req-synth-1",
+            "store": "graph",
+        }
+        [line] = [ln for ln in out.splitlines() if "api_trellis_error" in ln]
+        assert "StoreError" in line
+        assert _STORE_MESSAGE in line
+        assert "req-synth-1" in line
+        assert "synthetic-secret" not in out
+
+    def test_an_untyped_failure_keeps_its_traceback(
+        self,
+        client: TestClient,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unexpected bug reaches the catch-all, which logs its stack.
+
+        JSON, so the traceback is read off the ``api_unhandled_exception``
+        record itself rather than from anywhere in the stream.
+        """
+        monkeypatch.setenv("TRELLIS_LOG_FORMAT", "json")
+        configure_logging()
+
+        resp = client.get("/boom")
+        out = capsys.readouterr().err
+
+        assert resp.status_code == 500
+        [line] = [ln for ln in out.splitlines() if "api_unhandled_exception" in ln]
+        record = json.loads(line)
+        assert record["exc_type"] == "RuntimeError"
+        assert "Traceback (most recent call last)" in record["exception"]
+        assert "internal kaboom" in record["exception"]
