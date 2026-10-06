@@ -420,16 +420,21 @@ class GraphStoreContractTests:
         [
             {"node_type": "service", "properties": {"v": "first"}},
             {"node_type": "team", "properties": {"v": "second"}},
+            {"node_type": "service", "properties": {"v": "old"}},
         ],
-        ids=["same_spec", "other_spec"],
+        ids=["same_spec", "other_spec", "stored_spec"],
     )
     @pytest.mark.parametrize("existing", [False, True], ids=["new_id", "existing_id"])
     def test_upsert_nodes_bulk_rejects_a_repeated_node_id(
         self, store: GraphStore, existing: bool, repeat: dict[str, Any]
     ) -> None:
         """A ``node_id`` given twice in one call is refused before any write,
-        whether the second occurrence repeats the first or carries another
-        type and properties.
+        whether the second occurrence repeats the first, carries another
+        type and properties, or restates the stored node.
+
+        On an existing id the stored_spec repeat is one a version-preserving
+        no-op skip drops, so a refusal that looked only at the rows left to
+        write would let the first occurrence through.
 
         One call writes one version per node. The refusal names the second
         occurrence, as ``test_upsert_edges_bulk_rejects_duplicate_triplets``

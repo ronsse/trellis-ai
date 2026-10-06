@@ -64,6 +64,10 @@ def _capture_write_calls(
     :func:`_fetch_current_node_id_set` returns — bulk paths run an
     endpoint-validation read trip first, and tests that exercise the
     write path need that read to pretend the endpoints exist.
+
+    The bulk write (``UNWIND $rows``) returns a record for every row it
+    was sent, as a write that dropped no row would; ``upsert_edges_bulk``
+    refuses a call whose write returns no record for a row.
     """
     captured: list[dict[str, object]] = []
     endpoint_ids = known_endpoint_ids or set()
@@ -84,6 +88,12 @@ def _capture_write_calls(
         if "n.node_id IN $ids" in cypher and "RETURN n.node_id" in cypher:
             rows = [{"node_id": nid} for nid in endpoint_ids]
             result.__iter__ = lambda self_: iter(rows)
+        elif "UNWIND $rows" in cypher:
+            written = [
+                {"row_index": row["row_index"], "edge_id": "edge-xyz"}
+                for row in params["rows"]
+            ]
+            result.__iter__ = lambda self_: iter(written)
         else:
             result.__iter__ = lambda self_: iter([])
         return result
