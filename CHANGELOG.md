@@ -916,7 +916,7 @@ All notable changes to Trellis will be documented in this file.
   `get_node` shows, once, now or `as_of` an instant both rows are valid;
   a `limit` counts nodes and a filter judges the row shown. A listing
   filtered on a node field now reads every current row of each node
-  passing it: on Neo4j at 5,000 nodes that costs up to 2.7x for a filter
+  passing it: on Neo4j at 5,000 nodes that costs about 2.5x for a filter
   most nodes pass. The race that leaves the two rows is unchanged, as are
   edges written to such a node.
   ([#726](https://github.com/ronsse/trellis-ai/pull/726))
