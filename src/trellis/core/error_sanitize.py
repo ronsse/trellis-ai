@@ -57,6 +57,12 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"(?i)\b(select\s+.+?\s+from\s|insert\s+into\s|update\s+\S+\s+set\s"
         r"|delete\s+from\s|drop\s+(table|database)\s)"
     ),
+    # PostgreSQL row values, quoted by a constraint violation's DETAIL
+    # line: "Key (name)=(value) already exists." (unique, foreign key and
+    # exclusion; the column list can nest parentheses) and "Failing row
+    # contains (...)." (NOT NULL and CHECK). English wording only: a server
+    # with another lc_messages translates both.
+    re.compile(r"\bKey \(.*?\)=\(|\bFailing row contains \("),
 )
 
 _LONG_TOKEN_RUN = re.compile(
@@ -91,10 +97,11 @@ def sanitize_error_message(text: str, *, max_len: int = DEFAULT_MAX_LEN) -> str:
     Clean text passes through so operator-authored Trellis error
     messages ("entity_type 'precedent' not registered") stay useful in
     JSON output. Text containing an email, an inline-credential URL, a
-    secret-shaped assignment, a long token-shaped run, or raw SQL is
-    replaced wholesale with :data:`SUPPRESSED_MARKER` — partial
-    redaction is not attempted because any transform of the original
-    text risks leaving a recoverable fragment.
+    secret-shaped assignment, a long token-shaped run, raw SQL, or
+    PostgreSQL row values is replaced wholesale with
+    :data:`SUPPRESSED_MARKER` — partial redaction is not attempted
+    because any transform of the original text risks leaving a
+    recoverable fragment.
     """
     if any(pattern.search(text) for pattern in _LEAK_PATTERNS):
         return SUPPRESSED_MARKER
