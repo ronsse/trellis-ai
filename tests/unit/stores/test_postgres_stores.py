@@ -825,6 +825,51 @@ class TestPostgresGraphStore:
         store.upsert_node(entity_id, "service", {"name": "Vega"})
         assert extractor.extract("deploy orion") == []
 
+    # A ``properties.<key>`` DSL filter takes its key as a bound parameter,
+    # because psycopg reads a ``%`` in statement text as placeholder syntax.
+    # Each key is paired with the sibling key a misread of it would land on,
+    # and the sibling holds the value the filter matches, so a misread
+    # returns the sibling's row rather than nothing.
+    _DSL_KEY_CASES = pytest.mark.parametrize(
+        ("key", "sibling"),
+        [
+            ("owner_team", "owner_teams"),
+            ("a%b", "a%%b"),
+            ("a%%b", "a%b"),
+            ("it's", "it''s"),
+        ],
+        ids=["plain", "percent", "doubled-percent", "quote"],
+    )
+
+    @staticmethod
+    def _dsl_ids(store, key: str, op: str, value: Any) -> list[str]:
+        from trellis.stores.base.graph_query import FilterClause, NodeQuery
+
+        rows = store.execute_node_query(
+            NodeQuery(filters=(FilterClause(f"properties.{key}", op, value),))
+        )
+        return sorted(row["node_id"] for row in rows)
+
+    @_DSL_KEY_CASES
+    def test_contains_filters_on_exactly_the_named_key(
+        self, store, key: str, sibling: str
+    ) -> None:
+        store.upsert_node("hit", "service", {key: ["m", "z"]})
+        store.upsert_node("miss", "service", {key: ["z"]})
+        store.upsert_node("sibling", "service", {sibling: ["m"]})
+
+        assert self._dsl_ids(store, key, "contains", "m") == ["hit"]
+
+    @_DSL_KEY_CASES
+    def test_a_range_op_filters_on_exactly_the_named_key(
+        self, store, key: str, sibling: str
+    ) -> None:
+        store.upsert_node("low", "service", {key: 1})
+        store.upsert_node("boundary", "service", {key: 5})
+        store.upsert_node("sibling", "service", {sibling: 1})
+
+        assert self._dsl_ids(store, key, "lt", 5) == ["low"]
+
 
 # ``nodes`` exactly as v0.3.x created it (3b9cedbd), before v0.4.0 added
 # ``document_ids``. ``PostgresGraphStore`` migrates it forward on open.
