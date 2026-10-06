@@ -202,8 +202,10 @@ This command does **not** require the `TRELLIS_ENABLE_TRACE_EXTRACTION` flag —
 **JSON output:**
 
 ```json
-{"status": "backfilled", "traces_scanned": 12, "total_entities": 58, "total_edges": 44, "dry_run": false, "per_trace": [{"trace_id": "01JRK5...", "domain": "backend", "entities": 5, "edges": 4}]}
+{"status": "backfilled", "traces_scanned": 12, "total_entities": 58, "total_edges": 44, "succeeded": 102, "failed": 0, "rejected": 0, "duplicates": 0, "dry_run": false, "per_trace": [{"trace_id": "01JRK5...", "domain": "backend", "entities": 5, "edges": 4}]}
 ```
+
+`total_entities`, `total_edges` and the `per_trace` counts are drafts, the commands submitted; text output labels them `Drafts`. `succeeded`, `failed`, `rejected` and `duplicates` count what the executor answered, one key per status as `POST /api/v1/extract/drafts` reports them. So `failed` here is store failures alone, where the ingest hook's `failed` above sums both. A dry run executes nothing and omits the four keys. When every command is refused or fails, `status` is `"error"` with the first failure's sanitized `message`, and the command exits by that result: `3` for a policy refusal, `2` for any other refusal, `5` for a failure. A run that wrote anything stays `"backfilled"` and exits `0`, as `trellis ingest dbt-manifest` does; text output then names the failure count and the first failure's message.
 
 #### Document → vector embedding (opt-in)
 

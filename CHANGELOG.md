@@ -941,6 +941,17 @@ All notable changes to Trellis will be documented in this file.
   most nodes pass. The race that leaves the two rows is unchanged, as are
   edges written to such a node.
   ([#726](https://github.com/ronsse/trellis-ai/pull/726))
+- **`trellis extract traces` and `extract refresh` report what their batch
+  answered.** Both discarded the results of the governed batch they ran: a
+  backfill whose every write was refused printed `"status": "backfilled"`
+  and "Extracted N entities" and exited `0`, and a refused refresh read as
+  unchanged and exited `0`. Both now count the results by status
+  (`succeeded`, `failed`, `rejected`, `duplicates`) in JSON and text and
+  name the first failure, and `extract traces` labels its totals as drafts.
+  A run whose every command is refused or fails exits by the first one
+  (`3` for a policy, `2` for another refusal, `5` for a failure) with
+  `"status": "error"`, as `trellis ingest dbt-manifest` does; a run that
+  wrote anything still exits `0`. Dry runs are unchanged.
 
 ## [0.9.0] - 2026-05-13
 

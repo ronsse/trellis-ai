@@ -104,6 +104,7 @@ Refreshed jaffle-dbt
   Changed:           5
   Unchanged:         40
   Edges emitted:     63
+  Commands:          110 succeeded, 0 failed, 0 rejected, 0 duplicates
 
   Per-entity diffs:
     - model.my_project.fct_orders (dbt_model)
@@ -126,6 +127,10 @@ JSON mode (`--format json`):
   "changed_entities": 5,
   "unchanged_entities": 40,
   "edges_emitted": 63,
+  "succeeded": 110,
+  "failed": 0,
+  "rejected": 0,
+  "duplicates": 0,
   "diffs": [
     {
       "entity_id": "model.my_project.fct_orders",
@@ -147,7 +152,9 @@ JSON mode (`--format json`):
 }
 ```
 
-The JSON form is what cron / GHA workflows parse for alerting and metrics. Exit code is 0 when the refresh completes (even with zero diffs); non-zero only for genuine errors (missing source, unreadable input, extractor exceptions).
+The JSON form is what cron / GHA workflows parse for alerting and metrics. `succeeded`, `failed`, `rejected` and `duplicates` count the batch's command results by status. A diff compares the graph before and after, so an entity whose write was refused counts as unchanged; the `rejected` and `failed` counts tell the two apart.
+
+Exit code is 0 when the refresh wrote anything, even with zero diffs; when some writes were refused or failed, the text output names how many and the first failure's message. When every command is refused or fails, `status` is `"error"` with the first failure's sanitized `message`, and the exit is `3` for a policy refusal, `2` for any other refusal and `5` for a store failure, the rule `trellis ingest dbt-manifest` follows. Other errors (missing source, unreadable input, extractor exceptions) exit `1`.
 
 ---
 
