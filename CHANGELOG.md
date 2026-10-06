@@ -887,6 +887,7 @@ All notable changes to Trellis will be documented in this file.
   envelope instead of a traceback, and `StoreRegistry.validate` and API
   startup report the failure the same way; the
   `TRELLIS_VALIDATE_CONNECTIVITY` check still prints the driver's text.
+  ([#724](https://github.com/ronsse/trellis-ai/pull/724))
 
 ## [0.9.0] - 2026-05-13
 
