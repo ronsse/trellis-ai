@@ -1012,6 +1012,7 @@ All notable changes to Trellis will be documented in this file.
   path names it, and on SQLite 3.40 a key holding `"` matches no row.
   `GraphStore.query` and `VectorStore.query` state the rule, and both
   contract suites pin it on every backend.
+  ([#735](https://github.com/ronsse/trellis-ai/pull/735))
 
 ## [0.9.0] - 2026-05-13
 
