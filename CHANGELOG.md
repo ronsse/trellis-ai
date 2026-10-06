@@ -928,6 +928,19 @@ All notable changes to Trellis will be documented in this file.
   redaction fails as any other failed purge does. When that read fails
   too, the outcome is still reported as unknown.
   ([#727](https://github.com/ronsse/trellis-ai/pull/727))
+- **On Neo4j and ArcadeDB, the graph store's bulk, subgraph and listing
+  reads show one version of a node with two current rows.**
+  `get_nodes_bulk`, and so `get_subgraph`, `query` and
+  `execute_node_query` returned both rows of such a node, so a listing's
+  `limit` counted the node twice and a type, doc-link or property filter
+  could match the row `get_node` hides. They now return the row
+  `get_node` shows, once, now or `as_of` an instant both rows are valid;
+  a `limit` counts nodes and a filter judges the row shown. A listing
+  filtered on a node field now reads every current row of each node
+  passing it: on Neo4j at 5,000 nodes that costs 2.5x to 3x for a filter
+  most nodes pass. The race that leaves the two rows is unchanged, as are
+  edges written to such a node.
+  ([#726](https://github.com/ronsse/trellis-ai/pull/726))
 
 ## [0.9.0] - 2026-05-13
 

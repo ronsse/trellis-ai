@@ -5,11 +5,16 @@ backends hold "at most one current row per ``node_id``" in the
 close-then-insert transaction, not in the database, so concurrent writers
 can leave two (the module docstring of
 ``trellis.stores.bolt_opencypher.graph``). Each check writes the second row
-directly, as that race would, then requires ``get_node``, ``search_nodes``
-in either direction and ``count_nodes_by_type`` to show one version of the
-node: the one with the latest ``valid_from``, or the greater ``version_id``
-when the stamps are equal. The write checks require the next write to
-continue that version and close both rows, leaving one current row.
+directly, as that race would, then requires each read of current node rows
+to show one version of the node: the one with the latest ``valid_from``, or
+the greater ``version_id`` when the stamps are equal. Those reads are
+``get_node``, ``search_nodes`` in either direction, ``count_nodes_by_type``,
+``get_nodes_bulk``, ``get_subgraph``, ``query`` and ``execute_node_query``.
+The last four are also read ``as_of`` an instant both rows are valid, and a
+listing's ``limit`` counts nodes; a filtered listing ``as_of`` an instant
+before the two rows shows the version valid then. The write checks require
+the next write to continue that version and close both rows, leaving one
+current row.
 
 The duplicates are built so that rival rules pick the other row. A later
 stamp carries the smaller ``version_id`` and an earlier stamp the greater,
@@ -23,10 +28,13 @@ row is seen.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+import time
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from trellis.stores.base.graph import NODE_SEARCH_SORTS
+from trellis.stores.base.graph_query import FilterClause, NodeQuery
 
 LATER = timedelta(seconds=5)
 EARLIER = -LATER
@@ -214,6 +222,216 @@ def check_equal_stamps_pick_the_greater_version_id(store: Any) -> None:
     assert counts == {"kind-a": 2, "kind-b": 1}, counts
     counts = store.count_nodes_by_type(search="second")
     assert counts == {"kind-b": 1}, counts
+
+
+#: Duplicates for the listing checks: ``(node_id, shift, greater_version_id,
+#: created_at_shift)``. Each original is ``kind-a`` and named ``<node_id>
+#: original``; each copy is ``kind-b`` and named ``<node_id> copy``.
+#: ``dup-later``'s copy is shown and is the newest node. ``dup-earlier``'s
+#: original is shown, though its hidden copy is the newest row of all.
+#: ``dup-tie``'s copy is shown and is the oldest node.
+LIST_DUPLICATES = (
+    ("dup-later", LATER, False, None),
+    ("dup-earlier", EARLIER, True, LATER),
+    ("dup-tie", SAME, True, EARLIER),
+)
+DUPLICATED = tuple(node_id for node_id, *_ in LIST_DUPLICATES)
+
+#: The version each node of the listing checks shows: its name and type.
+LIST_SHOWN = {
+    "plain-a1": ("plain a1", "kind-a"),
+    "plain-b1": ("plain b1", "kind-b"),
+    "plain-a2": ("plain a2", "kind-a"),
+    "dup-later": ("dup-later copy", "kind-b"),
+    "dup-earlier": ("dup-earlier original", "kind-a"),
+    "dup-tie": ("dup-tie copy", "kind-b"),
+}
+
+#: LIST_SHOWN's nodes by the shown row's ``created_at``, newest first.
+NEWEST_FIRST = (
+    "dup-later",
+    "dup-earlier",
+    "plain-a2",
+    "plain-b1",
+    "plain-a1",
+    "dup-tie",
+)
+
+
+def _write_listed_nodes(store: Any) -> datetime:
+    """Write LIST_SHOWN's nodes and return an instant both rows of each are valid.
+
+    ``plain-a1`` gets an edge to every other node before the copies are
+    written, so each edge is attached to one row of its node.
+    """
+    for node_id in ("plain-a1", "plain-b1", "plain-a2"):
+        name, node_type = LIST_SHOWN[node_id]
+        store.upsert_node(node_id, node_type, {"name": name})
+    for node_id in DUPLICATED:
+        store.upsert_node(node_id, "kind-a", {"name": f"{node_id} original"})
+    for node_id in NEWEST_FIRST:
+        if node_id != "plain-a1":
+            store.upsert_edge("plain-a1", node_id, "relates_to")
+    for node_id, shift, greater, created_at_shift in LIST_DUPLICATES:
+        add_current_row(
+            store,
+            node_id,
+            name=f"{node_id} copy",
+            node_type="kind-b",
+            shift=shift,
+            greater_version_id=greater,
+            created_at_shift=created_at_shift,
+        )
+        assert len(_current_rows(store, node_id)) == 2, node_id
+    both_valid = datetime.now(UTC) + 2 * LATER
+    for node_id, version in LIST_SHOWN.items():
+        assert _shown(store.get_node(node_id)) == version, node_id
+        assert _shown(store.get_node(node_id, as_of=both_valid)) == version, node_id
+    return both_valid
+
+
+def _listed(rows: list[dict[str, Any]]) -> list[tuple[str, tuple[str, str]]]:
+    """Each row's ``node_id`` and the version it shows, in the order returned."""
+    return [(row["node_id"], _shown(row)) for row in rows]
+
+
+def _expected(node_ids: Iterable[str]) -> list[tuple[str, tuple[str, str]]]:
+    return [(node_id, LIST_SHOWN[node_id]) for node_id in node_ids]
+
+
+def _newest_of(node_type: str) -> list[str]:
+    return [node_id for node_id in NEWEST_FIRST if LIST_SHOWN[node_id][1] == node_type]
+
+
+def check_get_nodes_bulk_shows_one_version(store: Any) -> None:
+    """``get_nodes_bulk`` returns each node once, as ``get_node`` shows it.
+
+    For every node and for the duplicated ones alone, now and at an instant
+    both rows of each duplicated node are valid.
+    """
+    both_valid = _write_listed_nodes(store)
+    for node_ids in (list(LIST_SHOWN), list(DUPLICATED)):
+        for as_of in (None, both_valid):
+            rows = store.get_nodes_bulk(node_ids, as_of=as_of)
+            assert sorted(_listed(rows)) == sorted(_expected(node_ids)), as_of
+
+
+def check_get_subgraph_shows_one_version(store: Any) -> None:
+    """``get_subgraph`` returns each node once, as ``get_node`` shows it.
+
+    Each edge comes back once too: the copies carry none. From a plain seed
+    and from the duplicated seeds, now and at an instant both rows of each
+    duplicated node are valid.
+    """
+    both_valid = _write_listed_nodes(store)
+    cases = (
+        (["plain-a1"], 1, list(LIST_SHOWN)),
+        (list(DUPLICATED), 1, ["plain-a1", *DUPLICATED]),
+        (list(DUPLICATED), 0, list(DUPLICATED)),
+    )
+    for seeds, depth, node_ids in cases:
+        edges = sorted(
+            ("plain-a1", node_id) for node_id in node_ids if node_id != "plain-a1"
+        )
+        if "plain-a1" not in node_ids:
+            edges = []
+        for as_of in (None, both_valid):
+            subgraph = store.get_subgraph(seeds, depth=depth, as_of=as_of)
+            listed = sorted(_listed(subgraph["nodes"]))
+            assert listed == sorted(_expected(node_ids)), (seeds, depth, as_of)
+            got = sorted((e["source_id"], e["target_id"]) for e in subgraph["edges"])
+            assert got == edges, (seeds, depth, as_of)
+
+
+def check_query_shows_one_version(store: Any) -> None:
+    """``query`` lists each node once, as ``get_node`` shows it, newest first.
+
+    A ``limit`` counts nodes, and a type or property filter matches the
+    version shown, never the hidden row.
+    """
+    both_valid = _write_listed_nodes(store)
+    for as_of in (None, both_valid):
+        assert _listed(store.query(as_of=as_of)) == _expected(NEWEST_FIRST), as_of
+    for limit in range(1, len(NEWEST_FIRST) + 1):
+        rows = store.query(limit=limit)
+        assert _listed(rows) == _expected(NEWEST_FIRST[:limit]), limit
+    for node_type in NODE_TYPES:
+        newest = _newest_of(node_type)
+        rows = store.query(node_type=node_type)
+        assert _listed(rows) == _expected(newest), node_type
+        rows = store.query(node_type=node_type, limit=2)
+        assert _listed(rows) == _expected(newest[:2]), node_type
+    for node_id in DUPLICATED:
+        for name in (f"{node_id} original", f"{node_id} copy"):
+            rows = store.query(properties={"name": name})
+            found = [node_id] if LIST_SHOWN[node_id][0] == name else []
+            assert _listed(rows) == _expected(found), name
+
+
+def check_execute_node_query_shows_one_version(store: Any) -> None:
+    """``execute_node_query`` lists each node once, as ``get_node`` shows it.
+
+    Newest first, as ``query`` does: a ``limit`` counts nodes, and a type or
+    property filter matches the version shown, never the hidden row.
+    """
+    both_valid = _write_listed_nodes(store)
+    for as_of in (None, both_valid):
+        rows = store.execute_node_query(NodeQuery(as_of=as_of))
+        assert _listed(rows) == _expected(NEWEST_FIRST), as_of
+    for limit in range(1, len(NEWEST_FIRST) + 1):
+        rows = store.execute_node_query(NodeQuery(limit=limit))
+        assert _listed(rows) == _expected(NEWEST_FIRST[:limit]), limit
+    for node_type in NODE_TYPES:
+        newest = _newest_of(node_type)
+        typed = (FilterClause("node_type", "eq", node_type),)
+        rows = store.execute_node_query(NodeQuery(filters=typed))
+        assert _listed(rows) == _expected(newest), node_type
+        rows = store.execute_node_query(NodeQuery(filters=typed, limit=2))
+        assert _listed(rows) == _expected(newest[:2]), node_type
+    by_id = (FilterClause("node_id", "in", DUPLICATED),)
+    rows = store.execute_node_query(NodeQuery(filters=by_id))
+    duplicated_newest = [node_id for node_id in NEWEST_FIRST if node_id in DUPLICATED]
+    assert _listed(rows) == _expected(duplicated_newest), rows
+    for node_id in DUPLICATED:
+        for name in (f"{node_id} original", f"{node_id} copy"):
+            named = (FilterClause("properties.name", "eq", name),)
+            rows = store.execute_node_query(NodeQuery(filters=named))
+            found = [node_id] if LIST_SHOWN[node_id][0] == name else []
+            assert _listed(rows) == _expected(found), name
+
+
+def check_filtered_listing_as_of_shows_the_version_then(store: Any) -> None:
+    """A filtered listing ``as_of`` a past instant shows the version valid then.
+
+    ``dup-history`` is ``kind-a`` until it is rewritten as ``kind-b`` and
+    given a second current row. At an instant before that only its first
+    row is valid, so a filter that row passes lists it, after the newer
+    plain node, and never one of the later rows, even when they pass too.
+    """
+    store.upsert_node("dup-history", "kind-a", {"name": "dup-history then"})
+    store.upsert_node("plain-then", "kind-a", {"name": "plain then"})
+    time.sleep(0.005)
+    then = datetime.now(UTC)
+    time.sleep(0.005)
+    store.upsert_node("dup-history", "kind-b", {"name": "dup-history original"})
+    add_current_row(
+        store,
+        "dup-history",
+        name="dup-history copy",
+        shift=LATER,
+        greater_version_id=False,
+    )
+    expected = [
+        ("plain-then", ("plain then", "kind-a")),
+        ("dup-history", ("dup-history then", "kind-a")),
+    ]
+    assert _listed(store.query(node_type="kind-a", as_of=then)) == expected
+    for clause in (
+        FilterClause("node_type", "eq", "kind-a"),
+        FilterClause("node_type", "in", NODE_TYPES),
+    ):
+        rows = store.execute_node_query(NodeQuery(filters=(clause,), as_of=then))
+        assert _listed(rows) == expected, clause
 
 
 #: Duplicates for the write checks: ``(node_id, shift, greater_version_id,
