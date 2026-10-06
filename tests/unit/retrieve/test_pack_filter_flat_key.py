@@ -2,9 +2,9 @@
 
 ``PackBuilder.build(filters=...)`` forwards a key it does not own to the graph
 store's ``query(properties=...)`` and the vector store's ``query(filters=...)``.
-#729 refused a key outside ``[A-Za-z0-9_-]+`` there, so the pack recorded both
-axes as strategy failures. Both stores now bind the key, so the key that would
-have injected a tautology selects exactly the rows that carry it.
+Both stores bind the key, so a key that would inject a tautology if spliced
+selects exactly the rows that carry it, and neither axis records a strategy
+failure.
 """
 
 from __future__ import annotations

@@ -940,17 +940,24 @@ All notable changes to Trellis will be documented in this file.
   most nodes pass. The race that leaves the two rows is unchanged, as are
   edges written to such a node.
   ([#726](https://github.com/ronsse/trellis-ai/pull/726))
-- **A SQLite graph or vector filter key that is not a plain JSON object key
-  is refused instead of running as SQL.** The SQLite graph store's
-  `query(properties=...)` and `properties.<key>` query filters, on nodes and
-  edges, and the SQLite vector store's `query(filters=...)` spliced the key
-  into SQL text as a JSON path, so a `'` in it closed the literal: one such
-  key matched every row and another raised `sqlite3.OperationalError`. A key
-  outside `[A-Za-z0-9_-]+` now raises `ValueError` before any statement runs,
-  which `PackBuilder` records as that axis's strategy failure. A dotted key
-  such as `a.b`, which only SQLite read as a nested path, is refused too. No
-  REST, MCP, SDK or CLI route passes a caller-chosen key to these filters.
-  ([#729](https://github.com/ronsse/trellis-ai/pull/729))
+- **A SQLite graph or vector filter key is bound as a parameter instead of
+  running as SQL, and names one flat key, as written.** The SQLite graph
+  store's `query(properties=...)` and `properties.<key>` query filters, on
+  nodes and edges, and the SQLite vector store's `query(filters=...)` spliced
+  the key into SQL text as a JSON path, so a `'` in it closed the literal: one
+  such key matched every row and another raised `sqlite3.OperationalError`.
+  They now bind the key's JSON path, `$."<key>"`, as a statement parameter, so
+  no part of a key is SQL text. A key the other backends filter on now filters
+  on SQLite too, as one flat object key: `a.b` names the key `a.b`, which
+  SQLite alone read as `b` inside `a`, and a space, `'`, `"`, `\`, `[` or
+  non-ASCII letter is part of the key. A key holding a NUL character raises
+  `ValueError`, since no SQLite JSON path names it, and before SQLite 3.45 a
+  key holding `"` matches no row. `GraphStore.query` and `VectorStore.query`
+  state the rule, and both contract suites pin it on every backend but the
+  Neo4j vector store, whose query the CI image cannot parse. No REST, MCP,
+  SDK or CLI route passes a caller-chosen key to these filters.
+  ([#729](https://github.com/ronsse/trellis-ai/pull/729),
+  [#735](https://github.com/ronsse/trellis-ai/pull/735))
 - **A keyed command whose idempotency check cannot read the event log
   fails instead of escaping.** A `TrellisError` or `sqlite3.Error` from
   the executor's read of the event log for a command's idempotency key,
@@ -999,20 +1006,6 @@ All notable changes to Trellis will be documented in this file.
   before this fix, stays current, and the race that leaves the two rows is
   unchanged. Writes between nodes with one current row are unchanged.
   ([#732](https://github.com/ronsse/trellis-ai/pull/732))
-- **A SQLite graph or vector filter key is bound as a parameter and names one
-  flat key, as written.** This replaces #729's refusal. The SQLite graph
-  store's `query(properties=...)` and `properties.<key>` query filters, on
-  nodes and edges, and the SQLite vector store's `query(filters=...)` bind
-  the key's JSON path, `$."<key>"`, as a statement parameter, so no part of a
-  key is SQL text. A key the other backends filter on now filters on SQLite
-  too, as one flat object key: `a.b` names the key `a.b`, not `b` inside `a`,
-  and a space, `'`, `"`, `\`, `[` or non-ASCII letter is part of the key. A
-  pack filter on such a key no longer fails the graph and semantic axes. A
-  key holding a NUL character still raises `ValueError`, since no SQLite JSON
-  path names it, and on SQLite 3.40 a key holding `"` matches no row.
-  `GraphStore.query` and `VectorStore.query` state the rule, and both
-  contract suites pin it on every backend.
-  ([#735](https://github.com/ronsse/trellis-ai/pull/735))
 
 ## [0.9.0] - 2026-05-13
 

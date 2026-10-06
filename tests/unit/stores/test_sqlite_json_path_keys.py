@@ -5,13 +5,12 @@ Both stores filter on a caller's property or metadata key through
 ``$."<key>"``. The statement text is then the same whatever the key holds, and
 the key names one flat object member, as it does on every other backend.
 
-#729 refused every key outside ``[A-Za-z0-9_-]+`` here, because the path was
-spliced into the statement text then. Its injection keys are kept, and each now
-filters as an ordinary key. The spelling is one function, so the keys it must
-spell are pinned once, on ``query(properties=...)``. Each call site is then
-pinned on the statement it sends, recorded before sqlite3 binds anything: no
-part of the key in the text, its spelled path among the parameters, and exactly
-the rows that carry it.
+A key that would inject SQL if spliced into the statement text filters as an
+ordinary key. The spelling is one function, so the key shapes it must spell are
+pinned once, on ``query(properties=...)``. Each call site is then pinned on the
+statement it sends, recorded before sqlite3 binds anything: no part of the key
+in the text, its spelled path among the parameters, and exactly the rows that
+carry it.
 """
 
 from __future__ import annotations
@@ -25,36 +24,27 @@ from typing import Any
 import pytest
 
 from trellis.stores.base.graph_query import EdgeQuery, FilterClause, NodeQuery
-from trellis.stores.sqlite.base import SQLiteStoreBase, json_key_path
+from trellis.stores.sqlite.base import SQLiteStoreBase
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis.stores.sqlite.vector import SQLiteVectorStore
 
-#: Spliced raw into ``'$.<key>'``, this closes the string literal and ORs in a
-#: tautology that matches every row.
-TAUTOLOGY_KEY = "team') OR 1=1 OR ('"
-#: Spliced raw, this closes the literal and leaves a token SQLite cannot parse.
-SYNTAX_ERROR_KEY = "te'am"
-
-#: Keys #729 refused, the characters a quoted JSON path label decodes, and a
-#: lone surrogate, which sqlite3 can bind only escaped. Each is one flat key,
-#: carried by its own node in ``key_store``.
+#: Keys outside ``[A-Za-z0-9_-]+`` whose shape neither ``KEY`` below nor the
+#: contract cases carry: JSON path index syntax, the empty key, text that reads
+#: as a JSON escape, a backslash before a quote, and a lone surrogate, which
+#: sqlite3 can bind only escaped. Each is one flat key, carried by its own node
+#: in ``key_store``.
 FLAT_KEYS = {
-    "tautology": TAUTOLOGY_KEY,
-    "syntax": SYNTAX_ERROR_KEY,
-    "dot": "a.b",
     "index": "tags[0]",
     "empty": "",
-    "space": "two words",
-    "non-ascii": "clé",
-    "double-quote": 'say "hi"',
-    "backslash": "back\\slash",
     "escape-text": "\\u00e9",
     "backslash-quote": 'a\\"b',
     "lone-surrogate": "a\ud800b",
 }
 
-#: The key every call site filters on: the tautology above, a ``.``, both
-#: characters a quoted label escapes, a space and a non-ASCII letter.
+#: The key every call site filters on. Spliced raw into ``'$.<key>'``, it
+#: closes the string literal and ORs in a tautology that matches every row.
+#: It also holds a ``.``, both characters a quoted label escapes, a space and
+#: a non-ASCII letter.
 KEY = "team') OR 1=1 OR ('a.b \"c\" \\ é"
 #: Pieces of ``KEY`` a statement's text could carry; none of them is SQL.
 KEY_PARTS = ("team", "1=1", "a.b", "é")
@@ -102,7 +92,7 @@ def _assert_bound(seen: Statements, *, times: int = 1) -> None:
 
 
 def _owner(team: str) -> dict[str, str]:
-    """The same value under one plain key of each shape #729 accepted."""
+    """The same value under three plain keys."""
     return {"owner_team": team, "owner-team": team, "OwnerTeam2": team}
 
 
@@ -153,13 +143,9 @@ def key_store(tmp_path: Path) -> Iterator[SQLiteGraphStore]:
     store.upsert_node(
         "kp-control", "service", dict.fromkeys(FLAT_KEYS.values(), "data")
     )
-    # The value where a misspelled path lands: ``b`` inside ``a``, element 0
-    # of ``tags``, and the ``é`` the text ``\u00e9`` decodes to unescaped.
-    store.upsert_node(
-        "kp-decoy",
-        "service",
-        {"a": {"b": "platform"}, "tags": ["platform"], "é": "platform"},
-    )
+    # The value where a misspelled path lands: element 0 of ``tags``, and the
+    # ``é`` the text ``\u00e9`` decodes to unescaped.
+    store.upsert_node("kp-decoy", "service", {"tags": ["platform"], "é": "platform"})
     yield store
     store.close()
 
@@ -201,19 +187,6 @@ class TestTheSpelling:
         rows = key_store.query(properties={FLAT_KEYS[key_id]: "platform"})
         assert _node_ids(rows) == {f"kp-{key_id}"}
 
-    def test_a_double_quote_is_written_as_a_unicode_escape(self) -> None:
-        """``\\"`` matches on SQLite 3.53 and silently misses on 3.45 and 3.46."""
-        assert json_key_path('say "hi"') == '$."say \\u0022hi\\u0022"'
-
-    def test_the_label_is_spelled_as_the_stores_write_the_key(self) -> None:
-        """SQLite 3.40 compares the label with the stored text as written.
-
-        Both stores write that text with ``json.dumps`` defaults, which store
-        ``é`` as ``\\u00e9`` and a newline as ``\\n``. SQLite 3.45 and later
-        decode either spelling of those two, so no filter tells them apart.
-        """
-        assert json_key_path("clé\n") == '$."cl\\u00e9\\n"'
-
     def test_a_nul_is_refused_before_sql(self, key_store: SQLiteGraphStore) -> None:
         """No spelling names it.
 
@@ -223,13 +196,6 @@ class TestTheSpelling:
         with _statements(key_store) as seen, pytest.raises(ValueError, match="NUL"):
             key_store.query(properties={"a\x00b": "platform"})
         assert seen == []
-
-    @pytest.mark.parametrize("key", ["owner_team", "owner-team", "OwnerTeam2"])
-    def test_a_plain_key_filters_as_before(
-        self, graph_store: SQLiteGraphStore, key: str
-    ) -> None:
-        rows = graph_store.query(properties={key: "platform"})
-        assert _node_ids(rows) == {"node-a", "node-b"}
 
 
 class TestGraphQuery:
@@ -282,10 +248,6 @@ class TestNodeQueryDsl:
         assert _node_ids(rows) == expected
         _assert_bound(seen)
 
-    def test_a_plain_key_filters(self, graph_store: SQLiteGraphStore) -> None:
-        rows = graph_store.execute_node_query(NodeQuery(filters=_eq("owner_team")))
-        assert _node_ids(rows) == {"node-a", "node-b"}
-
 
 class TestContainsDsl:
     """``contains`` on nodes and edges (both use ``_render_contains_sqlite``)."""
@@ -303,13 +265,6 @@ class TestContainsDsl:
         _assert_bound(node_seen, times=2)
         _assert_bound(edge_seen, times=2)
 
-    def test_a_plain_key_filters(self, graph_store: SQLiteGraphStore) -> None:
-        clause = FilterClause("properties.column_names", "contains", "user_id")
-        nodes = graph_store.execute_node_query(NodeQuery(filters=(clause,)))
-        edges = graph_store.execute_edge_query(EdgeQuery(filters=(clause,)))
-        assert _node_ids(nodes) == {"node-a", "node-c"}
-        assert _edge_pairs(edges) == {("node-a", "node-b")}
-
 
 class TestEdgeQueryDsl:
     """``execute_edge_query`` on ``properties.<key>`` (``_edge_field_to_sql_expr``)."""
@@ -319,10 +274,6 @@ class TestEdgeQueryDsl:
             rows = graph_store.execute_edge_query(EdgeQuery(filters=_eq(KEY)))
         assert _edge_pairs(rows) == {("node-a", "node-b")}
         _assert_bound(seen)
-
-    def test_a_plain_key_filters(self, graph_store: SQLiteGraphStore) -> None:
-        rows = graph_store.execute_edge_query(EdgeQuery(filters=_eq("owner_team")))
-        assert _edge_pairs(rows) == {("node-a", "node-b"), ("node-c", "node-d")}
 
 
 class TestVectorQuery:
@@ -335,9 +286,3 @@ class TestVectorQuery:
             )
         assert {row["item_id"] for row in rows} == {"vec-a"}
         _assert_bound(seen)
-
-    def test_a_plain_key_filters(self, vector_store: SQLiteVectorStore) -> None:
-        rows = vector_store.query(
-            [1.0, 0.0, 0.0], top_k=10, filters={"owner_team": "platform"}
-        )
-        assert {row["item_id"] for row in rows} == {"vec-a", "vec-b"}
