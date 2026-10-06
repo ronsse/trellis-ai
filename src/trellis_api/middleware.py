@@ -136,10 +136,10 @@ async def unhandled_exception_handler(
 #: this handler is only the legibility half.
 #:
 #: It is also not the only channel, and the second one is stronger than
-#: the argument above: this handler calls ``logger.exception`` on **every**
-#: typed failure including the 409s, so an operator alerting on
-#: ``error``-level log lines sees ``api_trellis_error`` once per affected
-#: request with the traceback attached. If a deployment would rather have
+#: the argument above: this handler logs at ``error`` on **every** typed
+#: failure including the 409s, so an operator alerting on ``error``-level
+#: log lines sees ``api_trellis_error`` once per affected request, with the
+#: exception's type, code and message. If a deployment would rather have
 #: the 5xx rate move, the whole decision is one line — ``CONFIG_ERROR_STATUS
 #: = 500`` — and nothing else changes: the body stays legible, because the
 #: legibility lives in this handler and not in the catch-all.
@@ -194,9 +194,12 @@ async def trellis_error_handler(
     what makes handling the whole family safe rather than just
     ``ConfigError``: a driver-raised ``StoreError`` can echo a DSN with
     credentials, and an API response body is exactly the artifact #206
-    wrote that guard for. It is not a substitute for reading the logs —
-    ``logger.exception`` still records the full traceback under the same
-    ``request_id``.
+    wrote that guard for. The log line under the same ``request_id``
+    records the exception's type, code and message, and no traceback: a
+    store that maps a driver failure raises a type-only ``StoreError``
+    chained from the driver's exception, because a server's text can carry
+    query text and values (#702, #713), and a rendered traceback would
+    print that chained cause.
 
     Registered for :class:`~trellis.errors.TrellisError`, so Starlette's
     MRO lookup routes every subclass here and the catch-all keeps only
@@ -205,12 +208,15 @@ async def trellis_error_handler(
     request_id = getattr(request.state, "request_id", None)
     trellis_exc = exc if isinstance(exc, TrellisError) else TrellisError(str(exc))
     status_code = _error_status(trellis_exc)
-    logger.exception(
+    # No traceback on purpose; see the docstring. An untyped failure still
+    # reaches ``unhandled_exception_handler``, which logs its traceback.
+    logger.error(
         "api_trellis_error",
         path=request.url.path,
         method=request.method,
         request_id=request_id,
         exc_type=type(exc).__name__,
+        error=trellis_exc.message,
         error_code=trellis_exc.code,
         status_code=status_code,
     )

@@ -740,6 +740,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 msg = f"upsert_nodes_bulk[{i}]: {exc}"
                 raise type(exc)(msg) from exc
             node_ids.append(spec.get("node_id") or generate_ulid())
+        self._reject_repeated_node_ids(nodes)
 
         # The pre-fetch + UNWIND share one session — opening a fresh
         # session for each round trip costs ~1ms each on AuraDB Free
@@ -1351,9 +1352,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # CREATE between nulls raises on Neo4j and links two new empty
         # vertices on ArcadeDB.
         # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
-        # from any current version. Previously this path made a
-        # separate ``_find_current_edge`` call (~50% of total upsert
-        # latency on AuraDB Free).
+        # from any current version, so the write stays one round trip.
         now = _iso(utc_now())
         candidate_edge_id = generate_ulid()
         base_props = {

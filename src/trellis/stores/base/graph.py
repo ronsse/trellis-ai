@@ -231,6 +231,17 @@ def validate_node_search_args(*, sort: str, limit: int, offset: int) -> None:
         raise ValueError(msg)
 
 
+def node_search_like_pattern(search: str) -> str:
+    r"""SQL ``LIKE`` pattern matching any value that contains *search*.
+
+    Read with ``ESCAPE '\'``, which keeps ``%``, ``_`` and ``\`` in
+    *search* literal. The backslash is escaped first, so the escapes added
+    for ``%`` and ``_`` are not escaped again.
+    """
+    escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def check_node_role_immutable(
     node_id: str,
     existing: dict[str, Any],
@@ -365,7 +376,9 @@ class GraphStore(ABC):
         (:func:`validate_node_role_args`, :func:`validate_document_ids`,
         :func:`check_node_role_immutable`) runs against every row
         *before any write*. If any row fails validation, no rows are
-        written. Pass-through implementations should call
+        written. A ``node_id`` given twice in one call is refused the
+        same way, by a :class:`ValueError` naming the second
+        occurrence's index. Pass-through implementations should call
         :meth:`_pre_validate_nodes_bulk` to honor this contract.
         Backends with single-statement bulk paths (Neo4j) extend the
         guarantee to write-time failures via a single transaction;
@@ -387,8 +400,9 @@ class GraphStore(ABC):
 
         Raises:
             ValueError / TypeError: with the same conditions as
-                :meth:`upsert_node`. Errors mention the offending list
-                index so callers can map them back.
+                :meth:`upsert_node`, and ``ValueError`` for a ``node_id``
+                given twice. Errors mention the offending list index so
+                callers can map them back.
 
         Returns:
             List of node IDs in the same order as the input.
@@ -700,12 +714,10 @@ class GraphStore(ABC):
         counted apart; a type with no current node is absent. A non-empty
         *search* keeps only nodes whose ``name`` property, ``node_id`` or
         ``node_type`` contains it, ignoring case: the filter that
-        :meth:`search_nodes` applies for ``GET /graph/search``'s ``q``. The
-        SQL backends match with ``LIKE``/``ILIKE``, so ``%`` and ``_`` in
-        *search* are wildcards there; Postgres also reads a backslash as an
-        escape, and SQLite's ``LIKE`` ignores the case of ASCII letters
-        only. The Bolt backends match a plain lowercased substring, so those
-        characters are literal there.
+        :meth:`search_nodes` applies for ``GET /graph/search``'s ``q``.
+        Every character of *search* is literal, ``%``, ``_`` and the
+        backslash included. SQLite's ``LIKE`` ignores the case of ASCII
+        letters only.
         """
 
     @abstractmethod
@@ -881,6 +893,7 @@ class GraphStore(ABC):
             except (ValueError, TypeError) as exc:
                 msg = f"upsert_nodes_bulk[{i}]: {exc}"
                 raise type(exc)(msg) from exc
+        self._reject_repeated_node_ids(nodes)
 
         # Role immutability requires an existing-row lookup. Only rows
         # with an explicit node_id can collide; auto-assigned IDs are
@@ -902,6 +915,33 @@ class GraphStore(ABC):
             except ValueError as exc:
                 msg = f"upsert_nodes_bulk[{i}]: {exc}"
                 raise ValueError(msg) from exc
+
+    @staticmethod
+    def _reject_repeated_node_ids(nodes: list[dict[str, Any]]) -> None:
+        """Reject a ``node_id`` given twice in one bulk call, before any write.
+
+        One call writes one version per node. Without this check the SQL
+        backends' one-current-row unique index would fail the statement
+        mid-batch, and a Bolt statement, which has no such index, would
+        write each occurrence that differs from the stored version as a
+        current row. The error names the second occurrence's index, as
+        :meth:`_pre_validate_edges_bulk` does for a repeated edge. A
+        missing, ``None`` or empty ``node_id`` is auto-assigned, so it never
+        repeats.
+        """
+        seen: set[str] = set()
+        for i, spec in enumerate(nodes):
+            node_id = spec.get("node_id")
+            if not node_id:
+                continue
+            if node_id in seen:
+                msg = (
+                    f"upsert_nodes_bulk[{i}]: duplicate node_id={node_id!r} in "
+                    "batch; deduplicate before calling, since one call writes "
+                    "one version per node"
+                )
+                raise ValueError(msg)
+            seen.add(node_id)
 
     @staticmethod
     def _pre_validate_edges_bulk(edges: list[dict[str, Any]]) -> None:

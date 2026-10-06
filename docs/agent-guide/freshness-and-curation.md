@@ -154,7 +154,7 @@ JSON mode (`--format json`):
 
 The JSON form is what cron / GHA workflows parse for alerting and metrics. `succeeded`, `failed`, `rejected` and `duplicates` count the batch's command results by status. A diff compares the graph before and after, so an entity whose write was refused or failed counts as unchanged. The four counts are of commands, edge writes included, so `rejected` and `failed` say how many writes did not land, not which entities.
 
-Exit code is 0 unless every command was refused or failed, whatever the diff count; when some writes were refused or failed, the text output names how many and the first failure's message. When every command is refused or fails, `status` is `"error"` with the first failure's sanitized `message`, and the exit is `3` for a policy refusal, `2` for any other refusal and `5` for a store failure, the rule `trellis ingest dbt-manifest` follows. Other errors (missing source, unreadable input, extractor exceptions) exit `1`.
+Exit code is 0 unless every command was refused or failed, whatever the diff count; when some writes were refused or failed, the text output names how many and the first failure's message, and the JSON carries that message, sanitized, as `message` beside `"status": "refreshed"`. When every command is refused or fails, `status` is `"error"` with the first failure's sanitized `message`, and the exit is `3` for a policy refusal, `2` for any other refusal and `5` for a store failure, the rule `trellis ingest dbt-manifest` follows. Other errors (missing source, unreadable input, extractor exceptions) exit `1`.
 
 ---
 

@@ -415,6 +415,65 @@ class GraphStoreContractTests:
         assert store.count_nodes() == before
         assert store.get_node("fresh-row-0") is None
 
+    @pytest.mark.parametrize(
+        "repeat",
+        [
+            {"node_type": "service", "properties": {"v": "first"}},
+            {"node_type": "team", "properties": {"v": "second"}},
+        ],
+        ids=["same_spec", "other_spec"],
+    )
+    @pytest.mark.parametrize("existing", [False, True], ids=["new_id", "existing_id"])
+    def test_upsert_nodes_bulk_rejects_a_repeated_node_id(
+        self, store: GraphStore, existing: bool, repeat: dict[str, Any]
+    ) -> None:
+        """A ``node_id`` given twice in one call is refused before any write,
+        whether the second occurrence repeats the first or carries another
+        type and properties.
+
+        One call writes one version per node. The refusal names the second
+        occurrence, as ``test_upsert_edges_bulk_rejects_duplicate_triplets``
+        does for a repeated edge, and leaves the node, new or existing, and
+        the rest of the batch unwritten.
+        """
+        if existing:
+            store.upsert_node("rep-a", "service", {"v": "old"})
+            _sleep_for_ordering()
+        history_before = store.get_node_history("rep-a")
+        before = store.count_nodes()
+        with pytest.raises(ValueError, match=r"upsert_nodes_bulk\[2\].*duplicate"):
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": "rep-a",
+                        "node_type": "service",
+                        "properties": {"v": "first"},
+                    },
+                    {"node_id": "rep-b", "node_type": "service", "properties": {}},
+                    {"node_id": "rep-a", **repeat},
+                ]
+            )
+        assert store.count_nodes() == before
+        assert store.get_node("rep-b") is None
+        assert store.get_node_history("rep-a") == history_before
+
+    def test_upsert_nodes_bulk_assigns_each_empty_node_id(
+        self, store: GraphStore
+    ) -> None:
+        """A ``None`` or ``""`` ``node_id`` is auto-assigned, so two of each
+        in one call are four new nodes, not a repeated id."""
+        ids = store.upsert_nodes_bulk(
+            [
+                {"node_id": None, "node_type": "service", "properties": {}},
+                {"node_id": None, "node_type": "service", "properties": {}},
+                {"node_id": "", "node_type": "service", "properties": {}},
+                {"node_id": "", "node_type": "service", "properties": {}},
+            ]
+        )
+        assert len(set(ids)) == 4
+        assert all(ids)
+        assert all(store.get_node(node_id) is not None for node_id in ids)
+
     # ------------------------------------------------------------------
     # edges
     # ------------------------------------------------------------------
@@ -1480,6 +1539,54 @@ class GraphStoreContractTests:
         for page in ({"limit": -1}, {"offset": -1}):
             with pytest.raises(ValueError, match="must be >= 0"):
                 store.search_nodes(**page)
+
+    def test_node_search_reads_percent_underscore_and_backslash_literally(
+        self, store: GraphStore
+    ) -> None:
+        # Each searched name has a decoy that the search would match as a
+        # SQL LIKE pattern: "_" is any one character, "%" any run, and "\s"
+        # an escaped "s". Each node has its own type, so a count names the
+        # node it counted, and no id or type holds any searched text.
+        nodes = {
+            "lit-1": ("alpha", "a_b"),
+            "lit-2": ("bravo", "axb"),
+            "lit-3": ("charlie", "100%"),
+            "lit-4": ("delta", "1000"),
+            "lit-5": ("echo", "back\\slash"),
+            "lit-6": ("foxtrot", "backslash"),
+        }
+        for node_id, (node_type, name) in nodes.items():
+            store.upsert_node(node_id, node_type, {"name": name})
+
+        # pytest does not rewrite asserts in this module, so each message
+        # carries what the store answered.
+        for node_id in ("lit-1", "lit-3", "lit-5"):
+            node_type, name = nodes[node_id]
+            rows, total = store.search_nodes(search=name)
+            listed = ([r["node_id"] for r in rows], total)
+            assert listed == ([node_id], 1), (name, listed)
+            counts = store.count_nodes_by_type(search=name)
+            assert counts == {node_type: 1}, (name, counts)
+        # The text a pair shares still matches both, anywhere in the name.
+        for stem, pair in (("100", {"lit-3", "lit-4"}), ("slash", {"lit-5", "lit-6"})):
+            rows, total = store.search_nodes(search=stem)
+            matched = ({r["node_id"] for r in rows}, total)
+            assert matched == (pair, 2), (stem, matched)
+
+    def test_node_search_reads_an_id_and_a_type_literally(
+        self, store: GraphStore
+    ) -> None:
+        # The node_id and node_type match like the name: each decoy holds
+        # "x" where its target holds "_", and no name holds searched text.
+        store.upsert_node("id_a", "golf", {"name": "g-1"})
+        store.upsert_node("idxa", "golf", {"name": "g-2"})
+        store.upsert_node("t-1", "type_b", {"name": "g-3"})
+        store.upsert_node("t-2", "typexb", {"name": "g-4"})
+
+        for search, node_id in (("id_a", "id_a"), ("type_b", "t-1")):
+            rows, total = store.search_nodes(search=search)
+            listed = ([r["node_id"] for r in rows], total)
+            assert listed == ([node_id], 1), (search, listed)
 
     # ------------------------------------------------------------------
     # node_role + generation_spec
