@@ -946,11 +946,12 @@ All notable changes to Trellis will be documented in this file.
   backfill whose every write was refused printed `"status": "backfilled"`
   and "Extracted N entities" and exited `0`, and a refused refresh read as
   unchanged and exited `0`. Both now count the results by status
-  (`succeeded`, `failed`, `rejected`, `duplicates`) in JSON and text and
-  name the first failure, and `extract traces` labels its totals as drafts.
-  A run whose every command is refused or fails exits by the first one
-  (`3` for a policy, `2` for another refusal, `5` for a failure) with
-  `"status": "error"`, as `trellis ingest dbt-manifest` does; a run that
+  (`succeeded`, `failed`, `rejected`, `duplicates`) in JSON and text, the
+  text names the failure count and the first failure's message, and
+  `extract traces` labels its totals as drafts. A run whose every command
+  is refused or fails exits by the first one (`3` for a policy, `2` for
+  another refusal, `5` for a failure) with `"status": "error"` and that
+  failure's `message`, as `trellis ingest dbt-manifest` does; a run that
   wrote anything still exits `0`. Dry runs are unchanged.
 
 ## [0.9.0] - 2026-05-13
