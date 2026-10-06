@@ -20,10 +20,11 @@ streams bounded.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from trellis.core.base import TrellisModel, utc_now
 from trellis.core.ids import generate_ulid
@@ -62,7 +63,10 @@ class Measurement(TrellisModel):
     metric_value: float
     """The measured value. ``Measurement`` rows are scalar by
     contract; richer payloads (lists/dicts/strings) belong on
-    :class:`Observation` instead."""
+    :class:`Observation` instead. NaN is refused: it compares false
+    against everything, so no analysis can use it. ``Infinity`` and
+    ``-Infinity`` are accepted; whether they are legitimate
+    measurements is an open owner decision."""
 
     unit: str | None = None
     """Optional unit for the scalar value (``"percent"``,
@@ -81,3 +85,12 @@ class Measurement(TrellisModel):
     freshness/tag data). Defaults to ``{}`` for consistency with every
     other Trellis schema (``Evidence``, ``Entity``, ``Precedent``,
     ``Outcome``, ``Pack``) — saves consumers from ``None``-checks."""
+
+    @field_validator("metric_value", mode="after")
+    @classmethod
+    def _refuse_nan(cls, value: float) -> float:
+        """Refuse NaN, and only NaN; see ``metric_value``."""
+        if math.isnan(value):
+            msg = "metric_value must be a number, not NaN"
+            raise ValueError(msg)
+        return value

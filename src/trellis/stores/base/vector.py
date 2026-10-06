@@ -252,7 +252,10 @@ class VectorStore(ABC):
 
         Each *filters* key is one flat metadata key, compared as written:
         ``"a.b"`` is the key ``a.b``, not a path to ``b`` inside ``a``, and a
-        space, quote or non-ASCII character is part of the key.
+        space, quote or non-ASCII character is part of the key. On SQLite a
+        str, int, float or bool value is compared through a JSON path: a NUL
+        character in its key raises :class:`ValueError`, and before SQLite
+        3.45 the filter matches no row if its key holds a ``"``.
 
         Returns:
             List of ``{item_id, score, metadata}`` sorted by score descending.

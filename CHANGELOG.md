@@ -1083,6 +1083,42 @@ All notable changes to Trellis will be documented in this file.
   rows a failed `append_many` had inserted before the duplicate. The
   errors raised are unchanged.
   ([#739](https://github.com/ronsse/trellis-ai/pull/739))
+- **The warning for a missing audit event names a driver's exception by its
+  type alone.** When a command's audit event cannot be written, its result
+  carries an `audit_event_not_recorded` warning, which REST, MCP and the CLI
+  return to the caller. A raw driver error, such as the `sqlite3.Error` the
+  SQLite event log raises, is named by its type, `(IntegrityError)` instead
+  of `(IntegrityError: <driver text>)`, as the `audit_emit_failed` log line
+  names it, because a driver's text can carry query text and values. A
+  Trellis error, such as the type-only `StoreError` the Postgres event log
+  raises, keeps its message, and the warning's prefix, the rest of its text
+  and every status are unchanged.
+  ([#740](https://github.com/ronsse/trellis-ai/pull/740))
+- **A failure inside `trellis extract traces`' per-trace loop is reported,
+  not left as a traceback.** An untyped exception from extracting a trace,
+  reconciling its node roles or executing its batch, such as a database
+  driver error the executor does not turn into a result, left the CLI as a
+  Python traceback with nothing on stdout, so a `--format json` caller had
+  no JSON to parse. The loop now reports it as `extract refresh` reports
+  its run: the sanitized error payload in JSON or `Trace backfill failed:`
+  and the message in text, then exit `1`, as before. A `TrellisError`
+  still reaches the root boundary and exits by its type, and batches
+  already written for earlier traces stay written.
+  ([#742](https://github.com/ronsse/trellis-ai/pull/742))
+- **A validation error that echoes `NaN` or `Infinity` from the request
+  body answers 422, not 500; `POST /api/v1/feedback` and `trellis curate
+  feedback` hold `rating` to 0.0–1.0, and `Measurement` refuses NaN.**
+  Python's `json` module parses both bare tokens, and FastAPI's default 422
+  echoes the rejected value back, which Starlette cannot render, so a
+  validation error echoing one answered `500 internal_error` and logged a
+  traceback. The API's 422 handler now writes a non-finite number as its
+  token and is otherwise FastAPI's own, byte for byte. `POST
+  /api/v1/feedback` holds `rating` to 0.0–1.0 inclusive, as `POST
+  /api/v1/packs/{pack_id}/feedback` and the MCP tool already did, and
+  `trellis curate feedback` refuses anything else, NaN included, with exit
+  2. `Measurement.metric_value` refuses NaN, so `measurement.record`
+  refuses it from every surface; `Infinity` is still accepted.
+  ([#741](https://github.com/ronsse/trellis-ai/pull/741))
 - **A command missing a required arg is refused, not failed.**
   `MutationExecutor`'s Stage 1 arg check audited its refusal as
   `mutation.rejected` with reason `validate` but returned `FAILED` with no

@@ -783,6 +783,8 @@ components:
           - type: 'null'
           title: Pack Id
         rating:
+          maximum: 1.0
+          minimum: 0.0
           title: Rating
           type: number
         target_id:
