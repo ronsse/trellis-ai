@@ -1347,9 +1347,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # gets one new version, on that row, rather than one per row.
         # When an endpoint has no current row the aggregate still yields
         # one row, of empty lists, on both engines, so ``s`` and ``t``
-        # are both null; ``WHERE s IS NOT NULL`` drops it as the MATCH
-        # did, since a CREATE between nulls raises on Neo4j and links
-        # two new empty vertices on ArcadeDB.
+        # are both null; ``WHERE s IS NOT NULL`` drops that row, since a
+        # CREATE between nulls raises on Neo4j and links two new empty
+        # vertices on ArcadeDB.
         # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
         # from any current version. Previously this path made a
         # separate ``_find_current_edge`` call (~50% of total upsert
@@ -1506,7 +1506,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # new versions in a single UNWIND. Each row's endpoints are
             # narrowed to the rows they show, as in ``upsert_edge``;
             # grouping by ``row`` yields nothing for a row whose endpoint
-            # has no current row, so the MATCH still drops it.
+            # has no current row, so the MATCH drops it.
             # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
             # across versions, matching the single-row method's collapsed
             # pattern.
