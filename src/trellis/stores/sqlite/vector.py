@@ -16,7 +16,7 @@ except ImportError:
     HAS_NUMPY = False
 
 from trellis.stores.base.vector import VectorStore
-from trellis.stores.sqlite.base import SQLiteStoreBase
+from trellis.stores.sqlite.base import SQLiteStoreBase, json_key_path
 
 logger = structlog.get_logger(__name__)
 
@@ -139,12 +139,12 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
 
         if filters:
             for key, value in filters.items():
+                # A bool is an int, so it takes this branch too, and sqlite3
+                # binds it as 1 or 0: what json_extract returns for true/false.
                 if isinstance(value, str | int | float):
-                    where_parts.append(f"json_extract(metadata_json, '$.{key}') = ?")
+                    path = json_key_path(key)
+                    where_parts.append(f"json_extract(metadata_json, '{path}') = ?")
                     params.append(value)
-                elif isinstance(value, bool):
-                    where_parts.append(f"json_extract(metadata_json, '$.{key}') = ?")
-                    params.append(1 if value else 0)
                 else:
                     complex_filters[key] = value
 
