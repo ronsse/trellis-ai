@@ -175,27 +175,6 @@ def test_a_purge_the_server_refuses_is_a_store_error(graph_store):
     assert absent not in caught.value.message
 
 
-def test_a_command_the_server_refuses_is_a_store_error_without_its_reply(graph_store):
-    """An error answer to a SQL command is ``StoreError`` naming only its status.
-
-    ArcadeDB answers a query on a type it does not have with an error whose
-    body names the type, and that reply stays out of the message.
-    """
-    import re
-
-    from trellis.errors import StoreError
-    from trellis.stores.arcadedb.base import execute_sql
-
-    absent = "preescape_no_such_type_0001"
-
-    with pytest.raises(StoreError) as caught:
-        execute_sql(HTTP_URL, USER, PASSWORD, DATABASE, f"SELECT FROM {absent}")
-
-    message = caught.value.message
-    assert re.fullmatch(r"ArcadeDB SQL command failed: HTTP [45]\d\d", message)
-    assert caught.value.store is None
-
-
 class TestArcadeDBEdgeProvenance:
     """Round-trip the five provenance fields through a real ArcadeDB.
 

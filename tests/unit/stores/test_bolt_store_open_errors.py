@@ -5,13 +5,14 @@ trip, so an unreachable server or refused credentials fail there. The
 driver's error is raised as :class:`StoreError` naming the store and the
 error's type, with the error chained as its cause. The driver's text, which
 names hosts and carries the server's messages, stays out of the message: a
-redaction that opens the store writes the message to the audit log.
+redaction that opens the store writes the message to the audit log. The
+graph and vector stores open through one helper, so each case runs on one.
 """
 
 from __future__ import annotations
 
 import socket
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 
 import pytest
@@ -21,17 +22,12 @@ pytest.importorskip("neo4j")
 from neo4j.exceptions import AuthError, ServiceUnavailable
 
 from trellis.errors import StoreError
-from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
-from trellis.stores.base.graph import GraphStore
-from trellis.stores.base.vector import VectorStore
 from trellis.stores.bolt_opencypher.graph import BoltOpenCypherGraphStore
 from trellis.stores.neo4j.graph import Neo4jGraphStore
 from trellis.stores.neo4j.vector import Neo4jVectorStore
 
 SERVER_TEXT = "preescape-server-text-0001"
 PASSWORD = "unused-secret"  # noqa: S105 — test placeholder, not a real credential
-
-Opener = Callable[..., GraphStore | VectorStore]
 
 
 class _RefusingDriver:
@@ -57,70 +53,27 @@ def refused_uri() -> Iterator[str]:
         yield f"bolt://127.0.0.1:{unheard.getsockname()[1]}"
 
 
-@pytest.mark.parametrize(
-    ("open_store", "store"),
-    [
-        pytest.param(
-            lambda uri: Neo4jGraphStore(uri, password=PASSWORD),
-            "graph",
-            id="neo4j-graph",
-        ),
-        pytest.param(
-            lambda uri: Neo4jVectorStore(uri, password=PASSWORD, dimensions=3),
-            "vector",
-            id="neo4j-vector",
-        ),
-        pytest.param(
-            lambda uri: ArcadeDBGraphStore(
-                uri, password=PASSWORD, ensure_database_exists=False
-            ),
-            "graph",
-            id="arcadedb-graph",
-        ),
-    ],
-)
-def test_an_unreachable_server_is_a_store_error(
-    open_store: Opener, store: str, refused_uri: str
-) -> None:
+def test_an_unreachable_server_is_a_store_error(refused_uri: str) -> None:
     with pytest.raises(StoreError) as caught:
-        open_store(refused_uri)
+        Neo4jGraphStore(refused_uri, password=PASSWORD)
 
     message = caught.value.message
-    assert message == f"Opening the {store} store failed: ServiceUnavailable"
-    assert caught.value.store == store
+    assert message == "Opening the graph store failed: ServiceUnavailable"
+    assert caught.value.store == "graph"
     cause = caught.value.__cause__
     assert isinstance(cause, ServiceUnavailable)
     # The text the message leaves out is on the cause.
     assert refused_uri.removeprefix("bolt://") in str(cause)
 
 
-@pytest.mark.parametrize(
-    ("open_store", "store"),
-    [
-        pytest.param(
-            lambda driver: BoltOpenCypherGraphStore(
-                driver=driver, database="neo4j", owns_driver=False
-            ),
-            "graph",
-            id="graph",
-        ),
-        pytest.param(
-            lambda driver: Neo4jVectorStore(
-                "bolt://unused", driver=driver, dimensions=3
-            ),
-            "vector",
-            id="vector",
-        ),
-    ],
-)
-def test_refused_credentials_are_a_store_error(open_store: Opener, store: str) -> None:
+def test_refused_credentials_are_a_store_error() -> None:
     error = AuthError(SERVER_TEXT)
 
     with pytest.raises(StoreError) as caught:
-        open_store(_RefusingDriver(error))
+        Neo4jVectorStore("bolt://unused", driver=_RefusingDriver(error), dimensions=3)
 
-    assert caught.value.message == f"Opening the {store} store failed: AuthError"
-    assert caught.value.store == store
+    assert caught.value.message == "Opening the vector store failed: AuthError"
+    assert caught.value.store == "vector"
     assert caught.value.__cause__ is error
 
 

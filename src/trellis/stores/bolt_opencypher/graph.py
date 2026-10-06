@@ -81,7 +81,10 @@ from trellis.stores.base.graph_query import (
     RANGE_OP_GLYPH,
     check_doc_link_clause,
 )
-from trellis.stores.bolt_opencypher.base import BoltSessionRunner
+from trellis.stores.bolt_opencypher.base import (
+    BoltSessionRunner,
+    open_errors_as_store_error,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -472,16 +475,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         self._database = database
         self._owns_driver = owns_driver
         if init_schema:
-            from neo4j.exceptions import DriverError, Neo4jError  # noqa: PLC0415
-
-            # The driver's text names hosts and carries the server's
-            # messages, and a redaction that opens the store writes this
-            # message to the audit log; the error stays on ``__cause__``.
-            try:
+            with open_errors_as_store_error("graph"):
                 self._init_schema()
-            except (DriverError, Neo4jError) as exc:
-                msg = f"Opening the graph store failed: {type(exc).__name__}"
-                raise StoreError(msg, store="graph") from exc
 
     # ------------------------------------------------------------------
     # Schema
