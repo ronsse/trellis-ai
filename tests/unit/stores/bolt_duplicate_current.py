@@ -5,10 +5,13 @@ backends hold "at most one current row per ``node_id``" in the
 close-then-insert transaction, not in the database, so concurrent writers
 can leave two (the module docstring of
 ``trellis.stores.bolt_opencypher.graph``). Each check writes the second row
-directly, as that race would, then requires ``get_node``, ``search_nodes``
-in either direction and ``count_nodes_by_type`` to show one version of the
-node: the one with the latest ``valid_from``, or the greater ``version_id``
-when the stamps are equal. The write checks require the next write to
+directly, as that race would, then requires each read of current node rows
+to show one version of the node: the one with the latest ``valid_from``, or
+the greater ``version_id`` when the stamps are equal. Those reads are
+``get_node``, ``search_nodes`` in either direction, ``count_nodes_by_type``,
+``get_nodes_bulk``, ``get_subgraph``, ``query`` and ``execute_node_query``.
+The last four are also read ``as_of`` an instant both rows are valid, and a
+listing's ``limit`` counts nodes. The write checks require the next write to
 continue that version and close both rows, leaving one current row.
 
 The duplicates are built so that rival rules pick the other row. A later

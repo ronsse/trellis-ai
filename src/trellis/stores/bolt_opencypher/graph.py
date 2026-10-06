@@ -21,10 +21,13 @@ rely on single-writer discipline at the application layer. Among
 ``update_node_if_current`` calls holding one token exactly one writes,
 on both engines (measured against ``neo4j:2025.12`` and
 ``arcadedata/arcadedb:26.8.1``). Where a node has two current rows,
-``get_node``, ``search_nodes`` and ``count_nodes_by_type`` show the one
-with the later ``valid_from``, or the greater ``version_id`` between
-equal stamps (:func:`_one_version_per_node`), so a search hit, its type
-count and ``get_node`` on its id agree whichever way the search is sorted.
+``get_node``, ``get_nodes_bulk`` (so ``get_subgraph``), ``search_nodes``,
+``query``, ``execute_node_query`` and ``count_nodes_by_type`` show the
+one with the later ``valid_from``, or the greater ``version_id`` between
+equal stamps (:func:`_one_version_per_node`), and those taking ``as_of``
+pick the same way among the rows valid at that instant. So a search hit,
+its type count and ``get_node`` on its id agree whichever way the search
+is sorted, and a listing's ``limit`` counts nodes.
 ``upsert_node``, ``upsert_nodes_bulk`` and ``update_node_if_current``
 close every current row of the node they write and create one version,
 which carries ``created_at`` over from the shown row (:func:`_shown_row`);
@@ -182,6 +185,12 @@ def _temporal_predicate_in_list(as_of: datetime | None, var: str) -> str:
 #: the rows it returns.
 _NODE_WITHOUT_EMBEDDING = "n {.*, embedding: null} AS n"
 
+#: Sorts the rows bound to ``n`` newest first, for a ``LIMIT`` to follow.
+#: The key is projected before the sort: ArcadeDB 26.8.1 sorted 5,000
+#: current nodes by ``n.created_at`` in 245 ms, and by the projected key
+#: in 45 ms.
+_NEWEST_FIRST = "WITH n, n.created_at AS created_at ORDER BY created_at DESC "
+
 
 def _node_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
     """Convert a Bolt :Node's raw properties into the GraphStore dict shape.
@@ -254,9 +263,11 @@ def _shown_row(rows: str) -> str:
 def _one_version_per_node(match: str) -> str:
     """Cypher that keeps one of the rows *match* binds to ``n`` per ``node_id``.
 
-    The kept row is :func:`_shown_row`'s. ``get_node``, ``search_nodes``,
-    ``count_nodes_by_type`` and ``upsert_nodes_bulk``'s read of the current
-    versions pick through here, so they agree on the version of a node.
+    The kept row is :func:`_shown_row`'s. ``get_node``, ``get_nodes_bulk``,
+    ``search_nodes``, ``count_nodes_by_type``, ``upsert_nodes_bulk``'s read
+    of the current versions, and ``query`` and ``execute_node_query``
+    through :func:`_shown_rows_passing` pick through here, so they agree on
+    the version of a node.
     The rows are reduced rather than sorted: ArcadeDB 26.8.1 took 0.45 s
     to sort 10,000 current rows by ``valid_from`` and ``version_id``, and
     0.07 s to collect and reduce them.
@@ -265,6 +276,28 @@ def _one_version_per_node(match: str) -> str:
         f"{match} WITH n.node_id AS node_id, collect(n) AS rows "
         f"WITH {_shown_row('rows')} AS n "
     )
+
+
+def _shown_rows_passing(where: str, filters: list[str]) -> str:
+    """Cypher binding ``n`` to each node's shown row that passes *filters*.
+
+    *where* chooses the rows :func:`_one_version_per_node` picks from, so
+    every row of a node must pass or fail it together, as the temporal
+    filter and a ``node_id`` test do. A filter on a field such as
+    ``node_type`` can pass on one current row of a node and fail on
+    another, so it judges the row picked. The pick reads only the rows of
+    nodes with some row passing *filters*, so a filter that few nodes pass
+    stays cheap.
+    """
+    if not filters:
+        return _one_version_per_node(f"MATCH (n:Node) WHERE {where}")
+    passing = " AND ".join(filters)
+    candidates = (
+        f"MATCH (n:Node) WHERE {where} AND {passing} "
+        "WITH DISTINCT n.node_id AS candidate "
+        f"MATCH (n:Node {{node_id: candidate}}) WHERE {where}"
+    )
+    return _one_version_per_node(candidates) + f"WHERE {passing} "
 
 
 def _edge_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
@@ -893,10 +926,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         if not node_ids:
             return []
         where, params = _temporal_where(as_of, "n")
-        cypher = (
-            f"MATCH (n:Node) WHERE n.node_id IN $ids AND {where} "
-            f"RETURN {_NODE_WITHOUT_EMBEDDING}"
-        )
+        match = f"MATCH (n:Node) WHERE n.node_id IN $ids AND {where}"
+        cypher = _one_version_per_node(match) + f"RETURN {_NODE_WITHOUT_EMBEDDING}"
         records = self._run_read_list(cypher, ids=node_ids, **params)
         return [_node_props_to_dict(dict(r["n"])) for r in records]
 
@@ -1630,9 +1661,11 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         where, params = _temporal_where(as_of, "n")
-        conditions = [where]
+        # node_type judges the version shown, as in search_nodes, so the
+        # limit counts nodes and a node is listed only under that type.
+        filters = []
         if node_type is not None:
-            conditions.append("n.node_type = $node_type")
+            filters.append("n.node_type = $node_type")
             params["node_type"] = node_type
 
         # Scalar property filters are handled by decoding properties_json
@@ -1640,9 +1673,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # by filtering client-side, matching how query handles nested
         # filters in the Postgres backend.
         cypher = (
-            "MATCH (n:Node) WHERE "
-            + " AND ".join(conditions)
-            + " WITH n ORDER BY n.created_at DESC LIMIT $limit"
+            _shown_rows_passing(where, filters)
+            + _NEWEST_FIRST
+            + "LIMIT $limit"
             + f" RETURN {_NODE_WITHOUT_EMBEDDING}"
         )
         params["limit"] = limit * 4 if properties else limit
@@ -1865,14 +1898,16 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         decoding the JSON. Same approach the legacy ``query()`` method
         uses; semantics match.
         """
-        cypher_parts, cypher_params, py_predicates = self._compile_node_query(query)
+        node_parts, field_parts, cypher_params, py_predicates = (
+            self._compile_node_query(query)
+        )
         # Over-fetch when py_predicates are present to compensate for
         # client-side trimming.
         fetch_limit = query.limit * 10 if py_predicates else query.limit
         cypher = (
-            "MATCH (n:Node) WHERE "
-            + " AND ".join(cypher_parts)
-            + f" WITH n ORDER BY n.created_at DESC LIMIT {int(fetch_limit)}"
+            _shown_rows_passing(" AND ".join(node_parts), field_parts)
+            + _NEWEST_FIRST
+            + f"LIMIT {int(fetch_limit)}"
             + f" RETURN {_NODE_WITHOUT_EMBEDDING}"
         )
 
@@ -1888,9 +1923,15 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
 
     def _compile_node_query(
         self, query: Any
-    ) -> tuple[list[str], dict[str, Any], list[Any]]:
-        """Pure compile — returns (cypher_where_parts, params, python_predicates)."""
-        cypher_parts: list[str] = [self._temporal_filter_cypher(query.as_of)]
+    ) -> tuple[list[str], list[str], dict[str, Any], list[Any]]:
+        """Pure compile — returns (node_parts, field_parts, params, python_predicates).
+
+        ``node_parts`` (the temporal filter and any ``node_id`` clause) hold
+        or fail for every row of a node together; ``field_parts`` are the
+        other top-level clauses (:func:`_shown_rows_passing`).
+        """
+        node_parts: list[str] = [self._temporal_filter_cypher(query.as_of)]
+        field_parts: list[str] = []
         cypher_params: dict[str, Any] = {}
         if query.as_of is not None:
             cypher_params["as_of"] = query.as_of.isoformat()
@@ -1900,9 +1941,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 py_predicates.append(self._compile_property_predicate(clause))
                 continue
             frag, params = self._compile_top_level_clause(clause, i)
-            cypher_parts.append(frag)
+            (node_parts if clause.field == "node_id" else field_parts).append(frag)
             cypher_params.update(params)
-        return cypher_parts, cypher_params, py_predicates
+        return node_parts, field_parts, cypher_params, py_predicates
 
     @staticmethod
     def _compile_top_level_clause(clause: Any, idx: int) -> tuple[str, dict[str, Any]]:
