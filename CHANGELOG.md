@@ -1008,6 +1008,7 @@ All notable changes to Trellis will be documented in this file.
   Every backend now raises `ValueError` naming the second occurrence's
   index before it writes anything, as `upsert_edges_bulk` does for a
   repeated edge. A call that names each `node_id` once is unchanged.
+  ([#738](https://github.com/ronsse/trellis-ai/pull/738))
 
 ## [0.9.0] - 2026-05-13
 
