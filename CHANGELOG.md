@@ -1053,6 +1053,17 @@ All notable changes to Trellis will be documented in this file.
   one function, `trellis_cli.exit_codes.batch_outcome`, rather than a copy in
   each module, and those commands' output is otherwise unchanged.
   ([#736](https://github.com/ronsse/trellis-ai/pull/736))
+- **`upsert_nodes_bulk` refuses a `node_id` given twice in one call.** On
+  Neo4j and ArcadeDB every occurrence that did not match the node's stored
+  version wrote a version of its own, so two such occurrences left the node
+  with two current rows. On SQLite and Postgres it failed the
+  one-current-row unique index with `sqlite3.IntegrityError` or psycopg's
+  `UniqueViolation`, and SQLite kept the batch's writes before the failing
+  row pending on its connection, so the store's next commit saved them.
+  Every backend now raises `ValueError` naming the second occurrence's
+  index before it writes anything, as `upsert_edges_bulk` does for a
+  repeated edge. A call that names each `node_id` once is unchanged.
+  ([#738](https://github.com/ronsse/trellis-ai/pull/738))
 
 ## [0.9.0] - 2026-05-13
 
