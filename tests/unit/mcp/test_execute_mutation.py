@@ -327,11 +327,9 @@ class TestExecuteMutationErrors:
     def test_feedback_record_refuses_an_out_of_range_rating(
         self, temp_registry: StoreRegistry
     ) -> None:
-        """``feedback.record``'s args bypass the ``record_feedback`` tool's own
+        """A ``feedback.record`` rating of 5.0 is rejected and nothing is recorded.
 
-        bound here -- ``execute_mutation`` builds the ``Command`` straight
-        from caller-supplied ``args``, so an out-of-range rating is refused
-        the same way a missing arg is: ``rejected``, nothing recorded.
+        ``execute_mutation`` passes caller ``args`` straight into the ``Command``.
         """
         raw = execute_mutation(
             operation="feedback.record",

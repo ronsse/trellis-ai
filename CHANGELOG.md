@@ -1159,8 +1159,8 @@ All notable changes to Trellis will be documented in this file.
   `OperationRegistry.validate` checked only that `rating` was present, so
   `POST /api/v1/commands/batch` and MCP `execute_mutation` — the two
   surfaces that build a `Command` straight from caller args — could pass
-  NaN, +/-Infinity, a negative value, a value above `1.0`, a bool or a
-  string straight through to `FeedbackRecordHandler`, which recorded it
+  NaN, +/-Infinity, a negative value, a value above `1.0`, a bool, `null`
+  or a string straight through to `FeedbackRecordHandler`, which recorded it
   verbatim. `POST /api/v1/feedback` and `trellis curate feedback` already
   bound `rating` before building the `Command` and are unaffected. A bad
   rating on `feedback.record` now fails Stage 1 the same way a missing arg

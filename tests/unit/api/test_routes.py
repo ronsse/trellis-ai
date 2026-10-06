@@ -1216,12 +1216,9 @@ def test_batch_refuses_an_unattended_writer(client):
 
 
 def test_batch_feedback_record_refuses_an_out_of_range_rating(client):
-    """``feedback.record``'s args bypass the wire DTO's rating bound here --
+    """A batch rating of 5.0 is rejected (HTTP 200) and nothing is recorded.
 
-    unlike ``POST /api/v1/feedback``, ``BatchCommandItem.args`` is a plain
-    ``dict[str, Any]``, so an out-of-range rating reaches the executor and
-    is refused the way a missing arg is: HTTP 200, counted under
-    ``rejected``, nothing recorded.
+    ``BatchCommandItem.args`` is a plain dict, so no DTO bounds the rating here.
     """
     resp = client.post(
         "/api/v1/commands/batch",

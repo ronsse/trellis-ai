@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -196,31 +195,17 @@ class OperationRegistry:
         missing = required - set(command.args.keys())
         if missing:
             return False, [f"Missing required args: {', '.join(sorted(missing))}"]
-        # ``feedback.record`` is the one operation whose required args
-        # include a bound value. POST /api/v1/feedback, POST
-        # /packs/{pack_id}/feedback and the MCP ``record_feedback`` tool
-        # already hold ``rating`` to [0.0, 1.0] before a Command ever
-        # exists; the two surfaces that build a Command directly from
-        # caller-supplied args -- POST /api/v1/commands/batch and MCP
-        # ``execute_mutation`` -- did not, so NaN, +/-Infinity, a value
-        # outside the range, or a non-numeric value reached
-        # FeedbackRecordHandler, which records whatever it is given. This
-        # is deliberately scoped to one operation rather than a general
-        # per-operation validator framework.
+        # The one value checked here: a feedback rating is a 0.0-1.0 score,
+        # and POST /api/v1/commands/batch and MCP ``execute_mutation`` pass
+        # caller args straight through. The chained comparison is False for
+        # NaN and +/-Infinity, and compares an int too large for a float
+        # exactly, where ``math.isfinite`` would raise OverflowError.
         if command.operation is Operation.FEEDBACK_RECORD:
             rating = command.args["rating"]
-            # Deliberately NOT a chained ``0.0 <= rating <= 1.0``: every
-            # comparison against NaN is False, so a chained or separately-
-            # ANDed range check would let NaN slip through as "in range".
-            # ``math.isfinite`` is the actual NaN/Infinity guard; the two
-            # inequalities below only need to catch an out-of-bounds finite
-            # value.
             if (
                 isinstance(rating, bool)
                 or not isinstance(rating, int | float)
-                or not math.isfinite(rating)
-                or rating < 0.0
-                or rating > 1.0
+                or not 0.0 <= rating <= 1.0
             ):
                 message = (
                     f"rating must be a finite number in [0.0, 1.0], got {rating!r}"

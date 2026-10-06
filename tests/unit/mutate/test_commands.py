@@ -166,17 +166,7 @@ class TestOperationRegistry:
 
 
 class TestFeedbackRecordRatingBound:
-    """``feedback.record``'s ``rating`` is bound to [0.0, 1.0] at Stage 1.
-
-    REST ``POST /api/v1/feedback``, ``POST /packs/{pack_id}/feedback`` and
-    the MCP ``record_feedback`` tool already bind ``rating`` before it ever
-    reaches a ``Command``. ``OperationRegistry.validate`` only checked that
-    the key was present, so a caller that builds the ``Command`` directly —
-    ``POST /api/v1/commands/batch`` or MCP ``execute_mutation`` — could pass
-    NaN, Infinity, a negative number, a value above 1.0, a bool, or a string
-    straight through to ``FeedbackRecordHandler``, which records whatever it
-    is given.
-    """
+    """``feedback.record``'s ``rating`` must be a real number in [0.0, 1.0]."""
 
     @pytest.fixture
     def registry(self) -> OperationRegistry:
@@ -191,6 +181,7 @@ class TestFeedbackRecordRatingBound:
             -0.1,
             1.1,
             5.0,
+            pytest.param(10**400, id="int-beyond-float"),
             True,
             False,
             "0.7",
