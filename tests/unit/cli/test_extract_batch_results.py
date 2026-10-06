@@ -164,6 +164,23 @@ def _drafts(payload: dict) -> int:
     return payload["total_entities"] + payload["total_edges"]
 
 
+def _text_drafts(out: str) -> int:
+    """The draft total the text output's ``Drafts:`` line reports."""
+    match = re.search(r"Drafts: +(\d+) entities, (\d+) edges", out)
+    assert match, out
+    return int(match.group(1)) + int(match.group(2))
+
+
+def _counts(
+    succeeded: int = 0, failed: int = 0, rejected: int = 0, duplicates: int = 0
+) -> str:
+    """The text output's ``Commands:`` counts."""
+    return (
+        f"{succeeded} succeeded, {failed} failed, {rejected} rejected, "
+        f"{duplicates} duplicates"
+    )
+
+
 class TestExtractTracesReportsTheBatch:
     @_FORMATS
     def test_a_denied_backfill_exits_3_and_claims_no_extraction(
@@ -184,8 +201,9 @@ class TestExtractTracesReportsTheBatch:
         else:
             out = plain(result.output)
             assert "Extracted" not in out
-            assert "0 succeeded" in out
-            assert re.search(r"\b[1-9]\d* rejected", out), out
+            drafts = _text_drafts(out)
+            assert drafts > 0
+            assert _counts(rejected=drafts) in out
             assert "frozen [x]" in out
 
     @_WROTE_NOTHING
@@ -210,7 +228,7 @@ class TestExtractTracesReportsTheBatch:
         else:
             out = plain(result.output)
             assert "Extracted" not in out
-            assert re.search(rf"\b[1-9]\d* {key}", out), out
+            assert _counts(**{key: _text_drafts(out)}) in out
             assert _MESSAGE in out
 
     @_FORMATS
@@ -230,8 +248,9 @@ class TestExtractTracesReportsTheBatch:
         else:
             out = plain(result.output)
             assert "Trace backfill" in out
-            assert re.search(r"Drafts: +[1-9]\d* entities", out), out
-            assert "0 failed, 0 rejected, 0 duplicates" in out
+            drafts = _text_drafts(out)
+            assert drafts > 0
+            assert _counts(succeeded=drafts) in out
 
     @_FORMATS
     def test_a_mixed_backfill_reports_both_counts_and_exits_0(
@@ -252,8 +271,9 @@ class TestExtractTracesReportsTheBatch:
             )
         else:
             out = plain(result.output)
-            assert re.search(r"\b[1-9]\d* succeeded", out), out
-            assert "1 rejected" in out
+            drafts = _text_drafts(out)
+            assert drafts >= 2
+            assert _counts(succeeded=drafts - 1, rejected=1) in out
             assert _MESSAGE in out
 
     @_FORMATS
@@ -270,7 +290,9 @@ class TestExtractTracesReportsTheBatch:
             assert payload["duplicates"] == _drafts(payload) > 0
             assert (payload["failed"], payload["rejected"]) == (0, 0)
         else:
-            assert "0 failed, 0 rejected" in plain(result.output)
+            out = plain(result.output)
+            drafts = _text_drafts(out)
+            assert _counts(duplicates=drafts) in out
 
     @_FORMATS
     def test_a_dry_run_executes_nothing_and_reports_as_before(
@@ -315,8 +337,7 @@ class TestExtractRefreshReportsTheBatch:
         else:
             out = plain(result.output)
             assert "Refreshed" not in out
-            assert "0 succeeded" in out
-            assert "3 rejected" in out
+            assert _counts(rejected=3) in out
             assert "frozen [x]" in out
 
     @_WROTE_NOTHING
@@ -340,7 +361,7 @@ class TestExtractRefreshReportsTheBatch:
             assert (payload["succeeded"], payload[key]) == (0, 3)
         else:
             out = plain(result.output)
-            assert f"3 {key}" in out
+            assert _counts(**{key: 3}) in out
             assert _MESSAGE in out
 
     @_FORMATS
@@ -361,7 +382,7 @@ class TestExtractRefreshReportsTheBatch:
         else:
             out = plain(result.output)
             assert "Refreshed" in out
-            assert "3 succeeded, 0 failed, 0 rejected, 0 duplicates" in out
+            assert _counts(succeeded=3) in out
 
     @_FORMATS
     def test_a_mixed_refresh_reports_both_counts_and_exits_0(
@@ -376,8 +397,7 @@ class TestExtractRefreshReportsTheBatch:
             assert (payload["succeeded"], payload["rejected"]) == (2, 1)
         else:
             out = plain(result.output)
-            assert "2 succeeded" in out
-            assert "1 rejected" in out
+            assert _counts(succeeded=2, rejected=1) in out
             assert _MESSAGE in out
 
     @_FORMATS
@@ -396,4 +416,4 @@ class TestExtractRefreshReportsTheBatch:
                 0,
             )
         else:
-            assert "0 failed, 0 rejected, 3 duplicates" in plain(result.output)
+            assert _counts(duplicates=3) in plain(result.output)
