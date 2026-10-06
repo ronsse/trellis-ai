@@ -34,6 +34,10 @@ which carries ``created_at`` over from the shown row (:func:`_shown_row`);
 ``update_node_if_current`` compares its token with the shown row. So the
 next write of the node heals the duplicate rather than failing on it,
 except a bulk spec equal to the shown row, which stays a no-op.
+``upsert_edge`` and ``upsert_edges_bulk`` attach the new edge version to
+the shown row of each endpoint, so such a node does not double an edge
+written from or to it; they close the edge's current version only where
+it joins those two rows.
 
 Per-backend subclasses override the **seams**:
 
@@ -250,7 +254,8 @@ def _shown_row(rows: str) -> str:
     query returns rows in. Concurrent writers can leave a node two current
     rows (the module docstring). The reads that pick through
     :func:`_one_version_per_node` show this row, and the node writes
-    continue it, so a write carries over what those reads showed. Neo4j
+    continue it, so a write carries over what those reads showed; the edge
+    writes attach their new version to it. Neo4j
     compares the stamps as text, which is time order for the one spelling
     every write uses (``_iso(utc_now())``, aware UTC); ArcadeDB reads them
     as datetimes. Neither comparison can raise.
@@ -1337,6 +1342,14 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
 
         # One Cypher round trip: endpoint MATCH + existing-edge
         # OPTIONAL MATCH + close-old + create-new in a single query.
+        # Each endpoint is narrowed to the row it shows (``_shown_row``),
+        # so an endpoint with two current rows (the module docstring)
+        # gets one new version, on that row, rather than one per row.
+        # When an endpoint has no current row the aggregate still yields
+        # one row, of empty lists, on both engines, so ``s`` and ``t``
+        # are both null; ``WHERE s IS NOT NULL`` drops that row, since a
+        # CREATE between nulls raises on Neo4j and links two new empty
+        # vertices on ArcadeDB.
         # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
         # from any current version. Previously this path made a
         # separate ``_find_current_edge`` call (~50% of total upsert
@@ -1358,10 +1371,13 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "extractor_tier": extractor_tier,
         }
 
-        cypher = """
-        MATCH (s:Node {node_id: $source_id}) WHERE s.valid_to IS NULL
-        MATCH (t:Node {node_id: $target_id}) WHERE t.valid_to IS NULL
-        OPTIONAL MATCH (s)-[old:EDGE {edge_type: $edge_type}]->(t)
+        cypher = f"""
+        MATCH (s:Node {{node_id: $source_id}}) WHERE s.valid_to IS NULL
+        MATCH (t:Node {{node_id: $target_id}}) WHERE t.valid_to IS NULL
+        WITH collect(DISTINCT s) AS source_rows, collect(DISTINCT t) AS target_rows
+        WITH {_shown_row("source_rows")} AS s, {_shown_row("target_rows")} AS t
+        WHERE s IS NOT NULL
+        OPTIONAL MATCH (s)-[old:EDGE {{edge_type: $edge_type}}]->(t)
           WHERE old.valid_to IS NULL
         WITH s, t, old,
              coalesce(old.edge_id, $candidate_edge_id) AS edge_id_carry,
@@ -1487,9 +1503,13 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     raise ValueError(msg)
 
             # Round trip 2 — close any existing current edges and create
-            # new versions in a single UNWIND. ``coalesce`` carries
-            # ``edge_id`` and ``created_at`` forward across versions,
-            # matching the single-row method's collapsed pattern.
+            # new versions in a single UNWIND. Each row's endpoints are
+            # narrowed to the rows they show, as in ``upsert_edge``;
+            # grouping by ``row`` yields nothing for a row whose endpoint
+            # has no current row, so the MATCH drops it.
+            # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
+            # across versions, matching the single-row method's collapsed
+            # pattern.
             # NB: the existing-edge check filters ``edge_type`` in
             # the WHERE clause rather than via property-pattern
             # binding ``{edge_type: row.edge_type}``. ArcadeDB's
@@ -1498,10 +1518,14 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # match silently produces no rows), so ``old`` would
             # always be NULL and the prior version would not get
             # closed. Both Neo4j and ArcadeDB accept the WHERE form.
-            cypher = """
+            cypher = f"""
             UNWIND $rows AS row
-            MATCH (s:Node {node_id: row.source_id}) WHERE s.valid_to IS NULL
-            MATCH (t:Node {node_id: row.target_id}) WHERE t.valid_to IS NULL
+            MATCH (s:Node {{node_id: row.source_id}}) WHERE s.valid_to IS NULL
+            MATCH (t:Node {{node_id: row.target_id}}) WHERE t.valid_to IS NULL
+            WITH row, collect(DISTINCT s) AS source_rows,
+                 collect(DISTINCT t) AS target_rows
+            WITH row, {_shown_row("source_rows")} AS s,
+                 {_shown_row("target_rows")} AS t
             OPTIONAL MATCH (s)-[old:EDGE]->(t)
               WHERE old.edge_type = row.edge_type AND old.valid_to IS NULL
             WITH s, t, row, old,

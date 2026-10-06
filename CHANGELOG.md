@@ -885,8 +885,7 @@ All notable changes to Trellis will be documented in this file.
   every current row and create one version, which carries `created_at`
   over from the row `get_node` shows, and `update_node_if_current`
   compares its token with that row, so a token from the hidden row is
-  refused. The race that leaves the two rows is unchanged, as are edge
-  writes from such a node.
+  refused. The race that leaves the two rows is unchanged.
   ([#723](https://github.com/ronsse/trellis-ai/pull/723))
 - **A Neo4j or ArcadeDB store that is down fails a redaction without the
   server's text.** Opening a Neo4j or ArcadeDB graph store, or a Neo4j
@@ -990,6 +989,16 @@ All notable changes to Trellis will be documented in this file.
   as a parameter, as the store's other property filters already did. Plain
   keys and keys holding `'` return the same rows as before.
   ([#731](https://github.com/ronsse/trellis-ai/pull/731))
+- **On Neo4j and ArcadeDB, an edge written from or to a node with two
+  current rows gets one version.** `upsert_edge` and `upsert_edges_bulk`
+  created the edge once per current row of each endpoint, so such a node
+  left two current versions of the edge, `get_edges` returned it twice, and
+  `upsert_edge` raised the driver's "found multiple" warning. Both now
+  attach the new version to the row `get_node` shows for each endpoint. An
+  edge version already current on the hidden row, such as one written
+  before this fix, stays current, and the race that leaves the two rows is
+  unchanged. Writes between nodes with one current row are unchanged.
+  ([#732](https://github.com/ronsse/trellis-ai/pull/732))
 
 ## [0.9.0] - 2026-05-13
 
