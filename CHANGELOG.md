@@ -918,6 +918,7 @@ All notable changes to Trellis will be documented in this file.
   error, so the redaction is applied and audited; with a row left the
   redaction fails as any other failed purge does. When that read fails
   too, the outcome is still reported as unknown.
+  ([#727](https://github.com/ronsse/trellis-ai/pull/727))
 
 ## [0.9.0] - 2026-05-13
 
