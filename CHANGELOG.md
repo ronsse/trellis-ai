@@ -956,6 +956,7 @@ All notable changes to Trellis will be documented in this file.
   answers `200` with the command `failed`. The key is not recorded, so a
   retry runs once the log can be read. A Postgres event log's driver
   errors still escape.
+  ([#728](https://github.com/ronsse/trellis-ai/pull/728))
 
 ## [0.9.0] - 2026-05-13
 
