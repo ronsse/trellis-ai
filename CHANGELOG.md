@@ -888,6 +888,17 @@ All notable changes to Trellis will be documented in this file.
   refused. The race that leaves the two rows is unchanged, as are edge
   writes from such a node.
   ([#723](https://github.com/ronsse/trellis-ai/pull/723))
+- **A SQLite error inside a governed write fails the command instead of
+  escaping it.** A `sqlite3.Error` that a SQLite store raised during a
+  handler, such as for a locked or read-only database file, escaped the
+  executor: no `failed` result and no `mutation.rejected` event, so
+  `trellis curate entity --format json` printed a traceback and no JSON and
+  exited `1`, and `POST /api/v1/entities` answered `500`. The command now
+  answers `failed` with one `mutation.rejected` event, like any other
+  unexpected handler error: the CLI prints its JSON payload and exits `5`,
+  and the route answers `400`. An executor audit event that a SQLite event
+  log cannot write now leaves the `audit_event_not_recorded` warning on the
+  result instead of raising.
 
 ## [0.9.0] - 2026-05-13
 
