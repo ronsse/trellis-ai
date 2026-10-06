@@ -616,6 +616,83 @@ class GraphStoreContractTests:
             )
         assert store.count_edges() == before
 
+    def test_upsert_edges_bulk_closes_only_named_triplets(
+        self, store: GraphStore
+    ) -> None:
+        """A bulk write closes only the priors of the triplets it names:
+        edges that share its source but differ in target or type stay
+        current and untouched."""
+        store.upsert_nodes_bulk(
+            [
+                {"node_id": "syn-a", "node_type": "service", "properties": {}},
+                {"node_id": "syn-b", "node_type": "service", "properties": {}},
+                {"node_id": "syn-c", "node_type": "service", "properties": {}},
+            ]
+        )
+        store.upsert_edge("syn-a", "syn-b", "syn_rel", {"v": 1})
+        store.upsert_edge("syn-a", "syn-c", "syn_rel", {"v": 1})
+        store.upsert_edge("syn-a", "syn-b", "syn_other", {"v": 1})
+        _sleep_for_ordering()
+
+        store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "syn-a",
+                    "target_id": "syn-b",
+                    "edge_type": "syn_rel",
+                    "properties": {"v": 2},
+                }
+            ]
+        )
+
+        out = store.get_edges("syn-a", direction="outgoing")
+        assert len(out) == 3
+        by_key = {(e["target_id"], e["edge_type"]): e for e in out}
+        assert by_key[("syn-b", "syn_rel")]["properties"]["v"] == 2
+        assert by_key[("syn-c", "syn_rel")]["properties"]["v"] == 1
+        assert by_key[("syn-b", "syn_other")]["properties"]["v"] == 1
+
+    def test_upsert_edges_bulk_closes_two_triplets_same_source(
+        self, store: GraphStore
+    ) -> None:
+        """A batch naming two triplets for the same source closes exactly
+        their two priors, leaving an unrelated third edge untouched."""
+        store.upsert_nodes_bulk(
+            [
+                {"node_id": "syn-a", "node_type": "service", "properties": {}},
+                {"node_id": "syn-b", "node_type": "service", "properties": {}},
+                {"node_id": "syn-c", "node_type": "service", "properties": {}},
+            ]
+        )
+        store.upsert_edge("syn-a", "syn-b", "syn_rel", {"v": 1})
+        store.upsert_edge("syn-a", "syn-c", "syn_rel", {"v": 1})
+        store.upsert_edge("syn-a", "syn-b", "syn_other", {"v": 1})
+        _sleep_for_ordering()
+
+        store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "syn-a",
+                    "target_id": "syn-b",
+                    "edge_type": "syn_rel",
+                    "properties": {"v": 2},
+                },
+                {
+                    "source_id": "syn-a",
+                    "target_id": "syn-c",
+                    "edge_type": "syn_rel",
+                    "properties": {"v": 2},
+                },
+            ]
+        )
+
+        out = store.get_edges("syn-a", direction="outgoing")
+        assert len(out) == 3
+        by_key = {(e["target_id"], e["edge_type"]): e for e in out}
+        assert by_key[("syn-b", "syn_rel")]["properties"]["v"] == 2
+        assert by_key[("syn-c", "syn_rel")]["properties"]["v"] == 2
+        assert by_key[("syn-b", "syn_other")]["properties"]["v"] == 1
+
     def test_upsert_edge_same_triplet_is_idempotent(self, store: GraphStore) -> None:
         """Re-upserting the same edge (single-row) keeps one current version.
 

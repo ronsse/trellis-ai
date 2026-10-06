@@ -1190,6 +1190,12 @@ All notable changes to Trellis will be documented in this file.
   does: `REJECTED` with `metadata["rejection_reason"] = "validate"`, one
   `mutation.rejected` event, nothing recorded. No other operation changes.
   ([#751](https://github.com/ronsse/trellis-ai/pull/751))
+- **SQLite and Postgres `upsert_edges_bulk` closes only the prior versions
+  of the triplets a batch names.** It closed every current edge from a
+  batch entry's source, so upserting one `(source, target, edge_type)` edge
+  left that source's other current edges with no open version. Neo4j and
+  ArcadeDB already closed by exact triplet and are unchanged.
+  ([#752](https://github.com/ronsse/trellis-ai/pull/752))
 - **ArcadeDB `upsert_edges_bulk` no longer leaks a raw driver error when a
   dropped row's endpoint is recreated while the write's transaction is
   still open.** #746 re-read a dropped row's endpoints inside that same
