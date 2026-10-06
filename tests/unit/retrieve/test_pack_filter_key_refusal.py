@@ -1,12 +1,9 @@
-"""A pack's filter key reaches the SQLite stores' SQL only if it is a plain key.
+"""A pack filter key that is not a plain JSON object key fails the SQLite store axes.
 
-``PackBuilder.build(filters=...)`` forwards a key it does not own to the
-graph store's ``query(properties=...)`` and the vector store's
-``query(filters=...)``, and both stores build a JSON path into SQL text from
-it. Before they checked the key, ``team') OR 1=1 OR ('`` served every node and
-vector the two axes could see, with no failure recorded, and ``te'am`` failed
-both axes with ``sqlite3.OperationalError``. Now both axes record the refusal
-as a ``ValueError`` and serve nothing for it, while a plain key still filters.
+``PackBuilder.build(filters=...)`` forwards a key it does not own to the graph
+store's ``query(properties=...)`` and the vector store's ``query(filters=...)``.
+Both raise ``ValueError`` for a key outside ``[A-Za-z0-9_-]+``, and the pack
+records that as each axis's strategy failure while the keyword axis still runs.
 """
 
 from __future__ import annotations
@@ -25,8 +22,8 @@ from trellis.stores.registry import StoreRegistry
 if TYPE_CHECKING:
     from pathlib import Path
 
+#: Spliced raw, this key would match every node and vector both axes can see.
 TAUTOLOGY_KEY = "team') OR 1=1 OR ('"
-SYNTAX_ERROR_KEY = "te'am"
 TEXT = "how to fix the cache layer"
 
 
@@ -73,13 +70,10 @@ def _build(
     return pack, event.payload or {}
 
 
-@pytest.mark.parametrize(
-    "key", [TAUTOLOGY_KEY, SYNTAX_ERROR_KEY], ids=["tautology", "syntax-error"]
-)
 def test_a_bad_key_fails_both_store_axes_with_a_value_error(
-    registry: StoreRegistry, key: str
+    registry: StoreRegistry,
 ) -> None:
-    pack, payload = _build(registry, {key: "platform"})
+    pack, payload = _build(registry, {TAUTOLOGY_KEY: "platform"})
 
     assert [item.item_id for item in pack.items] == []
     assert pack.retrieval_report.strategies_used == ["keyword"]
@@ -88,15 +82,3 @@ def test_a_bad_key_fails_both_store_axes_with_a_value_error(
     for failure in failures.values():
         assert failure["error_class"] == "ValueError"
         assert "not a plain JSON object key" in failure["message"]
-
-
-@pytest.mark.parametrize(
-    ("value", "served"), [("data", ["node-1", "vec-1"]), ("platform", [])]
-)
-def test_a_plain_key_still_filters_both_store_axes(
-    registry: StoreRegistry, value: str, served: list[str]
-) -> None:
-    pack, payload = _build(registry, {"owner_team": value})
-
-    assert sorted(item.item_id for item in pack.items) == served
-    assert payload["strategy_failures"] == []

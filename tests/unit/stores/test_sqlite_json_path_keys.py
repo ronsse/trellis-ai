@@ -1,11 +1,11 @@
 """A filter key must not become SQL in the SQLite graph and vector stores.
 
-Both stores interpolate a caller's property or metadata key into SQL text as
-a JSON path, ``json_extract(<column>, '$.<key>')``. A key carrying ``'``
-closed that literal and the rest of the key ran as SQL: ``team') OR 1=1 OR
-('`` matched every row, and ``te'am`` raised ``sqlite3.OperationalError``.
-Every site now refuses a key outside ``[A-Za-z0-9_-]+`` with ``ValueError``
-before a statement runs, and a plain key filters as it did before.
+Both stores splice a caller's property or metadata key into SQL text as a JSON
+path, ``json_extract(<column>, '$.<key>')``, so every site passes the key
+through ``json_key_path`` first, which raises ``ValueError`` for a key outside
+``[A-Za-z0-9_-]+`` before any statement runs. The check is one function, so
+its refused and accepted keys are pinned once, on ``query(properties=...)``;
+each other site gets one refused key and one plain key.
 """
 
 from __future__ import annotations
@@ -22,21 +22,16 @@ from trellis.stores.sqlite.base import SQLiteStoreBase
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis.stores.sqlite.vector import SQLiteVectorStore
 
-#: Closes the path literal and ORs in a tautology: it matched every row.
+#: Closes the path literal and ORs in a tautology: spliced raw, it matches
+#: every row.
 TAUTOLOGY_KEY = "team') OR 1=1 OR ('"
 #: Closes the path literal and leaves a token SQLite cannot parse.
 SYNTAX_ERROR_KEY = "te'am"
-
-BAD_KEYS = pytest.mark.parametrize(
-    "key", [TAUTOLOGY_KEY, SYNTAX_ERROR_KEY], ids=["tautology", "syntax-error"]
-)
-#: One key per accepted shape: the codebase's snake_case, plus ``-``, upper
-#: case and digits. The fixtures store the same value under each.
-PLAIN_KEYS = pytest.mark.parametrize("key", ["owner_team", "owner-team", "OwnerTeam2"])
 REFUSAL = "not a plain JSON object key"
 
 
 def _owner(team: str) -> dict[str, str]:
+    """The same value under one key of each accepted shape."""
     return {"owner_team": team, "owner-team": team, "OwnerTeam2": team}
 
 
@@ -98,30 +93,35 @@ def _edge_pairs(rows: list[dict[str, Any]]) -> set[tuple[str, str]]:
     return {(row["source_id"], row["target_id"]) for row in rows}
 
 
-class TestGraphQuery:
-    """``SQLiteGraphStore.query(properties=...)``."""
+def _eq(key: str) -> tuple[FilterClause, ...]:
+    return (FilterClause(f"properties.{key}", "eq", "platform"),)
 
-    @BAD_KEYS
-    @pytest.mark.parametrize("value", ["platform", True, None])
-    def test_bad_key_is_refused_before_sql(
-        self, graph_store: SQLiteGraphStore, key: str, value: object
+
+class TestGraphQuery:
+    """``SQLiteGraphStore.query(properties=...)``, and the check's two sets."""
+
+    @pytest.mark.parametrize(
+        "key",
+        [TAUTOLOGY_KEY, SYNTAX_ERROR_KEY, "a.b", "tags[0]", "", "two words", "clé"],
+        ids=["tautology", "syntax", "dot", "index", "empty", "space", "non-ascii"],
+    )
+    def test_a_key_outside_the_plain_set_is_refused_before_sql(
+        self, graph_store: SQLiteGraphStore, key: str
     ) -> None:
         with _statements(graph_store) as seen, pytest.raises(ValueError, match=REFUSAL):
-            graph_store.query(properties={key: value})
+            graph_store.query(properties={key: "platform"})
         assert seen == []
 
-    @pytest.mark.parametrize("key", ["a.b", "tags[0]", "", "two words"])
-    def test_a_key_outside_the_plain_set_is_refused(
-        self, graph_store: SQLiteGraphStore, key: str
+    @pytest.mark.parametrize("value", [True, None])
+    def test_the_bool_and_none_branches_check_the_key_too(
+        self, graph_store: SQLiteGraphStore, value: object
     ) -> None:
-        """A nested path, an array index or an empty key is not one plain key."""
-        with pytest.raises(ValueError, match=REFUSAL):
-            graph_store.query(properties={key: "platform"})
+        with _statements(graph_store) as seen, pytest.raises(ValueError, match=REFUSAL):
+            graph_store.query(properties={TAUTOLOGY_KEY: value})
+        assert seen == []
 
-    @PLAIN_KEYS
-    def test_a_plain_key_filters_as_before(
-        self, graph_store: SQLiteGraphStore, key: str
-    ) -> None:
+    @pytest.mark.parametrize("key", ["owner_team", "owner-team", "OwnerTeam2"])
+    def test_a_plain_key_filters(self, graph_store: SQLiteGraphStore, key: str) -> None:
         with _statements(graph_store) as seen:
             rows = graph_store.query(properties={key: "platform"})
         assert _node_ids(rows) == {"node-a", "node-b"}
@@ -131,52 +131,33 @@ class TestGraphQuery:
 class TestNodeQueryDsl:
     """``execute_node_query`` on ``properties.<key>`` (``_field_to_sql_expr``)."""
 
-    @BAD_KEYS
-    def test_bad_key_is_refused_before_sql(
-        self, graph_store: SQLiteGraphStore, key: str
+    def test_a_bad_key_is_refused_before_sql(
+        self, graph_store: SQLiteGraphStore
     ) -> None:
-        query = NodeQuery(
-            filters=(FilterClause(f"properties.{key}", "eq", "platform"),)
-        )
+        query = NodeQuery(filters=_eq(TAUTOLOGY_KEY))
         with _statements(graph_store) as seen, pytest.raises(ValueError, match=REFUSAL):
             graph_store.execute_node_query(query)
         assert seen == []
 
-    @PLAIN_KEYS
-    def test_a_plain_key_filters_as_before(
-        self, graph_store: SQLiteGraphStore, key: str
-    ) -> None:
-        query = NodeQuery(
-            filters=(FilterClause(f"properties.{key}", "eq", "platform"),)
-        )
+    def test_a_plain_key_filters(self, graph_store: SQLiteGraphStore) -> None:
         with _statements(graph_store) as seen:
-            rows = graph_store.execute_node_query(query)
+            rows = graph_store.execute_node_query(NodeQuery(filters=_eq("owner_team")))
         assert _node_ids(rows) == {"node-a", "node-b"}
         assert _reached_sql(seen)
 
 
 class TestContainsDsl:
-    """``contains`` on either side (``_render_contains_sqlite``)."""
+    """``contains`` on nodes and edges (both use ``_render_contains_sqlite``)."""
 
-    @BAD_KEYS
-    def test_bad_key_is_refused_before_sql_on_nodes(
-        self, graph_store: SQLiteGraphStore, key: str
+    def test_a_bad_key_is_refused_before_sql(
+        self, graph_store: SQLiteGraphStore
     ) -> None:
-        query = NodeQuery(filters=(FilterClause(f"properties.{key}", "contains", 1),))
+        clause = FilterClause(f"properties.{TAUTOLOGY_KEY}", "contains", 1)
         with _statements(graph_store) as seen, pytest.raises(ValueError, match=REFUSAL):
-            graph_store.execute_node_query(query)
+            graph_store.execute_node_query(NodeQuery(filters=(clause,)))
         assert seen == []
 
-    @BAD_KEYS
-    def test_bad_key_is_refused_before_sql_on_edges(
-        self, graph_store: SQLiteGraphStore, key: str
-    ) -> None:
-        query = EdgeQuery(filters=(FilterClause(f"properties.{key}", "contains", 1),))
-        with _statements(graph_store) as seen, pytest.raises(ValueError, match=REFUSAL):
-            graph_store.execute_edge_query(query)
-        assert seen == []
-
-    def test_a_plain_key_filters_as_before(self, graph_store: SQLiteGraphStore) -> None:
+    def test_a_plain_key_filters(self, graph_store: SQLiteGraphStore) -> None:
         clause = FilterClause("properties.column_names", "contains", "user_id")
         with _statements(graph_store) as seen:
             nodes = graph_store.execute_node_query(NodeQuery(filters=(clause,)))
@@ -189,26 +170,17 @@ class TestContainsDsl:
 class TestEdgeQueryDsl:
     """``execute_edge_query`` on ``properties.<key>`` (``_edge_field_to_sql_expr``)."""
 
-    @BAD_KEYS
-    def test_bad_key_is_refused_before_sql(
-        self, graph_store: SQLiteGraphStore, key: str
+    def test_a_bad_key_is_refused_before_sql(
+        self, graph_store: SQLiteGraphStore
     ) -> None:
-        query = EdgeQuery(
-            filters=(FilterClause(f"properties.{key}", "eq", "platform"),)
-        )
+        query = EdgeQuery(filters=_eq(TAUTOLOGY_KEY))
         with _statements(graph_store) as seen, pytest.raises(ValueError, match=REFUSAL):
             graph_store.execute_edge_query(query)
         assert seen == []
 
-    @PLAIN_KEYS
-    def test_a_plain_key_filters_as_before(
-        self, graph_store: SQLiteGraphStore, key: str
-    ) -> None:
-        query = EdgeQuery(
-            filters=(FilterClause(f"properties.{key}", "eq", "platform"),)
-        )
+    def test_a_plain_key_filters(self, graph_store: SQLiteGraphStore) -> None:
         with _statements(graph_store) as seen:
-            rows = graph_store.execute_edge_query(query)
+            rows = graph_store.execute_edge_query(EdgeQuery(filters=_eq("owner_team")))
         assert _edge_pairs(rows) == {("node-a", "node-b"), ("node-c", "node-d")}
         assert _reached_sql(seen)
 
@@ -216,24 +188,22 @@ class TestEdgeQueryDsl:
 class TestVectorQuery:
     """``SQLiteVectorStore.query(filters=...)``."""
 
-    @BAD_KEYS
-    def test_bad_key_is_refused_before_sql(
-        self, vector_store: SQLiteVectorStore, key: str
+    def test_a_bad_key_is_refused_before_sql(
+        self, vector_store: SQLiteVectorStore
     ) -> None:
         with (
             _statements(vector_store) as seen,
             pytest.raises(ValueError, match=REFUSAL),
         ):
-            vector_store.query([1.0, 0.0, 0.0], top_k=10, filters={key: "platform"})
+            vector_store.query(
+                [1.0, 0.0, 0.0], top_k=10, filters={TAUTOLOGY_KEY: "platform"}
+            )
         assert seen == []
 
-    @PLAIN_KEYS
-    def test_a_plain_key_filters_as_before(
-        self, vector_store: SQLiteVectorStore, key: str
-    ) -> None:
+    def test_a_plain_key_filters(self, vector_store: SQLiteVectorStore) -> None:
         with _statements(vector_store) as seen:
             rows = vector_store.query(
-                [1.0, 0.0, 0.0], top_k=10, filters={key: "platform"}
+                [1.0, 0.0, 0.0], top_k=10, filters={"owner_team": "platform"}
             )
         assert {row["item_id"] for row in rows} == {"vec-a", "vec-b"}
         assert _reached_sql(seen)
