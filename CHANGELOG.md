@@ -849,6 +849,7 @@ All notable changes to Trellis will be documented in this file.
   `"already_ingested": true`, and the CLI text and MCP `save_experience`
   reply `Trace already ingested: <id>`. Re-extract a stored trace with
   `trellis extract traces`. Nodes and edges already attached stay.
+  ([#720](https://github.com/ronsse/trellis-ai/pull/720))
 
 ## [0.9.0] - 2026-05-13
 
