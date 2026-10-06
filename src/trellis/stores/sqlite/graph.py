@@ -39,7 +39,7 @@ from trellis.stores.base.graph_query import (
     RANGE_OP_GLYPH,
     check_doc_link_clause,
 )
-from trellis.stores.sqlite.base import SQLiteStoreBase
+from trellis.stores.sqlite.base import SQLiteStoreBase, json_key_path
 
 logger = structlog.get_logger(__name__)
 
@@ -1306,14 +1306,17 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         if properties:
             for key, value in properties.items():
                 if isinstance(value, bool):
-                    conditions.append(f"json_extract(properties_json, '$.{key}') = ?")
+                    path = json_key_path(key)
+                    conditions.append(f"json_extract(properties_json, '{path}') = ?")
                     params.append(1 if value else 0)
                 elif isinstance(value, str | int | float):
-                    conditions.append(f"json_extract(properties_json, '$.{key}') = ?")
+                    path = json_key_path(key)
+                    conditions.append(f"json_extract(properties_json, '{path}') = ?")
                     params.append(value)
                 elif value is None:
+                    path = json_key_path(key)
                     conditions.append(
-                        f"json_extract(properties_json, '$.{key}') IS NULL"
+                        f"json_extract(properties_json, '{path}') IS NULL"
                     )
                 else:
                     complex_filters[key] = value
@@ -1555,10 +1558,10 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 "not JSON arrays."
             )
             raise ValueError(msg)
-        key = field.split(".", 1)[1]
-        # The JSON path is constructed from the DSL field, not raw user
-        # input — same convention as :meth:`_field_to_sql_expr`.
-        #
+        # The key is the caller's and the path is spliced into SQL text, not
+        # bound, so :func:`json_key_path` refuses a key that is not a plain
+        # object key before it gets there.
+        path = json_key_path(field.split(".", 1)[1])
         # Subtlety: ``json_type(json_extract(j, '$.k'))`` raises
         # "malformed JSON" when the extracted value is a scalar string,
         # because ``json_extract`` returns the raw scalar TEXT and
@@ -1566,8 +1569,8 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # form ``json_type(j, '$.k')`` walks the path itself and
         # returns the type string ('text' / 'array' / etc.) or NULL
         # for missing keys — exactly the guard we need.
-        json_extract_expr = f"json_extract(properties_json, '$.{key}')"
-        json_type_expr = f"json_type(properties_json, '$.{key}')"
+        json_extract_expr = f"json_extract(properties_json, '{path}')"
+        json_type_expr = f"json_type(properties_json, '{path}')"
         safe_array = (
             f"(CASE WHEN {json_type_expr} = 'array' "
             f"THEN {json_extract_expr} ELSE '[]' END)"
@@ -1588,13 +1591,11 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             # renders as the plain ``IS NOT NULL`` on that column.
             return "document_ids_json"
         if field.startswith("properties."):
-            key = field.split(".", 1)[1]
-            # SQLite identifier-quoting on JSON path keys is unnecessary
-            # because keys come from agents and are constrained to JSON;
-            # parameter binding doesn't apply to json paths in
-            # json_extract — but the path string itself is constructed
-            # from the DSL so it's not user input.
-            return f"json_extract(properties_json, '$.{key}')"
+            # The key is the caller's and the path is spliced into SQL text,
+            # not bound, so :func:`json_key_path` refuses a key that is not a
+            # plain object key before it gets there.
+            path = json_key_path(field.split(".", 1)[1])
+            return f"json_extract(properties_json, '{path}')"
         msg = f"Unsupported DSL field path: {field!r}"
         raise ValueError(msg)
 
@@ -1648,8 +1649,8 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         if field in EDGE_TOP_LEVEL_COLUMNS:
             return field
         if field.startswith("properties."):
-            key = field.split(".", 1)[1]
-            return f"json_extract(properties_json, '$.{key}')"
+            path = json_key_path(field.split(".", 1)[1])
+            return f"json_extract(properties_json, '{path}')"
         msg = f"Unsupported DSL edge field path: {field!r}"
         raise ValueError(msg)
 
