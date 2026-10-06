@@ -1207,6 +1207,28 @@ All notable changes to Trellis will be documented in this file.
   still wraps it on screen. Text, colour, JSON output and exit codes are
   unchanged, and a message with its own newlines keeps them.
   ([#750](https://github.com/ronsse/trellis-ai/pull/750))
+- **The error sanitizer suppresses Neo4j and ArcadeDB duplicate-constraint
+  values over Bolt.** Neo4j's uniqueness-violation text quotes the value:
+  `` Node(<n>) already exists with label `<Label>` and property
+  `<prop>` = '<value>' `` (gql_status `22N79`). So does ArcadeDB's, raised
+  inside a managed transaction even with the value passed as a bound
+  parameter: `` Duplicated key [<value>] found on index '<Label>[<prop>]'
+  already assigned to record #<rid> `` (gql_status `50N42`). Both passed
+  through `sanitize_error_message` verbatim and now get its static marker.
+  The marker and every other pattern, caller and payload shape are
+  unchanged.
+  ([#753](https://github.com/ronsse/trellis-ai/pull/753))
+- **ArcadeDB `upsert_edges_bulk` raises its documented `ValueError`, not a
+  raw driver error, when a dropped row's endpoint is re-created mid-call.**
+  #746 re-read a dropped row's endpoints inside the write's still-open
+  transaction. On ArcadeDB, when another writer re-created one of them
+  after the write, beside a row the write had written, that re-read raised
+  `neo4j.exceptions.DatabaseError: Record #... not found`. The endpoints
+  are now re-read after the transaction rolls back: the error names the
+  endpoint that is still missing, or both when both are current again, and
+  no edge of the batch is written. Neo4j already raised the `ValueError`;
+  SQLite and Postgres are unchanged.
+  ([#754](https://github.com/ronsse/trellis-ai/pull/754))
 - **`SQLiteDocumentStore.search` refuses a scalar metadata filter on a
   NUL-holding key with the `ValueError` the SQLite graph and vector stores
   raise**, before any SQL runs, where it raised a raw
