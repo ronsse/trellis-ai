@@ -496,6 +496,36 @@ def _detach_delete_until_none(tx: ManagedTransaction, cypher: str, nid: str) -> 
         removed += count
 
 
+def _missing_endpoint_message(row_index: int, end: str, node_id: str) -> str:
+    """The ``upsert_edges_bulk`` error for one row's missing endpoint.
+
+    Shared by round trip 1 (the up-front check) and the post-rollback
+    re-read in ``upsert_edges_bulk``'s transaction-failure handler, so the
+    two call sites cannot report the same defect in different words.
+    """
+    return f"upsert_edges_bulk[{row_index}]: {end} {node_id!r} has no current version"
+
+
+class _MissingEdgeRowError(Exception):
+    """Raised inside ``upsert_edges_bulk``'s transaction function when round
+    trip 2 drops a row (its endpoints no longer both show current).
+
+    Not a ``DriverError``/``Neo4jError``, so the managed-transaction retry
+    loop (``Session._run_transaction``) never retries it: it only retries
+    ``except (DriverError, Neo4jError)`` errors whose ``is_retryable()`` is
+    true: this type matches neither, so it is caught by the preceding
+    ``except Exception: tx._close(); raise`` instead, which rolls the
+    transaction back and re-raises unchanged. That rollback is the point —
+    it lets the endpoints be re-read in a fresh round trip instead of
+    inside the aborting transaction, where ArcadeDB can raise a bare
+    driver ``DatabaseError`` for a row a concurrent writer touched.
+    """
+
+    def __init__(self, row_index: int) -> None:
+        super().__init__(row_index)
+        self.row_index = row_index
+
+
 class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
     """Shared SCD-2 + Cypher payload for openCypher-over-Bolt backends.
 
@@ -1489,27 +1519,29 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             valid_endpoints = self._fetch_current_node_id_set(session, endpoint_ids)
             for i, spec in enumerate(edges):
                 if spec["source_id"] not in valid_endpoints:
-                    msg = (
-                        f"upsert_edges_bulk[{i}]: source "
-                        f"{spec['source_id']!r} has no current version"
+                    raise ValueError(
+                        _missing_endpoint_message(i, "source", spec["source_id"])
                     )
-                    raise ValueError(msg)
                 if spec["target_id"] not in valid_endpoints:
-                    msg = (
-                        f"upsert_edges_bulk[{i}]: target "
-                        f"{spec['target_id']!r} has no current version"
+                    raise ValueError(
+                        _missing_endpoint_message(i, "target", spec["target_id"])
                     )
-                    raise ValueError(msg)
 
             # Round trip 2 — close any existing current edges and create
             # new versions in a single UNWIND. Each row's endpoints are
             # narrowed to the rows they show, as in ``upsert_edge``;
             # grouping by ``row`` yields nothing for a row whose endpoint
             # has no current row, so the MATCH drops it. ``_tx`` compares
-            # the rows written with the rows sent and refuses the call
-            # naming the first dropped row; the raise inside the
-            # transaction function rolls the transaction back, so no row
-            # of the batch is written.
+            # the rows written with the rows sent and, at the first
+            # dropped row, raises ``_MissingEdgeRowError`` naming its index;
+            # that rolls the transaction back (no row of the batch is
+            # written) without re-reading the endpoints inside the
+            # aborting transaction — on ArcadeDB, a row a concurrent
+            # writer touched can make that in-transaction re-read raise a
+            # bare driver ``DatabaseError`` instead of the documented
+            # ``ValueError``. The endpoints are re-read after the
+            # rollback instead, in a fresh round trip on the same
+            # session.
             # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
             # across versions, matching the single-row method's collapsed
             # pattern.
@@ -1550,33 +1582,37 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 # versions returns a record for each, which would hide a
                 # dropped row from a count.
                 written = {int(r["row_index"]) for r in records}
-                for i, spec in enumerate(edges):
-                    if i in written:
-                        continue
-                    ids = [spec["source_id"], spec["target_id"]]
-                    current = {
-                        r["node_id"]
-                        for r in tx.run(
-                            "MATCH (n:Node) WHERE n.node_id IN $ids "
-                            "AND n.valid_to IS NULL RETURN n.node_id AS node_id",
-                            ids=ids,
-                        )
-                    }
-                    for end, node_id in zip(("source", "target"), ids, strict=True):
-                        if node_id not in current:
-                            msg = (
-                                f"upsert_edges_bulk[{i}]: {end} {node_id!r} "
-                                "has no current version"
-                            )
-                            raise ValueError(msg)
-                    msg = (
-                        f"upsert_edges_bulk[{i}]: source {ids[0]!r} or target "
-                        f"{ids[1]!r} was not current when the write ran"
-                    )
-                    raise ValueError(msg)
+                for i in range(len(edges)):
+                    if i not in written:
+                        raise _MissingEdgeRowError(i)
                 return records
 
-            records = session.execute_write(_tx)
+            try:
+                records = session.execute_write(_tx)
+            except _MissingEdgeRowError as exc:
+                # The transaction already rolled back (``Session.
+                # _run_transaction`` closes the tx on any non-retryable
+                # exception and re-raises it unchanged). Re-read the
+                # row's endpoints fresh, the same way round trip 1 does,
+                # rather than inside the now-aborted transaction.
+                i = exc.row_index
+                spec = edges[i]
+                ids = [spec["source_id"], spec["target_id"]]
+                current = self._fetch_current_node_id_set(session, ids)
+                for end, node_id in zip(("source", "target"), ids, strict=True):
+                    if node_id not in current:
+                        raise ValueError(
+                            _missing_endpoint_message(i, end, node_id)
+                        ) from exc
+                # Both endpoints read as current after the rollback: the
+                # dropped row was caused by something else transient
+                # (e.g. a concurrent close/recreate of the edge itself),
+                # not a missing endpoint.
+                msg = (
+                    f"upsert_edges_bulk[{i}]: source {ids[0]!r} or target "
+                    f"{ids[1]!r} was not current when the write ran"
+                )
+                raise ValueError(msg) from exc
 
         # UNWIND iteration order isn't guaranteed; reorder by
         # ``row_index`` so the returned IDs line up with the input list.

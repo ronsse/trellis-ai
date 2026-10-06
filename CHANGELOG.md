@@ -1178,6 +1178,21 @@ All notable changes to Trellis will be documented in this file.
   Both apps register the handlers from
   `trellis_api.app.register_exception_handlers`.
   ([#749](https://github.com/ronsse/trellis-ai/pull/749))
+- **ArcadeDB `upsert_edges_bulk` no longer leaks a raw driver error when a
+  dropped row's endpoint is recreated while the write's transaction is
+  still open.** #746 re-read a dropped row's endpoints inside that same
+  transaction to build its `ValueError`. On ArcadeDB, if another writer
+  recreated the endpoint between the write and that re-read, next to a row
+  the write did commit, the re-read raised
+  `neo4j.exceptions.DatabaseError: Record #... not found` instead of the
+  documented `ValueError`; Neo4j was unaffected. The transaction function
+  now raises a private sentinel naming the row instead of re-reading
+  in-transaction; the managed-transaction retry logic never retries it
+  (it is neither a `DriverError` nor a `Neo4jError`), so the rollback runs
+  once and the endpoints are re-read fresh afterward, on the same session.
+  Round trip 1's up-front check and this post-rollback re-read now report
+  a missing endpoint through one shared message helper, so the two
+  cannot drift apart. SQLite and Postgres are unchanged.
 
 ## [0.9.0] - 2026-05-13
 

@@ -30,6 +30,8 @@ import pytest
 
 pytest.importorskip("neo4j")
 
+from neo4j._sync.work.transaction import ManagedTransaction
+
 from tests.unit.stores import bolt_duplicate_current
 
 URI = os.environ.get("TRELLIS_TEST_ARCADEDB_URI", "")
@@ -256,12 +258,21 @@ def test_upsert_edge_missing_endpoints_raises(graph_store, source_id, target_id)
 
 def _purge_after_endpoint_check(store, monkeypatch, gone: str) -> None:
     """Purge ``gone`` once ``upsert_edges_bulk``'s endpoint check has found
-    it current, so the write runs without it."""
+    it current, so the write runs without it.
+
+    ``_fetch_current_node_id_set`` also backs the post-rollback re-read that
+    runs after the dropped-row write, so this fires on the first call only —
+    a second call finds ``gone`` already purged and just passes through.
+    """
     check = store._fetch_current_node_id_set
+    purged = False
 
     def check_then_purge(session, node_ids):
+        nonlocal purged
         found = check(session, node_ids)
-        assert store.delete_node(gone)
+        if not purged:
+            assert store.delete_node(gone)
+            purged = True
         return found
 
     monkeypatch.setattr(store, "_fetch_current_node_id_set", check_then_purge)
@@ -323,6 +334,50 @@ def test_upsert_edges_bulk_refuses_a_dropped_row_beside_a_duplicated_edge(
     ):
         graph_store.upsert_edges_bulk(edges)
     assert _raw_counts(graph_store) == (nodes - 1, rels)
+
+
+def test_upsert_edges_bulk_raises_valueerror_when_endpoint_recreated_mid_write(
+    graph_store, monkeypatch
+):
+    """Gate #746 follow-up 1: row 1's target is purged after the endpoint
+    check (so the write's UNWIND drops it) and another writer recreates it
+    inside the still-open transaction, right after the UNWIND runs and
+    beside row 0, which the UNWIND did write. On ArcadeDB the in-transaction
+    re-read used to raise a bare driver ``DatabaseError`` for this shape
+    instead of the documented ``ValueError`` (gate g746 item 5); the
+    endpoints are now re-read after the rollback instead, so both engines
+    raise the same ``ValueError`` and the batch commits nothing."""
+    for node_id in ("a", "b", "c", "d"):
+        graph_store.upsert_node(node_id, "s", {})
+    _purge_after_endpoint_check(graph_store, monkeypatch, "d")
+
+    orig_run = ManagedTransaction.run
+
+    def recreate_after_unwind(self, query, parameters=None, **kw):
+        result = orig_run(self, query, parameters, **kw)
+        text = str(query)
+        if "UNWIND $rows" in text and "CREATE (s)-[new:EDGE]->(t)" in text:
+            records = list(result)
+            # Another writer recreates "d" while this transaction is
+            # still open, beside row 0's edge, which this UNWIND wrote.
+            graph_store.upsert_node("d", "s", {})
+            return records
+        return result
+
+    monkeypatch.setattr(ManagedTransaction, "run", recreate_after_unwind)
+
+    nodes, rels = _raw_counts(graph_store)
+    edges = [
+        {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
+        {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
+    ]
+    with pytest.raises(
+        ValueError,
+        match=r"upsert_edges_bulk\[1\]: source 'c' or target 'd' was not current",
+    ):
+        graph_store.upsert_edges_bulk(edges)
+    assert _raw_counts(graph_store) == (nodes, rels)
+    assert rels == 0
 
 
 class TestArcadeDBEdgeProvenance:
