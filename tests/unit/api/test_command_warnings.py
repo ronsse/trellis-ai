@@ -20,6 +20,7 @@ used for the withholding note.
 from __future__ import annotations
 
 import json
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -147,3 +148,66 @@ class TestTheKeyIsUnconditional:
         assert result["status"] == "success"
         assert "warnings" in result, f"{label}: key absent, not merely empty"
         assert result["warnings"] == []
+
+
+#: Stands in for a driver's own error text, which can carry query text
+#: and values.
+_DRIVER_TEXT = "synthetic-secret-8b2f"
+
+
+class TestAnAuditWarningCarriesNoDriverText:
+    def test_a_sqlite_error_from_the_event_log_is_named_by_its_type(
+        self, make_client, tmp_path: Path
+    ) -> None:
+        """A real ``sqlite3.Error`` from the shipped SQLite event log.
+
+        A trigger refuses the executor's ``mutation.executed`` row with
+        synthetic driver text, so the handler's write commits and the audit
+        emit raises ``sqlite3.IntegrityError``. The body says the audit event
+        is missing and names that type, and carries none of its text.
+        """
+        client = make_client()
+        assert app_module._registry is not None
+        _ = app_module._registry.operational.event_log  # creates events.db
+        conn = sqlite3.connect(tmp_path / "stores" / "events.db")
+        try:
+            conn.execute(
+                "CREATE TRIGGER refuse_the_audit_row BEFORE INSERT ON events "
+                "WHEN NEW.event_type = 'mutation.executed' "
+                f"BEGIN SELECT RAISE(ABORT, 'server says: {_DRIVER_TEXT}'); END"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json={
+                "commands": [
+                    {
+                        "operation": "entity.create",
+                        "args": {"entity_type": "service", "name": "synthetic-audit"},
+                    }
+                ],
+                "requested_by": "test:synthetic",
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert _DRIVER_TEXT not in resp.text
+        (result,) = resp.json()["results"]
+        assert result.pop("command_id")
+        assert result.pop("created_id"), "the handler's write committed"
+        assert result == {
+            "status": "success",
+            "operation": "entity.create",
+            "message": "Entity created: synthetic-audit",
+            "warnings": [
+                (
+                    "audit_event_not_recorded: the mutation.executed event for "
+                    "this command could not be written to the event log "
+                    "(IntegrityError). The outcome this result reports stands; "
+                    "only its audit record is missing."
+                )
+            ],
+        }

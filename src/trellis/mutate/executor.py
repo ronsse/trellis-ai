@@ -39,10 +39,12 @@ AUDIT_EMIT_FAILED_MARKER = "audit_event_not_recorded"
 #: The full warning. Built from the marker so the two cannot drift apart.
 #: Deliberately neutral about what the command did — it is appended to
 #: SUCCESS, FAILED, REJECTED and DUPLICATE results alike, and on three of
-#: those nothing was written to any store.
+#: those nothing was written to any store. ``{error}`` is the exception's
+#: type, plus ``: <message>`` only for a ``TrellisError``; see
+#: ``MutationExecutor._emit_event``.
 _AUDIT_EMIT_FAILED_TEMPLATE = (
     AUDIT_EMIT_FAILED_MARKER + ": the {event_type} event for this command "
-    "could not be written to the event log ({error_type}: {error}). The "
+    "could not be written to the event log ({error}). The "
     "outcome this result reports stands; only its audit record is missing."
 )
 
@@ -703,7 +705,9 @@ class MutationExecutor:
         a no-op on the CLI — #425) and stated on the returned
         :class:`CommandResult` under :data:`AUDIT_EMIT_FAILED_MARKER`. The
         line names the exception's type, adds its message only when it is a
-        ``TrellisError``, and carries no traceback. An emit from inside an
+        ``TrellisError``, and carries no traceback. The warning follows the
+        same rule, since REST, MCP and the CLI hand it to the caller and a
+        driver's text can carry query text and values. An emit from inside an
         ``except`` block (a failed handler, a failed idempotency read) has
         the failure being audited as its error's context, so a rendered
         traceback would print that failure, a driver's text included (#702,
@@ -759,7 +763,10 @@ class MutationExecutor:
             )
             return _AUDIT_EMIT_FAILED_TEMPLATE.format(
                 event_type=event_type,
-                error_type=type(exc).__name__,
-                error=exc,
+                error=(
+                    f"{type(exc).__name__}: {exc}"
+                    if isinstance(exc, TrellisError)
+                    else type(exc).__name__
+                ),
             )
         return None
