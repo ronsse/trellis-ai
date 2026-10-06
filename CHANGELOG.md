@@ -964,6 +964,22 @@ All notable changes to Trellis will be documented in this file.
   instead of `500`. The key is not recorded, so a retry runs once the log
   can be read. A Postgres event log's driver errors still escape.
   ([#728](https://github.com/ronsse/trellis-ai/pull/728))
+- **`trellis extract traces` and `extract refresh` report what their batch
+  answered.** Both discarded the results of the governed batch they ran: a
+  backfill whose every write was refused printed `"status": "backfilled"`
+  and "Extracted N entities" and exited `0`, and a refused refresh read as
+  unchanged and exited `0`. Both now count the results by status
+  (`succeeded`, `failed`, `rejected`, `duplicates`) in JSON and text, the
+  text names the failure count and the first failure's message, and
+  `extract traces` labels its totals as drafts. A run whose every command
+  is refused or fails exits by the first one (`3` for a policy, `2` for
+  another refusal, `5` for a failure) with `"status": "error"` and that
+  failure's `message`, as `trellis ingest dbt-manifest` does; a run that
+  wrote anything still exits `0`. A dry run's JSON and exit are unchanged.
+  The text output prints a trace's domain and a refresh diff's entity type,
+  keys and values verbatim, instead of deleting bracketed text or exiting
+  `1` on a closing tag such as `[/x]`.
+  ([#730](https://github.com/ronsse/trellis-ai/pull/730))
 
 ## [0.9.0] - 2026-05-13
 
