@@ -24,12 +24,23 @@ from tests.unreadable_paths import (
     UnreadablePathShape,
     unreadable,
 )
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis_cli.admin import admin_app
 from trellis_cli.exit_codes import EXIT_STORE
 
 #: What a real read-only SQLite file raises on a write.
 _READONLY_DB = "attempt to write a readonly database"
+
+#: A synthetic row value shaped like the opaque token a real Postgres/
+#: Neo4j/ArcadeDB duplicate-key message quotes (``DETAIL: Key (col)=(...)
+#: already exists.``) — 40+ chars of ``[A-Za-z0-9+_-]`` trips the
+#: sanitizer's long-opaque-token heuristic. Synthetic, not a real secret.
+_SYNTHETIC_SECRET = "synthetic-secret-a1b2c3d4e5f6a1b2c3d4e5f6"  # noqa: S105 — test placeholder, not a real credential
+_SYNTHETIC_STORE_ERROR = (
+    'duplicate key value violates unique constraint "node_pkey" DETAIL: '
+    f"Key (external_id)=({_SYNTHETIC_SECRET}) already exists."
+)
 
 
 def _write_sqlite_config(tmp_path: Path, name: str) -> tuple[Path, Path]:
@@ -448,3 +459,174 @@ class TestFailedMigrationExitsTheSameWayOnBothSurfaces:
             admin_app, self._failing_migration_argv(src_config, text_dst)
         )
         assert text_result.exit_code == 0, text_result.output
+
+
+class TestStoreFailureTextIsSanitized:
+    """#753 follow-up 2: a destination store's own failure text reaches
+    stdout unsanitized on every rendering path, while every other CLI
+    failure path routes ``str(exc)`` through ``sanitize_error_message``
+    first.
+
+    ``_SYNTHETIC_STORE_ERROR`` reproduces the ``DETAIL: Key (col)=(...)
+    already exists.`` shape a real Postgres/Neo4j/ArcadeDB duplicate-key
+    violation quotes, with a 41-char opaque token standing in for the
+    row value — long enough to trip the sanitizer's existing
+    long-opaque-token heuristic (no sanitizer pattern is added here).
+    """
+
+    @staticmethod
+    def _seeded_configs(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        message: str = _SYNTHETIC_STORE_ERROR,
+    ) -> tuple[Path, Path]:
+        """Seed the source store, THEN patch writes to fail.
+
+        Seeding the source also calls ``upsert_node``, so the patch must
+        land after seeding or it breaks setup instead of the migration.
+        """
+        src_config, src_db = _write_sqlite_config(tmp_path, "src")
+        dst_config, _ = _write_sqlite_config(tmp_path, "dst")
+        src = SQLiteGraphStore(db_path=src_db)
+        src.upsert_node("n1", node_type="X", properties={})
+        src.close()
+
+        def _refuse_write(*_args: object, **_kwargs: object) -> None:
+            raise sqlite3.IntegrityError(message)
+
+        monkeypatch.setattr(SQLiteGraphStore, "upsert_node", _refuse_write)
+        return src_config, dst_config
+
+    def test_fail_fast_abort_line_is_sanitized(
+        self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default (stop-on-error) strategy: the ``Migration aborted:``
+        line wraps ``MigrationStepError``, which embeds ``str(exc)`` of
+        the underlying store error verbatim."""
+        src_config, dst_config = self._seeded_configs(tmp_path, monkeypatch)
+
+        result = runner.invoke(
+            admin_app,
+            [
+                "migrate-graph",
+                "--from-config",
+                str(src_config),
+                "--to-config",
+                str(dst_config),
+            ],
+        )
+
+        output = plain(result.output)
+        assert _SYNTHETIC_SECRET not in output
+        assert SUPPRESSED_MARKER in output
+        assert result.exit_code == EXIT_STORE
+
+    def test_fail_fast_abort_line_is_sanitized_under_format_json(
+        self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``MigrationStepError`` is caught and rendered before the
+        ``--format`` branch is reached, so ``--format json`` does not
+        change this path — re-measured, not assumed."""
+        src_config, dst_config = self._seeded_configs(tmp_path, monkeypatch)
+
+        result = runner.invoke(
+            admin_app,
+            [
+                "migrate-graph",
+                "--from-config",
+                str(src_config),
+                "--to-config",
+                str(dst_config),
+                "--format",
+                "json",
+            ],
+        )
+
+        output = plain(result.output)
+        assert _SYNTHETIC_SECRET not in output
+        assert SUPPRESSED_MARKER in output
+        assert result.exit_code == EXIT_STORE
+
+    def test_continue_on_error_text_list_is_sanitized(
+        self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src_config, dst_config = self._seeded_configs(tmp_path, monkeypatch)
+
+        result = runner.invoke(
+            admin_app,
+            [
+                "migrate-graph",
+                "--from-config",
+                str(src_config),
+                "--to-config",
+                str(dst_config),
+                "--continue-on-error",
+            ],
+        )
+
+        output = plain(result.output)
+        assert _SYNTHETIC_SECRET not in output
+        assert SUPPRESSED_MARKER in output
+        assert result.exit_code == EXIT_STORE
+
+    def test_continue_on_error_json_errors_and_step_failures_are_sanitized(
+        self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src_config, dst_config = self._seeded_configs(tmp_path, monkeypatch)
+
+        result = runner.invoke(
+            admin_app,
+            [
+                "migrate-graph",
+                "--from-config",
+                str(src_config),
+                "--to-config",
+                str(dst_config),
+                "--continue-on-error",
+                "--format",
+                "json",
+            ],
+        )
+
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert payload["errors"], "the failed step must survive into the payload"
+        assert payload["errors"][0]["message"] == SUPPRESSED_MARKER
+        assert payload["step_failures"], "structured failures must survive too"
+        assert payload["step_failures"][0]["message"] == SUPPRESSED_MARKER
+        assert result.exit_code == EXIT_STORE
+        # Scope note, not asserted as a defect of this PR: step_failures[].
+        # traceback is a raw ``traceback.format_exception`` string, not a
+        # sanitizer rendering point named in this change, so it still
+        # carries the row value. Flagged in the PR body as a follow-up.
+        assert _SYNTHETIC_SECRET in payload["step_failures"][0]["traceback"]
+
+    def test_a_clean_failure_message_renders_unchanged(
+        self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure whose text the sanitizer leaves alone (no leak
+        heuristic trips) must render exactly as it did before this
+        change — sanitizing is not a license to also truncate or alter
+        clean operator-facing text."""
+        src_config, dst_config = self._seeded_configs(
+            tmp_path, monkeypatch, message=_READONLY_DB
+        )
+
+        result = runner.invoke(
+            admin_app,
+            [
+                "migrate-graph",
+                "--from-config",
+                str(src_config),
+                "--to-config",
+                str(dst_config),
+                "--continue-on-error",
+                "--format",
+                "json",
+            ],
+        )
+
+        payload = json.loads(result.stdout)
+        assert payload["errors"][0]["message"] == f"IntegrityError: {_READONLY_DB}"
+        assert payload["step_failures"][0]["message"] == _READONLY_DB

@@ -1207,6 +1207,18 @@ All notable changes to Trellis will be documented in this file.
   still wraps it on screen. Text, colour, JSON output and exit codes are
   unchanged, and a message with its own newlines keeps them.
   ([#750](https://github.com/ronsse/trellis-ai/pull/750))
+- **`trellis admin migrate-graph` sanitizes the destination store's own
+  failure text before printing it.** The `Migration aborted:` line
+  (`MigrationStepError`, which embeds the wrapped exception's `str()`),
+  `--continue-on-error`'s text `Errors:` list, and its `--format json`
+  `errors[].message` and `step_failures[].message` all printed `str(exc)`
+  verbatim — a duplicate-key or constraint violation from Postgres, Neo4j
+  or ArcadeDB can quote the row value that tripped it (#747/#753), so it
+  reached stdout unsanitized while every other CLI failure path routes
+  that text through `sanitize_error_message` first. All four now do too;
+  `report.errors`/`report.step_failures` keep the raw text for library
+  callers, and `step_failures[].traceback` in the JSON payload is
+  unchanged (a residual leak surface, follow-up).
 
 ## [0.9.0] - 2026-05-13
 
