@@ -1168,6 +1168,7 @@ class TestIngestBatchRefusals:
         if fmt == "json":
             payload = json.loads(result.stdout)
             assert (payload["status"], payload["nodes"]) == ("ingested", 1)
+            assert "message" not in payload
         else:
             assert "ingested" in plain(result.output)
 

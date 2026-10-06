@@ -143,7 +143,7 @@ class BatchOutcome(NamedTuple):
 def batch_outcome(
     results: Sequence[CommandResult], *, done: str, name_partial: bool = False
 ) -> BatchOutcome:
-    """Read a batch's results by the rule every batch command follows (#687).
+    """Read a batch's results by the #687 rule ``ingest`` and ``extract`` share.
 
     A batch is refused only when it is non-empty and every command was
     refused or failed. It exits by its first result, and its payload reads
