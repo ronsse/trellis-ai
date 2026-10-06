@@ -74,16 +74,17 @@ class TestExecutorTypedExceptionRouting:
 
         log_events: list[tuple[str, dict]] = []
 
-        def _exception(event: str, **kw: object) -> None:
+        def _error(event: str, **kw: object) -> None:
             log_events.append((event, dict(kw)))
 
         # Bind on the module-level logger; the executor reads via
         # logger.bind() inside execute() but the underlying handler
         # is the same structlog instance.
         bound_logger = executor_module.logger.bind()
-        monkeypatch.setattr(bound_logger, "exception", _exception)
-        # Patch logger.bind to return our bound stub so .exception is
-        # captured.
+        monkeypatch.setattr(bound_logger, "error", _error)
+        # Patch logger.bind to return our bound stub so .error is
+        # captured. structlog's .exception is .error with exc_info=True,
+        # so an .exception call is captured here too.
         monkeypatch.setattr(executor_module.logger, "bind", lambda **_: bound_logger)
 
         event_log = MagicMock()
@@ -102,6 +103,10 @@ class TestExecutorTypedExceptionRouting:
         assert store_events, "expected handler_typed_error to be logged"
         assert store_events[0]["store"] == "postgres"
         assert store_events[0]["error_type"] == "StoreError"
+        assert store_events[0]["error"] == "connection refused"
+        # Logged without exc_info; test_executor_failure_logging.py
+        # reads the rendered output.
+        assert "exc_info" not in store_events[0]
 
     def test_validation_error_unchanged(self) -> None:
         """Existing ValidationError path must continue to route as REJECTED
