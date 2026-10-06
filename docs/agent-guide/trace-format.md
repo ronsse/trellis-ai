@@ -345,7 +345,7 @@ trellis ingest trace trace.json --format json
 Output on success:
 
 ```json
-{"status": "ingested", "trace_id": "01JRK5N7QF8GHTM2XVZP3CWD9E", "source": "agent", "intent": "test"}
+{"status": "ingested", "trace_id": "01JRK5N7QF8GHTM2XVZP3CWD9E", "source": "agent", "intent": "test", "already_ingested": false}
 ```
 
 Output on validation error:

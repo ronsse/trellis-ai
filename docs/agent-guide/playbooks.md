@@ -58,7 +58,7 @@ trellis ingest trace /tmp/trace.json --format json
 **Expected output:**
 
 ```json
-{"status": "ingested", "trace_id": "01JRK5N7QF8GHTM2XVZP3CWD9E", "source": "agent", "intent": "Migrated user table to add email_verified column"}
+{"status": "ingested", "trace_id": "01JRK5N7QF8GHTM2XVZP3CWD9E", "source": "agent", "intent": "Migrated user table to add email_verified column", "already_ingested": false}
 ```
 
 4. (Optional) Record feedback if quality is known.

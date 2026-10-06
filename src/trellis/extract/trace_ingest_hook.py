@@ -14,9 +14,8 @@ Contract (mirrors the ``save_memory`` extraction stage):
   existing deployment sees byte-identical behaviour.
 * Runs **after** the trace is durably stored.  It only ever *reads* the
   trace; it never mutates it (traces are immutable).
-* Runs only for a trace the calling surface stored: each surface reads
-  :func:`trace_already_ingested` before its write and skips the hook for
-  a ``trace_id`` the store already held.
+* Skipped when :func:`trace_already_ingested`, which each calling surface
+  reads before its write, finds the ``trace_id`` already stored.
 * Fully best-effort: any failure is logged and swallowed.  A broken
   extraction must NEVER fail the ingest.
 * Drafts go through ``result_to_batch`` → ``execute_batch`` with the
@@ -105,10 +104,11 @@ def trace_already_ingested(registry: StoreRegistry, trace_id: str) -> bool:
     node.
 
     A trace another writer stores between this read and the handler's is
-    still extracted, as is every trace when this read fails: the surface
-    then behaves as it did before this check.  A store that cannot be read
-    fails the handler's own read too, and the surface reports that as it
-    always has.
+    still extracted.  So is a stored trace whose read here fails while the
+    handler's read succeeds: a failed read logs
+    ``trace_duplicate_check_failed`` and answers ``False``.  A store that
+    cannot be read fails the handler's read too, and the surface reports
+    that failure.
     """
     try:
         return registry.operational.trace_store.get(trace_id) is not None

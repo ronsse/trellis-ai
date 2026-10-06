@@ -144,10 +144,10 @@ def ingest_trace(
 
     # Feature-flagged post-ingest trace->graph extraction
     # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs the deterministic
-    # TraceExtractor through the governed MutationExecutor, and only for a
-    # trace this call stored: a duplicate's agent and artifacts would land
-    # on the stored trace's node. Never blocks ingest success -- failures
-    # are logged and swallowed inside the hook.
+    # TraceExtractor through the governed MutationExecutor, and not when the
+    # read above found the trace_id stored: a duplicate's agent and artifacts
+    # would land on the stored trace's node. Never blocks ingest success --
+    # failures are logged and swallowed inside the hook.
     extraction = (
         None
         if already_ingested

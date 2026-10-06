@@ -71,9 +71,9 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
 
     # Feature-flagged post-ingest trace->graph extraction
     # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs after the trace is durably
-    # stored, and only for a trace this call stored: a duplicate's agent and
-    # artifacts would land on the stored trace's node. Fail-soft inside the
-    # hook so it never fails the request.
+    # stored, and not when the read above found the trace_id stored: a
+    # duplicate's agent and artifacts would land on the stored trace's node.
+    # Fail-soft inside the hook so it never fails the request.
     if not already_ingested:
         run_trace_extraction(registry, trace, requested_by="api:ingest-trace")
 
