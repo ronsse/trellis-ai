@@ -76,11 +76,11 @@ _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
 # enumerate-don't-bare-except discipline as the tuple above, and for the same
 # reason: a broad ``except Exception`` here would be flagged by the
 # silent-fallback audit, and correctly — the guard does not swallow the
-# failure, it converts it into a warning on the result plus a traceback in
-# operator logs. ``StoreError`` is what a well-behaved backend raises; the
-# panic tuple covers a backend that does not, because an event log that
-# raises ``ConnectionError`` instead must not be the difference between a
-# degraded result and an aborted batch.
+# failure, it converts it into a warning on the result plus an ``error``
+# line in operator logs. ``StoreError`` is what a well-behaved backend
+# raises; the panic tuple covers a backend that does not, because an event
+# log that raises ``ConnectionError`` instead must not be the difference
+# between a degraded result and an aborted batch.
 _AUDIT_EMIT_FAILURE: tuple[type[BaseException], ...] = (
     StoreError,
     TrellisError,
@@ -586,8 +586,9 @@ class MutationExecutor:
         # message and the log line name the exception's type, not its text,
         # as the typed store errors do (#702, #713), so the line carries no
         # traceback; if the rejection event cannot be written either,
-        # ``_emit_event``'s own traceback chains this one. The key is not
-        # recorded, so a retry once the event log recovers runs.
+        # ``_emit_event`` logs that failure without one too, since this one
+        # is its context. The key is not recorded, so a retry once the event
+        # log recovers runs.
         try:
             persisted = self._event_log.has_idempotency_key(command.idempotency_key)
         except _AUDIT_EMIT_FAILURE as exc:
@@ -697,10 +698,16 @@ class MutationExecutor:
         batch down on a *failed* one, so the guard sits at the single seam
         every stage already routes through.
 
-        The failure is never swallowed: it is logged with a traceback at
-        ``error`` (``TRELLIS_LOG_LEVEL`` defaults to ``WARNING``, so anything
-        lower is a no-op on the CLI — #425) and stated on the returned
-        :class:`CommandResult` under :data:`AUDIT_EMIT_FAILED_MARKER`.
+        The failure is never swallowed: it is logged at ``error``
+        (``TRELLIS_LOG_LEVEL`` defaults to ``WARNING``, so anything lower is
+        a no-op on the CLI — #425) and stated on the returned
+        :class:`CommandResult` under :data:`AUDIT_EMIT_FAILED_MARKER`. The
+        line names the exception's type, adds its message only when it is a
+        ``TrellisError``, and carries no traceback. An emit from inside an
+        ``except`` block (a failed handler, a failed idempotency read) has
+        the failure being audited as its error's context, so a rendered
+        traceback would print that failure, a driver's text included (#702,
+        #713), even when the emit's own error is clean.
 
         Measured before it was written: over the 3,655 governed mutations
         this deployment has executed since 2026-07-06, zero Stage 5 emits
@@ -740,12 +747,15 @@ class MutationExecutor:
                 payload=payload,
             )
         except _AUDIT_EMIT_FAILURE as exc:
-            logger.exception(
+            # No traceback, and no text Trellis did not write; see the
+            # docstring.
+            logger.error(  # noqa: TRY400 — no traceback on purpose; see above
                 "audit_emit_failed",
                 command_id=command.command_id,
                 operation=command.operation,
                 event_type=event_type,
                 error_type=type(exc).__name__,
+                error=str(exc) if isinstance(exc, TrellisError) else None,
             )
             return _AUDIT_EMIT_FAILED_TEMPLATE.format(
                 event_type=event_type,

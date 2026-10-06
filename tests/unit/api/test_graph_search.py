@@ -204,6 +204,23 @@ def test_facets_honour_q_as_the_list_does(
     assert nothing["total"] == 0
 
 
+def test_search_reads_an_underscore_in_q_literally_on_a_sqlite_store(
+    client: TestClient, store: GraphStore
+) -> None:
+    store.upsert_node("n-1", "Activity", {"name": "a_b"})
+    # Read as a LIKE pattern, the "_" in q would match this name too.
+    store.upsert_node("n-2", "concept", {"name": "axb"})
+
+    resp = client.get(SEARCH, params={"q": "a_b"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert ([r["entity_id"] for r in body["results"]], body["total"]) == (["n-1"], 1)
+    assert _facets(client, q="a_b")["node_types"] == [
+        {"node_type": "Activity", "count": 1}
+    ]
+
+
 @pytest.mark.parametrize("q", ["", "%", "_", "\\", " ", "É", "é", "ß"])
 def test_facets_agree_with_the_list_on_wildcards_blanks_and_case(
     client: TestClient, store: GraphStore, q: str
@@ -217,8 +234,9 @@ def test_facets_agree_with_the_list_on_wildcards_blanks_and_case(
 
     body = _facets(client, q=q)
 
-    # What %, _, \ and non-ASCII case match differs by backend; the facet
-    # applies the list's own predicate, so the two agree.
+    # %, _ and \ are LIKE metacharacters, read literally; what non-ASCII
+    # case matches differs by backend. The facet applies the list's own
+    # predicate, so the two agree.
     total = _list_total(client, q=q)
     assert total > 0
     assert body["total"] == total

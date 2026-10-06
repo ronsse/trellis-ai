@@ -1023,6 +1023,36 @@ All notable changes to Trellis will be documented in this file.
   timeout and failed with `database is locked` until the connection's next
   commit.
   ([#733](https://github.com/ronsse/trellis-ai/pull/733))
+- **Two error log lines no longer print a driver's text.**
+  `api_trellis_error`, the REST API's line for a typed Trellis failure, and
+  `audit_emit_failed`, the executor's line for an audit event it could not
+  write, carry the exception's type and, when Trellis wrote it, its message
+  under `error`, instead of a traceback. A traceback prints the exception's
+  chain: the driver exception a type-only `StoreError` is chained from, whose
+  text can carry query text and values (#702, #713), and for an emit inside
+  an `except` block, the failure it was auditing. An untyped failure that
+  reaches the API's catch-all still logs its traceback; response bodies and
+  command results are unchanged.
+  ([#734](https://github.com/ronsse/trellis-ai/pull/734))
+- **A graph search for text holding `%`, `_` or `\` matches that text
+  literally on SQLite and Postgres.** `GET /graph/search`'s `q`, and the
+  facet counts under it, reach the graph store's `search_nodes` and
+  `count_nodes_by_type`, which the SQLite and Postgres stores matched as a
+  `LIKE` / `ILIKE` pattern: `%` and `_` were wildcards, so `q=a_b` also
+  listed a node named `axb` and `q=%` listed every node, and on Postgres a
+  backslash escaped the next character, so `back\slash` found `backslash`
+  and not itself. Both stores now escape the three characters and name `\`
+  as the `ESCAPE` character, so they match as the Neo4j and ArcadeDB stores
+  already did. ([#737](https://github.com/ronsse/trellis-ai/pull/737))
+- **A partial `trellis extract traces` or `extract refresh` run names its
+  first failure in JSON, as its text does.** The JSON of a run with some
+  writes refused or failed carries the first one's sanitized `message` beside
+  `"status": "backfilled"` or `"refreshed"`; it named a failure only when
+  every write was refused or failed. Exit codes are unchanged. The batch rule
+  these two share with `trellis ingest dbt-manifest` and `openlineage` is now
+  one function, `trellis_cli.exit_codes.batch_outcome`, rather than a copy in
+  each module, and those commands' output is otherwise unchanged.
+  ([#736](https://github.com/ronsse/trellis-ai/pull/736))
 - **`upsert_nodes_bulk` refuses a `node_id` given twice in one call.** On
   Neo4j and ArcadeDB every occurrence that did not match the node's stored
   version wrote a version of its own, so two such occurrences left the node

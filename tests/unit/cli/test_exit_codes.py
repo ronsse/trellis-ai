@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.mutate.commands import CommandResult, CommandStatus, Operation
 from trellis_cli import exit_codes
 from trellis_cli.extract_refresh import _emit_refresh_event, _snapshot_entities
@@ -84,6 +85,100 @@ class TestRefusalExitCode:
             metadata=metadata,
         )
         assert exit_codes.refusal_exit_code(result) == code
+
+
+#: A store error quoting its DSN, credentials and all.
+_DRIVER = "no route to postgres://ops:pw@db:5432/kb"
+
+_NAME_PARTIAL = pytest.mark.parametrize("name_partial", [False, True])
+
+
+def _batch(*answers: tuple[CommandStatus, str]) -> list[CommandResult]:
+    """Results answering a batch's commands in order, each with its message."""
+    return [
+        CommandResult(
+            command_id=f"cmd-{i}",
+            status=status,
+            operation=Operation.ENTITY_CREATE,
+            message=message,
+        )
+        for i, (status, message) in enumerate(answers)
+    ]
+
+
+class TestBatchOutcome:
+    """One reading of a batch's results for ingest and extract alike (#687, #730)."""
+
+    @_NAME_PARTIAL
+    @pytest.mark.parametrize(
+        "statuses",
+        [
+            pytest.param([CommandStatus.SUCCESS] * 2, id="all-success"),
+            pytest.param([CommandStatus.DUPLICATE] * 2, id="duplicate-only"),
+            pytest.param([CommandStatus.SUCCESS, CommandStatus.DUPLICATE], id="both"),
+            pytest.param([], id="empty"),
+        ],
+    )
+    def test_a_batch_with_no_failure_is_done(
+        self, statuses: list[CommandStatus], name_partial: bool
+    ) -> None:
+        """A duplicate replays a write that landed; an empty batch refused nothing."""
+        results = _batch(*((s, "done") for s in statuses))
+        outcome = exit_codes.batch_outcome(
+            results, done="ingested", name_partial=name_partial
+        )
+        assert outcome == (None, None, {"status": "ingested"})
+
+    @_NAME_PARTIAL
+    def test_a_batch_refused_throughout_is_refused_by_its_first_result(
+        self, name_partial: bool
+    ) -> None:
+        results = _batch(
+            (CommandStatus.REJECTED, "first"), (CommandStatus.FAILED, "second")
+        )
+        outcome = exit_codes.batch_outcome(
+            results, done="ingested", name_partial=name_partial
+        )
+        assert outcome.refusal is outcome.first_failure is results[0]
+        assert outcome.status == {"status": "error", "message": "first"}
+
+    @_NAME_PARTIAL
+    def test_a_mixed_batch_is_done_and_names_its_first_failure_on_request(
+        self, name_partial: bool
+    ) -> None:
+        results = _batch(
+            (CommandStatus.SUCCESS, "done"),
+            (CommandStatus.REJECTED, "first"),
+            (CommandStatus.FAILED, "second"),
+        )
+        outcome = exit_codes.batch_outcome(
+            results, done="backfilled", name_partial=name_partial
+        )
+        assert outcome.refusal is None
+        assert outcome.first_failure is results[1]
+        named = {"message": "first"} if name_partial else {}
+        assert outcome.status == {"status": "backfilled", **named}
+
+    @pytest.mark.parametrize(
+        ("answers", "status"),
+        [
+            pytest.param([(CommandStatus.FAILED, _DRIVER)], "error", id="refused"),
+            pytest.param(
+                [(CommandStatus.SUCCESS, "done"), (CommandStatus.FAILED, _DRIVER)],
+                "refreshed",
+                id="partial",
+            ),
+        ],
+    )
+    def test_driver_text_stays_out_of_the_payload(
+        self, answers: list[tuple[CommandStatus, str]], status: str
+    ) -> None:
+        """The payload is an artifact; the result keeps the text for the human form."""
+        results = _batch(*answers)
+        outcome = exit_codes.batch_outcome(results, done="refreshed", name_partial=True)
+        assert outcome.status == {"status": status, "message": SUPPRESSED_MARKER}
+        assert outcome.first_failure is results[-1]
+        assert results[-1].message == _DRIVER
 
 
 class TestExtractRefreshSnapshotErrors:
