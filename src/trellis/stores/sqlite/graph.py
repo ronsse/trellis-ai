@@ -1050,11 +1050,14 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # Pull existing current edges for the (source, target, type)
         # triplets in this batch in one shot. The single-row method
         # uses three-column equality; the bulk path replicates that by
-        # encoding the triplet as a delimited key client-side after
+        # keeping the rows whose triplet the batch names, after
         # one bulk fetch keyed on ``source_id IN (...)``. Choosing
         # source_id over (source, target) for the IN clause keeps the
         # query simple — the indexed ``edges_lookup_idx`` covers it
         # and post-filtering in Python is cheap at this scale.
+        triplets = {
+            (spec["source_id"], spec["target_id"], spec["edge_type"]) for spec in edges
+        }
         sources = {spec["source_id"] for spec in edges}
         placeholders = ",".join("?" for _ in sources)
         cursor = self._conn.execute(
@@ -1068,7 +1071,8 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         existing_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
         for row in cursor.fetchall():
             key = (row["source_id"], row["target_id"], row["edge_type"])
-            existing_edges[key] = dict(row)
+            if key in triplets:
+                existing_edges[key] = dict(row)
 
         now_iso = utc_now().isoformat()
         edge_ids: list[str] = []

@@ -1022,6 +1022,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         # side post-filtering on the (source, target, edge_type)
         # triplet is cheap at this scale. ``_pre_validate_edges_bulk``
         # already rejected in-batch duplicate triplets.
+        triplets = {
+            (spec["source_id"], spec["target_id"], spec["edge_type"]) for spec in edges
+        }
         sources = {spec["source_id"] for spec in edges}
         # Single connection for the bulk pre-fetch + UPDATE + INSERT so
         # the SCD-2 close-and-reinsert is transactional across all edges
@@ -1039,7 +1042,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                     (list(sources),),
                 )
                 existing_edges: dict[tuple[str, str, str], tuple[Any, ...]] = {
-                    (r[1], r[2], r[3]): r for r in cur.fetchall()
+                    (r[1], r[2], r[3]): r
+                    for r in cur.fetchall()
+                    if (r[1], r[2], r[3]) in triplets
                 }
 
             now = utc_now()
