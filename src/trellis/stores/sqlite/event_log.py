@@ -55,27 +55,33 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
     # -- mutations -----------------------------------------------------------
 
     def append(self, event: Event) -> None:
-        """Append event (immutable, no updates)."""
-        cur = self._conn.cursor()
-        cur.execute(
-            "INSERT INTO events "
-            "(event_id, event_type, source, entity_id, entity_type, "
-            "occurred_at, recorded_at, payload_json, metadata_json, schema_version) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                event.event_id,
-                str(event.event_type),
-                event.source,
-                event.entity_id,
-                event.entity_type,
-                event.occurred_at.isoformat(),
-                event.recorded_at.isoformat(),
-                json.dumps(event.payload),
-                json.dumps(event.metadata),
-                event.schema_version,
-            ),
-        )
-        self._conn.commit()
+        """Append event (immutable, no updates).
+
+        An INSERT that fails (a duplicate ``event_id``, say) has already
+        taken the database's write lock, so it is rolled back rather than
+        left open, holding that lock against every other connection.
+        """
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            conn.execute(
+                "INSERT INTO events "
+                "(event_id, event_type, source, entity_id, entity_type, "
+                "occurred_at, recorded_at, payload_json, metadata_json, "
+                "schema_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.event_id,
+                    str(event.event_type),
+                    event.source,
+                    event.entity_id,
+                    event.entity_type,
+                    event.occurred_at.isoformat(),
+                    event.recorded_at.isoformat(),
+                    json.dumps(event.payload),
+                    json.dumps(event.metadata),
+                    event.schema_version,
+                ),
+            )
         logger.debug(
             "event_log.appended",
             event_id=event.event_id,
