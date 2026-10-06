@@ -1177,7 +1177,7 @@ All notable changes to Trellis will be documented in this file.
   match, so both passed through `sanitize_error_message` verbatim. Both
   are now replaced with the sanitizer's static marker. The marker and
   every other pattern, caller and payload shape are unchanged.
-  (#PLACEHOLDER)
+  ([#753](https://github.com/ronsse/trellis-ai/pull/753))
 
 ## [0.9.0] - 2026-05-13
 
