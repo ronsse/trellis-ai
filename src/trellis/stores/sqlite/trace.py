@@ -57,26 +57,27 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
         agent_id = trace.context.agent_id if trace.context else None
         outcome_status = trace.outcome.status.value if trace.outcome else None
 
+        conn = self._conn
         try:
-            self._conn.execute(
-                """
-                INSERT INTO traces
-                    (trace_id, source, intent, domain, agent_id,
-                     outcome_status, trace_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    trace.trace_id,
-                    trace.source.value,
-                    trace.intent,
-                    domain,
-                    agent_id,
-                    outcome_status,
-                    trace.model_dump_json(),
-                    trace.created_at.isoformat(),
-                ),
-            )
-            self._conn.commit()
+            with conn:  # commits on success, rolls back on an exception
+                conn.execute(
+                    """
+                    INSERT INTO traces
+                        (trace_id, source, intent, domain, agent_id,
+                         outcome_status, trace_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        trace.trace_id,
+                        trace.source.value,
+                        trace.intent,
+                        domain,
+                        agent_id,
+                        outcome_status,
+                        trace.model_dump_json(),
+                        trace.created_at.isoformat(),
+                    ),
+                )
         except sqlite3.IntegrityError as exc:
             msg = f"Trace {trace.trace_id} already exists"
             raise StoreError(msg) from exc

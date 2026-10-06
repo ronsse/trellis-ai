@@ -1023,6 +1023,17 @@ All notable changes to Trellis will be documented in this file.
   timeout and failed with `database is locked` until the connection's next
   commit.
   ([#733](https://github.com/ronsse/trellis-ai/pull/733))
+- **A failed SQLite trace, API key, parameter or outcome write no longer
+  holds the write lock, and a failed outcome batch writes none of its
+  rows.** `SQLiteTraceStore.append`, `SQLiteApiKeyStore.create`,
+  `SQLiteParameterStore.put`, `SQLiteOutcomeStore.append` and
+  `SQLiteOutcomeStore.append_many` now roll back an INSERT that fails, such
+  as on a duplicate id, as `SQLiteEventLog.append` does. The transaction
+  had stayed open, so every other connection's write to that database
+  waited out its 10-second busy timeout and failed with `database is
+  locked` until the connection's next commit, and that commit wrote the
+  rows a failed `append_many` had inserted before the duplicate. The
+  errors raised are unchanged.
 
 ## [0.9.0] - 2026-05-13
 
