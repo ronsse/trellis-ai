@@ -882,8 +882,8 @@ class DocumentStoreContractTests:
 
         SQLite addresses a scalar filter through a JSON path, so a key
         holding a ``.`` reads as ``$.a.b`` — a nested lookup — unless the
-        component is quoted, and a key holding a ``"`` or a ``\`` has no
-        path spelling at all and would silently match nothing. Postgres
+        component is quoted, and even inside the quotes a ``"`` or a ``\``
+        is read as path syntax rather than as part of the key. Postgres
         binds the key directly and was never exposed to any of them. The
         contract is that the key means itself on both.
 
