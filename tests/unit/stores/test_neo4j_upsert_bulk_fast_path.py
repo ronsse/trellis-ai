@@ -1,4 +1,6 @@
-"""Unit tests for the Neo4jGraphStore.upsert_nodes_bulk fast-path branching.
+"""Unit tests for the Neo4jGraphStore bulk upserts, through a mock driver.
+
+Most cover upsert_nodes_bulk's fast-path branching.
 
 The bulk path measured at ~45 nodes/sec on AuraDB Free with the
 ``OPTIONAL MATCH`` shape, vs ~3281 nodes/sec for a CREATE-only UNWIND
@@ -9,6 +11,11 @@ pre-fetch ⇒ skip the OPTIONAL MATCH and emit a CREATE-only UNWIND.
 These tests assert on the **generated Cypher** via a mock driver. Live
 throughput is verified separately (see PR description); the unit-level
 guarantee here is that the branching picks the right shape.
+
+``TestUpsertNodesBulkRepeatedId`` counts round trips instead: a repeated
+``node_id`` is refused before the store opens a session.
+``TestUpsertEdgesBulkDroppedRow`` checks the message for a row the write
+dropped though both its endpoints read as current afterwards.
 """
 
 from __future__ import annotations
@@ -175,3 +182,70 @@ class TestUpsertNodesBulkFastPath:
             )
         # Write must NOT have run.
         session.execute_write.assert_not_called()
+
+
+def _batch(third_id: str) -> list[dict[str, object]]:
+    return [
+        {"node_id": "rt-a", "node_type": "doc", "properties": {}},
+        {"node_id": "rt-b", "node_type": "doc", "properties": {}},
+        {"node_id": third_id, "node_type": "doc", "properties": {}},
+    ]
+
+
+class TestUpsertNodesBulkRepeatedId:
+    def test_a_repeated_id_is_refused_before_any_round_trip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal runs before the store opens a session, so neither the
+        pre-fetch nor the write runs."""
+        store, session = _build_store_with_mock_driver(monkeypatch)
+        driver = store._driver  # type: ignore[attr-defined]
+        opened = driver.session.call_count
+
+        with pytest.raises(ValueError, match=r"upsert_nodes_bulk\[2\].*duplicate"):
+            store.upsert_nodes_bulk(_batch("rt-a"))  # type: ignore[attr-defined]
+
+        assert driver.session.call_count == opened
+        session.execute_read.assert_not_called()
+        session.execute_write.assert_not_called()
+
+    def test_the_batch_without_the_repeat_runs_both_round_trips(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The control for the test above: the same counts see the session,
+        the pre-fetch and the write when no id repeats."""
+        store, session = _build_store_with_mock_driver(monkeypatch)
+        driver = store._driver  # type: ignore[attr-defined]
+        opened = driver.session.call_count
+        session.execute_read.return_value = []
+
+        store.upsert_nodes_bulk(_batch("rt-c"))  # type: ignore[attr-defined]
+
+        assert driver.session.call_count == opened + 1
+        assert session.execute_read.call_count == 1
+        assert session.execute_write.call_count == 1
+
+
+class TestUpsertEdgesBulkDroppedRow:
+    def test_a_dropped_row_whose_endpoints_read_as_current_names_both(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The write returns no record for row 0, and the read that names the
+        missing endpoint finds both current, as when one was re-created in
+        between: the refusal names both rather than blaming one."""
+        store, session = _build_store_with_mock_driver(monkeypatch)
+        current = [{"node_id": "a"}, {"node_id": "b"}]
+        session.execute_read.return_value = current
+        tx = MagicMock(name="tx")
+        tx.run.side_effect = lambda cypher, **params: (
+            [] if "UNWIND $rows" in cypher else current
+        )
+        session.execute_write.side_effect = lambda fn: fn(tx)
+
+        with pytest.raises(
+            ValueError,
+            match=r"upsert_edges_bulk\[0\]: source 'a' or target 'b' stopped being",
+        ):
+            store.upsert_edges_bulk(  # type: ignore[attr-defined]
+                [{"source_id": "a", "target_id": "b", "edge_type": "links_to"}]
+            )
