@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -19,6 +20,7 @@ from trellis.mutate.commands import (
 from trellis.mutate.executor import MutationExecutor
 from trellis.schemas.enums import TraceSource
 from trellis.schemas.trace import Trace, TraceContext
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
@@ -385,6 +387,48 @@ class TestIdempotencyCacheEviction:
         assert result.status == CommandStatus.DUPLICATE
         assert "persisted" in result.message
 
+    def test_a_persisted_hit_enters_the_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A key the event log answers for is cached, so the log is asked once.
+
+        A fresh executor starts with an empty cache, so its first replay of
+        a key an earlier executor ran is answered from the event log. The
+        next replay is answered from the cache.
+        """
+        log = SQLiteEventLog(tmp_path / "events.db")
+        earlier = MutationExecutor(
+            event_log=log, handlers={Operation.ENTITY_CREATE: _handler()}
+        )
+        ran = earlier.execute(_cmd(idempotency_key="syn-key"))
+        assert ran.status == CommandStatus.SUCCESS
+        asked: list[str] = []
+        has_key = log.has_idempotency_key
+
+        def counting_has_key(key: str) -> bool:
+            asked.append(key)
+            return has_key(key)
+
+        monkeypatch.setattr(log, "has_idempotency_key", counting_has_key)
+        handler = _handler()
+        fresh = MutationExecutor(
+            event_log=log, handlers={Operation.ENTITY_CREATE: handler}
+        )
+
+        first = fresh.execute(_cmd(idempotency_key="syn-key"))
+        second = fresh.execute(_cmd(idempotency_key="syn-key"))
+
+        assert (first.status, first.message) == (
+            CommandStatus.DUPLICATE,
+            "Duplicate command (persisted): syn-key",
+        )
+        assert (second.status, second.message) == (
+            CommandStatus.DUPLICATE,
+            "Duplicate command: syn-key",
+        )
+        assert asked == ["syn-key"]
+        handler.handle.assert_not_called()
+
 
 class _RefusesSynBad:
     """Raises ``exc`` for the command named ``syn-bad``; succeeds otherwise.
@@ -439,6 +483,11 @@ class TestIdempotencyKeyRecordedOnlyOnSuccess:
                 RuntimeError("syn panic"),
                 CommandStatus.FAILED,
                 id="untyped-failed",
+            ),
+            pytest.param(
+                sqlite3.IntegrityError("syn constraint"),
+                CommandStatus.FAILED,
+                id="sqlite-failed",
             ),
         ],
     )
@@ -578,3 +627,34 @@ class TestBuildCurateExecutor:
         assert result.status == CommandStatus.SUCCESS
         assert result.created_id == trace.trace_id
         assert registry.operational.trace_store.get(trace.trace_id) is not None
+
+
+class TestSQLiteDriverError:
+    """A ``sqlite3.Error`` a SQLite store lets out of a handler is FAILED.
+
+    The SQLite stores, the default for every store, raise driver errors
+    unmapped on most write paths. ``query_only`` makes the graph store's
+    connection refuse writes, so the handler raises a real
+    ``sqlite3.OperationalError`` from inside the store.
+    """
+
+    def test_a_refused_write_is_failed_and_audited_once(self, tmp_path: Path) -> None:
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        registry = StoreRegistry(stores_dir=stores_dir)
+        registry.knowledge.graph_store._conn.execute("PRAGMA query_only = ON")
+        command = _cmd(args={"entity_type": "service", "name": "syn-entity"})
+
+        result = build_curate_executor(registry).execute(command)
+
+        assert result.status == CommandStatus.FAILED, result.message
+        events = registry.operational.event_log
+        rejected = events.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert [(e.payload["command_id"], e.payload["status"]) for e in rejected] == [
+            (command.command_id, "failed")
+        ]
+        assert events.get_events(event_type=EventType.MUTATION_EXECUTED) == []
+        # Exactly the driver's text: no SQL statement, path or traceback rides along.
+        driver_text = "attempt to write a readonly database"
+        assert result.message == f"Execution failed: {driver_text}"
+        assert rejected[0].payload["message"] == driver_text

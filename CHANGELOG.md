@@ -907,6 +907,15 @@ All notable changes to Trellis will be documented in this file.
   startup report the failure the same way; the
   `TRELLIS_VALIDATE_CONNECTIVITY` check still prints the driver's text.
   ([#724](https://github.com/ronsse/trellis-ai/pull/724))
+- **A SQLite error inside a governed write fails the command instead of
+  escaping it.** A `sqlite3.Error` from a SQLite store, such as for a locked
+  or read-only database file, answers `failed` with one `mutation.rejected`
+  event: `trellis curate entity --format json` prints its JSON payload and
+  exits `5` instead of a traceback and `1`, and `POST /api/v1/entities`
+  answers `400` instead of `500`. A SQLite event log that cannot write the
+  audit event leaves the `audit_event_not_recorded` warning on the result,
+  as a `StoreError` from it already did, instead of raising.
+  ([#725](https://github.com/ronsse/trellis-ai/pull/725))
 - **A Bolt purge that loses its connection during the commit reads back
   whether it committed.** On Neo4j and ArcadeDB, `delete_node` reported a
   connection lost while its commit was outstanding (`IncompleteCommit`) as
