@@ -1145,6 +1145,7 @@ All notable changes to Trellis will be documented in this file.
   `Execution failed: ValidationError`, without the field detail, and an
   `entity.create` that would change an existing node's `node_role` reads
   `Execution failed: ValueError`.
+  ([#748](https://github.com/ronsse/trellis-ai/pull/748))
 
 ## [0.9.0] - 2026-05-13
 
