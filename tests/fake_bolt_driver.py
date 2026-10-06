@@ -18,6 +18,12 @@ the retries by ``max_transaction_retry_time``; the fake by ``attempts``.
 
 Every transaction is kept on :attr:`FakeBoltDriver.transactions` with how it
 ended.
+
+``rows_left`` scripts the read ``delete_node`` makes after a commit whose
+outcome the driver cannot know: the number of ``Node`` rows of the node that
+read finds, or an exception it raises. The parameters of every such read are
+kept on :attr:`FakeBoltDriver.reads`, and a read the test did not script
+fails it.
 """
 
 from __future__ import annotations
@@ -32,9 +38,10 @@ from neo4j.exceptions import DriverError, Neo4jError
 
 @dataclass(frozen=True)
 class AtCommit:
-    """The purge removes one ``Node`` row, then its commit raises ``error``."""
+    """The purge removes ``rows`` ``Node`` rows, then its commit raises ``error``."""
 
     error: Exception
+    rows: int = 1
 
 
 Outcome = Exception | int | AtCommit
@@ -43,13 +50,20 @@ Outcome = Exception | int | AtCommit
 class FakeBoltDriver:
     """Open one :class:`FakeSession` per ``session()``."""
 
-    def __init__(self, *outcomes: Outcome, attempts: int = 3) -> None:
+    def __init__(
+        self,
+        *outcomes: Outcome,
+        attempts: int = 3,
+        rows_left: int | Exception | None = None,
+    ) -> None:
         if not outcomes:
             msg = "script at least one purge outcome"
             raise ValueError(msg)
         self._outcomes = list(outcomes)
         self.attempts = attempts
+        self.rows_left = rows_left
         self.transactions: list[FakeTransaction] = []
+        self.reads: list[dict[str, Any]] = []
 
     @contextmanager
     def session(self, **_config: Any) -> Iterator[FakeSession]:
@@ -89,22 +103,38 @@ class FakeSession:
                 return result
         raise errors[-1]
 
+    def run(self, cypher: str, **params: Any) -> FakeResult:
+        """Answer an auto-commit query with the scripted ``rows_left``."""
+        self._driver.reads.append(params)
+        rows_left = self._driver.rows_left
+        if rows_left is None:
+            msg = f"no read is scripted: {cypher}"
+            raise AssertionError(msg)
+        if isinstance(rows_left, Exception):
+            raise rows_left
+        return FakeResult({"remaining": rows_left})
+
 
 class FakeTransaction:
     """One transaction, and how it ended."""
 
     def __init__(self, outcome: Outcome) -> None:
         self._outcome = outcome
-        self._node_rows = outcome if isinstance(outcome, int) else 1
+        if isinstance(outcome, AtCommit):
+            self._node_rows = outcome.rows
+        elif isinstance(outcome, int):
+            self._node_rows = outcome
+        else:
+            self._node_rows = 1
         self.ended: str | None = None
 
     def run(self, cypher: str, **_params: Any) -> FakeResult:
         if not cypher.startswith("MATCH (n:Node") or "DETACH DELETE" not in cypher:
-            return FakeResult(0)
+            return FakeResult({"deleted": 0})
         if isinstance(self._outcome, Exception):
             raise self._outcome
         removed, self._node_rows = self._node_rows, 0
-        return FakeResult(removed)
+        return FakeResult({"deleted": removed})
 
     def commit(self) -> None:
         if isinstance(self._outcome, AtCommit):
@@ -114,13 +144,13 @@ class FakeTransaction:
 
 
 class FakeResult:
-    """A statement's result: ``single()`` carries the rows it removed."""
+    """A statement's result: ``single()`` is its one row."""
 
-    def __init__(self, deleted: int) -> None:
-        self._deleted = deleted
+    def __init__(self, row: dict[str, int]) -> None:
+        self._row = row
 
-    def single(self) -> dict[str, int]:
-        return {"deleted": self._deleted}
+    def single(self, strict: bool = False) -> dict[str, int]:
+        return self._row
 
     def consume(self) -> None:
         return None
