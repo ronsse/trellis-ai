@@ -65,7 +65,7 @@ class Measurement(TrellisModel):
     contract; richer payloads (lists/dicts/strings) belong on
     :class:`Observation` instead. NaN is refused: it compares false
     against everything, so no analysis can use it. ``Infinity`` and
-    ``-Infinity`` are still accepted; whether they are legitimate
+    ``-Infinity`` are accepted; whether they are legitimate
     measurements is an open owner decision."""
 
     unit: str | None = None

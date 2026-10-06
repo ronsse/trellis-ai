@@ -1083,11 +1083,12 @@ All notable changes to Trellis will be documented in this file.
   rows a failed `append_many` had inserted before the duplicate. The
   errors raised are unchanged.
   ([#739](https://github.com/ronsse/trellis-ai/pull/739))
-- **A request body holding `NaN` or `Infinity` answers 422, not 500, and
-  the feedback and measurement entry points refuse non-finite numbers.**
+- **A validation error that echoes `NaN` or `Infinity` from the request
+  body answers 422, not 500; `POST /api/v1/feedback` and `trellis curate
+  feedback` hold `rating` to 0.0–1.0, and `Measurement` refuses NaN.**
   Python's `json` module parses both bare tokens, and FastAPI's default 422
-  echoes the rejected value back, which Starlette cannot render, so an
-  invalid body carrying one answered `500 internal_error` and logged a
+  echoes the rejected value back, which Starlette cannot render, so a
+  validation error echoing one answered `500 internal_error` and logged a
   traceback. The API's 422 handler now writes a non-finite number as its
   token and is otherwise FastAPI's own, byte for byte. `POST
   /api/v1/feedback` holds `rating` to 0.0–1.0 inclusive, as `POST

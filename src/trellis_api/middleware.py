@@ -24,11 +24,12 @@ Four pieces wired into the FastAPI app from :func:`create_app`:
   exception already knows.
 
 * :func:`request_validation_error_handler` replaces FastAPI's default
-  422 handler with one that can render every body. The default echoes
-  the rejected value as ``detail[].input``, and Starlette renders JSON
-  with ``allow_nan=False``, so a body carrying ``NaN`` or ``Infinity``
-  (both of which Python's ``json`` module parses) made the 422 itself
-  raise, and the catch-all answered ``500 internal_error``.
+  422 handler. The default echoes the rejected value as
+  ``detail[].input``, and Starlette renders JSON with
+  ``allow_nan=False``, so an error echoing ``NaN`` or ``Infinity`` (both
+  of which Python's ``json`` module parses) makes that 422 raise and the
+  catch-all answer ``500 internal_error``. This handler writes a
+  non-finite float as its token.
 
 Health and version probes pass through the middleware too; the
 overhead is a ULID + a contextvar bind, both microsecond-scale.
@@ -133,17 +134,17 @@ async def request_validation_error_handler(
     request: Request,  # noqa: ARG001 — Starlette's handler signature; the 422 needs nothing from it
     exc: Exception,
 ) -> JSONResponse:
-    """FastAPI's 422, renderable whatever the body held.
+    """FastAPI's 422, with a non-finite float written as its token.
 
     The same status and body as FastAPI's
     ``request_validation_exception_handler`` — ``{"detail": [...]}`` from
     ``exc.errors()`` through ``jsonable_encoder`` — with one difference: a
     non-finite float anywhere in the errors, at any depth, is rendered as
     its token. A missing-field error echoes the whole body as its
-    ``input``, so a non-finite number anywhere in an invalid body reached
-    the renderer, not only one in the field that failed. A finite float is
-    returned unchanged, so every finite case is FastAPI's own response,
-    byte for byte (``tests/unit/api/test_non_finite_body.py``).
+    ``input``, so a non-finite number anywhere in a body missing a field
+    reaches the renderer, not only one in the field that failed. A finite
+    float is returned unchanged, so every finite case is FastAPI's own
+    response, byte for byte (``tests/unit/api/test_non_finite_body.py``).
     """
     # Registered only for RequestValidationError; the check narrows the
     # type Starlette's handler signature widens.

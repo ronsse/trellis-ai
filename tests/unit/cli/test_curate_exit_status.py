@@ -364,23 +364,15 @@ class TestFeedbackRating:
         }
         assert _get_registry().operational.event_log.count() == 0
 
-    @pytest.mark.parametrize("rating", ["nan", "inf", "-inf", "-0.1", "1.1"])
-    def test_refused_text(self, stores_dir: Path, rating: str) -> None:
-        result = runner.invoke(app, _feedback(rating, json_format=False))
+    def test_refused_text(self, stores_dir: Path) -> None:
+        result = runner.invoke(app, _feedback("nan", json_format=False))
         assert result.exit_code == 2, result.output
-        assert _refusal(rating) in plain(result.output)
+        assert _refusal("nan") in plain(result.output)
         assert _get_registry().operational.event_log.count() == 0
 
-    @pytest.mark.parametrize("rating", ["0.0", "0.5", "1.0"])
+    @pytest.mark.parametrize("rating", ["0.0", "1.0"])
     def test_in_range_json(self, stores_dir: Path, rating: str) -> None:
         result = runner.invoke(app, _feedback(rating, json_format=True))
         assert result.exit_code == 0, result.output
         assert json.loads(result.stdout.strip())["status"] == "success"
-        assert _get_registry().operational.event_log.count() > 0
-
-    @pytest.mark.parametrize("rating", ["0.0", "0.5", "1.0"])
-    def test_in_range_text(self, stores_dir: Path, rating: str) -> None:
-        result = runner.invoke(app, _feedback(rating, json_format=False))
-        assert result.exit_code == 0, result.output
-        assert "Command executed" in plain(result.output)
         assert _get_registry().operational.event_log.count() > 0

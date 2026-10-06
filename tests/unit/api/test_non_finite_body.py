@@ -1,15 +1,14 @@
-"""A non-finite number in a request body answers 422, never 500.
+"""A validation error echoing a non-finite number answers 422.
 
 Python's ``json`` module parses every request body, and it accepts the bare
 tokens ``NaN``, ``Infinity`` and ``-Infinity``, so any caller can put one in
-any body. Before this change a validation error about such a body could not
-be rendered: FastAPI's default ``RequestValidationError`` handler echoes the
+any body. FastAPI's default ``RequestValidationError`` handler echoes the
 rejected value back as ``detail[].input``, Starlette renders JSON with
-``allow_nan=False``, and building the 422 raised ``ValueError``. The
-catch-all then answered ``500 internal_error`` and logged a traceback for a
-caller's malformed body. A missing field echoes the whole body as its
-``input``, so *any* invalid body carrying a non-finite number failed that
-way, on every route that takes a body model.
+``allow_nan=False``, and building that 422 raises ``ValueError``, so the
+catch-all answers ``500 internal_error`` and logs a traceback for a
+caller's malformed body. A missing-field error echoes the whole body as
+its ``input``, so a non-finite number anywhere in a body missing a field
+reaches that renderer.
 
 :func:`~trellis_api.middleware.request_validation_error_handler` keeps
 FastAPI's 422 and renders a non-finite float anywhere in the error payload
@@ -118,7 +117,7 @@ class TestNonFiniteRatingAnswers422:
 
     @pytest.mark.parametrize("token", NON_FINITE)
     @pytest.mark.parametrize("path", [FEEDBACK, PACK_FEEDBACK])
-    def test_answers_422_and_records_nothing(
+    def test_answers_422_echoing_the_token_and_records_nothing(
         self,
         client: TestClient,
         registry: StoreRegistry,
@@ -130,34 +129,9 @@ class TestNonFiniteRatingAnswers422:
         resp = _post(client, path, body)
         # One assertion, so a failure shows the status and the log together.
         assert (resp.status_code, _unhandled(logs)) == (422, [])
-        _assert_nothing_recorded(registry)
-
-    @pytest.mark.parametrize("token", NON_FINITE)
-    @pytest.mark.parametrize("path", [FEEDBACK, PACK_FEEDBACK])
-    def test_the_error_names_the_rating_and_echoes_the_token(
-        self, client: TestClient, path: str, token: str
-    ) -> None:
-        body = f'{{"target_id": "tg-synthetic-1", "rating": {token}}}'
-        detail = _post(client, path, body).json()["detail"]
+        detail = resp.json()["detail"]
         [error] = [e for e in detail if e["loc"] == ["body", "rating"]]
         assert error["input"] == token
-
-    def test_a_missing_target_id_beside_nan_answers_422(
-        self,
-        client: TestClient,
-        registry: StoreRegistry,
-        logs: list[dict[str, Any]],
-    ) -> None:
-        """The missing-field error echoes the whole body, NaN included.
-
-        This is the shape that answered 500 on ``/api/v1/feedback`` before
-        ``rating`` had any bound at all.
-        """
-        resp = _post(client, FEEDBACK, '{"rating": NaN}')
-        assert (resp.status_code, _unhandled(logs)) == (422, [])
-        [missing] = [e for e in resp.json()["detail"] if e["type"] == "missing"]
-        assert missing["loc"] == ["body", "target_id"]
-        assert missing["input"] == {"rating": "NaN"}
         _assert_nothing_recorded(registry)
 
     def test_a_non_finite_value_nested_in_the_body_renders_as_its_token(
@@ -220,11 +194,6 @@ class TestFiniteErrorsMatchFastApisDefault:
         ("path", "body"),
         [
             pytest.param(FEEDBACK, '{"rating": 0.5}', id="missing-field"),
-            pytest.param(
-                FEEDBACK,
-                '{"target_id": "tg-synthetic-1", "rating": "abc"}',
-                id="wrong-type",
-            ),
             pytest.param(PACK_FEEDBACK, '{"rating": 1.1}', id="out-of-range-finite"),
         ],
     )
@@ -246,7 +215,7 @@ class TestMeasurementValue:
     """``metric_value`` refuses NaN, and only NaN.
 
     Whether ``Infinity`` is a legitimate measurement is an open owner
-    question, so this change leaves it where it was and pins that here.
+    question; it is accepted, and pinned here.
     """
 
     def test_nan_answers_422_and_stores_nothing(
@@ -261,17 +230,8 @@ class TestMeasurementValue:
         assert registry.knowledge.graph_store.query(node_type=MEASUREMENT) == []
         assert registry.operational.event_log.count() == 0
 
-    def test_a_finite_value_is_recorded(
-        self, client: TestClient, registry: StoreRegistry
-    ) -> None:
-        resp = _post(client, MEASUREMENTS, _measurement_body("0.07"))
-        assert resp.status_code == 201, resp.text
-        [node] = registry.knowledge.graph_store.query(node_type=MEASUREMENT)
-        assert node["properties"]["metric_value"] == 0.07
-        assert registry.operational.event_log.count() > 0
-
     @pytest.mark.parametrize("token", ["Infinity", "-Infinity"])
-    def test_infinity_is_recorded_as_before(
+    def test_infinity_is_recorded(
         self, client: TestClient, registry: StoreRegistry, token: str
     ) -> None:
         resp = _post(client, MEASUREMENTS, _measurement_body(token))

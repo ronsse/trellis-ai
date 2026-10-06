@@ -143,9 +143,9 @@ def create_app() -> FastAPI:
     # a roster (#443).
     app.add_exception_handler(TrellisError, trellis_error_handler)
 
-    # Over FastAPI's default 422 handler, which could not render a body
-    # holding ``NaN`` or ``Infinity`` and so turned a caller's malformed
-    # body into a 500. Same response for every other body.
+    # Over FastAPI's default 422 handler, which raises on an error echoing
+    # ``NaN`` or ``Infinity`` from the body, so the catch-all answers 500.
+    # Every finite 422 is unchanged.
     app.add_exception_handler(RequestValidationError, request_validation_error_handler)
 
     # OpenTelemetry + Prometheus — no-op when the ``observability``
