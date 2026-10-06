@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -17,7 +18,7 @@ from trellis.mutate.commands import (
     CommandStatus,
     Operation,
 )
-from trellis.mutate.executor import MutationExecutor
+from trellis.mutate.executor import AUDIT_EMIT_FAILED_MARKER, MutationExecutor
 from trellis.schemas.enums import TraceSource
 from trellis.schemas.trace import Trace, TraceContext
 from trellis.stores.base.event_log import EventType
@@ -514,6 +515,122 @@ class TestIdempotencyKeyRecordedOnlyOnSuccess:
         assert retry.status == CommandStatus.SUCCESS, retry.message
         assert retry.created_id == "ent-syn-fixed"
         assert handler.names == ["syn-bad", "syn-fixed"]
+
+
+def _store_a_corrupt_row(path: Path) -> Callable[[], None]:
+    """Make the persisted read raise a real ``sqlite3.OperationalError``.
+
+    The read's ``json_extract`` raises on a ``mutation.executed`` row whose
+    payload is not JSON, for any key it has not matched before reaching the
+    row. Appends still work. Returns the step that deletes the row.
+    """
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO events (event_id, event_type, source, occurred_at,"
+        " recorded_at, payload_json) VALUES ('syn-corrupt', 'mutation.executed',"
+        " 'syn', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',"
+        " 'not json')"
+    )
+    conn.commit()
+
+    def recover() -> None:
+        conn.execute("DELETE FROM events WHERE event_id = 'syn-corrupt'")
+        conn.commit()
+        conn.close()
+
+    return recover
+
+
+class TestPersistedIdempotencyReadFails:
+    """An event log that cannot answer Stage 3's read fails the command closed.
+
+    Running the handler without the answer could write a command twice,
+    which is what Stage 3 exists to prevent. So the result is FAILED and the
+    handler does not run. The key is not recorded, so the same command runs
+    once the log can be read again.
+    """
+
+    def test_the_command_fails_closed_and_runs_once_the_log_recovers(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "events.db"
+        log = SQLiteEventLog(path)
+        handler = _handler(created_id="syn-node-1")
+        executor = MutationExecutor(
+            event_log=log, handlers={Operation.ENTITY_CREATE: handler}
+        )
+        earlier = _named("syn-earlier", "syn-key-earlier")
+        assert executor.execute(earlier).status == CommandStatus.SUCCESS
+        command = _named("syn-entity", "syn-key-read")
+        recover = _store_a_corrupt_row(path)
+
+        result = executor.execute(command)
+
+        # The exception's type only: a driver's text stays out of the result
+        # and out of the persisted event.
+        expected = "Idempotency check failed: OperationalError"
+        assert (result.status, result.message, result.warnings) == (
+            CommandStatus.FAILED,
+            expected,
+            [],
+        )
+        assert handler.handle.call_count == 1  # the earlier command's call
+        rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert [
+            (e.payload["command_id"], e.payload["reason"], e.payload["message"])
+            for e in rejected
+        ] == [(command.command_id, "idempotency_check_failed", expected)]
+
+        recover()
+        retry = executor.execute(command)
+
+        assert retry.status == CommandStatus.SUCCESS, retry.message
+        assert handler.handle.call_count == 2
+        executed = log.get_events(event_type=EventType.MUTATION_EXECUTED)
+        assert [e.payload["command_id"] for e in executed] == [
+            earlier.command_id,
+            command.command_id,
+        ]
+
+    def test_an_unwritable_log_fails_closed_with_the_audit_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the rejection event cannot be written either, the result says so."""
+        log = SQLiteEventLog(tmp_path / "events.db")
+        handler = _handler(created_id="syn-node-1")
+        executor = MutationExecutor(
+            event_log=log, handlers={Operation.ENTITY_CREATE: handler}
+        )
+        earlier = _named("syn-earlier", "syn-key-earlier")
+        assert executor.execute(earlier).status == CommandStatus.SUCCESS
+        command = _named("syn-entity", "syn-key-gone")
+
+        def refuse(*args: object) -> None:
+            msg = "syn event log refused"
+            raise sqlite3.OperationalError(msg)
+
+        monkeypatch.setattr(log, "has_idempotency_key", refuse)
+        monkeypatch.setattr(log, "append", refuse)
+
+        result = executor.execute(command)
+
+        assert (result.status, result.message) == (
+            CommandStatus.FAILED,
+            "Idempotency check failed: OperationalError",
+        )
+        assert [w.split(":")[0] for w in result.warnings] == [AUDIT_EMIT_FAILED_MARKER]
+        assert handler.handle.call_count == 1  # the earlier command's call
+
+        monkeypatch.undo()
+        retry = executor.execute(command)
+
+        assert retry.status == CommandStatus.SUCCESS, retry.message
+        assert handler.handle.call_count == 2
+        executed = log.get_events(event_type=EventType.MUTATION_EXECUTED)
+        assert [e.payload["command_id"] for e in executed] == [
+            earlier.command_id,
+            command.command_id,
+        ]
 
 
 class TestBatchExecution:

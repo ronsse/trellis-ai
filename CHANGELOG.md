@@ -952,6 +952,18 @@ All notable changes to Trellis will be documented in this file.
   such as `a.b`, which only SQLite read as a nested path, is refused too. No
   REST, MCP, SDK or CLI route passes a caller-chosen key to these filters.
   ([#729](https://github.com/ronsse/trellis-ai/pull/729))
+- **A keyed command whose idempotency check cannot read the event log
+  fails instead of escaping.** A `TrellisError` or `sqlite3.Error` from
+  the executor's read of the event log for a command's idempotency key,
+  such as for a malformed event row, answers `failed` with the message
+  `Idempotency check failed: <exception type>` and one `mutation.rejected`
+  event with `reason: idempotency_check_failed`, and the handler does not
+  run. `trellis admin backfill-name-aliases --format json` prints its JSON
+  payload and exits `5` instead of a traceback and `1`, and
+  `POST /api/v1/commands/batch` answers `200` with the command `failed`
+  instead of `500`. The key is not recorded, so a retry runs once the log
+  can be read. A Postgres event log's driver errors still escape.
+  ([#728](https://github.com/ronsse/trellis-ai/pull/728))
 
 ## [0.9.0] - 2026-05-13
 
