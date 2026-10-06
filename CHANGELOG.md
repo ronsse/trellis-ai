@@ -1218,6 +1218,17 @@ All notable changes to Trellis will be documented in this file.
   The marker and every other pattern, caller and payload shape are
   unchanged.
   ([#753](https://github.com/ronsse/trellis-ai/pull/753))
+- **ArcadeDB `upsert_edges_bulk` raises its documented `ValueError`, not a
+  raw driver error, when a dropped row's endpoint is re-created mid-call.**
+  #746 re-read a dropped row's endpoints inside the write's still-open
+  transaction. On ArcadeDB, when another writer re-created one of them
+  after the write, beside a row the write had written, that re-read raised
+  `neo4j.exceptions.DatabaseError: Record #... not found`. The endpoints
+  are now re-read after the transaction rolls back: the error names the
+  endpoint that is still missing, or both when both are current again, and
+  no edge of the batch is written. Neo4j already raised the `ValueError`;
+  SQLite and Postgres are unchanged.
+  ([#754](https://github.com/ronsse/trellis-ai/pull/754))
 - **`trellis admin migrate-graph` sanitizes the destination store's own
   failure text before printing it.** The `Migration aborted:` line
   (`MigrationStepError`, which embeds the wrapped exception's `str()`),
