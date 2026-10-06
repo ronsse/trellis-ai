@@ -46,6 +46,10 @@ class TestCleanPassthrough:
         msg = "node 01JGME6CE1RJ0S4W5X7Y8Z9ABC has no current version"
         assert sanitize_error_message(msg) == msg
 
+    def test_text_near_the_postgres_row_shape_passes_through(self) -> None:
+        msg = "Key (name) is not indexed"
+        assert sanitize_error_message(msg) == msg
+
 
 class TestSuppression:
     def test_email_suppressed(self) -> None:
@@ -126,6 +130,38 @@ class TestSuppression:
             )
             == SUPPRESSED_MARKER
         )
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            # ``str(exc)`` of psycopg 3.3 errors from PostgreSQL 16, with
+            # synthetic values. The DETAIL line quotes the offending row.
+            (
+                'duplicate key value violates unique constraint "pair_a_b_key"\n'
+                "DETAIL:  Key (a, b)=(1, synthetic b value) already exists."
+            ),
+            (
+                "duplicate key value violates unique constraint"
+                ' "widget_lower_label"\n'
+                "DETAIL:  Key (lower(label))=(synthetic label) already exists."
+            ),
+            (
+                'insert or update on table "widget" violates foreign key constraint'
+                ' "widget_parent_id_fkey"\n'
+                "DETAIL:  Key (parent_id)=(424242) is not present in table"
+                ' "parent".'
+            ),
+            (
+                'null value in column "label" of relation "widget" violates'
+                " not-null constraint\n"
+                "DETAIL:  Failing row contains (5, synthetic-name-5, null, 1,"
+                " null)."
+            ),
+        ],
+        ids=["unique-composite", "unique-expression", "foreign-key-insert", "not-null"],
+    )
+    def test_postgres_row_values_suppressed(self, msg: str) -> None:
+        assert sanitize_error_message(msg) == SUPPRESSED_MARKER
 
 
 class TestBounding:
