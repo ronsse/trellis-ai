@@ -1083,6 +1083,17 @@ All notable changes to Trellis will be documented in this file.
   rows a failed `append_many` had inserted before the duplicate. The
   errors raised are unchanged.
   ([#739](https://github.com/ronsse/trellis-ai/pull/739))
+- **The warning for a missing audit event names a driver's exception by its
+  type alone.** When a command's audit event cannot be written, its result
+  carries an `audit_event_not_recorded` warning, which REST, MCP and the CLI
+  return to the caller. The warning quoted the event log's exception, so a
+  raw driver error, such as the `sqlite3.Error` the SQLite event log raises,
+  put the database's own text in the response. It now reads
+  `(IntegrityError)` where it read `(IntegrityError: <driver text>)`, as the
+  `audit_emit_failed` log line already omits that text. A Trellis error,
+  such as the type-only `StoreError` the Postgres event log raises, keeps its
+  message, and the warning's prefix, the rest of its text and every status
+  are unchanged. ([#740](https://github.com/ronsse/trellis-ai/pull/740))
 
 ## [0.9.0] - 2026-05-13
 

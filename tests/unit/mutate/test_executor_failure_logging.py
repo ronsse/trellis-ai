@@ -365,9 +365,9 @@ def test_a_failed_audit_emit_logs_its_type_and_not_the_failure_before_it(
 def test_a_failed_read_and_emit_return_failed_with_the_audit_warning() -> None:
     """The FAILED result and the one emit attempted, pinned whole.
 
-    How the emit failure is logged cannot move what the caller sees. The
-    warning carries the emit error's own text, even a raw driver error's:
-    the result is not the log, and this pin keeps it as it is.
+    The warning names the raw emit error by its type alone, as the
+    ``audit_emit_failed`` line does: the result reaches the caller, and a
+    driver's text can carry query text and values.
     """
     result, event_log, handler = _run_keyed_command(_raw, _raw)
 
@@ -384,8 +384,8 @@ def test_a_failed_read_and_emit_return_failed_with_the_audit_warning() -> None:
             (
                 "audit_event_not_recorded: the mutation.rejected event for this "
                 "command could not be written to the event log "
-                f"(OperationalError: server says: {_SERVER_TEXT}). The outcome "
-                "this result reports stands; only its audit record is missing."
+                "(OperationalError). The outcome this result reports stands; "
+                "only its audit record is missing."
             )
         ],
         "metadata": {},

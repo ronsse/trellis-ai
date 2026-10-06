@@ -425,3 +425,99 @@ class TestWhatTheGuardCatches:
 
         with pytest.raises(type(exc)):
             ex.execute(_cmd())
+
+
+# --------------------------------------------------------------------------
+# What the warning says about the error.
+#
+# REST, MCP and the CLI all hand the warning to the caller, so it follows the
+# rule the store errors follow (#702, #713) and the ``audit_emit_failed`` line
+# follows (#734): a ``TrellisError``'s message is Trellis-written and kept,
+# and any other exception is named by its type alone, because a driver's own
+# text can carry query text and values.
+# --------------------------------------------------------------------------
+
+#: Stands in for a driver's own error text.
+_DRIVER_TEXT = "synthetic-secret-4d1e"
+
+
+def _stage5_warning(error: str) -> str:
+    """The Stage 5 audit warning, spelled out as a caller receives it."""
+    return (
+        "audit_event_not_recorded: the mutation.executed event for this "
+        f"command could not be written to the event log ({error}). The "
+        "outcome this result reports stands; only its audit record is missing."
+    )
+
+
+def _committed_result(emit_error: BaseException) -> dict[str, Any]:
+    """A committed ``entity.create`` whose audit emit raises *emit_error*.
+
+    The result as a caller receives it, minus its timestamp and schema version.
+    """
+    ex = MutationExecutor(
+        event_log=_event_log(fails=emit_error),
+        handlers={Operation.ENTITY_CREATE: _handler(created_id="ent-synthetic-1")},
+    )
+    result = ex.execute(
+        _cmd(
+            command_id="cmd-synthetic-1",
+            target_id="node-synthetic-1",
+            requested_by="test:synthetic",
+        )
+    )
+    return result.model_dump(mode="json", exclude={"executed_at", "schema_version"})
+
+
+def _store_error_from_a_driver_error() -> StoreError:
+    """A type-only ``StoreError`` chained from a driver error, as #733 raises."""
+    err = StoreError("Event log append failed: OperationalError", store="event_log")
+    err.__cause__ = sqlite3.OperationalError(f"server says: {_DRIVER_TEXT}")
+    return err
+
+
+class TestTheWarningNamesTheErrorAsTheLogLineDoes:
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            pytest.param(
+                sqlite3.OperationalError(f"server says: {_DRIVER_TEXT}"),
+                id="sqlite3_error",
+            ),
+            pytest.param(
+                ConnectionError(f"refused: {_DRIVER_TEXT}"), id="oserror_subclass"
+            ),
+            pytest.param(ValueError(f"bad payload: {_DRIVER_TEXT}"), id="value_error"),
+        ],
+    )
+    def test_a_raw_error_is_named_by_its_type_alone(self, exc) -> None:
+        """Everything but the warning's parenthetical is as it was."""
+        assert _committed_result(exc) == {
+            "command_id": "cmd-synthetic-1",
+            "status": "success",
+            "operation": "entity.create",
+            "target_id": "node-synthetic-1",
+            "created_id": "ent-synthetic-1",
+            "message": "created",
+            "warnings": [_stage5_warning(type(exc).__name__)],
+            "metadata": {},
+        }
+
+    @pytest.mark.parametrize(
+        ("exc", "error"),
+        [
+            pytest.param(
+                _store_error_from_a_driver_error(),
+                "StoreError: Event log append failed: OperationalError",
+                id="store_error",
+            ),
+            pytest.param(
+                TrellisError("event log closed"),
+                "TrellisError: event log closed",
+                id="trellis_error",
+            ),
+        ],
+    )
+    def test_a_trellis_error_keeps_its_message(self, exc, error) -> None:
+        """The text the warning carried before the rule reached it, byte for byte."""
+        assert _committed_result(exc)["warnings"] == [_stage5_warning(error)]
