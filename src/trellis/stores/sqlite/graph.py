@@ -1301,23 +1301,20 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             conditions.append("node_type = ?")
             params.append(node_type)
 
-        # Push simple property filters to SQL via json_extract
+        # Push simple property filters to SQL via json_extract, the key's
+        # path bound like the value
         complex_filters: dict[str, Any] = {}
         if properties:
             for key, value in properties.items():
                 if isinstance(value, bool):
-                    path = json_key_path(key)
-                    conditions.append(f"json_extract(properties_json, '{path}') = ?")
-                    params.append(1 if value else 0)
+                    conditions.append("json_extract(properties_json, ?) = ?")
+                    params.extend([json_key_path(key), 1 if value else 0])
                 elif isinstance(value, str | int | float):
-                    path = json_key_path(key)
-                    conditions.append(f"json_extract(properties_json, '{path}') = ?")
-                    params.append(value)
+                    conditions.append("json_extract(properties_json, ?) = ?")
+                    params.extend([json_key_path(key), value])
                 elif value is None:
-                    path = json_key_path(key)
-                    conditions.append(
-                        f"json_extract(properties_json, '{path}') IS NULL"
-                    )
+                    conditions.append("json_extract(properties_json, ?) IS NULL")
+                    params.append(json_key_path(key))
                 else:
                     complex_filters[key] = value
 
@@ -1502,29 +1499,34 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         return SQLiteGraphStore._render_clause_sqlite(column, clause)
 
     @staticmethod
-    def _render_clause_sqlite(column: str, clause: Any) -> tuple[str, list[Any]]:
+    def _render_clause_sqlite(
+        column: tuple[str, list[Any]], clause: Any
+    ) -> tuple[str, list[Any]]:
         """Render a resolved SQL column expression against the clause op.
 
-        Shared between node and edge compilation so the operator
-        surface (``eq`` / ``in`` / ``exists`` / range) is implemented
-        in exactly one place.  ``contains`` is handled one level up in
+        *column* is the expression and the parameters it binds, which
+        precede the clause's own.  Shared between node and edge
+        compilation so the operator surface (``eq`` / ``in`` /
+        ``exists`` / range) is implemented in exactly one place.
+        ``contains`` is handled one level up in
         :meth:`_compile_clause_sqlite` / :meth:`_compile_edge_query`
         because it needs the raw JSON path, not a pre-rendered
         ``json_extract`` expression.
         """
+        expr, expr_params = column
         op = clause.op
         if op == "eq":
-            return f"{column} = ?", [clause.value]
+            return f"{expr} = ?", [*expr_params, clause.value]
         if op == "in":
             placeholders = ", ".join("?" for _ in clause.value)
-            return f"{column} IN ({placeholders})", list(clause.value)
+            return f"{expr} IN ({placeholders})", [*expr_params, *clause.value]
         if op == "exists":
-            return f"{column} IS NOT NULL", []
+            return f"{expr} IS NOT NULL", list(expr_params)
         sql_op = RANGE_OP_GLYPH.get(op)
         if sql_op is None:
             msg = f"Unknown filter op {clause.op!r}"
             raise ValueError(msg)
-        return f"{column} {sql_op} ?", [clause.value]
+        return f"{expr} {sql_op} ?", [*expr_params, clause.value]
 
     @staticmethod
     def _render_contains_sqlite(field: str, clause: Any) -> tuple[str, list[Any]]:
@@ -1558,9 +1560,8 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 "not JSON arrays."
             )
             raise ValueError(msg)
-        # The key is the caller's and the path is spliced into SQL text, not
-        # bound, so :func:`json_key_path` refuses a key that is not a plain
-        # object key before it gets there.
+        # The key is the caller's, so its path is bound, once for each of
+        # the two uses below.
         path = json_key_path(field.split(".", 1)[1])
         # Subtlety: ``json_type(json_extract(j, '$.k'))`` raises
         # "malformed JSON" when the extracted value is a scalar string,
@@ -1569,33 +1570,32 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # form ``json_type(j, '$.k')`` walks the path itself and
         # returns the type string ('text' / 'array' / etc.) or NULL
         # for missing keys — exactly the guard we need.
-        json_extract_expr = f"json_extract(properties_json, '{path}')"
-        json_type_expr = f"json_type(properties_json, '{path}')"
         safe_array = (
-            f"(CASE WHEN {json_type_expr} = 'array' "
-            f"THEN {json_extract_expr} ELSE '[]' END)"
+            "(CASE WHEN json_type(properties_json, ?) = 'array' "
+            "THEN json_extract(properties_json, ?) ELSE '[]' END)"
         )
         return (
             f"EXISTS (SELECT 1 FROM json_each({safe_array}) WHERE json_each.value = ?)",
-            [clause.value],
+            [path, path, clause.value],
         )
 
     @staticmethod
-    def _field_to_sql_expr(field: str) -> str:
-        """Map a DSL field path to a SQLite column / ``json_extract`` expression."""
+    def _field_to_sql_expr(field: str) -> tuple[str, list[Any]]:
+        """Map a DSL field path to a SQLite column / ``json_extract`` expression.
+
+        Returns the expression and the parameters it binds.
+        """
         if field in {"node_type", "node_role", "node_id"}:
-            return field
+            return field, []
         if field == DOC_LINK_FIELD:
             # Stored as a JSON array in its own TEXT column; ``exists``
             # (the only op ``check_doc_link_clause`` lets through)
             # renders as the plain ``IS NOT NULL`` on that column.
-            return "document_ids_json"
+            return "document_ids_json", []
         if field.startswith("properties."):
-            # The key is the caller's and the path is spliced into SQL text,
-            # not bound, so :func:`json_key_path` refuses a key that is not a
-            # plain object key before it gets there.
+            # The key is the caller's, so its path is bound, not spliced.
             path = json_key_path(field.split(".", 1)[1])
-            return f"json_extract(properties_json, '{path}')"
+            return "json_extract(properties_json, ?)", [path]
         msg = f"Unsupported DSL field path: {field!r}"
         raise ValueError(msg)
 
@@ -1644,13 +1644,16 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         return sql, params
 
     @staticmethod
-    def _edge_field_to_sql_expr(field: str) -> str:
-        """Map a DSL edge-field path to a SQLite column or JSON extract."""
+    def _edge_field_to_sql_expr(field: str) -> tuple[str, list[Any]]:
+        """Map a DSL edge-field path to a SQLite column or JSON extract.
+
+        Returns the expression and the parameters it binds.
+        """
         if field in EDGE_TOP_LEVEL_COLUMNS:
-            return field
+            return field, []
         if field.startswith("properties."):
             path = json_key_path(field.split(".", 1)[1])
-            return f"json_extract(properties_json, '{path}')"
+            return "json_extract(properties_json, ?)", [path]
         msg = f"Unsupported DSL edge field path: {field!r}"
         raise ValueError(msg)
 

@@ -35,8 +35,9 @@ TAUTOLOGY_KEY = "team') OR 1=1 OR ('"
 #: Spliced raw, this closes the literal and leaves a token SQLite cannot parse.
 SYNTAX_ERROR_KEY = "te'am"
 
-#: Keys #729 refused, then the characters a quoted JSON path label decodes.
-#: Each is one flat key, carried by its own node in ``key_store``.
+#: Keys #729 refused, the characters a quoted JSON path label decodes, and a
+#: lone surrogate, which sqlite3 can bind only escaped. Each is one flat key,
+#: carried by its own node in ``key_store``.
 FLAT_KEYS = {
     "tautology": TAUTOLOGY_KEY,
     "syntax": SYNTAX_ERROR_KEY,
@@ -49,6 +50,7 @@ FLAT_KEYS = {
     "backslash": "back\\slash",
     "escape-text": "\\u00e9",
     "backslash-quote": 'a\\"b',
+    "lone-surrogate": "a\ud800b",
 }
 
 #: The key every call site filters on: the tautology above, a ``.``, both
@@ -56,8 +58,8 @@ FLAT_KEYS = {
 KEY = "team') OR 1=1 OR ('a.b \"c\" \\ é"
 #: Pieces of ``KEY`` a statement's text could carry; none of them is SQL.
 KEY_PARTS = ("team", "1=1", "a.b", "é")
-#: ``KEY`` as bound: ``\`` doubled, then ``"`` written ``"``.
-KEY_PATH = "$.\"team') OR 1=1 OR ('a.b \\u0022c\\u0022 \\\\ é\""
+#: ``KEY`` as bound: as ``json.dumps`` writes it, each ``\"`` then ``\u0022``.
+KEY_PATH = "$.\"team') OR 1=1 OR ('a.b \\u0022c\\u0022 \\\\ \\u00e9\""
 
 Statements = list[tuple[str, tuple[Any, ...]]]
 
@@ -152,7 +154,7 @@ def key_store(tmp_path: Path) -> Iterator[SQLiteGraphStore]:
         "kp-control", "service", dict.fromkeys(FLAT_KEYS.values(), "data")
     )
     # The value where a misspelled path lands: ``b`` inside ``a``, element 0
-    # of ``tags``, and the ``é`` that an unescaped ``é`` decodes to.
+    # of ``tags``, and the ``é`` the text ``\u00e9`` decodes to unescaped.
     store.upsert_node(
         "kp-decoy",
         "service",
@@ -203,6 +205,15 @@ class TestTheSpelling:
         """``\\"`` matches on SQLite 3.53 and silently misses on 3.45 and 3.46."""
         assert json_key_path('say "hi"') == '$."say \\u0022hi\\u0022"'
 
+    def test_the_label_is_spelled_as_the_stores_write_the_key(self) -> None:
+        """SQLite 3.40 compares the label with the stored text as written.
+
+        Both stores write that text with ``json.dumps`` defaults, which store
+        ``é`` as ``\\u00e9`` and a newline as ``\\n``. SQLite 3.45 and later
+        decode either spelling of those two, so no filter tells them apart.
+        """
+        assert json_key_path("clé\n") == '$."cl\\u00e9\\n"'
+
     def test_a_nul_is_refused_before_sql(self, key_store: SQLiteGraphStore) -> None:
         """No spelling names it.
 
@@ -232,17 +243,13 @@ class TestGraphQuery:
         assert _node_ids(rows) == {"node-a"}
         _assert_bound(seen)
 
-    def test_the_bool_branch_binds_the_key(
-        self, graph_store: SQLiteGraphStore
-    ) -> None:
+    def test_the_bool_branch_binds_the_key(self, graph_store: SQLiteGraphStore) -> None:
         with _statements(graph_store) as seen:
             rows = graph_store.query(properties={KEY: True})
         assert _node_ids(rows) == {"node-b"}
         _assert_bound(seen)
 
-    def test_the_none_branch_binds_the_key(
-        self, graph_store: SQLiteGraphStore
-    ) -> None:
+    def test_the_none_branch_binds_the_key(self, graph_store: SQLiteGraphStore) -> None:
         with _statements(graph_store) as seen:
             rows = graph_store.query(properties={KEY: None})
         assert _node_ids(rows) == {"node-d"}

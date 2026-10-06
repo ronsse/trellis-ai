@@ -999,6 +999,19 @@ All notable changes to Trellis will be documented in this file.
   before this fix, stays current, and the race that leaves the two rows is
   unchanged. Writes between nodes with one current row are unchanged.
   ([#732](https://github.com/ronsse/trellis-ai/pull/732))
+- **A SQLite graph or vector filter key is bound as a parameter and names one
+  flat key, as written.** This replaces #729's refusal. The SQLite graph
+  store's `query(properties=...)` and `properties.<key>` query filters, on
+  nodes and edges, and the SQLite vector store's `query(filters=...)` bind
+  the key's JSON path, `$."<key>"`, as a statement parameter, so no part of a
+  key is SQL text. A key the other backends filter on now filters on SQLite
+  too, as one flat object key: `a.b` names the key `a.b`, not `b` inside `a`,
+  and a space, `'`, `"`, `\`, `[` or non-ASCII letter is part of the key. A
+  pack filter on such a key no longer fails the graph and semantic axes. A
+  key holding a NUL character still raises `ValueError`, since no SQLite JSON
+  path names it, and on SQLite 3.40 a key holding `"` matches no row.
+  `GraphStore.query` and `VectorStore.query` state the rule, and both
+  contract suites pin it on every backend.
 
 ## [0.9.0] - 2026-05-13
 

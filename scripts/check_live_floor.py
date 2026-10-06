@@ -26,11 +26,14 @@ from pathlib import PurePosixPath
 #:
 #: Hand-read off live-infra run 36293450400 at b51896b3 (2026-09-27), from
 #: that run's own per-test lines, never from this script: 25 passed, 15
-#: skipped. The 15 are ``SEARCH_ISSUING_TESTS``, which ``neo4j:2025.12``
-#: cannot run. A change that removes passing contract cases, or gates more of
-#: them behind the ``SEARCH`` capability, edits this row in the same diff.
+#: skipped. The skips are ``SEARCH_ISSUING_TESTS``, which ``neo4j:2025.12``
+#: cannot run. The four ``test_query_filter_key_is_one_flat_key_as_written``
+#: cases joined that roster, and a run against this workflow's images counted
+#: 25 passed, 19 skipped from its per-test lines. A change that removes
+#: passing contract cases, or gates more of them behind the ``SEARCH``
+#: capability, edits this row in the same diff.
 FLOORS: dict[str, tuple[int, int]] = {
-    "tests/unit/stores/contracts/test_neo4j_vector_contract.py": (25, 15),
+    "tests/unit/stores/contracts/test_neo4j_vector_contract.py": (25, 19),
 }
 
 

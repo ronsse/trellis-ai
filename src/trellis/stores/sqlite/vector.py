@@ -142,9 +142,8 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
                 # A bool is an int, so it takes this branch too, and sqlite3
                 # binds it as 1 or 0: what json_extract returns for true/false.
                 if isinstance(value, str | int | float):
-                    path = json_key_path(key)
-                    where_parts.append(f"json_extract(metadata_json, '{path}') = ?")
-                    params.append(value)
+                    where_parts.append("json_extract(metadata_json, ?) = ?")
+                    params.extend([json_key_path(key), value])
                 else:
                     complex_filters[key] = value
 

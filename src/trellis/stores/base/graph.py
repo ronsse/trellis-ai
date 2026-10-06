@@ -634,7 +634,10 @@ class GraphStore(ABC):
 
         Args:
             node_type: Optional node type filter.
-            properties: Optional property filters.
+            properties: Optional property filters. Each key is one flat
+                property key, compared as written: ``"a.b"`` is the key
+                ``a.b``, not a path to ``b`` inside ``a``, and a space, quote
+                or non-ASCII character is part of the key.
             limit: Max results.
             as_of: Optional point-in-time filter.
         """

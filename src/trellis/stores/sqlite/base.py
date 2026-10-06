@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-import re
+import json
 import sqlite3
 import threading
 import time
@@ -251,27 +251,35 @@ class SQLiteStoreBase:
         )
 
 
-_PLAIN_JSON_KEY = re.compile(r"[A-Za-z0-9_-]+")
-
-
 def json_key_path(key: str) -> str:
-    """Return the JSON path ``$.<key>`` for one plain object key, or raise.
+    """Return the JSON path naming *key* as one object member: ``$."<key>"``.
 
-    The graph and vector stores splice this path into SQL text as a string
-    literal, ``json_extract(<column>, '$.<key>')``, so the key is checked
-    before it gets there: a ``'`` would close the literal and the rest of the
-    key would be read as SQL, and a ``.`` or ``[`` would turn one key into a
-    nested path. Only ``[A-Za-z0-9_-]+`` passes.
+    The graph and vector stores bind this path as a statement parameter,
+    ``json_extract(<column>, ?)``, so no part of the key is ever SQL text.
+    Inside the quoted label a ``.``, ``[``, ``'`` or space is part of the
+    key, as every other backend reads it.
+
+    The label is the key as ``json.dumps`` writes it, the way both stores
+    write their JSON columns, with each ``\\"`` rewritten ``\\u0022``, because
+    a ``"`` written ``\\"`` matches on SQLite 3.53 but misses on 3.45 and
+    3.46. SQLite 3.45, 3.46 and 3.53 decode the escapes on both sides, and
+    3.40 compares the label with the stored text as written, so the one
+    spelling matches on all four, save that on 3.40 a key holding a ``"``
+    matches nothing under any spelling. ``json.dumps`` also escapes a lone
+    surrogate, which sqlite3 cannot bind raw.
 
     Raises:
-        ValueError: *key* is empty or holds any other character, the same
-            error the graph store's DSL compiler raises for a field or
+        ValueError: *key* holds a NUL character. SQLite rejects a raw NUL as
+            a bad path, and 3.45, 3.46 and 3.53 read ``\\u0000`` as the end
+            of the label and match the key's prefix instead. The graph
+            store's DSL compiler raises the same error for a field or
             operator it cannot compile.
     """
-    if not _PLAIN_JSON_KEY.fullmatch(key):
+    if "\x00" in key:
         msg = (
-            f"Filter key {key!r} is not a plain JSON object key: "
-            "use letters, digits, '_' or '-'"
+            f"Filter key {key!r} holds a NUL character, "
+            "which a SQLite JSON path cannot name"
         )
         raise ValueError(msg)
-    return f"$.{key}"
+    escaped = json.dumps(key)[1:-1].replace('\\"', "\\u0022")
+    return f'$."{escaped}"'
