@@ -48,6 +48,11 @@ def _build_app(registry: StoreRegistry) -> FastAPI:
         yield
 
     app = FastAPI(lifespan=_noop_lifespan)
+    # Same three handlers create_app registers — see
+    # register_exception_handlers for why they're shared (#741 follow-up 5):
+    # without them this shim answered a raw traceback / FastAPI's default
+    # 422 shape where production answers a structured envelope.
+    api_app_module.register_exception_handlers(app)
     app.include_router(version.router)
     app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
     app.include_router(ingest.router, prefix="/api/v1", tags=["ingest"])

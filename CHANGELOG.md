@@ -1131,6 +1131,17 @@ All notable changes to Trellis will be documented in this file.
   `"rejected"` and the exit code is `2`. Its message, audit event and
   warnings are unchanged. No CLI command builds such a command today.
   ([#744](https://github.com/ronsse/trellis-ai/pull/744))
+- **`trellis.testing.in_memory_client` answers the same status and body
+  `create_app()` does for a `TrellisError`, a finite validation error, and
+  the #741 `NaN`-echoing shape.** The in-process testing shim
+  (`trellis.testing.inmemory._build_app`) built a bare `FastAPI` with the
+  routers but none of `create_app`'s three exception handlers, so a test
+  written against it saw a raw traceback or a 500 where production answers
+  a structured `409`, and FastAPI's default 422 shape — including a crash
+  on an echoed `NaN` — where production answers the #741 fix. Both apps now
+  register the structured-500, `TrellisError`, and non-finite-422 handlers
+  from one function, `trellis_api.app.register_exception_handlers`; no
+  other shim behaviour (middleware, lifespan, routes) changed.
 
 ## [0.9.0] - 2026-05-13
 
