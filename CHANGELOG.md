@@ -839,6 +839,17 @@ All notable changes to Trellis will be documented in this file.
   `handler_failed_unexpected` keeps its traceback; the `failed` result and
   the `MUTATION_REJECTED` event are unchanged.
   ([#718](https://github.com/ronsse/trellis-ai/pull/718))
+- **On Neo4j and ArcadeDB, a node with two current rows reads as one
+  version.** Concurrent writers can leave a node two current rows, and
+  `get_node`, `search_nodes` and `count_nodes_by_type` did not agree on
+  which one is the node: an ascending and a descending search could show
+  different versions, a `node_type` filter could list the node under both
+  types, and the graph page's type chips could sum past the list's total.
+  All three now show the row with the later `valid_from`, or the greater
+  `version_id` between equal stamps, and a search matches only the name of
+  the version shown. The race itself is unchanged, as are
+  `get_nodes_bulk`, `query` and `get_subgraph`.
+  ([#719](https://github.com/ronsse/trellis-ai/pull/719))
 - **A refused or failed command no longer uses up its idempotency key.**
   Only a command whose handler succeeded makes its key answer `duplicate`,
   from the executor's in-process cache or from the event log. A command
