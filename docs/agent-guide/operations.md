@@ -179,7 +179,7 @@ When the flag is on, the CLI JSON output for a trace this call stored gains an `
 {"status": "ingested", "trace_id": "01JRK5...", "source": "agent", "intent": "...", "already_ingested": false, "extraction": {"entities": 5, "edges": 4, "failed": 0, "executed": true}}
 ```
 
-`entities` / `edges` count the commands *submitted*; `failed` counts those the executor rejected. The batch runs `CONTINUE_ON_ERROR`, so a non-zero `failed` is not an error for the ingest — the trace is stored either way — but it does mean some drafts did not land. Persistent non-zero `failed` is worth investigating; the `trace_extraction_commands_failed` log line carries the executor messages.
+`entities` / `edges` count the commands *submitted*; `failed` counts those that came back `rejected` or `failed`. The batch runs `CONTINUE_ON_ERROR`, so a non-zero `failed` is not an error for the ingest — the trace is stored either way — but it does mean some drafts did not land. Persistent non-zero `failed` is worth investigating; the `trace_extraction_commands_failed` log line carries the executor messages.
 
 ### `trellis extract traces` (backfill)
 
