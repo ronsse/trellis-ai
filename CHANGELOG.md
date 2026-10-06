@@ -1166,6 +1166,7 @@ All notable changes to Trellis will be documented in this file.
   rating on `feedback.record` now fails Stage 1 the same way a missing arg
   does: `REJECTED` with `metadata["rejection_reason"] = "validate"`, one
   `mutation.rejected` event, nothing recorded. No other operation changes.
+  ([#751](https://github.com/ronsse/trellis-ai/pull/751))
 
 ## [0.9.0] - 2026-05-13
 
