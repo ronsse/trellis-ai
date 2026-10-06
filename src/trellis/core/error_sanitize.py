@@ -63,6 +63,16 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     # contains (...)." (NOT NULL and CHECK). English wording only: a server
     # with another lc_messages translates both.
     re.compile(r"\bKey \(.*?\)=\(|\bFailing row contains \("),
+    # Bolt (Neo4j, ArcadeDB) duplicate-constraint texts quote the row value
+    # inline, no DETAIL line to strip: Neo4j's "Node(<n>) already exists
+    # with label `<Label>` and property `<prop>` = '<value>'" (gql_status
+    # 22N79), and ArcadeDB's in-transaction "Duplicated key [<value>] found
+    # on index '<Label>[<prop>]' already assigned to record #<rid>"
+    # (gql_status 50N42, over Bolt with bound parameters).
+    re.compile(
+        r"\balready exists with label `[^`]*` and property `[^`]*` = '"
+        r"|\bDuplicated key \[[^\]]*\] found on index '"
+    ),
 )
 
 _LONG_TOKEN_RUN = re.compile(
@@ -97,11 +107,11 @@ def sanitize_error_message(text: str, *, max_len: int = DEFAULT_MAX_LEN) -> str:
     Clean text passes through so operator-authored Trellis error
     messages ("entity_type 'precedent' not registered") stay useful in
     JSON output. Text containing an email, an inline-credential URL, a
-    secret-shaped assignment, a long token-shaped run, raw SQL, or
-    PostgreSQL row values is replaced wholesale with
-    :data:`SUPPRESSED_MARKER` — partial redaction is not attempted
-    because any transform of the original text risks leaving a
-    recoverable fragment.
+    secret-shaped assignment, a long token-shaped run, raw SQL, a
+    PostgreSQL row value, or a Neo4j or ArcadeDB duplicate-constraint row
+    value is replaced wholesale with :data:`SUPPRESSED_MARKER` — partial
+    redaction is not attempted because any transform of the original
+    text risks leaving a recoverable fragment.
     """
     if any(pattern.search(text) for pattern in _LEAK_PATTERNS):
         return SUPPRESSED_MARKER
