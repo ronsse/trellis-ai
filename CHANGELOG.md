@@ -1010,6 +1010,7 @@ All notable changes to Trellis will be documented in this file.
   type and, when Trellis wrote it, its message under `error`, with no
   traceback. An untyped failure that reaches the API's catch-all still logs
   its traceback, and response bodies and command results are unchanged.
+  ([#734](https://github.com/ronsse/trellis-ai/pull/734))
 
 ## [0.9.0] - 2026-05-13
 
