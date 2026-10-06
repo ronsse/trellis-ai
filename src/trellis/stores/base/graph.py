@@ -431,7 +431,9 @@ class GraphStore(ABC):
         Round-trip-cost guidance is the same as
         :meth:`upsert_nodes_bulk`. Endpoints must already be current
         nodes; otherwise :class:`ValueError` is raised mentioning the
-        offending list index.
+        offending list index. A ``(source_id, target_id, edge_type)``
+        triplet given twice in one call is refused before any write, by a
+        :class:`ValueError` naming the second occurrence's index.
 
         Returns:
             List of edge IDs in the same order as the input.
@@ -651,7 +653,11 @@ class GraphStore(ABC):
             properties: Optional property filters. Each key is one flat
                 property key, compared as written: ``"a.b"`` is the key
                 ``a.b``, not a path to ``b`` inside ``a``, and a space, quote
-                or non-ASCII character is part of the key.
+                or non-ASCII character is part of the key. On SQLite a
+                scalar or ``None`` value is compared through a JSON path: a
+                NUL character in its key raises :class:`ValueError`, and
+                before SQLite 3.45 a key holding a ``"`` reads as absent from
+                every node, so a scalar matches none and ``None`` matches all.
             limit: Max results.
             as_of: Optional point-in-time filter.
         """

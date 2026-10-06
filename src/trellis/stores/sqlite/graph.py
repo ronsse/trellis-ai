@@ -1460,12 +1460,14 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
     def execute_node_query(self, query: Any) -> list[dict[str, Any]]:
         """Compile :class:`NodeQuery` to a SQLite SELECT.
 
-        Supports the full Phase 1 operator surface (``eq`` / ``in`` /
-        ``exists``) on:
-
-        * ``node_type`` (column comparison)
-        * ``node_role`` (column comparison)
-        * ``properties.<key>`` (via ``json_extract``)
+        * ``node_type`` / ``node_role`` / ``node_id``: ``eq``, ``in``,
+          ``exists`` and the range ops compare the column; ``contains``
+          is refused.
+        * ``document_ids``: ``exists`` only.
+        * ``properties.<key>``: ``eq``, ``in`` and the range ops compare
+          the value ``json_extract`` reads at the key, ``exists`` matches a
+          non-null value, and ``contains`` tests membership of the array at
+          the key. Every op binds the key.
         """
         sql, params = self._compile_node_query(query)
         cursor = self._conn.execute(sql, params)

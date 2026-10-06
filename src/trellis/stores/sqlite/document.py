@@ -154,30 +154,23 @@ def _metadata_matches(metadata_json: str, key: str, expected_json: str) -> bool:
 
 
 def _bindable_json_path(key: str) -> str | None:
-    r"""``$."key"`` for *key*, or ``None`` if SQLite cannot address it.
+    r"""``$."key"`` for *key*, or ``None`` if *key* holds a ``"`` or a ``\``.
 
     Quoted so a key holding a ``.`` or a ``[`` is read as a literal member
     name rather than as path syntax, and returned to be **bound** rather
     than spliced: the key arrives from wire input, and the
     ``content_tags`` branch already binds its paths for that reason.
 
-    Two character classes have no SQLite JSON-path spelling at all, and both
-    parse as a *miss* rather than an error — so a key containing either would
-    silently match nothing. Measured against SQLite 3.45:
+    Inside the quotes a ``"`` ends the label and a ``\`` starts an escape
+    sequence, so such a key misses, names another key or raises a bad-path
+    error. :func:`~trellis.stores.sqlite.base.json_key_path` spells both on
+    SQLite 3.45 and later, but before 3.45 its spelling of a key holding a
+    ``"`` matches nothing.
 
-    * a double quote, because a backslash-escaped quote inside the component
-      is not read as a literal quote;
-    * a backslash, because inside a quoted component SQLite reads it as the
-      start of an escape sequence. For a key spelled ``a\b`` in Python,
-      ``json_extract`` under the path ``$."a\b"`` returns ``NULL`` while the
-      doubled ``$."a\\b"`` returns the value.
-
-    The backslash case was a live backend divergence, found by the #455
-    review gate: Postgres binds the key directly (``metadata -> %s``) and
-    matched the same document, inside the change (#409) whose whole point is
-    that the two backends cannot disagree about what a filter means. Both
-    classes are handed to :func:`_metadata_matches` instead, which compares
-    the parsed object in Python and needs no path.
+    Postgres binds the key directly (``metadata -> %s``) and matches such a
+    key as written. Keys holding either character are handed to
+    :func:`_metadata_matches` instead, which compares the parsed object in
+    Python, needs no path and matches on every SQLite release.
     """
     return None if '"' in key or "\\" in key else f'$."{key}"'
 
@@ -368,8 +361,8 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
                     )
                     filter_params.extend([path, value, path])
                 else:
-                    # Lists, dicts, ``None``, and keys SQLite cannot spell
-                    # a path for. SQLite has no structural JSON equality
+                    # Lists, dicts, ``None``, and keys holding a ``"`` or a
+                    # ``\``. SQLite has no structural JSON equality
                     # and ``json_extract`` returns a container as *text*,
                     # so a SQL comparison would call ``{"a": 1, "b": 2}``
                     # and ``{"b": 2, "a": 1}`` unequal — while Python and
