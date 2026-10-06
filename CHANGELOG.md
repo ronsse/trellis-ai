@@ -1034,6 +1034,7 @@ All notable changes to Trellis will be documented in this file.
   locked` until the connection's next commit, and that commit wrote the
   rows a failed `append_many` had inserted before the duplicate. The
   errors raised are unchanged.
+  ([#739](https://github.com/ronsse/trellis-ai/pull/739))
 
 ## [0.9.0] - 2026-05-13
 
