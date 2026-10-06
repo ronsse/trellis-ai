@@ -1131,6 +1131,19 @@ All notable changes to Trellis will be documented in this file.
   `"rejected"` and the exit code is `2`. Its message, audit event and
   warnings are unchanged. No CLI command builds such a command today.
   ([#744](https://github.com/ronsse/trellis-ai/pull/744))
+- **A failed SQLite graph, document, vector, tuner-state or API-key revoke
+  write no longer holds the write lock or saves part of itself.**
+  `SQLiteGraphStore.upsert_node`, `upsert_nodes_bulk`, `upsert_alias`,
+  `upsert_edge`, `upsert_edges_bulk`, `delete_node` and `delete_edge`,
+  `SQLiteDocumentStore.put` and `delete`, `SQLiteVectorStore.upsert` and
+  `delete`, `SQLiteTunerStateStore.put_proposal`, `update_status` and
+  `set_cursor`, and `SQLiteApiKeyStore.revoke` now roll back a write that
+  fails, as the writes fixed in #739 do. Until the store's next commit,
+  other connections' writes failed with `database is locked`, and that
+  commit saved the failed call's earlier statements, such as a version's
+  close without its replacement or a document without its full-text row.
+  `commit=False` writes and the errors raised are unchanged.
+  ([#745](https://github.com/ronsse/trellis-ai/pull/745))
 - **`trellis.testing.in_memory_client` answers the same status and body
   `create_app()` does for a `TrellisError`, a finite validation error, and
   the #741 `NaN`-echoing shape.** The in-process testing shim

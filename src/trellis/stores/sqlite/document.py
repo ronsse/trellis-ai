@@ -254,31 +254,32 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         metadata_json = json.dumps(metadata)
         chash = _content_hash(content)
 
-        # `preserve_updated_at` is bound, not spliced: an f-string here would
-        # couple the generated SQL to this block's indentation.
-        self._conn.execute(
-            """
-            INSERT INTO documents
-                (doc_id, content, content_hash,
-                 metadata_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(doc_id) DO UPDATE SET
-                content = excluded.content,
-                content_hash = excluded.content_hash,
-                metadata_json = excluded.metadata_json,
-                updated_at = CASE WHEN ?
-                    THEN documents.updated_at ELSE excluded.updated_at END
-            """,
-            (doc_id, content, chash, metadata_json, now, now, preserve_updated_at),
-        )
-        # FTS5 doesn't support ON CONFLICT — delete+insert
-        self._conn.execute("DELETE FROM documents_fts WHERE doc_id = ?", (doc_id,))
-        self._conn.execute(
-            "INSERT INTO documents_fts (doc_id, content) VALUES (?, ?)",
-            (doc_id, content),
-        )
+        conn = self._conn
+        with conn:  # one transaction: the document and its full-text row, or neither
+            # `preserve_updated_at` is bound, not spliced: an f-string here would
+            # couple the generated SQL to this block's indentation.
+            conn.execute(
+                """
+                INSERT INTO documents
+                    (doc_id, content, content_hash,
+                     metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(doc_id) DO UPDATE SET
+                    content = excluded.content,
+                    content_hash = excluded.content_hash,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = CASE WHEN ?
+                        THEN documents.updated_at ELSE excluded.updated_at END
+                """,
+                (doc_id, content, chash, metadata_json, now, now, preserve_updated_at),
+            )
+            # FTS5 doesn't support ON CONFLICT — delete+insert
+            conn.execute("DELETE FROM documents_fts WHERE doc_id = ?", (doc_id,))
+            conn.execute(
+                "INSERT INTO documents_fts (doc_id, content) VALUES (?, ?)",
+                (doc_id, content),
+            )
 
-        self._conn.commit()
         logger.debug("document_stored", doc_id=doc_id)
         return doc_id
 
@@ -292,9 +293,10 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         return self._row_to_dict(row)
 
     def delete(self, doc_id: str) -> bool:
-        cursor = self._conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
-        self._conn.execute("DELETE FROM documents_fts WHERE doc_id = ?", (doc_id,))
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # one transaction: both rows go, or neither
+            cursor = conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
+            conn.execute("DELETE FROM documents_fts WHERE doc_id = ?", (doc_id,))
         deleted = cursor.rowcount > 0
         if deleted:
             logger.debug("document_deleted", doc_id=doc_id)
