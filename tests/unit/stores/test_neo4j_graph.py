@@ -32,6 +32,8 @@ import pytest
 
 pytest.importorskip("neo4j")
 
+from tests.unit.stores import bolt_duplicate_current
+
 URI = os.environ.get("TRELLIS_TEST_NEO4J_URI", "")
 USER = os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j")
 PASSWORD = os.environ.get("TRELLIS_TEST_NEO4J_PASSWORD", "")
@@ -870,3 +872,18 @@ class TestEdgeProvenance:
                     }
                 ]
             )
+
+
+class TestDuplicateCurrentRow:
+    """One node_id with two current rows, as concurrent upserts can leave."""
+
+    def test_every_read_shows_the_newest_version(self, graph_store):
+        bolt_duplicate_current.check_every_read_shows_the_newest_version(graph_store)
+
+    def test_type_counts_follow_the_shown_version(self, graph_store):
+        bolt_duplicate_current.check_type_counts_follow_the_shown_version(graph_store)
+
+    def test_equal_stamps_pick_the_greater_version_id(self, graph_store):
+        bolt_duplicate_current.check_equal_stamps_pick_the_greater_version_id(
+            graph_store
+        )

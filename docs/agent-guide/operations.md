@@ -1772,7 +1772,7 @@ cmd = Command(
 )
 ```
 
-If the same key has been seen before (in-memory or in the event log), the executor returns `CommandStatus.DUPLICATE` without re-executing.
+If a command with the same key has already succeeded (in-memory or in the event log), the executor returns `CommandStatus.DUPLICATE` without re-executing. A command that was rejected or failed leaves its key free, so a corrected retry under the same key runs.
 
 ---
 

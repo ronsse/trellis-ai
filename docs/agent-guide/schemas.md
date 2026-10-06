@@ -1038,7 +1038,7 @@ Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes
 | `success` | Command executed successfully |
 | `rejected` | Policy gate rejected the command |
 | `failed` | Execution failed (validation or handler error) |
-| `duplicate` | Idempotency key already seen |
+| `duplicate` | A command with this idempotency key already succeeded |
 
 ### BatchStrategy
 

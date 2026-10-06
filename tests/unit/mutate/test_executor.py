@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from trellis.errors import ValidationError
+from trellis.errors import PolicyViolationError, StoreError, ValidationError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     BatchStrategy,
@@ -20,6 +20,7 @@ from trellis.mutate.executor import MutationExecutor
 from trellis.schemas.enums import TraceSource
 from trellis.schemas.trace import Trace, TraceContext
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 
 def _cmd(
@@ -383,6 +384,87 @@ class TestIdempotencyCacheEviction:
         result = executor.execute(_cmd(idempotency_key="evicted"))
         assert result.status == CommandStatus.DUPLICATE
         assert "persisted" in result.message
+
+
+class _RefusesSynBad:
+    """Raises ``exc`` for the command named ``syn-bad``; succeeds otherwise.
+
+    Records every name it was asked to handle, so a test can tell a
+    command that ran from one answered DUPLICATE before reaching it.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.names: list[str] = []
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        name = command.args["name"]
+        self.names.append(name)
+        if name == "syn-bad":
+            raise self.exc
+        return f"ent-{name}", "ok"
+
+
+def _named(name: str, key: str) -> Command:
+    return _cmd(args={"entity_type": "service", "name": name}, idempotency_key=key)
+
+
+class TestIdempotencyKeyRecordedOnlyOnSuccess:
+    """Only a command whose handler succeeded makes its key a duplicate.
+
+    A command the handler refuses (REJECTED) or fails on (FAILED) leaves
+    its key free, so a corrected retry under the same key runs on the
+    same executor, as it does on a fresh one.
+    """
+
+    @pytest.mark.parametrize(
+        ("exc", "first_status"),
+        [
+            pytest.param(
+                ValidationError("syn refused", code="syn_refused"),
+                CommandStatus.REJECTED,
+                id="validation-rejected",
+            ),
+            pytest.param(
+                PolicyViolationError("syn denied", policy_id="syn-policy"),
+                CommandStatus.REJECTED,
+                id="policy-rejected",
+            ),
+            pytest.param(
+                StoreError("syn store down", store="syn"),
+                CommandStatus.FAILED,
+                id="store-failed",
+            ),
+            pytest.param(
+                RuntimeError("syn panic"),
+                CommandStatus.FAILED,
+                id="untyped-failed",
+            ),
+        ],
+    )
+    def test_corrected_retry_under_the_same_key_runs(
+        self,
+        tmp_path: Path,
+        exc: Exception,
+        first_status: CommandStatus,
+    ) -> None:
+        log = SQLiteEventLog(tmp_path / "events.db")
+        handler = _RefusesSynBad(exc)
+        executor = MutationExecutor(
+            event_log=log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        first = executor.execute(_named("syn-bad", "syn-key-1"))
+        assert first.status == first_status
+        # The persisted check counts only executed mutations, so the
+        # refusal's own audit event does not make the key a duplicate.
+        assert log.has_idempotency_key("syn-key-1") is False
+
+        retry = executor.execute(_named("syn-fixed", "syn-key-1"))
+        assert retry.status == CommandStatus.SUCCESS, retry.message
+        assert retry.created_id == "ent-syn-fixed"
+        assert handler.names == ["syn-bad", "syn-fixed"]
 
 
 class TestBatchExecution:
