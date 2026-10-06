@@ -849,6 +849,7 @@ All notable changes to Trellis will be documented in this file.
   recorded only once the handler has succeeded. A succeeded command's key
   answers `duplicate` as before, from the cache and from the event log,
   whose check already counted only `mutation.executed` events.
+  ([#721](https://github.com/ronsse/trellis-ai/pull/721))
 
 ## [0.9.0] - 2026-05-13
 
