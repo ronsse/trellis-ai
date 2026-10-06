@@ -45,18 +45,6 @@ from trellis.stores.postgres.base import PostgresStoreBase
 logger = structlog.get_logger(__name__)
 
 
-def _pg_text_lit(value: str) -> str:
-    """Render a single-quoted SQL TEXT literal with naive escape.
-
-    Used in narrow code paths where the JSON path key is interpolated
-    into a SQL expression rather than bound as a parameter (Postgres
-    can't bind to ``->>`` operands).  Keys originate from the DSL, not
-    raw user input, but escaping single quotes keeps the renderer
-    robust to constants that happen to contain them.
-    """
-    return "'" + value.replace("'", "''") + "'"
-
-
 def _alias_lock_key(source_system: str, raw_id: str) -> str:
     """Encode an alias tuple as PostgreSQL-safe advisory-lock text."""
     return json.dumps([source_system, raw_id], separators=(",", ":"))
@@ -1597,15 +1585,15 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             # ever matching (``'{"a": "x"}' @> '{"a": ["x"]}'`` is
             # already false, but the guard documents the list-only
             # contract and protects against future shape drift).  The
-            # value JSON is bound as a parameter; the key still needs a
-            # literal in ``->`` because that operand isn't a bindable
-            # position.
+            # key and the value JSON are bound as parameters, as every
+            # ``properties.<key>`` op binds its key: psycopg would read
+            # a ``%`` in a spliced key as placeholder syntax.
             return (
                 (
-                    f"(jsonb_typeof(properties->{_pg_text_lit(key)}) = 'array' "
-                    f"AND properties @> %s::jsonb)"
+                    "(jsonb_typeof(properties->%s) = 'array' "
+                    "AND properties @> %s::jsonb)"
                 ),
-                [json.dumps({key: [clause.value]})],
+                [key, json.dumps({key: [clause.value]})],
             )
         sql_op = RANGE_OP_GLYPH.get(clause.op)
         if sql_op is not None:
@@ -1616,8 +1604,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             # asking a numeric question.  String range filters on
             # ``properties.<key>`` are not in scope today.
             return (
-                f"(properties->>{_pg_text_lit(key)})::numeric {sql_op} %s",
-                [clause.value],
+                f"(properties->>%s)::numeric {sql_op} %s",
+                [key, clause.value],
             )
         msg = f"Unknown filter op {clause.op!r}"
         raise ValueError(msg)

@@ -353,11 +353,15 @@ class TestPostgresContainsCompiler:
         sql, params = PostgresGraphStore._compile_properties_clause(clause)
         # The typeof guard rules out scalar-valued properties; the @>
         # containment carries the array-special-case.
-        assert "jsonb_typeof(properties->'column_names') = 'array'" in sql
+        assert "jsonb_typeof(properties->%s) = 'array'" in sql
         assert "properties @> %s::jsonb" in sql
-        # Nested-level @> requires the scalar wrapped in an array —
+        # The guard's key is a bound parameter, not SQL text. Nested-level
+        # @> requires the scalar wrapped in an array —
         # '{"a": ["x"]}' @> '{"a": "x"}' is FALSE in PostgreSQL.
-        assert params == [_json.dumps({"column_names": ["user_id"]})]
+        assert params == [
+            "column_names",
+            _json.dumps({"column_names": ["user_id"]}),
+        ]
 
     def test_contains_top_level_field_rejected(self) -> None:
         pytest.importorskip(
