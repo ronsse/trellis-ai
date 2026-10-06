@@ -1748,9 +1748,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # mislead it.
             try:
                 with self._driver.session(database=self._database) as session:
-                    # An auto-commit query runs on the writer: the lost
-                    # commit returned no bookmark, so a reader might not
-                    # show it yet.
+                    # A session's default access mode is WRITE, so this
+                    # read runs on the writer. A reader might not show the
+                    # lost commit yet: it returned no bookmark to wait for.
                     remaining = session.run(
                         "MATCH (n:Node {node_id: $nid}) RETURN count(n) AS remaining",
                         nid=node_id,
