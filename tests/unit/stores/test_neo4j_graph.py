@@ -604,6 +604,65 @@ def test_a_redaction_that_lost_a_concurrent_purge_emits_no_audit_event(
     assert _rows_left(graph_store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
 
 
+def _lose_the_purge_commit(monkeypatch, *, committed: bool) -> list[Exception]:
+    """Raise ``IncompleteCommit`` after each ``delete_node`` transaction.
+
+    The driver raises it when the connection drops with the commit
+    outstanding. With ``committed`` the purge commits first; otherwise its
+    statements run and are rolled back. Returns the errors raised so far.
+    """
+    import neo4j
+    from neo4j.exceptions import IncompleteCommit
+
+    original = neo4j.Session.execute_write
+    raised: list[Exception] = []
+
+    def lost(session: Any, transaction_function: Any, *args: Any, **kwargs: Any):
+        if "delete_node" not in getattr(transaction_function, "__qualname__", ""):
+            return original(session, transaction_function, *args, **kwargs)
+        if committed:
+            original(session, transaction_function, *args, **kwargs)
+        else:
+            with session.begin_transaction() as tx:
+                transaction_function(tx, *args, **kwargs)
+                tx.rollback()
+        msg = "synthetic lost commit"
+        raised.append(IncompleteCommit(msg))
+        raise raised[-1]
+
+    monkeypatch.setattr(neo4j.Session, "execute_write", lost)
+    return raised
+
+
+def test_a_lost_commit_the_purge_made_is_the_purge(graph_store, monkeypatch):
+    store = graph_store
+    _seed_purge_target(store, "n1")
+    lost = _lose_the_purge_commit(monkeypatch, committed=True)
+
+    assert store.delete_node("n1") is True
+    assert len(lost) == 1
+    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+
+
+def test_a_lost_commit_the_purge_did_not_make_is_a_failed_purge(
+    graph_store, monkeypatch
+):
+    from trellis.errors import StoreError
+
+    store = graph_store
+    _seed_purge_target(store, "n1")
+    seeded = _rows_left(store, "n1")
+    lost = _lose_the_purge_commit(monkeypatch, committed=False)
+
+    with pytest.raises(StoreError) as caught:
+        store.delete_node("n1")
+
+    assert lost == [caught.value.__cause__]
+    assert caught.value.message == "Purge of node n1 failed: IncompleteCommit"
+    assert seeded["Node"] == 2
+    assert _rows_left(store, "n1") == seeded
+
+
 def test_upsert_and_resolve_alias(graph_store):
     graph_store.upsert_node("orders_entity", "table", {"name": "orders"})
     graph_store.upsert_alias(

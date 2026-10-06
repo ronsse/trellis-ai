@@ -175,6 +175,74 @@ def test_a_purge_the_server_refuses_is_a_store_error(graph_store):
     assert absent not in caught.value.message
 
 
+def _lose_the_purge_commit(monkeypatch, *, committed: bool) -> list[Exception]:
+    """Raise ``IncompleteCommit`` after each ``delete_node`` transaction.
+
+    The driver raises it when the connection drops with the commit
+    outstanding. With ``committed`` the purge commits first; otherwise its
+    statements run and are rolled back. Returns the errors raised so far.
+    """
+    import neo4j
+    from neo4j.exceptions import IncompleteCommit
+
+    original = neo4j.Session.execute_write
+    raised: list[Exception] = []
+
+    def lost(session: Any, transaction_function: Any, *args: Any, **kwargs: Any):
+        if "delete_node" not in getattr(transaction_function, "__qualname__", ""):
+            return original(session, transaction_function, *args, **kwargs)
+        if committed:
+            original(session, transaction_function, *args, **kwargs)
+        else:
+            with session.begin_transaction() as tx:
+                transaction_function(tx, *args, **kwargs)
+                tx.rollback()
+        msg = "synthetic lost commit"
+        raised.append(IncompleteCommit(msg))
+        raise raised[-1]
+
+    monkeypatch.setattr(neo4j.Session, "execute_write", lost)
+    return raised
+
+
+def _seed_purge_target(store, node_id: str) -> None:
+    """Two versions, an edge and an alias: rows of every kind a purge removes."""
+    store.upsert_node(node_id, "person", {"phase": "1"})
+    store.upsert_node(node_id, "person", {"phase": "2"})
+    store.upsert_node(f"{node_id}-peer", "person", {})
+    store.upsert_edge(node_id, f"{node_id}-peer", "knows")
+    store.upsert_alias(node_id, "race-sys", f"raw-{node_id}", raw_name="One")
+
+
+def test_a_lost_commit_the_purge_made_is_the_purge(graph_store, monkeypatch):
+    store = graph_store
+    _seed_purge_target(store, "n1")
+    lost = _lose_the_purge_commit(monkeypatch, committed=True)
+
+    assert store.delete_node("n1") is True
+    assert len(lost) == 1
+    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+
+
+def test_a_lost_commit_the_purge_did_not_make_is_a_failed_purge(
+    graph_store, monkeypatch
+):
+    from trellis.errors import StoreError
+
+    store = graph_store
+    _seed_purge_target(store, "n1")
+    seeded = _rows_left(store, "n1")
+    lost = _lose_the_purge_commit(monkeypatch, committed=False)
+
+    with pytest.raises(StoreError) as caught:
+        store.delete_node("n1")
+
+    assert lost == [caught.value.__cause__]
+    assert caught.value.message == "Purge of node n1 failed: IncompleteCommit"
+    assert seeded["Node"] == 2
+    assert _rows_left(store, "n1") == seeded
+
+
 class TestArcadeDBEdgeProvenance:
     """Round-trip the five provenance fields through a real ArcadeDB.
 

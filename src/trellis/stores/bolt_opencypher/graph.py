@@ -1715,8 +1715,12 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         until ``max_transaction_retry_time`` runs out. A ``DriverError`` or
         ``Neo4jError`` that ends the purge, retried or not, is raised as
         :class:`StoreError` naming the node and the error's type. A
-        connection lost while the commit was outstanding leaves the purge's
-        outcome unknown, and the message says so.
+        connection lost while the commit was outstanding
+        (``IncompleteCommit``) leaves the outcome open, so the store reads
+        the node's ``Node`` rows back in a new session. None left is taken
+        as a committed purge, which returns as it would have without the
+        error; a row left as a failed one, raised as above. When that read
+        fails too, the outcome is unknown, and the message says so.
         """
         from neo4j.exceptions import (  # noqa: PLC0415
             DriverError,
@@ -1724,7 +1728,12 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             Neo4jError,
         )
 
+        # What the last run of ``_tx`` returned: when that run's commit is
+        # lost, ``execute_write`` raises instead of returning it.
+        removed_any = False
+
         def _tx(tx: ManagedTransaction) -> bool:
+            nonlocal removed_any
             # Take the write locks on the node's rows before counting. A
             # statement that waits on a concurrent purge's lock still counts
             # the rows it matched before the wait; this one waits instead,
@@ -1758,7 +1767,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 "RETURN count(c) AS deleted",
                 node_id,
             )
-            return removed > 0
+            removed_any = removed > 0
+            return removed_any
 
         # Outside ``_tx``: the driver retries only its own errors, so a
         # StoreError raised in there would end the retries.
@@ -1766,11 +1776,29 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             with self._driver.session(database=self._database) as session:
                 deleted = bool(session.execute_write(_tx))
         except IncompleteCommit as exc:
-            msg = (
-                f"Purge of node {node_id} lost its connection during the commit, "
-                f"so its outcome is unknown: {type(exc).__name__}"
-            )
-            raise StoreError(msg, store="graph") from exc
+            # The purge is one transaction, so its ``Node`` rows decide for
+            # its ``Alias`` and ``AliasClaim`` rows too. A concurrent purge
+            # or a write that re-creates the node before this read would
+            # mislead it.
+            try:
+                with self._driver.session(database=self._database) as session:
+                    # A session's default access mode is WRITE, so this
+                    # read runs on the writer. A reader might not show the
+                    # lost commit yet: it returned no bookmark to wait for.
+                    remaining = session.run(
+                        "MATCH (n:Node {node_id: $nid}) RETURN count(n) AS remaining",
+                        nid=node_id,
+                    ).single(strict=True)["remaining"]
+            except (DriverError, Neo4jError):
+                msg = (
+                    f"Purge of node {node_id} lost its connection during the "
+                    f"commit, so its outcome is unknown: {type(exc).__name__}"
+                )
+                raise StoreError(msg, store="graph") from exc
+            if remaining:
+                msg = f"Purge of node {node_id} failed: {type(exc).__name__}"
+                raise StoreError(msg, store="graph") from exc
+            deleted = removed_any
         except (DriverError, Neo4jError) as exc:
             msg = f"Purge of node {node_id} failed: {type(exc).__name__}"
             raise StoreError(msg, store="graph") from exc
