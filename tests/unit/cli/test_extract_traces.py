@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
-from typer.testing import CliRunner
+import typer
+from typer.testing import CliRunner, Result
 
+from tests.cli_output import plain
+from trellis.core.error_sanitize import SUPPRESSED_MARKER, sanitized_error_payload
+from trellis.errors import StoreError
+from trellis.mutate.executor import MutationExecutor
+from trellis_cli import extract_refresh as extract_cli
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_POLICY, EXIT_STORE
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -129,3 +137,113 @@ class TestBackfill:
         assert result.exit_code == 0
         data = json.loads(result.stdout.strip())
         assert data["traces_scanned"] == 0
+
+
+class _DriverError(Exception):
+    """An exception outside the executor's handler tuple, as ``psycopg.Error`` is."""
+
+
+#: A credentialed DSN, which the sanitizer suppresses whole, and a closing
+#: tag Rich raises ``MarkupError`` on if the line prints it as markup.
+_LOOP_FAILURE = "no route to postgres://ops:synthetic-secret@db [/x]"
+
+#: The calls the per-trace loop makes, any of which can raise.
+_LOOP_CALLS = pytest.mark.parametrize(
+    "call", ["extract_trace_batch", "reconcile_node_roles", "execute_batch"]
+)
+
+_FORMATS = pytest.mark.parametrize("fmt", ["json", "text"])
+
+
+def _raise_from(monkeypatch: pytest.MonkeyPatch, call: str, exc: BaseException) -> None:
+    """Make the loop's *call* raise *exc*."""
+
+    def _raise(*_args: object, **_kwargs: object) -> NoReturn:
+        raise exc
+
+    owner = MutationExecutor if call == "execute_batch" else extract_cli
+    monkeypatch.setattr(owner, call, _raise)
+
+
+def _backfill(fmt: str) -> Result:
+    """Run the backfill, adding ``--format json`` when *fmt* asks for it."""
+    args = ["extract", "traces"]
+    return runner.invoke(app, [*args, "--format", "json"] if fmt == "json" else args)
+
+
+class TestLoopFailure:
+    """A failure inside the per-trace loop is reported, not a traceback.
+
+    The trace query had a catch-all and the loop after it had none, so an
+    exception the executor does not turn into a result left the CLI as a
+    traceback with exit ``1`` and nothing on stdout: a ``--format json``
+    caller had no JSON to parse. The loop now reports it as ``extract
+    refresh`` reports its run. ``CliRunner`` also exits ``1`` for an
+    uncaught exception, so each test asserts the ``SystemExit`` too.
+    """
+
+    @_LOOP_CALLS
+    def test_json_prints_the_sanitized_payload(
+        self, monkeypatch: pytest.MonkeyPatch, call: str
+    ) -> None:
+        _ingest(_TRACE_A)
+        exc = _DriverError(_LOOP_FAILURE)
+        _raise_from(monkeypatch, call, exc)
+        result = _backfill("json")
+        assert result.exit_code == EXIT_INTERNAL, result.output
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
+        payload = json.loads(result.stdout)
+        assert payload == sanitized_error_payload(exc)
+        assert payload["message"] == SUPPRESSED_MARKER
+        assert "synthetic-secret" not in result.output
+
+    @_LOOP_CALLS
+    def test_text_prints_one_line(
+        self, monkeypatch: pytest.MonkeyPatch, call: str
+    ) -> None:
+        _ingest(_TRACE_A)
+        _raise_from(monkeypatch, call, _DriverError(_LOOP_FAILURE))
+        result = _backfill("text")
+        assert result.exit_code == EXIT_INTERNAL, result.output
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
+        assert plain(result.output).splitlines() == [
+            f"Trace backfill failed: {_LOOP_FAILURE}"
+        ]
+
+    @_FORMATS
+    def test_a_trellis_error_still_exits_by_its_type(
+        self, monkeypatch: pytest.MonkeyPatch, fmt: str
+    ) -> None:
+        """A typed failure passes the catch to the root boundary, as before it.
+
+        The boundary exits it through ``exit_code_for``, ``5`` for a
+        ``StoreError`` where the catch-all would answer ``1``. The graph
+        read in ``reconcile_node_roles`` is where a backend's mapped
+        ``StoreError`` would come from.
+        """
+        _ingest(_TRACE_A)
+        _raise_from(monkeypatch, "reconcile_node_roles", StoreError("graph down"))
+        result = _backfill(fmt)
+        assert result.exit_code == EXIT_STORE, result.output
+        assert isinstance(result.exception, SystemExit), repr(result.exception)
+        if fmt == "json":
+            assert json.loads(result.stdout)["error_code"] == "STORE_ERROR"
+        else:
+            assert plain(result.output).startswith("STORE_ERROR")
+
+    @_FORMATS
+    def test_an_exit_raised_in_the_loop_keeps_its_code(
+        self, monkeypatch: pytest.MonkeyPatch, fmt: str
+    ) -> None:
+        """``typer.Exit`` is a ``RuntimeError``; the catch must pass it on.
+
+        Nothing in the loop raises one today. ``extract refresh`` re-raises
+        it because its run reaches ``_get_registry()``, which does, and the
+        loop's catch keeps the same rule so an exit is never reported as a
+        failure and turned into a ``1``.
+        """
+        _ingest(_TRACE_A)
+        _raise_from(monkeypatch, "execute_batch", typer.Exit(code=EXIT_POLICY))
+        result = _backfill(fmt)
+        assert result.exit_code == EXIT_POLICY, result.output
+        assert result.output == ""

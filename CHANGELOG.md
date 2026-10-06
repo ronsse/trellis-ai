@@ -1083,6 +1083,16 @@ All notable changes to Trellis will be documented in this file.
   rows a failed `append_many` had inserted before the duplicate. The
   errors raised are unchanged.
   ([#739](https://github.com/ronsse/trellis-ai/pull/739))
+- **A failure inside `trellis extract traces`' per-trace loop is reported,
+  not left as a traceback.** An untyped exception from extracting a trace,
+  reconciling its node roles or executing its batch, such as a database
+  driver error the executor does not turn into a result, left the CLI as a
+  Python traceback with nothing on stdout, so a `--format json` caller had
+  no JSON to parse. The loop now reports it as `extract refresh` reports
+  its run: the sanitized error payload in JSON or one line in text, then
+  exit `1`, as before. A `TrellisError` still reaches the root boundary and
+  exits by its type, and batches already written for earlier traces stay
+  written.
 
 ## [0.9.0] - 2026-05-13
 
