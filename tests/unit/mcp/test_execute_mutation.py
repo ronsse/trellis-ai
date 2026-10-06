@@ -291,8 +291,7 @@ class TestExecuteMutationErrors:
 
     def test_a_trellis_error_keeps_its_text(self, temp_registry: StoreRegistry) -> None:
         """A damaged policy file fails ``build_curate_executor`` with a
-        ``ConfigError``, whose text names the file and the fix. Its message
-        is what it was before untyped text was dropped."""
+        ``ConfigError``, whose text names the file and the fix."""
         (temp_registry.stores_dir / "policies.json").write_text(
             '{"polices": []}', encoding="utf-8"
         )

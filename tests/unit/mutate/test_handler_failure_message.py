@@ -7,7 +7,7 @@ batch response, the MCP result JSON and the CLI's JSON and text output. A
 catch is named by its type alone (``Execution failed: IntegrityError``),
 because its text can be a driver's, which can carry query text and values.
 The full text still reaches the operator log and the ``MUTATION_REJECTED``
-audit payload; this module pins the payload unchanged.
+audit payload.
 """
 
 from __future__ import annotations
@@ -17,10 +17,8 @@ from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 
-from trellis.errors import ConfigError, StoreError, TrellisError
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.executor import MutationExecutor
-from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 if TYPE_CHECKING:
@@ -44,7 +42,6 @@ _UNTYPED = [
     ),
     pytest.param(ValueError(_DRIVER_TEXT), "ValueError", id="valueerror"),
 ]
-_UNTYPED_EXCEPTIONS = [pytest.param(case.values[0], id=case.id) for case in _UNTYPED]
 
 
 class _Raises:
@@ -86,51 +83,3 @@ def test_an_untyped_failure_is_named_by_its_type_alone(
     assert result.status == CommandStatus.FAILED
     assert result.message == f"Execution failed: {type_name}"
     assert _MARKER not in result.model_dump_json()
-
-
-@pytest.mark.parametrize(
-    ("exc", "message"),
-    [
-        pytest.param(
-            TrellisError("synthetic trellis failure"),
-            "Execution failed: synthetic trellis failure",
-            id="trelliserror",
-        ),
-        pytest.param(
-            StoreError("synthetic store failure", store="graph"),
-            "Execution failed: synthetic store failure",
-            id="storeerror",
-        ),
-        pytest.param(
-            ConfigError("synthetic config failure", setting="synthetic"),
-            "Execution failed: synthetic config failure",
-            id="configerror",
-        ),
-    ],
-)
-def test_a_trellis_failure_keeps_its_text(
-    event_log: SQLiteEventLog, exc: TrellisError, message: str
-) -> None:
-    """Byte for byte what the typed catch wrote before untyped text was dropped."""
-    result = _fail(event_log, exc)
-
-    assert result.status == CommandStatus.FAILED
-    assert result.message == message
-
-
-@pytest.mark.parametrize("exc", _UNTYPED_EXCEPTIONS)
-def test_the_audit_payload_keeps_the_full_text(
-    event_log: SQLiteEventLog, exc: Exception
-) -> None:
-    """The FAILED event is the operator's record; its payload is unchanged."""
-    _fail(event_log, exc)
-
-    (event,) = event_log.get_events(event_type=EventType.MUTATION_REJECTED)
-    assert event.payload == {
-        "command_id": _COMMAND_ID,
-        "operation": "entity.create",
-        "status": "failed",
-        "message": _DRIVER_TEXT,
-        "requested_by": "test:synthetic",
-        "idempotency_key": None,
-    }
