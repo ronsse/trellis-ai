@@ -1095,6 +1095,7 @@ All notable changes to Trellis will be documented in this file.
   `trellis curate feedback` refuses anything else, NaN included, with exit
   2. `Measurement.metric_value` refuses NaN, so `measurement.record`
   refuses it from every surface; `Infinity` is still accepted.
+  ([#741](https://github.com/ronsse/trellis-ai/pull/741))
 
 ## [0.9.0] - 2026-05-13
 
