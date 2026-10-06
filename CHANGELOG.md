@@ -850,6 +850,14 @@ All notable changes to Trellis will be documented in this file.
   the version shown. The race itself is unchanged, as are
   `get_nodes_bulk`, `query` and `get_subgraph`.
   ([#719](https://github.com/ronsse/trellis-ai/pull/719))
+- **A refused or failed command no longer uses up its idempotency key.**
+  Only a command whose handler succeeded makes its key answer `duplicate`,
+  from the executor's in-process cache or from the event log. A command
+  that is `rejected` or `failed` leaves its key free, so a corrected retry
+  under the same key runs, including one later in the same
+  `POST /api/v1/commands/batch` or `POST /api/v1/ingest/bulk` request,
+  each of which runs on one executor.
+  ([#721](https://github.com/ronsse/trellis-ai/pull/721))
 
 ## [0.9.0] - 2026-05-13
 
