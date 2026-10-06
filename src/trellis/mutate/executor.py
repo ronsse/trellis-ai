@@ -138,7 +138,10 @@ class MutationExecutor:
         self._event_log = event_log
         self._handlers: dict[str, CommandHandler] = handlers or {}
         self._idempotency_cache_size = idempotency_cache_size
-        # FIFO-bounded cache of seen idempotency keys. OrderedDict preserves
+        # FIFO-bounded cache of the idempotency keys of succeeded commands: a
+        # key is recorded once its handler has succeeded (or the persisted
+        # check finds it), never for a refused or failed command, so a
+        # corrected retry under the same key runs. OrderedDict preserves
         # insertion order; overflow evicts the oldest key via popitem(last=False).
         # When event_log is attached, evicted keys are still rejected via
         # event_log.has_idempotency_key() (authoritative, cross-restart).
@@ -387,6 +390,13 @@ class MutationExecutor:
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
 
+        # Only a command whose handler succeeded makes its key a duplicate.
+        # Every refused or failed exit above returned without recording it,
+        # so a corrected retry under the same key runs. The persisted check
+        # agrees: it counts only MUTATION_EXECUTED events.
+        if command.idempotency_key:
+            self._record_idempotency_key(command.idempotency_key)
+
         # Stage 5: Emit Event
         #
         # The one emit that runs after a committed write. It is guarded at
@@ -529,8 +539,10 @@ class MutationExecutor:
 
         Extracted verbatim from :meth:`execute` so the stage list there
         reads as a sequence of gates rather than as one of them inlined.
-        Returns ``None`` when the command is not a replay, having recorded
-        its key for the next call. ``policy_warnings`` is threaded in rather
+        Returns ``None`` when the command is not a replay, without recording
+        its key: :meth:`execute` records it only once the handler has
+        succeeded, so a refused or failed command leaves the key free for a
+        corrected retry. ``policy_warnings`` is threaded in rather
         than recomputed: a duplicate is an outcome reachable after Stage 2,
         so it carries the warnings like every other one.
         """
@@ -577,7 +589,6 @@ class MutationExecutor:
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
 
-        self._record_idempotency_key(command.idempotency_key)
         return None
 
     def _emit_rejection(
