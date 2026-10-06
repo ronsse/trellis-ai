@@ -870,6 +870,21 @@ class TestPostgresGraphStore:
 
         assert self._dsl_ids(store, key, "lt", 5) == ["low"]
 
+    def test_an_edge_range_op_filters_on_exactly_the_named_key(self, store) -> None:
+        from trellis.stores.base.graph_query import EdgeQuery, FilterClause
+
+        # The edge DSL binds the key too: a misread of ``a%%b`` would
+        # return the ``a%b`` edge.
+        for node_id in ("source", "low", "sibling"):
+            store.upsert_node(node_id, "service", {})
+        store.upsert_edge("source", "low", "calls", {"a%%b": 1})
+        store.upsert_edge("source", "sibling", "calls", {"a%b": 1})
+
+        rows = store.execute_edge_query(
+            EdgeQuery(filters=(FilterClause("properties.a%%b", "lt", 5),))
+        )
+        assert [row["target_id"] for row in rows] == ["low"]
+
 
 # ``nodes`` exactly as v0.3.x created it (3b9cedbd), before v0.4.0 added
 # ``document_ids``. ``PostgresGraphStore`` migrates it forward on open.
