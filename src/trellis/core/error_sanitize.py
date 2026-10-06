@@ -60,7 +60,8 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     # PostgreSQL row values, quoted by a constraint violation's DETAIL
     # line: "Key (name)=(value) already exists." (unique, foreign key and
     # exclusion; the column list can nest parentheses) and "Failing row
-    # contains (...)." (NOT NULL and CHECK).
+    # contains (...)." (NOT NULL and CHECK). English wording only: a server
+    # with another lc_messages translates both.
     re.compile(r"\bKey \(.*?\)=\(|\bFailing row contains \("),
 )
 
