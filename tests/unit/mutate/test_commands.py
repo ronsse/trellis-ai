@@ -151,10 +151,72 @@ class TestOperationRegistry:
     def test_validates_all_ops_with_correct_args(
         self, registry: OperationRegistry
     ) -> None:
-        # Every operation should validate when all required args provided
+        # Every operation should validate when all required args provided.
+        # FEEDBACK_RECORD's "rating" is bound to [0.0, 1.0] below, so the
+        # generic "test_value" string stand-in would fail it; give that one
+        # operation a real in-range value instead.
         for op in Operation:
             required = registry.get_required_args(op)
             args = dict.fromkeys(required, "test_value")
+            if op is Operation.FEEDBACK_RECORD:
+                args["rating"] = 0.5
             cmd = Command(operation=op, args=args)
             valid, errors = registry.validate(cmd)
             assert valid is True, f"{op}: {errors}"
+
+
+class TestFeedbackRecordRatingBound:
+    """``feedback.record``'s ``rating`` must be a real number in [0.0, 1.0]."""
+
+    @pytest.fixture
+    def registry(self) -> OperationRegistry:
+        return OperationRegistry()
+
+    @pytest.mark.parametrize(
+        "rating",
+        [
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            -0.1,
+            1.1,
+            5.0,
+            pytest.param(10**400, id="int-beyond-float"),
+            True,
+            False,
+            "0.7",
+            None,
+        ],
+    )
+    def test_rejects_an_out_of_range_or_non_numeric_rating(
+        self, registry: OperationRegistry, rating: object
+    ) -> None:
+        cmd = Command(
+            operation=Operation.FEEDBACK_RECORD,
+            args={"target_id": "t1", "rating": rating},
+        )
+        valid, errors = registry.validate(cmd)
+        assert valid is False
+        assert len(errors) == 1
+        assert "rating" in errors[0]
+
+    @pytest.mark.parametrize("rating", [0.0, 0.7, 1.0, 1, 0])
+    def test_accepts_an_in_range_rating(
+        self, registry: OperationRegistry, rating: object
+    ) -> None:
+        cmd = Command(
+            operation=Operation.FEEDBACK_RECORD,
+            args={"target_id": "t1", "rating": rating},
+        )
+        valid, errors = registry.validate(cmd)
+        assert valid is True
+        assert errors == []
+
+    def test_other_operations_are_unaffected(self, registry: OperationRegistry) -> None:
+        """The bound is ``feedback.record``-only; it must not leak elsewhere."""
+        cmd = Command(
+            operation=Operation.ENTITY_CREATE,
+            args={"entity_type": "service", "name": "auth", "rating": 5.0},
+        )
+        valid, _errors = registry.validate(cmd)
+        assert valid is True

@@ -1178,6 +1178,18 @@ All notable changes to Trellis will be documented in this file.
   Both apps register the handlers from
   `trellis_api.app.register_exception_handlers`.
   ([#749](https://github.com/ronsse/trellis-ai/pull/749))
+- **A `feedback.record` command refuses a rating outside `[0.0, 1.0]`.**
+  `OperationRegistry.validate` checked only that `rating` was present, so
+  `POST /api/v1/commands/batch` and MCP `execute_mutation` — the two
+  surfaces that build a `Command` straight from caller args — could pass
+  NaN, +/-Infinity, a negative value, a value above `1.0`, a bool, `null`
+  or a string straight through to `FeedbackRecordHandler`, which recorded it
+  verbatim. `POST /api/v1/feedback` and `trellis curate feedback` already
+  bound `rating` before building the `Command` and are unaffected. A bad
+  rating on `feedback.record` now fails Stage 1 the same way a missing arg
+  does: `REJECTED` with `metadata["rejection_reason"] = "validate"`, one
+  `mutation.rejected` event, nothing recorded. No other operation changes.
+  ([#751](https://github.com/ronsse/trellis-ai/pull/751))
 - **A failed command's message names a non-Trellis exception by its type
   alone.** When a handler raises an exception outside the Trellis hierarchy,
   such as the `sqlite3.Error` a SQLite store lets out, the FAILED result's

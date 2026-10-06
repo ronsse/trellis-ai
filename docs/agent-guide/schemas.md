@@ -1036,7 +1036,7 @@ Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes
 | Value | Description |
 |-------|-------------|
 | `success` | Command executed successfully |
-| `rejected` | Refused. `metadata["rejection_reason"]` names the cause: `immutable_core` (an unattended writer asked for an operation outside its allow-list), `validate` (the command named an unknown operation or lacked a required arg), `policy_violation` (the policy gate or a handler's `PolicyViolationError`), or the `code` of a handler's `ValidationError` (`handler_validate` if it set none) |
+| `rejected` | Refused. `metadata["rejection_reason"]` names the cause: `immutable_core` (an unattended writer asked for an operation outside its allow-list), `validate` (the command named an unknown operation, lacked a required arg, or gave `feedback.record` a `rating` that is not a number from 0.0 to 1.0), `policy_violation` (the policy gate or a handler's `PolicyViolationError`), or the `code` of a handler's `ValidationError` (`handler_validate` if it set none) |
 | `failed` | No handler is registered for the operation, or the handler raised any other `TrellisError` (store errors included; `IdempotencyError` answers `duplicate`) or one of the exceptions in `trellis.mutate.executor._UNEXPECTED_HANDLER_FAILURE` (Python built-ins and `sqlite3.Error`). Also when the event log raises a `TrellisError` or one of those exceptions while checking the command's idempotency key: the handler does not run, and the `mutation.rejected` event carries `reason: idempotency_check_failed` |
 | `duplicate` | A command with this idempotency key already succeeded |
 
