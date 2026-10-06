@@ -1119,6 +1119,16 @@ All notable changes to Trellis will be documented in this file.
   2. `Measurement.metric_value` refuses NaN, so `measurement.record`
   refuses it from every surface; `Infinity` is still accepted.
   ([#741](https://github.com/ronsse/trellis-ai/pull/741))
+- **The error sanitizer suppresses PostgreSQL row values.** psycopg's text
+  for a constraint violation ends in a `DETAIL` line that quotes the row:
+  `Key (name)=(value) already exists.` for a unique, foreign key or
+  exclusion violation, and `Failing row contains (...).` for a NOT NULL or
+  CHECK violation. No leak heuristic matched either shape, so a psycopg
+  error that reached `sanitize_error_message`, such as through a CLI
+  command's `--format json` error payload, carried the values verbatim.
+  Such text is now replaced with the sanitizer's static marker. The
+  marker, the truncation, the payload shape and every caller are
+  unchanged.
 
 ## [0.9.0] - 2026-05-13
 
