@@ -35,6 +35,7 @@ from rich.markup import escape
 
 from trellis.core.base import utc_now
 from trellis.core.error_sanitize import sanitized_error_payload
+from trellis.errors import TrellisError
 from trellis.extract.commands import (
     batch_draft_counts,
     reconcile_node_roles,
@@ -593,7 +594,7 @@ def _print_backfill(
 
 
 @extract_app.command("traces")
-def traces(
+def traces(  # noqa: PLR0912 - per-format failure report, as in refresh
     since: int = typer.Option(
         7,
         "--since",
@@ -654,26 +655,43 @@ def traces(
     total_entities = 0
     total_edges = 0
 
-    for trace in stored_traces:
-        _result, batch = extract_trace_batch(trace, requested_by="cli:extract-traces")
-        if batch is not None and not dry_run:
-            reconcile_node_roles(batch, registry.knowledge.graph_store)
-        # Count the batch, not the raw result: a confidence gate can drop
-        # drafts between the two, and the number reported has to be what
-        # would actually be written.
-        n_entities, n_edges = batch_draft_counts(batch)
-        total_entities += n_entities
-        total_edges += n_edges
-        per_trace.append(
-            {
-                "trace_id": trace.trace_id,
-                "domain": trace.context.domain,
-                "entities": n_entities,
-                "edges": n_edges,
-            }
-        )
-        if not dry_run and batch is not None:
-            results.extend(executor.execute_batch(batch))
+    # An exception from the loop is reported as ``refresh`` reports its run,
+    # so a ``--format json`` caller still gets JSON. A ``TrellisError``
+    # passes on to the root boundary, which exits it by ``exit_code_for``;
+    # this catch is for the rest, such as a driver error outside the
+    # executor's handler tuple. Batches executed for earlier traces stay
+    # written.
+    try:
+        for trace in stored_traces:
+            _result, batch = extract_trace_batch(
+                trace, requested_by="cli:extract-traces"
+            )
+            if batch is not None and not dry_run:
+                reconcile_node_roles(batch, registry.knowledge.graph_store)
+            # Count the batch, not the raw result: a confidence gate can drop
+            # drafts between the two, and the number reported has to be what
+            # would actually be written.
+            n_entities, n_edges = batch_draft_counts(batch)
+            total_entities += n_entities
+            total_edges += n_edges
+            per_trace.append(
+                {
+                    "trace_id": trace.trace_id,
+                    "domain": trace.context.domain,
+                    "entities": n_entities,
+                    "edges": n_edges,
+                }
+            )
+            if not dry_run and batch is not None:
+                results.extend(executor.execute_batch(batch))
+    except (typer.Exit, TrellisError):
+        raise
+    except Exception as exc:
+        if output_format == "json":
+            print(json.dumps(sanitized_error_payload(exc)))
+        else:
+            console.print(f"[red]Trace backfill failed: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=EXIT_INTERNAL) from None
 
     # The draft totals say what extraction proposed; the command counts say
     # what the writes answered. A dry run executes nothing and counts none.

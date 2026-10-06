@@ -171,7 +171,8 @@ class TestUniformRejectionEvents:
             handlers=_all_op_handlers(),
         )
         result = executor.execute(cmd)
-        assert result.status == CommandStatus.FAILED
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "validate"
         assert _emitted_event_types(event_log) == ["mutation.rejected"]
         payload = _emitted_payloads(event_log)[0]
         assert payload["reason"] == "validate"
@@ -293,7 +294,7 @@ class TestBatchStopOnError:
         assert len(results) == good_before + 1
         for r in results[:good_before]:
             assert r.status == CommandStatus.SUCCESS
-        assert results[-1].status == CommandStatus.FAILED
+        assert results[-1].status == CommandStatus.REJECTED
 
         # Each SUCCESS before the failure emits one MUTATION_EXECUTED, the
         # validate-stage rejection emits one MUTATION_REJECTED, then nothing

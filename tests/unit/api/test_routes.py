@@ -1133,7 +1133,7 @@ def test_batch_creates_entities(client):
 
 
 def test_batch_stop_on_error(client):
-    """Batch with stop_on_error halts after first failure."""
+    """Batch with stop_on_error halts after the first refusal."""
     resp = client.post(
         "/api/v1/commands/batch",
         json={
@@ -1144,7 +1144,7 @@ def test_batch_stop_on_error(client):
                 },
                 {
                     "operation": "entity.create",
-                    "args": {},  # missing required fields → validation fail
+                    "args": {},  # missing required fields → refused
                 },
                 {
                     "operation": "entity.create",
@@ -1156,9 +1156,9 @@ def test_batch_stop_on_error(client):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["executed"] == 2  # stopped after failure
+    assert data["executed"] == 2  # stopped after the refusal
     assert data["succeeded"] == 1
-    assert data["failed"] == 1
+    assert (data["failed"], data["rejected"]) == (0, 1)
 
 
 def test_batch_continue_on_error(client):
@@ -1173,11 +1173,15 @@ def test_batch_continue_on_error(client):
                 },
                 {
                     "operation": "entity.create",
-                    "args": {},  # fails
+                    "args": {},  # refused
                 },
                 {
                     "operation": "entity.create",
                     "args": {"entity_type": "service", "name": "third"},
+                },
+                {
+                    "operation": "link.remove",
+                    "args": {"edge_id": "syn-edge"},  # no handler: failed
                 },
             ],
             "strategy": "continue_on_error",
@@ -1185,9 +1189,30 @@ def test_batch_continue_on_error(client):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["executed"] == 3
+    assert data["executed"] == 4
     assert data["succeeded"] == 2
-    assert data["failed"] == 1
+    assert (data["failed"], data["rejected"]) == (1, 1)
+
+
+def test_batch_refuses_an_unattended_writer(client):
+    """The batch hands its requested_by to the executor, so the roster refuses."""
+    resp = client.post(
+        "/api/v1/commands/batch",
+        json={
+            "commands": [
+                {
+                    "operation": "entity.create",
+                    "args": {"entity_type": "service", "name": "syn-svc"},
+                }
+            ],
+            "strategy": "continue_on_error",
+            "requested_by": "worker:embed-traces",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert (data["rejected"], data["failed"]) == (1, 0)
+    assert [r["status"] for r in data["results"]] == ["rejected"]
 
 
 def test_batch_idempotency(client):

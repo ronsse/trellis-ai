@@ -296,13 +296,33 @@ class TestExecuteMutationErrors:
             args={"source_id": "a", "target_id": "b"},  # missing edge_kind
         )
         payload = json.loads(raw)
-        # The executor surfaces this as a FAILED CommandResult, which the
-        # tool relays verbatim — status is the executor's "failed", not
-        # the tool's pre-flight "error".
-        assert payload["status"] == "failed"
+        # The executor refuses this at Stage 1 with a REJECTED CommandResult,
+        # which the tool relays verbatim — status is the executor's
+        # "rejected", not the tool's pre-flight "error".
+        assert payload["status"] == "rejected"
         assert "validation failed" in payload["message"].lower()
         assert "edge_kind" in payload["message"]
         assert payload["operation"] == "link.create"
+
+    def test_a_missing_arg_is_reported_as_the_roster_refusal_is(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Both Stage 1 refusals answer ``rejected`` with the same fields."""
+        missing_arg = json.loads(
+            execute_mutation(operation="link.create", args={"source_id": "syn-node-a"})
+        )
+        roster = json.loads(
+            execute_mutation(
+                operation="entity.create",
+                args={"entity_type": "service", "name": "syn-svc"},
+                actor="worker:embed-traces",
+            )
+        )
+        assert missing_arg["status"] == roster["status"] == "rejected"
+        assert sorted(missing_arg) == sorted(roster)
+        assert missing_arg["message"] == (
+            "Validation failed: Missing required args: edge_kind, target_id"
+        )
 
     def test_handler_failure_surfaces_rejected_status(
         self, temp_registry: StoreRegistry
