@@ -376,7 +376,8 @@ def migrate_provenance_command(
         else:
             console.print(
                 f"[red]store error: {escape(type(exc).__name__)}: "
-                f"{escape(str(exc))}[/red]"
+                f"{escape(str(exc))}[/red]",
+                soft_wrap=True,
             )
         raise typer.Exit(code=EXIT_STORE) from exc
 
