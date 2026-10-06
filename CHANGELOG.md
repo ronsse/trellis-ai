@@ -1007,6 +1007,7 @@ All notable changes to Trellis will be documented in this file.
   these two share with `trellis ingest dbt-manifest` and `openlineage` is now
   one function, `trellis_cli.exit_codes.batch_outcome`, rather than a copy in
   each module, and those commands' output is otherwise unchanged.
+  ([#736](https://github.com/ronsse/trellis-ai/pull/736))
 
 ## [0.9.0] - 2026-05-13
 
