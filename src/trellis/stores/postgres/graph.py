@@ -56,6 +56,19 @@ def _alias_lock_key(source_system: str, raw_id: str) -> str:
 #: purge back, so running it again is safe.
 _PURGE_ATTEMPTS = 3
 
+#: Name of the partial unique index that enforces one current (``valid_to
+#: IS NULL``) row per ``node_id``. Matched against
+#: ``exc.diag.constraint_name`` — never the driver's message text, which is
+#: locale-dependent and, since #747, sanitized before it reaches a caller.
+_NODE_CURRENT_INDEX = "idx_nodes_current"
+
+#: How many times ``upsert_node`` attempts a create that races another
+#: writer creating the same new ``node_id``. One retry: the first attempt's
+#: ``UniqueViolation`` on ``_NODE_CURRENT_INDEX`` means the other writer has
+#: already committed, so the retry's ``FOR UPDATE`` finds its row and turns
+#: this create into a new version over it (see ``upsert_node``).
+_NODE_CREATE_RACE_ATTEMPTS = 2
+
 
 def _delete_until_none(
     cur: psycopg.Cursor[Any], sql: str, params: tuple[str, ...]
@@ -304,7 +317,6 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         if node_id is None:
             node_id = generate_ulid()
 
-        now = utc_now()
         properties_json = json.dumps(properties)
         generation_spec_json = (
             json.dumps(generation_spec) if generation_spec is not None else None
@@ -314,69 +326,127 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         )
 
         # Hold one pooled connection across the read+write so the
-        # SELECT-then-UPDATE-then-INSERT sees a consistent snapshot.
-        # Without this, under concurrent upserts of the same node_id
-        # two callers could each read "no current version" and both
-        # INSERT — leaving two rows with valid_to=NULL.
-        with self._conn() as conn:
-            existing = self._fetch_current_node_for_update(conn, node_id)
-            if existing:
-                check_node_role_immutable(node_id, existing, node_role)
-                created_at = existing["created_at"]
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE nodes SET valid_to = %s"
-                        " WHERE node_id = %s AND valid_to IS NULL",
-                        (now, node_id),
-                    )
-                    version_id = generate_ulid()
-                    cur.execute(
-                        """
-                        INSERT INTO nodes
-                            (version_id, node_id, node_type, node_role,
-                             generation_spec, document_ids, properties,
-                             created_at, updated_at, valid_from, valid_to)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                        """,
-                        (
-                            version_id,
-                            node_id,
-                            node_type,
-                            node_role,
-                            generation_spec_json,
-                            document_ids_json,
-                            properties_json,
-                            created_at,
-                            now,
-                            now,
-                        ),
-                    )
-            else:
-                version_id = generate_ulid()
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO nodes
-                            (version_id, node_id, node_type, node_role,
-                             generation_spec, document_ids, properties,
-                             created_at, updated_at, valid_from, valid_to)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                        """,
-                        (
-                            version_id,
-                            node_id,
-                            node_type,
-                            node_role,
-                            generation_spec_json,
-                            document_ids_json,
-                            properties_json,
-                            now,
-                            now,
-                            now,
-                        ),
-                    )
+        # SELECT-then-UPDATE-then-INSERT sees a consistent snapshot. This
+        # closes the race *when a current row already exists*: ``FOR
+        # UPDATE`` locks that row, so a second writer blocks until the
+        # first commits and then re-reads the row it just closed.
+        #
+        # It does not close the race for a brand-new node_id, because
+        # there is no row yet for ``FOR UPDATE`` to lock. Two concurrent
+        # creates can each read "no current version" and both reach the
+        # bare INSERT below; the first to commit wins ``idx_nodes_current``
+        # and the second gets a ``UniqueViolation`` from Postgres rather
+        # than a lock wait. ``_write_node_version`` is retried once for
+        # exactly that case: the retry's ``FOR UPDATE`` now finds the
+        # winner's row and this writer's create becomes a new version
+        # over it, matching what SQLite's single-writer serialisation
+        # would have produced.
+        import psycopg.errors  # noqa: PLC0415
 
-        return node_id
+        for attempt in range(_NODE_CREATE_RACE_ATTEMPTS):
+            try:
+                with self._conn() as conn:
+                    self._write_node_version(
+                        conn,
+                        node_id,
+                        node_type,
+                        node_role,
+                        generation_spec_json,
+                        document_ids_json,
+                        properties_json,
+                    )
+            except psycopg.errors.UniqueViolation as exc:
+                if getattr(exc.diag, "constraint_name", None) != _NODE_CURRENT_INDEX:
+                    raise
+                is_last_attempt = attempt == _NODE_CREATE_RACE_ATTEMPTS - 1
+                logger.info(
+                    "pg_node_create_race",
+                    node_type=node_type,
+                    attempt=attempt,
+                    gave_up=is_last_attempt,
+                )
+                if is_last_attempt:
+                    msg = (
+                        "Node create conflicted with a concurrent writer on "
+                        f"retry: {type(exc).__name__}"
+                    )
+                    raise StoreError(msg, store="graph") from exc
+            else:
+                return node_id
+        # Unreachable: the loop above always either returns or raises.
+        unreachable_msg = "unreachable"
+        raise AssertionError(unreachable_msg)  # pragma: no cover
+
+    def _write_node_version(
+        self,
+        conn: psycopg.Connection,
+        node_id: str,
+        node_type: str,
+        node_role: str,
+        generation_spec_json: str | None,
+        document_ids_json: str | None,
+        properties_json: str,
+    ) -> None:
+        """Write one node version on ``conn``: close the current row (if
+        any) and insert the new one. One attempt — callers retry.
+        """
+        now = utc_now()
+        existing = self._fetch_current_node_for_update(conn, node_id)
+        if existing:
+            check_node_role_immutable(node_id, existing, node_role)
+            created_at = existing["created_at"]
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE nodes SET valid_to = %s"
+                    " WHERE node_id = %s AND valid_to IS NULL",
+                    (now, node_id),
+                )
+                version_id = generate_ulid()
+                cur.execute(
+                    """
+                    INSERT INTO nodes
+                        (version_id, node_id, node_type, node_role,
+                         generation_spec, document_ids, properties,
+                         created_at, updated_at, valid_from, valid_to)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                    """,
+                    (
+                        version_id,
+                        node_id,
+                        node_type,
+                        node_role,
+                        generation_spec_json,
+                        document_ids_json,
+                        properties_json,
+                        created_at,
+                        now,
+                        now,
+                    ),
+                )
+        else:
+            version_id = generate_ulid()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO nodes
+                        (version_id, node_id, node_type, node_role,
+                         generation_spec, document_ids, properties,
+                         created_at, updated_at, valid_from, valid_to)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                    """,
+                    (
+                        version_id,
+                        node_id,
+                        node_type,
+                        node_role,
+                        generation_spec_json,
+                        document_ids_json,
+                        properties_json,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
 
     def update_node_if_current(
         self,
@@ -510,23 +580,43 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 )
             )
 
-        with self._conn() as conn, conn.cursor() as cur:
-            if existing:
-                cur.execute(
-                    "UPDATE nodes SET valid_to = %s "
-                    "WHERE node_id = ANY(%s) AND valid_to IS NULL",
-                    (now, list(existing.keys())),
+        # No retry here, unlike ``upsert_node``: a bulk ``executemany`` that
+        # hits ``_NODE_CURRENT_INDEX`` fails the whole batch, and a retry
+        # would need to know which of ``node_ids`` raced — this statement
+        # reports only the first conflict, not which row it was — without
+        # re-inserting the rows that already committed. That is a bigger
+        # change than this fix; a caller that races a bulk create gets a
+        # clean typed error instead of a raw driver exception, and can
+        # retry the whole batch itself (idempotent: every row is an
+        # upsert).
+        import psycopg.errors  # noqa: PLC0415
+
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                if existing:
+                    cur.execute(
+                        "UPDATE nodes SET valid_to = %s "
+                        "WHERE node_id = ANY(%s) AND valid_to IS NULL",
+                        (now, list(existing.keys())),
+                    )
+                cur.executemany(
+                    """
+                    INSERT INTO nodes
+                        (version_id, node_id, node_type, node_role,
+                         generation_spec, document_ids, properties,
+                         created_at, updated_at, valid_from, valid_to)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                    """,
+                    insert_rows,
                 )
-            cur.executemany(
-                """
-                INSERT INTO nodes
-                    (version_id, node_id, node_type, node_role,
-                     generation_spec, document_ids, properties,
-                     created_at, updated_at, valid_from, valid_to)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                """,
-                insert_rows,
+        except psycopg.errors.UniqueViolation as exc:
+            if getattr(exc.diag, "constraint_name", None) != _NODE_CURRENT_INDEX:
+                raise
+            msg = (
+                "Bulk node create conflicted with a concurrent writer: "
+                f"{type(exc).__name__}"
             )
+            raise StoreError(msg, store="graph") from exc
         return node_ids
 
     def get_node(
