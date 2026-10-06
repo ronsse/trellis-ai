@@ -1238,12 +1238,11 @@ All notable changes to Trellis will be documented in this file.
   ([#743](https://github.com/ronsse/trellis-ai/issues/743) follow-up 3)
 - **Four more CLI failure lines are no longer hard-wrapped at the console
   width.** The same exposure #750 fixed for 16 sites also applied to
-  `admin migrate-graph`'s "Invalid YAML in ..." arm and to the shared
-  "File not found" / "Path not found" print used by `ingest trace`,
-  `ingest evidence`, `ingest dbt-manifest`, `ingest openlineage`,
-  `ingest conversations` and `ingest corpus`. They now print unwrapped the
-  same way. Text, colour, JSON output and exit codes are unchanged.
-  ([#758](https://github.com/ronsse/trellis-ai/pull/758))
+  `admin migrate-graph`'s "Invalid YAML in ..." line and to the
+  "File not found" / "Path not found" lines of `ingest trace`, `evidence`,
+  `dbt-manifest`, `openlineage`, `conversations` and `corpus`. They now
+  print unwrapped the same way. Text, colour, JSON output and exit codes
+  are unchanged. ([#758](https://github.com/ronsse/trellis-ai/pull/758))
 
 ## [0.9.0] - 2026-05-13
 
