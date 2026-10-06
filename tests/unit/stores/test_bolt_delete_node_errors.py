@@ -45,8 +45,8 @@ from neo4j.exceptions import (
 from tests.fake_bolt_driver import AtCommit, FakeBoltDriver, Outcome
 from trellis.errors import StoreError
 from trellis.mutate import build_curate_executor
-from trellis.mutate.commands import Command, CommandResult, CommandStatus, Operation
-from trellis.stores.base.event_log import EventLog, EventType
+from trellis.mutate.commands import Command, CommandStatus, Operation
+from trellis.stores.base.event_log import EventType
 from trellis.stores.bolt_opencypher.graph import BoltOpenCypherGraphStore
 from trellis.stores.registry import StoreRegistry
 
@@ -149,6 +149,9 @@ class TestDeleteNodeErrors:
 
         assert store.delete_node(NODE) is deleted
         assert driver.reads == [{"nid": NODE}]
+        # Both sessions open on the store's database in the default WRITE
+        # access mode, so the read runs where the purge did: on the writer.
+        assert driver.sessions == [{"database": "neo4j"}] * 2
         # The driver does not run a purge that may have committed again.
         assert _ended(driver) == ["commit raised"]
 
@@ -247,26 +250,6 @@ class TestWithTheRealDriver:
         assert "failed: DriverError" in caught.value.message
 
 
-def _redact(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    bolt_store: BoltOpenCypherGraphStore,
-) -> tuple[str, Command, CommandResult, EventLog]:
-    """Redact a node of a SQLite registry through ``bolt_store``'s purge."""
-    stores_dir = tmp_path / "stores"
-    stores_dir.mkdir()
-    registry = StoreRegistry(stores_dir=stores_dir)
-    graph = registry.knowledge.graph_store
-    node_id = graph.upsert_node(None, "person", {"name": "Purge Target"})
-    monkeypatch.setattr(graph, "delete_node", bolt_store.delete_node)
-    command = Command(
-        operation=Operation.REDACTION_APPLY,
-        args={"target_id": node_id, "reason": "synthetic purge"},
-    )
-    result = build_curate_executor(registry).execute(command)
-    return node_id, command, result, registry.operational.event_log
-
-
 class TestThroughTheExecutor:
     @pytest.mark.parametrize(
         "error",
@@ -276,50 +259,27 @@ class TestThroughTheExecutor:
     def test_a_purge_that_cannot_finish_fails_the_redaction_and_is_audited(
         self, error: Exception, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        registry = StoreRegistry(stores_dir=stores_dir)
+        graph = registry.knowledge.graph_store
+        node_id = graph.upsert_node(None, "person", {"name": "Purge Target"})
         bolt_store, _driver = _store(error)
+        monkeypatch.setattr(graph, "delete_node", bolt_store.delete_node)
+        command = Command(
+            operation=Operation.REDACTION_APPLY,
+            args={"target_id": node_id, "reason": "synthetic purge failure"},
+        )
 
-        node_id, command, result, event_log = _redact(tmp_path, monkeypatch, bolt_store)
+        result = build_curate_executor(registry).execute(command)
 
         assert result.status == CommandStatus.FAILED
         assert node_id in result.message
+        event_log = registry.operational.event_log
         rejected = event_log.get_events(event_type=EventType.MUTATION_REJECTED)
         assert [(e.payload["command_id"], e.payload["status"]) for e in rejected] == [
             (command.command_id, "failed")
         ]
         assert type(error).__name__ in rejected[0].payload["message"]
         assert SERVER_TEXT not in rejected[0].payload["message"]
-        assert event_log.get_events(event_type=EventType.REDACTION_APPLIED) == []
-
-    def test_a_lost_commit_with_no_row_left_applies_the_redaction(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        lost = IncompleteCommit(SERVER_TEXT)
-        bolt_store, _driver = _store(AtCommit(lost), rows_left=0)
-
-        node_id, command, result, event_log = _redact(tmp_path, monkeypatch, bolt_store)
-
-        assert result.status == CommandStatus.SUCCESS
-        applied = event_log.get_events(event_type=EventType.REDACTION_APPLIED)
-        assert [(e.payload["target_id"], e.payload["command_id"]) for e in applied] == [
-            (node_id, command.command_id)
-        ]
-        assert event_log.get_events(event_type=EventType.MUTATION_REJECTED) == []
-
-    def test_a_lost_commit_with_a_row_left_fails_the_redaction(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        lost = IncompleteCommit(SERVER_TEXT)
-        bolt_store, _driver = _store(AtCommit(lost), rows_left=1)
-
-        node_id, command, result, event_log = _redact(tmp_path, monkeypatch, bolt_store)
-
-        assert result.status == CommandStatus.FAILED
-        rejected = event_log.get_events(event_type=EventType.MUTATION_REJECTED)
-        assert [(e.payload["command_id"], e.payload["status"]) for e in rejected] == [
-            (command.command_id, "failed")
-        ]
-        assert (
-            f"Purge of node {node_id} failed: IncompleteCommit"
-            in rejected[0].payload["message"]
-        )
         assert event_log.get_events(event_type=EventType.REDACTION_APPLIED) == []

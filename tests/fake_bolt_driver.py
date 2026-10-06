@@ -23,7 +23,8 @@ ended.
 outcome the driver cannot know: the number of ``Node`` rows of the node that
 read finds, or an exception it raises. The parameters of every such read are
 kept on :attr:`FakeBoltDriver.reads`, and a read the test did not script
-fails it.
+fails it. The keyword arguments of every ``session()`` are kept on
+:attr:`FakeBoltDriver.sessions`.
 """
 
 from __future__ import annotations
@@ -64,9 +65,11 @@ class FakeBoltDriver:
         self.rows_left = rows_left
         self.transactions: list[FakeTransaction] = []
         self.reads: list[dict[str, Any]] = []
+        self.sessions: list[dict[str, Any]] = []
 
     @contextmanager
-    def session(self, **_config: Any) -> Iterator[FakeSession]:
+    def session(self, **config: Any) -> Iterator[FakeSession]:
+        self.sessions.append(config)
         yield FakeSession(self)
 
     def next_outcome(self) -> Outcome:
