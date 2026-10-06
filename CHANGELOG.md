@@ -1083,6 +1083,26 @@ All notable changes to Trellis will be documented in this file.
   rows a failed `append_many` had inserted before the duplicate. The
   errors raised are unchanged.
   ([#739](https://github.com/ronsse/trellis-ai/pull/739))
+- **A failed SQLite graph, document, vector, tuner-state or API-key revoke
+  write no longer holds the write lock or saves part of itself.**
+  `SQLiteGraphStore.upsert_node`, `upsert_nodes_bulk`, `upsert_alias`,
+  `upsert_edge`, `upsert_edges_bulk`, `delete_node` and `delete_edge`,
+  `SQLiteDocumentStore.put` and `delete`, `SQLiteVectorStore.upsert` and
+  `delete`, `SQLiteTunerStateStore.put_proposal`, `update_status` and
+  `set_cursor`, and `SQLiteApiKeyStore.revoke` now roll back a statement
+  that fails after taking the write lock, as the writes fixed in #739 do.
+  The transaction had stayed open, so every other connection's write
+  waited out its 10-second busy timeout and failed with `database is
+  locked`, and the connection's next commit saved what the failed call had
+  done so far: the close of an updated node's, alias's or edge's current
+  version without its replacement, a bulk write's rows before the failing
+  one, the deletion of a node's edges and aliases but not of the node, a
+  document's new content without its full-text row, or a document's
+  deletion with its full-text row left behind. `upsert_node` and
+  `upsert_edge` with `commit=False` still leave the commit or rollback to
+  the caller's `transaction()`. The errors raised are unchanged, and the
+  `GraphStore.upsert_nodes_bulk` docstring no longer says SQLite and
+  Postgres loop over `upsert_node` and can leave part of a batch.
 
 ## [0.9.0] - 2026-05-13
 

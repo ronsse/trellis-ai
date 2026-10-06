@@ -96,13 +96,14 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
         dimensions = len(vector)
         meta_json = json.dumps(metadata or {})
 
-        self._conn.execute(
-            "INSERT OR REPLACE INTO vectors "
-            "(item_id, vector_blob, dimensions, metadata_json) "
-            "VALUES (?, ?, ?, ?)",
-            (item_id, blob, dimensions, meta_json),
-        )
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            conn.execute(
+                "INSERT OR REPLACE INTO vectors "
+                "(item_id, vector_blob, dimensions, metadata_json) "
+                "VALUES (?, ?, ?, ?)",
+                (item_id, blob, dimensions, meta_json),
+            )
 
     def upsert_bulk(self, items: list[dict[str, Any]]) -> None:
         # In-process backend: a simple loop is the correct
@@ -197,11 +198,12 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
         }
 
     def delete(self, item_id: str) -> bool:
-        cursor = self._conn.execute(
-            "DELETE FROM vectors WHERE item_id = ?",
-            (item_id,),
-        )
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            cursor = conn.execute(
+                "DELETE FROM vectors WHERE item_id = ?",
+                (item_id,),
+            )
         return cursor.rowcount > 0
 
     def count(self) -> int:

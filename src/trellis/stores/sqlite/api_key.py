@@ -77,13 +77,13 @@ class SQLiteApiKeyStore(SQLiteStoreBase, ApiKeyStore):
         return record
 
     def revoke(self, key_id: str) -> bool:
-        cur = self._conn.cursor()
-        cur.execute(
-            "UPDATE trellis_api_keys SET revoked_at = ?"
-            " WHERE key_id = ? AND revoked_at IS NULL",
-            (utc_now().isoformat(), key_id),
-        )
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            cur = conn.execute(
+                "UPDATE trellis_api_keys SET revoked_at = ?"
+                " WHERE key_id = ? AND revoked_at IS NULL",
+                (utc_now().isoformat(), key_id),
+            )
         if cur.rowcount == 0:
             # Loud on misuse: distinguish unknown vs already-revoked in
             # the log so the operator knows which mistake they made.

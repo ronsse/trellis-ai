@@ -6,7 +6,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from typing import Any
 
@@ -420,65 +420,67 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         existing = self.get_node(node_id)
         if existing:
             check_node_role_immutable(node_id, existing, node_role)
-            # Close the current version
-            self._conn.execute(
-                """
-                UPDATE nodes SET valid_to = ?
-                WHERE node_id = ? AND valid_to IS NULL
-                """,
-                (now_iso, node_id),
-            )
-            # Insert new version
-            version_id = generate_ulid()
-            self._conn.execute(
-                """
-                INSERT INTO nodes
-                    (version_id, node_id, node_type, node_role,
-                     generation_spec_json, document_ids_json,
-                     properties_json, created_at, updated_at,
-                     valid_from, valid_to)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-                """,
-                (
-                    version_id,
-                    node_id,
-                    node_type,
-                    node_role,
-                    generation_spec_json,
-                    document_ids_json,
-                    properties_json,
-                    existing["created_at"],
-                    now_iso,
-                    now_iso,
-                ),
-            )
-        else:
-            version_id = generate_ulid()
-            self._conn.execute(
-                """
-                INSERT INTO nodes
-                    (version_id, node_id, node_type, node_role,
-                     generation_spec_json, document_ids_json,
-                     properties_json, created_at, updated_at,
-                     valid_from, valid_to)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-                """,
-                (
-                    version_id,
-                    node_id,
-                    node_type,
-                    node_role,
-                    generation_spec_json,
-                    document_ids_json,
-                    properties_json,
-                    now_iso,
-                    now_iso,
-                    now_iso,
-                ),
-            )
-
-        if commit:
-            self._conn.commit()
+        conn = self._conn
+        # Commits on success and rolls back on an exception. With commit=False
+        # the caller's transaction() does both, so the write only joins it.
+        with conn if commit else nullcontext():
+            if existing:
+                # Close the current version
+                conn.execute(
+                    """
+                    UPDATE nodes SET valid_to = ?
+                    WHERE node_id = ? AND valid_to IS NULL
+                    """,
+                    (now_iso, node_id),
+                )
+                # Insert new version
+                version_id = generate_ulid()
+                conn.execute(
+                    """
+                    INSERT INTO nodes
+                        (version_id, node_id, node_type, node_role,
+                         generation_spec_json, document_ids_json,
+                         properties_json, created_at, updated_at,
+                         valid_from, valid_to)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        version_id,
+                        node_id,
+                        node_type,
+                        node_role,
+                        generation_spec_json,
+                        document_ids_json,
+                        properties_json,
+                        existing["created_at"],
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+            else:
+                version_id = generate_ulid()
+                conn.execute(
+                    """
+                    INSERT INTO nodes
+                        (version_id, node_id, node_type, node_role,
+                         generation_spec_json, document_ids_json,
+                         properties_json, created_at, updated_at,
+                         valid_from, valid_to)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        version_id,
+                        node_id,
+                        node_type,
+                        node_role,
+                        generation_spec_json,
+                        document_ids_json,
+                        properties_json,
+                        now_iso,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
         return node_id
 
     def update_node_if_current(
@@ -603,29 +605,30 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 )
             )
 
-        # Close any prior current versions in one shot. ``IN`` against
-        # the (indexed) ``node_id`` column is a single statement; the
-        # subset of nodes without prior versions is a no-op.
-        if existing:
-            placeholders = ",".join("?" for _ in existing)
-            self._conn.execute(
-                f"UPDATE nodes SET valid_to = ? "
-                f"WHERE node_id IN ({placeholders}) AND valid_to IS NULL",
-                (now_iso, *existing.keys()),
-            )
+        conn = self._conn
+        with conn:  # one transaction: a failed row rolls back the whole batch
+            # Close any prior current versions in one shot. ``IN`` against
+            # the (indexed) ``node_id`` column is a single statement; the
+            # subset of nodes without prior versions is a no-op.
+            if existing:
+                placeholders = ",".join("?" for _ in existing)
+                conn.execute(
+                    f"UPDATE nodes SET valid_to = ? "
+                    f"WHERE node_id IN ({placeholders}) AND valid_to IS NULL",
+                    (now_iso, *existing.keys()),
+                )
 
-        self._conn.executemany(
-            """
-            INSERT INTO nodes
-                (version_id, node_id, node_type, node_role,
-                 generation_spec_json, document_ids_json,
-                 properties_json, created_at, updated_at,
-                 valid_from, valid_to)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-            """,
-            insert_rows,
-        )
-        self._conn.commit()
+            conn.executemany(
+                """
+                INSERT INTO nodes
+                    (version_id, node_id, node_type, node_role,
+                     generation_spec_json, document_ids_json,
+                     properties_json, created_at, updated_at,
+                     valid_from, valid_to)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                insert_rows,
+            )
         return node_ids
 
     def get_node(
@@ -686,44 +689,45 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         now_iso = now.isoformat()
 
         existing = self.resolve_alias(source_system, raw_id)
-        if existing:
-            self._conn.execute(
-                """
-                UPDATE entity_aliases SET valid_to = ?
-                WHERE alias_id = ? AND valid_to IS NULL
-                """,
-                (now_iso, existing["alias_id"]),
-            )
-            alias_id = existing["alias_id"]
-            created_at = existing["created_at"]
-        else:
-            alias_id = generate_ulid()
-            created_at = now_iso
+        conn = self._conn
+        with conn:  # one transaction: a failed insert rolls back the close
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE entity_aliases SET valid_to = ?
+                    WHERE alias_id = ? AND valid_to IS NULL
+                    """,
+                    (now_iso, existing["alias_id"]),
+                )
+                alias_id = existing["alias_id"]
+                created_at = existing["created_at"]
+            else:
+                alias_id = generate_ulid()
+                created_at = now_iso
 
-        version_id = generate_ulid()
-        self._conn.execute(
-            """
-            INSERT INTO entity_aliases
-                (version_id, alias_id, entity_id, source_system,
-                 raw_id, raw_name, match_confidence, is_primary,
-                 created_at, updated_at, valid_from, valid_to)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-            """,
-            (
-                version_id,
-                alias_id,
-                entity_id,
-                source_system,
-                raw_id,
-                raw_name,
-                match_confidence,
-                1 if is_primary else 0,
-                created_at,
-                now_iso,
-                now_iso,
-            ),
-        )
-        self._conn.commit()
+            version_id = generate_ulid()
+            conn.execute(
+                """
+                INSERT INTO entity_aliases
+                    (version_id, alias_id, entity_id, source_system,
+                     raw_id, raw_name, match_confidence, is_primary,
+                     created_at, updated_at, valid_from, valid_to)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    version_id,
+                    alias_id,
+                    entity_id,
+                    source_system,
+                    raw_id,
+                    raw_name,
+                    match_confidence,
+                    1 if is_primary else 0,
+                    created_at,
+                    now_iso,
+                    now_iso,
+                ),
+            )
         return str(alias_id)
 
     def bind_alias_if_absent(
@@ -935,74 +939,75 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         now_iso = now.isoformat()
         properties_json = json.dumps(properties or {})
 
-        if row:
-            edge_id: str = row["edge_id"]
-            # Close current version
-            self._conn.execute(
-                """
-                UPDATE edges SET valid_to = ?
-                WHERE edge_id = ? AND valid_to IS NULL
-                """,
-                (now_iso, edge_id),
-            )
-            # Insert new version
-            version_id = generate_ulid()
-            self._conn.execute(
-                """
-                INSERT INTO edges
-                    (version_id, edge_id, source_id, target_id, edge_type,
-                     properties_json, created_at, valid_from, valid_to,
-                     source_trace_id, agent_id, confidence,
-                     evidence_ref, extractor_tier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
-                """,
-                (
-                    version_id,
-                    edge_id,
-                    source_id,
-                    target_id,
-                    edge_type,
-                    properties_json,
-                    now_iso,
-                    now_iso,
-                    source_trace_id,
-                    agent_id,
-                    confidence,
-                    evidence_ref,
-                    extractor_tier,
-                ),
-            )
-        else:
-            edge_id = generate_ulid()
-            version_id = generate_ulid()
-            self._conn.execute(
-                """
-                INSERT INTO edges
-                    (version_id, edge_id, source_id, target_id, edge_type,
-                     properties_json, created_at, valid_from, valid_to,
-                     source_trace_id, agent_id, confidence,
-                     evidence_ref, extractor_tier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
-                """,
-                (
-                    version_id,
-                    edge_id,
-                    source_id,
-                    target_id,
-                    edge_type,
-                    properties_json,
-                    now_iso,
-                    now_iso,
-                    source_trace_id,
-                    agent_id,
-                    confidence,
-                    evidence_ref,
-                    extractor_tier,
-                ),
-            )
-
-        if commit:
-            self._conn.commit()
+        conn = self._conn
+        # Commits on success and rolls back on an exception. With commit=False
+        # the caller's transaction() does both, so the write only joins it.
+        with conn if commit else nullcontext():
+            if row:
+                edge_id: str = row["edge_id"]
+                # Close current version
+                conn.execute(
+                    """
+                    UPDATE edges SET valid_to = ?
+                    WHERE edge_id = ? AND valid_to IS NULL
+                    """,
+                    (now_iso, edge_id),
+                )
+                # Insert new version
+                version_id = generate_ulid()
+                conn.execute(
+                    """
+                    INSERT INTO edges
+                        (version_id, edge_id, source_id, target_id, edge_type,
+                         properties_json, created_at, valid_from, valid_to,
+                         source_trace_id, agent_id, confidence,
+                         evidence_ref, extractor_tier)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        version_id,
+                        edge_id,
+                        source_id,
+                        target_id,
+                        edge_type,
+                        properties_json,
+                        now_iso,
+                        now_iso,
+                        source_trace_id,
+                        agent_id,
+                        confidence,
+                        evidence_ref,
+                        extractor_tier,
+                    ),
+                )
+            else:
+                edge_id = generate_ulid()
+                version_id = generate_ulid()
+                conn.execute(
+                    """
+                    INSERT INTO edges
+                        (version_id, edge_id, source_id, target_id, edge_type,
+                         properties_json, created_at, valid_from, valid_to,
+                         source_trace_id, agent_id, confidence,
+                         evidence_ref, extractor_tier)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        version_id,
+                        edge_id,
+                        source_id,
+                        target_id,
+                        edge_type,
+                        properties_json,
+                        now_iso,
+                        now_iso,
+                        source_trace_id,
+                        agent_id,
+                        confidence,
+                        evidence_ref,
+                        extractor_tier,
+                    ),
+                )
         return edge_id
 
     def upsert_edges_bulk(self, edges: list[dict[str, Any]]) -> list[str]:
@@ -1102,27 +1107,28 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 )
             )
 
-        # Close any prior current edges in one shot. ``IN`` against
-        # the indexed ``edge_id`` column for the subset we found.
-        if existing_edges:
-            edge_id_placeholders = ",".join("?" for _ in existing_edges)
-            self._conn.execute(
-                f"UPDATE edges SET valid_to = ? "
-                f"WHERE edge_id IN ({edge_id_placeholders}) AND valid_to IS NULL",
-                (now_iso, *(prior["edge_id"] for prior in existing_edges.values())),
+        conn = self._conn
+        with conn:  # one transaction: a failed row rolls back the whole batch
+            # Close any prior current edges in one shot. ``IN`` against
+            # the indexed ``edge_id`` column for the subset we found.
+            if existing_edges:
+                edge_id_placeholders = ",".join("?" for _ in existing_edges)
+                conn.execute(
+                    f"UPDATE edges SET valid_to = ? "
+                    f"WHERE edge_id IN ({edge_id_placeholders}) AND valid_to IS NULL",
+                    (now_iso, *(prior["edge_id"] for prior in existing_edges.values())),
+                )
+            conn.executemany(
+                """
+                INSERT INTO edges
+                    (version_id, edge_id, source_id, target_id, edge_type,
+                     properties_json, created_at, valid_from, valid_to,
+                     source_trace_id, agent_id, confidence,
+                     evidence_ref, extractor_tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                """,
+                insert_rows,
             )
-        self._conn.executemany(
-            """
-            INSERT INTO edges
-                (version_id, edge_id, source_id, target_id, edge_type,
-                 properties_json, created_at, valid_from, valid_to,
-                 source_trace_id, agent_id, confidence,
-                 evidence_ref, extractor_tier)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
-            """,
-            insert_rows,
-        )
-        self._conn.commit()
         return edge_ids
 
     def get_edges(
@@ -1348,25 +1354,27 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
     # ------------------------------------------------------------------
 
     def delete_node(self, node_id: str) -> bool:
-        # Cascade: delete all edge versions referencing this node
-        self._conn.execute(
-            "DELETE FROM edges WHERE source_id = ? OR target_id = ?",
-            (node_id, node_id),
-        )
-        self._conn.execute(
-            "DELETE FROM entity_aliases WHERE entity_id = ?",
-            (node_id,),
-        )
-        cursor = self._conn.execute("DELETE FROM nodes WHERE node_id = ?", (node_id,))
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # one transaction: a failed delete rolls back the cascade
+            # Cascade: delete all edge versions referencing this node
+            conn.execute(
+                "DELETE FROM edges WHERE source_id = ? OR target_id = ?",
+                (node_id, node_id),
+            )
+            conn.execute(
+                "DELETE FROM entity_aliases WHERE entity_id = ?",
+                (node_id,),
+            )
+            cursor = conn.execute("DELETE FROM nodes WHERE node_id = ?", (node_id,))
         deleted = cursor.rowcount > 0
         if deleted:
             logger.debug("node_deleted", node_id=node_id)
         return deleted
 
     def delete_edge(self, edge_id: str) -> bool:
-        cursor = self._conn.execute("DELETE FROM edges WHERE edge_id = ?", (edge_id,))
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            cursor = conn.execute("DELETE FROM edges WHERE edge_id = ?", (edge_id,))
         deleted = cursor.rowcount > 0
         if deleted:
             logger.debug("edge_deleted", edge_id=edge_id)

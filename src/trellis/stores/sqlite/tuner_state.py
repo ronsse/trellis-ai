@@ -66,33 +66,34 @@ class SQLiteTunerStateStore(SQLiteStoreBase, TunerStateStore):
 
     def put_proposal(self, proposal: ParameterProposal) -> ParameterProposal:
         now = utc_now().isoformat()
-        cur = self._conn.cursor()
-        cur.execute(
-            "INSERT OR REPLACE INTO proposals ("
-            "proposal_id, tuner, status, component_id, domain, intent_family, "
-            "tool_name, proposed_values_json, baseline_version, sample_size, "
-            "effect_size, notes, created_at, updated_at, metadata_json, schema_version"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                proposal.proposal_id,
-                proposal.tuner,
-                proposal.status,
-                proposal.scope.component_id,
-                proposal.scope.domain,
-                proposal.scope.intent_family,
-                proposal.scope.tool_name,
-                json.dumps(proposal.proposed_values),
-                proposal.baseline_version,
-                proposal.sample_size,
-                proposal.effect_size,
-                proposal.notes,
-                proposal.created_at.isoformat(),
-                now,
-                json.dumps(proposal.metadata),
-                proposal.schema_version,
-            ),
-        )
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            conn.execute(
+                "INSERT OR REPLACE INTO proposals ("
+                "proposal_id, tuner, status, component_id, domain, intent_family, "
+                "tool_name, proposed_values_json, baseline_version, sample_size, "
+                "effect_size, notes, created_at, updated_at, "
+                "metadata_json, schema_version"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    proposal.proposal_id,
+                    proposal.tuner,
+                    proposal.status,
+                    proposal.scope.component_id,
+                    proposal.scope.domain,
+                    proposal.scope.intent_family,
+                    proposal.scope.tool_name,
+                    json.dumps(proposal.proposed_values),
+                    proposal.baseline_version,
+                    proposal.sample_size,
+                    proposal.effect_size,
+                    proposal.notes,
+                    proposal.created_at.isoformat(),
+                    now,
+                    json.dumps(proposal.metadata),
+                    proposal.schema_version,
+                ),
+            )
         logger.info(
             "tuner_proposal.stored",
             proposal_id=proposal.proposal_id,
@@ -140,19 +141,20 @@ class SQLiteTunerStateStore(SQLiteStoreBase, TunerStateStore):
         if existing is None:
             return None
         now = utc_now().isoformat()
-        cur = self._conn.cursor()
-        if notes is not None:
-            cur.execute(
-                "UPDATE proposals SET status = ?, notes = ?, updated_at = ? "
-                "WHERE proposal_id = ?",
-                (status, notes, now, proposal_id),
-            )
-        else:
-            cur.execute(
-                "UPDATE proposals SET status = ?, updated_at = ? WHERE proposal_id = ?",
-                (status, now, proposal_id),
-            )
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            if notes is not None:
+                conn.execute(
+                    "UPDATE proposals SET status = ?, notes = ?, updated_at = ? "
+                    "WHERE proposal_id = ?",
+                    (status, notes, now, proposal_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE proposals SET status = ?, updated_at = ? "
+                    "WHERE proposal_id = ?",
+                    (status, now, proposal_id),
+                )
         return self.get_proposal(proposal_id)
 
     # -- cursors -------------------------------------------------------------
@@ -164,13 +166,13 @@ class SQLiteTunerStateStore(SQLiteStoreBase, TunerStateStore):
         return str(row["cursor"]) if row else None
 
     def set_cursor(self, tuner: str, cursor: str) -> None:
-        cur = self._conn.cursor()
-        cur.execute(
-            "INSERT OR REPLACE INTO tuner_cursors (tuner, cursor, updated_at) "
-            "VALUES (?, ?, ?)",
-            (tuner, cursor, utc_now().isoformat()),
-        )
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            conn.execute(
+                "INSERT OR REPLACE INTO tuner_cursors (tuner, cursor, updated_at) "
+                "VALUES (?, ?, ?)",
+                (tuner, cursor, utc_now().isoformat()),
+            )
 
     # -- helpers -------------------------------------------------------------
 
