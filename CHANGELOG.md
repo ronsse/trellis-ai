@@ -869,15 +869,12 @@ All notable changes to Trellis will be documented in this file.
   reply `Trace already ingested: <id>`. Re-extract a stored trace with
   `trellis extract traces`. Nodes and edges already attached stay.
   ([#720](https://github.com/ronsse/trellis-ai/pull/720))
-- **The agent guide names every executor path behind `rejected` and
-  `failed`.** `schemas.md` said only the policy gate rejects a command; an
-  unattended writer's refused operation and a handler's `ValidationError`
-  or `PolicyViolationError` do too. Its `failed` row now names Stage 1
-  validation, a missing handler and the handler errors that answer
-  `failed`. The trace-extraction `failed` count in `operations.md` counts
-  both statuses. The `API_MINOR` comment and `surfaces.md` state the rule
-  the repo follows: the minor moves with `SDK_API_MINOR` when the SDK comes
-  to rely on an addition, not on every new optional field.
+- **The agent guide names every path behind the `rejected` and `failed`
+  command statuses.** `schemas.md` credited `rejected` to the policy gate
+  alone. `operations.md` now says the trace-extraction `failed` count
+  covers both statuses. The `API_MINOR` comment and `surfaces.md` state the
+  rule the repo follows: the minor moves with `SDK_API_MINOR` when the SDK
+  comes to rely on an addition, not on every new optional field.
   ([#722](https://github.com/ronsse/trellis-ai/pull/722))
 
 ## [0.9.0] - 2026-05-13

@@ -31,10 +31,9 @@ from trellis.core.base import SCHEMA_VERSION
 API_MAJOR = 1
 
 # Bump only with ``SDK_API_MINOR``, when the SDK comes to rely on an addition.
-# Since minor 2, tests/unit/sdk/test_http.py pins the two equal, and an SDK
-# warns against every server whose minor is below its own, so an addition no
-# SDK reads (a new route or optional field) bumps neither.  Reset to 0 when
-# API_MAJOR bumps.
+# tests/unit/sdk/test_http.py pins the two equal, and an SDK warns against
+# every server whose minor is below its own, so a new route or optional field
+# that no SDK reads bumps neither.  Reset to 0 when API_MAJOR bumps.
 #
 # 1 — ``GET /api/version`` gained the optional ``write_provenance``
 #     field (build identity + effective write-behaviour flags).  Purely
