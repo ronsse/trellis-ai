@@ -989,6 +989,7 @@ All notable changes to Trellis will be documented in this file.
   `a%b` and returned the wrong rows. Both filters now bind the key
   as a parameter, as the store's other property filters already did. Plain
   keys and keys holding `'` return the same rows as before.
+  ([#731](https://github.com/ronsse/trellis-ai/pull/731))
 
 ## [0.9.0] - 2026-05-13
 
