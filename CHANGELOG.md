@@ -869,6 +869,13 @@ All notable changes to Trellis will be documented in this file.
   reply `Trace already ingested: <id>`. Re-extract a stored trace with
   `trellis extract traces`. Nodes and edges already attached stay.
   ([#720](https://github.com/ronsse/trellis-ai/pull/720))
+- **The agent guide names every path behind the `rejected` and `failed`
+  command statuses.** `schemas.md` credited `rejected` to the policy gate
+  alone. `operations.md` now says the trace-extraction `failed` count
+  covers both statuses. The `API_MINOR` comment and `surfaces.md` state the
+  rule the repo follows: the minor moves with `SDK_API_MINOR` when the SDK
+  comes to rely on an addition, not on every new optional field.
+  ([#722](https://github.com/ronsse/trellis-ai/pull/722))
 - **On Neo4j and ArcadeDB, a write heals a node with two current rows.**
   `upsert_node` and `upsert_nodes_bulk` over such a node failed the
   `version_id` unique constraint and left both rows current, so every
