@@ -1190,6 +1190,12 @@ All notable changes to Trellis will be documented in this file.
   does: `REJECTED` with `metadata["rejection_reason"] = "validate"`, one
   `mutation.rejected` event, nothing recorded. No other operation changes.
   ([#751](https://github.com/ronsse/trellis-ai/pull/751))
+- **SQLite and Postgres `upsert_edges_bulk` closes only the prior versions
+  of the triplets a batch names.** It closed every current edge from a
+  batch entry's source, so upserting one `(source, target, edge_type)` edge
+  left that source's other current edges with no open version. Neo4j and
+  ArcadeDB already closed by exact triplet and are unchanged.
+  ([#752](https://github.com/ronsse/trellis-ai/pull/752))
 - **A failed command's message names a non-Trellis exception by its type
   alone.** When a handler raises an exception outside the Trellis hierarchy,
   such as the `sqlite3.Error` a SQLite store lets out, the FAILED result's
