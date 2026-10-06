@@ -880,6 +880,7 @@ All notable changes to Trellis will be documented in this file.
   token with that row, so a token from the hidden row is refused. The race
   that leaves the two rows is unchanged, as are edge writes from such a
   node.
+  ([#723](https://github.com/ronsse/trellis-ai/pull/723))
 
 ## [0.9.0] - 2026-05-13
 
