@@ -10,12 +10,15 @@ An exception that is not the driver's own is raised unchanged.
 audited instead of escaping the executor as a driver error.
 
 A connection lost while the commit is outstanding is ``IncompleteCommit``:
-the purge may have committed, so the message says its outcome is unknown.
+the purge may have committed, so the store reads the node's ``Node`` rows
+back in a new session. No row left is the purge, which returns as it would
+have without the error; a row left is a purge that failed. When that read
+fails too, the outcome is unknown, and the message says so.
 
 No database is needed: ``FakeBoltDriver`` scripts what each purge
-transaction's ``DETACH DELETE`` of the ``Node`` rows does, and
-``TestWithTheRealDriver`` uses the real driver, pointed at a port nothing
-listens on or already closed.
+transaction's ``DETACH DELETE`` of the ``Node`` rows does and what that read
+finds, and ``TestWithTheRealDriver`` uses the real driver, pointed at a port
+nothing listens on or already closed.
 """
 
 from __future__ import annotations
@@ -52,8 +55,10 @@ NODE = "purge-target"
 SERVER_TEXT = "synthetic server text quoting a value"
 
 
-def _store(*outcomes: Outcome) -> tuple[BoltOpenCypherGraphStore, FakeBoltDriver]:
-    driver = FakeBoltDriver(*outcomes)
+def _store(
+    *outcomes: Outcome, rows_left: int | Exception | None = None
+) -> tuple[BoltOpenCypherGraphStore, FakeBoltDriver]:
+    driver = FakeBoltDriver(*outcomes, rows_left=rows_left)
     store = BoltOpenCypherGraphStore(
         driver=driver,
         database="neo4j",
@@ -133,22 +138,73 @@ class TestDeleteNodeErrors:
         assert SERVER_TEXT not in caught.value.message
         assert _ended(driver) == ["rollback"] * 3
 
-    def test_a_connection_lost_during_the_commit_leaves_the_outcome_unknown(
-        self,
+    @pytest.mark.parametrize(("rows", "deleted"), [(1, True), (0, False)])
+    def test_a_lost_commit_with_no_row_left_is_the_purge(
+        self, rows: int, deleted: bool
+    ) -> None:
+        # The purge committed, so it reports what it removed, as it would
+        # have without the error.
+        lost = IncompleteCommit(SERVER_TEXT)
+        store, driver = _store(AtCommit(lost, rows=rows), rows_left=0)
+
+        assert store.delete_node(NODE) is deleted
+        assert driver.reads == [{"nid": NODE}]
+        # Both sessions open on the store's database in the default WRITE
+        # access mode, so the read runs where the purge did: on the writer.
+        assert driver.sessions == [{"database": "neo4j"}] * 2
+        # The driver does not run a purge that may have committed again.
+        assert _ended(driver) == ["commit raised"]
+
+    @pytest.mark.parametrize("rows_left", [1, 2])
+    def test_a_lost_commit_with_a_row_left_is_a_failed_purge(
+        self, rows_left: int
     ) -> None:
         lost = IncompleteCommit(SERVER_TEXT)
-        store, driver = _store(AtCommit(lost), 1)
+        store, driver = _store(AtCommit(lost), rows_left=rows_left)
 
         with pytest.raises(StoreError) as caught:
             store.delete_node(NODE)
 
         assert caught.value.store == "graph"
         assert caught.value.__cause__ is lost
-        assert NODE in caught.value.message
-        assert "outcome is unknown: IncompleteCommit" in caught.value.message
-        assert SERVER_TEXT not in caught.value.message
-        # The driver does not run a purge that may have committed again.
+        assert caught.value.message == f"Purge of node {NODE} failed: IncompleteCommit"
+        assert driver.reads == [{"nid": NODE}]
         assert _ended(driver) == ["commit raised"]
+
+    @pytest.mark.parametrize(
+        "error",
+        [ServiceUnavailable(SERVER_TEXT), ClientError(SERVER_TEXT)],
+        ids=lambda error: type(error).__name__,
+    )
+    def test_a_lost_commit_whose_read_fails_leaves_the_outcome_unknown(
+        self, error: Exception
+    ) -> None:
+        lost = IncompleteCommit(SERVER_TEXT)
+        store, driver = _store(AtCommit(lost), rows_left=error)
+
+        with pytest.raises(StoreError) as caught:
+            store.delete_node(NODE)
+
+        assert caught.value.store == "graph"
+        assert caught.value.__cause__ is lost
+        assert caught.value.message == (
+            f"Purge of node {NODE} lost its connection during the commit, "
+            "so its outcome is unknown: IncompleteCommit"
+        )
+        assert driver.reads == [{"nid": NODE}]
+        assert _ended(driver) == ["commit raised"]
+
+    def test_an_error_from_outside_the_driver_in_that_read_is_raised_unchanged(
+        self,
+    ) -> None:
+        bug = RuntimeError(SERVER_TEXT)
+        store, driver = _store(AtCommit(IncompleteCommit(SERVER_TEXT)), rows_left=bug)
+
+        with pytest.raises(RuntimeError) as caught:
+            store.delete_node(NODE)
+
+        assert caught.value is bug
+        assert driver.reads == [{"nid": NODE}]
 
 
 class TestWithTheRealDriver:

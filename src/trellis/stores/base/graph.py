@@ -672,7 +672,10 @@ class GraphStore(ABC):
         concurrent purges both see ``True`` only if a writer creates a
         version while one of them runs, and each has then removed one; on
         Neo4j both can instead count one version, created after one of them
-        took its locks.
+        took its locks. On Neo4j and ArcadeDB a purge whose connection drops
+        during its commit reads the node back and takes no version left as
+        its own purge: when it rolled back while the other committed, both
+        see ``True`` too.
         """
 
     @abstractmethod

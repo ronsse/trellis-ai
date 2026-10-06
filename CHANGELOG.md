@@ -916,6 +916,18 @@ All notable changes to Trellis will be documented in this file.
   audit event leaves the `audit_event_not_recorded` warning on the result,
   as a `StoreError` from it already did, instead of raising.
   ([#725](https://github.com/ronsse/trellis-ai/pull/725))
+- **A Bolt purge that loses its connection during the commit reads back
+  whether it committed.** On Neo4j and ArcadeDB, `delete_node` reported a
+  connection lost while its commit was outstanding (`IncompleteCommit`) as
+  an unknown outcome, so a purge that had committed still failed the
+  redaction: the audit held `MUTATION_REJECTED` and no
+  `REDACTION_APPLIED`, and running the redaction again answered
+  `target_not_found`. The purge now reads the node's `Node` rows back in a
+  new session. With none left it returns as it would have without the
+  error, so the redaction is applied and audited; with a row left the
+  redaction fails as any other failed purge does. When that read fails
+  too, the outcome is still reported as unknown.
+  ([#727](https://github.com/ronsse/trellis-ai/pull/727))
 
 ## [0.9.0] - 2026-05-13
 
