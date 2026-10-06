@@ -898,3 +898,15 @@ class TestDuplicateCurrentRow:
         bolt_duplicate_current.check_update_node_if_current_heals_a_duplicate(
             graph_store
         )
+
+    def test_get_nodes_bulk_shows_one_version(self, graph_store):
+        bolt_duplicate_current.check_get_nodes_bulk_shows_one_version(graph_store)
+
+    def test_get_subgraph_shows_one_version(self, graph_store):
+        bolt_duplicate_current.check_get_subgraph_shows_one_version(graph_store)
+
+    def test_query_shows_one_version(self, graph_store):
+        bolt_duplicate_current.check_query_shows_one_version(graph_store)
+
+    def test_execute_node_query_shows_one_version(self, graph_store):
+        bolt_duplicate_current.check_execute_node_query_shows_one_version(graph_store)
