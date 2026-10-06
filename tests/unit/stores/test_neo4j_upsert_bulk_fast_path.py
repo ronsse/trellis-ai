@@ -230,16 +230,15 @@ class TestUpsertEdgesBulkDroppedRow:
     def test_a_dropped_row_whose_endpoints_read_as_current_names_both(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The write returns no record for row 0, and the read that names the
-        missing endpoint finds both current, as when one was re-created in
-        between: the refusal names both rather than blaming one."""
+        """The write returns a record for row 1 but none for row 0, and the
+        read after the rollback finds row 0's endpoints current, as when one
+        was re-created in between: the refusal names row 0 and both of its
+        endpoints rather than blaming one."""
         store, session = _build_store_with_mock_driver(monkeypatch)
-        current = [{"node_id": "a"}, {"node_id": "b"}]
+        current = [{"node_id": node_id} for node_id in ("a", "b", "c", "d")]
         session.execute_read.return_value = current
         tx = MagicMock(name="tx")
-        tx.run.side_effect = lambda cypher, **params: (
-            [] if "UNWIND $rows" in cypher else current
-        )
+        tx.run.return_value = [{"row_index": 1, "edge_id": "e1"}]  # drops row 0
         session.execute_write.side_effect = lambda fn: fn(tx)
 
         with pytest.raises(
@@ -247,5 +246,51 @@ class TestUpsertEdgesBulkDroppedRow:
             match=r"upsert_edges_bulk\[0\]: source 'a' or target 'b' was not current",
         ):
             store.upsert_edges_bulk(  # type: ignore[attr-defined]
+                [
+                    {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
+                    {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
+                ]
+            )
+
+
+class TestUpsertEdgesBulkMissingEndpointMessageIsShared:
+    def test_round_trip_1_and_the_post_rollback_read_report_identical_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round trip 1's up-front check and the post-rollback re-read raise
+        ``ValueError`` for the same (row index, endpoint, id) through one
+        shared message helper, so the two can't drift apart. Drive both
+        paths to a "source 'a' has no current version" refusal and compare
+        the exact text."""
+        store, session = _build_store_with_mock_driver(monkeypatch)
+
+        # Round trip 1: "a" is missing from the start, so the call never
+        # reaches the write.
+        session.execute_read.return_value = [{"node_id": "b"}]
+        with pytest.raises(ValueError) as round_trip_1:
+            store.upsert_edges_bulk(  # type: ignore[attr-defined]
                 [{"source_id": "a", "target_id": "b", "edge_type": "links_to"}]
             )
+        session.execute_write.assert_not_called()
+
+        # Post-rollback: both endpoints read as current at round trip 1, the
+        # write drops the row, and "a" reads as gone on the re-read that
+        # follows the rollback — the same defect, caught one round trip
+        # later.
+        store2, session2 = _build_store_with_mock_driver(monkeypatch)
+        session2.execute_read.side_effect = [
+            [{"node_id": "a"}, {"node_id": "b"}],
+            [{"node_id": "b"}],
+        ]
+        tx = MagicMock(name="tx")
+        tx.run.return_value = []  # the UNWIND write drops the one row
+        session2.execute_write.side_effect = lambda fn: fn(tx)
+        with pytest.raises(ValueError) as post_rollback:
+            store2.upsert_edges_bulk(  # type: ignore[attr-defined]
+                [{"source_id": "a", "target_id": "b", "edge_type": "links_to"}]
+            )
+
+        assert str(round_trip_1.value) == str(post_rollback.value)
+        assert str(round_trip_1.value) == (
+            "upsert_edges_bulk[0]: source 'a' has no current version"
+        )
