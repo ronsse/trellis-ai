@@ -11,6 +11,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from tests.cli_output import plain
+from tests.duplicate_trace import graph_state, synthetic_trace
 from tests.unreadable_paths import (
     UNREADABLE_PATH_IDS,
     UNREADABLE_PATH_SHAPES,
@@ -249,6 +250,91 @@ class TestIngestTraceExtraction:
         assert data["status"] == "ingested"
         assert data["extraction"]["executed"] is False
         assert "extraction exploded" in data["extraction"]["error"]
+
+
+class TestIngestTraceDuplicate:
+    """A trace_id the store already holds stores nothing and extracts nothing."""
+
+    def _write(self, tmp_path: Path, trace_id: str, label: str) -> str:
+        f = tmp_path / f"{label}.json"
+        f.write_text(json.dumps(synthetic_trace(trace_id, label)))
+        return str(f)
+
+    def test_a_duplicate_id_leaves_the_graph_as_it_was(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The second trace's agent and artifact never reach ``trace:<id>``.
+
+        The duplicate still exits 0 and keeps the documented success keys;
+        ``already_ingested`` tells the two calls apart, and ``source`` and
+        ``intent`` echo what was submitted.
+        """
+        monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+        from trellis_cli.stores import get_graph_store
+
+        first_file = self._write(tmp_path, "syn-dup-cli", "first")
+        second_file = self._write(tmp_path, "syn-dup-cli", "second")
+
+        first = runner.invoke(app, ["ingest", "trace", first_file, "--format", "json"])
+        graph = get_graph_store()
+        after_first = graph_state(graph, "syn-dup-cli")
+        second = runner.invoke(
+            app, ["ingest", "trace", second_file, "--format", "json"]
+        )
+
+        assert first.exit_code == 0
+        assert second.exit_code == 0
+        assert graph.get_node("agent:syn-agent-first") is not None
+        assert graph_state(graph, "syn-dup-cli") == after_first
+        assert graph.get_node("agent:syn-agent-second") is None
+        assert graph.get_node("artifact:syn-art-second") is None
+        assert json.loads(first.stdout)["already_ingested"] is False
+        assert json.loads(second.stdout) == {
+            "status": "ingested",
+            "trace_id": "syn-dup-cli",
+            "source": "agent",
+            "intent": "synthetic intent second",
+            "already_ingested": True,
+        }
+
+    def test_text_output_says_already_ingested(self, tmp_path: Path) -> None:
+        """Text names the duplicate and does not echo the submitted intent."""
+        first_file = self._write(tmp_path, "syn-dup-text", "first")
+        second_file = self._write(tmp_path, "syn-dup-text", "second")
+
+        first = runner.invoke(app, ["ingest", "trace", first_file])
+        second = runner.invoke(app, ["ingest", "trace", second_file])
+
+        assert first.exit_code == 0
+        assert second.exit_code == 0
+        assert "Trace ingested: syn-dup-text" in plain(first.stdout)
+        out = plain(second.stdout)
+        assert "Trace already ingested: syn-dup-text" in out
+        assert "synthetic intent second" not in out
+
+    def test_a_fresh_id_reading_already_ingested_is_extracted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The handler's message embeds the caller's trace_id.
+
+        So a duplicate signal read from that message would be steered by
+        the id, and this fresh trace would go unextracted.
+        """
+        monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+        from trellis_cli.stores import get_graph_store
+
+        trace_id = "syn trace already ingested"
+        trace_file = self._write(tmp_path, trace_id, "fresh")
+
+        result = runner.invoke(app, ["ingest", "trace", trace_file, "--format", "json"])
+
+        graph = get_graph_store()
+        data = json.loads(result.stdout)
+        assert result.exit_code == 0
+        assert data["already_ingested"] is False
+        assert data["extraction"]["executed"] is True
+        assert graph.get_node(f"trace:{trace_id}") is not None
+        assert graph.get_node("agent:syn-agent-fresh") is not None
 
 
 class TestIngestEvidence:

@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 import trellis_api.app as app_module
+from tests.duplicate_trace import graph_state, synthetic_trace
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import StaleStoreWriteError, StoreError
 from trellis.schemas.enums import PolicyType
@@ -229,6 +230,84 @@ def test_ingest_trace_blank_trace_id_answers_400(client, extraction_calls):
     assert resp.status_code == 400
     assert "trace_id must not be empty" in resp.json()["detail"]
     assert traces.count() == 1
+    assert extraction_calls == []
+
+
+# ── a trace_id already stored stores nothing, so nothing is extracted ───
+
+
+def test_ingest_trace_duplicate_id_leaves_the_graph_as_it_was(client, monkeypatch):
+    """A second trace under a stored trace_id adds nothing to the graph.
+
+    The handler keeps the stored trace, so the second trace's agent and
+    artifact must not reach ``trace:<id>``. The duplicate still answers 200
+    and says it was already ingested.
+    """
+    monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+    graph = app_module._registry.knowledge.graph_store
+
+    first = client.post("/api/v1/traces", json=synthetic_trace("syn-dup-rest", "first"))
+    after_first = graph_state(graph, "syn-dup-rest")
+    second = client.post(
+        "/api/v1/traces", json=synthetic_trace("syn-dup-rest", "second")
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert graph.get_node("agent:syn-agent-first") is not None
+    assert graph_state(graph, "syn-dup-rest") == after_first
+    assert graph.get_node("agent:syn-agent-second") is None
+    assert graph.get_node("artifact:syn-art-second") is None
+    assert first.json()["already_ingested"] is False
+    assert second.json() == {
+        "status": "ok",
+        "trace_id": "syn-dup-rest",
+        "evidence_id": None,
+        "already_ingested": True,
+    }
+
+
+def test_ingest_trace_fresh_id_reading_already_ingested_is_extracted(
+    client, monkeypatch
+):
+    """A fresh trace is extracted even when its id says "already ingested".
+
+    The handler's message embeds the caller's trace_id, so a duplicate
+    signal read from that message would be steered by the id.
+    """
+    monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+    trace_id = "syn trace already ingested"
+
+    resp = client.post("/api/v1/traces", json=synthetic_trace(trace_id, "fresh"))
+
+    graph = app_module._registry.knowledge.graph_store
+    assert resp.status_code == 200
+    assert resp.json()["already_ingested"] is False
+    assert graph.get_node(f"trace:{trace_id}") is not None
+    assert graph.get_node("agent:syn-agent-fresh") is not None
+
+
+def test_ingest_trace_unreadable_trace_store_keeps_409(
+    client, monkeypatch, extraction_calls
+):
+    """A trace store that cannot be read still answers 409, not 500.
+
+    The duplicate check reads the store before the write. Its failure must
+    not escape the route ahead of the handler's own read, which fails the
+    same way and is answered 409.
+    """
+    traces = app_module._registry.operational.trace_store
+
+    def _fail(_trace_id):
+        msg = "synthetic read failure"
+        raise StoreError(msg)
+
+    monkeypatch.setattr(traces, "get", _fail)
+
+    resp = client.post("/api/v1/traces", json=_rich_trace())
+
+    assert resp.status_code == 409
+    assert "synthetic read failure" in resp.json()["detail"]
     assert extraction_calls == []
 
 

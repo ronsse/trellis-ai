@@ -18,6 +18,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from structlog.testing import capture_logs
 
 import trellis.mcp.server as server_mod
+from tests.duplicate_trace import graph_state, synthetic_trace
 from tests.structlog_isolation import clear_cached_logger_proxies
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.hashing import content_hash
@@ -410,6 +411,50 @@ class TestSaveExperience:
         # Save must still succeed even though extraction explodes.
         result = save_experience(json.dumps(self._rich_trace()))
         assert result.startswith("Trace saved:")
+
+    def test_duplicate_id_leaves_the_graph_as_it_was(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A second trace under a stored trace_id adds nothing to the graph.
+
+        The handler keeps the stored trace, so the second trace's agent and
+        artifact must not reach ``trace:<id>``. The save still returns, and
+        says the trace was already ingested.
+        """
+        monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+        graph = temp_registry.knowledge.graph_store
+
+        first = save_experience(json.dumps(synthetic_trace("syn-dup-mcp", "first")))
+        after_first = graph_state(graph, "syn-dup-mcp")
+        second = save_experience(json.dumps(synthetic_trace("syn-dup-mcp", "second")))
+
+        assert graph.get_node("agent:syn-agent-first") is not None
+        assert graph_state(graph, "syn-dup-mcp") == after_first
+        assert graph.get_node("agent:syn-agent-second") is None
+        assert graph.get_node("artifact:syn-art-second") is None
+        assert first == "Trace saved: syn-dup-mcp"
+        assert second == (
+            "Trace already ingested: syn-dup-mcp; "
+            "this submission was not stored or extracted."
+        )
+
+    def test_fresh_id_reading_already_ingested_is_extracted(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fresh trace is extracted even when its id says "already ingested".
+
+        The handler's message embeds the caller's trace_id, so a duplicate
+        signal read from that message would be steered by the id.
+        """
+        monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+        trace_id = "syn trace already ingested"
+
+        result = save_experience(json.dumps(synthetic_trace(trace_id, "fresh")))
+
+        graph = temp_registry.knowledge.graph_store
+        assert result == f"Trace saved: {trace_id}"
+        assert graph.get_node(f"trace:{trace_id}") is not None
+        assert graph.get_node("agent:syn-agent-fresh") is not None
 
 
 # ---------------------------------------------------------------------------

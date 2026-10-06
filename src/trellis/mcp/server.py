@@ -51,7 +51,10 @@ from trellis.core.write_config import (
 from trellis.core.write_provenance import get_write_provenance
 from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.extract.memory_ingest_hook import run_memory_extraction
-from trellis.extract.trace_ingest_hook import run_trace_extraction
+from trellis.extract.trace_ingest_hook import (
+    run_trace_extraction,
+    trace_already_ingested,
+)
 from trellis.feedback.attribution import (
     lookup_pack_bodied_item_ids,
     lookup_pack_item_ids,
@@ -1279,6 +1282,9 @@ def save_experience(trace_json: str) -> str:
     trace = _stamp_trace_project(trace)
     registry = _get_registry()
     executor = build_curate_executor(registry)
+    # Read before the write: the handler answers a stored trace_id as a
+    # success that stores nothing, and only its message says which.
+    already_ingested = trace_already_ingested(registry, trace.trace_id)
     result = executor.execute(
         Command(
             operation=Operation.TRACE_INGEST,
@@ -1296,6 +1302,13 @@ def save_experience(trace_json: str) -> str:
                 "command_id": result.command_id,
                 "message": result.message,
             },
+        )
+    if already_ingested:
+        # A duplicate's agent and artifacts would land on the stored
+        # trace's node, so it is not extracted either.
+        return (
+            f"Trace already ingested: {result.created_id}; "
+            "this submission was not stored or extracted."
         )
 
     # Feature-flagged post-ingest trace->graph extraction

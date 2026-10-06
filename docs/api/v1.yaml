@@ -821,6 +821,11 @@ components:
       additionalProperties: false
       description: Response after ingesting a trace or evidence.
       properties:
+        already_ingested:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Already Ingested
         evidence_id:
           anyOf:
           - type: string

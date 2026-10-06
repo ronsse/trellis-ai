@@ -147,8 +147,10 @@ EOF
 **JSON output (success):**
 
 ```json
-{"status": "ingested", "trace_id": "01JRK5N7QF8GHTM2XVZP3CWD9E", "source": "agent", "intent": "Refactored database connection pooling"}
+{"status": "ingested", "trace_id": "01JRK5N7QF8GHTM2XVZP3CWD9E", "source": "agent", "intent": "Refactored database connection pooling", "already_ingested": false}
 ```
+
+A `trace_id` the store already holds is not stored again, because traces are immutable. The command still exits `0` with `status` `"ingested"`, but `already_ingested` is `true` and nothing is extracted. `source` and `intent` echo the submitted trace, not the stored one.
 
 **JSON output (validation error):**
 
@@ -165,16 +167,16 @@ EOF
 
 By default trace ingestion is write-only to the TraceStore — the trace is stored but no graph nodes/edges are created. Set the environment variable `TRELLIS_ENABLE_TRACE_EXTRACTION=1` (also accepts `true`/`yes`/`on`) to turn on a **post-ingest** deterministic extraction stage that mines the trace's structured fields into the knowledge graph through the governed `MutationExecutor`.
 
-The flag applies identically across all three trace-ingest paths: the CLI `trellis ingest trace`, the REST `POST /api/v1/traces`, and the MCP `save_experience` tool. Extraction always runs *after* the trace is durably stored, only ever *reads* the trace (traces stay immutable), and is fully fail-soft — a broken extraction is logged and swallowed, never failing the ingest.
+The flag applies identically across all three trace-ingest paths: the CLI `trellis ingest trace`, the REST `POST /api/v1/traces`, and the MCP `save_experience` tool. Extraction always runs *after* the trace is durably stored, only ever *reads* the trace (traces stay immutable), and is fully fail-soft — a broken extraction is logged and swallowed, never failing the ingest. A submission whose `trace_id` is already stored is not extracted on any of the three paths, since its fields would land on the stored trace's node: REST answers `"already_ingested": true` and `save_experience` replies `Trace already ingested: <id>`. Re-extract a stored trace with `trellis extract traces`.
 
 What gets extracted (deterministic, structured fields only) is documented in [trace-format.md → Graph Extraction](trace-format.md#graph-extraction-opt-in). Every emitted node and edge carries property-based provenance: `source_trace_id`, `agent_id`, `extractor_tier`, and `extraction_confidence`.
 
 A second, separately opt-in variable gates weak drafts: `TRELLIS_TRACE_EXTRACTION_MIN_CONFIDENCE=<0.0-1.0>` drops drafts scoring below the floor, plus any edge left pointing at a dropped entity. Unset (the default) means no gate — enabling extraction never also enables a silent drop. It applies to both the live hook and `trellis extract traces`, and the reported entity/edge counts are counted *after* the gate.
 
-When the flag is on, the CLI JSON output gains an `extraction` block:
+When the flag is on, the CLI JSON output for a trace this call stored gains an `extraction` block:
 
 ```json
-{"status": "ingested", "trace_id": "01JRK5...", "source": "agent", "intent": "...", "extraction": {"entities": 5, "edges": 4, "failed": 0, "executed": true}}
+{"status": "ingested", "trace_id": "01JRK5...", "source": "agent", "intent": "...", "already_ingested": false, "extraction": {"entities": 5, "edges": 4, "failed": 0, "executed": true}}
 ```
 
 `entities` / `edges` count the commands *submitted*; `failed` counts those the executor rejected. The batch runs `CONTINUE_ON_ERROR`, so a non-zero `failed` is not an error for the ingest — the trace is stored either way — but it does mean some drafts did not land. Persistent non-zero `failed` is worth investigating; the `trace_extraction_commands_failed` log line carries the executor messages.
