@@ -1218,21 +1218,19 @@ All notable changes to Trellis will be documented in this file.
   The marker and every other pattern, caller and payload shape are
   unchanged.
   ([#753](https://github.com/ronsse/trellis-ai/pull/753))
-- **A two-writer `upsert_node` create on Postgres no longer raises a raw
-  `UniqueViolation`.** Two transactions creating the same brand-new
-  `node_id` race: neither finds a current row to lock with `FOR UPDATE`, so
-  both `INSERT`, and the loser hit the partial unique index
-  `idx_nodes_current` and surfaced a driver exception straight to the
-  caller (for example `trellis ingest dbt-manifest` exiting `1`) while its
-  own write was silently lost. `upsert_node` now retries once, matched on
-  `exc.diag.constraint_name` rather than message text (the #747 sanitizer
-  already suppresses that text), re-reading with `FOR UPDATE` so the
-  loser's create becomes a new version over the winner's row — the outcome
-  SQLite's single-writer serialisation already gave. If the retry also
-  conflicts, or for `upsert_nodes_bulk` (whose single `executemany` cannot
-  identify which row of the batch raced, so it does not retry), the caller
-  gets a type-only `StoreError` with no node_id or property value in the
-  message. No tracking issue; follow-up from the #747 gate.
+- **Concurrent `upsert_node` writes of one node on Postgres no longer
+  raise a raw `UniqueViolation`.** The `FOR UPDATE` read serialises
+  neither two creates of a new `node_id`, which have no row to lock, nor
+  two updates of an existing one, where the writer that waited finds no
+  current row. The later `INSERT` hit the partial unique index
+  `idx_nodes_current` and its write was lost. `upsert_node` now retries
+  once in a fresh transaction, which writes a new version over the
+  winner's row, and matches the index by `exc.diag.constraint_name`
+  because the message text follows the server's locale. A second
+  conflict, or any conflict in `upsert_nodes_bulk`, which does not retry,
+  raises a `StoreError` naming only the exception type. Other unique
+  violations are unchanged.
+  ([#755](https://github.com/ronsse/trellis-ai/pull/755))
 
 ## [0.9.0] - 2026-05-13
 

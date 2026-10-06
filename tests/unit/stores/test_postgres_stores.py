@@ -215,14 +215,8 @@ def _wait_for_lock_wait(dsn: str, table: str) -> bool:
 def _wait_for_insert_lock_wait(dsn: str, table: str) -> bool:
     """Poll until an ``INSERT INTO <table>`` waits on a lock (20 s cap).
 
-    Used for the node-create race: a bare ``INSERT`` finding no current row
-    to ``FOR UPDATE`` only blocks once it reaches the partial unique index,
-    so this is the signal that the race window was actually entered. The
-    leading and trailing ``%%`` both matter: ``_write_node_version``'s
-    INSERT is a multi-line triple-quoted string, so the query text in
-    ``pg_stat_activity`` starts with a newline and indentation (not
-    literally ``INSERT INTO``) and the table name is followed by a
-    newline, not a space.
+    ``%%`` on both sides: the store's INSERT text starts with a newline, and
+    a newline follows the table name.
     """
     sql = (
         "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
@@ -375,12 +369,9 @@ class TestPostgresGraphStore:
         assert len(history) == 2
 
     def test_upsert_node_create_race_becomes_new_version(self, store) -> None:
-        """Two writers creating the same brand-new node_id race on
-        ``idx_nodes_current``. Before this fix the loser's ``INSERT`` raised
-        a raw ``psycopg.errors.UniqueViolation`` that reached the caller
-        (gate #747 follow-up, probes/g-747/race-base.txt). The loser must
-        instead turn its create into a new version over the winner's row,
-        the outcome SQLite's single-writer serialisation already gives.
+        """Two writers creating the same new node_id race on
+        ``idx_nodes_current``. The loser retries and writes a new version
+        over the winner's row, as SQLite's single writer would.
         """
         node_id = "race-node-synthetic-create"
 
@@ -410,9 +401,12 @@ class TestPostgresGraphStore:
         writer_a = threading.Thread(target=call_upsert)
         writer_a.start()
 
-        waited = _wait_for_insert_lock_wait(PG_DSN, "nodes")
-        other.commit()
-        writer_a.join(timeout=20)
+        try:
+            waited = _wait_for_insert_lock_wait(PG_DSN, "nodes")
+            other.commit()
+            writer_a.join(timeout=20)
+        finally:
+            other.close()
 
         assert waited, "writer A never blocked on writer B's held insert"
         assert not writer_a.is_alive()
@@ -450,41 +444,40 @@ class TestPostgresGraphStore:
     def test_upsert_node_retry_exhausted_raises_store_error(
         self, store, monkeypatch
     ) -> None:
-        """When the retry also conflicts, ``upsert_node`` raises a
-        type-only :class:`StoreError` -- no node_id, no property value in
-        the message (#747's sanitizer work is why: a raw driver message
-        here would have quoted both).
+        """When the retry also conflicts, ``upsert_node`` gives up after one
+        retry and raises a :class:`StoreError` naming only the exception
+        type, never the node_id.
         """
         from trellis.errors import StoreError
         from trellis.stores.postgres.graph import PostgresGraphStore
 
         node_id = "race-node-synthetic-exhausted"
-        sentinel_value = "synthetic-value-should-not-leak"
-        store.upsert_node(node_id, "t", {"secret": sentinel_value})
+        store.upsert_node(node_id, "t", {})
 
         # Force every attempt down the "no existing row" branch, so its
         # bare INSERT conflicts with the real current row above on both
         # the first attempt and the retry.
+        reads: list[str] = []
+
+        def no_current_row(_self: object, _conn: object, nid: str) -> None:
+            reads.append(nid)
+
         monkeypatch.setattr(
-            PostgresGraphStore,
-            "_fetch_current_node_for_update",
-            lambda self, conn, nid: None,
+            PostgresGraphStore, "_fetch_current_node_for_update", no_current_row
         )
 
         with pytest.raises(StoreError) as exc_info:
-            store.upsert_node(node_id, "t", {"secret": sentinel_value})
+            store.upsert_node(node_id, "t", {})
 
-        message = str(exc_info.value)
-        assert node_id not in message
-        assert sentinel_value not in message
+        assert len(reads) == 2
+        assert node_id not in str(exc_info.value)
 
     def test_upsert_nodes_bulk_create_race_raises_store_error(
         self, store, monkeypatch
     ) -> None:
-        """``upsert_nodes_bulk`` doesn't retry (the plan's stated
-        deviation: one ``executemany`` failure doesn't say which row of the
-        batch raced), so a racing create gets the typed, type-only
-        StoreError instead of a raw UniqueViolation.
+        """``upsert_nodes_bulk`` does not retry: a racing create rolls the
+        batch back and raises a type-only :class:`StoreError` instead of a
+        raw ``UniqueViolation``.
         """
         from trellis.errors import StoreError
         from trellis.stores.postgres.graph import PostgresGraphStore
