@@ -899,6 +899,7 @@ All notable changes to Trellis will be documented in this file.
   and the route answers `400`. An executor audit event that a SQLite event
   log cannot write now leaves the `audit_event_not_recorded` warning on the
   result instead of raising.
+  ([#725](https://github.com/ronsse/trellis-ai/pull/725))
 
 ## [0.9.0] - 2026-05-13
 
