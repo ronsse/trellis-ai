@@ -394,11 +394,21 @@ class GraphStoreContractTests:
         assert store.count_nodes() == before
         assert store.get_node("fresh-row-0") is None
 
+    @pytest.mark.parametrize(
+        "repeat",
+        [
+            {"node_type": "service", "properties": {"v": "first"}},
+            {"node_type": "team", "properties": {"v": "second"}},
+        ],
+        ids=["same_spec", "other_spec"],
+    )
     @pytest.mark.parametrize("existing", [False, True], ids=["new_id", "existing_id"])
     def test_upsert_nodes_bulk_rejects_a_repeated_node_id(
-        self, store: GraphStore, existing: bool
+        self, store: GraphStore, existing: bool, repeat: dict[str, Any]
     ) -> None:
-        """A ``node_id`` given twice in one call is refused before any write.
+        """A ``node_id`` given twice in one call is refused before any write,
+        whether the second occurrence repeats the first or carries another
+        type and properties.
 
         One call writes one version per node. The refusal names the second
         occurrence, as ``test_upsert_edges_bulk_rejects_duplicate_triplets``
@@ -419,11 +429,7 @@ class GraphStoreContractTests:
                         "properties": {"v": "first"},
                     },
                     {"node_id": "rep-b", "node_type": "service", "properties": {}},
-                    {
-                        "node_id": "rep-a",
-                        "node_type": "service",
-                        "properties": {"v": "second"},
-                    },
+                    {"node_id": "rep-a", **repeat},
                 ]
             )
         assert store.count_nodes() == before

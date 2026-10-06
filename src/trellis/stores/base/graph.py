@@ -389,8 +389,9 @@ class GraphStore(ABC):
 
         Raises:
             ValueError / TypeError: with the same conditions as
-                :meth:`upsert_node`. Errors mention the offending list
-                index so callers can map them back.
+                :meth:`upsert_node`, and ``ValueError`` for a ``node_id``
+                given twice. Errors mention the offending list index so
+                callers can map them back.
 
         Returns:
             List of node IDs in the same order as the input.
@@ -910,10 +911,11 @@ class GraphStore(ABC):
         One call writes one version per node. Without this check the SQL
         backends' one-current-row unique index would fail the statement
         mid-batch, and a Bolt statement, which has no such index, would
-        write both versions as current rows. The error names the second
-        occurrence's index, as :meth:`_pre_validate_edges_bulk` does for a
-        repeated edge. A missing, ``None`` or empty ``node_id`` is
-        auto-assigned, so it never repeats.
+        write each occurrence that differs from the stored version as a
+        current row. The error names the second occurrence's index, as
+        :meth:`_pre_validate_edges_bulk` does for a repeated edge. A
+        missing, ``None`` or empty ``node_id`` is auto-assigned, so it never
+        repeats.
         """
         seen: set[str] = set()
         for i, spec in enumerate(nodes):

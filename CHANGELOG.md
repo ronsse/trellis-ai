@@ -1024,8 +1024,9 @@ All notable changes to Trellis will be documented in this file.
   commit.
   ([#733](https://github.com/ronsse/trellis-ai/pull/733))
 - **`upsert_nodes_bulk` refuses a `node_id` given twice in one call.** On
-  Neo4j and ArcadeDB such a call wrote one version per occurrence and left
-  the node with two current rows. On SQLite and Postgres it failed the
+  Neo4j and ArcadeDB every occurrence that did not match the node's stored
+  version wrote a version of its own, so two such occurrences left the node
+  with two current rows. On SQLite and Postgres it failed the
   one-current-row unique index with `sqlite3.IntegrityError` or psycopg's
   `UniqueViolation`, and SQLite kept the batch's writes before the failing
   row pending on its connection, so the store's next commit saved them.
