@@ -1144,6 +1144,16 @@ All notable changes to Trellis will be documented in this file.
   close without its replacement or a document without its full-text row.
   `commit=False` writes and the errors raised are unchanged.
   ([#745](https://github.com/ronsse/trellis-ai/pull/745))
+- **A CLI failure line is no longer hard-wrapped at the console width.**
+  Sixteen `except Exception` arms in `trellis extract refresh`,
+  `extract traces`, `ingest` (trace, evidence, dbt-manifest, openlineage,
+  conversations, corpus), `admin migrate-provenance` and the admin proposal
+  commands print `<what failed>: <message>` in text mode. Rich hard-wrapped
+  that line at the console width, 80 columns when no standard stream is a
+  terminal, so a caller reading one line got part of the message. They now
+  print it unwrapped, as the root error boundary does, and the terminal
+  still wraps it on screen. Text, colour, JSON output and exit codes are
+  unchanged, and a message with its own newlines keeps them.
 
 ## [0.9.0] - 2026-05-13
 
