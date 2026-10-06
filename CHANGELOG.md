@@ -1103,6 +1103,7 @@ All notable changes to Trellis will be documented in this file.
   the caller's `transaction()`. The errors raised are unchanged, and the
   `GraphStore.upsert_nodes_bulk` docstring no longer says SQLite and
   Postgres loop over `upsert_node` and can leave part of a batch.
+  ([#745](https://github.com/ronsse/trellis-ai/pull/745))
 
 ## [0.9.0] - 2026-05-13
 
