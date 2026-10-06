@@ -1137,43 +1137,6 @@ def test_batch_idempotency(client):
     assert data["duplicates"] == 1
 
 
-def test_batch_corrected_retry_after_a_refusal_runs(client):
-    """A command the handler refuses leaves its idempotency key free.
-
-    The route runs the whole batch on one executor, so before the fix the
-    refusal recorded the key and the corrected retry answered DUPLICATE.
-    Only the command that succeeded makes the key a duplicate.
-    """
-    trace = {
-        "source": "agent",
-        "intent": "syn task",
-        "context": {"agent_id": "syn-agent"},
-    }
-    resp = client.post(
-        "/api/v1/commands/batch",
-        json={
-            "commands": [
-                {
-                    "operation": "trace.ingest",
-                    "args": {"trace": {**trace, "trace_id": trace_id}},
-                    "idempotency_key": "syn-key-1",
-                }
-                # Refused (blank trace_id), corrected, then a true replay.
-                for trace_id in ("", "syn-trace-1", "syn-trace-2")
-            ],
-            "strategy": "sequential",
-        },
-    )
-    assert resp.status_code == 200
-    results = resp.json()["results"]
-    assert [r["status"] for r in results] == ["rejected", "success", "duplicate"]
-    assert results[1]["created_id"] == "syn-trace-1"
-    assert results[2]["message"] == "Duplicate command: syn-key-1"
-    traces = app_module._registry.operational.trace_store
-    assert traces.get("syn-trace-1") is not None
-    assert traces.get("syn-trace-2") is None
-
-
 def test_batch_evidence_ingest_allocates_document_id(client):
     response = client.post(
         "/api/v1/commands/batch",

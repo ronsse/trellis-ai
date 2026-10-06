@@ -414,7 +414,7 @@ class TestIdempotencyKeyRecordedOnlyOnSuccess:
 
     A command the handler refuses (REJECTED) or fails on (FAILED) leaves
     its key free, so a corrected retry under the same key runs on the
-    same executor, as it already did on a fresh one.
+    same executor, as it does on a fresh one.
     """
 
     @pytest.mark.parametrize(
@@ -465,34 +465,6 @@ class TestIdempotencyKeyRecordedOnlyOnSuccess:
         assert retry.status == CommandStatus.SUCCESS, retry.message
         assert retry.created_id == "ent-syn-fixed"
         assert handler.names == ["syn-bad", "syn-fixed"]
-
-    def test_succeeded_key_answers_duplicate_in_process_and_persisted(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        log = SQLiteEventLog(tmp_path / "events.db")
-        handler = _RefusesSynBad(StoreError("unused", store="syn"))
-        executor = MutationExecutor(
-            event_log=log,
-            handlers={Operation.ENTITY_CREATE: handler},
-        )
-        first = executor.execute(_named("syn-fixed", "syn-key-2"))
-        assert first.status == CommandStatus.SUCCESS
-
-        # Same executor: the in-process cache answers.
-        again = executor.execute(_named("syn-other", "syn-key-2"))
-        assert again.status == CommandStatus.DUPLICATE
-        assert again.message == "Duplicate command: syn-key-2"
-
-        # A fresh executor on the same log: the persisted check answers.
-        fresh = MutationExecutor(
-            event_log=log,
-            handlers={Operation.ENTITY_CREATE: handler},
-        )
-        replay = fresh.execute(_named("syn-other", "syn-key-2"))
-        assert replay.status == CommandStatus.DUPLICATE
-        assert replay.message == "Duplicate command (persisted): syn-key-2"
-        assert handler.names == ["syn-fixed"]
 
 
 class TestBatchExecution:

@@ -537,8 +537,8 @@ class MutationExecutor:
     ) -> CommandResult | None:
         """Stage 3 — return a DUPLICATE result if this command is a replay.
 
-        Extracted verbatim from :meth:`execute` so the stage list there
-        reads as a sequence of gates rather than as one of them inlined.
+        A method of its own so the stage list in :meth:`execute` reads as
+        a sequence of gates rather than as one of them inlined.
         Returns ``None`` when the command is not a replay, without recording
         its key: :meth:`execute` records it only once the handler has
         succeeded, so a refused or failed command leaves the key free for a

@@ -840,15 +840,12 @@ All notable changes to Trellis will be documented in this file.
   the `MUTATION_REJECTED` event are unchanged.
   ([#718](https://github.com/ronsse/trellis-ai/pull/718))
 - **A refused or failed command no longer uses up its idempotency key.**
-  The executor recorded a command's idempotency key in its in-process
-  cache before the handler ran, so a command the handler refused
-  (`rejected`) or failed on (`failed`) kept its key, and a corrected retry
-  under the same key on the same executor answered `duplicate` without
-  running. `POST /api/v1/commands/batch` runs a whole batch on one
-  executor, so a batch could not carry its own retry. The key is now
-  recorded only once the handler has succeeded. A succeeded command's key
-  answers `duplicate` as before, from the cache and from the event log,
-  whose check already counted only `mutation.executed` events.
+  Only a command whose handler succeeded makes its key answer `duplicate`,
+  from the executor's in-process cache or from the event log. A command
+  that is `rejected` or `failed` leaves its key free, so a corrected retry
+  under the same key runs, including one later in the same
+  `POST /api/v1/commands/batch` or `POST /api/v1/ingest/bulk` request,
+  each of which runs on one executor.
   ([#721](https://github.com/ronsse/trellis-ai/pull/721))
 
 ## [0.9.0] - 2026-05-13
