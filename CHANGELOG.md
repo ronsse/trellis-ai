@@ -1207,6 +1207,17 @@ All notable changes to Trellis will be documented in this file.
   still wraps it on screen. Text, colour, JSON output and exit codes are
   unchanged, and a message with its own newlines keeps them.
   ([#750](https://github.com/ronsse/trellis-ai/pull/750))
+- **The error sanitizer suppresses Neo4j and ArcadeDB duplicate-constraint
+  values over Bolt.** Neo4j's uniqueness-violation text quotes the value:
+  `` Node(<n>) already exists with label `<Label>` and property
+  `<prop>` = '<value>' `` (gql_status `22N79`). So does ArcadeDB's, raised
+  inside a managed transaction even with the value passed as a bound
+  parameter: `` Duplicated key [<value>] found on index '<Label>[<prop>]'
+  already assigned to record #<rid> `` (gql_status `50N42`). Both passed
+  through `sanitize_error_message` verbatim and now get its static marker.
+  The marker and every other pattern, caller and payload shape are
+  unchanged.
+  ([#753](https://github.com/ronsse/trellis-ai/pull/753))
 - **A failed command's message names a non-Trellis exception by its type
   alone.** When a handler raises an exception outside the Trellis hierarchy,
   such as the `sqlite3.Error` a SQLite store lets out, the FAILED result's
