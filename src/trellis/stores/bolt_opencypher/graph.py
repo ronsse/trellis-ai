@@ -462,12 +462,26 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         built the driver themselves (``close()`` will then close it),
         or ``owns_driver=False`` when the registry shared a driver
         across the graph + vector pair (``close()`` is a no-op).
+
+        The schema statements are the store's first round trip, so an
+        unreachable server or refused credentials fail here: a
+        ``DriverError`` or ``Neo4jError`` is raised as :class:`StoreError`
+        naming the error's type.
         """
         self._driver: Driver = driver
         self._database = database
         self._owns_driver = owns_driver
         if init_schema:
-            self._init_schema()
+            from neo4j.exceptions import DriverError, Neo4jError  # noqa: PLC0415
+
+            # The driver's text names hosts and carries the server's
+            # messages, and a redaction that opens the store writes this
+            # message to the audit log; the error stays on ``__cause__``.
+            try:
+                self._init_schema()
+            except (DriverError, Neo4jError) as exc:
+                msg = f"Opening the graph store failed: {type(exc).__name__}"
+                raise StoreError(msg, store="graph") from exc
 
     # ------------------------------------------------------------------
     # Schema

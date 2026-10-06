@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.errors import StoreError
 from trellis.stores.base.registry import RegistryContext
 from trellis.stores.base.vector import VectorStore
 from trellis.stores.neo4j.base import (
@@ -144,7 +145,17 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
         self._m = m
         self._ef_construction = ef_construction
         self._quantization = quantization
-        self._init_schema()
+        from neo4j.exceptions import DriverError, Neo4jError  # noqa: PLC0415
+
+        # The index DDL is the store's first round trip. The driver's text
+        # names hosts and carries the server's messages, and a redaction
+        # that opens the store writes this message to the audit log; the
+        # error stays on ``__cause__``.
+        try:
+            self._init_schema()
+        except (DriverError, Neo4jError) as exc:
+            msg = f"Opening the vector store failed: {type(exc).__name__}"
+            raise StoreError(msg, store="vector") from exc
         logger.info(
             "neo4j_vector_store_initialized",
             dimensions=dimensions,
