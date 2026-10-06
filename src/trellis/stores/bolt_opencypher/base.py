@@ -24,8 +24,12 @@ instance; stores own a driver only when they build their own (passed
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
+
+from trellis.errors import StoreError
 
 if TYPE_CHECKING:
     from neo4j import Driver
@@ -165,3 +169,21 @@ def verify_connectivity(driver: Driver) -> None:
     :class:`RegistryValidationError`).
     """
     driver.verify_connectivity()
+
+
+@contextmanager
+def open_errors_as_store_error(store: str) -> Iterator[None]:
+    """Raise a driver error from opening ``store`` as :class:`StoreError`.
+
+    The message names the store and the error's type only. The driver's
+    text names hosts and carries the server's messages, and a redaction
+    that opens the store writes the message to the audit log; the error
+    stays on ``__cause__``.
+    """
+    from neo4j.exceptions import DriverError, Neo4jError  # noqa: PLC0415
+
+    try:
+        yield
+    except (DriverError, Neo4jError) as exc:
+        msg = f"Opening the {store} store failed: {type(exc).__name__}"
+        raise StoreError(msg, store=store) from exc

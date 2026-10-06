@@ -806,7 +806,7 @@ All notable changes to Trellis will be documented in this file.
   is reported as an unknown outcome, because the purge may have
   committed. The other Bolt graph writes still raise the driver's own
   errors, as do the Bolt calls a redaction makes before its purge, such
-  as opening the graph store and its reads.
+  as its reads.
   ([#713](https://github.com/ronsse/trellis-ai/pull/713))
 - **Trace extraction mints no graph node for an empty `artifact_id`.** Such a
   ref, including a whitespace-only one, gets no node or edge and is logged at
@@ -888,6 +888,25 @@ All notable changes to Trellis will be documented in this file.
   refused. The race that leaves the two rows is unchanged, as are edge
   writes from such a node.
   ([#723](https://github.com/ronsse/trellis-ai/pull/723))
+- **A Neo4j or ArcadeDB store that is down fails a redaction without the
+  server's text.** Opening a Neo4j or ArcadeDB graph store, or a Neo4j
+  vector store, runs schema statements, and a driver error there, such as
+  an unreachable server or refused credentials, escaped
+  `MutationExecutor`: `trellis curate redact` exited `1` with a traceback
+  and no JSON, and no `MUTATION_REJECTED` event was written. ArcadeDB's
+  HTTP calls (database creation, the edge-schema migration and every
+  ArcadeDB vector statement) raised urllib's error, or a `RuntimeError`
+  holding the server's reply and the command or URL, and that text reached
+  the failed redaction's result and its `MUTATION_REJECTED` event; a reply
+  that was not HTTP escaped. Each now raises `StoreError` naming the
+  operation and the HTTP status or the error's type, chained to the error
+  where there is one, so the redaction is `failed` (exit `5` in both
+  formats) and audited without the text. Other commands that open such a
+  store, such as `trellis admin graph-health`, exit `5` with the error
+  envelope instead of a traceback, and `StoreRegistry.validate` and API
+  startup report the failure the same way; the
+  `TRELLIS_VALIDATE_CONNECTIVITY` check still prints the driver's text.
+  ([#724](https://github.com/ronsse/trellis-ai/pull/724))
 - **A SQLite error inside a governed write fails the command instead of
   escaping it.** A `sqlite3.Error` from a SQLite store, such as for a locked
   or read-only database file, answers `failed` with one `mutation.rejected`

@@ -202,6 +202,7 @@ class ArcadeDBVectorStore(VectorStore):
             self._database,
             command,
             params=params,
+            store="vector",
         )
 
     def _init_schema(self, *, ddl_user: str, ddl_password: str) -> None:
@@ -211,7 +212,14 @@ class ArcadeDBVectorStore(VectorStore):
         # Deliberately bypasses ``self._sql`` — DDL uses the migration
         # credential pair, never the runtime one (issue #193).
         def ddl(command: str) -> None:
-            execute_sql(self._http_url, ddl_user, ddl_password, self._database, command)
+            execute_sql(
+                self._http_url,
+                ddl_user,
+                ddl_password,
+                self._database,
+                command,
+                store="vector",
+            )
 
         ddl("CREATE VERTEX TYPE Node IF NOT EXISTS")
         ddl("CREATE PROPERTY Node.embedding IF NOT EXISTS LIST OF FLOAT")

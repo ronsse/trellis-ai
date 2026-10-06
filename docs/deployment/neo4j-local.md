@@ -206,7 +206,7 @@ directory exists. Don't run `trellis admin init` to fix that: with
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `ServiceUnavailable: Couldn't connect to localhost:7687` | Container not running | `docker ps` → start with the command in Step 1 |
+| `Opening the graph store failed: ServiceUnavailable` | Container not running | `docker ps` → start with the command in Step 1 |
 | `AuthError` | Password mismatch between container and env var | Re-run `docker run` with the same `NEO4J_AUTH` value as `TRELLIS_NEO4J_PASSWORD` |
 | `no such vector schema index` on first query after init | Race against AuraDB-style async index provisioning (rare on local Docker) | Phase 1.4's `wait_for_vector_index_online` should prevent this; if you hit it, file an issue with the timeline |
 
