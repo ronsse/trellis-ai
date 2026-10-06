@@ -989,6 +989,7 @@ All notable changes to Trellis will be documented in this file.
   edge version already current on the hidden row, such as one written
   before this fix, stays current, and the race that leaves the two rows is
   unchanged. Writes between nodes with one current row are unchanged.
+  ([#732](https://github.com/ronsse/trellis-ai/pull/732))
 
 ## [0.9.0] - 2026-05-13
 
