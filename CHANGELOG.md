@@ -979,6 +979,16 @@ All notable changes to Trellis will be documented in this file.
   keys and values verbatim, instead of deleting bracketed text or exiting
   `1` on a closing tag such as `[/x]`.
   ([#730](https://github.com/ronsse/trellis-ai/pull/730))
+- **A Postgres graph filter on a property key holding `%` filters on that
+  key.** The Postgres graph store's `contains` and range (`lt`, `lte`,
+  `gt`, `gte`) `properties.<key>` query filters, on nodes and edges,
+  spliced the key into the statement as a quoted literal, and psycopg read
+  a `%` in it as placeholder syntax: a key such as `a%b` raised
+  `psycopg.ProgrammingError`, and a key such as `a%%b` read the property
+  `a%b` and returned the wrong rows. Both filters now bind the key
+  as a parameter, as the store's other property filters already did. Plain
+  keys and keys holding `'` return the same rows as before.
+  ([#731](https://github.com/ronsse/trellis-ai/pull/731))
 - **On Neo4j and ArcadeDB, an edge written from or to a node with two
   current rows gets one version.** `upsert_edge` and `upsert_edges_bulk`
   created the edge once per current row of each endpoint, so such a node
