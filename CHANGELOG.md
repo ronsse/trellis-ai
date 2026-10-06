@@ -878,6 +878,7 @@ All notable changes to Trellis will be documented in this file.
   both statuses. The `API_MINOR` comment and `surfaces.md` state the rule
   the repo follows: the minor moves with `SDK_API_MINOR` when the SDK comes
   to rely on an addition, not on every new optional field.
+  ([#722](https://github.com/ronsse/trellis-ai/pull/722))
 
 ## [0.9.0] - 2026-05-13
 
