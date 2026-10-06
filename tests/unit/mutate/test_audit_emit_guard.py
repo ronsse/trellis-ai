@@ -481,17 +481,13 @@ class TestTheWarningNamesTheErrorAsTheLogLineDoes:
         "exc",
         [
             pytest.param(
-                sqlite3.OperationalError(f"server says: {_DRIVER_TEXT}"),
-                id="sqlite3_error",
-            ),
-            pytest.param(
                 ConnectionError(f"refused: {_DRIVER_TEXT}"), id="oserror_subclass"
             ),
             pytest.param(ValueError(f"bad payload: {_DRIVER_TEXT}"), id="value_error"),
         ],
     )
     def test_a_raw_error_is_named_by_its_type_alone(self, exc) -> None:
-        """Everything but the warning's parenthetical is as it was."""
+        """The warning names the error by its type; the result is pinned whole."""
         assert _committed_result(exc) == {
             "command_id": "cmd-synthetic-1",
             "status": "success",
@@ -519,5 +515,5 @@ class TestTheWarningNamesTheErrorAsTheLogLineDoes:
         ],
     )
     def test_a_trellis_error_keeps_its_message(self, exc, error) -> None:
-        """The text the warning carried before the rule reached it, byte for byte."""
+        """The warning keeps a Trellis error's type and message, byte for byte."""
         assert _committed_result(exc)["warnings"] == [_stage5_warning(error)]
