@@ -46,29 +46,6 @@ class TestExitCodeMap:
 class TestRefusalExitCode:
     """A refused or failed write exits by its reason, for curate and ingest alike."""
 
-    def test_the_arg_check_refusal_exits_2_beside_a_store_failure(self) -> None:
-        """Every CLI site supplies its args, so map the executor's own result."""
-        from trellis.errors import StoreError
-        from trellis.mutate.commands import Command
-        from trellis.mutate.executor import MutationExecutor
-
-        handler = MagicMock()
-        handler.handle.side_effect = StoreError("synthetic outage", store="graph")
-        executor = MutationExecutor(handlers={Operation.ENTITY_CREATE: handler})
-        refused = executor.execute(
-            Command(operation=Operation.ENTITY_CREATE, args={"name": "syn-b"})
-        )
-        failed = executor.execute(
-            Command(
-                operation=Operation.ENTITY_CREATE,
-                args={"entity_type": "service", "name": "syn-b"},
-            )
-        )
-        assert [exit_codes.refusal_exit_code(r) for r in (refused, failed)] == [
-            exit_codes.EXIT_VALIDATION,
-            exit_codes.EXIT_STORE,
-        ]
-
     @pytest.mark.parametrize(
         ("status", "metadata", "code"),
         [

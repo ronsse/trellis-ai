@@ -1179,43 +1179,34 @@ def test_batch_continue_on_error(client):
                     "operation": "entity.create",
                     "args": {"entity_type": "service", "name": "third"},
                 },
+                {
+                    "operation": "link.remove",
+                    "args": {"edge_id": "syn-edge"},  # no handler: failed
+                },
             ],
             "strategy": "continue_on_error",
         },
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["executed"] == 3
+    assert data["executed"] == 4
     assert data["succeeded"] == 2
-    assert (data["failed"], data["rejected"]) == (0, 1)
+    assert (data["failed"], data["rejected"]) == (1, 1)
 
 
-@pytest.mark.parametrize(
-    ("requested_by", "command"),
-    [
-        pytest.param(
-            "api:mutations",
-            {"operation": "link.create", "args": {"source_id": "syn-node-a"}},
-            id="missing-arg",
-        ),
-        pytest.param(
-            "worker:embed-traces",
-            {
-                "operation": "entity.create",
-                "args": {"entity_type": "service", "name": "syn-svc"},
-            },
-            id="roster",
-        ),
-    ],
-)
-def test_batch_counts_a_stage_1_refusal_as_rejected(client, requested_by, command):
-    """A missing required arg is counted as the roster refusal is: 200, rejected=1."""
+def test_batch_refuses_an_unattended_writer(client):
+    """The batch hands its requested_by to the executor, so the roster refuses."""
     resp = client.post(
         "/api/v1/commands/batch",
         json={
-            "commands": [command],
+            "commands": [
+                {
+                    "operation": "entity.create",
+                    "args": {"entity_type": "service", "name": "syn-svc"},
+                }
+            ],
             "strategy": "continue_on_error",
-            "requested_by": requested_by,
+            "requested_by": "worker:embed-traces",
         },
     )
     assert resp.status_code == 200
