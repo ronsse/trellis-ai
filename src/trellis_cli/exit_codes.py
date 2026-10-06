@@ -29,6 +29,10 @@ Mapping to the typed exception hierarchy in :mod:`trellis.errors`:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import NamedTuple
+
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.errors import (
     ConfigError,
     IdempotencyError,
@@ -52,6 +56,8 @@ __all__ = [
     "EXIT_POLICY",
     "EXIT_STORE",
     "EXIT_VALIDATION",
+    "BatchOutcome",
+    "batch_outcome",
     "exit_code_for",
     "refusal_exit_code",
 ]
@@ -114,3 +120,47 @@ def refusal_exit_code(result: CommandResult) -> int:
     if result.metadata.get("rejection_reason") == "policy_violation":
         return EXIT_POLICY
     return EXIT_VALIDATION
+
+
+#: The answers under which a command wrote nothing. ``DUPLICATE`` is not one:
+#: it answers the replay of a write that already landed.
+_REFUSED = (CommandStatus.REJECTED, CommandStatus.FAILED)
+
+
+class BatchOutcome(NamedTuple):
+    """What a governed batch's results mean for the command that submitted it."""
+
+    #: The first result when every command was refused or failed, else
+    #: ``None``. The command exits by it, through :func:`refusal_exit_code`.
+    refusal: CommandResult | None
+    #: The first refused or failed result, whatever the others answered.
+    first_failure: CommandResult | None
+    #: The payload's ``status``, with a sanitized ``message`` when it names
+    #: a failure.
+    status: dict[str, str]
+
+
+def batch_outcome(
+    results: Sequence[CommandResult], *, done: str, name_partial: bool = False
+) -> BatchOutcome:
+    """Read a batch's results by the rule every batch command follows (#687).
+
+    A batch is refused only when it is non-empty and every command was
+    refused or failed. It exits by its first result, and its payload reads
+    ``"status": "error"`` with that result's message, so the payload and the
+    exit code come from one flag. Any other batch reads *done* and exits
+    ``0``: a duplicate replays a write that landed, and an empty batch refused
+    nothing. *name_partial* names a partial batch's first failure in its
+    payload too, as ``trellis extract`` names it in text.
+
+    The payload's message passes through :func:`sanitize_error_message`: the
+    payload is an artifact, and a store's error can quote its DSN. The
+    results keep the raw text for the human form. It returns rather than
+    raises, so each caller's ``raise`` stays below its format branch.
+    """
+    first = next((r for r in results if r.status in _REFUSED), None)
+    refused = first is not None and all(r.status in _REFUSED for r in results)
+    status = {"status": "error" if refused else done}
+    if first is not None and (refused or name_partial):
+        status["message"] = sanitize_error_message(first.message)
+    return BatchOutcome(first if refused else None, first, status)

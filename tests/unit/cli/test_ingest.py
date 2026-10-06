@@ -18,6 +18,7 @@ from tests.unreadable_paths import (
     UnreadablePathShape,
     unreadable,
 )
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.mutate.commands import (
     Command,
     CommandBatch,
@@ -1051,8 +1052,12 @@ class TestIngestBatchExitCodes:
 def _fake_batch(
     monkeypatch: pytest.MonkeyPatch,
     outcomes: list[tuple[CommandStatus, dict[str, str]]],
+    message: str = _MESSAGE,
 ) -> None:
-    """Answer the batch's commands with *outcomes* in order; the last repeats."""
+    """Answer the batch's commands with *outcomes* in order; the last repeats.
+
+    The first command carries *message*.
+    """
     executor = MagicMock(spec=MutationExecutor)
 
     def _execute_batch(batch: CommandBatch) -> list[CommandResult]:
@@ -1064,7 +1069,7 @@ def _fake_batch(
                 command_id=f"cmd-{i}",
                 status=status,
                 operation=cmd.operation,
-                message=_MESSAGE if i == 0 else f"later {i}",
+                message=message if i == 0 else f"later {i}",
                 metadata=dict(metadata),
             )
             for i, (cmd, (status, metadata)) in enumerate(
@@ -1132,6 +1137,21 @@ class TestIngestBatchRefusals:
             assert (payload["status"], payload["message"]) == ("error", _MESSAGE)
         else:
             assert _MESSAGE in plain(result.output)
+
+    @_BATCHES
+    def test_driver_text_in_a_refusal_stays_out_of_the_payload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+    ) -> None:
+        """JSON output is an artifact, so a store error's credentials stay out."""
+        _fake_batch(
+            monkeypatch,
+            [(CommandStatus.FAILED, {})],
+            message="no route to postgres://ops:pw@db:5432/kb",
+        )
+        result = _invoke(["ingest", command, _batch_input(tmp_path, command)], "json")
+        assert result.exit_code == 5, result.output
+        payload = json.loads(result.stdout)
+        assert (payload["status"], payload["message"]) == ("error", SUPPRESSED_MARKER)
 
     @_FORMATS
     @_BATCHES

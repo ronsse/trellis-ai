@@ -184,6 +184,14 @@ def _counts(
     )
 
 
+def _named(result: Result) -> str:
+    """The failure a text run names: what follows ``first:`` on its failures line."""
+    assert result.exit_code == 0, result.output
+    match = re.search(r"; first: (.*)$", plain(result.output), re.MULTILINE)
+    assert match, result.output
+    return match.group(1)
+
+
 class TestExtractTracesReportsTheBatch:
     @_FORMATS
     def test_a_denied_backfill_exits_3_and_claims_no_extraction(
@@ -296,6 +304,19 @@ class TestExtractTracesReportsTheBatch:
             assert drafts >= 2
             assert _counts(succeeded=drafts - 1, rejected=1) in out
             assert _MESSAGE in out
+
+    def test_a_mixed_backfill_names_in_json_the_failure_its_text_names(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The payload carries the message top-level, as ``ingest``'s does."""
+        _ingest_trace()
+        _fake_batch(monkeypatch, _MIXED)
+        named = _named(_invoke(["extract", "traces"], "text"))
+        result = _invoke(["extract", "traces"], "json")
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "backfilled"
+        assert payload["message"] == named == _MESSAGE
 
     @_FORMATS
     def test_duplicates_are_not_failures(
@@ -420,6 +441,18 @@ class TestExtractRefreshReportsTheBatch:
             out = plain(result.output)
             assert _counts(succeeded=2, rejected=1) in out
             assert _MESSAGE in out
+
+    def test_a_mixed_refresh_names_in_json_the_failure_its_text_names(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The payload carries the message top-level, as ``ingest``'s does."""
+        _fake_batch(monkeypatch, _MIXED)
+        named = _named(_invoke(_refresh_args(tmp_path), "text"))
+        result = _invoke(_refresh_args(tmp_path), "json")
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "refreshed"
+        assert payload["message"] == named == _MESSAGE
 
     @_FORMATS
     def test_duplicates_are_not_failures(

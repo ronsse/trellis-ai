@@ -999,6 +999,14 @@ All notable changes to Trellis will be documented in this file.
   before this fix, stays current, and the race that leaves the two rows is
   unchanged. Writes between nodes with one current row are unchanged.
   ([#732](https://github.com/ronsse/trellis-ai/pull/732))
+- **A partial `trellis extract traces` or `extract refresh` run names its
+  first failure in JSON, as its text does.** The JSON of a run with some
+  writes refused or failed carries the first one's sanitized `message` beside
+  `"status": "backfilled"` or `"refreshed"`; it named a failure only when
+  every write was refused or failed. Exit codes are unchanged. The batch rule
+  these two share with `trellis ingest dbt-manifest` and `openlineage` is now
+  one function, `trellis_cli.exit_codes.batch_outcome`, rather than a copy in
+  each module, and those commands' output is otherwise unchanged.
 
 ## [0.9.0] - 2026-05-13
 
