@@ -1493,6 +1493,21 @@ class GraphStoreContractTests:
             matched = ({r["node_id"] for r in rows}, total)
             assert matched == (pair, 2), (stem, matched)
 
+    def test_node_search_reads_an_id_and_a_type_literally(
+        self, store: GraphStore
+    ) -> None:
+        # The node_id and node_type match like the name: each decoy holds
+        # "x" where its target holds "_", and no name holds searched text.
+        store.upsert_node("id_a", "golf", {"name": "g-1"})
+        store.upsert_node("idxa", "golf", {"name": "g-2"})
+        store.upsert_node("t-1", "type_b", {"name": "g-3"})
+        store.upsert_node("t-2", "typexb", {"name": "g-4"})
+
+        for search, node_id in (("id_a", "id_a"), ("type_b", "t-1")):
+            rows, total = store.search_nodes(search=search)
+            listed = ([r["node_id"] for r in rows], total)
+            assert listed == ([node_id], 1), (search, listed)
+
     # ------------------------------------------------------------------
     # node_role + generation_spec
     # ------------------------------------------------------------------
