@@ -25,6 +25,12 @@ on both engines (measured against ``neo4j:2025.12`` and
 with the later ``valid_from``, or the greater ``version_id`` between
 equal stamps (:func:`_one_version_per_node`), so a search hit, its type
 count and ``get_node`` on its id agree whichever way the search is sorted.
+``upsert_node``, ``upsert_nodes_bulk`` and ``update_node_if_current``
+close every current row of the node they write and create one version,
+which carries ``created_at`` over from the shown row (:func:`_shown_row`);
+``update_node_if_current`` compares its token with the shown row. So the
+next write of the node heals the duplicate rather than failing on it,
+except a bulk spec equal to the shown row, which stays a no-op.
 
 Per-backend subclasses override the **seams**:
 
@@ -224,27 +230,40 @@ def _matches_node_search(
     return any(needle in h.lower() for h in haystacks)
 
 
+def _shown_row(rows: str) -> str:
+    """Cypher for the row of the list *rows* that a node shows; ``null`` if empty.
+
+    The shown row has the later ``valid_from``, or the greater
+    ``version_id`` between equal stamps, so no choice rests on the order a
+    query returns rows in. Concurrent writers can leave a node two current
+    rows (the module docstring). The reads that pick through
+    :func:`_one_version_per_node` show this row, and the node writes
+    continue it, so a write carries over what every read showed. Neo4j
+    compares the stamps as text, which is time order for the one spelling
+    every write uses (``_iso(utc_now())``, aware UTC); ArcadeDB reads them
+    as datetimes. Neither comparison can raise.
+    """
+    return (
+        f"reduce(shown = head({rows}), r IN tail({rows}) | "
+        "CASE WHEN r.valid_from > shown.valid_from OR "
+        "(r.valid_from = shown.valid_from AND r.version_id > shown.version_id) "
+        "THEN r ELSE shown END)"
+    )
+
+
 def _one_version_per_node(match: str) -> str:
     """Cypher that keeps one of the rows *match* binds to ``n`` per ``node_id``.
 
-    The kept row has the later ``valid_from``, or the greater
-    ``version_id`` between equal stamps, so no choice rests on the order a
-    query returns rows in. Concurrent writers can leave a node two current
-    rows (the module docstring). ``get_node``, ``search_nodes`` and
-    ``count_nodes_by_type`` pick through here, so they show the same
-    version of a node. Neo4j compares the stamps as text, which is time
-    order for the one spelling every write uses (``_iso(utc_now())``, aware
-    UTC); ArcadeDB reads them as datetimes. Neither comparison can raise.
+    The kept row is :func:`_shown_row`'s. ``get_node``, ``search_nodes``,
+    ``count_nodes_by_type`` and ``upsert_nodes_bulk``'s read of the current
+    versions pick through here, so they agree on the version of a node.
     The rows are reduced rather than sorted: ArcadeDB 26.8.1 took 0.45 s
     to sort 10,000 current rows by ``valid_from`` and ``version_id``, and
     0.07 s to collect and reduce them.
     """
     return (
         f"{match} WITH n.node_id AS node_id, collect(n) AS rows "
-        "WITH reduce(shown = head(rows), r IN tail(rows) | "
-        "CASE WHEN r.valid_from > shown.valid_from OR "
-        "(r.valid_from = shown.valid_from AND r.version_id > shown.version_id) "
-        "THEN r ELSE shown END) AS n "
+        f"WITH {_shown_row('rows')} AS n "
     )
 
 
@@ -499,13 +518,17 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         if node_id is None:
             node_id = generate_ulid()
 
-        # One Cypher round trip: ``OPTIONAL MATCH`` finds an existing
-        # current row (if any), the WHERE filters out role-immutability
-        # conflicts so the CREATE only runs when the write is legal,
-        # ``coalesce`` carries ``created_at`` forward across versions.
-        # Previously this path made a separate ``get_node`` call to
-        # fetch the prior version — measured at ~50% of total upsert
-        # latency on AuraDB Free.
+        # One Cypher round trip: ``OPTIONAL MATCH`` finds the current
+        # rows (none, one, or the race's two), the WHERE filters out
+        # role-immutability conflicts with the shown row so the CREATE
+        # only runs when the write is legal, every current row is
+        # closed, and ``coalesce`` carries ``created_at`` forward from
+        # the shown row. Collecting the rows first keeps the CREATE to
+        # one per call: one per matched row reused one ``version_id``,
+        # so a node with two current rows failed the unique constraint
+        # on every later write. Previously this path made a separate
+        # ``get_node`` call to fetch the prior version — measured at
+        # ~50% of total upsert latency on AuraDB Free.
         now = _iso(utc_now())
         new_props = {
             "node_id": node_id,
@@ -526,11 +549,13 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "valid_to": None,
         }
 
-        cypher = """
-        OPTIONAL MATCH (old:Node {node_id: $node_id}) WHERE old.valid_to IS NULL
-        WITH old, old.node_role AS prior_role
+        cypher = f"""
+        OPTIONAL MATCH (cur:Node {{node_id: $node_id}}) WHERE cur.valid_to IS NULL
+        WITH collect(cur) AS current_rows
+        WITH current_rows, {_shown_row("current_rows")} AS old
+        WITH current_rows, old, old.node_role AS prior_role
         WHERE prior_role IS NULL OR prior_role = $node_role
-        SET old.valid_to = $now
+        FOREACH (c IN current_rows | SET c.valid_to = $now)
         WITH old, coalesce(old.created_at, $now) AS created_at_carry
         CREATE (n:Node)
         SET n = $new_props
@@ -592,28 +617,33 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "valid_from": now,
             "valid_to": None,
         }
-        # ``MATCH``, not ``OPTIONAL MATCH``: no current row, no write.
-        # Setting and removing ``_cas_lock`` writes the row before the
-        # token is re-read (Neo4j's lost-update idiom). Both engines need
-        # it: without it, two writers holding one token both wrote on
-        # Neo4j and on ArcadeDB (measured). On Neo4j the write takes the
-        # row's lock, so a writer that closed or purged the row commits
-        # first and the second WHERE sees it. ArcadeDB takes no lock: the
-        # loser fails, at commit with a code the driver retries or on the
+        # No current row, no write: the shown row is then ``null`` and
+        # the token compare filters the CREATE. Setting and removing
+        # ``_cas_lock`` writes every current row before the token is
+        # re-read (Neo4j's lost-update idiom). Both engines need it:
+        # without it, two writers holding one token both wrote on Neo4j
+        # and on ArcadeDB (measured). On Neo4j the write takes the row's
+        # lock, so a writer that closed or purged the row commits first
+        # and the second WHERE sees it. ArcadeDB takes no lock: the loser
+        # fails, at commit with a code the driver retries or on the
         # generic engine code that ``_execute_alias_write`` retries, and
-        # the re-run reads committed state. ``datetime()`` on both sides
-        # because ArcadeDB stores the ISO string as a DateTime, which
-        # never equals a string.
-        cypher = """
-        MATCH (old:Node {node_id: $node_id})
-        WHERE old.valid_to IS NULL
-        SET old._cas_lock = true
-        REMOVE old._cas_lock
-        WITH old
-        WHERE old.valid_to IS NULL
-          AND datetime(old.valid_from) = datetime($expected_valid_from)
+        # the re-run reads committed state. The token is compared with
+        # the shown row (``_shown_row``), the version every read returns,
+        # and a write closes every current row, as ``upsert_node`` does.
+        # ``datetime()`` on both sides because ArcadeDB stores the ISO
+        # string as a DateTime, which never equals a string.
+        cypher = f"""
+        MATCH (cur:Node {{node_id: $node_id}})
+        WHERE cur.valid_to IS NULL
+        SET cur._cas_lock = true
+        REMOVE cur._cas_lock
+        WITH cur
+        WHERE cur.valid_to IS NULL
+        WITH collect(cur) AS current_rows
+        WITH current_rows, {_shown_row("current_rows")} AS old
+        WHERE datetime(old.valid_from) = datetime($expected_valid_from)
           AND (old.node_role IS NULL OR old.node_role = $node_role)
-        SET old.valid_to = $now
+        FOREACH (c IN current_rows | SET c.valid_to = $now)
         WITH old, coalesce(old.created_at, $now) AS created_at_carry
         CREATE (n:Node)
         SET n = $new_props
@@ -748,7 +778,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # * Hot path (no prior rows for any of these node_ids) —
             #   issue a CREATE-only UNWIND. Skips the per-row
             #   ``OPTIONAL MATCH`` index lookup, the ``valid_to``
-            #   filter, the no-op ``SET old.valid_to``, and the
+            #   filter, the no-op close of current rows, and the
             #   ``coalesce`` on ``created_at``. Measured on AuraDB
             #   Free 2026-04-27: the OPTIONAL MATCH version ingested
             #   at ~45 nodes/sec; the loader script's CREATE-only
@@ -760,9 +790,12 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             #
             # * Cold path (one or more rows have a prior current
             #   row) — full OPTIONAL MATCH version that carries
-            #   ``created_at`` forward and closes the prior version,
-            #   preserving SCD-2 semantics for re-ingest of an
-            #   existing node.
+            #   ``created_at`` forward from the shown row and closes
+            #   every current row, preserving SCD-2 semantics for
+            #   re-ingest of an existing node. Collecting the rows
+            #   keeps the CREATE to one per input row, as in
+            #   ``upsert_node``, so the race's second current row is
+            #   closed rather than failing the batch.
             #
             # ``created_at`` is set in both shapes to the row's
             # ``valid_from`` (== ``now``); the cold path's coalesce
@@ -782,14 +815,15 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # a current version (unchanged no-ops were filtered out above).
             has_prior = any(nid in current_by_id for nid in write_node_ids)
             if has_prior:
-                cypher = """
+                cypher = f"""
                 UNWIND $rows AS row
-                OPTIONAL MATCH (old:Node {node_id: row.node_id})
-                  WHERE old.valid_to IS NULL
-                WITH row, old, coalesce(old.created_at, row.props.valid_from)
+                OPTIONAL MATCH (cur:Node {{node_id: row.node_id}})
+                  WHERE cur.valid_to IS NULL
+                WITH row, collect(cur) AS current_rows
+                WITH row, current_rows, {_shown_row("current_rows")} AS old
+                FOREACH (c IN current_rows | SET c.valid_to = row.props.valid_from)
+                WITH row, coalesce(old.created_at, row.props.valid_from)
                      AS created_at_carry
-                SET old.valid_to = row.props.valid_from
-                WITH row, created_at_carry
                 CREATE (n:Node)
                 SET n = row.props
                 SET n.created_at = created_at_carry
@@ -818,14 +852,17 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         Returns the full parsed node (the ``get_node`` shape) so the bulk
         write path can both validate role immutability and detect an
         unchanged re-upsert (issue #195) without a second round trip.
+        A node with two current rows maps to the one ``get_node`` shows.
         ``created_at`` is still carried forward in the write Cypher via
         ``coalesce``.
         """
         if not node_ids:
             return {}
         cypher = (
-            "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL "
-            f"RETURN {_NODE_WITHOUT_EMBEDDING}"
+            _one_version_per_node(
+                "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL"
+            )
+            + f"RETURN {_NODE_WITHOUT_EMBEDDING}"
         )
         records = session.execute_read(lambda tx: list(tx.run(cypher, ids=node_ids)))
         result: dict[str, dict[str, Any]] = {}

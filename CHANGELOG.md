@@ -869,6 +869,17 @@ All notable changes to Trellis will be documented in this file.
   reply `Trace already ingested: <id>`. Re-extract a stored trace with
   `trellis extract traces`. Nodes and edges already attached stay.
   ([#720](https://github.com/ronsse/trellis-ai/pull/720))
+- **On Neo4j and ArcadeDB, a write heals a node with two current rows.**
+  `upsert_node` and `upsert_nodes_bulk` over such a node failed the
+  `version_id` unique constraint and left both rows current, so every
+  later write of the node failed too. `update_node_if_current` closed only
+  the row its token named, so the node kept two current rows, and it
+  raised when both rows had the same `valid_from`. All three now close
+  every current row and create one version, which carries `created_at`
+  over from the row reads show, and `update_node_if_current` compares its
+  token with that row, so a token from the hidden row is refused. The race
+  that leaves the two rows is unchanged, as are edge writes from such a
+  node.
 
 ## [0.9.0] - 2026-05-13
 
