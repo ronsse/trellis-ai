@@ -542,3 +542,8 @@ class TestDuplicateCurrentRow:
 
     def test_execute_node_query_shows_one_version(self, graph_store):
         bolt_duplicate_current.check_execute_node_query_shows_one_version(graph_store)
+
+    def test_filtered_listing_as_of_shows_the_version_then(self, graph_store):
+        bolt_duplicate_current.check_filtered_listing_as_of_shows_the_version_then(
+            graph_store
+        )

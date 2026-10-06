@@ -11,8 +11,10 @@ the greater ``version_id`` when the stamps are equal. Those reads are
 ``get_node``, ``search_nodes`` in either direction, ``count_nodes_by_type``,
 ``get_nodes_bulk``, ``get_subgraph``, ``query`` and ``execute_node_query``.
 The last four are also read ``as_of`` an instant both rows are valid, and a
-listing's ``limit`` counts nodes. The write checks require the next write to
-continue that version and close both rows, leaving one current row.
+listing's ``limit`` counts nodes; a filtered listing ``as_of`` an instant
+before the two rows shows the version valid then. The write checks require
+the next write to continue that version and close both rows, leaving one
+current row.
 
 The duplicates are built so that rival rules pick the other row. A later
 stamp carries the smaller ``version_id`` and an earlier stamp the greater,
@@ -26,6 +28,7 @@ row is seen.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -395,6 +398,40 @@ def check_execute_node_query_shows_one_version(store: Any) -> None:
             rows = store.execute_node_query(NodeQuery(filters=named))
             found = [node_id] if LIST_SHOWN[node_id][0] == name else []
             assert _listed(rows) == _expected(found), name
+
+
+def check_filtered_listing_as_of_shows_the_version_then(store: Any) -> None:
+    """A filtered listing ``as_of`` a past instant shows the version valid then.
+
+    ``dup-history`` is ``kind-a`` until it is rewritten as ``kind-b`` and
+    given a second current row. At an instant before that only its first
+    row is valid, so a filter that row passes lists it, after the newer
+    plain node, and never one of the later rows, even when they pass too.
+    """
+    store.upsert_node("dup-history", "kind-a", {"name": "dup-history then"})
+    store.upsert_node("plain-then", "kind-a", {"name": "plain then"})
+    time.sleep(0.005)
+    then = datetime.now(UTC)
+    time.sleep(0.005)
+    store.upsert_node("dup-history", "kind-b", {"name": "dup-history original"})
+    add_current_row(
+        store,
+        "dup-history",
+        name="dup-history copy",
+        shift=LATER,
+        greater_version_id=False,
+    )
+    expected = [
+        ("plain-then", ("plain then", "kind-a")),
+        ("dup-history", ("dup-history then", "kind-a")),
+    ]
+    assert _listed(store.query(node_type="kind-a", as_of=then)) == expected
+    for clause in (
+        FilterClause("node_type", "eq", "kind-a"),
+        FilterClause("node_type", "in", NODE_TYPES),
+    ):
+        rows = store.execute_node_query(NodeQuery(filters=(clause,), as_of=then))
+        assert _listed(rows) == expected, clause
 
 
 #: Duplicates for the write checks: ``(node_id, shift, greater_version_id,

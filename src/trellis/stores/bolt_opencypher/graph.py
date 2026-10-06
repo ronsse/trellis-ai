@@ -284,10 +284,11 @@ def _one_version_per_node(match: str) -> str:
 def _shown_rows_passing(where: str, filters: list[str]) -> str:
     """Cypher binding ``n`` to each node's shown row that passes *filters*.
 
-    *where* chooses the rows :func:`_one_version_per_node` picks from, so
-    every row of a node must pass or fail it together, as the temporal
-    filter and a ``node_id`` test do. A filter on a field such as
-    ``node_type`` can pass on one current row of a node and fail on
+    *where* chooses the rows :func:`_one_version_per_node` picks from: the
+    temporal filter, which keeps the rows ``get_node`` would pick from,
+    narrowed at most by a test that a node's rows pass or fail together,
+    such as one on ``node_id``. Both matches apply it. A filter on a field
+    such as ``node_type`` can pass on one of those rows and fail on
     another, so it judges the row picked. The pick reads only the rows of
     nodes with some row passing *filters*, so a filter that few nodes pass
     stays cheap.
@@ -1935,9 +1936,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
     ) -> tuple[list[str], list[str], dict[str, Any], list[Any]]:
         """Pure compile — returns (node_parts, field_parts, params, python_predicates).
 
-        ``node_parts`` (the temporal filter and any ``node_id`` clause) hold
-        or fail for every row of a node together; ``field_parts`` are the
-        other top-level clauses (:func:`_shown_rows_passing`).
+        ``node_parts`` (the temporal filter and any ``node_id`` clause)
+        choose the rows a node's shown row is picked from; ``field_parts``
+        are the other top-level clauses, judged on the row picked
+        (:func:`_shown_rows_passing`).
         """
         node_parts: list[str] = [self._temporal_filter_cypher(query.as_of)]
         field_parts: list[str] = []
