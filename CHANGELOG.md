@@ -1008,7 +1008,7 @@ All notable changes to Trellis will be documented in this file.
   backslash escaped the next character, so `back\slash` found `backslash`
   and not itself. Both stores now escape the three characters and name `\`
   as the `ESCAPE` character, so they match as the Neo4j and ArcadeDB stores
-  already did. ([#PRNUM](https://github.com/ronsse/trellis-ai/pull/PRNUM))
+  already did. ([#737](https://github.com/ronsse/trellis-ai/pull/737))
 
 ## [0.9.0] - 2026-05-13
 
