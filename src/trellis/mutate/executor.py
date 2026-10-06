@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections import OrderedDict
 from typing import Protocol
 
@@ -54,6 +55,8 @@ _AUDIT_EMIT_FAILED_TEMPLATE = (
 # operator logs. We list the canonical Python panic types explicitly;
 # new backends should map their own errors into ``StoreError`` (one
 # of the typed catches above) rather than relying on this fallback.
+# ``sqlite3.Error`` is listed because the default SQLite stores raise it
+# unmapped, from writes that share no seam to map it at.
 _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
     RuntimeError,
     OSError,
@@ -65,6 +68,7 @@ _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
     AssertionError,
     LookupError,
     ArithmeticError,
+    sqlite3.Error,
 )
 
 # Exception classes the audit-emit guard in ``_emit_event`` catches. Same
