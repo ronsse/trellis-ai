@@ -236,6 +236,27 @@ class GraphStoreContractTests:
         assert len(results) == 1
         assert results[0]["node_id"] == "a"
 
+    @pytest.mark.parametrize(
+        "key",
+        ["two words", "a.b", "clé", "it's"],
+        ids=["space", "dot", "unicode", "quote"],
+    )
+    def test_query_property_key_is_one_flat_key_as_written(
+        self, store: GraphStore, key: str
+    ) -> None:
+        """A property filter key names one top-level property, spelled as given.
+
+        The control carries the key with another value. The decoy carries
+        the value where a backend reading ``a.b`` as a path would look.
+        """
+        store.upsert_node("kp-target", "service", {key: "kp-match"})
+        store.upsert_node("kp-control", "service", {key: "kp-other"})
+        store.upsert_node("kp-decoy", "service", {"a": {"b": "kp-match"}})
+
+        results = store.query(properties={key: "kp-match"})
+
+        assert [r["node_id"] for r in results] == ["kp-target"]
+
     def test_query_respects_limit(self, store: GraphStore) -> None:
         for i in range(5):
             store.upsert_node(f"n{i}", "service", {})

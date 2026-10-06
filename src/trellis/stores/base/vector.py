@@ -250,6 +250,10 @@ class VectorStore(ABC):
     ) -> list[dict[str, Any]]:
         """Find similar vectors.
 
+        Each *filters* key is one flat metadata key, compared as written:
+        ``"a.b"`` is the key ``a.b``, not a path to ``b`` inside ``a``, and a
+        space, quote or non-ASCII character is part of the key.
+
         Returns:
             List of ``{item_id, score, metadata}`` sorted by score descending.
         """
