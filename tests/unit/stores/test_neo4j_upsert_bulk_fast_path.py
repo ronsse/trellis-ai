@@ -244,7 +244,7 @@ class TestUpsertEdgesBulkDroppedRow:
 
         with pytest.raises(
             ValueError,
-            match=r"upsert_edges_bulk\[0\]: source 'a' or target 'b' stopped being",
+            match=r"upsert_edges_bulk\[0\]: source 'a' or target 'b' was not current",
         ):
             store.upsert_edges_bulk(  # type: ignore[attr-defined]
                 [{"source_id": "a", "target_id": "b", "edge_type": "links_to"}]

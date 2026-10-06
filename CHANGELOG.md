@@ -1119,6 +1119,16 @@ All notable changes to Trellis will be documented in this file.
   2. `Measurement.metric_value` refuses NaN, so `measurement.record`
   refuses it from every surface; `Infinity` is still accepted.
   ([#741](https://github.com/ronsse/trellis-ai/pull/741))
+- **Neo4j and ArcadeDB `upsert_edges_bulk` refuses a row whose endpoint
+  stops being current during the call.** The method checks that every
+  source and target is current, then writes the batch in a second round
+  trip. A row whose endpoint stopped being current between the two, as
+  when another writer deletes it, wrote nothing and came back as `""` in
+  the returned ids, while the batch's other rows were written. The write
+  now checks that it wrote every row it was sent and raises `ValueError`
+  naming the first missing row's index and endpoint, as the endpoint check
+  does, and the raise rolls the write's transaction back, so no row of the
+  batch is written. A call whose endpoints stay current is unchanged.
 
 ## [0.9.0] - 2026-05-13
 
