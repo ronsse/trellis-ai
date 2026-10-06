@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
+from tests.unit.stores.sqlite_write_lock import committed_rows, write_at_once
 from trellis.core.base import utc_now
 from trellis.schemas.outcome import ComponentOutcome, OutcomeEvent
 from trellis.stores.sqlite.outcome import SQLiteOutcomeStore
@@ -127,3 +129,92 @@ def test_run_filter(store: SQLiteOutcomeStore):
     results = store.query(run_id="r1")
     assert len(results) == 1
     assert results[0].run_id == "r1"
+
+
+_DUPLICATE_EVENT_ID = r"^UNIQUE constraint failed: outcomes\.event_id$"
+_EVENT_IDS = "SELECT event_id FROM outcomes ORDER BY event_id"
+
+
+def _write_at_once(db_path: Path, event_id: str) -> None:
+    stamp = utc_now().isoformat()
+    write_at_once(
+        db_path,
+        "INSERT INTO outcomes (event_id, component_id, occurred_at, recorded_at,"
+        " success, latency_ms, outcome_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (event_id, "syn-component", stamp, stamp, 1, 1.0, "{}"),
+    )
+
+
+def test_an_append_commits_at_once(store: SQLiteOutcomeStore, tmp_path: Path):
+    store.append(_make(event_id="syn-outcome-1"))
+
+    rows = committed_rows(tmp_path / "outcomes.db", _EVENT_IDS)
+    assert rows == [("syn-outcome-1",)]
+
+
+def test_a_failed_append_holds_no_write_lock(store: SQLiteOutcomeStore, tmp_path: Path):
+    """A duplicate append is rolled back, not left holding the write lock."""
+    store.append(_make(event_id="syn-outcome-1"))
+
+    with pytest.raises(sqlite3.IntegrityError, match=_DUPLICATE_EVENT_ID):
+        store.append(_make(event_id="syn-outcome-1"))
+
+    assert store._conn.in_transaction is False
+    _write_at_once(tmp_path / "outcomes.db", "syn-outcome-2")
+    rows = committed_rows(tmp_path / "outcomes.db", _EVENT_IDS)
+    assert rows == [("syn-outcome-1",), ("syn-outcome-2",)]
+
+
+def test_an_append_many_commits_at_once(store: SQLiteOutcomeStore, tmp_path: Path):
+    store.append_many([_make(event_id=f"syn-outcome-{n}") for n in (1, 2, 3)])
+
+    rows = committed_rows(tmp_path / "outcomes.db", _EVENT_IDS)
+    assert rows == [("syn-outcome-1",), ("syn-outcome-2",), ("syn-outcome-3",)]
+
+
+def test_a_failed_append_many_holds_no_write_lock(
+    store: SQLiteOutcomeStore, tmp_path: Path
+):
+    """A batch that fails on a duplicate is rolled back, not left holding the lock."""
+    store.append(_make(event_id="syn-outcome-0"))
+
+    with pytest.raises(sqlite3.IntegrityError, match=_DUPLICATE_EVENT_ID):
+        store.append_many(
+            [_make(event_id="syn-outcome-1"), _make(event_id="syn-outcome-0")]
+        )
+
+    assert store._conn.in_transaction is False
+    _write_at_once(tmp_path / "outcomes.db", "syn-outcome-9")
+    rows = committed_rows(tmp_path / "outcomes.db", _EVENT_IDS)
+    assert rows == [("syn-outcome-0",), ("syn-outcome-9",)]
+
+
+def test_a_duplicate_mid_batch_writes_none_of_the_batch(
+    store: SQLiteOutcomeStore, tmp_path: Path
+):
+    """``append_many`` is one transaction: a failed row writes none of its batch.
+
+    Rows the batch inserted before the duplicate would otherwise stay pending
+    on the store's connection, for its next commit to write.
+    """
+    store.append(_make(event_id="syn-outcome-0"))
+    batch = [
+        _make(event_id=event_id)
+        for event_id in (
+            "syn-outcome-1",
+            "syn-outcome-2",
+            "syn-outcome-0",
+            "syn-outcome-3",
+        )
+    ]
+
+    with pytest.raises(sqlite3.IntegrityError, match=_DUPLICATE_EVENT_ID):
+        store.append_many(batch)
+
+    db_path = tmp_path / "outcomes.db"
+    assert committed_rows(db_path, _EVENT_IDS) == [("syn-outcome-0",)]
+    store.append(_make(event_id="syn-outcome-9"))
+    assert committed_rows(db_path, _EVENT_IDS) == [
+        ("syn-outcome-0",),
+        ("syn-outcome-9",),
+    ]

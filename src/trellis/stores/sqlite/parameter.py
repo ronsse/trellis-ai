@@ -56,27 +56,27 @@ class SQLiteParameterStore(SQLiteStoreBase, ParameterStore):
     # -- mutations -----------------------------------------------------------
 
     def put(self, params: ParameterSet) -> ParameterSet:
-        cur = self._conn.cursor()
-        cur.execute(
-            "INSERT INTO parameter_snapshots ("
-            "params_version, component_id, domain, intent_family, tool_name, "
-            "values_json, source, created_at, notes, metadata_json, schema_version"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                params.params_version,
-                params.scope.component_id,
-                params.scope.domain,
-                params.scope.intent_family,
-                params.scope.tool_name,
-                json.dumps(params.values),
-                params.source,
-                params.created_at.isoformat(),
-                params.notes,
-                json.dumps(params.metadata),
-                params.schema_version,
-            ),
-        )
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            conn.execute(
+                "INSERT INTO parameter_snapshots ("
+                "params_version, component_id, domain, intent_family, tool_name, "
+                "values_json, source, created_at, notes, metadata_json, schema_version"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    params.params_version,
+                    params.scope.component_id,
+                    params.scope.domain,
+                    params.scope.intent_family,
+                    params.scope.tool_name,
+                    json.dumps(params.values),
+                    params.source,
+                    params.created_at.isoformat(),
+                    params.notes,
+                    json.dumps(params.metadata),
+                    params.schema_version,
+                ),
+            )
         logger.info(
             "parameters.stored",
             params_version=params.params_version,

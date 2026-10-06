@@ -79,9 +79,9 @@ class SQLiteOutcomeStore(SQLiteStoreBase, OutcomeStore):
     # -- mutations -----------------------------------------------------------
 
     def append(self, outcome: OutcomeEvent) -> None:
-        cur = self._conn.cursor()
-        cur.execute(*self._insert(outcome))
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            conn.execute(*self._insert(outcome))
         logger.debug(
             "outcome.appended",
             event_id=outcome.event_id,
@@ -91,10 +91,10 @@ class SQLiteOutcomeStore(SQLiteStoreBase, OutcomeStore):
     def append_many(self, outcomes: list[OutcomeEvent]) -> int:
         if not outcomes:
             return 0
-        cur = self._conn.cursor()
-        for o in outcomes:
-            cur.execute(*self._insert(o))
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # one transaction: a failed row rolls back the whole batch
+            for o in outcomes:
+                conn.execute(*self._insert(o))
         logger.debug("outcomes.appended_many", count=len(outcomes))
         return len(outcomes)
 
