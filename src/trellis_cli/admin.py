@@ -1850,9 +1850,17 @@ def migrate_graph(
             for target, msg in payload["errors"]
         ]
         # step_failures already serialize cleanly via asdict (dataclass);
-        # their ``message`` field is the same raw str(exc) as above.
+        # their ``message`` field is the same raw str(exc) as above, and
+        # ``traceback`` is a full traceback.format_exception() string
+        # whose last line repeats that same message — an equally
+        # user-facing stdout surface, so it goes through the same
+        # sanitizer. sanitize_error_message is all-or-nothing (it
+        # returns the marker on any hit, never a partial redaction), so
+        # a leaking traceback is replaced wholesale and a clean one
+        # renders unchanged.
         for failure in payload["step_failures"]:
             failure["message"] = sanitize_error_message(failure["message"])
+            failure["traceback"] = sanitize_error_message(failure["traceback"])
         # ``status`` is the house contract for --format json callers
         # (docs/design/adr-cli-exit-codes.md), and it is derived from the
         # same ``failed`` flag as the exit code so the two cannot

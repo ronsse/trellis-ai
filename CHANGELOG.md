@@ -1211,14 +1211,21 @@ All notable changes to Trellis will be documented in this file.
   failure text before printing it.** The `Migration aborted:` line
   (`MigrationStepError`, which embeds the wrapped exception's `str()`),
   `--continue-on-error`'s text `Errors:` list, and its `--format json`
-  `errors[].message` and `step_failures[].message` all printed `str(exc)`
-  verbatim — a duplicate-key or constraint violation from Postgres, Neo4j
-  or ArcadeDB can quote the row value that tripped it (#747/#753), so it
-  reached stdout unsanitized while every other CLI failure path routes
-  that text through `sanitize_error_message` first. All four now do too;
+  `errors[].message`, `step_failures[].message` and
+  `step_failures[].traceback` all printed `str(exc)` (or, for
+  `traceback`, a full `traceback.format_exception()`) verbatim — a
+  duplicate-key or constraint violation from Postgres, Neo4j or ArcadeDB
+  can quote the row value that tripped it (#747/#753), so it reached
+  stdout unsanitized while every other CLI failure path routes that text
+  through `sanitize_error_message` first. All five now do too;
   `report.errors`/`report.step_failures` keep the raw text for library
-  callers, and `step_failures[].traceback` in the JSON payload is
-  unchanged (a residual leak surface, follow-up).
+  callers. `sanitize_error_message` is all-or-nothing, so a leaking
+  traceback is replaced wholesale with the marker rather than partially
+  redacted; whether a given traceback trips the sanitizer's
+  long-opaque-token heuristic also depends on the checkout path's own
+  length (any 40+ char path component, not just injected secrets, trips
+  it), which is a property of the shared sanitizer rather than of this
+  change.
 
 ## [0.9.0] - 2026-05-13
 

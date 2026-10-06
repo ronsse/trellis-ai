@@ -596,11 +596,14 @@ class TestStoreFailureTextIsSanitized:
         assert payload["step_failures"], "structured failures must survive too"
         assert payload["step_failures"][0]["message"] == SUPPRESSED_MARKER
         assert result.exit_code == EXIT_STORE
-        # Scope note, not asserted as a defect of this PR: step_failures[].
-        # traceback is a raw ``traceback.format_exception`` string, not a
-        # sanitizer rendering point named in this change, so it still
-        # carries the row value. Flagged in the PR body as a follow-up.
-        assert _SYNTHETIC_SECRET in payload["step_failures"][0]["traceback"]
+        # step_failures[].traceback is a raw traceback.format_exception()
+        # string whose last line repeats the same leaking message, and it
+        # is just as user-facing (stdout, --format json) as the message
+        # field above — the sanitizer is all-or-nothing, so a leaking
+        # traceback is replaced wholesale with the marker, never partially
+        # redacted.
+        assert _SYNTHETIC_SECRET not in payload["step_failures"][0]["traceback"]
+        assert payload["step_failures"][0]["traceback"] == SUPPRESSED_MARKER
 
     def test_a_clean_failure_message_renders_unchanged(
         self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
@@ -630,3 +633,12 @@ class TestStoreFailureTextIsSanitized:
         payload = json.loads(result.stdout)
         assert payload["errors"][0]["message"] == f"IntegrityError: {_READONLY_DB}"
         assert payload["step_failures"][0]["message"] == _READONLY_DB
+        # Not asserted here: whether step_failures[].traceback itself
+        # renders unchanged for this message. traceback.format_exception()
+        # embeds the absolute source-file path of every frame, so whether
+        # it trips the long-opaque-token heuristic depends on the
+        # checkout's own path length, not on this message's content — this
+        # worktree's directory name is exactly 40 chars and trips it
+        # on its own. That is a property of the shared sanitizer, not of
+        # this message, and is noted as a finding in the PR body rather
+        # than pinned to a path-length-dependent assertion here.
