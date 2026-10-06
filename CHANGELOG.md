@@ -961,7 +961,7 @@ All notable changes to Trellis will be documented in this file.
   payload and exits `5` instead of a traceback and `1`, and
   `POST /api/v1/commands/batch` answers `200` with the command `failed`
   instead of `500`. The key is not recorded, so a retry runs once the log
-  can be read. A Postgres event log's driver errors still escape.
+  can be read.
   ([#728](https://github.com/ronsse/trellis-ai/pull/728))
 - **`trellis extract traces` and `extract refresh` report what their batch
   answered.** Both discarded the results of the governed batch they ran: a
@@ -999,6 +999,51 @@ All notable changes to Trellis will be documented in this file.
   before this fix, stays current, and the race that leaves the two rows is
   unchanged. Writes between nodes with one current row are unchanged.
   ([#732](https://github.com/ronsse/trellis-ai/pull/732))
+- **A Postgres event log's driver errors are raised as `StoreError`, and a
+  failed SQLite event-log append no longer holds the write lock.**
+  `PostgresEventLog.append`, `has_idempotency_key`, `get_events` and
+  `count` let a psycopg error escape, such as a `PoolTimeout` taking a
+  connection or an `OperationalError` from a statement, so a keyed command
+  raised out of `MutationExecutor.execute` instead of failing closed and an
+  unkeyed one raised after its handler had written. They now raise
+  `StoreError` with the message `Event log <method> failed: <exception
+  type>`, leaving out the server's text: a keyed command answers `failed`
+  with `Idempotency check failed: StoreError`, and an unkeyed one reports
+  its write with a warning that its audit event is missing. A handler's
+  own event write fails the same way, so a trace ingest whose event
+  cannot be written answers `failed` with `Execution failed: Event log
+  append failed: <exception type>`, and `POST /api/v1/traces` answers `409`
+  instead of `500`, with the trace written either way.
+  `GET /api/v1/events` answers `500` with `code: store_error` instead of
+  `internal_error`, and `trellis analyze health --format json` prints a
+  JSON error payload and exits `5` instead of a traceback and `1`.
+  `SQLiteEventLog.append` now rolls back an INSERT that fails, such as on a
+  duplicate `event_id`. The transaction had stayed open, so every other
+  connection's write to that database waited out its 10-second busy
+  timeout and failed with `database is locked` until the connection's next
+  commit.
+  ([#733](https://github.com/ronsse/trellis-ai/pull/733))
+- **Two error log lines no longer print a driver's text.**
+  `api_trellis_error`, the REST API's line for a typed Trellis failure, and
+  `audit_emit_failed`, the executor's line for an audit event it could not
+  write, carry the exception's type and, when Trellis wrote it, its message
+  under `error`, instead of a traceback. A traceback prints the exception's
+  chain: the driver exception a type-only `StoreError` is chained from, whose
+  text can carry query text and values (#702, #713), and for an emit inside
+  an `except` block, the failure it was auditing. An untyped failure that
+  reaches the API's catch-all still logs its traceback; response bodies and
+  command results are unchanged.
+  ([#734](https://github.com/ronsse/trellis-ai/pull/734))
+- **A graph search for text holding `%`, `_` or `\` matches that text
+  literally on SQLite and Postgres.** `GET /graph/search`'s `q`, and the
+  facet counts under it, reach the graph store's `search_nodes` and
+  `count_nodes_by_type`, which the SQLite and Postgres stores matched as a
+  `LIKE` / `ILIKE` pattern: `%` and `_` were wildcards, so `q=a_b` also
+  listed a node named `axb` and `q=%` listed every node, and on Postgres a
+  backslash escaped the next character, so `back\slash` found `backslash`
+  and not itself. Both stores now escape the three characters and name `\`
+  as the `ESCAPE` character, so they match as the Neo4j and ArcadeDB stores
+  already did. ([#737](https://github.com/ronsse/trellis-ai/pull/737))
 - **A partial `trellis extract traces` or `extract refresh` run names its
   first failure in JSON, as its text does.** The JSON of a run with some
   writes refused or failed carries the first one's sanitized `message` beside

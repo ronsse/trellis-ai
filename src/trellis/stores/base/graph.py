@@ -231,6 +231,17 @@ def validate_node_search_args(*, sort: str, limit: int, offset: int) -> None:
         raise ValueError(msg)
 
 
+def node_search_like_pattern(search: str) -> str:
+    r"""SQL ``LIKE`` pattern matching any value that contains *search*.
+
+    Read with ``ESCAPE '\'``, which keeps ``%``, ``_`` and ``\`` in
+    *search* literal. The backslash is escaped first, so the escapes added
+    for ``%`` and ``_`` are not escaped again.
+    """
+    escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def check_node_role_immutable(
     node_id: str,
     existing: dict[str, Any],
@@ -697,12 +708,10 @@ class GraphStore(ABC):
         counted apart; a type with no current node is absent. A non-empty
         *search* keeps only nodes whose ``name`` property, ``node_id`` or
         ``node_type`` contains it, ignoring case: the filter that
-        :meth:`search_nodes` applies for ``GET /graph/search``'s ``q``. The
-        SQL backends match with ``LIKE``/``ILIKE``, so ``%`` and ``_`` in
-        *search* are wildcards there; Postgres also reads a backslash as an
-        escape, and SQLite's ``LIKE`` ignores the case of ASCII letters
-        only. The Bolt backends match a plain lowercased substring, so those
-        characters are literal there.
+        :meth:`search_nodes` applies for ``GET /graph/search``'s ``q``.
+        Every character of *search* is literal, ``%``, ``_`` and the
+        backslash included. SQLite's ``LIKE`` ignores the case of ASCII
+        letters only.
         """
 
     @abstractmethod
