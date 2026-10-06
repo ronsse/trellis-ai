@@ -1093,6 +1093,7 @@ All notable changes to Trellis will be documented in this file.
   exit `1`, as before. A `TrellisError` still reaches the root boundary and
   exits by its type, and batches already written for earlier traces stay
   written.
+  ([#742](https://github.com/ronsse/trellis-ai/pull/742))
 
 ## [0.9.0] - 2026-05-13
 
