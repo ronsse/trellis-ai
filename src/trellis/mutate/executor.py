@@ -196,10 +196,11 @@ class MutationExecutor:
             audit = self._emit_rejection(command, reason="validate", message=message)
             return CommandResult(
                 command_id=command.command_id,
-                status=CommandStatus.FAILED,
+                status=CommandStatus.REJECTED,
                 operation=command.operation,
                 message=message,
                 warnings=_audit_warnings(audit),
+                metadata={"rejection_reason": "validate"},
             )
 
         # Stage 2: Policy Check

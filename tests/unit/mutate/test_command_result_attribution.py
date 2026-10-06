@@ -17,7 +17,7 @@ The twelve sites, read top to bottom through ``execute`` and
 ``_check_idempotency``, and the test that pins each:
 
 * unattended-writer roster refusal (REJECTED) -- ``test_immutable_core_refusal``
-* registry arg validation (FAILED) -- ``test_arg_validation_failure``
+* registry arg validation (REJECTED) -- ``test_arg_validation_failure``
 * policy gate, deny and require_approval (REJECTED) --
   ``test_policy_gate_rejection``
 * Stage 3 replay, in-memory key cache (DUPLICATE) -- ``test_in_memory_replay``
@@ -34,7 +34,7 @@ The twelve sites, read top to bottom through ``execute`` and
 * handler raises an untyped panic (FAILED) -- ``test_handler_panic``
 * handler returns (SUCCESS) -- ``test_success``
 
-Status alone does not identify a site (four are REJECTED, four FAILED),
+Status alone does not identify a site (five are REJECTED, three FAILED),
 so every test also asserts a fragment of the message its site writes. Two
 pairs share a message *shape* -- both replay sites write ``Duplicate
 command: <key>`` (``IdempotencyError.__str__`` and the in-memory replay
@@ -290,9 +290,9 @@ def test_arg_validation_failure(event_log: SQLiteEventLog) -> None:
         commands,
         results,
         [
-            (CommandStatus.FAILED, "Validation failed: Missing required args: name"),
+            (CommandStatus.REJECTED, "Validation failed: Missing required args: name"),
             (
-                CommandStatus.FAILED,
+                CommandStatus.REJECTED,
                 "Validation failed: Missing required args: edge_kind",
             ),
         ],

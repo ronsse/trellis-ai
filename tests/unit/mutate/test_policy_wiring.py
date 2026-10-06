@@ -228,7 +228,7 @@ class TestDefaultPostureIsTransparent:
         )
         # entity.create requires args the registry validates.
         result = gated.execute(Command(operation=Operation.ENTITY_CREATE, args={}))
-        assert result.status == CommandStatus.FAILED
+        assert result.status == CommandStatus.REJECTED
 
     def test_build_curate_executor_wires_a_gate(self, tmp_path: Path) -> None:
         """The wiring itself: the factory must attach a gate, not None."""

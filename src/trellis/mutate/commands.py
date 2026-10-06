@@ -88,10 +88,10 @@ class CommandResult(VersionedModel):
 
     A REJECTED result names why in ``metadata["rejection_reason"]``, the
     ``reason`` its ``MUTATION_REJECTED`` event carries: ``policy_violation``,
-    ``immutable_core``, or a handler's ``ValidationError.code``
-    (``handler_validate`` when it set none). A caller holding only the
-    result, such as the CLI choosing an exit code, can then tell a policy
-    refusal from any other.
+    ``immutable_core``, ``validate`` (the operation registry's arg check),
+    or a handler's ``ValidationError.code`` (``handler_validate`` when it
+    set none). A caller holding only the result, such as the CLI choosing
+    an exit code, can then tell a policy refusal from any other.
     """
 
     command_id: str
