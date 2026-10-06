@@ -1036,8 +1036,8 @@ Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes
 | Value | Description |
 |-------|-------------|
 | `success` | Command executed successfully |
-| `rejected` | Policy gate rejected the command |
-| `failed` | Execution failed (validation or handler error) |
+| `rejected` | Refused: Stage 1 found an unattended writer asking for an operation outside its allow-list (`metadata["rejection_reason"]` is `immutable_core`), the Stage 2 policy gate blocked it (`policy_violation`), or the handler raised `PolicyViolationError` (`policy_violation`) or `ValidationError` (its `code`, or `handler_validate` when it set none) |
+| `failed` | Stage 1 validation failed (unknown operation or a missing required arg), no handler is registered for the operation, or the handler raised any other `TrellisError` (store errors included; `IdempotencyError` answers `duplicate`) or one of the built-in exceptions in `trellis.mutate.executor._UNEXPECTED_HANDLER_FAILURE` |
 | `duplicate` | A command with this idempotency key already succeeded |
 
 ### BatchStrategy

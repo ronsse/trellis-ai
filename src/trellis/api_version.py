@@ -9,9 +9,10 @@ Compatibility rules:
 
 * **api_major** — bump on a breaking change to any ``/api/v<major>/*``
   route.  Clients refuse to talk to a server with a different major.
-* **api_minor** — bump on a backwards-compatible addition.  Clients
-  warn when the server minor is older than the one they were built
-  against (feature may be missing) but continue.
+* **api_minor** — bump on a backwards-compatible addition the SDK comes
+  to rely on (see ``API_MINOR`` below).  Clients warn when the server
+  minor is older than the one they were built against (feature may be
+  missing) but continue.
 * **wire_schema** — the Pydantic-level DTO schema version.  Independent
   of ``api_major`` because additive field changes can be backwards
   compatible at the wire level even when a route signature changes.
@@ -29,8 +30,10 @@ from trellis.core.base import SCHEMA_VERSION
 # Bump when a /api/v<major>/ route breaks backwards compatibility.
 API_MAJOR = 1
 
-# Bump on backwards-compatible additions (new routes, new optional
-# fields, new enum values that default safely).  Reset to 0 when
+# Bump only with ``SDK_API_MINOR``, when the SDK comes to rely on an addition.
+# Since minor 2, tests/unit/sdk/test_http.py pins the two equal, and an SDK
+# warns against every server whose minor is below its own, so an addition no
+# SDK reads (a new route or optional field) bumps neither.  Reset to 0 when
 # API_MAJOR bumps.
 #
 # 1 — ``GET /api/version`` gained the optional ``write_provenance``
