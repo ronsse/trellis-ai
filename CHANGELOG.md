@@ -1129,6 +1129,7 @@ All notable changes to Trellis will be documented in this file.
   naming the first missing row's index and endpoint, as the endpoint check
   does, and the raise rolls the write's transaction back, so no row of the
   batch is written. A call whose endpoints stay current is unchanged.
+  ([#746](https://github.com/ronsse/trellis-ai/pull/746))
 
 ## [0.9.0] - 2026-05-13
 
