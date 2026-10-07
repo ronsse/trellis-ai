@@ -49,6 +49,7 @@ from trellis.core.write_config import (
     WriteBehaviourConfig,
 )
 from trellis.core.write_provenance import get_write_provenance
+from trellis.errors import TrellisError
 from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.extract.memory_ingest_hook import run_memory_extraction
 from trellis.extract.trace_ingest_hook import (
@@ -3655,8 +3656,12 @@ def execute_mutation(
         result = executor.execute(command)
     except Exception as exc:
         logger.exception("execute_mutation_failed", operation=str(op))
+        # A TrellisError keeps its text, which Trellis wrote. Any other
+        # exception is named by its type: its text can be a driver's. The
+        # log above and the chained cause keep it for the operator.
+        detail = exc if isinstance(exc, TrellisError) else type(exc).__name__
         _raise_internal(
-            f"execution failed: {exc}",
+            f"execution failed: {detail}",
             cause=exc,
             data={
                 "command_id": command.command_id,

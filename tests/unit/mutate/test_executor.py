@@ -119,7 +119,7 @@ class TestMutationExecutor:
         )
         result = executor.execute(_cmd())
         assert result.status == CommandStatus.FAILED
-        assert "DB error" in result.message
+        assert result.message == "Execution failed: RuntimeError"
 
     def test_emits_event_on_success(self) -> None:
         event_log = MagicMock()
@@ -771,7 +771,8 @@ class TestSQLiteDriverError:
             (command.command_id, "failed")
         ]
         assert events.get_events(event_type=EventType.MUTATION_EXECUTED) == []
-        # Exactly the driver's text: no SQL statement, path or traceback rides along.
+        # The caller reads the driver error's type and the audit its exact
+        # text: no SQL statement, path or traceback rides along in either.
         driver_text = "attempt to write a readonly database"
-        assert result.message == f"Execution failed: {driver_text}"
+        assert result.message == "Execution failed: OperationalError"
         assert rejected[0].payload["message"] == driver_text

@@ -144,7 +144,7 @@ class TestExecutorUnexpectedException:
         )
         result = executor.execute(_cmd())
         assert result.status == CommandStatus.FAILED
-        assert "backend panic" in result.message
+        assert result.message == "Execution failed: RuntimeError"
         # FAILED audit event written
         event_type = event_log.emit.call_args.args[0]
         assert event_type.value == "mutation.rejected"  # FAILED maps to REJECTED type

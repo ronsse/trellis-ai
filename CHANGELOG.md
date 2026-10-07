@@ -1236,6 +1236,30 @@ All notable changes to Trellis will be documented in this file.
   store compared in Python, is refused too. A `None`, list or dict value is
   still compared in Python and does not raise.
   ([#743](https://github.com/ronsse/trellis-ai/issues/743) follow-up 3)
+- **Concurrent `upsert_node` writes of one node on Postgres no longer
+  raise a raw `UniqueViolation`.** The `FOR UPDATE` read serialises
+  neither two creates of a new `node_id`, which have no row to lock, nor
+  two updates of an existing one, where the writer that waited finds no
+  current row. The later `INSERT` hit the partial unique index
+  `idx_nodes_current` and its write was lost. `upsert_node` now retries
+  once in a fresh transaction, which writes a new version over the
+  winner's row, and matches the index by `exc.diag.constraint_name`
+  because the message text follows the server's locale. A second
+  conflict, or any conflict in `upsert_nodes_bulk`, which does not retry,
+  raises a `StoreError` naming only the exception type. Other unique
+  violations are unchanged.
+  ([#755](https://github.com/ronsse/trellis-ai/pull/755))
+- **A failed command names a non-Trellis exception by its type alone.** The
+  FAILED message that REST, MCP and the CLI return reads, for example,
+  `Execution failed: IntegrityError` instead of the exception's text, which a
+  driver can fill with query text and values. MCP `execute_mutation` names an
+  exception that escapes the executor the same way. A Trellis error keeps its
+  text, and the operator log, the audit event and every status are unchanged.
+  A `ValueError` or pydantic error raised on a caller's input loses its detail
+  too: an invalid or changed `node_role`, or duplicate `document_ids`, on
+  `entity.create` reads `Execution failed: ValueError`, and an invalid trace
+  sent to `trace.ingest` reads `Execution failed: ValidationError`.
+  ([#748](https://github.com/ronsse/trellis-ai/pull/748))
 - **Four more CLI failure lines are no longer hard-wrapped at the console
   width.** The same exposure #750 fixed for 16 sites also applied to
   `admin migrate-graph`'s "Invalid YAML in ..." line and to the
