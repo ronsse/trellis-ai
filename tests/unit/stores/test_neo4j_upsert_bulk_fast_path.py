@@ -16,6 +16,10 @@ guarantee here is that the branching picks the right shape.
 ``node_id`` is refused before the store opens a session.
 ``TestUpsertEdgesBulkDroppedRow`` checks the message for a row the write
 dropped though both its endpoints read as current afterwards.
+``TestUpsertEdgesBulkTransactionRunsOnce`` counts calls to
+``session.execute_write`` (and so to the wrapped transaction function) for
+the same scenario, pinning the #754 follow-up that the write is not
+retried.
 """
 
 from __future__ import annotations
@@ -251,6 +255,37 @@ class TestUpsertEdgesBulkDroppedRow:
                     {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
                 ]
             )
+
+
+class TestUpsertEdgesBulkTransactionRunsOnce:
+    def test_execute_write_is_called_exactly_once_when_a_row_vanishes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The vanished-endpoint ``ValueError`` comes from a single write
+        attempt, not from ``_tx`` being retried after the rollback. #754's
+        gate: the no-retry claim rested on driver source and one probe's
+        event order rather than on a test. ``session.execute_write``'s
+        ``side_effect`` is what invokes the wrapped transaction function
+        (``fn(tx)``), so counting calls to the mock counts calls to ``_tx``
+        — a retry added around the ``session.execute_write(_tx)`` call
+        would show up here as ``call_count == 2`` even though the raised
+        ``ValueError`` looks identical either way."""
+        store, session = _build_store_with_mock_driver(monkeypatch)
+        current = [{"node_id": node_id} for node_id in ("a", "b", "c", "d")]
+        session.execute_read.return_value = current
+        tx = MagicMock(name="tx")
+        tx.run.return_value = [{"row_index": 1, "edge_id": "e1"}]  # drops row 0
+        session.execute_write.side_effect = lambda fn: fn(tx)
+
+        with pytest.raises(ValueError):
+            store.upsert_edges_bulk(  # type: ignore[attr-defined]
+                [
+                    {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
+                    {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
+                ]
+            )
+
+        assert session.execute_write.call_count == 1
 
 
 class TestUpsertEdgesBulkMissingEndpointMessageIsShared:

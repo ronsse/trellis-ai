@@ -50,11 +50,11 @@ pytestmark = [
 def graph_store():
     """Fresh ArcadeDBGraphStore with a cleaned database per test.
 
-    Mirrors the Neo4j fixture pattern — wipe :Node / :Alias rows
-    between tests so each test sees a deterministic state. The typed-
-    property schema is created once per database and survives the
-    wipe (DELETE doesn't touch the schema), so we don't need to
-    re-run migrations between tests.
+    Mirrors the Neo4j fixture pattern — wipe every label the store
+    writes (:Node, :Alias, :AliasClaim) between tests so each test
+    sees a deterministic state. The typed-property schema is created
+    once per database and survives the wipe (DELETE doesn't touch the
+    schema), so we don't need to re-run migrations between tests.
     """
     from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
 
@@ -67,7 +67,7 @@ def graph_store():
         ensure_database_exists=True,
     )
     with store._driver.session(database=store._database) as session:
-        session.run("MATCH (n) WHERE n:Node OR n:Alias DETACH DELETE n")
+        session.run("MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim DETACH DELETE n")
     yield store
     store.close()
 
@@ -549,7 +549,9 @@ class TestArcadeDBEdgeProvenance:
             graph_store = registry.knowledge.graph_store
             # Clean rows from prior tests in this class.
             with graph_store._driver.session(database=graph_store._database) as session:
-                session.run("MATCH (n) WHERE n:Node OR n:Alias DETACH DELETE n")
+                session.run(
+                    "MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim DETACH DELETE n"
+                )
             graph_store.upsert_node("a", "service", {})
             graph_store.upsert_node("b", "service", {})
             graph_store.upsert_edge("a", "b", "depends_on", confidence=0.5)
