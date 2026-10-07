@@ -1511,6 +1511,19 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
 
 `withholding` is the builder's stamped summary verbatim, so it carries `withheld_item_ids` as well as the counts — #404's counts-and-reasons-only rule scopes the *rendered note* an agent reads, not this payload, whose reader already holds the stores. `retrieval_report` is abbreviated above; it also carries `queries_run`, `duration_ms` and `schema_version`, and its `rejected_items` / `budget_trace` are populated on any pack that hit a budget.
 
+**`POST /api/v1/packs/sectioned` carries the same `axes` block** (#783). `SectionedPackResponse.axes` is the identical `{available, ran, failed, semantic}` shape, read off the first section's `strategies_used` — `build_sectioned` runs every strategy once and gives every section that one list, so the first stands for all. A `sections=[]` request has no section to read it from, so `axes` is `null` there even though `PACK_ASSEMBLED.strategy_failures` recorded the raise.
+
+**MCP renders a markdown line, not a JSON block.** `get_context`, `search`, and — since #789 — `get_context(sections=...)`, `get_objective_context`, `get_task_context` and `get_sectioned_context` all add one line naming any axis in `axes.failed`, to both a populated and an empty reply:
+
+```
+**Retrieval axis failed:** <names>.
+```
+
+Axis names only, never the exception text — that stays in `PACK_ASSEMBLED.strategy_failures`. A reply with no failed axis has no such line. Two gaps in that line:
+
+- A `misconfigured` semantic axis (an embedder resolved but the vector backend never initialised) never lands in `axes.failed`, so this line says nothing about it; only `axes.semantic` (REST and `--format json`) and the CLI's text sentence report that state.
+- The SDK's `get_objective_context` / `get_task_context` format their own local markdown (`trellis_sdk._format.format_sectioned_pack_as_markdown`) and never read the response's `axes` key, so neither renders this line at all.
+
 > **This is a CLI contract change.** Before #410 the payload was
 > `{"status", "intent", "domain", "agent_id", "count", "include_chunks", "items"}`
 > with `items` a flat list of **doc-id strings**. `items` is now a list of
