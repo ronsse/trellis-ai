@@ -180,6 +180,150 @@ def test_edge_write_racing_node_upsert_keeps_one_current_node(graph_store):
     )
 
 
+def _wait_for_blocked_write(store, needle: str) -> bool:
+    """Poll until a statement containing ``needle`` is blocked on a lock (20 s cap).
+
+    Generalizes ``_wait_for_blocked_purge`` below with a caller-chosen needle,
+    since different writers' Cypher binds different parameter names.
+    """
+    cypher = (
+        "SHOW TRANSACTIONS YIELD currentQuery, status "
+        f"WHERE status STARTS WITH 'Blocked' AND currentQuery CONTAINS '{needle}' "
+        "RETURN count(*) AS n"
+    )
+    deadline = time.monotonic() + 20
+    with store._driver.session(database=store._database) as session:
+        while time.monotonic() < deadline:
+            if session.run(cypher).single()["n"]:
+                return True
+            time.sleep(0.005)
+    return False
+
+
+@pytest.mark.parametrize("endpoint", ["source", "target"])
+def test_upsert_edge_locks_endpoint_before_resolving(
+    graph_store, monkeypatch, endpoint
+):
+    # upsert_edge's locking prelude write-locks both endpoints' current
+    # rows, by node_id, before the endpoint MATCH/resolve runs -- in the
+    # same transaction as the resolve and the CREATE (module docstring).
+    # A concurrent upsert_node on either endpoint has to wait for that one
+    # transaction to commit: it cannot close the row upsert_edge is about
+    # to act on mid-resolution. Held via the single-thread "run the write,
+    # then start and wait on a racer before returning" idiom used by the
+    # purge tests above, since upsert_edge is one Cypher statement in one
+    # transaction -- there is no per-statement pause point to hook.
+    import neo4j
+
+    store = graph_store
+    store.upsert_node("a", "service", {})
+    store.upsert_node("b", "service", {})
+    raced_id = "a" if endpoint == "source" else "b"
+    second = _second_neo4j_store()
+    writer = threading.get_ident()
+    original = neo4j.Session.execute_write
+    state: dict[str, Any] = {}
+
+    def racer() -> None:
+        state["raced"] = second.upsert_node(raced_id, "service", {"raced": True})
+
+    def gated(session: Any, transaction_function: Any, *args: Any, **kwargs: Any):
+        if threading.get_ident() != writer:
+            return original(session, transaction_function, *args, **kwargs)
+
+        def held(tx: Any, *a: Any, **k: Any) -> Any:
+            result = transaction_function(tx, *a, **k)
+            state["racer"] = threading.Thread(target=racer)
+            state["racer"].start()
+            state["blocked"] = _wait_for_blocked_write(store, "$node_role")
+            return result
+
+        return original(session, held, *args, **kwargs)
+
+    try:
+        monkeypatch.setattr(neo4j.Session, "execute_write", gated)
+        edge_id = store.upsert_edge("a", "b", "depends_on", {})
+        state["racer"].join(timeout=20)
+
+        assert state["blocked"], (
+            f"a concurrent upsert_node on the {endpoint} endpoint never blocked "
+            "on upsert_edge's lock"
+        )
+        assert not state["racer"].is_alive()
+        assert state["raced"] == raced_id
+        edges = store.get_edges("a", direction="outgoing")
+        assert len(edges) == 1
+        assert edges[0]["edge_id"] == edge_id
+        nodes = [r for r in store.get_node_history(raced_id) if r["valid_to"] is None]
+        assert len(nodes) == 1
+        assert nodes[0]["properties"]["raced"] is True
+    finally:
+        second.close()
+
+
+def test_upsert_edge_update_keeps_one_current_edge_across_source_reversion(
+    graph_store, monkeypatch
+):
+    # The #790-gate follow-up: updating an already-current edge resolves
+    # its endpoints and its prior row in one transaction. Unlocked, a
+    # concurrent upsert_node could re-version the source between that
+    # resolve and the close+create, binding this writer to a row no
+    # longer current, or letting a second edge writer bound to the new
+    # row race it -- two writers, one edge_id, two current rows
+    # (gates/790.md Follow-ups item 1, reasoned there but not reproduced).
+    # The lock serializes the re-version behind this transaction instead.
+    import neo4j
+
+    store = graph_store
+    store.upsert_node("a", "service", {})
+    store.upsert_node("b", "service", {})
+    first_edge_id = store.upsert_edge("a", "b", "depends_on", {"writer": "seed"})
+    second = _second_neo4j_store()
+    writer = threading.get_ident()
+    original = neo4j.Session.execute_write
+    state: dict[str, Any] = {}
+
+    def racer() -> None:
+        state["raced"] = second.upsert_node("a", "service", {"reversioned": True})
+
+    def gated(session: Any, transaction_function: Any, *args: Any, **kwargs: Any):
+        if threading.get_ident() != writer:
+            return original(session, transaction_function, *args, **kwargs)
+
+        def held(tx: Any, *a: Any, **k: Any) -> Any:
+            result = transaction_function(tx, *a, **k)
+            state["racer"] = threading.Thread(target=racer)
+            state["racer"].start()
+            state["blocked"] = _wait_for_blocked_write(store, "$node_role")
+            return result
+
+        return original(session, held, *args, **kwargs)
+
+    try:
+        monkeypatch.setattr(neo4j.Session, "execute_write", gated)
+        updated_edge_id = store.upsert_edge(
+            "a", "b", "depends_on", {"writer": "update"}
+        )
+        state["racer"].join(timeout=20)
+
+        assert state["blocked"], (
+            "the source re-version never blocked on the edge update's lock"
+        )
+        assert not state["racer"].is_alive()
+        assert updated_edge_id == first_edge_id
+
+        edges = store.get_edges("a", direction="outgoing")
+        assert len(edges) == 1
+        assert edges[0]["edge_id"] == first_edge_id
+        assert edges[0]["properties"]["writer"] == "update"
+
+        nodes = [r for r in store.get_node_history("a") if r["valid_to"] is None]
+        assert len(nodes) == 1
+        assert nodes[0]["properties"]["reversioned"] is True
+    finally:
+        second.close()
+
+
 def test_get_edges_incoming(graph_store):
     graph_store.upsert_node("a", "s", {})
     graph_store.upsert_node("b", "s", {})
