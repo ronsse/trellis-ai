@@ -1383,6 +1383,13 @@ All notable changes to Trellis will be documented in this file.
   one's row; a write on a connection already in a transaction joins it.
   Duplicate rows already stored stay.
   ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 2)
+- **6 more red CLI failure lines no longer hard-wrap.** Each prints an id,
+  path or error text from a helper whose caller then exits non-zero, so the
+  soft-wrap rule cannot see it: `admin install-skills`, `admin
+  check-extractors`, `admin smoke-test` (x2), `worker embed-traces` and
+  `ingest corpus --prune`. A hand-listed roster test pins these and two
+  earlier hand-wrapped lines of the same shape.
+  ([#771](https://github.com/ronsse/trellis-ai/pull/771) follow-ups 1 and 3)
 - **A failed embedder resolution is retried, not cached as "not
   configured".** `StoreRegistry.embedding_fn` set its cache to `None`
   *before* resolving `TRELLIS_EMBEDDING_FN` or `embeddings.provider`, so

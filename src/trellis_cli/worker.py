@@ -2113,5 +2113,6 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
     for failure in payload["failures"]:
         console.print(
             f"[red]  {escape(failure['trace_id'])}: "
-            f"{escape(str(failure['error']))}[/red]"
+            f"{escape(str(failure['error']))}[/red]",
+            soft_wrap=True,
         )
