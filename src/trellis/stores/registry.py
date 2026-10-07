@@ -512,28 +512,37 @@ def _import_callable(
     """Import a callable from a dotted module path (e.g. ``pkg.mod.func``).
 
     Raises :class:`ConfigError` naming *setting* when the path is
-    malformed, importing its module raises :class:`ImportError` (including
-    a module that exists but cannot import its own dependency), or the
-    named attribute is missing or not callable. *setting* should name
-    whichever of ``TRELLIS_EMBEDDING_FN`` (the env var) or
-    ``embeddings.provider`` (the YAML key) supplied *dotted_path*, so the
-    operator edits the right one. Any other exception raised by the target
-    module's own top-level code while it imports is that module's bug, not
-    a bad path, and propagates unchanged rather than being caught here
-    (#794). Returning ``None`` silently here would let a misconfigured
-    ``TRELLIS_EMBEDDING_FN`` propagate as ``embedding_fn is None``
-    downstream, which masks the typo behind a "no embeddings configured"
-    branch.
+    malformed — not a string, with no dot, or with any dot-separated
+    segment empty (a leading, trailing, or doubled dot, e.g. ``.pkg.fn``,
+    ``pkg.``, ``pkg..fn``) — when importing its module raises
+    :class:`ImportError` (including a module that exists but cannot import
+    its own dependency), or when the named attribute is missing or not
+    callable. *setting* should name whichever of ``TRELLIS_EMBEDDING_FN``
+    (the env var) or ``embeddings.provider`` (the YAML key) supplied
+    *dotted_path*, so the operator edits the right one. Any other exception
+    raised by the target module's own top-level code while it imports is
+    that module's bug, not a bad path, and propagates unchanged rather than
+    being caught here (#794). Returning ``None`` silently here would let a
+    misconfigured ``TRELLIS_EMBEDDING_FN`` propagate as
+    ``embedding_fn is None`` downstream, which masks the typo behind a "no
+    embeddings configured" branch.
     """
     import importlib  # noqa: PLC0415
 
-    module_path, _, attr_name = dotted_path.rpartition(".")
-    if not module_path or not attr_name:
+    # Checked whole, before any import: a leading dot would reach
+    # `import_module` as a relative import (`TypeError`, not `ImportError`),
+    # and a non-string has no `.rpartition`. A non-string is named by its
+    # type, never echoed: a YAML mapping can hold a credential, and this
+    # message reaches the REST body and the error log.
+    is_str = isinstance(dotted_path, str)
+    if not (is_str and "." in dotted_path and all(dotted_path.split("."))):
+        shown = repr(dotted_path) if is_str else f"of type {type(dotted_path).__name__}"
         msg = (
-            f"Invalid embedding callable path {dotted_path!r} —"
+            f"Invalid embedding callable path {shown} —"
             " expected a dotted path like 'pkg.module.func'."
         )
         raise ConfigError(msg, setting=setting)
+    module_path, _, attr_name = dotted_path.rpartition(".")
     try:
         module = importlib.import_module(module_path)
     except ImportError as exc:

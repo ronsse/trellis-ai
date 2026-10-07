@@ -1552,6 +1552,15 @@ All notable changes to Trellis will be documented in this file.
   `1`. Rich hard-wrapped a long one at the console width, splitting it
   mid-token. All four now pass `soft_wrap=True`.
   (follow-up 1 from the [#799](https://github.com/ronsse/trellis-ai/pull/799) gate)
+- **A leading-dot embedding-callable path, or a non-string
+  `embeddings.provider`, answered 500 instead of `ConfigError`.** `.pkg.fn`
+  reached `importlib.import_module` as a relative import (`TypeError`) and an
+  int, list or mapping had no `.rpartition` (`AttributeError`). The path is
+  now checked whole before any import (a `str`, every dot-separated part
+  non-empty) and raises the `ConfigError` (REST 409) a no-dot path does; a
+  non-string is named by its type, never echoed, since a mapping can hold a
+  credential.
+  (follow-ups B and C from the [#800](https://github.com/ronsse/trellis-ai/pull/800) gate)
 
 ## [0.9.0] - 2026-05-13
 
