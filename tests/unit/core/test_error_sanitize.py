@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 import yaml
 
 from trellis.core.error_sanitize import (
+    DEFAULT_MAX_LEN,
     SUPPRESSED_MARKER,
     describe_yaml_error,
     sanitize_error_message,
@@ -14,6 +17,13 @@ from trellis.core.error_sanitize import (
 
 #: A fake credential planted where PyYAML's ``str(exc)`` would quote it.
 _SENTINEL = "XQ1BR6asQyYAJ6tcK6JnaWKZ"
+
+
+def _filler(length: int) -> str:
+    """``length`` chars of prose: short space-separated words, so no run
+    is 40+ chars and nothing resembles ``@``/``=``/``:`` — safe against
+    every ``_LEAK_PATTERNS`` entry and the long-opaque-token check."""
+    return ("lorem " * (length // 6 + 2))[:length]
 
 
 class TestCleanPassthrough:
@@ -279,6 +289,56 @@ class TestBounding:
     def test_custom_max_len(self) -> None:
         out = sanitize_error_message("abcdef", max_len=3)
         assert out == "abc…[truncated]"
+
+
+class TestScanWindowBound:
+    """``sanitize_error_message`` scans ``max_len`` plus a fixed margin, not
+    the whole text: the email and credential-URL patterns backtrack
+    quadratically over a long run of word characters."""
+
+    def test_long_adversarial_run_sanitizes_well_under_a_second(self) -> None:
+        # An unbounded scan takes ~26 s on this input and the bounded one a
+        # few milliseconds, so the 1 s bound holds on a loaded runner.
+        text = "x" * 100_000 + "://"
+        start = time.perf_counter()
+        out = sanitize_error_message(text)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, f"took {elapsed:.3f}s — the scan is not bounded"
+        # The 100k-char run is itself a long opaque token either way.
+        assert out == SUPPRESSED_MARKER
+
+    @pytest.mark.parametrize(
+        "sensitive",
+        [
+            # The closing "@" lands ~170 chars past the cut.
+            "postgresql://svc_reader:"
+            + "%21".join(["Kd8sVq2m"] * 15)
+            + "@db.example.internal/x",
+            # FROM lands ~120 chars past the cut.
+            (
+                "SELECT id, display_name, email_address, phone_number, street_address,"
+                " city, region, postal_code, country_code, created_at, updated_at"
+                " FROM customers"
+            ),
+            # 40 of the token's 60 chars fall past the cut.
+            "Zq9xWv3Lk8" * 6,
+        ],
+        ids=["credential-url", "sql-column-list", "opaque-token"],
+    )
+    def test_secret_straddling_the_cut_is_suppressed(self, sensitive: str) -> None:
+        # Starts 20 chars before max_len, so only its pattern's tail is past it.
+        text = _filler(DEFAULT_MAX_LEN - 21) + " " + sensitive + " " + _filler(50)
+        assert sanitize_error_message(text) == SUPPRESSED_MARKER
+
+    def test_leak_wholly_beyond_the_window_passes_through_clean(self) -> None:
+        text = _filler(DEFAULT_MAX_LEN + 600) + " alice@example.com"
+        out = sanitize_error_message(text)
+        assert out == text[:DEFAULT_MAX_LEN] + "…[truncated]"
+
+    def test_window_grows_with_max_len(self) -> None:
+        # Past the default window, but visible under this max_len.
+        text = _filler(DEFAULT_MAX_LEN * 3) + " alice@example.com"
+        assert sanitize_error_message(text, max_len=len(text)) == SUPPRESSED_MARKER
 
 
 class TestPayload:

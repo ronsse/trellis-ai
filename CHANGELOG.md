@@ -1319,6 +1319,15 @@ All notable changes to Trellis will be documented in this file.
   own or an enclosing block; an exit under a later `if`, an `Exit` a helper
   returns and a conditional-expression message are not policed yet.
   ([#766](https://github.com/ronsse/trellis-ai/pull/766))
+- **`sanitize_error_message` scans a bounded window, not the whole
+  exception text.** The email and inline-credential-URL patterns backtrack
+  quadratically over a long run of word characters, so a 100k-character
+  input took about 26 s. The leak heuristics now scan at most
+  `max_len + 500` characters, a few milliseconds at worst. A secret that
+  starts in the visible prefix still trips its pattern if it completes
+  within 500 characters past the cut; a leak lying wholly past the window
+  now yields the truncated prefix instead of the marker.
+  ([#763](https://github.com/ronsse/trellis-ai/pull/763) follow-up 2)
 - **An uncaught tool exception is sanitized too, closing the gap the entry
   above left open.** `save_knowledge`'s and `save_experience`'s own
   `executor.execute` calls have no `try/except`, so a driver exception
