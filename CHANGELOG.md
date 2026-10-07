@@ -1460,6 +1460,14 @@ All notable changes to Trellis will be documented in this file.
   carrying `[...]` was read as a style tag and deleted. All three are now
   escaped; `--format json` is unchanged.
   ([#784](https://github.com/ronsse/trellis-ai/pull/784) follow-up 1)
+- **A broken driver install no longer replaces a handler's own failure in
+  `MutationExecutor`.** The handler-panic catch imported `psycopg` and
+  `neo4j.exceptions` to find their base errors, so a driver whose import
+  raised anything but `ImportError` (a native library that fails to load)
+  escaped `execute()` in place of the handler's FAILED result, on every
+  call. The classes are now read from `sys.modules` and nothing is
+  imported: a driver's exception can only exist once its module is.
+  ([#773](https://github.com/ronsse/trellis-ai/pull/773) follow-up 2)
 
 ## [0.9.0] - 2026-05-13
 
