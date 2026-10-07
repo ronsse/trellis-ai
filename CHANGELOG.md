@@ -1521,17 +1521,12 @@ All notable changes to Trellis will be documented in this file.
   (follow-up 5 from the [#793](https://github.com/ronsse/trellis-ai/pull/793) gate)
 - **A bad `TRELLIS_EMBEDDING_FN` path's `ConfigError` names the env var, not
   `embeddings.provider`.** `_import_callable` hardcoded `setting=` to the
-  config key at all four of its raise sites, so an operator chasing a typo'd
-  env var was pointed at the wrong YAML key. It now takes a `setting=`
-  keyword (default `"embeddings.provider"`), and the env-var call site
-  passes `setting="TRELLIS_EMBEDDING_FN"`. Re-measurement at #794's head
-  found the three "path is wrong" failures (missing module, missing
-  attribute, non-callable attribute) already raised typed `ConfigError` for
-  both sources — that part of #794's follow-up was already fixed; only the
-  `setting` attribution was wrong. Both docstrings now also say explicitly
-  that an exception raised by the target module's own import-time code
-  propagates unchanged rather than being translated. Pins the
-  `TRELLIS_EMBEDDING_FN=""` fall-through to config with a new test.
+  config key, so an operator chasing a typo'd env var was pointed at the
+  wrong YAML key; the env-var call site now passes
+  `setting="TRELLIS_EMBEDDING_FN"`. The docstrings now state which failures
+  are a `ConfigError` (a malformed path, an `ImportError`, a missing or
+  non-callable attribute) and that any other import-time exception
+  propagates unchanged.
   ([#794](https://github.com/ronsse/trellis-ai/pull/794) follow-ups F1-F3)
 
 ## [0.9.0] - 2026-05-13

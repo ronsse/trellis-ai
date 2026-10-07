@@ -450,6 +450,7 @@ def test_embedding_fn_unimportable_env_var_raises_rather_than_using_config(
 # YAML key actually supplied the path.
 
 _BAD_DOTTED_PATHS = [
+    pytest.param("nodot", id="malformed"),
     pytest.param(
         "no_such_module_for_embedding_fn_setting_test.embed", id="missing_module"
     ),
@@ -491,15 +492,6 @@ def test_embedding_fn_config_provider_bad_path_setting_names_the_yaml_key(
     with pytest.raises(ConfigError) as exc_info:
         _ = registry.embedding_fn
     assert exc_info.value.setting == "embeddings.provider"
-
-
-def test_import_callable_setting_kwarg_overrides_the_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``_import_callable``'s own ``setting=`` parameter is honoured directly."""
-    with pytest.raises(ConfigError) as exc_info:
-        _import_callable(_UNIMPORTABLE_PATH, setting="TRELLIS_EMBEDDING_FN")
-    assert exc_info.value.setting == "TRELLIS_EMBEDDING_FN"
 
 
 # -- F1: a dotted path's own import-time failure is not a bad path --------

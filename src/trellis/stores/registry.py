@@ -511,18 +511,19 @@ def _import_callable(
 ) -> Callable[[str], list[float]]:
     """Import a callable from a dotted module path (e.g. ``pkg.mod.func``).
 
-    Raises :class:`ConfigError` (naming *setting*) when — and only when —
-    the *path itself* is wrong: malformed, the module cannot be found, or
-    the named attribute is missing or not callable. *setting* should name
+    Raises :class:`ConfigError` naming *setting* when the path is
+    malformed, importing its module raises :class:`ImportError` (including
+    a module that exists but cannot import its own dependency), or the
+    named attribute is missing or not callable. *setting* should name
     whichever of ``TRELLIS_EMBEDDING_FN`` (the env var) or
     ``embeddings.provider`` (the YAML key) supplied *dotted_path*, so the
-    operator edits the right one. An exception raised by the target
-    module's own top-level code while it imports — anything other than
-    :class:`ImportError` — is that module's bug, not a bad path, and
-    propagates unchanged rather than being caught here (#794). Returning
-    ``None`` silently here would let a misconfigured ``TRELLIS_EMBEDDING_FN``
-    propagate as ``embedding_fn is None`` downstream, which masks the typo
-    behind a "no embeddings configured" branch.
+    operator edits the right one. Any other exception raised by the target
+    module's own top-level code while it imports is that module's bug, not
+    a bad path, and propagates unchanged rather than being caught here
+    (#794). Returning ``None`` silently here would let a misconfigured
+    ``TRELLIS_EMBEDDING_FN`` propagate as ``embedding_fn is None``
+    downstream, which masks the typo behind a "no embeddings configured"
+    branch.
     """
     import importlib  # noqa: PLC0415
 
@@ -1674,13 +1675,13 @@ class StoreRegistry:
         :class:`BackendNotInstalledError` when ``provider: openai`` is
         configured but the ``llm-openai`` extra is missing, and
         :class:`ConfigError` when ``provider: openai`` finds no API key, or
-        a dotted-path provider's module can't be found or its attribute is
-        missing or not callable — naming ``TRELLIS_EMBEDDING_FN`` when the
-        path came from the env var, ``embeddings.provider`` when it came
-        from config. An exception raised by the target module's own code
-        while it imports (not a bad path) propagates unchanged. A raise
-        caches nothing, so the next access resolves again; a callable or
-        ``None`` is cached.
+        a dotted path is malformed, raises :class:`ImportError` on import,
+        or names a missing or non-callable attribute — naming
+        ``TRELLIS_EMBEDDING_FN`` when the path came from the env var,
+        ``embeddings.provider`` when it came from config. Any other
+        exception the target module raises while it imports propagates
+        unchanged. A raise caches nothing, so the next access resolves
+        again; a callable or ``None`` is cached.
         """
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]
