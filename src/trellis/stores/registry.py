@@ -1652,35 +1652,37 @@ class StoreRegistry:
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]
 
-        self._embedding_fn_cache = None  # default: not configured
+        resolved: Callable[[str], list[float]] | None = None
 
         # 1. Check env var for custom dotted-path callable
         import os  # noqa: PLC0415
 
         custom_path = os.environ.get("TRELLIS_EMBEDDING_FN")
         if custom_path:
-            self._embedding_fn_cache = _import_callable(custom_path)
-            if self._embedding_fn_cache is not None:
+            resolved = _import_callable(custom_path)
+            if resolved is not None:
                 logger.info("embedding_fn_loaded", source="env", path=custom_path)
-                return self._embedding_fn_cache
-
-        # 2. Check config
-        provider = self._embedding_config.get("provider")
-        if not provider:
-            return None
-
-        if provider == "openai":
-            self._embedding_fn_cache = _build_openai_embedding_fn(
-                self._embedding_config
-            )
         else:
-            # Treat provider as a dotted import path
-            self._embedding_fn_cache = _import_callable(provider)
+            # 2. Check config
+            provider = self._embedding_config.get("provider")
+            if provider:
+                if provider == "openai":
+                    resolved = _build_openai_embedding_fn(self._embedding_config)
+                else:
+                    # Treat provider as a dotted import path
+                    resolved = _import_callable(provider)
 
-        if self._embedding_fn_cache is not None:
-            logger.info("embedding_fn_loaded", source="config", provider=provider)
+                if resolved is not None:
+                    logger.info(
+                        "embedding_fn_loaded", source="config", provider=provider
+                    )
 
-        return self._embedding_fn_cache
+        # Reached only when resolution above didn't raise. Cache the outcome
+        # (a resolved callable, or None for "not configured") so a resolution
+        # that raises is retried on the next call instead of being
+        # remembered as unconfigured forever.
+        self._embedding_fn_cache = resolved
+        return resolved
 
     @property
     def budget_config(self) -> Any:

@@ -1383,6 +1383,19 @@ All notable changes to Trellis will be documented in this file.
   one's row; a write on a connection already in a transaction joins it.
   Duplicate rows already stored stay.
   ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 2)
+- **A failed embedder resolution is retried, not cached as "not
+  configured".** `StoreRegistry.embedding_fn` set its cache to `None`
+  *before* resolving `TRELLIS_EMBEDDING_FN` or `embeddings.provider`, so
+  once resolution raised (an unimportable dotted path, or the `llm-openai`
+  extra missing), every later call silently returned `None` instead of
+  raising again — in a long-lived API process, the first `POST
+  /api/v1/packs` answered `409 config_error` and every later one answered
+  `200` with `axes.semantic: "not_configured"`, hiding a live
+  misconfiguration. It now resolves into a local and assigns the cache
+  only once resolution completes without raising, so a raising resolution
+  raises on every call; a successful resolution and an explicit "not
+  configured" `None` are each still cached after the first call.
+  (#775 follow-up F1)
 
 ## [0.9.0] - 2026-05-13
 
