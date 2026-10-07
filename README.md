@@ -110,7 +110,7 @@ flowchart TB
 
     subgraph Interfaces["🔌 Interfaces"]
         direction LR
-        CLI("CLI<br/>trellis") ~~~ MCP("MCP Server<br/>16 tools") ~~~ REST("REST API<br/>FastAPI") ~~~ SDK("Python SDK<br/>local + remote") ~~~ UI("Web UI<br/>Memory Explorer")
+        CLI("CLI<br/>trellis") ~~~ MCP("MCP Server<br/>16 tools") ~~~ REST("REST API<br/>FastAPI") ~~~ SDK("Python SDK<br/>HTTP client") ~~~ UI("Web UI<br/>Memory Explorer")
     end
 
     subgraph Core["⚙️ Core engine"]
@@ -361,17 +361,16 @@ trellis admin migrate-graph \
 
 Retrieval tools accept `max_tokens` (default 2000; `get_items` defaults to 4000, and the three sectioned tools to `retrieval.budgets` in `config.yaml`, or 4000 if it is unset). With `TRELLIS_ENABLE_EMBED_ON_INGEST=1` and an embedder configured, documents saved via `save_memory`, `save_knowledge`, `POST /documents`, `POST /evidence`, `trellis ingest corpus` / `conversations` or `trellis ingest dbt-manifest` become semantically retrievable immediately; backfill existing documents with `trellis admin reindex-vectors`.
 
-**Python SDK** — dual-mode (`import trellis_sdk`). Same API, flip `base_url` to go from in-process to HTTP.
+**Python SDK** — HTTP-only (`import trellis_sdk`): point `base_url` at a running `trellis admin serve`, or use `trellis.testing.in_memory_client` in tests.
 
 ```python
 from trellis_sdk import TrellisClient
 
-client = TrellisClient()                                  # local
-client = TrellisClient(base_url="http://localhost:8420")  # remote
+client = TrellisClient(base_url="http://localhost:8420")
 
 pack = client.assemble_pack("deploy checklist for staging", max_tokens=2000)
 trace_id = client.ingest_trace(trace_dict)
-client.record_feedback(pack.pack_id, task_succeeded=True)
+client.record_feedback(pack["pack_id"], rating=0.8, helpful_item_ids=[...])
 ```
 
 Skill helpers return pre-summarized markdown strings for direct LLM injection:
