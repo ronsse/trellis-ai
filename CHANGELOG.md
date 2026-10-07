@@ -1300,6 +1300,21 @@ All notable changes to Trellis will be documented in this file.
   filter key, so it names the literal facet; a NUL now raises `ValueError`
   before any SQL runs.
   ([#756](https://github.com/ronsse/trellis-ai/pull/756) follow-up 1)
+- **`sanitize_error_message` scans a bounded window instead of the full
+  exception text.** Two of the eight `_LEAK_PATTERNS` entries (the email and
+  inline-credential-URL patterns) backtrack quadratically over a long run of
+  word characters — a 100k-character adversarial string took roughly 27s;
+  with the fix it is flat at well under a millisecond regardless of length.
+  Every heuristic now runs over `text[:max_len + _SCAN_MARGIN]` rather than
+  the whole string; `_SCAN_MARGIN` (80) is sized from the largest minimal
+  match context among all eight patterns for a match starting at the last
+  visible byte, not only the two slow ones. A secret straddling the cut
+  (starting inside the visible prefix, closing just past it) still trips
+  its pattern; a leak whose pattern needs more than the margin to complete
+  is no longer caught — the output never carried anything past the cut
+  anyway, so this only changes an already-truncated text from the static
+  marker to its clean truncated prefix.
+  ([#763](https://github.com/ronsse/trellis-ai/pull/763) follow-up 2)
 
 ## [0.9.0] - 2026-05-13
 
