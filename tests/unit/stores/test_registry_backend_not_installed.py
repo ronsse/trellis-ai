@@ -270,6 +270,59 @@ def test_embedding_fn_property_propagates_backend_error(
         _ = registry.embedding_fn
 
 
+# -- _build_openai_embedding_fn raises on a missing key (#779 F-a) ---------
+
+
+def test_openai_embedding_fn_missing_key_raises_configerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No key anywhere: the SDK's own ``OpenAIError`` becomes a ``ConfigError``."""
+    openai = pytest.importorskip("openai")  # optional extra; skip when unavailable
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(ConfigError) as exc_info:
+        _build_openai_embedding_fn({"model": "text-embedding-3-small"})
+    assert exc_info.value.setting == "embeddings.api_key_env"
+    assert "OPENAI_API_KEY" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, openai.OpenAIError)
+    # The SDK's own wording, whatever its version, stays out of the message.
+    assert str(exc_info.value.__cause__) not in str(exc_info.value)
+
+
+def test_openai_embedding_fn_sdk_env_fallback_builds_callable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``OPENAI_API_KEY`` alone, with no key in config, still builds the callable."""
+    pytest.importorskip("openai")  # optional extra; skip when unavailable
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-obviously-fake-0000")
+    embed = _build_openai_embedding_fn({"model": "text-embedding-3-small"})
+    assert callable(embed)
+
+
+def test_openai_embed_network_error_survives_as_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``OpenAIError`` from the embeddings call itself is not a config error."""
+    pytest.importorskip("openai")  # optional extra; skip when unavailable
+    import openai
+
+    monkeypatch.setenv("FAKE_OPENAI_KEY_VAR", "sk-test-obviously-fake-0000")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    embed = _build_openai_embedding_fn(
+        {"model": "text-embedding-3-small", "api_key_env": "FAKE_OPENAI_KEY_VAR"}
+    )
+
+    def _raise_network_error(*args: Any, **kwargs: Any) -> Any:
+        synthetic_msg = "synthetic network failure"
+        raise openai.OpenAIError(synthetic_msg)
+
+    monkeypatch.setattr(
+        openai.resources.embeddings.Embeddings, "create", _raise_network_error
+    )
+    with pytest.raises(openai.OpenAIError) as exc_info:
+        embed("synthetic probe text")
+    assert not isinstance(exc_info.value, ConfigError)
+
+
 # -- a failed resolution is not cached (#775 follow-up F1) -----------------
 
 _UNIMPORTABLE_PATH = "no_such_module_for_embedding_fn_cache_test.embed"
@@ -309,6 +362,56 @@ def test_embedding_fn_raises_again_on_second_call_config_path(
     with pytest.raises(ConfigError):
         _ = registry.embedding_fn
     with pytest.raises(ConfigError):
+        _ = registry.embedding_fn
+
+
+# -- env var outranks config when both are set ----------------------------
+
+
+@pytest.mark.parametrize(
+    "config_provider",
+    [
+        pytest.param(
+            "trellis.stores.registry._import_callable",
+            id="config_resolves_to_a_different_callable",
+        ),
+        pytest.param(_UNIMPORTABLE_PATH, id="config_path_does_not_import"),
+        pytest.param("openai", id="config_provider_is_openai"),
+    ],
+)
+def test_embedding_fn_env_var_wins_when_config_also_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_provider: str
+) -> None:
+    """``TRELLIS_EMBEDDING_FN`` outranks ``embeddings.provider``.
+
+    Config is not resolved while the env var is set, so the env callable
+    comes back whether the provider names another callable, a path that
+    cannot import, or ``openai``.
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "trellis.stores.registry._mask_api_key")
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        embeddings={"provider": config_provider},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    assert registry.embedding_fn is _mask_api_key
+
+
+def test_embedding_fn_unimportable_env_var_raises_rather_than_using_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``TRELLIS_EMBEDDING_FN`` that cannot import raises; config is no fallback."""
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _UNIMPORTABLE_PATH)
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        embeddings={"provider": "trellis.stores.registry._mask_api_key"},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError, match=_UNIMPORTABLE_PATH):
         _ = registry.embedding_fn
 
 
