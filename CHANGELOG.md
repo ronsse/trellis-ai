@@ -1409,6 +1409,21 @@ All notable changes to Trellis will be documented in this file.
   resolves again until one succeeds, so `/packs` keeps answering `409`
   and MCP `get_context` keeps erroring while the configuration is broken.
   ([#779](https://github.com/ronsse/trellis-ai/pull/779))
+- **`trellis analyze health` surfaces a failed retrieval strategy.** When one
+  `PackBuilder` strategy raised, the surviving axes kept serving and the
+  failure reached only the `PACK_ASSEMBLED` event's `strategy_failures` and
+  an ERROR log line. `trellis analyze health` now counts the window's packs
+  with a failed strategy, per strategy name with the latest occurrence, in
+  text and `--format json`, and any such pack adds a `warn` reason. Counts
+  and strategy names only, never exception text.
+  ([#781](https://github.com/ronsse/trellis-ai/pull/781))
+- **`admin smoke-test` and `admin install-skills`/`quickstart` keep a
+  bracketed backend or OS error intact.** A check's or readyz backend's
+  `error`, and a failed skill copy's, went into Rich markup raw, so a
+  `[...]` in it (a bracketed host or path) was read as a style tag and
+  deleted: the operator saw a different error from the one raised. Each
+  is now escaped; `--format json` is unchanged.
+  ([#777](https://github.com/ronsse/trellis-ai/pull/777) follow-up 2)
 - **A driver's broken install can no longer mask a handler's own failure in
   `MutationExecutor`.** #773's lookup imported `psycopg` and
   `neo4j.exceptions` the first time an exception reached a handler-panic
