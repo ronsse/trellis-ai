@@ -87,7 +87,7 @@ def _fail(
             }
         )
     else:
-        console.print(f"[red]{escape(message)}[/red]")
+        console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
     raise typer.Exit(code=EXIT_VALIDATION)
 
 

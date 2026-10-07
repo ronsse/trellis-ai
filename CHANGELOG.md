@@ -1271,6 +1271,13 @@ All notable changes to Trellis will be documented in this file.
   text. `MigrationReport` keeps the raw text, as does the
   `--continue-on-error` error log on stderr.
   ([#757](https://github.com/ronsse/trellis-ai/pull/757))
+- **Four more CLI failure lines are no longer hard-wrapped at the console
+  width.** The same exposure #750 fixed for 16 sites also applied to
+  `admin migrate-graph`'s "Invalid YAML in ..." line and to the
+  "File not found" / "Path not found" lines of `ingest trace`, `evidence`,
+  `dbt-manifest`, `openlineage`, `conversations` and `corpus`. They now
+  print unwrapped the same way. Text, colour, JSON output and exit codes
+  are unchanged. ([#758](https://github.com/ronsse/trellis-ai/pull/758))
 - **The error sanitizer also suppresses Neo4j's constraint-*creation* text,
   not just the write-time violation #753 covers.** The stores' own startup
   schema DDL, `CREATE CONSTRAINT ... IS UNIQUE`, quotes the value too when
