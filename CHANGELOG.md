@@ -1300,6 +1300,20 @@ All notable changes to Trellis will be documented in this file.
   filter key, so it names the literal facet; a NUL now raises `ValueError`
   before any SQL runs.
   ([#756](https://github.com/ronsse/trellis-ai/pull/756) follow-up 1)
+- **Every remaining CLI failure line is wrapped, and a rule now stops a new
+  one from going unwrapped.** #750 and #758 each hand-fixed a batch of
+  these lines; each left same-shaped ones behind, and nothing caught the
+  next batch forming. The 49 lines the #758 gate's own scan found still
+  missing `soft_wrap=True` — a `*console.print` of a `[red]`/`[bold red]`
+  f-string with an interpolation, followed by a non-zero `typer.Exit` /
+  `SystemExit` — now carry it; text, escaping, exit codes and `--format
+  json` output are unchanged. `extract_refresh.py`'s `Source {source!r}
+  not declared in ...` line (one of the 49) also gets `escape(repr(...))`,
+  matching the house pattern used at its neighboring sites — an identical
+  `[yellow]` line three statements below was left as a follow-up. A new
+  AST rule, `tests/unit/test_cli_failure_soft_wrap_rule.py`, now fails if a
+  future failure line goes unwrapped. (follow-up to
+  [#758](https://github.com/ronsse/trellis-ai/pull/758); PR link added once opened)
 
 ## [0.9.0] - 2026-05-13
 

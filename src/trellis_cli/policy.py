@@ -316,7 +316,9 @@ def show_policy(
         if output_format == "json":
             _print_json(_policy_not_found(policy_id))
         else:
-            console.print(f"[red]Policy not found: {escape(policy_id)}[/red]")
+            console.print(
+                f"[red]Policy not found: {escape(policy_id)}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
@@ -443,7 +445,9 @@ def remove_policy(
         if output_format == "json":
             _print_json(_policy_not_found(policy_id))
         else:
-            console.print(f"[red]Policy not found: {escape(policy_id)}[/red]")
+            console.print(
+                f"[red]Policy not found: {escape(policy_id)}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_INTERNAL)
 
     try:

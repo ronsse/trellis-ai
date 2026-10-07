@@ -53,7 +53,8 @@ def _parse_tags(
                 )
             else:
                 console.print(
-                    f"[red]Invalid --tag {escape(repr(raw))}: expected k=v[/red]"
+                    f"[red]Invalid --tag {escape(repr(raw))}: expected k=v[/red]",
+                    soft_wrap=True,
                 )
             raise typer.Exit(code=EXIT_VALIDATION)
         metadata[key.strip()] = value.strip()

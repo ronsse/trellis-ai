@@ -427,7 +427,8 @@ def show_proposal_command(
         else:
             console.print(
                 "[red]No PROPOSAL_DRAFTED event for proposal_id="
-                f"{escape(repr(proposal_id))}.[/red]"
+                f"{escape(repr(proposal_id))}.[/red]",
+                soft_wrap=True,
             )
             console.print(
                 "[dim]Run 'trellis admin list-proposals' to see available IDs.[/dim]"

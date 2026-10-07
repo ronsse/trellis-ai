@@ -144,7 +144,7 @@ def link(
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
             _print_warnings(result.warnings)
         raise typer.Exit(code=refusal_exit_code(result))
 
@@ -263,7 +263,7 @@ def prune(
         if output_format == "json":
             emit_json({"status": "error", "message": message})
         else:
-            console.print(f"[red]{message}[/red]")
+            console.print(f"[red]{message}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_VALIDATION)
 
     cmd = Command(
@@ -285,7 +285,7 @@ def prune(
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
             _print_warnings(result.warnings)
         raise typer.Exit(code=refusal_exit_code(result))
 
@@ -345,7 +345,7 @@ def restore(
             if output_format == "json":
                 emit_json({"status": "error", "message": unreadable})
             else:
-                console.print(f"[red]{escape(unreadable)}[/red]")
+                console.print(f"[red]{escape(unreadable)}[/red]", soft_wrap=True)
             raise typer.Exit(code=EXIT_VALIDATION) from exc
         ids.extend(line.strip() for line in text.splitlines() if line.strip())
     if not ids:
@@ -353,7 +353,7 @@ def restore(
         if output_format == "json":
             emit_json({"status": "error", "message": message})
         else:
-            console.print(f"[red]{message}[/red]")
+            console.print(f"[red]{message}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_VALIDATION)
 
     cmd = Command(
@@ -375,7 +375,7 @@ def restore(
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
             _print_warnings(result.warnings)
         raise typer.Exit(code=refusal_exit_code(result))
 
@@ -453,7 +453,7 @@ def redact(
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
             _print_warnings(result.warnings)
         raise typer.Exit(code=refusal_exit_code(result))
 
@@ -501,7 +501,8 @@ def entity(
                 )
             else:
                 console.print(
-                    f"[red]Invalid JSON for --properties[/red]: {escape(str(exc))}"
+                    f"[red]Invalid JSON for --properties[/red]: {escape(str(exc))}",
+                    soft_wrap=True,
                 )
             raise typer.Exit(code=EXIT_VALIDATION) from exc
 
@@ -528,7 +529,7 @@ def entity(
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
             _print_warnings(result.warnings)
         raise typer.Exit(code=refusal_exit_code(result))
 
@@ -587,7 +588,7 @@ def feedback(
         if output_format == "json":
             emit_json({"status": "error", "message": message})
         else:
-            console.print(f"[red]{message}[/red]")
+            console.print(f"[red]{message}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_VALIDATION)
     args: dict[str, object] = {"target_id": target_id, "rating": rating}
     if comment:

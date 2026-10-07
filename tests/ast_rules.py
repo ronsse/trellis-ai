@@ -208,6 +208,7 @@ __all__ = [
     "assert_scan_is_not_vacuous",
     "calls_named",
     "calls_to_any",
+    "cli_failure_exit_sites",
     "construction_names",
     "construction_sites",
     "decoy_lines",
@@ -216,6 +217,8 @@ __all__ = [
     "iter_modules",
     "marker_lines",
     "name_of",
+    "parent_map",
+    "raises_nonzero_exit",
     "render_evasion_corpus",
 ]
 
@@ -421,6 +424,154 @@ def generate_call_sites(root: Path) -> list[CallSite]:
                 for keyword in node.keywords
             )
         )
+    return sites
+
+
+def parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    """Map every node in *tree* to its direct parent.
+
+    ``tests/unit/test_governed_write_rule.py`` and
+    ``tests/unit/test_llm_consumer_rule.py`` each build this dict locally
+    with the same one-line comprehension, which is the module's own
+    thesis — a predicate reinvented twice is a missing shared primitive,
+    not two careless authors. A rule that needs to climb from a call up
+    through its enclosing statements (an ``if``/``try``/``with`` nest, a
+    function, the module) builds this once per tree and reuses it for
+    every query, so two climbs over the same tree cannot disagree about
+    what a node's parent is.
+    """
+    mapping: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            mapping[child] = node
+    return mapping
+
+
+#: Spellings this repo raises to end the process. Matches the #758 gate's
+#: own completeness probe (``probes/g758/scan.py::raises_exit``), which
+#: cross-checked clean against a grep count before this module existed.
+_PROCESS_EXIT_NAMES = frozenset(
+    {"typer.Exit", "SystemExit", "Exit", "click.exceptions.Exit"}
+)
+
+
+def raises_nonzero_exit(stmt: ast.stmt) -> bool:
+    """Does *stmt* raise ``typer.Exit``/``SystemExit`` with a non-zero code?
+
+    ``typer.Exit()`` and ``SystemExit()`` both default their code to ``0``,
+    so a bare call or an explicit ``0``/``None`` reads as a *successful*
+    exit and this returns ``False`` for it — only a raise that can end the
+    process non-zero counts. This is deliberately narrower than
+    ``test_format_exit_parity_rule.py``'s ``_exit_kind``: that one grades a
+    whole block's *reachable* exit level across helper calls for a
+    branch-symmetry question; this one asks whether one concrete
+    ``ast.Raise`` statement is a non-zero exit, which is all a failure-line
+    rule needs and is cheap enough to call from inside a climb over
+    enclosing blocks.
+    """
+    if not isinstance(stmt, ast.Raise) or stmt.exc is None:
+        return False
+    exc = stmt.exc
+    func = exc.func if isinstance(exc, ast.Call) else exc
+    if ast.unparse(func) not in _PROCESS_EXIT_NAMES:
+        return False
+    if not isinstance(exc, ast.Call):
+        return True
+    args = list(exc.args) + [kw.value for kw in exc.keywords if kw.arg == "code"]
+    if not args:
+        return False
+    first = args[0]
+    return not (isinstance(first, ast.Constant) and first.value in (0, None))
+
+
+_ENCLOSING_BLOCK_FIELDS = ("body", "orelse", "finalbody")
+
+
+def _statement_owning(node: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> ast.stmt:
+    current = node
+    while not isinstance(current, ast.stmt):
+        current = parents[current]
+    return current
+
+
+def _exit_follows(call: ast.Call, parents: Mapping[ast.AST, ast.AST]) -> bool:
+    """Does a non-zero exit follow *call*'s statement in its own block or
+    an enclosing one?
+
+    Climbs from the call's own statement through each enclosing
+    ``if``/``try``/``with``/``for``/``while`` up to the nearest function or
+    the module, and at every level checks the statements *after* the
+    current one in whichever of ``body``/``orelse``/``finalbody`` holds it.
+    An exit in a sibling ``except`` handler of the same ``try`` is not
+    "after" the call in any of those three sequences and so is not
+    counted — residue, not a claim that no such site exists.
+    """
+    current = _statement_owning(call, parents)
+    while not isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+        owner = parents[current]
+        for field_name in _ENCLOSING_BLOCK_FIELDS:
+            sequence = getattr(owner, field_name, None)
+            if isinstance(sequence, list) and current in sequence:
+                later = sequence[sequence.index(current) + 1 :]
+                if any(raises_nonzero_exit(later_stmt) for later_stmt in later):
+                    return True
+        current = owner
+    return False
+
+
+def _is_console_print_call(node: ast.AST) -> bool:
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        return False
+    if node.func.attr != "print":
+        return False
+    receiver = name_of(node.func.value)
+    return bool(receiver) and receiver.lower().endswith("console")
+
+
+def cli_failure_exit_sites(root: Path) -> list[CallSite]:
+    """Every ``*console.print(f"...")`` failure line under *root*.
+
+    A site renders ``[red]``/``[bold red]`` text with at least one
+    f-string interpolation, and a non-zero ``typer.Exit``/``SystemExit``
+    follows it in the same or an enclosing block (:func:`_exit_follows`) —
+    a message an operator might copy or script against, on the path where
+    the command is about to end the process non-zero. Returned regardless
+    of whether the call already carries ``soft_wrap=True``, so the result
+    is the *population* a wrap rule reasons over, not its violations; a
+    caller filters by inspecting ``site.node.keywords`` for the kwarg it
+    cares about. Lifted from the #758 gate's own completeness probe
+    (``probes/g758/scan.py``), re-derived independently here rather than
+    imported, per this module's own cross-check requirement.
+
+    A red line with no exit after it, and an exit that is reachable only
+    through a sibling ``except`` handler of the call's own ``try``
+    (:func:`_exit_follows`'s residue), are both excluded on purpose: the
+    former is not a failure line in this rule's sense, and the latter is a
+    shape no scanner here resolves.
+    """
+    sites: list[CallSite] = []
+    for path, tree in iter_modules(root):
+        parents = parent_map(tree)
+        for node in ast.walk(tree):
+            if not _is_console_print_call(node):
+                continue
+            call = node
+            assert isinstance(call, ast.Call)
+            if not call.args or not isinstance(call.args[0], ast.JoinedStr):
+                continue
+            fstring = call.args[0]
+            literal = "".join(
+                value.value
+                for value in fstring.values
+                if isinstance(value, ast.Constant) and isinstance(value.value, str)
+            )
+            if "[red]" not in literal and "[bold red]" not in literal:
+                continue
+            if not any(isinstance(v, ast.FormattedValue) for v in fstring.values):
+                continue
+            if not _exit_follows(call, parents):
+                continue
+            sites.append(CallSite(path=path, node=call))
     return sites
 
 
