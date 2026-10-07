@@ -32,7 +32,7 @@ from trellis.ops.write_health import (
 from trellis.schemas import trace as trace_schemas
 from trellis.schemas.enums import OutcomeStatus
 from trellis.schemas.trace import EvidenceRef, Outcome, Trace, TraceStep
-from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.event_log import Event, EventLog, EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 #: Every model name in the trace schema. A hint may name only the model
@@ -769,6 +769,96 @@ class TestServeAttribution:
         assert report.pack_attribution_rate == pytest.approx(1.0)
 
 
+class TestFailedStrategies:
+    """#775 F3 / #761 follow-up A — a failed retrieval axis reaching health.
+
+    ``PackBuilder`` keeps serving the surviving axes when one strategy
+    raises, recording the failure only in ``PACK_ASSEMBLED.strategy_failures``
+    and one ERROR log line. These tests pin the aggregate this surface adds:
+    a count, the count per strategy name, and the latest occurrence, read
+    off the same ``PACK_ASSEMBLED`` scan ``summarize_serve_attribution``
+    already performs for attribution coverage.
+    """
+
+    def test_one_failed_strategy_pack_is_counted(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={
+                "strategy_failures": [
+                    {
+                        "strategy": "semantic",
+                        "error_class": "RuntimeError",
+                        "message": "synthetic, never asserted",
+                    }
+                ]
+            },
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.failed_strategies.packs == 1
+        assert report.failed_strategies.by_strategy == {"semantic": 1}
+        assert report.failed_strategies.latest_at is not None
+
+    def test_clean_packs_report_no_failures(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={"strategy_failures": []},
+        )
+        event_log.emit(EventType.PACK_ASSEMBLED, "pack_builder", payload={})
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.failed_strategies.packs == 0
+        assert report.failed_strategies.by_strategy == {}
+        assert report.failed_strategies.latest_at is None
+
+    def test_failures_tallied_per_strategy_across_packs(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={"strategy_failures": [{"strategy": "semantic"}]},
+        )
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={
+                "strategy_failures": [
+                    {"strategy": "semantic"},
+                    {"strategy": "graph"},
+                ]
+            },
+        )
+        event_log.emit(EventType.PACK_ASSEMBLED, "pack_builder", payload={})
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.failed_strategies.packs == 2
+        assert report.failed_strategies.by_strategy == {"semantic": 2, "graph": 1}
+
+    def test_failure_outside_window_is_not_counted(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.append(
+            Event(
+                event_type=EventType.PACK_ASSEMBLED,
+                source="pack_builder",
+                occurred_at=datetime.now(tz=UTC) - timedelta(days=10),
+                payload={"strategy_failures": [{"strategy": "semantic"}]},
+            )
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.failed_strategies.packs == 0
+        assert report.failed_strategies.by_strategy == {}
+        assert report.failed_strategies.latest_at is None
+
+
 class TestBackendHealth:
     def test_unattributed_feedback_warns(self, tmp_path: Path) -> None:
         """The starvation signature: feedback exists, none attributed."""
@@ -818,6 +908,56 @@ class TestBackendHealth:
         assert report.status == "ok"
         assert report.reasons == []
         assert report.model_dump()["write"]["attempts"] == 0
+
+    def test_failed_strategy_pack_warns_without_exception_text(
+        self, tmp_path: Path
+    ) -> None:
+        """#775 F3 / #761 follow-up A — the new reason, and nothing leaked."""
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={
+                "strategy_failures": [
+                    {
+                        "strategy": "semantic",
+                        "error_class": "RuntimeError",
+                        "message": "secret/path/or.dsn=synthetic-never-real",
+                    }
+                ]
+            },
+        )
+
+        report = summarize_backend_health(event_log, days=1)
+
+        assert report.status == "warn"
+        assert any("semantic" in reason for reason in report.reasons)
+        assert any("failed retrieval strategy" in reason for reason in report.reasons)
+        dumped = json.dumps(report.model_dump(mode="json"))
+        assert "secret/path/or.dsn" not in dumped
+        assert "RuntimeError" not in dumped
+        for reason in report.reasons:
+            assert "secret/path/or.dsn" not in reason
+            assert "RuntimeError" not in reason
+
+    def test_only_clean_packs_add_no_failed_strategy_reason(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={
+                "injected_items": [{"item_id": "a"}],
+                "strategy_failures": [],
+            },
+        )
+        event_log.emit(EventType.PACK_ASSEMBLED, "pack_builder", payload={})
+
+        report = summarize_backend_health(event_log, days=1)
+
+        assert report.status == "ok"
+        assert report.reasons == []
 
 
 class TestRetrievalAvailabilityDisclosure:

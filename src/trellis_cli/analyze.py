@@ -95,6 +95,7 @@ if TYPE_CHECKING:
         HoldoutHorizon,
         HoldoutReport,
     )
+    from trellis.ops.write_health import ServeAttributionReport
 
 logger = structlog.get_logger(__name__)
 
@@ -626,6 +627,33 @@ def _print_capture_coverage(capture: CaptureCoverageReport) -> None:
         console.print(f"    [dim]{note}[/dim]")
 
 
+def _print_failed_strategies(serve: ServeAttributionReport) -> None:
+    """Render the failed-retrieval-strategy line of ``analyze health``.
+
+    #775 F3 / #761 follow-up A. ``PackBuilder`` keeps serving the surviving
+    axes when one ``SearchStrategy`` raises, recording the failure only in
+    ``PACK_ASSEMBLED.strategy_failures`` and one ERROR log line — this is
+    the only place that aggregate reaches an operator. Strategy names are
+    escaped per the house Rich rule; never the exception's class or
+    message, which can carry a path or a DSN fragment.
+    """
+    failed = serve.failed_strategies
+    if not failed.packs:
+        return
+    by_strategy = ", ".join(
+        f"{escape(name)}: {count}"
+        for name, count in sorted(
+            failed.by_strategy.items(), key=lambda item: (-item[1], item[0])
+        )
+    )
+    latest = f"{failed.latest_at:%Y-%m-%d %H:%M} UTC" if failed.latest_at else "unknown"
+    console.print(
+        f"    [yellow]strategy failures[/yellow] "
+        f"{escape(str(failed.packs))} pack(s) hit a failed retrieval axis "
+        f"({by_strategy}), latest {latest}"
+    )
+
+
 @analyze_app.command("health")
 def health(
     days: int = typer.Option(7, help="Days of history to analyze"),
@@ -748,6 +776,7 @@ def health(
             f"that cited them, across {serve.packs_with_stray_citations} "
             f"pack(s){detail}"
         )
+    _print_failed_strategies(serve)
     if serve.retrieval_availability_note:
         # #365. Printed next to the number it qualifies, not in a footnote:
         # untargeted feedback is routinely read as "agents are not

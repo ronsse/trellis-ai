@@ -1398,6 +1398,20 @@ All notable changes to Trellis will be documented in this file.
   past it. The result names the error's type alone; the audit event keeps
   the error's text, which can quote the values being written.
   ([#773](https://github.com/ronsse/trellis-ai/pull/773))
+- **`trellis analyze health` surfaces a failed retrieval strategy.** When one
+  `PackBuilder` strategy raised, the surviving axes kept serving and the
+  failure was recorded only in the `PACK_ASSEMBLED` event's
+  `strategy_failures` payload field plus one ERROR log line — invisible to
+  an operator unless they read raw events, even if an axis failed on every
+  pack for a week. `summarize_serve_attribution` now tallies
+  `strategy_failures` off the same `PACK_ASSEMBLED` scan it already reads
+  for attribution coverage (no second query), reporting a count, a
+  per-strategy breakdown, and the latest occurrence. Any such pack in the
+  window adds a named `warn` reason in both `trellis analyze health` and its
+  `--format json` payload. Counts and strategy names only — never the
+  exception's class or message, which can carry a path or a DSN fragment.
+  ([#775](https://github.com/ronsse/trellis-ai/pull/775) follow-up F3 /
+  [#761](https://github.com/ronsse/trellis-ai/pull/761) follow-up A)
 
 ## [0.9.0] - 2026-05-13
 
