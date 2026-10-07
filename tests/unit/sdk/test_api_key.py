@@ -41,10 +41,8 @@ def _recording_handler(calls: list[dict[str, str]]):
 def _repr_recording_handler(reprs: list[str]):
     """A handler that records ``repr(request.headers)`` and answers 200.
 
-    This is what an ``httpx`` event hook (or anything that logs
-    ``request.headers``) would see — ``repr(Headers)`` masks only the
-    ``Authorization`` entry (as ``[secure]``); it does not touch
-    ``X-API-Key``.
+    ``repr(Headers)`` masks only the ``Authorization`` entry (as
+    ``[secure]``); ``dict()`` or ``.items()`` of the same headers does not.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -97,6 +95,7 @@ class TestApiKeyHeaderSync:
         assert len(calls) == 2
         for headers in calls:
             assert AUTHORIZATION_HEADER.lower() not in headers
+            assert all(_SYNTHETIC_KEY not in value for value in headers.values())
 
     def test_header_repr_masks_key(self) -> None:
         reprs: list[str] = []
@@ -140,6 +139,7 @@ class TestApiKeyHeaderAsync:
         assert len(calls) == 2
         for headers in calls:
             assert AUTHORIZATION_HEADER.lower() not in headers
+            assert all(_SYNTHETIC_KEY not in value for value in headers.values())
 
     async def test_header_repr_masks_key(self) -> None:
         reprs: list[str] = []

@@ -205,11 +205,10 @@ All notable changes to Trellis will be documented in this file.
   `TrellisClientError` unless the caller injected
   `http=httpx.Client(headers=...)`. Both clients now take a keyword-only
   `api_key=`, sent as `Authorization: Bearer` on every request including
-  the version handshake (the server accepts this or `X-API-Key` on the
-  same scopes; `httpx` masks only `Authorization` in a header repr and
-  strips only it on a cross-origin redirect). Nothing is read from the
-  environment. An empty `api_key=`, or one beside an injected `http=`,
-  raises `ValueError`.
+  the version handshake (the server also accepts `X-API-Key`, on the same
+  scopes; `httpx` masks only `Authorization` in a header repr). Nothing is
+  read from the environment. An empty `api_key=`, or one beside an
+  injected `http=`, raises `ValueError`.
   (follow-up from the [#804](https://github.com/ronsse/trellis-ai/pull/804) gate)
 
 ### Changed
