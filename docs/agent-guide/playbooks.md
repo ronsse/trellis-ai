@@ -443,6 +443,7 @@ client.close()
 ### If It Fails
 
 - **`TrellisTransportError`:** nothing answered at `base_url`; start the API server (`trellis admin serve`) and read its log, since a store misconfiguration stops it before it listens.
+- **`TrellisClientError` with a 401 status:** the client sent no credential to a server running `TRELLIS_AUTH_MODE=required`, or sent one the server does not accept; pass a valid key as `api_key=` to `TrellisClient`/`AsyncTrellisClient` rather than injecting `http=httpx.Client(headers=...)` by hand.
 
 ---
 

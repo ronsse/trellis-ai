@@ -200,6 +200,14 @@ All notable changes to Trellis will be documented in this file.
   not read the rate low and the MDE high. The main-session figures keep the
   whole window and say so. Existing JSON keys and the inferential
   statistics are unchanged.
+- **`TrellisClient`/`AsyncTrellisClient` take `api_key=`.** Against a
+  server running `TRELLIS_AUTH_MODE=required`, SDK calls failed with a 401
+  `TrellisClientError` unless the caller injected
+  `http=httpx.Client(headers=...)`. Both clients now take a keyword-only
+  `api_key=`, sent as `X-API-Key` on every request including the version
+  handshake. Nothing is read from the environment. An empty `api_key=`, or
+  one beside an injected `http=`, raises `ValueError`.
+  (follow-up from the [#804](https://github.com/ronsse/trellis-ai/pull/804) gate)
 
 ### Changed
 
