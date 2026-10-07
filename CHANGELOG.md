@@ -1409,6 +1409,20 @@ All notable changes to Trellis will be documented in this file.
   resolves again until one succeeds, so `/packs` keeps answering `409`
   and MCP `get_context` keeps erroring while the configuration is broken.
   ([#779](https://github.com/ronsse/trellis-ai/pull/779))
+- **A driver's broken install can no longer mask a handler's own failure in
+  `MutationExecutor`.** #773's lookup imported `psycopg` and
+  `neo4j.exceptions` the first time an exception reached a handler-panic
+  catch, caching the result with `lru_cache`. If an installed driver's
+  import raised anything other than `ImportError` (a broken install, a
+  native-library load failure), that error escaped `execute()` in place of
+  the handler's own FAILED result — on every call, because `lru_cache` does
+  not cache a raise. The lookup now reads `sys.modules.get("psycopg")` /
+  `sys.modules.get("neo4j.exceptions")` instead: an exception of a driver's
+  class can only exist if that driver's module is already imported, so the
+  classes can be found without ever importing anything, and the cache (now
+  pointless, and itself a staleness risk once a store imports a driver for
+  the first time after an earlier catch) is gone.
+  (#773 follow-up 2)
 
 ## [0.9.0] - 2026-05-13
 

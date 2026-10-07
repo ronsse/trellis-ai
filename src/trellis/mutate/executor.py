@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import functools
 import sqlite3
+import sys
 from collections import OrderedDict
 from typing import Protocol
 
@@ -78,33 +78,29 @@ _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
 )
 
 
-@functools.lru_cache(maxsize=1)
 def _optional_driver_panics() -> tuple[type[BaseException], ...]:
     """``psycopg.Error`` and the Bolt driver's ``DriverError``/``Neo4jError``,
-    for each of the two packages that is installed.
+    for whichever of the two packages is already imported.
 
-    Importing ``trellis.mutate.executor`` must not import either optional
-    driver (``tests/unit/mutate/test_executor_optional_deps.py``), so this
-    runs when an exception first reaches a catch that calls it, and
-    ``lru_cache`` keeps a missing extra from being retried after that.
+    Looked up in ``sys.modules`` rather than imported: an exception of a
+    driver's class can only exist if that driver's module is already
+    imported (the Postgres and Bolt stores import theirs directly), so this
+    never needs to import anything itself, and
+    ``trellis.mutate.executor`` importing neither optional driver
+    (``tests/unit/mutate/test_executor_optional_deps.py``) follows for free.
+    Not cached: a store that imports its driver for the first time *after*
+    an earlier catch must still be recognised on the next one, and a cached
+    result taken before that import would stay stale for the rest of the
+    process.
     """
     panics: list[type[BaseException]] = []
-    try:
-        import psycopg  # noqa: PLC0415 — deferred, see the docstring above
-
-        has_psycopg = True
-    except ImportError:
-        has_psycopg = False
-    if has_psycopg:
+    psycopg = sys.modules.get("psycopg")
+    if psycopg is not None:
         panics.append(psycopg.Error)
-    try:
-        from neo4j.exceptions import DriverError, Neo4jError  # noqa: PLC0415
-
-        has_neo4j = True
-    except ImportError:
-        has_neo4j = False
-    if has_neo4j:
-        panics.extend((DriverError, Neo4jError))
+    neo4j_exceptions = sys.modules.get("neo4j.exceptions")
+    if neo4j_exceptions is not None:
+        panics.append(neo4j_exceptions.DriverError)
+        panics.append(neo4j_exceptions.Neo4jError)
     return tuple(panics)
 
 

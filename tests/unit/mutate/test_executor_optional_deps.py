@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
@@ -62,6 +63,115 @@ def test_importing_the_executor_imports_neither_driver() -> None:
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_broken_driver_import_does_not_replace_handler_panic() -> None:
+    """A driver whose import machinery raises something other than
+    ``ImportError`` (a broken install, a native-library load failure) must
+    not replace a handler's own ``RuntimeError`` and FAILED result with an
+    escaping exception. A fresh interpreter, because this installs a
+    meta-path finder that would otherwise affect other tests' imports.
+    """
+    script = (
+        "import sys\n"
+        "import importlib.abc\n"
+        "import tempfile\n"
+        "from pathlib import Path\n"
+        "\n"
+        "class _BoomFinder(importlib.abc.MetaPathFinder):\n"
+        "    def find_module(self, fullname, path=None):\n"
+        "        if fullname == 'psycopg':\n"
+        "            raise RuntimeError('synthetic broken install')\n"
+        "        return None\n"
+        "\n"
+        "sys.meta_path.insert(0, _BoomFinder())\n"
+        "\n"
+        "from trellis.mutate.commands import Command, Operation\n"
+        "from trellis.mutate.executor import MutationExecutor\n"
+        "from trellis.stores.sqlite.event_log import SQLiteEventLog\n"
+        "\n"
+        "class _Raises:\n"
+        "    def handle(self, command):\n"
+        "        raise RuntimeError('synthetic handler panic')\n"
+        "\n"
+        "with tempfile.TemporaryDirectory() as tmp:\n"
+        "    log = SQLiteEventLog(Path(tmp) / 'events.db')\n"
+        "    executor = MutationExecutor(\n"
+        "        event_log=log, handlers={Operation.ENTITY_CREATE: _Raises()}\n"
+        "    )\n"
+        "    command = Command(\n"
+        "        operation=Operation.ENTITY_CREATE,\n"
+        "        args={'entity_type': 'service', 'name': 'synthetic'},\n"
+        "        command_id='cmd-broken-driver-1',\n"
+        "        requested_by='test:synthetic',\n"
+        "    )\n"
+        "    result = executor.execute(command)\n"
+        "    assert result.status.value == 'failed', result\n"
+        "    expected = 'Execution failed: RuntimeError'\n"
+        "    assert result.message == expected, result.message\n"
+        "    log.close()\n"
+    )
+    result = subprocess.run(  # noqa: S603 — fixed interpreter + inline script, no shell
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": repo_src_pythonpath()},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_driver_imported_after_first_catch_is_still_recognised(
+    event_log: SQLiteEventLog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A driver a store imports for the first time *after* the executor's
+    first handler-panic catch must still be recognised on the very next
+    catch — a cached lookup, fixed at the first catch, would stay stale for
+    the rest of the process once a store imports the driver later.
+    """
+    monkeypatch.delitem(sys.modules, "psycopg", raising=False)
+
+    class _SyntheticDriverError(Exception):
+        """Stands in for ``psycopg.Error`` before the module is imported."""
+
+    executor = MutationExecutor(
+        event_log=event_log,
+        handlers={
+            Operation.ENTITY_CREATE: _Raises(
+                _SyntheticDriverError("not yet importable")
+            )
+        },
+    )
+    first_command = Command(
+        operation=Operation.ENTITY_CREATE,
+        args={"entity_type": "service", "name": "synthetic-1"},
+        command_id="cmd-stale-cache-1",
+        requested_by="test:synthetic",
+    )
+    # Before anything has imported a "psycopg" module, this class is not a
+    # recognised handler-panic class — it is a genuine unmapped exception,
+    # so it is expected to propagate. This call only exercises the lookup
+    # once with "psycopg" absent from sys.modules.
+    with pytest.raises(_SyntheticDriverError):
+        executor.execute(first_command)
+
+    # A store now imports the driver for the first time, later in the same
+    # process.
+    fake_psycopg = types.ModuleType("psycopg")
+    fake_psycopg.Error = _SyntheticDriverError  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+
+    second_command = Command(
+        operation=Operation.ENTITY_CREATE,
+        args={"entity_type": "service", "name": "synthetic-2"},
+        command_id="cmd-stale-cache-2",
+        requested_by="test:synthetic",
+    )
+    result = executor.execute(second_command)
+
+    assert result.status == CommandStatus.FAILED
+    assert result.message == f"Execution failed: {_SyntheticDriverError.__name__}"
 
 
 @pytest.mark.parametrize(
