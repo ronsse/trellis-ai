@@ -1300,6 +1300,17 @@ All notable changes to Trellis will be documented in this file.
   filter key, so it names the literal facet; a NUL now raises `ValueError`
   before any SQL runs.
   ([#756](https://github.com/ronsse/trellis-ai/pull/756) follow-up 1)
+- **An MCP tool that catches a store or driver exception sanitizes its text
+  before replying.** 14 sites in `src/trellis/mcp/server.py`, among them
+  `save_memory`'s governed write and `record_observation`, quoted the
+  exception verbatim, so a Postgres `DETAIL` line could return a row value
+  to the agent. They now render it through `_exception_detail`: a
+  `TrellisError` keeps its text, and anything else goes through
+  `sanitize_error_message`. The sites left quote caller-input errors or the
+  executor's own message, and `tests/unit/mcp/test_exception_text_roster.py`
+  fails the build on a new one. An exception a tool does not catch, such as
+  one from `save_knowledge`'s write, still reaches the caller through
+  FastMCP's generic error. (trellis-ai#748)
 
 ## [0.9.0] - 2026-05-13
 
