@@ -292,17 +292,13 @@ class TestBounding:
 
 
 class TestScanWindowBound:
-    """``sanitize_error_message`` scans a bounded window, not the whole
-    text (#763 follow-up 2): the email and credential-URL patterns
-    backtrack quadratically on a long run of word characters, so an
-    unbounded scan of caller-controlled exception text can stall a
-    request for seconds to minutes."""
+    """``sanitize_error_message`` scans ``max_len`` plus a fixed margin, not
+    the whole text: the email and credential-URL patterns backtrack
+    quadratically over a long run of word characters."""
 
     def test_long_adversarial_run_sanitizes_well_under_a_second(self) -> None:
-        # 100k chars in the URL-reaching shape; the gate measured base at
-        # ~27s for this size (quadratic in text length). The window bound
-        # makes the scan length independent of the input, so head should
-        # finish in well under the 1s bound even on a loaded CI runner.
+        # An unbounded scan takes ~26 s on this input and the bounded one a
+        # few milliseconds, so the 1 s bound holds on a loaded runner.
         text = "x" * 100_000 + "://"
         start = time.perf_counter()
         out = sanitize_error_message(text)
@@ -311,35 +307,38 @@ class TestScanWindowBound:
         # The 100k-char run is itself a long opaque token either way.
         assert out == SUPPRESSED_MARKER
 
-    def test_email_straddling_the_cut_is_suppressed(self) -> None:
-        # The local part starts 5 chars before max_len; "@example.com"
-        # falls entirely past it, within the scan margin.
-        filler = _filler(DEFAULT_MAX_LEN - 5)
-        text = filler + "alice@example.com" + _filler(50)
-        assert sanitize_error_message(text) == SUPPRESSED_MARKER
-
-    def test_credential_url_straddling_the_cut_is_suppressed(self) -> None:
-        # "postgres:/" (10 chars) lands before max_len; the credential and
-        # its closing "@" fall past it, within the scan margin.
-        filler = _filler(DEFAULT_MAX_LEN - 10)
-        text = filler + "postgres://admin:hunter2pass@" + _filler(50)
+    @pytest.mark.parametrize(
+        "sensitive",
+        [
+            # The closing "@" lands ~170 chars past the cut.
+            "postgresql://svc_reader:"
+            + "%21".join(["Kd8sVq2m"] * 15)
+            + "@db.example.internal/x",
+            # FROM lands ~120 chars past the cut.
+            (
+                "SELECT id, display_name, email_address, phone_number, street_address,"
+                " city, region, postal_code, country_code, created_at, updated_at"
+                " FROM customers"
+            ),
+            # 40 of the token's 60 chars fall past the cut.
+            "Zq9xWv3Lk8" * 6,
+        ],
+        ids=["credential-url", "sql-column-list", "opaque-token"],
+    )
+    def test_secret_straddling_the_cut_is_suppressed(self, sensitive: str) -> None:
+        # Starts 20 chars before max_len, so only its pattern's tail is past it.
+        text = _filler(DEFAULT_MAX_LEN - 21) + " " + sensitive + " " + _filler(50)
         assert sanitize_error_message(text) == SUPPRESSED_MARKER
 
     def test_leak_wholly_beyond_the_window_passes_through_clean(self) -> None:
-        # The secret starts 200 chars past max_len — comfortably past any
-        # reasonable scan margin — so no part of it is in the visible
-        # prefix and no part of it can leak through sanitize_error_message's
-        # output: the window bound's intended, documented consequence
-        # (see PR body). At base (unbounded scan) this is suppressed
-        # instead, since the full text is searched regardless of max_len.
-        leaked_email = "alice@example.com"
-        filler = _filler(DEFAULT_MAX_LEN + 200)
-        text = filler + leaked_email
+        text = _filler(DEFAULT_MAX_LEN + 600) + " alice@example.com"
         out = sanitize_error_message(text)
         assert out == text[:DEFAULT_MAX_LEN] + "…[truncated]"
-        assert leaked_email not in out
-        assert "alice" not in out
-        assert "@" not in out
+
+    def test_window_grows_with_max_len(self) -> None:
+        # Past the default window, but visible under this max_len.
+        text = _filler(DEFAULT_MAX_LEN * 3) + " alice@example.com"
+        assert sanitize_error_message(text, max_len=len(text)) == SUPPRESSED_MARKER
 
 
 class TestPayload:

@@ -1311,20 +1311,14 @@ All notable changes to Trellis will be documented in this file.
   fails the build on a new one. An exception a tool does not catch, such as
   one from `save_knowledge`'s write, still reaches the caller through
   FastMCP's generic error. (trellis-ai#748)
-- **`sanitize_error_message` scans a bounded window instead of the full
-  exception text.** Two of the eight `_LEAK_PATTERNS` entries (the email and
-  inline-credential-URL patterns) backtrack quadratically over a long run of
-  word characters — a 100k-character adversarial string took roughly 27s;
-  with the fix it is flat at well under a millisecond regardless of length.
-  Every heuristic now runs over `text[:max_len + _SCAN_MARGIN]` rather than
-  the whole string; `_SCAN_MARGIN` (80) is sized from the largest minimal
-  match context among all eight patterns for a match starting at the last
-  visible byte, not only the two slow ones. A secret straddling the cut
-  (starting inside the visible prefix, closing just past it) still trips
-  its pattern; a leak whose pattern needs more than the margin to complete
-  is no longer caught — the output never carried anything past the cut
-  anyway, so this only changes an already-truncated text from the static
-  marker to its clean truncated prefix.
+- **`sanitize_error_message` scans a bounded window, not the whole
+  exception text.** The email and inline-credential-URL patterns backtrack
+  quadratically over a long run of word characters, so a 100k-character
+  input took about 26 s. The leak heuristics now scan at most
+  `max_len + 500` characters, a few milliseconds at worst. A secret that
+  starts in the visible prefix still trips its pattern if it completes
+  within 500 characters past the cut; a leak lying wholly past the window
+  now yields the truncated prefix instead of the marker.
   ([#763](https://github.com/ronsse/trellis-ai/pull/763) follow-up 2)
 
 ## [0.9.0] - 2026-05-13

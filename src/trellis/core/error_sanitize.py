@@ -83,16 +83,13 @@ _LONG_TOKEN_RUN = re.compile(
 )
 _PATH_SEPARATORS = frozenset("/\\")
 
-#: Extra characters scanned past ``max_len`` so a leak pattern that
-#: starts inside the visible prefix still trips when it needs a few more
-#: characters to complete. The largest such fixed context among
-#: ``_LEAK_PATTERNS`` today is the Neo4j constraint-violation pattern's
-#: literal text plus its longest declared label/property names
-#: (``AliasClaim``/``claim_key``, ~68 chars starting one character before
-#: the cut) — more than the 40-char long-opaque-token minimum or any
-#: secret-assignment keyword (``authorization``, 13 chars). 80 gives that
-#: headroom.
-_SCAN_MARGIN = 80
+#: Characters scanned past ``max_len``. Only ``text[:max_len]`` reaches the
+#: output, but a secret starting there can complete its pattern past the
+#: cut: a long-opaque-token run needs 40 characters, and the email,
+#: credential-URL and SQL patterns end on the ``@`` or ``from`` that follows
+#: the sensitive text. 500 covers most DSN userinfo and column lists; the
+#: patterns' worst-case backtracking over a 1000-character window is ~3 ms.
+_SCAN_MARGIN = 500
 
 
 def _is_repeated_character_path_component(text: str, match: re.Match[str]) -> bool:
@@ -126,9 +123,10 @@ def sanitize_error_message(text: str, *, max_len: int = DEFAULT_MAX_LEN) -> str:
     value is replaced wholesale with :data:`SUPPRESSED_MARKER` — partial
     redaction is not attempted because any transform of the original
     text risks leaving a recoverable fragment. The heuristics scan only
-    ``text[:max_len + _SCAN_MARGIN]``: nothing past that window can reach
-    the output, so a leak whose pattern needs more than the margin to
-    complete past the cut is treated the same as one that never appears.
+    ``text[:max_len + _SCAN_MARGIN]``, so their cost does not grow with
+    the input. A match that cannot complete inside that window is missed:
+    a leak wholly past it no longer suppresses the visible prefix, and a
+    secret straddling the cut by more than the margin shows its start.
     """
     window = text[: max_len + _SCAN_MARGIN]
     if any(pattern.search(window) for pattern in _LEAK_PATTERNS):
