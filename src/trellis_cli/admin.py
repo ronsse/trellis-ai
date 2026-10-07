@@ -18,7 +18,7 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
-from trellis.core.error_sanitize import describe_yaml_error
+from trellis.core.error_sanitize import describe_yaml_error, sanitize_error_message
 from trellis.core.path_presence import path_is_present
 from trellis.core.version import (
     STALENESS_FRESH,
@@ -1685,7 +1685,10 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
     except Exception as exc:
         # ``str(exc)`` prints the offending line, which can hold a password.
         reason = escape(describe_yaml_error(exc))
-        console.print(f"[red]Invalid YAML in {escape(str(path))}: {reason}[/red]")
+        console.print(
+            f"[red]Invalid YAML in {escape(str(path))}: {reason}[/red]",
+            soft_wrap=True,
+        )
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     graph_block = data.get("graph") if isinstance(data, dict) else None
@@ -1801,7 +1804,10 @@ def migrate_graph(
                 console.print(f"[red]{escape(str(exc))}[/red]")
                 raise typer.Exit(code=EXIT_INTERNAL) from exc
             except MigrationStepError as exc:
-                console.print(f"[red]Migration aborted: {escape(str(exc))}[/red]")
+                # str(exc) embeds the destination store's own error
+                # text, which can quote the row value that tripped it.
+                sanitized = escape(sanitize_error_message(str(exc)))
+                console.print(f"[red]Migration aborted: {sanitized}[/red]")
                 console.print(
                     "[yellow]Re-run with --continue-on-error to capture all "
                     "failures in one pass.[/yellow]"
@@ -1832,11 +1838,19 @@ def migrate_graph(
         from dataclasses import asdict  # noqa: PLC0415
 
         # Errors are list[tuple] which json doesn't serialize directly.
+        # The report keeps the raw text for library callers; only this
+        # payload, which reaches stdout, is sanitized.
         payload = asdict(report)
         payload["errors"] = [
-            {"target": target, "message": msg} for target, msg in payload["errors"]
+            {"target": target, "message": sanitize_error_message(msg)}
+            for target, msg in payload["errors"]
         ]
-        # step_failures already serialize cleanly via asdict (dataclass).
+        # The traceback is dropped, not sanitized: it repeats the text of
+        # every chained exception, and a sanitized traceback is either the
+        # marker or its first 500 characters, which can quote a cause.
+        for failure in payload["step_failures"]:
+            failure["message"] = sanitize_error_message(failure["message"])
+            del failure["traceback"]
         # ``status`` is the house contract for --format json callers
         # (docs/design/adr-cli-exit-codes.md), and it is derived from the
         # same ``failed`` flag as the exit code so the two cannot
@@ -1854,8 +1868,10 @@ def migrate_graph(
             console.print("[red]Errors:[/red]")
             for target, msg in report.errors:
                 # ``target`` is the legacy graph key the migration choked
-                # on — an identifier the operator re-runs against.
-                console.print(f"  [red]{escape(target)}[/red]: {escape(msg)}")
+                # on — an identifier the operator re-runs against. ``msg``
+                # is sanitized as in the JSON branch above.
+                sanitized_msg = escape(sanitize_error_message(msg))
+                console.print(f"  [red]{escape(target)}[/red]: {sanitized_msg}")
 
     if failed:
         raise typer.Exit(code=EXIT_STORE)

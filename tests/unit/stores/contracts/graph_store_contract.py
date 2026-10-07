@@ -693,6 +693,67 @@ class GraphStoreContractTests:
         assert by_key[("syn-c", "syn_rel")]["properties"]["v"] == 2
         assert by_key[("syn-b", "syn_other")]["properties"]["v"] == 1
 
+    def test_upsert_edges_bulk_leaves_closed_version_alone(
+        self, store: GraphStore
+    ) -> None:
+        """A bulk re-upsert closes only the current version of the triplet
+        it names. An already-closed (historical) version of that same
+        edge keeps its ``valid_from`` and ``valid_to`` untouched, and
+        exactly one version stays current.
+
+        Dropping the ``valid_to IS NULL`` guard from the bulk close
+        statement would re-close every version sharing the edge's
+        ``edge_id`` — including this historical one — and rewrite its
+        ``valid_to``, which would silently corrupt ``as_of`` time travel.
+        """
+        store.upsert_nodes_bulk(
+            [
+                {"node_id": "syn-closed-x", "node_type": "service", "properties": {}},
+                {"node_id": "syn-closed-y", "node_type": "service", "properties": {}},
+            ]
+        )
+        store.upsert_edge("syn-closed-x", "syn-closed-y", "syn_rel", {"v": 1})
+        _sleep_for_ordering()
+        # A timestamp strictly between the first and second single-row
+        # versions reads back the first version by its (now-closed)
+        # valid_to, once the second upsert_edge below closes it.
+        between = _now()
+        _sleep_for_ordering()
+        store.upsert_edge("syn-closed-x", "syn-closed-y", "syn_rel", {"v": 2})
+
+        historical_before = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel", as_of=between
+        )
+        assert len(historical_before) == 1
+        closed_valid_from = historical_before[0]["valid_from"]
+        closed_valid_to = historical_before[0]["valid_to"]
+        assert closed_valid_to is not None
+
+        _sleep_for_ordering()
+        store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "syn-closed-x",
+                    "target_id": "syn-closed-y",
+                    "edge_type": "syn_rel",
+                    "properties": {"v": 3},
+                }
+            ]
+        )
+
+        historical_after = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel", as_of=between
+        )
+        assert len(historical_after) == 1
+        assert historical_after[0]["valid_from"] == closed_valid_from
+        assert historical_after[0]["valid_to"] == closed_valid_to
+
+        current = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel"
+        )
+        assert len(current) == 1
+        assert current[0]["properties"]["v"] == 3
+
     def test_upsert_edge_same_triplet_is_idempotent(self, store: GraphStore) -> None:
         """Re-upserting the same edge (single-row) keeps one current version.
 
