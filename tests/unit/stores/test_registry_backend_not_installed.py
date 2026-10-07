@@ -312,6 +312,44 @@ def test_embedding_fn_raises_again_on_second_call_config_path(
         _ = registry.embedding_fn
 
 
+# -- env var outranks config when both are set (#779 follow-up F-b) -------
+
+
+@pytest.mark.parametrize(
+    "config_provider",
+    [
+        pytest.param(
+            "trellis.stores.registry._import_callable",
+            id="config_resolves_to_a_different_callable",
+        ),
+        pytest.param(_UNIMPORTABLE_PATH, id="config_path_does_not_import"),
+    ],
+)
+def test_embedding_fn_env_var_wins_when_config_also_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_provider: str
+) -> None:
+    """``TRELLIS_EMBEDDING_FN`` outranks ``embeddings.provider`` when both are set.
+
+    The property docstring says the env var is checked first and config is
+    consulted "only when the env var is unset" — not a second vote once it
+    IS set. Covers a config provider that resolves to a different callable
+    (a config-wins bug would return that object instead) and one that
+    can't be imported at all (a config-wins bug, or a bug that resolves
+    config for its side effect while still returning the env value, would
+    raise ``ConfigError`` instead). Neither reaches the return: the
+    registry answers the env callable, unchanged, and never raises.
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "trellis.stores.registry._mask_api_key")
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        embeddings={"provider": config_provider},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    assert registry.embedding_fn is _mask_api_key
+
+
 def test_embedding_fn_not_configured_is_still_cached(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
