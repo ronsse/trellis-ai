@@ -349,7 +349,10 @@ _IPV6_URL = "http://[fd00::1]:8420"
 
 # handler, extra CLI args, expected exit code, substrings that must survive verbatim.
 _SMOKE_TEXT_SCENARIOS: dict[
-    str, tuple[Callable[[httpx.Request], httpx.Response], tuple[str, ...], int, tuple[str, ...]]
+    str,
+    tuple[
+        Callable[[httpx.Request], httpx.Response], tuple[str, ...], int, tuple[str, ...]
+    ],
 ] = {
     "check": (_healthz_raises, (), 1, (_BRACKETED_ERROR,)),
     "backend": (_readyz_backend_fails, (), 1, (_BRACKETED_ERROR,)),

@@ -2092,8 +2092,9 @@ def _render_smoke_text(
                 detail = f"{b_status}"
                 if b_latency is not None:
                     detail += f" ({b_latency}ms)"
+                b_name = escape(backend)
                 console.print(
-                    f"        [{b_style}]{escape(backend)}[/{b_style}]: {escape(detail)}"
+                    f"        [{b_style}]{b_name}[/{b_style}]: {escape(detail)}"
                 )
                 if info.get("error"):
                     console.print(
