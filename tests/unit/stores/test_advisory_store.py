@@ -1275,17 +1275,19 @@ class TestTheRecoveryCommandRuns:
         ]
 
     def test_the_recovery_command_survives_a_metacharacter_without_a_space(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A bracket quotes on its own merit, not as a proxy for a space.
+        """A bracket is quoted on its own, not because a space came with it.
 
-        Both cases above pair their metacharacter with a space (``"my
-        [staging] dir"``), so a ``recovery`` rewritten to quote only when a
-        space is present — rather than call ``shlex.quote``, which treats
-        ``[`` as unsafe independently of whitespace — would still pass every
-        test in this class. This is the one case that tells the two apart.
+        ``[`` opens a glob, so an unquoted ``d[staging]/…`` can expand to
+        another path. The case above pairs its bracket with a space, so a
+        ``recovery`` that quoted only on a space would pass it; this one
+        fails that rewrite. The path is relative, after ``chdir``, because
+        under a ``--basetemp`` holding a space an absolute ``tmp_path``
+        would be quoted for the space and the bracket would go untested.
         """
-        data_dir = tmp_path / "d[staging]"
+        monkeypatch.chdir(tmp_path)
+        data_dir = Path("d[staging]")
         data_dir.mkdir()
         path = data_dir / "advisories.json"
         path.write_text("{ broken", encoding="utf-8")
@@ -1301,13 +1303,10 @@ class TestTheRecoveryCommandRuns:
 
         The command is pasted by hand and read by humans; gratuitous quotes
         on the common case would be a regression in the thing this string
-        exists for. Pinned to the literal string rather than
-        ``expected_recovery(path)``: comparing against the helper only pins
-        this claim while ``--basetemp`` itself needs no quoting — under one
-        that does, ``tmp_path`` carries the space and both sides quote, so
-        the comparison passes without checking the "ordinary path" case at
-        all. A relative path built after ``monkeypatch.chdir(tmp_path)``
-        (test_worker.py's shape) keeps the literal basetemp-independent.
+        exists for. A literal on a relative path, after ``chdir``: under a
+        ``--basetemp`` holding a space, an absolute ``tmp_path`` needs
+        quoting, so comparing it with ``expected_recovery`` would quote both
+        sides and check nothing.
         """
         monkeypatch.chdir(tmp_path)
         path = Path("advisories.json")
