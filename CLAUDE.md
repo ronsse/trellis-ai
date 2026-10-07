@@ -60,7 +60,7 @@ All but `trellis_sdk` and `trellis_wire` depend on `trellis` (core library) and 
 | `trellis_api` | `trellis-api` | StoreRegistry in FastAPI lifespan + `Depends()` injection |
 | `trellis_sdk` | (library) | **HTTP-only**: httpx to REST API; no `trellis` import (`test_isolation.py`) |
 | `trellis_workers` | `trellis-session-capture` | Direct imports; `trace_embed` submits Commands to MutationExecutor |
-| `trellis_wire` | (library) | Pydantic DTOs shared by core, API and SDK; no `trellis` import |
+| `trellis_wire` | (library) | Pydantic DTOs shared by core, API and SDK |
 
 ### Governed Mutation Pipeline (`src/trellis/mutate/`)
 
