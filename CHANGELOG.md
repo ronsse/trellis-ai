@@ -1442,6 +1442,16 @@ All notable changes to Trellis will be documented in this file.
   bulk write racing another writer of the same edge can still duplicate it.
   ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 2, also
   the Bolt item from the [#774](https://github.com/ronsse/trellis-ai/pull/774) gate)
+- **`get_context(sections=...)`, `get_objective_context`, `get_task_context`
+  and `get_sectioned_context` report a failed retrieval axis too.** These
+  four share `_sectioned_context`, the one helper #783 left silent: a
+  failed axis reached neither the markdown reply nor any JSON block, so the
+  gap #783 closed for the flat path and the sectioned REST route stayed
+  open on these MCP tools. Same one-line note, same `describe_axes` /
+  `format_failed_axes_note` helpers, same header placement (after
+  `pack_id`, before the withholding note, outside the token budget) as the
+  flat path; a clean reply is unchanged.
+  ([#783](https://github.com/ronsse/trellis-ai/pull/783) follow-up)
 
 ## [0.9.0] - 2026-05-13
 

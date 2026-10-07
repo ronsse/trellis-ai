@@ -1168,6 +1168,21 @@ def _sectioned_context(
             }
             for s in sectioned_pack.sections
         ]
+        # Same axis report the sectioned REST route computes (#775/#783):
+        # build_sectioned() runs every strategy once over one pool and gives
+        # every section the identical strategies_used list, so the first
+        # section's is as good as any. No section (an empty ``sections``
+        # request, unreachable from every caller of this helper today, since
+        # each validates a non-empty list before calling in) means nothing
+        # to report, the same posture the REST route takes.
+        axis_note = ""
+        if sectioned_pack.sections:
+            axes = describe_axes(
+                builder,
+                sectioned_pack.sections[0].retrieval_report.strategies_used,
+                embedder_configured=registry.embedding_fn is not None,
+            )
+            axis_note = format_failed_axes_note(axes["failed"])
         result = format_sectioned_pack_as_markdown(
             section_dicts,
             intent,
@@ -1176,6 +1191,7 @@ def _sectioned_context(
             withholding=withholding_from_payload(
                 sectioned_pack.metadata.get("withholding")
             ),
+            axis_note=axis_note,
         )
         adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
         if adv_md:

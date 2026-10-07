@@ -125,6 +125,44 @@ def test_format_sectioned_pack_omits_relevance_score():
     assert "body" in result
 
 
+def test_format_sectioned_pack_axis_note_appears_once_across_sections():
+    """``axis_note`` is a header-level fact about the whole pack, not a
+    per-section one -- it must render exactly once no matter how many
+    sections carry items (mcp-sectioned-tools-report-failed-axis follow-up
+    to the #783 gate)."""
+    sections = [
+        {
+            "name": "Domain",
+            "items": [
+                {
+                    "item_id": "s1",
+                    "item_type": "document",
+                    "excerpt": "body one",
+                    "relevance_score": 0.9,
+                }
+            ],
+        },
+        {
+            "name": "Operational",
+            "items": [
+                {
+                    "item_id": "s2",
+                    "item_type": "document",
+                    "excerpt": "body two",
+                    "relevance_score": 0.8,
+                }
+            ],
+        },
+    ]
+    result = format_sectioned_pack_as_markdown(
+        sections,
+        "q",
+        max_tokens=2000,
+        axis_note="**Retrieval axis failed:** keyword.",
+    )
+    assert result.count("Retrieval axis failed") == 1
+
+
 def test_format_traces_empty():
     assert "No traces" in format_traces_as_markdown([])
 
