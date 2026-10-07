@@ -37,19 +37,13 @@ except a bulk spec equal to the shown row, which stays a no-op.
 ``upsert_edge`` and ``upsert_edges_bulk`` attach the new edge version to
 the shown row of each endpoint, so such a node does not double an edge
 written from or to it. The existing-edge lookup that closes the prior
-version matches by each endpoint's ``node_id`` property, not the two
-*current* (shown) rows: ``upsert_node`` re-versions a node by closing its
-current row and opening a new one without moving the row's relationships
-(above), so an edge created before an endpoint's later re-version still
-hangs off that now-closed row. Matching through ``node_id`` rather than
-the shown-row binding finds it there too; collecting every current match
-and closing all of them with ``FOREACH`` (as ``upsert_node`` does for its
-own rows) keeps the write to one round trip and self-heals a graph that
-already has more than one, carrying ``edge_id``/``created_at`` forward
-from the :func:`_shown_row` pick among them (#782 follow-up 1 — before
-this, the lookup silently missed a re-versioned endpoint's edge and left
-two current edges for one logical triplet). The new edge is still
-created between the two current shown rows, exactly as before.
+version matches each endpoint by ``node_id`` on any row, closed or
+current: re-versioning a node does not move its rows' relationships
+(above), so an edge written before the re-version still hangs off the
+closed row. The lookup closes every current match with ``FOREACH``, as
+``upsert_node`` does for its own rows, so a triplet that already has two
+current versions heals on its next write, and carries
+``edge_id``/``created_at`` forward from the :func:`_shown_row` pick.
 
 ``upsert_edge`` has its own race, separate from the node-duplication one
 above: an unprotected ``OPTIONAL MATCH`` for the existing edge followed
@@ -1440,11 +1434,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         SET s._cas_lock = true
         REMOVE s._cas_lock
         WITH s, t
-        // Match the existing edge by each endpoint's node_id, not the
-        // `s`/`t` shown-row bindings above: see the module docstring. The
-        // node patterns here are deliberately not `s`/`t` -- they match
-        // any row (closed or current) carrying that node_id, so an edge
-        // left on a since-closed endpoint row is still found and closed.
+        // Each endpoint on any row, not only `s`/`t`: an edge stays on
+        // the row it was written to (module docstring).
         OPTIONAL MATCH (:Node {{node_id: $source_id}})
           -[old:EDGE {{edge_type: $edge_type}}]->(:Node {{node_id: $target_id}})
           WHERE old.valid_to IS NULL
@@ -1598,11 +1589,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                  collect(DISTINCT t) AS target_rows
             WITH row, {_shown_row("source_rows")} AS s,
                  {_shown_row("target_rows")} AS t
-            // Match the existing edge by each endpoint's node_id, not
-            // the `s`/`t` shown-row bindings above: see the module
-            // docstring and upsert_edge. A row's source/target can
-            // still carry an edge hanging off a since-closed row, so
-            // old_s/old_t are matched to ANY row for that node_id.
+            // Each endpoint on any row, not only `s`/`t` (module
+            // docstring), filtered in WHERE per the NB above.
             OPTIONAL MATCH (old_s:Node)-[old:EDGE]->(old_t:Node)
               WHERE old_s.node_id = row.source_id
                 AND old_t.node_id = row.target_id

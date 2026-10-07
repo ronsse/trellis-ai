@@ -787,15 +787,9 @@ def add_duplicate_current_edge(
 ) -> str:
     """Write a second current ``EDGE`` row for one (source, target, type).
 
-    Reproduces the #782 follow-up 1 defect's end state directly: the
-    existing-edge lookup missed the prior version (because an endpoint had
-    been re-versioned), so ``upsert_edge`` minted a fresh ``edge_id`` rather
-    than closing it -- two current edges for one logical triplet, each with
-    its own ``edge_id``, exactly as the unpatched code would leave behind.
-    Unlike :func:`add_current_row`'s node duplicate (same ``node_id``, two
-    rows), the two edges here are distinct relationship instances, which is
-    how Bolt stores a second current edge version. Returns the new row's
-    ``edge_id``.
+    The new row has its own ``edge_id`` and a ``valid_from`` *shift* later:
+    what a lookup that misses the prior version leaves, two current edges
+    for one triplet. Returns the new row's ``edge_id``.
     """
     with store._driver.session(database=store._database) as session:
         record = session.run(
@@ -831,26 +825,17 @@ def add_duplicate_current_edge(
 def _current_edge_count(
     store: Any, source_id: str, target_id: str, edge_type: str
 ) -> int:
-    with store._driver.session(database=store._database) as session:
-        return session.run(
-            "MATCH (s:Node {node_id: $source_id})-[r:EDGE {edge_type: $edge_type}]->"
-            "(t:Node {node_id: $target_id}) WHERE r.valid_to IS NULL "
-            "RETURN count(r) AS c",
-            source_id=source_id,
-            target_id=target_id,
-            edge_type=edge_type,
-        ).single()["c"]
+    return sum(
+        version.get("valid_to") is None and version["edge_type"] == edge_type
+        for version in _edge_versions(store, source_id, target_id)
+    )
 
 
 def check_upsert_edge_heals_a_duplicate_edge(store: Any) -> None:
     """``upsert_edge`` closes every current edge of a doubled triplet, not one.
 
-    Builds the #782 follow-up 1 defect's end state directly (two current
-    edges for one triplet, distinct ``edge_id``\\ s) via
-    :func:`add_duplicate_current_edge`, then upserts the triplet again. A
-    fix that closes only the :func:`_shown_row`-picked match (a plausible
-    off-by-one on the collect/``FOREACH`` change) would leave the other
-    one dangling; this requires zero current rows survive but the new one.
+    The reversion contract cases leave one prior version to close, so
+    only these checks tell closing every match from closing one.
     """
     store.upsert_node("dup-edge-a", "kind-a", {})
     store.upsert_node("dup-edge-b", "kind-b", {})
