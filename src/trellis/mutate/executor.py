@@ -390,11 +390,15 @@ class MutationExecutor:
                 str(exc),
                 policy_warnings=policy_warnings,
             )
+            # The caller reads the type alone. No TrellisError reaches this
+            # catch, and the text of anything else can be a driver's, which
+            # can carry query text and values. The traceback above and the
+            # audit event keep it.
             return CommandResult(
                 command_id=command.command_id,
                 status=CommandStatus.FAILED,
                 operation=command.operation,
-                message=f"Execution failed: {exc}",
+                message=f"Execution failed: {type(exc).__name__}",
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
 

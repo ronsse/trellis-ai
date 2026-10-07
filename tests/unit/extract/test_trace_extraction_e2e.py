@@ -31,6 +31,7 @@ from trellis.mutate.commands import CommandStatus
 from trellis.retrieve.pack_builder import PackBudget, PackBuilder
 from trellis.retrieve.strategies import GraphSearch
 from trellis.schemas.trace import Trace
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 _TRACE_DATA: dict = {
@@ -164,7 +165,18 @@ class TestUnmigratedGraph:
         results = build_curate_executor(registry).execute_batch(batch)
         failed = [r for r in results if r.status is CommandStatus.FAILED]
         assert len(failed) == 1
-        assert "Cannot change node_role" in failed[0].message
+        # The store raises a ValueError, which the caller reads by its type;
+        # the audit event keeps the text that names the role conflict.
+        assert failed[0].message == "Execution failed: ValueError"
+        rejected = [
+            event
+            for event in registry.operational.event_log.get_events(
+                event_type=EventType.MUTATION_REJECTED
+            )
+            if event.payload["command_id"] == failed[0].command_id
+        ]
+        assert len(rejected) == 1
+        assert "Cannot change node_role" in rejected[0].payload["message"]
 
     async def test_reconciled_batch_has_no_failed_commands(
         self, registry: StoreRegistry
