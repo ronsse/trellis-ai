@@ -359,7 +359,7 @@ def migrate_provenance_command(
             }
             emit_json(payload, indent=2)
         else:
-            console.print(f"[red]{escape(str(exc))}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     except typer.Exit:
         raise

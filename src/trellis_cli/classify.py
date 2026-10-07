@@ -170,7 +170,7 @@ def backfill(
         if output_format == "json":
             emit_json({"status": "error", "message": str(exc)})
         else:
-            console.print(f"[red]{escape(str(exc))}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     result = reclassify_stale(
@@ -281,7 +281,8 @@ def _require_llm_facet_classifier() -> Classifier:
             f"[red]classify shadow requires an LLM SDK that is not installed: "
             f"{escape(str(exc))}[/red]\n"
             "[dim]Install it, e.g. 'uv pip install trellis-ai\\[llm-openai]', "
-            "and configure an 'llm:' block in config.yaml.[/dim]"
+            "and configure an 'llm:' block in config.yaml.[/dim]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     if llm is None:
@@ -291,7 +292,8 @@ def _require_llm_facet_classifier() -> Classifier:
             "configured.[/red]\n"
             f"[dim]Add an 'llm:' block to {escape(config_path)} (provider, "
             "api_key_env, model). A local model is the intended default here — "
-            "the pass is ~1.6s per document and runs over the whole corpus.[/dim]"
+            "the pass is ~1.6s per document and runs over the whole corpus.[/dim]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_INTERNAL)
     return build_llm_facet_classifier(
@@ -393,7 +395,8 @@ def shadow(
         if result.errors:
             console.print(
                 f"[red]  {result.errors} document(s) failed and were skipped — "
-                f"see the log for the item IDs.[/red]"
+                f"see the log for the item IDs.[/red]",
+                soft_wrap=True,
             )
         if result.stale_snapshot:
             console.print(
@@ -632,7 +635,7 @@ def tag_candidates(
         if output_format == "json":
             emit_json({"status": "error", "message": message})
         else:
-            console.print(f"[red]{escape(message)}[/red]")
+            console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     if output_format == "json":
@@ -796,7 +799,7 @@ def domain_candidates(
         if output_format == "json":
             emit_json({"status": "error", "message": message})
         else:
-            console.print(f"[red]{escape(message)}[/red]")
+            console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     shown = [c for c in candidates if c.documents_gained >= min_gain]

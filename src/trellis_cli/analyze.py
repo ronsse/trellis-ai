@@ -271,7 +271,7 @@ def _build_learning_registry_or_exit() -> ParameterRegistry:
     try:
         return _build_learning_registry()
     except typer.BadParameter as exc:
-        console.print(f"[red]{escape(str(exc))}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
 
@@ -910,7 +910,7 @@ def replay(
             refill=not no_refill,
         )
     except ValueError as exc:
-        console.print(f"[red]{escape(str(exc))}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=2) from exc
 
     event_log = get_event_log()
@@ -1612,7 +1612,7 @@ def holdout(
         if output_format == "json":
             emit_json({"status": "error", "message": message})
         else:
-            console.print(f"[red]{escape(message)}[/red]")
+            console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_VALIDATION) from exc
 
     if output_format == "json":

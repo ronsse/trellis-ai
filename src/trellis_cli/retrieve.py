@@ -470,7 +470,8 @@ def file_context(
     if output_format not in ("text", "json", "jsonl"):
         console.print(
             f"[red]Unsupported --format {output_format!r};"
-            " expected one of: text, json, jsonl[/red]"
+            " expected one of: text, json, jsonl[/red]",
+            soft_wrap=True,
         )
         raise typer.Exit(EXIT_VALIDATION)
 
