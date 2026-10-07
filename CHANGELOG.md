@@ -1433,6 +1433,15 @@ All notable changes to Trellis will be documented in this file.
   reply is unchanged. `get_context(sections=...)`, `get_objective_context`,
   `get_task_context` and `get_sectioned_context` do not report it yet.
   ([#783](https://github.com/ronsse/trellis-ai/pull/783))
+- **`BoltOpenCypherGraphStore.upsert_edge` (Neo4j and ArcadeDB) leaves one
+  current row per logical edge under concurrency.** Two concurrent writers
+  on the same `(source_id, target_id, edge_type)` could both read "no
+  current edge" and both create one. `upsert_edge` now write-locks the
+  source endpoint's current row before that read, so the second writer
+  reads the first one's row. `upsert_edges_bulk` takes no such lock, so a
+  bulk write racing another writer of the same edge can still duplicate it.
+  ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 2, also
+  the Bolt item from the [#774](https://github.com/ronsse/trellis-ai/pull/774) gate)
 - **A driver's broken install can no longer mask a handler's own failure in
   `MutationExecutor`.** #773's lookup imported `psycopg` and
   `neo4j.exceptions` the first time an exception reached a handler-panic

@@ -34,7 +34,7 @@ pytest.importorskip("neo4j")
 
 from neo4j import ManagedTransaction
 
-from tests.unit.stores import bolt_duplicate_current
+from tests.unit.stores import bolt_duplicate_current, bolt_edge_create_race
 
 URI = os.environ.get("TRELLIS_TEST_NEO4J_URI", "")
 USER = os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j")
@@ -153,6 +153,31 @@ def test_edge_upsert_replaces_current(graph_store):
     edges = graph_store.get_edges("a", direction="outgoing")
     assert len(edges) == 1
     assert edges[0]["properties"]["w"] == 2
+
+
+def _second_neo4j_store():
+    """A second, independent Neo4jGraphStore against the fixture's database."""
+    from trellis.stores.neo4j.graph import Neo4jGraphStore
+
+    return Neo4jGraphStore(URI, user=USER, password=PASSWORD, database=DATABASE)
+
+
+def test_concurrent_edge_create_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_concurrent_edge_create_leaves_one_current_row(
+        graph_store, _second_neo4j_store
+    )
+
+
+def test_concurrent_edge_update_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_concurrent_edge_update_leaves_one_current_row(
+        graph_store, _second_neo4j_store
+    )
+
+
+def test_edge_write_racing_node_upsert_keeps_one_current_node(graph_store):
+    bolt_edge_create_race.check_edge_write_racing_node_upsert_keeps_one_current_node(
+        graph_store, _second_neo4j_store
+    )
 
 
 def test_get_edges_incoming(graph_store):

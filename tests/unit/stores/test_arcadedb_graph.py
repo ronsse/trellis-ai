@@ -32,7 +32,7 @@ pytest.importorskip("neo4j")
 
 from neo4j import ManagedTransaction
 
-from tests.unit.stores import bolt_duplicate_current
+from tests.unit.stores import bolt_duplicate_current, bolt_edge_create_race
 
 URI = os.environ.get("TRELLIS_TEST_ARCADEDB_URI", "")
 USER = os.environ.get("TRELLIS_TEST_ARCADEDB_USER", "root")
@@ -254,6 +254,38 @@ def test_upsert_edge_missing_endpoints_raises(graph_store, source_id, target_id)
     with pytest.raises(ValueError, match="no current version"):
         graph_store.upsert_edge(source_id, target_id, "links_to")
     assert graph_store.count_edges() == 0
+
+
+def _second_arcadedb_store():
+    """A second, independent ArcadeDBGraphStore against the fixture's database."""
+    from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
+
+    return ArcadeDBGraphStore(
+        URI,
+        user=USER,
+        password=PASSWORD,
+        database=DATABASE,
+        http_url=HTTP_URL,
+        ensure_database_exists=True,
+    )
+
+
+def test_concurrent_edge_create_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_concurrent_edge_create_leaves_one_current_row(
+        graph_store, _second_arcadedb_store
+    )
+
+
+def test_concurrent_edge_update_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_concurrent_edge_update_leaves_one_current_row(
+        graph_store, _second_arcadedb_store
+    )
+
+
+def test_edge_write_racing_node_upsert_keeps_one_current_node(graph_store):
+    bolt_edge_create_race.check_edge_write_racing_node_upsert_keeps_one_current_node(
+        graph_store, _second_arcadedb_store
+    )
 
 
 def _purge_after_endpoint_check(store, monkeypatch, gone: str) -> None:
