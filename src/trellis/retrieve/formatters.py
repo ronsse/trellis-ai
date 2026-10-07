@@ -64,6 +64,7 @@ def format_pack_as_markdown(
     pack_id: str | None = None,
     withholding: WithholdingSummary | None = None,
     empty_text: str | None = None,
+    axis_note: str = "",
 ) -> str:
     """Format pack items as concise markdown for LLM consumption.
 
@@ -97,6 +98,12 @@ def format_pack_as_markdown(
         empty_text: Line rendered in place of the item blocks when
             ``items`` is empty, so an empty pack keeps its ``pack_id``
             header and citation footer.
+        axis_note: One line naming a failed retrieval axis (from
+            :func:`~trellis.retrieve.builder_factory.format_failed_axes_note`),
+            or ``""`` when none failed. Same header placement and
+            not-charged-to-budget rule as ``withholding``, and for the same
+            reason: this is the markdown surface, so a caller who never
+            reads ``PACK_ASSEMBLED.strategy_failures`` still sees the gap.
 
     Returns:
         Markdown-formatted string within token budget.
@@ -104,6 +111,8 @@ def format_pack_as_markdown(
     lines = [f"# Context for: {intent}"]
     if pack_id:
         lines.append(f"**pack_id:** `{pack_id}`")
+    if axis_note:
+        lines.append(axis_note)
     note = format_withholding_note(withholding)
     if note:
         lines.append(note)
@@ -242,6 +251,7 @@ def format_pack_as_index_markdown(
     pack_id: str | None = None,
     withholding: WithholdingSummary | None = None,
     empty_text: str | None = None,
+    axis_note: str = "",
 ) -> str:
     """Format pack items as an id index — one line per item, no bodies.
 
@@ -266,6 +276,7 @@ def format_pack_as_index_markdown(
             pack is all pointers, so the distinction it draws — served but
             demoted vs. withheld entirely — matters here most.
         empty_text: As in :func:`format_pack_as_markdown`.
+        axis_note: As in :func:`format_pack_as_markdown`.
 
     Returns:
         Markdown-formatted index within token budget.
@@ -273,6 +284,8 @@ def format_pack_as_index_markdown(
     lines = [f"# Context index for: {intent}"]
     if pack_id:
         lines.append(f"**pack_id:** `{pack_id}`")
+    if axis_note:
+        lines.append(axis_note)
     note = format_withholding_note(withholding)
     if note:
         lines.append(note)

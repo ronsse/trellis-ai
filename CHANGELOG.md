@@ -1424,6 +1424,15 @@ All notable changes to Trellis will be documented in this file.
   deleted: the operator saw a different error from the one raised. Each
   is now escaped; `--format json` is unchanged.
   ([#777](https://github.com/ronsse/trellis-ai/pull/777) follow-up 2)
+- **`POST /api/v1/packs/sectioned`, MCP `get_context` and `search` report a
+  failed retrieval axis.** The sectioned response gains the optional `axes`
+  block `POST /api/v1/packs` has (`null` for `sections=[]`). `get_context`
+  without `sections` and `search` add one line,
+  `**Retrieval axis failed:** <names>.`, naming only the axes that raised,
+  so a degraded empty pack no longer reads like an empty corpus; a clean
+  reply is unchanged. `get_context(sections=...)`, `get_objective_context`,
+  `get_task_context` and `get_sectioned_context` do not report it yet.
+  ([#783](https://github.com/ronsse/trellis-ai/pull/783))
 
 ## [0.9.0] - 2026-05-13
 
