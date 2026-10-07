@@ -1647,7 +1647,8 @@ class StoreRegistry:
         :class:`BackendNotInstalledError` when ``provider: openai`` is
         configured but the ``llm-openai`` extra is missing, and
         :class:`ConfigError` when the dotted-path provider can't be
-        imported or doesn't resolve to a callable.
+        imported or doesn't resolve to a callable. A raise caches nothing,
+        so the next access resolves again; a callable or ``None`` is cached.
         """
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]
@@ -1677,10 +1678,7 @@ class StoreRegistry:
                         "embedding_fn_loaded", source="config", provider=provider
                     )
 
-        # Reached only when resolution above didn't raise. Cache the outcome
-        # (a resolved callable, or None for "not configured") so a resolution
-        # that raises is retried on the next call instead of being
-        # remembered as unconfigured forever.
+        # Assigned only after resolution returns, so a raise leaves _UNSET.
         self._embedding_fn_cache = resolved
         return resolved
 

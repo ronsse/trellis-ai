@@ -44,6 +44,7 @@ from trellis.stores.registry import (
     StoreRegistry,
     _build_openai_embedding_fn,
     _import_callable,
+    _mask_api_key,
 )
 
 
@@ -274,16 +275,13 @@ def test_embedding_fn_property_propagates_backend_error(
 _UNIMPORTABLE_PATH = "no_such_module_for_embedding_fn_cache_test.embed"
 
 
-def test_embedding_fn_raises_again_on_second_call_env_var(
+def test_embedding_fn_retries_a_failed_env_var_until_it_resolves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A ``TRELLIS_EMBEDDING_FN`` that fails to import raises every call.
+    """A ``TRELLIS_EMBEDDING_FN`` that fails to import raises on every call.
 
-    Before the fix, the property set its cache to ``None`` *before*
-    resolving. A raising resolution left ``None`` cached, so a long-lived
-    process answered the first caller with the real error and every later
-    caller with a silent "not configured" — even though an embedder was
-    configured, just misconfigured.
+    A raise caches nothing, so once the path imports, the next call
+    returns the callable rather than a cached error or "not configured".
     """
     monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _UNIMPORTABLE_PATH)
     registry = StoreRegistry.from_config_dir(
@@ -293,12 +291,14 @@ def test_embedding_fn_raises_again_on_second_call_env_var(
         _ = registry.embedding_fn
     with pytest.raises(ConfigError):
         _ = registry.embedding_fn
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "trellis.stores.registry._mask_api_key")
+    assert registry.embedding_fn is _mask_api_key
 
 
 def test_embedding_fn_raises_again_on_second_call_config_path(
     tmp_path: Path,
 ) -> None:
-    """Same as above, via ``embeddings.provider`` instead of the env var."""
+    """An unimportable ``embeddings.provider`` raises on every call too."""
     config_dir = _write_config(
         tmp_path / "cfg",
         embeddings={"provider": _UNIMPORTABLE_PATH},
@@ -317,8 +317,8 @@ def test_embedding_fn_not_configured_is_still_cached(
 ) -> None:
     """``None`` for "not configured" is cached, not re-resolved per call.
 
-    Configuring an embedder *after* the first (uncached) ``None`` answer
-    must not change the second answer — the cache was already populated.
+    An embedder configured after the first ``None`` answer does not change
+    the second answer.
     """
     registry = StoreRegistry.from_config_dir(
         config_dir=tmp_path / "cfg", data_dir=tmp_path / "data"

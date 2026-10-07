@@ -225,27 +225,6 @@ class TestTheOtherConfigErrorTheSweepFound:
         assert 'uv pip install -e ".[llm-openai]"' in body["message"]
         assert body["setting"] == "backend.openai"
 
-    def test_an_unimportable_embedder_answers_the_same_way_every_call(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A failed resolution must not be cached as "not configured" (#775
-        follow-up F1). Before the fix, ``StoreRegistry.embedding_fn`` set its
-        cache to ``None`` before resolving, so the *first* request in a
-        long-lived process saw this 409 and every later one answered 200
-        with ``axes.semantic == "not_configured"`` — hiding a live
-        misconfiguration behind a one-shot refusal.
-        """
-        monkeypatch.setenv(
-            "TRELLIS_EMBEDDING_FN", "no_such_module_for_boundary_cache_test.embed"
-        )
-
-        first = client.post("/api/v1/packs", json={"intent": "anything"})
-        second = client.post("/api/v1/packs", json={"intent": "anything"})
-
-        assert first.status_code == CONFIG_ERROR_STATUS
-        assert second.status_code == CONFIG_ERROR_STATUS
-        assert first.json()["code"] == second.json()["code"] == "config_error"
-
 
 class TestTheCatchAllKeepsWhatItShouldHave:
     def test_an_untyped_exception_is_still_an_opaque_500(
