@@ -1271,6 +1271,16 @@ All notable changes to Trellis will be documented in this file.
   text. `MigrationReport` keeps the raw text, as does the
   `--continue-on-error` error log on stderr.
   ([#757](https://github.com/ronsse/trellis-ai/pull/757))
+- **The error sanitizer also suppresses Neo4j's constraint-*creation* text,
+  not just the write-time violation #753 covers.** The stores' own startup
+  schema DDL, `CREATE CONSTRAINT ... IS UNIQUE`, quotes the value too when
+  it runs over nodes that already duplicate it: `` Both Node(<n>) and
+  Node(<n>) have the label `<Label>` and property `<prop>` = '<value>' ``
+  (gql_status `50N11`). It passed through `sanitize_error_message` verbatim
+  and now gets the static marker. ArcadeDB's equivalent failure, measured
+  the same way, never quotes a value in the text its Bolt client sees, so
+  it needs no entry.
+  ([#753](https://github.com/ronsse/trellis-ai/pull/753) follow-up 1)
 
 ## [0.9.0] - 2026-05-13
 

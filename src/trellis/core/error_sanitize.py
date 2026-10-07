@@ -70,6 +70,12 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     # '<Label>[<prop>]' ...". The prefix alone, because the value can hold
     # its own "]": an alias claim key is a JSON array.
     re.compile(r"\bDuplicated key \["),
+    # Neo4j's *constraint-creation* violation quotes the value too, raised
+    # when the stores' startup schema DDL (``CREATE CONSTRAINT ... IS
+    # UNIQUE``) runs over rows that already duplicate it: "Both Node(<n>)
+    # and Node(<n>) have the label `<Label>` and property `<prop>` =
+    # '<value>'". Distinct wording from the write-time violation above.
+    re.compile(r"\bhave the label `[^`]*` and property `[^`]*` = '"),
 )
 
 _LONG_TOKEN_RUN = re.compile(

@@ -218,6 +218,33 @@ class TestSuppression:
         )
         assert sanitize_error_message(msg) == msg
 
+    def test_neo4j_constraint_creation_over_duplicates_suppressed(self) -> None:
+        # Neo4j 2025.12 ``str(Neo4jError)``, raised by ``CREATE CONSTRAINT
+        # ... IS UNIQUE`` — the stores' startup schema DDL — run over rows
+        # that already duplicate it (gql_status 50N11). Distinct from the
+        # write-time violation above: captured against two synthetic
+        # duplicate nodes created ahead of the constraint.
+        msg = (
+            "{neo4j_code: Neo.DatabaseError.Schema.ConstraintCreationFailed} "
+            "{message: Unable to create Constraint( name='dup_version_id', "
+            "type='NODE PROPERTY UNIQUENESS', schema=(:Node {version_id}) ):\n"
+            "Both Node(0) and Node(1) have the label `Node` and property "
+            "`version_id` = 'synthetic-constraint-dup'. Note that only the "
+            "first found violation is shown.} {gql_status: 50N11} "
+            "{gql_status_description: error: general processing exception - "
+            "constraint creation failed. Unable to create 'dup_version_id'.}"
+        )
+        assert sanitize_error_message(msg) == SUPPRESSED_MARKER
+
+    def test_constraint_creation_without_quoted_value_passes_through(self) -> None:
+        # The "have the label" wording up to the property name, with no
+        # quoted value — the near-miss control for the pattern above.
+        msg = (
+            "Both Node(0) and Node(1) have the label `Node` and property "
+            "`version_id` set but no single violation could be reported"
+        )
+        assert sanitize_error_message(msg) == msg
+
 
 class TestBounding:
     def test_long_clean_message_truncated(self) -> None:
