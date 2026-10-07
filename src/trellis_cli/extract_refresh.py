@@ -274,7 +274,8 @@ def _print_results(
     if first is not None:
         console.print(
             f"  [yellow]{counts['failed'] + counts['rejected']} failed or "
-            f"rejected; first: {escape(first.message)}[/yellow]"
+            f"rejected; first: {escape(first.message)}[/yellow]",
+            soft_wrap=True,
         )
 
 

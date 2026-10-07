@@ -200,18 +200,17 @@ HAND_READ_CROSS_FUNCTION_COUNT = 17
 #: same way a red one does, and so does a line with no colour tag at all:
 #: ``_named_function_print_calls`` collects every ``*console.print`` in the
 #: named function regardless of colour or markup, and the fragment is what
-#: narrows it to one. retrieve.py's ``trace``/``entity`` entries and
-#: extract_refresh.py's ``refresh`` print and exit in the same function;
-#: they are here because they are yellow, which ``failure_line_sites`` does
-#: not scan. curate.py's ``_execute_command`` is also same-function, but
-#: its ``Message:`` line carries no colour tag at all, so the red-only scan
-#: cannot see it either. curate.py's ``_print_warnings`` is the original
-#: cross-function shape: its callers (``_execute_command`` and ``link``,
-#: among others) exit non-zero after calling it. The fragment tells apart
-#: entries that share a function: admin.py's ``_render_smoke_text`` (two
-#: reds), ingest_conversations.py's ``_render_report`` (its
-#: ``warning``/``withheld`` pair), and ingest_corpus.py's ``_render_report``
-#: (its ``prune``/``warning``/``withheld`` trio).
+#: narrows it to one. retrieve.py's ``trace`` and ``entity`` entries print
+#: and exit in the same function; they are here because they are yellow,
+#: which ``failure_line_sites`` does not scan. curate.py's
+#: ``_execute_command`` entry is same-function too, and uncoloured.
+#: extract_refresh.py's yellow ``~`` diff line is left off: a refused batch
+#: commits nothing, so there is no diff to print before the exit. The
+#: fragment tells apart entries that share a function: admin.py's
+#: ``_render_smoke_text`` (two reds), ingest_conversations.py's
+#: ``_render_report`` (its ``warning``/``withheld`` pair), and
+#: ingest_corpus.py's ``_render_report`` (its ``prune``/``warning``/
+#: ``withheld`` trio).
 CROSS_FUNCTION_FAILURE_LINES = (
     ("admin.py", "_print_skills_summary", "failed"),
     ("admin.py", "_print_check_extractors_report", "not configurable from"),
@@ -220,7 +219,7 @@ CROSS_FUNCTION_FAILURE_LINES = (
     ("admin_api_keys.py", "_store_error", "store error"),
     ("curate.py", "_execute_command", "Message:"),
     ("curate.py", "_print_warnings", "Warning:"),
-    ("extract_refresh.py", "refresh", "~[/yellow]"),
+    ("extract_refresh.py", "_print_results", "first:"),
     ("ingest_conversations.py", "_render_report", "warning['kind']"),
     ("ingest_conversations.py", "_render_report", "withheld_name"),
     ("ingest_corpus.py", "_render_report", "pruned_name"),

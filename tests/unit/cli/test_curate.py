@@ -130,11 +130,10 @@ class TestCuratePromote:
     def test_warning_long_detail_prints_as_one_line(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``_print_warnings`` -- a helper two functions away from either
-        ``typer.Exit`` it is printed before (``_execute_command``'s own, and
-        ``link``'s) -- escapes a policy id/condition or an audit error that
-        can be arbitrarily long; it must not split one at the console
-        width."""
+        """``_print_warnings`` prints a policy id and condition, or an audit
+        error, of any length; its callers (here ``_execute_command``) exit
+        non-zero after it on a refusal, and it must not split one at the
+        console width."""
         monkeypatch.setenv("COLUMNS", "60")
         long_detail = "synthetic-policy-detail-" + "0123456789abcdef" * 4
         executor = MagicMock(spec=MutationExecutor)
