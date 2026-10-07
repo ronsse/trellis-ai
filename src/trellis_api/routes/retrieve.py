@@ -8,7 +8,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import ValidationError
 
-from trellis.retrieve.builder_factory import build_pack_builder
+from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.schemas.pack import PackBudget, SectionRequest
@@ -16,6 +16,7 @@ from trellis.schemas.trace import Trace
 from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
+    AxisReportResponse,
     PackRequest,
     PackResponse,
     SectionedPackRequest,
@@ -129,6 +130,14 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         tag_filters=req.tag_filters,
     )
 
+    # The axis report `trellis retrieve pack --format json` prints, so a
+    # caller can tell a pack missing a failed axis from a full one.
+    axes = describe_axes(
+        builder,
+        pack.retrieval_report.strategies_used,
+        embedder_configured=registry.embedding_fn is not None,
+    )
+
     return PackResponse(
         pack_id=pack.pack_id,
         intent=pack.intent,
@@ -139,6 +148,7 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         advisories=[a.model_dump(mode="json") for a in pack.advisories],
         retrieval_report=pack.retrieval_report.model_dump(),
         withholding=pack.metadata.get("withholding"),
+        axes=AxisReportResponse(**axes),
     )
 
 

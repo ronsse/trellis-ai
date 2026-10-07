@@ -1364,6 +1364,15 @@ All notable changes to Trellis will be documented in this file.
   passes `max_len` today, so this was unreachable; it now raises
   `ValueError` for any `max_len < 0`, and `max_len=0` is unchanged.
   ([#767](https://github.com/ronsse/trellis-ai/pull/767) follow-up 2)
+- **`POST /api/v1/packs` says which retrieval axes ran.** When one strategy
+  raises, `PackBuilder` serves the surviving axes and records the failure in
+  `PACK_ASSEMBLED.strategy_failures` and the log, so a REST caller got a 200
+  and a degraded pack it could not tell from a full one. `PackResponse` now
+  carries the optional `axes` block (`available`, `ran`, `failed`,
+  `semantic`) that `trellis retrieve pack --format json` already prints,
+  from the same `describe_axes` call: axis names and states, never exception
+  text. The sectioned route and MCP `get_context` are unchanged.
+  ([#761](https://github.com/ronsse/trellis-ai/pull/761) follow-up A)
 - **`SQLiteGraphStore.upsert_edge` and `upsert_edges_bulk` leave one current
   row per logical edge under concurrency.** `idx_edges_upsert` on
   `(source_id, target_id, edge_type)` is not unique, and both methods read

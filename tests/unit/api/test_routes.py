@@ -7,6 +7,7 @@ import json
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -17,7 +18,10 @@ import trellis_api.app as app_module
 from tests.duplicate_trace import graph_state, synthetic_trace
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import StaleStoreWriteError, StoreError
+from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.strategies import SearchStrategy
 from trellis.schemas.enums import PolicyType
+from trellis.schemas.pack import PackItem
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.trace import Trace
 from trellis.stores.base import VectorStore
@@ -919,6 +923,92 @@ def test_assemble_pack_returns_typed_withholding(client) -> None:
     assert withholding["by_reason"] == {"archived": 1, "noise": 1}
     assert sorted(withholding["withheld_item_ids"]) == ["archived", "noise"]
     assert withholding["served_count"] == 1
+
+
+# -- axes: which retrieval axes a pack ran, and which failed --
+
+_AXIS_FAILURE_SENTINEL = "SENTINEL_AXIS_FAILURE_f91e7c"
+
+
+def _axis_item(item_id: str) -> PackItem:
+    return PackItem(
+        item_id=item_id, item_type="document", excerpt="x", relevance_score=0.5
+    )
+
+
+def _make_axis_strategy(name: str, items: list[PackItem]) -> SearchStrategy:
+    strategy = MagicMock(spec=SearchStrategy)
+    strategy.name = name
+    strategy.search.return_value = items
+    return strategy
+
+
+def _make_failing_axis_strategy(name: str, message: str) -> SearchStrategy:
+    strategy = MagicMock(spec=SearchStrategy)
+    strategy.name = name
+    strategy.search.side_effect = RuntimeError(message)
+    return strategy
+
+
+def _builder_with_one_failing_strategy(
+    *_args: object, **_kwargs: object
+) -> PackBuilder:
+    """Three strategies, the middle one raising — same shape as
+    tests/unit/retrieve/test_pack_builder_failures.py's partial-failure case."""
+    good_a = _make_axis_strategy("keyword", [_axis_item("d1")])
+    bad = _make_failing_axis_strategy("semantic", _AXIS_FAILURE_SENTINEL)
+    good_b = _make_axis_strategy("graph", [_axis_item("e1")])
+    return PackBuilder(strategies=[good_a, bad, good_b])
+
+
+def _semantic_init_fails(*_args: object, **_kwargs: object) -> object:
+    msg = "vector backend unavailable"
+    raise RuntimeError(msg)
+
+
+@pytest.mark.parametrize(
+    ("embedding_fn", "semantic"),
+    [(None, "not_configured"), (_EMBED_FN_PATH, "misconfigured")],
+)
+def test_assemble_pack_reports_no_failed_axes_when_none_raise(
+    client, monkeypatch, embedding_fn: str | None, semantic: str
+) -> None:
+    """Only the route's ``embedder_configured`` argument separates a missing
+    embedder from a resolved one whose vector search failed to initialise."""
+    if embedding_fn is None:
+        monkeypatch.delenv("TRELLIS_EMBEDDING_FN", raising=False)
+    else:
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", embedding_fn)
+        monkeypatch.setattr(
+            "trellis.retrieve.strategies.SemanticSearch", _semantic_init_fails
+        )
+
+    response = client.post("/api/v1/packs", json={"intent": "quiet pack"})
+
+    assert response.status_code == 200
+    axes = response.json()["axes"]
+    assert axes["failed"] == []
+    assert axes["ran"] == response.json()["retrieval_report"]["strategies_used"]
+    assert axes["ran"]  # at least the keyword axis ran — not a vacuous empty list
+    assert axes["semantic"] == semantic
+
+
+def test_assemble_pack_reports_failed_axis_when_a_strategy_raises(
+    client, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        retrieve, "build_pack_builder", _builder_with_one_failing_strategy
+    )
+
+    response = client.post("/api/v1/packs", json={"intent": "degraded pack"})
+
+    assert response.status_code == 200
+    axes = response.json()["axes"]
+    assert axes["failed"] == ["semantic"]
+    assert sorted(axes["ran"]) == ["graph", "keyword"]
+    assert sorted(axes["available"]) == ["graph", "keyword", "semantic"]
+    # Names and states only, never the exception text.
+    assert _AXIS_FAILURE_SENTINEL not in response.text
 
 
 def test_assemble_sectioned_pack_returns_routed_ids_and_served_count(client) -> None:
