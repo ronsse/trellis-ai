@@ -47,9 +47,16 @@ SDK_API_MINOR = 2
 SDK_WIRE_SCHEMA = "0.1.0"
 SDK_VERSION = "0.1.0"
 
-#: Header name :mod:`trellis_api.auth` accepts a credential on (it wins over
-#: ``Authorization: Bearer`` when both are present).
-API_KEY_HEADER = "X-API-Key"
+#: Header name the SDK sends its credential on. :mod:`trellis_api.auth`
+#: accepts this header or ``X-API-Key`` (which wins when both are present),
+#: so either reaches the same scopes and the same legacy-shared-secret
+#: path. The SDK sends ``Authorization: Bearer`` rather than ``X-API-Key``
+#: because ``httpx`` reserves two protections for ``Authorization`` alone:
+#: it is masked as ``[secure]`` in ``repr(Headers)`` (an event hook that
+#: logs request headers would otherwise print the key verbatim), and it is
+#: the one header ``httpx`` strips on a redirect that crosses origins.
+AUTHORIZATION_HEADER = "Authorization"
+_BEARER_PREFIX = "Bearer"
 
 _HTTP_OK_MAX = 299
 _HTTP_CLIENT_MIN = 400
@@ -147,7 +154,7 @@ def api_key_headers(
     if not api_key:
         msg = "api_key= is empty; pass a key or omit the argument."
         raise ValueError(msg)
-    return {API_KEY_HEADER: api_key}
+    return {AUTHORIZATION_HEADER: f"{_BEARER_PREFIX} {api_key}"}
 
 
 def pack_attribution(
@@ -297,7 +304,7 @@ def _parse_retry_after(header: str | None) -> float | None:
 
 
 __all__ = [
-    "API_KEY_HEADER",
+    "AUTHORIZATION_HEADER",
     "SDK_API_MAJOR",
     "SDK_API_MINOR",
     "SDK_VERSION",

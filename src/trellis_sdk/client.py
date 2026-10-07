@@ -57,12 +57,13 @@ class TrellisClient:
     an injected ``httpx.Client`` (for tests — see
     :func:`trellis.testing.in_memory_client`).
 
-    Pass ``api_key=`` with ``base_url=`` to send it as ``X-API-Key`` on
-    every request, including the version handshake, to a server running
-    ``TRELLIS_AUTH_MODE=required`` or ``optional``. Nothing is read from
-    the environment. An empty ``api_key=``, or one beside an injected
-    ``http=`` (whose headers are the caller's to set), raises
-    ``ValueError``.
+    Pass ``api_key=`` with ``base_url=`` to send it as
+    ``Authorization: Bearer`` on every request, including the version
+    handshake, to a server running ``TRELLIS_AUTH_MODE=required`` or
+    ``optional`` (the server accepts this or ``X-API-Key`` on the same
+    scopes). Nothing is read from the environment. An empty ``api_key=``,
+    or one beside an injected ``http=`` (whose headers are the caller's to
+    set), raises ``ValueError``.
 
     The version handshake fires lazily on the first request, not in
     ``__init__`` — so constructing a client never issues network IO.
