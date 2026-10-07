@@ -1399,20 +1399,12 @@ All notable changes to Trellis will be documented in this file.
   the error's text, which can quote the values being written.
   ([#773](https://github.com/ronsse/trellis-ai/pull/773))
 - **`BoltOpenCypherGraphStore.upsert_edge` (Neo4j and ArcadeDB) leaves one
-  current row per logical edge under concurrency.** Like the SQLite fix
-  above, an unprotected `OPTIONAL MATCH` read followed by `CREATE` let two
-  concurrent writers on the same `(source_id, target_id, edge_type)` both
-  see "no current edge" and both create one; this logical key cannot carry
-  a uniqueness constraint because historical rows share it. Measured on
-  throwaway `neo4j:2025.12` and `arcadedb:26.8.1` containers before fixing:
-  the race reproduced on every rep on Neo4j (create and update shapes);
-  ArcadeDB's own optimistic-concurrency retry already serialized it at
-  base. `upsert_edge` now write-locks the source endpoint's shown row (a
-  no-op self-assignment) before the existing-edge read, so a second writer
-  blocks until the first commits and then reads its row; zero reproductions
-  on either engine after the fix. `upsert_edges_bulk` is unchanged (out of
-  scope: it would need a sorted per-row lock order to avoid a new
-  cross-row deadlock class).
+  current row per logical edge under concurrency.** Two concurrent writers
+  on the same `(source_id, target_id, edge_type)` could both read "no
+  current edge" and both create one. `upsert_edge` now write-locks the
+  source endpoint's current row before that read, so the second writer
+  reads the first one's row. `upsert_edges_bulk` takes no such lock, so a
+  bulk write racing another writer of the same edge can still duplicate it.
   ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 2, also
   the Bolt item from the [#774](https://github.com/ronsse/trellis-ai/pull/774) gate)
 

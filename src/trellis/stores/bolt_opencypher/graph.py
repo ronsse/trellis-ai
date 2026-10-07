@@ -45,16 +45,16 @@ by ``CREATE`` lets two concurrent writers on the same
 ``(source_id, target_id, edge_type)`` both observe "no current edge" and
 both create one, leaving two current rows for one logical edge (there is
 no uniqueness constraint to fall back on, because historical rows share
-the same key). ``upsert_edge`` closes this by write-locking the source
-endpoint's shown row (a no-op self-assignment) before the read, so a
-second writer blocks until the first commits and then sees its row as
-``old``. Measured against ``neo4j:2025.12``: reproduces on every rep
-without the lock, zero reps with it. ``arcadedb:26.8.1``'s own
-optimistic-concurrency retry already serialized this case at base, so
-the lock is a no-op there in practice but keeps the shared Cypher
-correct for both engines. ``upsert_edges_bulk`` does not take this lock
-(out of scope: UNWIND would need a sorted per-row key order, like
-Postgres's bulk edge path, to avoid a new cross-row deadlock class).
+the same key). ``upsert_edge`` write-locks the source endpoint's shown
+row before the read, with the scratch-property write
+``update_node_if_current`` uses, so a second writer waits for the first
+to commit and then reads its row as ``old``. On ArcadeDB the engine's
+optimistic-concurrency retry already serializes the race. On Neo4j the
+source-first lock lets concurrent writes of ``x->y`` and ``y->x``
+deadlock; the driver retries the loser. Only single-row writers take the
+lock: ``upsert_edges_bulk`` does not (it would need a sorted per-row lock
+order, like Postgres's bulk edge path), so a bulk write racing another
+writer of the same edge can still leave two current rows.
 
 Per-backend subclasses override the **seams**:
 
@@ -1417,17 +1417,16 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         WITH {_shown_row("source_rows")} AS s, {_shown_row("target_rows")} AS t
         WHERE s IS NOT NULL
         // Write-lock the source endpoint's shown row before reading for an
-        // existing edge, so a second concurrent upsert_edge on the same
-        // (source, target, edge_type) blocks here until the first writer
-        // commits, then sees its row as `old` instead of racing it to
-        // CREATE. The self-assignment is a no-op value write, chosen
-        // because this logical key cannot carry a uniqueness constraint
-        // (historical rows share it). Measured: reproduces 20/20 and
-        // 30/30 on Neo4j without this lock (create and update shapes),
-        // 0/30 with it, on both Neo4j and ArcadeDB. A `WITH` must
-        // separate this write from the `OPTIONAL MATCH` read that follows
-        // (Cypher forbids a read clause directly after a write clause).
-        SET s.valid_to = s.valid_to
+        // existing edge, so a second upsert_edge on the same (source,
+        // target, edge_type) waits here for the first to commit, then reads
+        // its row as `old` instead of racing it to CREATE. The lock writes
+        // a scratch property, never valid_to: a SET's right-hand side is
+        // read before the lock is granted, so `SET s.valid_to = s.valid_to`
+        // would write a stale null over a concurrent upsert_node's close
+        // and reopen the row. Cypher needs a `WITH` between this write and
+        // the read that follows.
+        SET s._cas_lock = true
+        REMOVE s._cas_lock
         WITH s, t
         OPTIONAL MATCH (s)-[old:EDGE {{edge_type: $edge_type}}]->(t)
           WHERE old.valid_to IS NULL

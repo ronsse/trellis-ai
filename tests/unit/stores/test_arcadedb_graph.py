@@ -282,6 +282,12 @@ def test_concurrent_edge_update_leaves_one_current_row(graph_store):
     )
 
 
+def test_edge_write_racing_node_upsert_keeps_one_current_node(graph_store):
+    bolt_edge_create_race.check_edge_write_racing_node_upsert_keeps_one_current_node(
+        graph_store, _second_arcadedb_store
+    )
+
+
 def _purge_after_endpoint_check(store, monkeypatch, gone: str) -> None:
     """Purge ``gone`` once ``upsert_edges_bulk``'s endpoint check has found
     it current, so the write runs without it.

@@ -174,6 +174,12 @@ def test_concurrent_edge_update_leaves_one_current_row(graph_store):
     )
 
 
+def test_edge_write_racing_node_upsert_keeps_one_current_node(graph_store):
+    bolt_edge_create_race.check_edge_write_racing_node_upsert_keeps_one_current_node(
+        graph_store, _second_neo4j_store
+    )
+
+
 def test_get_edges_incoming(graph_store):
     graph_store.upsert_node("a", "s", {})
     graph_store.upsert_node("b", "s", {})
