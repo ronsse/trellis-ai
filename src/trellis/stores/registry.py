@@ -602,6 +602,11 @@ def _build_openai_embedding_fn(
     is not installed — returning ``None`` here silently demoted
     ``embeddings: provider: openai`` configs to no-embedding mode
     instead of telling the operator the extra is missing.
+
+    Raises :class:`ConfigError` when the SDK is installed but no API key
+    resolves from ``embeddings.api_key_env``, ``embeddings.api_key`` or
+    ``OPENAI_API_KEY``. The constructor's untyped ``openai.OpenAIError``
+    is chained as the cause; its text stays out of the message.
     """
     try:
         import openai  # noqa: PLC0415
@@ -621,7 +626,16 @@ def _build_openai_embedding_fn(
     if config.get("base_url"):
         kwargs["base_url"] = config["base_url"]
 
-    client = openai.OpenAI(**kwargs)
+    try:
+        client = openai.OpenAI(**kwargs)
+    except openai.OpenAIError as exc:
+        msg = (
+            "OpenAI embeddings are configured but no API key was found."
+            " Set embeddings.api_key_env to the name of an environment"
+            " variable holding the key, embeddings.api_key to a literal"
+            " value, or export OPENAI_API_KEY."
+        )
+        raise ConfigError(msg, setting="embeddings.api_key_env") from exc
 
     def _embed(text: str) -> list[float]:
         resp = client.embeddings.create(input=[text], model=model)
@@ -1646,9 +1660,10 @@ class StoreRegistry:
         (no env var, no ``embeddings.provider``). Raises
         :class:`BackendNotInstalledError` when ``provider: openai`` is
         configured but the ``llm-openai`` extra is missing, and
-        :class:`ConfigError` when the dotted-path provider can't be
-        imported or doesn't resolve to a callable. A raise caches nothing,
-        so the next access resolves again; a callable or ``None`` is cached.
+        :class:`ConfigError` when ``provider: openai`` finds no API key or
+        the dotted-path provider can't be imported or doesn't resolve to a
+        callable. A raise caches nothing, so the next access resolves
+        again; a callable or ``None`` is cached.
         """
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]

@@ -1442,6 +1442,24 @@ All notable changes to Trellis will be documented in this file.
   bulk write racing another writer of the same edge can still duplicate it.
   ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 2, also
   the Bolt item from the [#774](https://github.com/ronsse/trellis-ai/pull/774) gate)
+- **A missing OpenAI API key answers like a config error, not a 500.**
+  `embeddings: provider: openai` with the `llm-openai` extra installed and
+  no key anywhere let the SDK client constructor's untyped
+  `openai.OpenAIError` escape, so every `POST /api/v1/packs` answered
+  `500` and the CLI exited `1` uncaught. It is now a `ConfigError` naming
+  `embeddings.api_key_env`, `embeddings.api_key` and `OPENAI_API_KEY`,
+  never the SDK's wording or a key value: REST answers `409`
+  `config_error`, the CLI exits `5`, and MCP `get_context` keeps
+  `INTERNAL_ERROR` with that message. A failed embeddings call still
+  raises `openai.OpenAIError`.
+  (follow-up F-a from [#779](https://github.com/ronsse/trellis-ai/pull/779))
+- **`admin smoke-test`'s header and readyz backend rows keep a bracketed URL
+  or backend name intact.** The header's URL and a readyz backend's name and
+  status/latency detail went into Rich markup raw, so an IPv6 host led by a
+  lowercase letter (`http://[fd00::1]:8420`) or a backend key or status
+  carrying `[...]` was read as a style tag and deleted. All three are now
+  escaped; `--format json` is unchanged.
+  ([#784](https://github.com/ronsse/trellis-ai/pull/784) follow-up 1)
 - **A broken driver install no longer replaces a handler's own failure in
   `MutationExecutor`.** The handler-panic catch imported `psycopg` and
   `neo4j.exceptions` to find their base errors, so a driver whose import
