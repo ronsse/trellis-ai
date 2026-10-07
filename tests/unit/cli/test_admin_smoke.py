@@ -401,44 +401,34 @@ class TestSmokeTestErrorTextVerbatim:
 
 
 # ---------------------------------------------------------------------------
-# A readyz body whose ``backends`` is not a mapping — a foreign server, a
-# proxy, or an older build. ``_render_smoke_text`` must not crash on it; the
-# JSON branch never called ``.items()`` on it, so it was never at risk.
+# A readyz body whose ``backends`` is not a mapping, from a server or proxy
+# that is not Trellis. Text mode skips the backend rows; json keeps the value.
 # ---------------------------------------------------------------------------
 
 
-def _readyz_backends_list(request: httpx.Request) -> httpx.Response:
-    if request.url.path == "/readyz":
-        return httpx.Response(
-            200, json={"status": "ready", "backends": ["event_log", "graph_store"]}
-        )
-    return _healthy_handler("secret")(request)
-
-
-def _readyz_backends_string(request: httpx.Request) -> httpx.Response:
-    if request.url.path == "/readyz":
-        return httpx.Response(
-            200, json={"status": "ready", "backends": "all backends reachable"}
-        )
-    return _healthy_handler("secret")(request)
-
-
-_NON_DICT_BACKENDS_SCENARIOS: dict[str, Callable[[httpx.Request], httpx.Response]] = {
-    "list": _readyz_backends_list,
-    "string": _readyz_backends_string,
+_NON_DICT_BACKENDS: dict[str, object] = {
+    "list": ["event_log", "graph_store"],
+    "string": "all backends reachable",
 }
+
+
+def _readyz_backends(backends: object) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/readyz":
+            return httpx.Response(200, json={"status": "ready", "backends": backends})
+        return _healthy_handler("secret")(request)
+
+    return handler
 
 
 class TestSmokeTestNonDictBackends:
     @pytest.mark.parametrize(
-        "scenario",
-        list(_NON_DICT_BACKENDS_SCENARIOS),
-        ids=list(_NON_DICT_BACKENDS_SCENARIOS),
+        "scenario", list(_NON_DICT_BACKENDS), ids=list(_NON_DICT_BACKENDS)
     )
     def test_text_mode_survives_and_matches_json_exit_code(
         self, monkeypatch: pytest.MonkeyPatch, scenario: str
     ) -> None:
-        handler = _NON_DICT_BACKENDS_SCENARIOS[scenario]
+        handler = _readyz_backends(_NON_DICT_BACKENDS[scenario])
 
         _patch_client(monkeypatch, handler)
         json_result = runner.invoke(
@@ -453,6 +443,9 @@ class TestSmokeTestNonDictBackends:
             text_result.exit_code,
             json_result.exit_code,
         )
+        payload = json.loads(json_result.stdout)
+        readyz = next(c for c in payload["checks"] if c["name"] == "readyz")
+        assert readyz["backends"] == _NON_DICT_BACKENDS[scenario]  # json keeps it raw
 
     def test_dict_backends_still_render_per_backend_detail(
         self, monkeypatch: pytest.MonkeyPatch
