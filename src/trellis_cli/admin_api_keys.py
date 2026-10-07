@@ -76,7 +76,7 @@ def _store_error(exc: Exception, output_format: str) -> typer.Exit:
     if output_format == "json":
         print(json.dumps({"error": "store_error", "message": message}))
     else:
-        console.print(f"[red]store error: {escape(message)}[/red]")
+        console.print(f"[red]store error: {escape(message)}[/red]", soft_wrap=True)
     return typer.Exit(code=EXIT_STORE)
 
 

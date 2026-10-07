@@ -457,9 +457,10 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             raise typer.Exit(code=EXIT_INTERNAL)
         if not entry.enabled:
             console.print(
-                f"[yellow]Source {source!r} is disabled in "
+                f"[yellow]Source {escape(repr(source))} is disabled in "
                 f"{escape(str(sources_path))} — "
-                f"refusing to refresh. Remove enabled: false to proceed.[/yellow]"
+                f"refusing to refresh. Remove enabled: false to proceed.[/yellow]",
+                soft_wrap=True,
             )
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
@@ -538,7 +539,8 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         console.print(
             f"[green]Refreshed {source_name}[/green]"
             if refusal is None
-            else f"[red]Refresh of {source_name} failed[/red]"
+            else f"[red]Refresh of {source_name} failed[/red]",
+            soft_wrap=True,
         )
         console.print(f"  Extractor: {summary['extractor_used']} ({summary['tier']})")
         console.print(f"  Entities scanned:  {summary['entities_scanned']}")
@@ -560,7 +562,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
                 for key in diff.get("added", {}):
                     console.print(f"      [green]+[/green] {escape(key)}")
                 for key in diff.get("removed", {}):
-                    console.print(f"      [red]-[/red] {escape(key)}")
+                    console.print(f"      [red]-[/red] {escape(key)}", soft_wrap=True)
                 for key, (b, a) in (diff.get("changed") or {}).items():
                     console.print(
                         f"      [yellow]~[/yellow] {escape(key)}: "
@@ -581,7 +583,8 @@ def _print_backfill(
     console.print(
         f"[red]Trace backfill failed ({since} days)[/red]"
         if outcome.refusal is not None
-        else f"[green]Trace backfill ({since} days)[/green]"
+        else f"[green]Trace backfill ({since} days)[/green]",
+        soft_wrap=True,
     )
     console.print(f"  Traces scanned:  {summary['traces_scanned']}")
     drafts = f"{summary['total_entities']} entities, {summary['total_edges']} edges"

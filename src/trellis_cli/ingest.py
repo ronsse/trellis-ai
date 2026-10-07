@@ -448,7 +448,8 @@ def ingest_dbt_manifest(
         console.print(
             "[green]dbt manifest ingested[/green]"
             if refusal is None
-            else f"[red]dbt ingest failed: {escape(refusal.message)}[/red]"
+            else f"[red]dbt ingest failed: {escape(refusal.message)}[/red]",
+            soft_wrap=True,
         )
         console.print(f"  Nodes: {counts['nodes']}")
         console.print(f"  Edges: {counts['edges']}")
@@ -523,7 +524,8 @@ def ingest_openlineage(
         console.print(
             "[green]OpenLineage events ingested[/green]"
             if refusal is None
-            else f"[red]OpenLineage ingest failed: {escape(refusal.message)}[/red]"
+            else f"[red]OpenLineage ingest failed: {escape(refusal.message)}[/red]",
+            soft_wrap=True,
         )
         console.print(f"  Nodes: {counts['nodes']}")
         console.print(f"  Edges: {counts['edges']}")
