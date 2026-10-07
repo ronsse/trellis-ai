@@ -1328,23 +1328,16 @@ All notable changes to Trellis will be documented in this file.
   within 500 characters past the cut; a leak lying wholly past the window
   now yields the truncated prefix instead of the marker.
   ([#763](https://github.com/ronsse/trellis-ai/pull/763) follow-up 2)
-- **An uncaught tool exception is sanitized too, closing the gap the entry
-  above left open.** `save_knowledge`'s and `save_experience`'s own
-  `executor.execute` calls have no `try/except`, so a driver exception
-  escaping either reached FastMCP's own tool dispatch with nothing
-  upstream to sanitize it: `mask_error_details` defaults to `False`, and
-  FastMCP wraps any uncaught exception as `Error calling tool '<name>':
-  {e}`, embedding `str(e)` raw. A new `_SanitizeUncaughtToolErrors`
-  middleware (`mcp.add_middleware`) is the one choke point for every
-  present and future tool: it inspects the wrapped `ToolError`'s
-  `__cause__` and, unless that cause is an already-sanitized `McpError`
-  (the 14 sites above) or a tool's own explicit `ToolError`, rebuilds the
-  message through `_exception_detail` — the same function the sites above
-  use, so a `TrellisError`'s own text still survives and anything else
-  goes through `sanitize_error_message`. `mask_error_details=True` alone
-  was rejected: it strips `{e}` entirely, which would also blank the
-  already-safe detail the 14 sites above raise down to the bare tool name.
-  (trellis-ai#765 gate follow-up 1)
+- **An exception a tool does not catch is sanitized too.** `save_knowledge`
+  and `save_experience` call `executor.execute` with no `try/except`, so a
+  driver exception escaping either reached the caller raw inside FastMCP's
+  generic `Error calling tool '<name>': {e}`. A `_SanitizeUncaughtToolErrors`
+  middleware now rebuilds that message for every tool through
+  `_exception_detail`, as #765's sites do. Their replies, a tool's own
+  `ToolError` and FastMCP's rate-limit and timeout messages pass unchanged.
+  A pydantic `ValidationError` raised inside a tool body is not wrapped that
+  way, so it still reaches the caller raw.
+  ([#765](https://github.com/ronsse/trellis-ai/pull/765) follow-up 1)
 
 ## [0.9.0] - 2026-05-13
 

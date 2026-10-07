@@ -325,8 +325,7 @@ class _SanitizeUncaughtToolErrors(Middleware):
     by the time FastMCP wraps it here the embedded text is already safe. A
     tool with no ``try/except`` at all (``save_knowledge``'s and
     ``save_experience``'s own ``executor.execute`` calls) has nothing
-    upstream to sanitize it, and the cause reaches this wrapping raw
-    (gate #765, follow-up 1).
+    upstream to sanitize it, and the cause reaches this wrapping raw.
 
     Only one level of ``__cause__`` is inspected, following
     ``fastmcp.server.middleware.error_handling.RetryMiddleware``'s own
@@ -370,11 +369,6 @@ class _SanitizeUncaughtToolErrors(Middleware):
                 or not str(exc).startswith(prefix)
             ):
                 raise
-            logger.info(
-                "mcp.uncaught_tool_exception_sanitized",
-                tool=name,
-                cause_type=type(cause).__name__,
-            )
             message = f"{prefix} {_exception_detail(cause)}"
             raise ToolError(message) from cause
 
