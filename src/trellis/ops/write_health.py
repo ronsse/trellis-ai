@@ -615,6 +615,26 @@ class WriteHealthReport(TrellisModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+class FailedStrategyReport(TrellisModel):
+    """Packs in the window whose build continued after a strategy raised.
+
+    Tallied from ``PACK_ASSEMBLED.strategy_failures`` over every scanned
+    pack, a withheld one included, since it still ran its strategies.
+    Counts and strategy names only, never the exception's class or message,
+    which can carry a path or a DSN fragment.
+    """
+
+    #: Packs in the window whose build continued after at least one
+    #: strategy raised.
+    packs: int = 0
+    #: Failures per strategy name. A strategy failing on more than one of
+    #: ``packs`` contributes more than one count here.
+    by_strategy: dict[str, int] = Field(default_factory=dict)
+    #: ``occurred_at`` of the most recent failed-strategy pack in the
+    #: window, or ``None`` when ``packs`` is zero.
+    latest_at: datetime | None = None
+
+
 class ServeAttributionReport(TrellisModel):
     """The serve-side coverage numbers the learning join lives or dies on.
 
@@ -725,6 +745,11 @@ class ServeAttributionReport(TrellisModel):
     retrieval_availability_note: str = ""
     #: Coverage of the PACK_ASSEMBLED / FEEDBACK_RECORDED reads (#374).
     scan: ScanCoverage = Field(default_factory=ScanCoverage)
+
+    #: See :class:`FailedStrategyReport`.
+    failed_strategies: FailedStrategyReport = Field(
+        default_factory=FailedStrategyReport
+    )
 
 
 class BackendHealthReport(TrellisModel):
@@ -892,6 +917,24 @@ def summarize_serve_attribution(
     feedback_scan = scan_events(
         event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
     )
+    # Every scanned pack, not the holdout-filtered population below: a
+    # withheld pack still ran its strategies. A malformed entry is skipped
+    # or counted as "unknown", because one bad event must not fail health.
+    failed_packs = 0
+    failures_by_strategy: dict[str, int] = {}
+    latest_failure_at: datetime | None = None
+    for event in pack_scan.events:
+        failures = event.payload.get("strategy_failures")
+        if not isinstance(failures, list) or not failures:
+            continue
+        failed_packs += 1
+        for failure in failures:
+            name = failure.get("strategy") if isinstance(failure, dict) else None
+            strategy = str(name or "unknown")
+            failures_by_strategy[strategy] = failures_by_strategy.get(strategy, 0) + 1
+        if latest_failure_at is None or event.occurred_at > latest_failure_at:
+            latest_failure_at = event.occurred_at
+
     # The served arm only: a withheld pack carries no injected items, and
     # it and the feedback naming it would read as a capture regression.
     # Feedback in the window can name a pack the scan lacks, one assembled
@@ -966,6 +1009,11 @@ def summarize_serve_attribution(
             RETRIEVAL_AVAILABILITY_ASSUMPTION if feedback - pack_targeted else ""
         ),
         scan=merge_coverage(pack_scan.coverage, feedback_scan.coverage),
+        failed_strategies=FailedStrategyReport(
+            packs=failed_packs,
+            by_strategy=failures_by_strategy,
+            latest_at=latest_failure_at,
+        ),
     )
 
 
@@ -994,6 +1042,20 @@ def summarize_backend_health(
             f"only {serve.packs_with_injected_items}/{serve.packs} packs "
             "carry injected_items[] — the learning join is starved below "
             f"{_ATTRIBUTION_COVERAGE_WARN:.0%} coverage"
+        )
+    if serve.failed_strategies.packs > 0:
+        by_strategy = ", ".join(
+            f"{name}: {count}"
+            for name, count in sorted(
+                serve.failed_strategies.by_strategy.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        )
+        latest = serve.failed_strategies.latest_at
+        latest_str = f"{latest:%Y-%m-%d %H:%M} UTC" if latest else "unknown"
+        reasons.append(
+            f"{serve.failed_strategies.packs} pack(s) in window hit a failed "
+            f"retrieval strategy ({by_strategy}), latest {latest_str}"
         )
     if serve.feedback_events > 0 and serve.feedback_attributed == 0:
         # Same trigger condition as before — ``status`` is read by the

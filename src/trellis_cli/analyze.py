@@ -759,7 +759,7 @@ def health(
 
     _print_capture_coverage(report.capture)
     for reason in report.reasons:
-        console.print(f"  [yellow]warn[/yellow] {reason}")
+        console.print(f"  [yellow]warn[/yellow] {escape(reason)}")
     if report.status == "ok" and write.attempts == 0 and serve.packs == 0:
         console.print("[dim]  No write or serve activity in window.[/dim]")
 
