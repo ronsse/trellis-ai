@@ -32,12 +32,18 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import structlog
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
+
+if TYPE_CHECKING:
+    import mcp.types as mcp_types
+    from fastmcp.tools.base import ToolResult
 from pydantic import ValidationError
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
@@ -305,6 +311,69 @@ mcp = FastMCP(
         "that returns nothing."
     ),
 )
+
+
+class _SanitizeUncaughtToolErrors(Middleware):
+    """Render an exception no tool caught through ``_exception_detail`` too.
+
+    FastMCP's own tool dispatch wraps any exception a tool does not catch
+    as ``ToolError(f"Error calling tool {name!r}: {e}") from e`` (its
+    ``mask_error_details`` defaults to ``False``), embedding ``str(e)`` raw
+    — a Postgres DETAIL line or a Neo4j constraint message included. The 14
+    sites ``_exception_detail`` already covers (#765) raise an
+    already-sanitized ``McpError`` from inside their own ``try/except``, so
+    by the time FastMCP wraps it here the embedded text is already safe. A
+    tool with no ``try/except`` at all (``save_knowledge``'s and
+    ``save_experience``'s own ``executor.execute`` calls) has nothing
+    upstream to sanitize it, and the cause reaches this wrapping raw.
+
+    Only one level of ``__cause__`` is inspected, following
+    ``fastmcp.server.middleware.error_handling.RetryMiddleware``'s own
+    precedent: middleware below this one must not re-wrap with a new
+    ``from`` clause, or the real cause is hidden here too. Left untouched,
+    by design:
+
+    * ``cause is None`` — a tool (or FastMCP itself) raised ``ToolError``
+      directly; its author already chose the message.
+    * ``isinstance(cause, McpError)`` — one of the 14 sites above (``McpError``
+      is not a ``fastmcp.exceptions.FastMCPError`` subclass, so it reaches
+      this same generic wrap already-safe); re-running ``_exception_detail``
+      would be redundant and, for a validation message that is the caller's
+      own input and was never routed through ``_exception_detail`` at all,
+      could mangle text deliberately preserved verbatim.
+    * the message does not start with FastMCP's own
+      ``"Error calling tool {name!r}:"`` prefix — the two actionable
+      messages ``call_tool`` builds for an ``httpx`` rate-limit or timeout
+      (chained with ``from e`` too) carry no raw driver text to strip, and
+      rewriting them would lose the retry hint they exist to give.
+
+    Everything else is FastMCP's generic wrap of some other uncaught
+    exception, Trellis's own (``TrellisError``) or not — exactly
+    ``_exception_detail``'s two cases, so it decides what survives.
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mcp_types.CallToolRequestParams],
+        call_next: CallNext[mcp_types.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        try:
+            return await call_next(context)
+        except ToolError as exc:
+            cause = exc.__cause__
+            name = context.message.name
+            prefix = f"Error calling tool {name!r}:"
+            if (
+                cause is None
+                or isinstance(cause, McpError)
+                or not str(exc).startswith(prefix)
+            ):
+                raise
+            message = f"{prefix} {_exception_detail(cause)}"
+            raise ToolError(message) from cause
+
+
+mcp.add_middleware(_SanitizeUncaughtToolErrors())
 
 
 _registry: StoreRegistry | None = None

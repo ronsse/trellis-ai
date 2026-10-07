@@ -1338,6 +1338,16 @@ All notable changes to Trellis will be documented in this file.
   sorted order so overlapping batches cannot deadlock, and each version is
   stamped after its lock is granted. Duplicate rows already stored stay.
   (trellis-ai#768)
+- **An exception a tool does not catch is sanitized too.** `save_knowledge`
+  and `save_experience` call `executor.execute` with no `try/except`, so a
+  driver exception escaping either reached the caller raw inside FastMCP's
+  generic `Error calling tool '<name>': {e}`. A `_SanitizeUncaughtToolErrors`
+  middleware now rebuilds that message for every tool through
+  `_exception_detail`, as #765's sites do. Their replies, a tool's own
+  `ToolError` and FastMCP's rate-limit and timeout messages pass unchanged.
+  A pydantic `ValidationError` raised inside a tool body is not wrapped that
+  way, so it still reaches the caller raw.
+  ([#765](https://github.com/ronsse/trellis-ai/pull/765) follow-up 1)
 
 ## [0.9.0] - 2026-05-13
 
