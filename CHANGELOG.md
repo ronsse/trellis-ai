@@ -1373,6 +1373,16 @@ All notable changes to Trellis will be documented in this file.
   from the same `describe_axes` call: axis names and states, never exception
   text. The sectioned route and MCP `get_context` are unchanged.
   ([#761](https://github.com/ronsse/trellis-ai/pull/761) follow-up A)
+- **`SQLiteGraphStore.upsert_edge` and `upsert_edges_bulk` leave one current
+  row per logical edge under concurrency.** `idx_edges_upsert` on
+  `(source_id, target_id, edge_type)` is not unique, and both methods read
+  the current row before taking the write lock, so two connections (two
+  processes, or two threads of one store) creating the same edge could each
+  insert a current row. Both now run `BEGIN IMMEDIATE` before that read, so
+  a second writer waits (up to the busy timeout) and then reads the first
+  one's row; a write on a connection already in a transaction joins it.
+  Duplicate rows already stored stay.
+  ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 2)
 
 ## [0.9.0] - 2026-05-13
 
