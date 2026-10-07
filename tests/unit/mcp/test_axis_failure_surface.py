@@ -22,8 +22,8 @@ vector backend never initialised, so the axis never reaches ``available``
 at all and ``format_failed_axes_note`` — built from ``axes["failed"]`` —
 cannot see it. This module also pins that every tool above adds a second,
 separate line for that state, that the two lines coexist when both apply,
-and that a clean pack (and a pack with only a failed axis) gains no such
-line.
+and that a clean pack, a pack with only a failed axis, and a pack whose
+semantic axis was built (and ran or raised) gain no such line.
 """
 
 from __future__ import annotations
@@ -257,16 +257,15 @@ def test_get_context_clean_empty_pack_is_unchanged(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("index", [False, True])
 def test_get_context_reports_misconfigured_semantic_for_a_populated_pack(
-    temp_registry: StoreRegistry, monkeypatch, index: bool
+    temp_registry: StoreRegistry, monkeypatch
 ) -> None:
     monkeypatch.setattr(
         server_mod, "_build_pack_builder", _builder_clean_without_semantic
     )
     _configure_embedder(monkeypatch, temp_registry)
 
-    result = get_context(INTENT, index=index)
+    result = get_context(INTENT)
     lines = result.split("\n")
 
     assert _MISCONFIGURED_SEMANTIC_LINE in lines
@@ -348,21 +347,36 @@ def test_search_reports_misconfigured_semantic_axis(
     assert _MISCONFIGURED_SEMANTIC_LINE in lines
 
 
-def test_get_context_clean_pack_has_no_misconfigured_semantic_note(
-    temp_registry: StoreRegistry,
+@pytest.mark.parametrize("semantic_raises", [False, True])
+def test_get_context_built_semantic_axis_is_never_misconfigured(
+    temp_registry: StoreRegistry, monkeypatch, semantic_raises: bool
 ) -> None:
-    """A real builder with a real (unconfigured) embedder state -- no
-    monkeypatched registry -- renders neither note."""
-    store = temp_registry.knowledge.document_store
-    store.put(
-        "doc-a",
-        "alpha bravo runbook drain queue " * 10,
-        {"content_tags": {"domain": "alpha"}},
+    """With an embedder configured and the semantic strategy built, the
+    axis is "ran" or "failed", never "misconfigured": a semantic axis that
+    raised is named by the failed-axis line alone, and one that ran adds
+    no line at all."""
+    keyword = _make_axis_strategy("keyword", [_axis_item("d1")])
+    semantic = (
+        _make_failing_axis_strategy("semantic", _AXIS_FAILURE_SENTINEL)
+        if semantic_raises
+        else _make_axis_strategy("semantic", [_axis_item("d2")])
     )
+    monkeypatch.setattr(
+        server_mod,
+        "_build_pack_builder",
+        lambda *_args, **_kwargs: PackBuilder(strategies=[keyword, semantic]),
+    )
+    _configure_embedder(monkeypatch, temp_registry)
 
     result = get_context(INTENT)
+    lines = result.split("\n")
 
     assert "Semantic retrieval misconfigured" not in result
+    assert _AXIS_FAILURE_SENTINEL not in result
+    if semantic_raises:
+        assert "**Retrieval axis failed:** semantic." in lines
+    else:
+        assert "Retrieval axis failed" not in result
 
 
 # ---------------------------------------------------------------------------

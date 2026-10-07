@@ -1521,7 +1521,7 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
 
 Axis names only, never the exception text — that stays in `PACK_ASSEMBLED.strategy_failures`. A reply with no failed axis has no such line.
 
-A `misconfigured` semantic axis (an embedder resolved but the vector backend never initialised) never lands in `axes.failed` — it's absent from `axes.available` entirely, so the line above says nothing about it. The same tools (#783 gate, follow-up F2) add a second, independent line for that state:
+A `misconfigured` semantic axis (an embedder resolved but the vector backend never initialised) never lands in `axes.failed` — it's absent from `axes.available` entirely, so the line above says nothing about it. The same tools add a second, independent line for that state:
 
 ```
 **Semantic retrieval misconfigured:** the vector store did not initialise; results are keyword and graph only.
