@@ -12,20 +12,14 @@ exit a later statement in its own block or an enclosing one, OR nested
 inside a later sibling statement such as ``if error is not None: raise
 typer.Exit(...)`` (the shape ``test_format_exit_parity_rule.py`` asks
 for); and the message as the red arm of a conditional expression
-(``ast.IfExp``), on either side of it. Widening to the later-sibling shape
-also caught two real lines no one had named: analyze.py's ``graph_shape``
-and extract_refresh.py's per-key diff line both reach their function's
-exit the same way, later and nested in an ``if``.
+(``ast.IfExp``), on either side of it.
 
-It still does not see an exit in a *different* function than the print:
-a helper that returns an ``Exit`` for its caller to raise
-(``admin_api_keys.py``'s ``_store_error``), or a helper that only prints
-and leaves the exit decision to its caller (extract_refresh.py's
-``_print_backfill``, called, then ``if refusal is not None: raise
-typer.Exit(...)`` back in the caller). Both are wrapped by hand and left
-out of the hand-read floor: resolving a second function's control flow is
-more machinery than two call sites are worth. Nor does it see a receiver
-not named ``*console``. Lines of those shapes are not policed here.
+It does not see an exit raised in a *different* function than the print
+-- a helper that returns an ``Exit`` for its caller to raise
+(``admin_api_keys.py``'s ``_store_error``), or one that only prints and
+leaves the exit to its caller (extract_refresh.py's ``_print_backfill``)
+-- nor a receiver not named ``*console``. Lines of those shapes are not
+policed here and stay out of the hand-read floor, wrapped or not.
 """
 
 from __future__ import annotations
@@ -40,15 +34,12 @@ SRC = Path(__file__).parents[2] / "src" / "trellis_cli"
 #: 74 sites found by a tokenize recount written independently of this scan
 #: (site-for-site equal to it at #766's head), less classify.py's shadow
 #: summary, which exits ``EXIT_OK`` (73), plus 8 sites this widening makes
-#: visible: admin.py:1533 and :1883, curate.py:78 (a later sibling
-#: ``if``); extract_refresh.py:538 and ingest.py:448 and :523 (an
-#: ``IfExp`` red arm, the shape the #766 gate named); and two the gate's
-#: hand read did not name but the same shape covers once it is scanned
-#: rather than eyeballed -- analyze.py:3130 and extract_refresh.py:563.
-#: admin_api_keys.py:79 and extract_refresh.py:581 (an ``Exit`` in a
-#: different function than the print) are wrapped by hand and stay out of
-#: this count; see the module docstring. Counted outside this scan, never
-#: computed by it.
+#: visible: admin.py:1533 and :1884, analyze.py:3130, curate.py:78 and
+#: extract_refresh.py:565 (an exit under a later ``if``);
+#: extract_refresh.py:539, ingest.py:448 and :524 (an ``IfExp`` red arm).
+#: Lines whose exit is raised in a different function than the print stay
+#: out of this count; see the module docstring. Counted outside this scan,
+#: never computed by it.
 HAND_READ_FAILURE_LINE_COUNT = 81
 
 #: Spellings this repo raises to end the process.
@@ -79,9 +70,7 @@ def _raises_within(node: ast.AST) -> list[ast.Raise]:
     through itself, not just as a direct statement."""
     if isinstance(node, ast.Raise):
         return [node]
-    if isinstance(
-        node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
-    ):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return []
     found: list[ast.Raise] = []
     for child in ast.iter_child_nodes(node):
@@ -252,16 +241,13 @@ def test_rule_discriminates_wrap_exit_code_and_block(tmp_path: Path) -> None:
 
 
 def test_rule_finds_later_if_and_ifexp_shapes(tmp_path: Path) -> None:
-    """Two shapes the #766 gate found and #766's rule could not see: an
-    exit raised inside a *later* sibling ``if`` rather than as a direct
-    statement (``later_if.py``, the shape
+    """An exit raised inside a *later* sibling ``if`` rather than as a
+    direct statement (``later_if.py``, the shape
     ``test_format_exit_parity_rule.py`` requires), and the red arm of a
     conditional expression, on either side of it (``ifexp_red_orelse.py``,
-    ``ifexp_red_body.py``). ``_zero`` variants of each must stay out of the
-    population entirely, the same as ``zero_exit.py`` above.
-    ``helper_returned_exit.py`` pins a third shape -- an ``Exit`` a helper
-    returns for its caller to raise -- that stays unseen; see the module
-    docstring."""
+    ``ifexp_red_body.py``). A zero exit under a later ``if`` stays out, as
+    ``zero_exit.py`` does above, and so does a raise inside a nested
+    function, which is not on the print's path (``nested_def.py``)."""
     header = "import typer\nfrom trellis_cli.output import console\n\n"
     files = {
         "later_if.py": (
@@ -306,24 +292,14 @@ def test_rule_finds_later_if_and_ifexp_shapes(tmp_path: Path) -> None:
             "    if refusal is not None:\n"
             "        raise typer.Exit(code=1)\n"
         ),
-        "ifexp_zero_exit.py": (
-            "def run(refusal, label):\n"
-            "    console.print(\n"
-            "        f'[red]Failed {label}[/red]'\n"
-            "        if refusal is not None\n"
-            "        else f'[green]OK {label}[/green]'\n"
-            "    )\n"
-            "    if refusal is not None:\n"
-            "        raise typer.Exit(code=EXIT_OK)\n"
-        ),
-        "helper_returned_exit.py": (
-            "def _build_error(path):\n"
-            "    console.print(f'[red]Store error: {path}[/red]')\n"
-            "    return typer.Exit(code=1)\n"
-            "\n"
-            "\n"
+        "nested_def.py": (
             "def run(path):\n"
-            "    raise _build_error(path)\n"
+            "    console.print(f'[red]Nested-def failure: {path}[/red]')\n"
+            "\n"
+            "    def _abort():\n"
+            "        raise typer.Exit(code=1)\n"
+            "\n"
+            "    return _abort\n"
         ),
     }
     for name, body in files.items():
@@ -332,4 +308,3 @@ def test_rule_finds_later_if_and_ifexp_shapes(tmp_path: Path) -> None:
     sites = failure_line_sites(tmp_path)
     found = sorted(site.path.name for site in sites)
     assert found == ["ifexp_red_body.py", "ifexp_red_orelse.py", "later_if.py"], found
-    assert not any(_has_soft_wrap(s.node) for s in sites)

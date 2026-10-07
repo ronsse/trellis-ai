@@ -1338,17 +1338,13 @@ All notable changes to Trellis will be documented in this file.
   sorted order so overlapping batches cannot deadlock, and each version is
   stamped after its lock is granted. Duplicate rows already stored stay.
   (trellis-ai#768)
-- **10 more red CLI lines, plus one yellow one, are no longer hard-wrapped at
-  the console width.** The soft-wrap rule now also catches an exit raised
-  under a later `if` (`admin.py` x2, `curate.py`) and the red arm of a
-  conditional-expression message (`extract_refresh.py` x2, `ingest.py` x2);
-  scanning rather than eyeballing the shape surfaced two sites the #766 gate
-  had not named (`analyze.py`'s truncated-scan line, `extract_refresh.py`'s
-  diff-removed line). `extract_refresh.py`'s disabled-source line also
-  escapes the source name. Two sites reachable only from a different
-  function than the one that prints -- `admin_api_keys.py`'s `_store_error`
-  and `extract_refresh.py`'s backfill summary -- stay unpoliced by the scan
-  and are wrapped and documented by hand.
+- **10 more red CLI lines, and one yellow one, no longer hard-wrap at the
+  console width**, which could split an id or path mid-token. The soft-wrap
+  rule now also sees an exit raised inside a later `if` (`admin.py` x2,
+  `analyze.py`, `curate.py`, `extract_refresh.py`) and the red arm of a
+  conditional-expression message (`extract_refresh.py`, `ingest.py` x2). A
+  line whose exit is raised in a different function from the print is still
+  outside the rule; two such lines are wrapped here by hand.
   ([#766](https://github.com/ronsse/trellis-ai/pull/766) follow-ups 1-2)
 
 ## [0.9.0] - 2026-05-13
