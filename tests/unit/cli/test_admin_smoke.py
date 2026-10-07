@@ -401,6 +401,74 @@ class TestSmokeTestErrorTextVerbatim:
 
 
 # ---------------------------------------------------------------------------
+# A readyz body whose ``backends`` is not a mapping — a foreign server, a
+# proxy, or an older build. ``_render_smoke_text`` must not crash on it; the
+# JSON branch never called ``.items()`` on it, so it was never at risk.
+# ---------------------------------------------------------------------------
+
+
+def _readyz_backends_list(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/readyz":
+        return httpx.Response(
+            200, json={"status": "ready", "backends": ["event_log", "graph_store"]}
+        )
+    return _healthy_handler("secret")(request)
+
+
+def _readyz_backends_string(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/readyz":
+        return httpx.Response(
+            200, json={"status": "ready", "backends": "all backends reachable"}
+        )
+    return _healthy_handler("secret")(request)
+
+
+_NON_DICT_BACKENDS_SCENARIOS: dict[str, Callable[[httpx.Request], httpx.Response]] = {
+    "list": _readyz_backends_list,
+    "string": _readyz_backends_string,
+}
+
+
+class TestSmokeTestNonDictBackends:
+    @pytest.mark.parametrize(
+        "scenario",
+        list(_NON_DICT_BACKENDS_SCENARIOS),
+        ids=list(_NON_DICT_BACKENDS_SCENARIOS),
+    )
+    def test_text_mode_survives_and_matches_json_exit_code(
+        self, monkeypatch: pytest.MonkeyPatch, scenario: str
+    ) -> None:
+        handler = _NON_DICT_BACKENDS_SCENARIOS[scenario]
+
+        _patch_client(monkeypatch, handler)
+        json_result = runner.invoke(
+            app, ["admin", "smoke-test", "--api-key", "secret", "--format", "json"]
+        )
+
+        _patch_client(monkeypatch, handler)
+        text_result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
+
+        assert text_result.exception is None, text_result.output
+        assert text_result.exit_code == json_result.exit_code, (
+            text_result.exit_code,
+            json_result.exit_code,
+        )
+
+    def test_dict_backends_still_render_per_backend_detail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The normal (dict) shape is unaffected by the non-dict guard."""
+        _patch_client(monkeypatch, _healthy_handler("secret"))
+
+        result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
+
+        assert result.exit_code == 0, result.stdout
+        rendered = plain(result.stdout)
+        assert "event_log" in rendered
+        assert "graph_store" in rendered
+
+
+# ---------------------------------------------------------------------------
 # Tolerable non-pass — observability not wired
 # ---------------------------------------------------------------------------
 

@@ -2082,7 +2082,11 @@ def _render_smoke_text(
             console.print(f"        [dim]{escape(check['note'])}[/dim]")
         if check.get("reason"):
             console.print(f"        [dim]{check['reason']}[/dim]")
-        if check["name"] == "readyz" and check.get("backends"):
+        if (
+            check["name"] == "readyz"
+            and check.get("backends")
+            and isinstance(check["backends"], dict)
+        ):
             for backend, info in check["backends"].items():
                 if not isinstance(info, dict):
                     continue

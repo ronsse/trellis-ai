@@ -1460,6 +1460,16 @@ All notable changes to Trellis will be documented in this file.
   carrying `[...]` was read as a style tag and deleted. All three are now
   escaped; `--format json` is unchanged.
   ([#784](https://github.com/ronsse/trellis-ai/pull/784) follow-up 1)
+- **`admin smoke-test`'s text mode no longer crashes on a non-dict `backends`
+  in the readyz body.** A `/readyz` response whose `backends` key is a list
+  or a string — a foreign server, a proxy, or an older build — made
+  `_render_smoke_text` raise `AttributeError: '...' object has no attribute
+  'items'`; `--format json` was unaffected, since it never called `.items()`
+  on it. The per-backend loop now also requires `isinstance(..., dict)`,
+  the same guard already applied to each backend's own value beside it; a
+  non-dict `backends` is skipped silently, matching that sibling guard, and
+  the exit code is unchanged (it is computed before the format branch).
+  (#784 follow-up 1 / #788 gate finding 3, follow-up F1)
 
 ## [0.9.0] - 2026-05-13
 
