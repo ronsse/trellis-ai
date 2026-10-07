@@ -38,8 +38,9 @@ Status alone does not identify a site (five are REJECTED, three FAILED),
 so every test also asserts a fragment of the message its site writes. Two
 pairs share a message *shape* -- both replay sites write ``Duplicate
 command: <key>`` (``IdempotencyError.__str__`` and the in-memory replay
-use the same words) and both handler-failure sites write ``Execution
-failed: <exc>`` -- and there the command that reaches the site is what
+use the same words) and both handler-failure sites begin ``Execution
+failed:`` (the typed catch goes on with the exception's text, the untyped
+one with its type name) -- and there the command that reaches the site is what
 separates them: a handler raising against a command with no idempotency
 key can only reach the handler site, and a typed exception can only reach
 the typed catch. The map is proved by execution rather than by the
@@ -471,8 +472,8 @@ def test_handler_panic(event_log: SQLiteEventLog) -> None:
         commands,
         results,
         [
-            (CommandStatus.FAILED, "Execution failed: backend panic"),
-            (CommandStatus.FAILED, "Execution failed: 'missing-key'"),
+            (CommandStatus.FAILED, "Execution failed: RuntimeError"),
+            (CommandStatus.FAILED, "Execution failed: KeyError"),
         ],
     )
 

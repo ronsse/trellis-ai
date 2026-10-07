@@ -1249,6 +1249,17 @@ All notable changes to Trellis will be documented in this file.
   raises a `StoreError` naming only the exception type. Other unique
   violations are unchanged.
   ([#755](https://github.com/ronsse/trellis-ai/pull/755))
+- **A failed command names a non-Trellis exception by its type alone.** The
+  FAILED message that REST, MCP and the CLI return reads, for example,
+  `Execution failed: IntegrityError` instead of the exception's text, which a
+  driver can fill with query text and values. MCP `execute_mutation` names an
+  exception that escapes the executor the same way. A Trellis error keeps its
+  text, and the operator log, the audit event and every status are unchanged.
+  A `ValueError` or pydantic error raised on a caller's input loses its detail
+  too: an invalid or changed `node_role`, or duplicate `document_ids`, on
+  `entity.create` reads `Execution failed: ValueError`, and an invalid trace
+  sent to `trace.ingest` reads `Execution failed: ValidationError`.
+  ([#748](https://github.com/ronsse/trellis-ai/pull/748))
 - **`trellis admin migrate-graph` sanitizes a destination store's failure
   text before printing it.** The `Migration aborted:` line,
   `--continue-on-error`'s `Errors:` list, and the `--format json`
