@@ -1502,24 +1502,14 @@ All notable changes to Trellis will be documented in this file.
   already doubled heals on its next upsert. SQLite and Postgres were not
   affected.
   ([#782](https://github.com/ronsse/trellis-ai/pull/782) follow-up 1)
-- **A missing OpenAI API key on the LLM/embedder provider classes answers
-  like a config error, not a raw SDK exception.** `OpenAIClient` and
-  `OpenAIEmbedder` (`trellis.llm.providers.openai`) share
-  `_build_async_client`, which had the same unguarded
-  `AsyncOpenAI(**kwargs)` shape #786 fixed in the registry's embedding
-  function — constructing either with no key anywhere raised the SDK's
-  untyped `openai.OpenAIError`, naming no setting. Neither class is
-  reachable with a missing key through `StoreRegistry`'s current builders
-  or `mcp.server`'s env fallback today — both pre-resolve the key and
-  treat "none found" as "not configured" before ever constructing a
-  client — but both classes are public and directly constructible. The
-  constructor call now raises `ConfigError` naming `llm.api_key_env` for
-  `OpenAIClient` and `llm.embedding.api_key_env` for `OpenAIEmbedder`
-  (the two classes are configured under different `llm:` sub-keys), with
-  the SDK's original error chained as `__cause__`; a non-`OpenAIError`
-  from the constructor, and an explicitly passed `client=`, are
-  unaffected. `trellis.llm.providers.anthropic` has the identical shape
-  and is unchanged here.
+- **A missing OpenAI API key on the provider classes is a config error, not
+  a raw SDK exception.** Constructing `OpenAIClient` or `OpenAIEmbedder`
+  (`trellis.llm.providers.openai`) with no key anywhere raised the SDK's
+  untyped `openai.OpenAIError`; it now raises `ConfigError` naming
+  `llm.api_key_env` or `llm.embedding.api_key_env`, with the SDK error
+  chained as `__cause__`. No in-repo caller reaches it today:
+  `StoreRegistry`'s builders and `mcp.server`'s env fallback treat a missing
+  key as "not configured" before constructing a client.
   (follow-up 2 from [#786](https://github.com/ronsse/trellis-ai/pull/786))
 
 ## [0.9.0] - 2026-05-13

@@ -435,6 +435,7 @@ class TestMissingKeyConfigError:
             OpenAIClient()
         assert exc_info.value.setting == "llm.api_key_env"
         assert exc_info.value.__cause__ is sdk_error
+        assert str(sdk_error) not in str(exc_info.value)
 
     def test_embedder_missing_key_raises_configerror(
         self, monkeypatch: pytest.MonkeyPatch
@@ -452,6 +453,7 @@ class TestMissingKeyConfigError:
             OpenAIEmbedder()
         assert exc_info.value.setting == "llm.embedding.api_key_env"
         assert exc_info.value.__cause__ is sdk_error
+        assert str(sdk_error) not in str(exc_info.value)
 
     def test_non_openai_error_propagates_unwrapped(
         self, monkeypatch: pytest.MonkeyPatch

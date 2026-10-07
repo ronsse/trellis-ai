@@ -33,8 +33,8 @@ def _build_async_client(
     """Construct an ``AsyncOpenAI`` client, deferring the SDK import.
 
     Raises :class:`~trellis.errors.ConfigError` naming *setting* when the
-    SDK is installed but resolves no API key — neither *api_key* nor the
-    SDK's own ``OPENAI_API_KEY`` env var fallback. The constructor's
+    SDK is installed but resolves no API key from *api_key* or from its own
+    environment fallback (which varies by SDK version). The constructor's
     untyped ``openai.OpenAIError`` is chained as the cause; its text stays
     out of the message, mirroring
     ``trellis.stores.registry._build_openai_embedding_fn`` (#786). *setting*
