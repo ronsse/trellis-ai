@@ -1526,6 +1526,15 @@ All notable changes to Trellis will be documented in this file.
   it mid-token so it could not be copied whole. Both lines now pass
   `soft_wrap=True`.
   ([#777](https://github.com/ronsse/trellis-ai/pull/777) follow-up 1)
+- **A missing OpenAI API key on the provider classes is a config error, not
+  a raw SDK exception.** Constructing `OpenAIClient` or `OpenAIEmbedder`
+  (`trellis.llm.providers.openai`) with no key anywhere raised the SDK's
+  untyped `openai.OpenAIError`; it now raises `ConfigError` naming
+  `llm.api_key_env` or `llm.embedding.api_key_env`, with the SDK error
+  chained as `__cause__`. No in-repo caller reaches it today:
+  `StoreRegistry`'s builders and `mcp.server`'s env fallback treat a missing
+  key as "not configured" before constructing a client.
+  (follow-up 2 from [#786](https://github.com/ronsse/trellis-ai/pull/786))
 
 ## [0.9.0] - 2026-05-13
 
