@@ -9,6 +9,12 @@ payload errors, which the caller needs to fix its call, and one message
 hand-read exemption list, not a todo list: a new site fails the build, and
 a fixed site must shrink this roster and its count. The scan cannot see an
 exception that a tool never catches.
+
+The scan reads every module under ``src/trellis/mcp``, not just
+``server.py``, because any of them can build caller-facing text.
+``_MODULE_EXEMPTIONS`` is keyed by each module's path relative to the
+package, so an exemption in one module never covers a same-named function
+in another, and a key naming a module the scan does not visit fails.
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ from pathlib import Path
 import pytest
 
 import trellis.mcp.server as server_mod
-from tests.ast_rules import name_of
+from tests.ast_rules import iter_modules, name_of
 
 #: Calls whose arguments never reach the caller: structlog methods (full
 #: driver text in a log line is the house pattern) and this module's own
@@ -70,18 +76,32 @@ EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
     ),
 }
 
-# Hand count (trellis-ai#748): 1 in
-# save_experience, 2 in _resolve_evidence_pointer, 1 in record_observation,
-# 1 in execute_mutation, 1 in _SanitizeUncaughtToolErrors.on_call_tool.
-# Re-grep '{exc}\|str(exc)' in src/trellis/mcp/server.py and subtract the
-# helper's own internal use and the one log-only site (_build_llm_client,
-# excluded structurally above) to reconcile. The scan's other shapes,
-# repr(), an attribute chain inside str()/repr()/an f-string, a `%` right
-# operand and a `.format(...)` argument, have no site in server.py:
-# re-grep 'repr(exc\|{exc\.\|str(exc\.\|% exc\|format(exc' finds none.
+#: Per-module exemption rosters, keyed by POSIX path relative to the
+#: package (``server.py``; a subpackage module would be ``sub/name.py``),
+#: so this reads the same wherever the package is installed. A module
+#: absent here must scan clean: every one of its raw exception-text sites
+#: is unrostered, which fails the build exactly like an undeclared function
+#: in server.py does. A key naming a module the scan does not visit, one
+#: renamed or deleted, fails the build too.
+_MODULE_EXEMPTIONS: dict[str, dict[str, str]] = {
+    "server.py": EXCEPTION_TEXT_EXEMPTIONS,
+}
+
+# Hand count (trellis-ai#748): 1 in save_experience, 2 in
+# _resolve_evidence_pointer, 1 in record_observation, 1 in
+# execute_mutation, 1 in _SanitizeUncaughtToolErrors.on_call_tool, all in
+# server.py. Re-grep '{exc}\|str(exc)' in src/trellis/mcp/server.py and
+# subtract the one log-only site (_build_llm_client, excluded structurally
+# above) to reconcile. The scan's other shapes, repr(), an
+# attribute chain inside str()/repr()/an f-string, a `%` right operand and
+# a `.format(...)` argument, have no site in server.py: re-grep
+# 'repr(exc\|{exc\.\|str(exc\.\|% exc\|format(exc' finds none. Every other
+# module under src/trellis/mcp (__init__.py, auth.py, knowledge_links.py,
+# reconcile.py, supersession.py) hand-reads clean at this count.
 _HAND_READ_SITE_COUNT = 6
 
 _SERVER_PATH = Path(inspect.getsourcefile(server_mod) or "")
+_MCP_PACKAGE_DIR = _SERVER_PATH.parent
 
 #: Calls that render their single argument's text.
 _STRINGIFY_CALL_NAMES = frozenset({"str", "repr"})
@@ -184,30 +204,99 @@ def _scan(tree: ast.Module) -> dict[str, list[ast.AST]]:
     return by_function
 
 
-def _server_scan() -> dict[str, list[ast.AST]]:
-    return _scan(ast.parse(_SERVER_PATH.read_text(encoding="utf-8")))
+def _mcp_scan(root: Path | None = None) -> dict[str, dict[str, list[ast.AST]]]:
+    """Raw exception-text sites for every ``*.py`` module under *root*
+    (default: the real ``src/trellis/mcp`` package this process imported),
+    keyed by POSIX path relative to *root*, the ``_MODULE_EXEMPTIONS`` key,
+    so two files' same-named functions cannot collide."""
+    package_dir = root if root is not None else _MCP_PACKAGE_DIR
+    return {
+        path.relative_to(package_dir).as_posix(): _scan(tree)
+        for path, tree in iter_modules(package_dir)
+    }
+
+
+def _roster_problems(
+    found_by_module: dict[str, dict[str, list[ast.AST]]],
+    roster: dict[str, dict[str, str]],
+) -> list[str]:
+    """Reconcile a scan (module key -> function name -> sites) against
+    *roster* (module key -> function name -> reason), one line per module
+    key that differs. A roster key with no scanned module is reported on
+    its own. A scanned module is checked against its own key's names only,
+    so an exemption under another module's key never excuses a site here.
+    """
+    problems: list[str] = []
+    for key in sorted(set(found_by_module) | set(roster)):
+        if key not in found_by_module:
+            problems.append(f"{key}: roster names a module that was not scanned")
+            continue
+        found = found_by_module[key]
+        declared = set(roster.get(key, {}))
+        unrostered = set(found) - declared
+        stale = declared - set(found)
+        if unrostered or stale:
+            problems.append(
+                f"{key}: unrostered={sorted(unrostered)}; stale={sorted(stale)}"
+            )
+    return problems
 
 
 def test_every_raw_exception_text_site_is_a_declared_exemption() -> None:
-    found = _server_scan()
-    declared = set(EXCEPTION_TEXT_EXEMPTIONS)
-    assert set(found) == declared, (
-        "raw exception text sites in src/trellis/mcp/server.py differ from "
-        f"the roster: unrostered={sorted(set(found) - declared)}; "
-        f"stale={sorted(declared - set(found))}"
+    found_by_module = _mcp_scan()
+    problems = _roster_problems(found_by_module, _MODULE_EXEMPTIONS)
+    assert not problems, (
+        "raw exception text sites under src/trellis/mcp differ from the "
+        "roster:\n" + "\n".join(problems)
+    )
+    total = sum(
+        len(hits) for found in found_by_module.values() for hits in found.values()
     )
     thin = [
-        name
-        for name, reason in EXCEPTION_TEXT_EXEMPTIONS.items()
+        f"{module}:{name}"
+        for module, exemptions in _MODULE_EXEMPTIONS.items()
+        for name, reason in exemptions.items()
         if len(reason.split()) < 4
     ]
     assert not thin, f"exemptions need prose reasons: {thin}"
-    total = sum(len(hits) for hits in found.values())
     assert total == _HAND_READ_SITE_COUNT, (
-        f"found {total} raw exception text sites, expected the hand-read "
-        f"{_HAND_READ_SITE_COUNT}. A new site must not inherit an existing "
-        "function-level exemption; a fixed site must shrink this count."
+        f"found {total} raw exception text sites across src/trellis/mcp, "
+        f"expected the hand-read {_HAND_READ_SITE_COUNT}. A new site must "
+        "not inherit an existing function-level exemption; a fixed site "
+        "must shrink this count."
     )
+
+
+def test_a_nested_module_is_keyed_by_its_relative_path(tmp_path: Path) -> None:
+    """A subpackage module is scanned and keyed by its relative path: a
+    nested ``sub/server.py`` neither inherits the top-level ``server.py``'s
+    exemptions nor merges into its scan, so its same-named site is
+    reported."""
+    leak = (
+        "def leaky_tool():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as exc:\n"
+        "        return f'failed: {exc}'\n"
+    )
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "server.py").write_text(leak, encoding="utf-8")
+    (tmp_path / "sub" / "server.py").write_text(leak, encoding="utf-8")
+    roster = {"server.py": {"leaky_tool": "exempt only at the top level"}}
+    problems = _roster_problems(_mcp_scan(tmp_path), roster)
+    assert problems == ["sub/server.py: unrostered=['leaky_tool']; stale=[]"]
+
+
+def test_roster_problems_catches_a_stale_module_key() -> None:
+    """A roster key naming a module the scan did not visit, one renamed or
+    deleted, is reported by name."""
+    found_by_module: dict[str, dict[str, list[ast.AST]]] = {"server.py": {}}
+    roster = {
+        "server.py": {},
+        "deleted_module.py": {"old_tool": "module no longer exists"},
+    }
+    problems = _roster_problems(found_by_module, roster)
+    assert problems == ["deleted_module.py: roster names a module that was not scanned"]
 
 
 @pytest.mark.parametrize(
@@ -262,6 +351,41 @@ def test_scan_catches_a_newly_added_leak() -> None:
     )
     found = _scan(defective)
     assert "_brand_new_tool" in found
+
+
+def test_the_scan_covers_every_module_not_just_server() -> None:
+    """Non-vacuousness for the file discovery: the real scan visits the
+    package's other modules, not just server.py."""
+    scanned = set(_mcp_scan())
+    assert scanned >= {
+        "server.py",
+        "supersession.py",
+        "auth.py",
+        "knowledge_links.py",
+        "reconcile.py",
+    }
+
+
+def test_scan_catches_a_newly_added_leak_in_a_non_server_module(tmp_path: Path) -> None:
+    """Non-vacuousness for the widening itself: a leak appended to a
+    scratch copy of a real non-server module (supersession.py) is still
+    caught. Checked by membership, not roster
+    equality, so this holds whether or not supersession.py's own sites
+    are declared exemptions at the time this runs."""
+    package_dir = tmp_path / "mcp"
+    package_dir.mkdir()
+    source = (_MCP_PACKAGE_DIR / "supersession.py").read_text(encoding="utf-8")
+    defective = source + (
+        "\n\n"
+        "def _brand_new_tool():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as exc:\n"
+        "        return f'failed: {exc}'\n"
+    )
+    (package_dir / "supersession.py").write_text(defective, encoding="utf-8")
+    found = _mcp_scan(package_dir)
+    assert "_brand_new_tool" in found["supersession.py"]
 
 
 def test_scan_catches_a_newly_added_leak_in_a_class_method() -> None:

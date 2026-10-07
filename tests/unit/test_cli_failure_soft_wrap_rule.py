@@ -22,7 +22,9 @@ leaves the exit to its caller (extract_refresh.py's ``_print_backfill``)
 hand-read floor below. A cross-function line that can print an unbounded
 id, path or error text before a non-zero exit is listed by hand in
 ``CROSS_FUNCTION_FAILURE_LINES`` instead, and the second test checks it;
-one that interpolates only a fixed vocabulary or a count, or that cannot
+so is a yellow line of that kind whose exit is in its own function
+(retrieve.py's ``Trace not found``), which the red-only scan skips. One
+that interpolates only a fixed vocabulary or a count, or that cannot
 print on a non-zero exit, is left off.
 """
 
@@ -188,26 +190,35 @@ def test_every_cli_failure_line_passes_soft_wrap() -> None:
 #: ``HAND_READ_FAILURE_LINE_COUNT`` above, so a roster entry quietly
 #: dropped (or renamed past what it matches) shrinks the *measured*
 #: population below this floor instead of moving the floor with it.
-HAND_READ_CROSS_FUNCTION_COUNT = 10
+HAND_READ_CROSS_FUNCTION_COUNT = 14
 
 #: (file, function, message fragment) for each cross-function failure line:
 #: a helper prints it in red or yellow, and a caller in the same file
 #: raises a non-zero exit after the call -- a yellow line qualifies the
 #: same way a red one does: ``_named_function_print_calls`` collects every
 #: ``*console.print`` in the named function regardless of colour, and the
-#: fragment is what narrows it to one. The fragment tells apart entries
-#: that share a function: admin.py's ``_render_smoke_text`` (two reds) and
-#: ingest_corpus.py's ``_render_report`` (its ``prune``/``withheld`` pair).
+#: fragment is what narrows it to one. retrieve.py's ``trace`` and
+#: ``entity`` entries print and exit in the same function; they are here
+#: because they are yellow, which ``failure_line_sites`` does not scan.
+#: The fragment tells apart entries that share a function: admin.py's
+#: ``_render_smoke_text`` (two reds), ingest_conversations.py's
+#: ``_render_report`` (its ``warning``/``withheld`` pair), and
+#: ingest_corpus.py's ``_render_report`` (its ``prune``/``warning``/
+#: ``withheld`` trio).
 CROSS_FUNCTION_FAILURE_LINES = (
     ("admin.py", "_print_skills_summary", "failed"),
     ("admin.py", "_print_check_extractors_report", "not configurable from"),
     ("admin.py", "_render_smoke_text", "check['error']"),
     ("admin.py", "_render_smoke_text", "info['error']"),
     ("admin_api_keys.py", "_store_error", "store error"),
+    ("ingest_conversations.py", "_render_report", "warning['kind']"),
     ("ingest_conversations.py", "_render_report", "withheld_name"),
     ("ingest_corpus.py", "_render_report", "pruned_name"),
+    ("ingest_corpus.py", "_render_report", "warning['kind']"),
     ("ingest_corpus.py", "_render_report", "withheld_name"),
     ("policy.py", "_render_degradation", "POLICY STORE DEGRADED"),
+    ("retrieve.py", "entity", "Entity not found"),
+    ("retrieve.py", "trace", "Trace not found"),
     ("worker.py", "_render_embed_traces_text", "trace_id"),
 )
 
@@ -263,7 +274,7 @@ def test_cross_function_failure_lines_pass_soft_wrap() -> None:
     """Each roster entry resolves to exactly one print, and it passes
     ``soft_wrap=True``. Entries are found by function and message
     fragment, not by ``failure_line_sites``, which cannot see an exit
-    raised in another function."""
+    raised in another function or a line that is not red."""
     sites = _cross_function_roster_matches(SRC)
     assert_hand_read_floor(
         len(sites),
