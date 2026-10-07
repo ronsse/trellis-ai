@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 import yaml
 
 from trellis.core.error_sanitize import (
+    DEFAULT_MAX_LEN,
     SUPPRESSED_MARKER,
     describe_yaml_error,
     sanitize_error_message,
@@ -14,6 +17,13 @@ from trellis.core.error_sanitize import (
 
 #: A fake credential planted where PyYAML's ``str(exc)`` would quote it.
 _SENTINEL = "XQ1BR6asQyYAJ6tcK6JnaWKZ"
+
+
+def _filler(length: int) -> str:
+    """``length`` chars of prose: short space-separated words, so no run
+    is 40+ chars and nothing resembles ``@``/``=``/``:`` — safe against
+    every ``_LEAK_PATTERNS`` entry and the long-opaque-token check."""
+    return ("lorem " * (length // 6 + 2))[:length]
 
 
 class TestCleanPassthrough:
@@ -279,6 +289,57 @@ class TestBounding:
     def test_custom_max_len(self) -> None:
         out = sanitize_error_message("abcdef", max_len=3)
         assert out == "abc…[truncated]"
+
+
+class TestScanWindowBound:
+    """``sanitize_error_message`` scans a bounded window, not the whole
+    text (#763 follow-up 2): the email and credential-URL patterns
+    backtrack quadratically on a long run of word characters, so an
+    unbounded scan of caller-controlled exception text can stall a
+    request for seconds to minutes."""
+
+    def test_long_adversarial_run_sanitizes_well_under_a_second(self) -> None:
+        # 100k chars in the URL-reaching shape; the gate measured base at
+        # ~27s for this size (quadratic in text length). The window bound
+        # makes the scan length independent of the input, so head should
+        # finish in well under the 1s bound even on a loaded CI runner.
+        text = "x" * 100_000 + "://"
+        start = time.perf_counter()
+        out = sanitize_error_message(text)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, f"took {elapsed:.3f}s — the scan is not bounded"
+        # The 100k-char run is itself a long opaque token either way.
+        assert out == SUPPRESSED_MARKER
+
+    def test_email_straddling_the_cut_is_suppressed(self) -> None:
+        # The local part starts 5 chars before max_len; "@example.com"
+        # falls entirely past it, within the scan margin.
+        filler = _filler(DEFAULT_MAX_LEN - 5)
+        text = filler + "alice@example.com" + _filler(50)
+        assert sanitize_error_message(text) == SUPPRESSED_MARKER
+
+    def test_credential_url_straddling_the_cut_is_suppressed(self) -> None:
+        # "postgres:/" (10 chars) lands before max_len; the credential and
+        # its closing "@" fall past it, within the scan margin.
+        filler = _filler(DEFAULT_MAX_LEN - 10)
+        text = filler + "postgres://admin:hunter2pass@" + _filler(50)
+        assert sanitize_error_message(text) == SUPPRESSED_MARKER
+
+    def test_leak_wholly_beyond_the_window_passes_through_clean(self) -> None:
+        # The secret starts 200 chars past max_len — comfortably past any
+        # reasonable scan margin — so no part of it is in the visible
+        # prefix and no part of it can leak through sanitize_error_message's
+        # output: the window bound's intended, documented consequence
+        # (see PR body). At base (unbounded scan) this is suppressed
+        # instead, since the full text is searched regardless of max_len.
+        leaked_email = "alice@example.com"
+        filler = _filler(DEFAULT_MAX_LEN + 200)
+        text = filler + leaked_email
+        out = sanitize_error_message(text)
+        assert out == text[:DEFAULT_MAX_LEN] + "…[truncated]"
+        assert leaked_email not in out
+        assert "alice" not in out
+        assert "@" not in out
 
 
 class TestPayload:

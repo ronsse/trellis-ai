@@ -83,6 +83,17 @@ _LONG_TOKEN_RUN = re.compile(
 )
 _PATH_SEPARATORS = frozenset("/\\")
 
+#: Extra characters scanned past ``max_len`` so a leak pattern that
+#: starts inside the visible prefix still trips when it needs a few more
+#: characters to complete. The largest such fixed context among
+#: ``_LEAK_PATTERNS`` today is the Neo4j constraint-violation pattern's
+#: literal text plus its longest declared label/property names
+#: (``AliasClaim``/``claim_key``, ~68 chars starting one character before
+#: the cut) — more than the 40-char long-opaque-token minimum or any
+#: secret-assignment keyword (``authorization``, 13 chars). 80 gives that
+#: headroom.
+_SCAN_MARGIN = 80
+
 
 def _is_repeated_character_path_component(text: str, match: re.Match[str]) -> bool:
     """Recognize the low-entropy component used by long pytest basetemps."""
@@ -114,11 +125,15 @@ def sanitize_error_message(text: str, *, max_len: int = DEFAULT_MAX_LEN) -> str:
     PostgreSQL row value, or a Neo4j or ArcadeDB duplicate-constraint row
     value is replaced wholesale with :data:`SUPPRESSED_MARKER` — partial
     redaction is not attempted because any transform of the original
-    text risks leaving a recoverable fragment.
+    text risks leaving a recoverable fragment. The heuristics scan only
+    ``text[:max_len + _SCAN_MARGIN]``: nothing past that window can reach
+    the output, so a leak whose pattern needs more than the margin to
+    complete past the cut is treated the same as one that never appears.
     """
-    if any(pattern.search(text) for pattern in _LEAK_PATTERNS):
+    window = text[: max_len + _SCAN_MARGIN]
+    if any(pattern.search(window) for pattern in _LEAK_PATTERNS):
         return SUPPRESSED_MARKER
-    if _has_long_opaque_token(text):
+    if _has_long_opaque_token(window):
         return SUPPRESSED_MARKER
     if len(text) > max_len:
         return text[:max_len] + "…[truncated]"
