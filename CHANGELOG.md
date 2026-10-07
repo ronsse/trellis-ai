@@ -1312,8 +1312,9 @@ All notable changes to Trellis will be documented in this file.
   matching the house pattern used at its neighboring sites — an identical
   `[yellow]` line three statements below was left as a follow-up. A new
   AST rule, `tests/unit/test_cli_failure_soft_wrap_rule.py`, now fails if a
-  future failure line goes unwrapped. (follow-up to
-  [#758](https://github.com/ronsse/trellis-ai/pull/758); PR link added once opened)
+  future failure line goes unwrapped.
+  ([#766](https://github.com/ronsse/trellis-ai/pull/766), follow-up to
+  [#758](https://github.com/ronsse/trellis-ai/pull/758))
 
 ## [0.9.0] - 2026-05-13
 
