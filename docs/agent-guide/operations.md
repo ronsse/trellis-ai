@@ -1519,10 +1519,17 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
 **Retrieval axis failed:** <names>.
 ```
 
-Axis names only, never the exception text — that stays in `PACK_ASSEMBLED.strategy_failures`. A reply with no failed axis has no such line. Two gaps in that line:
+Axis names only, never the exception text — that stays in `PACK_ASSEMBLED.strategy_failures`. A reply with no failed axis has no such line.
 
-- A `misconfigured` semantic axis (an embedder resolved but the vector backend never initialised) never lands in `axes.failed`, so this line says nothing about it; only `axes.semantic` (REST and `--format json`) and the CLI's text sentence report that state.
-- The SDK's `get_objective_context` / `get_task_context` format their own local markdown (`trellis_sdk._format.format_sectioned_pack_as_markdown`) and never read the response's `axes` key, so neither renders this line at all.
+A `misconfigured` semantic axis (an embedder resolved but the vector backend never initialised) never lands in `axes.failed` — it's absent from `axes.available` entirely, so the line above says nothing about it. The same tools (#783 gate, follow-up F2) add a second, independent line for that state:
+
+```
+**Semantic retrieval misconfigured:** the vector store did not initialise; results are keyword and graph only.
+```
+
+Same facts as the CLI's `misconfigured` sentence (`SEMANTIC_AXIS_NOTES`), never the exception text. A failed axis and a misconfigured semantic axis are independent states a single build can hit together, so both lines render when both apply; a reply with neither has no such line. One gap remains:
+
+- The SDK's `get_objective_context` / `get_task_context` format their own local markdown (`trellis_sdk._format.format_sectioned_pack_as_markdown`) and never read the response's `axes` key, so neither renders either line at all.
 
 > **This is a CLI contract change.** Before #410 the payload was
 > `{"status", "intent", "domain", "agent_id", "count", "include_chunks", "items"}`

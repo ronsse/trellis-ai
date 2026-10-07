@@ -98,12 +98,17 @@ def format_pack_as_markdown(
         empty_text: Line rendered in place of the item blocks when
             ``items`` is empty, so an empty pack keeps its ``pack_id``
             header and citation footer.
-        axis_note: One line naming a failed retrieval axis (from
-            :func:`~trellis.retrieve.builder_factory.format_failed_axes_note`),
-            or ``""`` when none failed. Same header placement and
-            not-charged-to-budget rule as ``withholding``, and for the same
-            reason: this is the markdown surface, so a caller who never
-            reads ``PACK_ASSEMBLED.strategy_failures`` still sees the gap.
+        axis_note: Pre-rendered line(s) naming a retrieval axis problem —
+            a failed axis and/or a misconfigured semantic axis (built by
+            the caller from
+            :func:`~trellis.retrieve.builder_factory.format_failed_axes_note`
+            and
+            :func:`~trellis.retrieve.builder_factory.format_misconfigured_semantic_note`,
+            respectively) — or ``""`` when none applies. Same header
+            placement and not-charged-to-budget rule as ``withholding``,
+            and for the same reason: this is the markdown surface, so a
+            caller who never reads ``PACK_ASSEMBLED.strategy_failures`` or
+            ``axes.semantic`` still sees the gap.
 
     Returns:
         Markdown-formatted string within token budget.

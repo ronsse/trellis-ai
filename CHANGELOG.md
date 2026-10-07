@@ -1535,6 +1535,18 @@ All notable changes to Trellis will be documented in this file.
   `StoreRegistry`'s builders and `mcp.server`'s env fallback treat a missing
   key as "not configured" before constructing a client.
   (follow-up 2 from [#786](https://github.com/ronsse/trellis-ai/pull/786))
+- **`get_context`, `search`, `get_context(sections=...)`, `get_objective_context`,
+  `get_task_context` and `get_sectioned_context` now report a misconfigured
+  semantic axis.** These MCP tools already added a `**Retrieval axis failed:**`
+  line for an axis named in `axes.failed`, but a `misconfigured` semantic axis
+  (an embedder resolved and the vector backend never initialised) never lands
+  in that list — it's absent from `axes.available` entirely — so an agent on
+  MCP got a silent keyword-and-graph-only pack while REST's `axes.semantic`
+  and the CLI's text sentence both reported the gap. The same tools now add a
+  second, independent `**Semantic retrieval misconfigured:**` line for that
+  state, reusing the one `describe_axes` report both lines are built from; a
+  clean pack, or one with only a failed axis, is unchanged.
+  (follow-up F2 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
 
 ## [0.9.0] - 2026-05-13
 
