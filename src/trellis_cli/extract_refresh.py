@@ -442,15 +442,17 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         sources_path = Path(sources_file)
         if not sources_path.exists():
             console.print(
-                f"[red]sources.yaml not found: {escape(str(sources_path))}[/red]"
+                f"[red]sources.yaml not found: {escape(str(sources_path))}[/red]",
+                soft_wrap=True,
             )
             raise typer.Exit(code=EXIT_INTERNAL)
         config = load_sources(sources_path)
         entry = config.find(source)
         if entry is None:
             console.print(
-                f"[red]Source {source!r} not declared in "
-                f"{escape(str(sources_path))}[/red]"
+                f"[red]Source {escape(repr(source))} not declared in "
+                f"{escape(str(sources_path))}[/red]",
+                soft_wrap=True,
             )
             raise typer.Exit(code=EXIT_INTERNAL)
         if not entry.enabled:
@@ -467,7 +469,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         except typer.Exit:
             raise
         except typer.BadParameter as exc:
-            console.print(f"[red]{escape(str(exc))}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
             raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":
@@ -512,7 +514,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         except typer.Exit:
             raise
         except typer.BadParameter as exc:
-            console.print(f"[red]{escape(str(exc))}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
             raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":

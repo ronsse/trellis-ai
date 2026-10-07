@@ -83,6 +83,14 @@ _LONG_TOKEN_RUN = re.compile(
 )
 _PATH_SEPARATORS = frozenset("/\\")
 
+#: Characters scanned past ``max_len``. Only ``text[:max_len]`` reaches the
+#: output, but a secret starting there can complete its pattern past the
+#: cut: a long-opaque-token run needs 40 characters, and the email,
+#: credential-URL and SQL patterns end on the ``@`` or ``from`` that follows
+#: the sensitive text. 500 covers most DSN userinfo and column lists; the
+#: patterns' worst-case backtracking over a 1000-character window is ~3 ms.
+_SCAN_MARGIN = 500
+
 
 def _is_repeated_character_path_component(text: str, match: re.Match[str]) -> bool:
     """Recognize the low-entropy component used by long pytest basetemps."""
@@ -114,11 +122,16 @@ def sanitize_error_message(text: str, *, max_len: int = DEFAULT_MAX_LEN) -> str:
     PostgreSQL row value, or a Neo4j or ArcadeDB duplicate-constraint row
     value is replaced wholesale with :data:`SUPPRESSED_MARKER` — partial
     redaction is not attempted because any transform of the original
-    text risks leaving a recoverable fragment.
+    text risks leaving a recoverable fragment. The heuristics scan only
+    ``text[:max_len + _SCAN_MARGIN]``, so their cost does not grow with
+    the input. A match that cannot complete inside that window is missed:
+    a leak wholly past it no longer suppresses the visible prefix, and a
+    secret straddling the cut by more than the margin shows its start.
     """
-    if any(pattern.search(text) for pattern in _LEAK_PATTERNS):
+    window = text[: max_len + _SCAN_MARGIN]
+    if any(pattern.search(window) for pattern in _LEAK_PATTERNS):
         return SUPPRESSED_MARKER
-    if _has_long_opaque_token(text):
+    if _has_long_opaque_token(window):
         return SUPPRESSED_MARKER
     if len(text) > max_len:
         return text[:max_len] + "…[truncated]"

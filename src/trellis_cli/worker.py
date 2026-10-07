@@ -260,13 +260,14 @@ def _build_auto_promote_policy_or_exit() -> AutoPromotePolicy:
     try:
         return _build_auto_promote_policy()
     except typer.BadParameter as exc:
-        console.print(f"[red]{escape(str(exc))}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     except ValueError as exc:
         # AutoPromotePolicy.__post_init__ rejects thresholds looser than the
         # manual gate or a disarmed rollback.
         console.print(
-            f"[red]invalid learning.auto_promote config: {escape(str(exc))}[/red]"
+            f"[red]invalid learning.auto_promote config: {escape(str(exc))}[/red]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
@@ -1435,7 +1436,8 @@ def _require_llm_client_or_exit(consumer: LLMConsumer, *, command: str) -> Any:
             f"[red]{command} requires an LLM SDK that is not installed: "
             f"{escape(str(exc))}[/red]\n"
             "[dim]Install it, e.g. 'uv pip install trellis-ai\\[llm-openai]', "
-            "and configure an 'llm:' block in config.yaml.[/dim]"
+            "and configure an 'llm:' block in config.yaml.[/dim]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     if llm is None:
@@ -1445,7 +1447,8 @@ def _require_llm_client_or_exit(consumer: LLMConsumer, *, command: str) -> Any:
             "configured.[/red]\n"
             f"[dim]Add an 'llm:' block to {escape(config_path)} (provider, "
             "api_key_env, model) and install the matching extra "
-            "(\\[llm-openai] / \\[llm-anthropic]).[/dim]"
+            "(\\[llm-openai] / \\[llm-anthropic]).[/dim]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_INTERNAL)
     return llm
@@ -1904,7 +1907,10 @@ def capture_sessions_cmd(
         else:
             # escape(): the remediation names the `[llm-openai]` /
             # `[llm-anthropic]` extras, which Rich would eat as markup tags.
-            console.print(f"[red]worker capture-sessions: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]worker capture-sessions: {escape(str(exc))}[/red]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     payload = report.to_payload()
@@ -2070,7 +2076,9 @@ def embed_traces_cmd(
         if output_format == "json":
             emit_json({"status": "error", "message": str(exc)})
         else:
-            console.print(f"[red]worker embed-traces: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]worker embed-traces: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     payload = report.to_dict()

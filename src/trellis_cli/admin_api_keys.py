@@ -119,7 +119,7 @@ def create_api_key_command(
                 )
             )
         else:
-            console.print(f"[red]{escape(str(exc))}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_VALIDATION) from exc
 
     try:
@@ -216,7 +216,8 @@ def revoke_api_key_command(*, key_id: str, output_format: str) -> None:
         else:
             console.print(
                 f"[red]Cannot revoke {escape(repr(key_id))}: "
-                f"{reason.replace('_', ' ')}.[/red]"
+                f"{reason.replace('_', ' ')}.[/red]",
+                soft_wrap=True,
             )
         raise typer.Exit(code=EXIT_VALIDATION)
 

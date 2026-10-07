@@ -145,7 +145,8 @@ def ingest_trace(
             emit_json(error_payload)
         else:
             console.print(
-                f"[red]Failed to ingest trace: {escape(result.message)}[/red]"
+                f"[red]Failed to ingest trace: {escape(result.message)}[/red]",
+                soft_wrap=True,
             )
         raise typer.Exit(code=refusal_exit_code(result))
 

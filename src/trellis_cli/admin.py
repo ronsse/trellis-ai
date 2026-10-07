@@ -1047,7 +1047,7 @@ def _refuse_option(msg: str, output_format: str) -> NoReturn:
     if output_format == "json":
         typer.echo(json.dumps({"status": "error", "error": msg}))
     else:
-        console.print(f"[red]Error:[/red] {escape(msg)}")
+        console.print(f"[red]Error:[/red] {escape(msg)}", soft_wrap=True)
     raise typer.Exit(EXIT_VALIDATION)
 
 
@@ -1665,19 +1665,25 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
     # a path through a regular file absent and raises on an unsearchable parent
     # or an overlong name. The read below reports each with the OS's reason.
     if not path_is_present(path):
-        console.print(f"[red]Config file not found: {escape(str(path))}[/red]")
+        console.print(
+            f"[red]Config file not found: {escape(str(path))}[/red]", soft_wrap=True
+        )
         raise typer.Exit(code=EXIT_VALIDATION)
 
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         reason = escape(exc.strerror or str(exc))
-        console.print(f"[red]Could not read {escape(str(path))}: {reason}[/red]")
+        console.print(
+            f"[red]Could not read {escape(str(path))}: {reason}[/red]", soft_wrap=True
+        )
         raise typer.Exit(code=EXIT_VALIDATION) from None
     except UnicodeDecodeError as exc:
         console.print(
             f"[red]Could not read {escape(str(path))}: it is not valid"
-            f" {escape(exc.encoding)} text (byte offset {escape(str(exc.start))})[/red]"
+            f" {escape(exc.encoding)} text (byte offset "
+            f"{escape(str(exc.start))})[/red]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_VALIDATION) from None
     try:
@@ -1695,7 +1701,8 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
     if not isinstance(graph_block, dict) or "backend" not in graph_block:
         console.print(
             f"[red]{escape(str(path))} must contain a 'graph:' block with a"
-            " 'backend' key[/red]"
+            " 'backend' key[/red]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_VALIDATION)
 
@@ -1801,13 +1808,15 @@ def migrate_graph(
             try:
                 report = migrator.run(dry_run=dry_run, strategy=strategy)
             except MigrationCapacityExceededError as exc:
-                console.print(f"[red]{escape(str(exc))}[/red]")
+                console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
                 raise typer.Exit(code=EXIT_INTERNAL) from exc
             except MigrationStepError as exc:
                 # str(exc) embeds the destination store's own error
                 # text, which can quote the row value that tripped it.
                 sanitized = escape(sanitize_error_message(str(exc)))
-                console.print(f"[red]Migration aborted: {sanitized}[/red]")
+                console.print(
+                    f"[red]Migration aborted: {sanitized}[/red]", soft_wrap=True
+                )
                 console.print(
                     "[yellow]Re-run with --continue-on-error to capture all "
                     "failures in one pass.[/yellow]"
@@ -2219,7 +2228,7 @@ def _lookup_candidate_payload(event_log: Any, candidate_id: str) -> dict[str, An
         f"No WELL_KNOWN_CANDIDATE event found with candidate_id="
         f"{candidate_id!r}. Run 'trellis analyze schema-evolution' first."
     )
-    console.print(f"[red]{escape(msg)}[/red]")
+    console.print(f"[red]{escape(msg)}[/red]", soft_wrap=True)
     # Not-found is a workflow state (operator must run schema-evolution
     # first), not a malformed input — surface as EXIT_INTERNAL rather
     # than EXIT_VALIDATION.
@@ -2470,7 +2479,7 @@ def draft_promotion_adr(
             f"Refusing to overwrite existing ADR at {output_path}. "
             "Pass --force to overwrite (the prior content will be replaced)."
         )
-        console.print(f"[red]{escape(msg)}[/red]")
+        console.print(f"[red]{escape(msg)}[/red]", soft_wrap=True)
         # Overwrite-without-force is a destructive-action guard rather
         # than a malformed-input error — surface as EXIT_INTERNAL.
         raise typer.Exit(code=EXIT_INTERNAL)

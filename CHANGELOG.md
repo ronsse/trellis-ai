@@ -1311,6 +1311,23 @@ All notable changes to Trellis will be documented in this file.
   fails the build on a new one. An exception a tool does not catch, such as
   one from `save_knowledge`'s write, still reaches the caller through
   FastMCP's generic error. (trellis-ai#748)
+- **49 more red CLI lines are no longer hard-wrapped at the console width.**
+  Each now passes `soft_wrap=True`, and `extract refresh`'s
+  undeclared-source line also escapes the source name. A new rule,
+  `tests/unit/test_cli_failure_soft_wrap_rule.py`, fails on an unwrapped red
+  `console.print` with an interpolation that a non-zero exit follows in its
+  own or an enclosing block; an exit under a later `if`, an `Exit` a helper
+  returns and a conditional-expression message are not policed yet.
+  ([#766](https://github.com/ronsse/trellis-ai/pull/766))
+- **`sanitize_error_message` scans a bounded window, not the whole
+  exception text.** The email and inline-credential-URL patterns backtrack
+  quadratically over a long run of word characters, so a 100k-character
+  input took about 26 s. The leak heuristics now scan at most
+  `max_len + 500` characters, a few milliseconds at worst. A secret that
+  starts in the visible prefix still trips its pattern if it completes
+  within 500 characters past the cut; a leak lying wholly past the window
+  now yields the truncated prefix instead of the marker.
+  ([#763](https://github.com/ronsse/trellis-ai/pull/763) follow-up 2)
 - **`PostgresGraphStore.upsert_edge` and `upsert_edges_bulk` leave one
   current row per logical edge under concurrency.** `idx_edges_current` is
   unique on the random `edge_id`, not on `(source_id, target_id,
