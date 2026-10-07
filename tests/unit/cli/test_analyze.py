@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
+from tests.recovery_command import expected_recovery
 from trellis.errors import StaleStoreWriteError
 from trellis.learning import PROMOTE_RECOMMENDATIONS
 from trellis.retrieve.token_pricing import _INPUT_PRICE_PER_MTOK
@@ -652,7 +653,7 @@ class TestAdvisoryCommandsOnADegradedStore:
         assert result.exit_code == EXIT_STORE, result.output
         data = json.loads(result.stdout.strip())
         assert data["store_degradation"]["reason"] == "malformed_json"
-        assert data["store_degradation"]["recovery"] == f"mv {path} {path}.corrupt"
+        assert data["store_degradation"]["recovery"] == expected_recovery(path)
         assert data["advisories_stored"] == 0
 
     def test_effectiveness_exits_store_rather_than_traceback(

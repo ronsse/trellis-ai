@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
+from tests.recovery_command import expected_recovery
 from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.advisory import (
     Advisory,
@@ -465,7 +466,7 @@ class TestCorruptFileIsPreservedNotOverwritten:
 
         assert excinfo.value.code == "DEGRADED_STORE_WRITE"
         assert excinfo.value.path == str(path)
-        assert excinfo.value.recovery == f"mv {path} {path}.corrupt"
+        assert excinfo.value.recovery == expected_recovery(path)
 
     def test_a_refused_write_does_not_mutate_the_store_either(
         self, tmp_path: Path
@@ -622,9 +623,9 @@ class TestCorruptFileIsPreservedNotOverwritten:
         with pytest.raises(DegradedStoreWriteError) as excinfo:
             store.put(_advisory())
 
-        assert excinfo.value.recovery == f"mv {path} {path}.corrupt"
+        assert excinfo.value.recovery == expected_recovery(path)
         assert str(path) in str(excinfo.value)
-        assert f"mv {path}" in str(excinfo.value)
+        assert expected_recovery(path) in str(excinfo.value)
         assert store.degradation is not None
         assert store.degradation.to_dict()["recovery"] == excinfo.value.recovery
 
@@ -654,7 +655,7 @@ class TestCorruptFileIsPreservedNotOverwritten:
         assert lines[0]["log_level"] == "error"
         assert lines[0]["path"] == str(path)
         assert lines[0]["reason"] == "malformed_json"
-        assert lines[0]["recovery"] == f"mv {path} {path}.corrupt"
+        assert lines[0]["recovery"] == expected_recovery(path)
 
     def test_a_clean_load_says_nothing_alarming(self, tmp_path: Path) -> None:
         """A warning on every load would train the reader to skip it."""
@@ -1285,4 +1286,4 @@ class TestTheRecoveryCommandRuns:
         store = AdvisoryStore(path)
 
         assert store.degradation is not None
-        assert store.degradation.recovery == f"mv {path} {path}.corrupt"
+        assert store.degradation.recovery == expected_recovery(path)
