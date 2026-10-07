@@ -67,8 +67,9 @@ class AsyncTrellisClient:
     from a single client instance.  Raise it for parallel fan-out
     workloads; lower it to be gentle on shared infrastructure.
 
-    Pass ``api_key=`` with ``base_url=`` to send it as ``X-API-Key`` on
-    every request, including the version handshake; it is refused as
+    Pass ``api_key=`` with ``base_url=`` to send it as
+    ``Authorization: Bearer`` on every request, including the version
+    handshake; it is refused as
     :class:`~trellis_sdk.client.TrellisClient` refuses it.
     """
 
