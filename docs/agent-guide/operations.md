@@ -1524,7 +1524,7 @@ Axis names only, never the exception text — that stays in `PACK_ASSEMBLED.stra
 A `misconfigured` semantic axis (an embedder resolved but the vector backend never initialised) never lands in `axes.failed` — it's absent from `axes.available` entirely, so the line above says nothing about it. The same tools add a second, independent line for that state:
 
 ```
-**Semantic retrieval misconfigured:** the vector store did not initialise; results are keyword and graph only.
+**Semantic retrieval misconfigured:** the vector store did not initialise, so this pack has no semantic results.
 ```
 
 Same facts as the CLI's `misconfigured` sentence (`SEMANTIC_AXIS_NOTES`), never the exception text. A failed axis and a misconfigured semantic axis are independent states a single build can hit together, so both lines render when both apply; a reply with neither has no such line. One gap remains:
