@@ -462,63 +462,42 @@ class TestSmokeTestNonDictBackends:
 
 
 # ---------------------------------------------------------------------------
-# A dict readyz backend whose own ``error`` is a truthy non-string (an int,
-# an object, a list, ``true``) -- follow-up F1 from the #791 gate.
-# ``rich.markup.escape`` requires ``str``; the backend-error line crashed
-# text mode with TypeError while json printed the raw value fine.
+# A dict readyz backend whose own ``error`` is not a string (an int, an
+# object). ``rich.markup.escape`` takes only ``str``, so text mode prints
+# ``str(error)``; json keeps the raw value. The string case is the control.
 # ---------------------------------------------------------------------------
 
 
-_NON_STRING_BACKEND_ERRORS: dict[str, object] = {
+_BACKEND_ERRORS: dict[str, object] = {
     "int": 500,
     "dict": {"code": "x"},
+    "string": "connection refused",
 }
 
 
 class TestSmokeTestNonStringBackendError:
     @pytest.mark.parametrize(
-        "scenario",
-        list(_NON_STRING_BACKEND_ERRORS),
-        ids=list(_NON_STRING_BACKEND_ERRORS),
+        "scenario", list(_BACKEND_ERRORS), ids=list(_BACKEND_ERRORS)
     )
     def test_text_mode_survives_and_matches_json_exit_code(
         self, monkeypatch: pytest.MonkeyPatch, scenario: str
     ) -> None:
-        backends = {
-            "graph": {"status": "error", "error": _NON_STRING_BACKEND_ERRORS[scenario]}
-        }
-        handler = _readyz_backends(backends)
+        error = _BACKEND_ERRORS[scenario]
+        backends = {"graph": {"status": "error", "error": error}}
+        _patch_client(monkeypatch, _readyz_backends(backends))
 
-        _patch_client(monkeypatch, handler)
         json_result = runner.invoke(
             app, ["admin", "smoke-test", "--api-key", "secret", "--format", "json"]
         )
-
-        _patch_client(monkeypatch, handler)
         text_result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
 
         assert text_result.exception is None, text_result.output
-        assert text_result.exit_code == json_result.exit_code, (
-            text_result.exit_code,
-            json_result.exit_code,
-        )
+        assert text_result.exit_code == json_result.exit_code
+        # The value itself, as str() prints it: a string has no repr quotes.
+        assert f"          {error}" in plain(text_result.stdout)
         payload = json.loads(json_result.stdout)
         readyz = next(c for c in payload["checks"] if c["name"] == "readyz")
         assert readyz["backends"] == backends  # json keeps the raw value
-
-    def test_string_backend_error_is_unchanged(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The already-working string case renders byte-for-byte as before."""
-        backends = {"graph": {"status": "error", "error": "connection refused"}}
-        handler = _readyz_backends(backends)
-        _patch_client(monkeypatch, handler)
-
-        result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
-
-        assert result.exit_code == 0, result.stdout
-        rendered = plain(result.stdout)
-        assert "          connection refused" in rendered
 
 
 # ---------------------------------------------------------------------------
