@@ -9,6 +9,12 @@ payload errors, which the caller needs to fix its call, and one message
 hand-read exemption list, not a todo list: a new site fails the build, and
 a fixed site must shrink this roster and its count. The scan cannot see an
 exception that a tool never catches.
+
+The scan runs over every module in ``src/trellis/mcp``, not just
+``server.py``: supersession.py's own stamp functions built caller-facing
+exception text the same way server.py's sites do, and the roster did not
+notice until trellis-ai#796 (gate follow-up F2). ``_MODULE_EXEMPTIONS`` is
+keyed by filename so two files' same-named functions cannot collide.
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ from pathlib import Path
 import pytest
 
 import trellis.mcp.server as server_mod
-from tests.ast_rules import name_of
+from tests.ast_rules import iter_modules, name_of
 
 #: Calls whose arguments never reach the caller: structlog methods (full
 #: driver text in a log line is the house pattern) and this module's own
@@ -70,18 +76,31 @@ EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
     ),
 }
 
-# Hand count (trellis-ai#748): 1 in
-# save_experience, 2 in _resolve_evidence_pointer, 1 in record_observation,
-# 1 in execute_mutation, 1 in _SanitizeUncaughtToolErrors.on_call_tool.
-# Re-grep '{exc}\|str(exc)' in src/trellis/mcp/server.py and subtract the
-# helper's own internal use and the one log-only site (_build_llm_client,
-# excluded structurally above) to reconcile. The scan's other shapes,
-# repr(), an attribute chain inside str()/repr()/an f-string, a `%` right
-# operand and a `.format(...)` argument, have no site in server.py:
-# re-grep 'repr(exc\|{exc\.\|str(exc\.\|% exc\|format(exc' finds none.
+#: Per-module exemption rosters, keyed by filename (not the full path, so
+#: this reads the same regardless of where the package is installed). A
+#: module absent here must scan clean: every one of its raw exception-text
+#: sites is unrostered, which fails the build exactly like an undeclared
+#: function in server.py does.
+_MODULE_EXEMPTIONS: dict[str, dict[str, str]] = {
+    "server.py": EXCEPTION_TEXT_EXEMPTIONS,
+}
+
+# Hand count (trellis-ai#748, widened trellis-ai#796 gate follow-up F2):
+# 1 in save_experience, 2 in _resolve_evidence_pointer, 1 in
+# record_observation, 1 in execute_mutation, 1 in
+# _SanitizeUncaughtToolErrors.on_call_tool -- all in server.py. Re-grep
+# '{exc}\|str(exc)' in src/trellis/mcp/server.py and subtract the helper's
+# own internal use and the one log-only site (_build_llm_client, excluded
+# structurally above) to reconcile. The scan's other shapes, repr(), an
+# attribute chain inside str()/repr()/an f-string, a `%` right operand and
+# a `.format(...)` argument, have no site in server.py: re-grep
+# 'repr(exc\|{exc\.\|str(exc\.\|% exc\|format(exc' finds none. Every other
+# module under src/trellis/mcp (__init__.py, auth.py, knowledge_links.py,
+# reconcile.py, supersession.py) hand-reads clean at this count.
 _HAND_READ_SITE_COUNT = 6
 
 _SERVER_PATH = Path(inspect.getsourcefile(server_mod) or "")
+_MCP_PACKAGE_DIR = _SERVER_PATH.parent
 
 #: Calls that render their single argument's text.
 _STRINGIFY_CALL_NAMES = frozenset({"str", "repr"})
@@ -184,29 +203,38 @@ def _scan(tree: ast.Module) -> dict[str, list[ast.AST]]:
     return by_function
 
 
-def _server_scan() -> dict[str, list[ast.AST]]:
-    return _scan(ast.parse(_SERVER_PATH.read_text(encoding="utf-8")))
+def _mcp_scan(root: Path | None = None) -> dict[Path, dict[str, list[ast.AST]]]:
+    """Raw exception-text sites for every ``*.py`` module under *root*
+    (default: the real ``src/trellis/mcp`` package this process imported),
+    keyed by path so two files' same-named functions cannot collide."""
+    package_dir = root if root is not None else _MCP_PACKAGE_DIR
+    return {path: _scan(tree) for path, tree in iter_modules(package_dir)}
 
 
 def test_every_raw_exception_text_site_is_a_declared_exemption() -> None:
-    found = _server_scan()
-    declared = set(EXCEPTION_TEXT_EXEMPTIONS)
-    assert set(found) == declared, (
-        "raw exception text sites in src/trellis/mcp/server.py differ from "
-        f"the roster: unrostered={sorted(set(found) - declared)}; "
-        f"stale={sorted(declared - set(found))}"
-    )
+    found_by_module = _mcp_scan()
+    total = 0
+    for path, found in found_by_module.items():
+        declared = set(_MODULE_EXEMPTIONS.get(path.name, {}))
+        assert set(found) == declared, (
+            f"raw exception text sites in src/trellis/mcp/{path.name} "
+            f"differ from the roster: "
+            f"unrostered={sorted(set(found) - declared)}; "
+            f"stale={sorted(declared - set(found))}"
+        )
+        total += sum(len(hits) for hits in found.values())
     thin = [
-        name
-        for name, reason in EXCEPTION_TEXT_EXEMPTIONS.items()
+        f"{module}:{name}"
+        for module, exemptions in _MODULE_EXEMPTIONS.items()
+        for name, reason in exemptions.items()
         if len(reason.split()) < 4
     ]
     assert not thin, f"exemptions need prose reasons: {thin}"
-    total = sum(len(hits) for hits in found.values())
     assert total == _HAND_READ_SITE_COUNT, (
-        f"found {total} raw exception text sites, expected the hand-read "
-        f"{_HAND_READ_SITE_COUNT}. A new site must not inherit an existing "
-        "function-level exemption; a fixed site must shrink this count."
+        f"found {total} raw exception text sites across src/trellis/mcp, "
+        f"expected the hand-read {_HAND_READ_SITE_COUNT}. A new site must "
+        "not inherit an existing function-level exemption; a fixed site "
+        "must shrink this count."
     )
 
 
@@ -262,6 +290,43 @@ def test_scan_catches_a_newly_added_leak() -> None:
     )
     found = _scan(defective)
     assert "_brand_new_tool" in found
+
+
+def test_the_scan_covers_every_module_not_just_server() -> None:
+    """Non-vacuousness for the file discovery: trellis-ai#796 gate follow-up
+    F2 found the roster scanned server.py only, which is how
+    supersession.py's stamp leaks went unseen until #796. The real scan
+    must visit more than server.py's own file."""
+    scanned = {path.name for path in _mcp_scan()}
+    assert scanned >= {
+        "server.py",
+        "supersession.py",
+        "auth.py",
+        "knowledge_links.py",
+        "reconcile.py",
+    }
+
+
+def test_scan_catches_a_newly_added_leak_in_a_non_server_module(tmp_path: Path) -> None:
+    """Non-vacuousness for the widening itself: a leak appended to a
+    scratch copy of a real non-server module (supersession.py, the module
+    #796 fixed) is still caught. Checked by membership, not roster
+    equality, so this holds whether or not supersession.py's own sites
+    are declared exemptions at the time this runs."""
+    package_dir = tmp_path / "mcp"
+    package_dir.mkdir()
+    source = (_MCP_PACKAGE_DIR / "supersession.py").read_text(encoding="utf-8")
+    defective = source + (
+        "\n\n"
+        "def _brand_new_tool():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as exc:\n"
+        "        return f'failed: {exc}'\n"
+    )
+    (package_dir / "supersession.py").write_text(defective, encoding="utf-8")
+    found = _mcp_scan(package_dir)
+    assert "_brand_new_tool" in found[package_dir / "supersession.py"]
 
 
 def test_scan_catches_a_newly_added_leak_in_a_class_method() -> None:
