@@ -1544,6 +1544,14 @@ All notable changes to Trellis will be documented in this file.
   non-callable attribute) and that any other import-time exception
   propagates unchanged.
   ([#794](https://github.com/ronsse/trellis-ai/pull/794) follow-ups F1-F3)
+- **The yellow `warning` line of `trellis ingest corpus` and `ingest
+  conversations`, and the "not found" line of `retrieve trace` and
+  `retrieve entity`, keep a long path or id on one line.** The warning
+  line carries a directory path plus error text on an exit-`5` `--prune`
+  run; each not-found line carries the id the caller passed, before exit
+  `1`. Rich hard-wrapped a long one at the console width, splitting it
+  mid-token. All four now pass `soft_wrap=True`.
+  (follow-up 1 from the [#799](https://github.com/ronsse/trellis-ai/pull/799) gate)
 
 ## [0.9.0] - 2026-05-13
 
