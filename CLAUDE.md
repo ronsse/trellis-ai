@@ -58,8 +58,8 @@ All packages depend on `trellis` (core library) and share configuration via `Sto
 | `trellis` | (library) | Schemas, stores, mutation executor, retrieval, MCP server |
 | `trellis_cli` | `trellis` | Direct imports + StoreRegistry |
 | `trellis_api` | `trellis-api` | StoreRegistry in FastAPI lifespan + `Depends()` injection |
-| `trellis_sdk` | (library) | **Dual-mode**: local (lazy imports trellis directly) or remote (httpx to REST API) |
-| `trellis_workers` | (library) | Direct imports + SDK client; submits Commands to MutationExecutor |
+| `trellis_sdk` | (library) | **HTTP-only**: httpx to REST API; no runtime `trellis` import (test_isolation.py) |
+| `trellis_workers` | (library) | Direct imports; submits Commands to MutationExecutor |
 
 ### Governed Mutation Pipeline (`src/trellis/mutate/`)
 
