@@ -20,6 +20,16 @@ It does not see an exit raised in a *different* function than the print
 leaves the exit to its caller (extract_refresh.py's ``_print_backfill``)
 -- nor a receiver not named ``*console``. Lines of those shapes are not
 policed here and stay out of the hand-read floor, wrapped or not.
+
+#771's gate hand-identified 14 such cross-function sites in one file each
+(a helper prints, a different function in the same file exits non-zero
+afterward). Re-reading all 14 against current ``main`` found 5 that still
+carry an unbounded id/path/free-text value *and* a confirmed non-zero
+exit after the call; the other 9 interpolate a bounded vocabulary or
+count, or (``ingest_conversations.py``'s prune line) sit on a path that
+can never co-occur with the one non-zero exit. Those 5 are pinned below,
+by function and message fragment, without teaching the scanner above the
+cross-function hop -- doing that is left to a future follow-up (#771 F2).
 """
 
 from __future__ import annotations
@@ -176,6 +186,101 @@ def test_every_cli_failure_line_passes_soft_wrap() -> None:
         "CLI failure line(s) without soft_wrap=True; Rich hard-wraps them at "
         "the console width and splits the path or id they carry: "
         + "; ".join(unwrapped)
+    )
+
+
+#: Hand count of the roster below, kept as its own literal rather than
+#: ``len(CROSS_FUNCTION_FAILURE_LINES)`` -- the same shape as
+#: ``HAND_READ_FAILURE_LINE_COUNT`` above, so a roster entry quietly
+#: dropped (or renamed past what it matches) shrinks the *measured*
+#: population below this floor instead of moving the floor with it.
+HAND_READ_CROSS_FUNCTION_COUNT = 5
+
+#: #771 follow-up F1/F3: the 5 cross-function failure lines hand-verified
+#: against current ``main`` (see the module docstring). Each entry is
+#: (file, function, message fragment); the fragment tells apart the two
+#: entries that share a function (admin.py's ``_render_smoke_text``).
+CROSS_FUNCTION_FAILURE_LINES = (
+    ("admin.py", "_print_skills_summary", "failed"),
+    ("admin.py", "_print_check_extractors_report", "not configurable from"),
+    ("admin.py", "_render_smoke_text", "check['error']"),
+    ("admin.py", "_render_smoke_text", "info['error']"),
+    ("worker.py", "_render_embed_traces_text", "trace_id"),
+)
+
+
+def _named_function_print_calls(tree: ast.Module, function_name: str) -> list[ast.Call]:
+    """Every ``*console.print(...)`` call lexically inside a function
+    named *function_name*, anywhere in *tree*."""
+    calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function_name
+        ):
+            continue
+        for child in ast.walk(node):
+            if not (
+                isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+            ):
+                continue
+            receiver = name_of(child.func.value) or ""
+            if child.func.attr == "print" and receiver.lower().endswith("console"):
+                calls.append(child)
+    return calls
+
+
+def _cross_function_roster_matches(root: Path) -> list[CallSite]:
+    """One ``CallSite`` per roster entry that resolves to exactly one
+    ``*console.print`` call carrying its literal fragment, in the named
+    function, in the named file.
+
+    An entry that resolves to zero or more than one call is left out
+    rather than raised here: the hand-read floor in the test below is
+    what notices a roster that has quietly stopped matching, the same
+    division of labour ``failure_line_sites`` has with its own floor.
+    """
+    modules = list(iter_modules(root))
+    sites: list[CallSite] = []
+    for file_name, function_name, fragment in CROSS_FUNCTION_FAILURE_LINES:
+        for path, tree in modules:
+            if path.name != file_name:
+                continue
+            calls = [
+                call
+                for call in _named_function_print_calls(tree, function_name)
+                if fragment in ast.unparse(call)
+            ]
+            if len(calls) == 1:
+                sites.append(CallSite(path=path, node=calls[0]))
+    return sites
+
+
+def test_cross_function_failure_lines_pass_soft_wrap() -> None:
+    """#771 follow-up F1/F3: a hand-listed roster of failure lines whose
+    print and whose non-zero exit sit in *different* functions of the
+    same file -- a shape ``failure_line_sites`` above is blind to by
+    design (module docstring). This test does not teach that scanner the
+    cross-function hop; it locates each roster entry independently, by
+    its function and a literal fragment of its message.
+    """
+    sites = _cross_function_roster_matches(SRC)
+    assert_hand_read_floor(
+        len(sites),
+        HAND_READ_CROSS_FUNCTION_COUNT,
+        subject="cross-function CLI failure line (#771 follow-up F1 roster)",
+        hint=(
+            "Recount CROSS_FUNCTION_FAILURE_LINES by hand against #771's "
+            "gate (xfunc-samefile.txt) before lowering this floor; a "
+            "dropped or renamed entry should show up here as a shrunk "
+            "population, not just a shorter tuple."
+        ),
+    )
+    unwrapped = [site.describe(SRC) for site in sites if not _has_soft_wrap(site.node)]
+    assert not unwrapped, (
+        "cross-function CLI failure line(s) without soft_wrap=True; Rich "
+        "hard-wraps them at the console width and splits the id or path "
+        "they carry: " + "; ".join(unwrapped)
     )
 
 
