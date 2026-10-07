@@ -1545,15 +1545,13 @@ All notable changes to Trellis will be documented in this file.
   propagates unchanged.
   ([#794](https://github.com/ronsse/trellis-ai/pull/794) follow-ups F1-F3)
 - **A leading-dot embedding-callable path, or a non-string
-  `embeddings.provider`, answered 500 instead of `ConfigError`.**
-  `_import_callable`'s malformed-path check only looked at the two parts
-  `rpartition(".")` produced, so `.pkg.fn` or `..fn` reached
-  `importlib.import_module` as an unresolvable relative import (`TypeError`,
-  not `ImportError` — escapes uncaught) and a non-string `provider` (an int, a
-  list, a mapping) had no `.rpartition` at all (`AttributeError`); both leaked
-  as a raw 500. The check now looks at the whole path once, before any import
-  is attempted — a `str`, with every dot-separated part non-empty — raising
-  the same `ConfigError` a plain no-dot path already did.
+  `embeddings.provider`, answered 500 instead of `ConfigError`.** `.pkg.fn`
+  reached `importlib.import_module` as a relative import (`TypeError`) and an
+  int, list or mapping had no `.rpartition` (`AttributeError`). The path is
+  now checked whole before any import (a `str`, every dot-separated part
+  non-empty) and raises the `ConfigError` (REST 409) a no-dot path does; a
+  non-string is named by its type, never echoed, since a mapping can hold a
+  credential.
   (follow-ups B and C from the [#800](https://github.com/ronsse/trellis-ai/pull/800) gate)
 
 ## [0.9.0] - 2026-05-13

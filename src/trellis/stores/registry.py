@@ -529,17 +529,16 @@ def _import_callable(
     """
     import importlib  # noqa: PLC0415
 
-    # Checked once, as a whole, before any import is attempted: a leading
-    # dot reaches `importlib.import_module` as a relative import with no
-    # package context (`TypeError`, not `ImportError` — escapes uncaught),
-    # and a non-string value (an int or list from a misconfigured
-    # `embeddings.provider`) has no `.rpartition` at all (`AttributeError`).
-    # Both are operator config errors, not bugs, so both become the same
-    # `ConfigError` a plain no-dot path already raised.
-    parts = dotted_path.split(".") if isinstance(dotted_path, str) else []
-    if len(parts) < 2 or any(not part for part in parts):  # noqa: PLR2004
+    # Checked whole, before any import: a leading dot would reach
+    # `import_module` as a relative import (`TypeError`, not `ImportError`),
+    # and a non-string has no `.rpartition`. A non-string is named by its
+    # type, never echoed: a YAML mapping can hold a credential, and this
+    # message reaches the REST body and the error log.
+    is_str = isinstance(dotted_path, str)
+    if not (is_str and "." in dotted_path and all(dotted_path.split("."))):
+        shown = repr(dotted_path) if is_str else f"of type {type(dotted_path).__name__}"
         msg = (
-            f"Invalid embedding callable path {dotted_path!r} —"
+            f"Invalid embedding callable path {shown} —"
             " expected a dotted path like 'pkg.module.func'."
         )
         raise ConfigError(msg, setting=setting)

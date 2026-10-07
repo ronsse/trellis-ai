@@ -502,7 +502,7 @@ def test_embedding_fn_config_provider_bad_path_setting_names_the_yaml_key(
 _NON_STRING_PROVIDERS = [
     pytest.param(7, id="int"),
     pytest.param([1, 2], id="list"),
-    pytest.param({"a": 1}, id="mapping"),
+    pytest.param({"api_key": "synthetic-credential"}, id="mapping"),
 ]
 
 
@@ -511,12 +511,13 @@ def test_embedding_fn_config_provider_non_string_raises_configerror_naming_the_y
     tmp_path: Path, bad_value: object
 ) -> None:
     """A non-string ``embeddings.provider`` (an int, a list, a mapping) is
-    an operator error.
+    an operator error, named by its type rather than echoed.
 
     ``_import_callable`` called ``dotted_path.rpartition(".")`` directly,
     so a config.yaml author who wrote ``provider: 8080`` or a YAML list by
     accident got ``AttributeError`` → REST 500 instead of the same
-    ``ConfigError`` a bad string path raises.
+    ``ConfigError`` a bad string path raises. The message reaches the REST
+    body and the error log, so a misplaced mapping's credential must not.
     """
     config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": bad_value})
     registry = StoreRegistry.from_config_dir(
@@ -525,6 +526,8 @@ def test_embedding_fn_config_provider_non_string_raises_configerror_naming_the_y
     with pytest.raises(ConfigError) as exc_info:
         _ = registry.embedding_fn
     assert exc_info.value.setting == "embeddings.provider"
+    assert f"of type {type(bad_value).__name__}" in exc_info.value.message
+    assert repr(bad_value) not in exc_info.value.message
 
 
 @pytest.mark.parametrize(
@@ -699,26 +702,6 @@ def test_import_callable_empty_segment_raises_before_import(bad_path: str) -> No
     """
     with pytest.raises(ConfigError) as exc_info:
         _import_callable(bad_path)
-    assert "Invalid embedding callable path" in str(exc_info.value)
-
-
-@pytest.mark.parametrize(
-    "bad_value",
-    [
-        pytest.param(7, id="int"),
-        pytest.param([1, 2], id="list"),
-        pytest.param({"a": 1}, id="mapping"),
-    ],
-)
-def test_import_callable_non_string_raises_configerror(bad_value: object) -> None:
-    """A non-string path (an int or list from ``embeddings.provider``) is malformed.
-
-    ``dotted_path.rpartition(".")`` on a non-string raises ``AttributeError``
-    before this check existed — an operator config error, not a bug, so it
-    must become the same ``ConfigError`` a bad string path raises.
-    """
-    with pytest.raises(ConfigError) as exc_info:
-        _import_callable(bad_value)  # type: ignore[arg-type]
     assert "Invalid embedding callable path" in str(exc_info.value)
 
 
