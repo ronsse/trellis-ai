@@ -1249,22 +1249,6 @@ All notable changes to Trellis will be documented in this file.
   raises a `StoreError` naming only the exception type. Other unique
   violations are unchanged.
   ([#755](https://github.com/ronsse/trellis-ai/pull/755))
-- **A contract case pins that `upsert_edges_bulk` leaves an edge's
-  already-closed version alone.** #752 fixed the bulk close naming the
-  wrong edges but left the guard that matters most unpinned: dropping
-  `AND valid_to IS NULL` from the close statement (SQLite, Postgres) or
-  the equivalent `OPTIONAL MATCH` predicate (Neo4j, ArcadeDB) would
-  re-close every version sharing an edge's `edge_id`, silently rewriting
-  a historical `valid_to` and corrupting `as_of` time travel. One new
-  `GraphStoreContractTests` case now re-upserts an edge once to create a
-  closed version, bulk-re-upserts it, and reads the closed version back
-  by `as_of` to assert its `valid_from` and `valid_to` are untouched and
-  that exactly one version is current. Also: the `upsert_edges_bulk`
-  docstring claimed `created_at` is carried forward "same as
-  `upsert_edge`" on every backend; measured, that only holds for Neo4j
-  and ArcadeDB — SQLite's and Postgres's single-row `upsert_edge` stamps
-  a fresh `created_at` on each new version while their bulk path carries
-  it forward. The docstring now says so; no store's behaviour changed.
 
 ## [0.9.0] - 2026-05-13
 
