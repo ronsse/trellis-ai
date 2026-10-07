@@ -1467,6 +1467,13 @@ All notable changes to Trellis will be documented in this file.
   such a value, as it already did for a non-dict backend entry; json still
   shows it raw, and both formats exit with the same code.
   (follow-up F1 from [#788](https://github.com/ronsse/trellis-ai/pull/788))
+- **`trellis admin migrate-provenance` prints each per-edge error
+  verbatim.** An error line carries the store's exception text, which went
+  into Rich markup raw, so a `[...]` in it was read as a style tag and
+  deleted, and a line wider than the console was hard-wrapped, folding a
+  long token mid-way. The text is now escaped and printed with
+  `soft_wrap=True`; `--format json` is unchanged.
+  (follow-up F2 from [#777](https://github.com/ronsse/trellis-ai/pull/777))
 - **A broken driver install no longer replaces a handler's own failure in
   `MutationExecutor`.** The handler-panic catch imported `psycopg` and
   `neo4j.exceptions` to find their base errors, so a driver whose import
@@ -1485,6 +1492,16 @@ All notable changes to Trellis will be documented in this file.
   `pack_id`, before the withholding note, outside the token budget) as the
   flat path; a clean reply is unchanged.
   ([#783](https://github.com/ronsse/trellis-ai/pull/783) follow-up)
+- **`BoltOpenCypherGraphStore.upsert_edge` and `upsert_edges_bulk` (Neo4j and
+  ArcadeDB) find an edge left on a re-versioned endpoint.** `upsert_node`
+  re-versions a node without moving its relationships, and the existing-edge
+  lookup matched only between the two current endpoint rows, so the next
+  upsert of a triplet with a re-versioned endpoint minted a second current
+  edge. The lookup now matches each endpoint's `node_id` on any row and
+  closes every current match, carrying the `edge_id` forward, so a triplet
+  already doubled heals on its next upsert. SQLite and Postgres were not
+  affected.
+  ([#782](https://github.com/ronsse/trellis-ai/pull/782) follow-up 1)
 - **`admin smoke-test`'s text mode no longer crashes on a non-string readyz
   backend `error`.** A dict backend entry whose own `error` was a truthy
   non-string (an int, an object, a list, `true`) raised `TypeError` at

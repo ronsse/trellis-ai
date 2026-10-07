@@ -844,6 +844,44 @@ class GraphStoreContractTests:
         assert len(edges) == 1
         assert edges[0]["properties"]["v"] == 2
 
+    @pytest.mark.parametrize("bulk", [False, True], ids=["single", "bulk"])
+    @pytest.mark.parametrize("reversioned", ["a", "b"], ids=["source", "target"])
+    def test_upsert_edge_survives_endpoint_reversion(
+        self, store: GraphStore, reversioned: str, bulk: bool
+    ) -> None:
+        """Re-versioning an endpoint after the edge exists still finds it.
+
+        ``upsert_node`` closes a node's current row and opens a new one
+        without moving its relationships (the Bolt module docstring). The
+        next write of the triplet must find the edge on the closed row,
+        close it there and carry its ``edge_id`` forward: one current edge.
+        """
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        first_edge_id = store.upsert_edge("a", "b", "depends_on", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_node(reversioned, "service", {"reversioned": True})
+        _sleep_for_ordering()
+        if bulk:
+            (second_edge_id,) = store.upsert_edges_bulk(
+                [
+                    {
+                        "source_id": "a",
+                        "target_id": "b",
+                        "edge_type": "depends_on",
+                        "properties": {"v": 2},
+                    }
+                ]
+            )
+        else:
+            second_edge_id = store.upsert_edge("a", "b", "depends_on", {"v": 2})
+
+        assert second_edge_id == first_edge_id
+        edges = store.get_edges("a", direction="outgoing", edge_type="depends_on")
+        assert len(edges) == 1
+        assert edges[0]["edge_id"] == first_edge_id
+        assert edges[0]["properties"]["v"] == 2
+
     def test_reingest_same_graph_is_idempotent(self, store: GraphStore) -> None:
         """Re-ingesting the same nodes + edges leaves both counts stable (#195).
 
