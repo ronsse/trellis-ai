@@ -1685,7 +1685,10 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
     except Exception as exc:
         # ``str(exc)`` prints the offending line, which can hold a password.
         reason = escape(describe_yaml_error(exc))
-        console.print(f"[red]Invalid YAML in {escape(str(path))}: {reason}[/red]")
+        console.print(
+            f"[red]Invalid YAML in {escape(str(path))}: {reason}[/red]",
+            soft_wrap=True,
+        )
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     graph_block = data.get("graph") if isinstance(data, dict) else None

@@ -1,8 +1,8 @@
-"""A catch-all failure line prints as one line, however long its message.
+"""A failure line prints as one line, however long its message.
 
-Each site is an ``except Exception`` arm that prints ``<what failed>:
-<message>`` through a module-level Rich console in text mode. Rich
-hard-wraps a line at the console width unless it is printed with
+Each site prints ``<what failed>: <message>`` through a module-level Rich
+console in text mode, from an ``except Exception`` arm or a missing-path
+check. Rich hard-wraps a line at the console width unless it is printed with
 ``soft_wrap``, and the width is 80 columns when no standard stream is a
 terminal, so without it a caller reading one line gets part of a long
 message.
@@ -14,6 +14,13 @@ file, whose OS message depends on the temp path, so those cases patch
 ``Path.read_text`` for the one input file. ``extract refresh``, ``extract
 traces``' query and ``admin migrate-provenance`` had no test that reaches
 the arm, so their cases patch a call inside it.
+
+The missing-path cases (``ingest trace``, whose ``_fail`` helper three
+sibling commands share, ``ingest conversations`` and ``ingest corpus``)
+pass the long message as the command's own path argument, which the line
+echoes back, so they patch nothing. The ``admin migrate-graph`` YAML case
+runs from ``tmp_path`` with a relative ``--from-config``, because that
+line prints the path as given ahead of the reason.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ from tests.unit.cli.test_extract_traces import (
 )
 from tests.unit.cli.test_ingest import _batch_input
 from trellis.stores.sqlite.trace import SQLiteTraceStore
+from trellis_cli import admin as admin_cli
 from trellis_cli import admin_migrate_provenance as migrate_cli
 from trellis_cli import ingest as ingest_cli
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
@@ -158,7 +166,36 @@ def _proposals(*command: str) -> Arrange:
     return arrange
 
 
+def _trace_not_found(_tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """``ingest trace`` on a missing file, through the shared ``_fail``."""
+    return ["ingest", "trace", _LONG]
+
+
+def _conversations_not_found(
+    _tmp_path: Path, _monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    return ["ingest", "conversations", _LONG]
+
+
+def _corpus_not_found(_tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    return ["ingest", "corpus", _LONG]
+
+
+def _migrate_graph_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    # ``yaml.safe_load`` only needs to raise to reach the arm; the reason
+    # printed comes from ``describe_yaml_error``, patched directly so the
+    # case controls it exactly like every other site's message, rather
+    # than fixing a PyYAML wording to the test. The line prints the path
+    # as given, so a relative one keeps the expected prefix a literal.
+    monkeypatch.setattr("yaml.safe_load", _raise)
+    monkeypatch.setattr(admin_cli, "describe_yaml_error", lambda _exc: _LONG)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "from.yaml").write_text("graph:\n  backend: sqlite\n")
+    return ["admin", "migrate-graph", "-f", "from.yaml", "-t", "to.yaml"]
+
+
 _STORE_ERROR = f"store error: {_DriverError.__name__}: "
+_PATH_NOT_FOUND = "Path not found: "
 
 _SITES = [
     pytest.param(
@@ -220,6 +257,24 @@ _SITES = [
         _STORE_ERROR,
         EXIT_STORE,
         id="show-proposal",
+    ),
+    pytest.param(
+        _trace_not_found, "File not found: ", EXIT_VALIDATION, id="trace-not-found"
+    ),
+    pytest.param(
+        _conversations_not_found,
+        _PATH_NOT_FOUND,
+        EXIT_VALIDATION,
+        id="conversations-not-found",
+    ),
+    pytest.param(
+        _corpus_not_found, _PATH_NOT_FOUND, EXIT_VALIDATION, id="corpus-not-found"
+    ),
+    pytest.param(
+        _migrate_graph_yaml,
+        "Invalid YAML in from.yaml: ",
+        EXIT_VALIDATION,
+        id="migrate-graph-yaml",
     ),
 ]
 
