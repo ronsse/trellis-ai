@@ -1611,6 +1611,15 @@ All notable changes to Trellis will be documented in this file.
   surfaces give the same reason for the same input and a `200` sectioned
   response always has at least one section to read `axes` from.
   (follow-up F4 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
+- **The Python SDK's `get_objective_context` and `get_task_context` now name
+  a failed or misconfigured retrieval axis, sync and async.** They read the
+  response's `sections` and `withholding` but not its `axes` block, so an SDK
+  caller whose keyword or semantic axis failed saw what looked like a clean
+  pack. They now render MCP's two axis lines from that block, with MCP's
+  formatters, which moved to the new `trellis_wire.axes` (still re-exported
+  from `trellis.retrieve.builder_factory`); a response without `axes` renders
+  no note.
+  (follow-up F3 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
 
 ## [0.9.0] - 2026-05-13
 

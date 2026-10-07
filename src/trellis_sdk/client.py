@@ -39,6 +39,7 @@ from trellis_wire import (
     PackFeedbackRequest,
     PackFeedbackResponse,
 )
+from trellis_wire.axes import axis_note_from_payload
 from trellis_wire.withholding import withholding_from_payload
 
 if TYPE_CHECKING:
@@ -324,6 +325,7 @@ class TrellisClient:
             intent,
             max_tokens=max_tokens,
             withholding=withholding_from_payload(pack.get("withholding")),
+            axis_note=axis_note_from_payload(pack.get("axes")),
         )
 
     def get_task_context(
@@ -363,6 +365,7 @@ class TrellisClient:
             intent,
             max_tokens=max_tokens,
             withholding=withholding_from_payload(pack.get("withholding")),
+            axis_note=axis_note_from_payload(pack.get("axes")),
         )
 
     def get_entity(self, entity_id: str) -> dict[str, Any] | None:
