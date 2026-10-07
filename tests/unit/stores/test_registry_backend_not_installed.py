@@ -451,6 +451,8 @@ def test_embedding_fn_unimportable_env_var_raises_rather_than_using_config(
 
 _BAD_DOTTED_PATHS = [
     pytest.param("nodot", id="malformed"),
+    pytest.param(".pkg.fn", id="leading_dot"),
+    pytest.param("..fn", id="leading_dot_only"),
     pytest.param(
         "no_such_module_for_embedding_fn_setting_test.embed", id="missing_module"
     ),
@@ -492,6 +494,66 @@ def test_embedding_fn_config_provider_bad_path_setting_names_the_yaml_key(
     with pytest.raises(ConfigError) as exc_info:
         _ = registry.embedding_fn
     assert exc_info.value.setting == "embeddings.provider"
+
+
+#: Non-string ``embeddings.provider`` values that are truthy (so the
+#: ``if provider:`` call-site check lets them through to
+#: ``_import_callable``, unlike ``None``/``0``/``[]``/``{}``/``""`` below).
+_NON_STRING_PROVIDERS = [
+    pytest.param(7, id="int"),
+    pytest.param([1, 2], id="list"),
+    pytest.param({"api_key": "synthetic-credential"}, id="mapping"),
+]
+
+
+@pytest.mark.parametrize("bad_value", _NON_STRING_PROVIDERS)
+def test_embedding_fn_config_provider_non_string_raises_configerror_naming_the_yaml_key(
+    tmp_path: Path, bad_value: object
+) -> None:
+    """A non-string ``embeddings.provider`` (an int, a list, a mapping) is
+    an operator error, named by its type rather than echoed.
+
+    ``_import_callable`` called ``dotted_path.rpartition(".")`` directly,
+    so a config.yaml author who wrote ``provider: 8080`` or a YAML list by
+    accident got ``AttributeError`` → REST 500 instead of the same
+    ``ConfigError`` a bad string path raises. The message reaches the REST
+    body and the error log, so a misplaced mapping's credential must not.
+    """
+    config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": bad_value})
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        _ = registry.embedding_fn
+    assert exc_info.value.setting == "embeddings.provider"
+    assert f"of type {type(bad_value).__name__}" in exc_info.value.message
+    assert repr(bad_value) not in exc_info.value.message
+
+
+@pytest.mark.parametrize(
+    "falsy_value",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(0, id="zero"),
+        pytest.param([], id="empty_list"),
+        pytest.param({}, id="empty_mapping"),
+        pytest.param("", id="empty_string"),
+    ],
+)
+def test_embedding_fn_falsy_provider_values_stay_not_configured(
+    tmp_path: Path, falsy_value: object
+) -> None:
+    """A null or empty ``embeddings.provider`` still means "not configured".
+
+    The call site's ``if provider:`` guard, not ``_import_callable``,
+    decides this — pinned here so widening the malformed-path check inside
+    ``_import_callable`` cannot accidentally start rejecting these too.
+    """
+    config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": falsy_value})
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    assert registry.embedding_fn is None
 
 
 # -- F1: a dotted path's own import-time failure is not a bad path --------
@@ -609,6 +671,37 @@ def test_import_callable_bad_path_raises_configerror() -> None:
     """A path without a dot can't resolve to module + attribute."""
     with pytest.raises(ConfigError) as exc_info:
         _import_callable("nodot")
+    assert "Invalid embedding callable path" in str(exc_info.value)
+
+
+#: Shapes with an empty dot-separated segment somewhere other than the
+#: leading position. ``pkg.`` and ``pkg..fn`` already raised ``ConfigError``
+#: before the shape check covered every segment — but via
+#: ``importlib.import_module`` failing and being caught by the
+#: ``except ImportError`` branch below, not via the malformed-path check.
+#: Asserting the *malformed* message (not just "some ConfigError") proves
+#: the shape check itself catches them, which a check that only recognizes
+#: a *leading* dot would not (it would still reach a ``ConfigError``, just
+#: via the import-failure branch, with a different message).
+_MALFORMED_SHAPES = [
+    pytest.param(".pkg.fn", id="leading_dot"),
+    pytest.param("..fn", id="leading_dot_only"),
+    pytest.param("pkg.", id="trailing_dot"),
+    pytest.param("pkg..fn", id="doubled_dot"),
+]
+
+
+@pytest.mark.parametrize("bad_path", _MALFORMED_SHAPES)
+def test_import_callable_empty_segment_raises_before_import(bad_path: str) -> None:
+    """Any empty dot-separated segment is malformed, not just a leading dot.
+
+    A leading-dot path (``.pkg.fn``, ``..fn``) reaches
+    ``importlib.import_module`` with a relative module name and no package
+    context, raising ``TypeError`` rather than ``ImportError`` — uncaught,
+    so it escaped as a REST 500 before this check covered every segment.
+    """
+    with pytest.raises(ConfigError) as exc_info:
+        _import_callable(bad_path)
     assert "Invalid embedding callable path" in str(exc_info.value)
 
 

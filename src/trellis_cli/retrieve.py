@@ -294,7 +294,10 @@ def trace(
         if output_format == "json":
             emit_json({"status": "not_found", "trace_id": trace_id})
         else:
-            console.print(f"[yellow]Trace not found[/yellow]: {escape(trace_id)}")
+            console.print(
+                f"[yellow]Trace not found[/yellow]: {escape(trace_id)}",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
@@ -332,7 +335,10 @@ def entity(
         if output_format == "json":
             emit_json({"status": "not_found", "entity_id": entity_id})
         else:
-            console.print(f"[yellow]Entity not found[/yellow]: {escape(entity_id)}")
+            console.print(
+                f"[yellow]Entity not found[/yellow]: {escape(entity_id)}",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":

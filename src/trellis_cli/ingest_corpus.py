@@ -123,7 +123,8 @@ def _render_report(report: CorpusSyncReport) -> None:
         )
         console.print(
             f"  [yellow]warning[/yellow] {escape(str(warning['kind']))}: "
-            f"{escape(detail)}"
+            f"{escape(detail)}",
+            soft_wrap=True,
         )
 
 

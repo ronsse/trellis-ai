@@ -442,8 +442,7 @@ client.close()
 
 ### If It Fails
 
-- **ConnectionError (remote mode):** Ensure the API server is running (`trellis admin serve`).
-- **Store not initialized (local mode):** Run `trellis admin init`.
+- **`TrellisTransportError`:** nothing answered at `base_url`; start the API server (`trellis admin serve`) and read its log, since a store misconfiguration stops it before it listens.
 
 ---
 

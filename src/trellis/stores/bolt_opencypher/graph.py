@@ -51,16 +51,21 @@ by ``CREATE`` lets two concurrent writers on the same
 ``(source_id, target_id, edge_type)`` both observe "no current edge" and
 both create one, leaving two current rows for one logical edge (there is
 no uniqueness constraint to fall back on, because historical rows share
-the same key). ``upsert_edge`` write-locks the source endpoint's shown
-row before the read, with the scratch-property write
-``update_node_if_current`` uses, so a second writer waits for the first
-to commit and then reads its row as ``old``. On ArcadeDB the engine's
-optimistic-concurrency retry already serializes the race. On Neo4j the
-source-first lock lets concurrent writes of ``x->y`` and ``y->x``
-deadlock; the driver retries the loser. Only single-row writers take the
+the same key). ``upsert_edge`` therefore first writes ``_cas_lock`` to
+the current rows of both endpoints, in sorted ``node_id`` order, and only
+then resolves the endpoints and reads the existing edge. On Neo4j that
+write takes each row's lock, so an ``upsert_node`` on either endpoint
+that is already in flight commits before the endpoints are resolved, and
+the edge lands on the row it left current; a second writer of the same
+edge likewise waits for the first and reads its row as ``old``. The
+sorted order keeps writers of ``x->y`` and ``y->x`` from deadlocking.
+ArcadeDB takes no lock: a conflicting writer fails at commit and the
+driver retries it, but two concurrent writers of one edge can still both
+commit there and leave two current rows. Only single-row writers take the
 lock: ``upsert_edges_bulk`` does not (it would need a sorted per-row lock
-order, like Postgres's bulk edge path), so a bulk write racing another
-writer of the same edge can still leave two current rows.
+order across every row it writes, like Postgres's bulk edge path), so a
+bulk write racing another writer of the same edge can still leave two
+current rows.
 
 Per-backend subclasses override the **seams**:
 
@@ -1387,16 +1392,16 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             extractor_tier=extractor_tier,
         )
 
-        # One Cypher round trip: endpoint MATCH + existing-edge
-        # OPTIONAL MATCH + close-old + create-new in a single query.
-        # Each endpoint is narrowed to the row it shows (``_shown_row``),
-        # so an endpoint with two current rows (the module docstring)
-        # gets one new version, on that row, rather than one per row.
-        # When an endpoint has no current row the aggregate still yields
-        # one row, of empty lists, on both engines, so ``s`` and ``t``
-        # are both null; ``WHERE s IS NOT NULL`` drops that row, since a
-        # CREATE between nulls raises on Neo4j and links two new empty
-        # vertices on ArcadeDB.
+        # One Cypher round trip: endpoint-lock prelude + endpoint MATCH +
+        # existing-edge OPTIONAL MATCH + close-old + create-new, in a
+        # single query. Each endpoint is narrowed to the row it shows
+        # (``_shown_row``), so an endpoint with two current rows (the
+        # module docstring) gets one new version, on that row, rather
+        # than one per row. When an endpoint has no current row the
+        # aggregate still yields one row, of empty lists, on both
+        # engines, so ``s`` and ``t`` are both null; ``WHERE s IS NOT
+        # NULL`` drops that row, since a CREATE between nulls raises on
+        # Neo4j and links two new empty vertices on ArcadeDB.
         # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
         # from any current version, so the write stays one round trip.
         now = _iso(utc_now())
@@ -1415,25 +1420,29 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "evidence_ref": evidence_ref,
             "extractor_tier": extractor_tier,
         }
+        # Sorted, so writers of x->y and y->x take the locks in one order.
+        lo_id, hi_id = sorted((source_id, target_id))
 
         cypher = f"""
+        // Lock both endpoints' current rows, lowest node_id first, before
+        // resolving either: a concurrent upsert_node writes `valid_to` on
+        // the row this writes `_cas_lock` to, so the endpoint MATCHes
+        // below see the state after it commits. `WITH count(...)` yields
+        // one row even when nothing matched, so a missing endpoint still
+        // reaches `WHERE s IS NOT NULL`.
+        MATCH (lo_cand:Node {{node_id: $lo_id}}) WHERE lo_cand.valid_to IS NULL
+        SET lo_cand._cas_lock = true
+        REMOVE lo_cand._cas_lock
+        WITH count(lo_cand) AS _locked_lo
+        MATCH (hi_cand:Node {{node_id: $hi_id}}) WHERE hi_cand.valid_to IS NULL
+        SET hi_cand._cas_lock = true
+        REMOVE hi_cand._cas_lock
+        WITH count(hi_cand) AS _locked_hi
         MATCH (s:Node {{node_id: $source_id}}) WHERE s.valid_to IS NULL
         MATCH (t:Node {{node_id: $target_id}}) WHERE t.valid_to IS NULL
         WITH collect(DISTINCT s) AS source_rows, collect(DISTINCT t) AS target_rows
         WITH {_shown_row("source_rows")} AS s, {_shown_row("target_rows")} AS t
         WHERE s IS NOT NULL
-        // Write-lock the source endpoint's shown row before reading for an
-        // existing edge, so a second upsert_edge on the same (source,
-        // target, edge_type) waits here for the first to commit, then reads
-        // its row as `old` instead of racing it to CREATE. The lock writes
-        // a scratch property, never valid_to: a SET's right-hand side is
-        // read before the lock is granted, so `SET s.valid_to = s.valid_to`
-        // would write a stale null over a concurrent upsert_node's close
-        // and reopen the row. Cypher needs a `WITH` between this write and
-        // the read that follows.
-        SET s._cas_lock = true
-        REMOVE s._cas_lock
-        WITH s, t
         // Each endpoint on any row, not only `s`/`t`: an edge stays on
         // the row it was written to (module docstring).
         OPTIONAL MATCH (:Node {{node_id: $source_id}})
@@ -1456,6 +1465,8 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             cypher,
             source_id=source_id,
             target_id=target_id,
+            lo_id=lo_id,
+            hi_id=hi_id,
             edge_type=edge_type,
             now=now,
             candidate_edge_id=candidate_edge_id,
