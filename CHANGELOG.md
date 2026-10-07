@@ -1571,6 +1571,17 @@ All notable changes to Trellis will be documented in this file.
   and resolves them after. ArcadeDB, which takes no locks, and
   `upsert_edges_bulk` behave as before. (follow-up 1 from
   [#790](https://github.com/ronsse/trellis-ai/pull/790))
+- **`TrellisClient`/`AsyncTrellisClient` send no credential.** Against a
+  server running `TRELLIS_AUTH_MODE=required`, every call failed with an
+  undocumented 401 `TrellisClientError` unless the caller knew to inject
+  `http=httpx.Client(headers=...)` manually. Both clients now take a
+  keyword-only `api_key=`, sent as `X-API-Key` on every request including
+  the version handshake, falling back to `$TRELLIS_API_KEY` (the same
+  variable `trellis admin smoke-test` already reads client-side and the
+  server's legacy shared-secret path accepts). `api_key=` together with an
+  injected `http=` raises `ValueError`: that client's headers are the
+  caller's to set directly.
+  (follow-up from the [#804](https://github.com/ronsse/trellis-ai/pull/804) gate)
 
 ## [0.9.0] - 2026-05-13
 

@@ -47,6 +47,18 @@ SDK_API_MINOR = 2
 SDK_WIRE_SCHEMA = "0.1.0"
 SDK_VERSION = "0.1.0"
 
+#: Header name :mod:`trellis_api.auth` accepts a credential on (it wins over
+#: ``Authorization: Bearer`` when both are present).
+API_KEY_HEADER = "X-API-Key"
+
+#: Env var already read client-side by ``trellis admin smoke-test``
+#: (``trellis_cli.admin``) as the default ``--api-key``, and server-side by
+#: the legacy shared-secret path (``trellis_api.auth.API_KEY_ENV``). Both
+#: clients fall back to it so the one variable that turns on
+#: ``TRELLIS_AUTH_MODE=required`` on a server also authenticates an SDK
+#: client pointed at it — no second name to remember.
+API_KEY_ENV_VAR = "TRELLIS_API_KEY"
+
 _HTTP_OK_MAX = 299
 _HTTP_CLIENT_MIN = 400
 _HTTP_CLIENT_MAX = 499
@@ -267,6 +279,8 @@ def _parse_retry_after(header: str | None) -> float | None:
 
 
 __all__ = [
+    "API_KEY_ENV_VAR",
+    "API_KEY_HEADER",
     "SDK_API_MAJOR",
     "SDK_API_MINOR",
     "SDK_VERSION",
