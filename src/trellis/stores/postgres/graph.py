@@ -53,15 +53,14 @@ def _alias_lock_key(source_system: str, raw_id: str) -> str:
 
 
 def _edge_lock_key(source_id: str, target_id: str, edge_type: str) -> str:
-    """Encode an edge tuple as PostgreSQL-safe advisory-lock text.
+    """Return the advisory-lock text for one logical edge.
 
     JSON-encoding (as ``_alias_lock_key`` does) keeps distinct triples
-    from colliding by concatenation. The ``"edge:"`` prefix keeps this
-    key space from colliding with ``_alias_lock_key``'s: both feed
-    ``hashtextextended`` in the same session-wide advisory-lock
-    namespace, and ``_alias_lock_key`` never emits that prefix (it
-    returns a bare JSON array), so the two can't collide regardless of
-    what ``source_system``/``raw_id``/edge values occur.
+    distinct, and the ``"edge:"`` prefix keeps this text apart from
+    ``_alias_lock_key``'s bare JSON arrays, which share the database-wide
+    advisory-lock key space. Distinct texts can still collide once
+    ``hashtextextended`` maps them to 64 bits; the odds are negligible,
+    and the cost is a wait, or a deadlock Postgres detects and aborts.
     """
     return "edge:" + json.dumps(
         [source_id, target_id, edge_type], separators=(",", ":")
@@ -1013,7 +1012,6 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             extractor_tier=extractor_tier,
         )
 
-        now = utc_now()
         properties_json = json.dumps(properties or {})
 
         # Single connection for the read+write so the SCD-2 close-and-
@@ -1027,6 +1025,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         # ``upsert_alias`` uses on the alias key.
         with self._conn() as conn:
             _lock_edge_keys(conn, [(source_id, target_id, edge_type)])
+            # Read the clock under the lock, so versions are stamped in the
+            # order they commit.
+            now = utc_now()
             with conn.cursor() as cur:
                 cur.execute(
                     """

@@ -1311,20 +1311,16 @@ All notable changes to Trellis will be documented in this file.
   fails the build on a new one. An exception a tool does not catch, such as
   one from `save_knowledge`'s write, still reaches the caller through
   FastMCP's generic error. (trellis-ai#748)
-- **`PostgresGraphStore.upsert_edge` and `upsert_edges_bulk` no longer
-  duplicate the current row under concurrency.** `idx_edges_current` is a
-  unique index on the random `edge_id`, not on the logical key
-  `(source_id, target_id, edge_type)`, so two concurrent writers of one
-  logical edge each minted their own `edge_id` and both committed a
-  current row, silently and 30/30 reproducibly — `FOR UPDATE` cannot
-  serialize this because a miss (no current row yet, or one another
-  writer just closed) leaves it nothing to lock. Both writers now take a
-  transaction-scoped `pg_advisory_xact_lock` on the logical key before
-  their read, the same idiom `upsert_alias` already uses; the bulk path
-  locks every row's key in one sorted, de-duplicated order first so two
-  overlapping batches can't deadlock. No schema change, no new index, and
-  existing duplicate rows are not healed (a follow-up, not this fix).
-  ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 1)
+- **`PostgresGraphStore.upsert_edge` and `upsert_edges_bulk` leave one
+  current row per logical edge under concurrency.** `idx_edges_current` is
+  unique on the random `edge_id`, not on `(source_id, target_id,
+  edge_type)`, and `FOR UPDATE` cannot serialize writers that find no
+  current row, so two concurrent writers of one edge could each commit a
+  current row. Both paths now take a `pg_advisory_xact_lock` on that key
+  before reading, as `upsert_alias` does; the bulk path takes its keys in
+  sorted order so overlapping batches cannot deadlock, and each version is
+  stamped after its lock is granted. Duplicate rows already stored stay.
+  (trellis-ai#768)
 
 ## [0.9.0] - 2026-05-13
 

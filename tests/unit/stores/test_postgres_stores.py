@@ -281,14 +281,12 @@ def _current_edge_rows(
 
 
 def test_edge_lock_key_keeps_distinct_triples_from_colliding() -> None:
-    """``_edge_lock_key`` must not let two distinct triples collide.
+    """Distinct edge triples get distinct lock keys.
 
-    JSON-encoding (rather than bare concatenation) keeps a boundary-shifted
-    pair of triples distinct, and keeping ``edge_type`` in the key keeps two
-    logical edges that share endpoints but differ only in ``edge_type`` from
-    locking each other out: each needs its own key, or a writer racing one
-    could be serialized against the other's unrelated lock instead of its
-    own.
+    Bare concatenation would give ``("ab", "c")`` and ``("a", "bc")`` one
+    key, and dropping ``edge_type`` would give every edge type between two
+    nodes one key. Either stays correct but makes unrelated writers wait for
+    each other.
     """
     from trellis.stores.postgres.graph import _edge_lock_key
 
@@ -658,16 +656,12 @@ class TestPostgresGraphStore:
         assert edges[0]["edge_type"] == "knows"
 
     def test_upsert_edge_create_race_leaves_one_current_row(self, store) -> None:
-        """Two writers creating the same new logical edge must leave exactly
-        one current row.
+        """Two writers creating one new logical edge leave one current row.
 
-        ``idx_edges_current`` is unique on the random ``edge_id``, not on
-        the logical key, so before the fix neither writer's INSERT ever
-        collides with the other's: both read "no current row", both mint
-        their own ``edge_id``, and both commit (confirmed 30/30 by the
-        #762 gate's probe). A ``threading.Barrier`` starts both real
-        ``upsert_edge`` calls together so the race window is exercised the
-        same way on every run, matching the gate's own reproduction.
+        ``idx_edges_current`` is unique on the random ``edge_id``, not on the
+        logical key, so only the edge lock stops both writers from reading
+        "no current row" and each committing an ``edge_id`` of its own. A
+        barrier starts both calls together.
         """
         source_id, target_id, edge_type = (
             "race-edge-synthetic-create-src",
@@ -706,14 +700,12 @@ class TestPostgresGraphStore:
         assert current[0]["edge_id"] in (outcome["a"], outcome["b"])
 
     def test_upsert_edge_update_race_leaves_one_current_row(self, store) -> None:
-        """Two writers updating the same *existing* logical edge must leave
-        exactly one current row.
+        """Two writers updating one existing logical edge leave one current
+        row.
 
-        Before the fix, the loser's ``FOR UPDATE`` read blocks on the
-        winner's row lock, then re-checks the row once unblocked, finds it
-        already closed, and -- unable to see the winner's new row -- mints
-        its own ``edge_id`` instead of reusing one, so both commit a
-        current row (confirmed 30/30 by the #762 gate's probe).
+        Without the edge lock, the loser's ``FOR UPDATE`` read waits for the
+        winner, then finds that row closed and the winner's new row not yet
+        visible to its snapshot, and mints an ``edge_id`` of its own.
         """
         source_id, target_id, edge_type = (
             "race-edge-synthetic-update-src",
@@ -752,22 +744,86 @@ class TestPostgresGraphStore:
         assert len(current) == 1, current
         assert current[0]["properties"]["writer"] in ("a", "b")
 
-    def test_upsert_edges_bulk_overlapping_batches_do_not_deadlock(self, store) -> None:
-        """Two batches that share two logical edges, listed in opposite
-        order, must not deadlock and must leave exactly one current row per
-        key.
+    def test_upsert_edge_stamps_its_version_after_the_lock_wait(self, store) -> None:
+        """A writer that waits for the edge lock stamps its version after the
+        wait.
 
-        Before the fix neither batch takes any lock, so this is just the
-        create race again, twice over. After the fix each batch locks its
-        triplets in one sorted order, so two batches touching the same
-        keys in different orders can't form a circular wait -- the second
-        batch serializes behind the first instead of deadlocking with it.
+        A clock read before the lock lets a queued writer close the winner's
+        version at an earlier time than that version's ``valid_from``, so an
+        ``as_of`` read in the gap serves two versions of one edge.
         """
-        store.upsert_node("race-bulk-n1", "synthetic_type", {})
-        store.upsert_node("race-bulk-n2", "synthetic_type", {})
-        store.upsert_node("race-bulk-n3", "synthetic_type", {})
-        store.upsert_node("race-bulk-n4", "synthetic_type", {})
+        from trellis.core.base import utc_now
+        from trellis.stores.postgres.graph import _edge_lock_key
 
+        key = (
+            "lock-clock-synthetic-src",
+            "lock-clock-synthetic-tgt",
+            "synthetic_rel",
+        )
+        store.upsert_node(key[0], "synthetic_type", {})
+        store.upsert_node(key[1], "synthetic_type", {})
+        store.upsert_edge(*key, {"writer": "seed"})
+
+        outcome: dict[str, Any] = {}
+
+        def call_upsert() -> None:
+            try:
+                outcome["edge_id"] = store.upsert_edge(*key, {"writer": "queued"})
+            except Exception as exc:
+                outcome["edge_id"] = exc
+
+        writer = threading.Thread(target=call_upsert)
+        holder = psycopg.connect(PG_DSN)
+        try:
+            holder.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (_edge_lock_key(*key),),
+            )
+            writer.start()
+            queued = False
+            deadline = time.monotonic() + 10
+            with psycopg.connect(PG_DSN, autocommit=True) as watcher:
+                while not queued and time.monotonic() < deadline:
+                    queued = watcher.execute(
+                        "SELECT count(*) > 0 FROM pg_locks"
+                        " WHERE locktype = 'advisory' AND NOT granted"
+                        " AND %s = ANY(pg_blocking_pids(pid))",
+                        (holder.info.backend_pid,),
+                    ).fetchone()[0]
+                    if not queued:
+                        time.sleep(0.01)
+            released_at = utc_now()
+            holder.commit()
+        finally:
+            holder.close()
+        writer.join(timeout=20)
+
+        assert queued, "upsert_edge did not wait for the edge lock"
+        assert not writer.is_alive()
+        assert not isinstance(outcome["edge_id"], Exception), outcome["edge_id"]
+        with psycopg.connect(PG_DSN, autocommit=True) as conn:
+            versions = conn.execute(
+                "SELECT valid_from, valid_to FROM edges"
+                " WHERE source_id = %s AND target_id = %s AND edge_type = %s"
+                " ORDER BY valid_from",
+                key,
+            ).fetchall()
+        assert len(versions) == 2, versions
+        assert versions[1][0] >= released_at, versions
+
+    def test_upsert_edges_bulk_overlapping_batches_leave_one_current_row(
+        self, store
+    ) -> None:
+        """Two batches sharing two edges, listed in opposite order, leave one
+        current row per key without deadlocking.
+
+        ``edge_w`` sorts first and is in the first batch only, so a batch
+        that locked only its first sorted key would not wait for the other.
+        """
+        for n in range(5):
+            store.upsert_node(f"race-bulk-n{n}", "synthetic_type", {})
+
+        edge_w = ("race-bulk-n0", "race-bulk-n2", "synthetic_rel")
         edge_x = ("race-bulk-n1", "race-bulk-n2", "synthetic_rel")
         edge_y = ("race-bulk-n3", "race-bulk-n4", "synthetic_rel")
 
@@ -779,7 +835,7 @@ class TestPostgresGraphStore:
                 "properties": {"writer": writer},
             }
 
-        batch1 = [spec(edge_x, "p"), spec(edge_y, "p")]
+        batch1 = [spec(edge_w, "p"), spec(edge_x, "p"), spec(edge_y, "p")]
         batch2 = [spec(edge_y, "q"), spec(edge_x, "q")]
 
         barrier = threading.Barrier(2)
@@ -804,27 +860,20 @@ class TestPostgresGraphStore:
         for name in ("1", "2"):
             assert not isinstance(outcome[name], Exception), outcome[name]
 
-        for key in (edge_x, edge_y):
+        for key in (edge_w, edge_x, edge_y):
             current = _current_edge_rows(PG_DSN, *key)
             assert len(current) == 1, (key, current)
 
     def test_lock_edge_keys_acquires_locks_in_one_sorted_order(
         self, store, monkeypatch
     ) -> None:
-        """``_lock_edge_keys`` must issue its ``pg_advisory_xact_lock`` calls
-        in one sorted, de-duplicated order regardless of the caller's input
-        order.
+        """``_lock_edge_keys`` takes its locks in one sorted order, whatever
+        the input order.
 
-        That is what lets two ``upsert_edges_bulk`` batches whose triplets
-        overlap in different orders converge on the same lock sequence
-        instead of forming a wait cycle. This inspects the actual SQL call
-        order directly rather than relying on a real deadlock to manifest,
-        which is timing-dependent and -- for a small key set -- not
-        guaranteed even without the ``sorted()`` call, since a plain
-        ``set``'s iteration order for a few non-colliding elements can
-        coincide with sorted order by chance; nine keys makes that
-        coincidence negligible (1-in-362880) while still being a direct,
-        deterministic check of the ordering contract itself.
+        A deadlock between two real batches is too timing-dependent to
+        assert, so this records the lock calls instead. With nine keys, an
+        unsorted set iterating in sorted order by chance is a 1-in-362880
+        event.
         """
         from trellis.stores.postgres.graph import _edge_lock_key, _lock_edge_keys
 
