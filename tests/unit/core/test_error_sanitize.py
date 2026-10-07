@@ -218,22 +218,45 @@ class TestSuppression:
         )
         assert sanitize_error_message(msg) == msg
 
-    def test_neo4j_constraint_creation_over_duplicates_suppressed(self) -> None:
-        # Neo4j 2025.12 ``str(Neo4jError)``, raised by ``CREATE CONSTRAINT
-        # ... IS UNIQUE`` — the stores' startup schema DDL — run over rows
-        # that already duplicate it (gql_status 50N11). Distinct from the
-        # write-time violation above: captured against two synthetic
-        # duplicate nodes created ahead of the constraint.
-        msg = (
-            "{neo4j_code: Neo.DatabaseError.Schema.ConstraintCreationFailed} "
-            "{message: Unable to create Constraint( name='dup_version_id', "
-            "type='NODE PROPERTY UNIQUENESS', schema=(:Node {version_id}) ):\n"
-            "Both Node(0) and Node(1) have the label `Node` and property "
-            "`version_id` = 'synthetic-constraint-dup'. Note that only the "
-            "first found violation is shown.} {gql_status: 50N11} "
-            "{gql_status_description: error: general processing exception - "
-            "constraint creation failed. Unable to create 'dup_version_id'.}"
-        )
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            # Neo4j 2025.12 ``str(Neo4jError)``, raised by the stores' own
+            # startup schema DDL (``CREATE CONSTRAINT ... IS UNIQUE``) run over
+            # two synthetic nodes that already duplicate the value (gql_status
+            # 50N11). Distinct from the write-time violation above. The two
+            # cases differ in label and property; the claim key is the store's
+            # JSON array.
+            (
+                "{neo4j_code: Neo.DatabaseError.Schema.ConstraintCreationFailed} "
+                "{message: Unable to create Constraint( "
+                "name='node_version_unique', type='NODE PROPERTY UNIQUENESS', "
+                "schema=(:Node {version_id}) ):\n"
+                "Both Node(0) and Node(1) have the label `Node` and property "
+                "`version_id` = 'synthetic-constraint-dup'. Note that only the "
+                "first found violation is shown.} {gql_status: 50N11} "
+                "{gql_status_description: error: general processing exception - "
+                "constraint creation failed. Unable to create "
+                "'node_version_unique'.}"
+            ),
+            (
+                "{neo4j_code: Neo.DatabaseError.Schema.ConstraintCreationFailed} "
+                "{message: Unable to create Constraint( "
+                "name='alias_claim_unique', type='NODE PROPERTY UNIQUENESS', "
+                "schema=(:AliasClaim {claim_key}) ):\n"
+                "Both Node(2) and Node(3) have the label `AliasClaim` and "
+                'property `claim_key` = \'["synthetic-system","synthetic-raw-id"]\'. '
+                "Note that only the first found violation is shown.} "
+                "{gql_status: 50N11} {gql_status_description: error: general "
+                "processing exception - constraint creation failed. Unable to "
+                "create 'alias_claim_unique'.}"
+            ),
+        ],
+        ids=["node-version-unique", "alias-claim-unique"],
+    )
+    def test_neo4j_constraint_creation_over_duplicates_suppressed(
+        self, msg: str
+    ) -> None:
         assert sanitize_error_message(msg) == SUPPRESSED_MARKER
 
     def test_constraint_creation_without_quoted_value_passes_through(self) -> None:
