@@ -216,16 +216,7 @@ def _raise_mutation_failed(
 
 
 def _exception_detail(exc: BaseException) -> str:
-    """Render a caught exception for a caller-facing message.
-
-    Thin alias over :func:`trellis.core.error_sanitize.render_exception_detail`,
-    kept under this name (rather than calling the shared function directly
-    at each of this module's many call sites) so
-    ``tests/unit/mcp/test_exception_text_roster.py``'s ``_SAFE_CALL_NAMES``
-    keeps matching call sites by this literal name. ``trellis.mcp.supersession``
-    calls the shared function directly — this module already imports
-    ``trellis.mcp.supersession``, so the reverse import would cycle.
-    """
+    """Render a caught exception for a caller-facing message."""
     return render_exception_detail(exc)
 
 

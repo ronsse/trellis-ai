@@ -1502,21 +1502,15 @@ All notable changes to Trellis will be documented in this file.
   already doubled heals on its next upsert. SQLite and Postgres were not
   affected.
   ([#782](https://github.com/ronsse/trellis-ai/pull/782) follow-up 1)
-- **A `supersedes=` stamp failure's exception text is sanitized before it
-  reaches an MCP caller.** `supersede_document` and `supersede_entity`
-  (`trellis.mcp.supersession`) caught any exception their stamp raised and
-  returned `f"{type(exc).__name__}: {exc}"` verbatim — unlike every other
-  caught-exception site in `trellis.mcp.server`, which renders through
-  `_exception_detail` (a `TrellisError`'s own text passes through, anything
-  else is sanitized). That string reaches an `McpError` message via
-  `save_knowledge`'s `supersedes=` stamps and one of `save_memory`'s two
-  stamp callers, so a non-Trellis exception from a document or graph store
-  driver could leak raw text (a DSN, a credential) to a caller. The
-  rendering logic moved to `trellis.core.error_sanitize.render_exception_detail`,
-  which both `_exception_detail` and the two stamp functions now call, so a
-  `TrellisError`'s text still comes back unchanged and a clean message (a
-  timeout) still comes back readable, but a leak-shaped one comes back as
-  the sanitizer's marker with the exception's type name still present.
+- **A `supersedes=` stamp failure no longer leaks driver text to an MCP
+  caller.** `supersede_document` and `supersede_entity` returned the caught
+  exception's raw text, which `save_knowledge` and `save_memory` put into an
+  `McpError` message or into a saved memory's warning. They now render it
+  through `trellis.core.error_sanitize.render_exception_detail`, the rule
+  `trellis.mcp.server`'s other caught-exception sites already used: a
+  `TrellisError`'s text and a clean message (a timeout) read through
+  unchanged, and a leak-shaped one comes back as the sanitizer's marker
+  after the exception's type name.
   (follow-up 5 from the [#793](https://github.com/ronsse/trellis-ai/pull/793) gate)
 
 ## [0.9.0] - 2026-05-13

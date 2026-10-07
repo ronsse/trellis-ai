@@ -271,12 +271,7 @@ def supersede_document(
         logger.exception(
             "supersession_stamp_failed", target=doc_id, successor=successor
         )
-        # The error string can reach an MCP caller verbatim (save_knowledge's
-        # ``_raise_if_supersede_failed``, save_memory's two callers) — render
-        # it the way ``trellis.mcp.server._exception_detail`` does rather
-        # than embedding ``exc`` raw, so a non-Trellis exception (a store
-        # driver's, not Trellis's own) can't leak its text (trellis-ai#793
-        # follow-up 5).
+        # This string reaches the MCP caller, so driver text is sanitized.
         return f"{type(exc).__name__}: {render_exception_detail(exc)}"
 
 
@@ -323,7 +318,6 @@ def supersede_entity(
         logger.exception(
             "supersession_stamp_failed", target=node_id, successor=successor
         )
-        # See the matching comment in supersede_document above.
         return f"{type(exc).__name__}: {render_exception_detail(exc)}"
 
 
