@@ -1544,6 +1544,17 @@ All notable changes to Trellis will be documented in this file.
   non-callable attribute) and that any other import-time exception
   propagates unchanged.
   ([#794](https://github.com/ronsse/trellis-ai/pull/794) follow-ups F1-F3)
+- **A leading-dot embedding-callable path, or a non-string
+  `embeddings.provider`, answered 500 instead of `ConfigError`.**
+  `_import_callable`'s malformed-path check only looked at the two parts
+  `rpartition(".")` produced, so `.pkg.fn` or `..fn` reached
+  `importlib.import_module` as an unresolvable relative import (`TypeError`,
+  not `ImportError` — escapes uncaught) and a non-string `provider` (an int, a
+  list, a mapping) had no `.rpartition` at all (`AttributeError`); both leaked
+  as a raw 500. The check now looks at the whole path once, before any import
+  is attempted — a `str`, with every dot-separated part non-empty — raising
+  the same `ConfigError` a plain no-dot path already did.
+  (follow-ups B and C from the [#800](https://github.com/ronsse/trellis-ai/pull/800) gate)
 
 ## [0.9.0] - 2026-05-13
 
