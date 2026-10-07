@@ -1611,6 +1611,21 @@ All notable changes to Trellis will be documented in this file.
   surfaces give the same reason for the same input and a `200` sectioned
   response always has at least one section to read `axes` from.
   (follow-up F4 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
+- **The Python SDK's `get_objective_context` and `get_task_context` now name
+  a failed or misconfigured retrieval axis, sync and async.** MCP's markdown
+  surfaces, and REST's `axes` block, already reported a failed or
+  misconfigured axis; the SDK's two sectioned-context methods formatted the
+  response's `sections` and `withholding` fields but read nothing from
+  `axes`, so an SDK caller whose keyword or semantic axis failed saw what
+  looked like a genuinely clean pack. `format_failed_axes_note` and
+  `format_misconfigured_semantic_note` moved from
+  `trellis.retrieve.builder_factory` to new module `trellis_wire.axes`
+  (re-exported from `builder_factory` unchanged, same move
+  `trellis.retrieve.withholding` made for `format_withholding_note`), plus a
+  new `axis_note_from_payload` that parses a wire-level `axes` dict
+  defensively — a server older than the field renders no note rather than
+  raising. (follow-up F3 from the
+  [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
 
 ## [0.9.0] - 2026-05-13
 

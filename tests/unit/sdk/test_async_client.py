@@ -121,6 +121,117 @@ class TestAsyncRetrieve:
         assert "**Section routing:** this pack is empty because 2 items" in rendered
         assert rendered.index("**Section routing:**") < rendered.index("## Section:")
 
+    @staticmethod
+    def _sectioned_response(axes: dict | None) -> httpx.Response:
+        body = {
+            "pack_id": "p1",
+            "sections": [{"name": "only", "items": []}],
+        }
+        if axes is not None:
+            body["axes"] = axes
+        return httpx.Response(200, json=body)
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["get_objective_context", "get_task_context"],
+    )
+    async def test_sectioned_context_names_a_failed_axis(
+        self, method_name: str
+    ) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return self._sectioned_response(
+                {
+                    "available": ["keyword", "graph"],
+                    "ran": ["graph"],
+                    "failed": ["keyword"],
+                    "semantic": "not_configured",
+                }
+            )
+
+        http = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://testserver"
+        )
+        async with AsyncTrellisClient(http=http, verify_version=False) as client:
+            rendered = await getattr(client, method_name)("deploy checklist")
+
+        assert "**Retrieval axis failed:** keyword." in rendered
+        assert rendered.index("**Retrieval axis failed:**") < rendered.index(
+            "## Section:"
+        )
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["get_objective_context", "get_task_context"],
+    )
+    async def test_sectioned_context_names_a_misconfigured_semantic_axis(
+        self, method_name: str
+    ) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return self._sectioned_response(
+                {
+                    "available": ["keyword", "graph"],
+                    "ran": ["keyword", "graph"],
+                    "failed": [],
+                    "semantic": "misconfigured",
+                }
+            )
+
+        http = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://testserver"
+        )
+        async with AsyncTrellisClient(http=http, verify_version=False) as client:
+            rendered = await getattr(client, method_name)("deploy checklist")
+
+        assert "**Semantic retrieval misconfigured:**" in rendered
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["get_objective_context", "get_task_context"],
+    )
+    async def test_sectioned_context_renders_nothing_for_healthy_axes(
+        self, method_name: str
+    ) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return self._sectioned_response(
+                {
+                    "available": ["keyword", "graph"],
+                    "ran": ["keyword", "graph"],
+                    "failed": [],
+                    "semantic": "not_configured",
+                }
+            )
+
+        http = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://testserver"
+        )
+        async with AsyncTrellisClient(http=http, verify_version=False) as client:
+            rendered = await getattr(client, method_name)("deploy checklist")
+
+        assert "Retrieval axis failed" not in rendered
+        assert "Semantic retrieval misconfigured" not in rendered
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["get_objective_context", "get_task_context"],
+    )
+    async def test_sectioned_context_renders_nothing_without_an_axes_block(
+        self, method_name: str
+    ) -> None:
+        """A server older than the ``axes`` field renders no note and must
+        not raise."""
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return self._sectioned_response(None)
+
+        http = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://testserver"
+        )
+        async with AsyncTrellisClient(http=http, verify_version=False) as client:
+            rendered = await getattr(client, method_name)("deploy checklist")
+
+        assert "Retrieval axis failed" not in rendered
+        assert "Semantic retrieval misconfigured" not in rendered
+
 
 class TestAsyncCurate:
     async def test_create_and_get_entity(self, client: AsyncTrellisClient):
