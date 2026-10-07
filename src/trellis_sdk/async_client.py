@@ -18,7 +18,6 @@ ASGI-transport fixture that drops the network entirely in tests.
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -26,10 +25,9 @@ import structlog
 
 from trellis_sdk._format import format_sectioned_pack_as_markdown
 from trellis_sdk._http import (
-    API_KEY_ENV_VAR,
-    API_KEY_HEADER,
     SDK_API_MAJOR,
     SDK_API_MINOR,
+    api_key_headers,
     check_handshake,
     pack_attribution,
     raise_for_status,
@@ -68,11 +66,9 @@ class AsyncTrellisClient:
     from a single client instance.  Raise it for parallel fan-out
     workloads; lower it to be gentle on shared infrastructure.
 
-    Pass ``api_key=`` together with ``base_url=`` to send it as
-    ``X-API-Key`` on every request, including the version handshake;
-    see :class:`~trellis_sdk.client.TrellisClient` for the
-    ``$TRELLIS_API_KEY`` fallback and why it is refused together with
-    an injected ``http=``.
+    Pass ``api_key=`` with ``base_url=`` to send it as ``X-API-Key`` on
+    every request, including the version handshake; it is refused as
+    :class:`~trellis_sdk.client.TrellisClient` refuses it.
     """
 
     def __init__(
@@ -95,22 +91,12 @@ class AsyncTrellisClient:
         if http is not None and base_url is not None:
             msg = "Pass base_url OR http, not both."
             raise ValueError(msg)
-        if http is not None and api_key is not None:
-            msg = (
-                "Pass api_key= only with base_url=, not http=. An "
-                "injected http= client's headers are the caller's to "
-                "set directly."
-            )
-            raise ValueError(msg)
+        headers = api_key_headers(api_key, http_injected=http is not None)
 
         self._owns_http = http is None
         if http is not None:
             self._http = http
         else:
-            resolved_key = (
-                api_key if api_key is not None else os.environ.get(API_KEY_ENV_VAR)
-            )
-            headers = {API_KEY_HEADER: resolved_key} if resolved_key else None
             self._http = httpx.AsyncClient(
                 base_url=cast("str", base_url).rstrip("/"),
                 timeout=timeout,

@@ -1,10 +1,6 @@
-"""Tests for TrellisClient / AsyncTrellisClient api_key= credential injection.
+"""Tests for the ``api_key=`` credential on TrellisClient / AsyncTrellisClient.
 
-Follow-up from the #804 gate finding: the SDK sent no credential, so a
-reader pointed at a server running ``TRELLIS_AUTH_MODE=required`` got an
-undocumented 401 on the first call unless they knew to inject
-``http=httpx.Client(headers=...)`` manually. All content here (header
-values, observation payloads) is synthetic.
+All content here (header values, observation payloads) is synthetic.
 """
 
 from __future__ import annotations
@@ -16,12 +12,16 @@ import httpx
 import pytest
 
 from trellis.testing import in_memory_client
-from trellis_sdk._http import API_KEY_ENV_VAR, API_KEY_HEADER
+from trellis_sdk._http import API_KEY_HEADER
 from trellis_sdk.async_client import AsyncTrellisClient
 from trellis_sdk.client import TrellisClient
 from trellis_sdk.exceptions import TrellisClientError, TrellisTransportError
 
 _SYNTHETIC_KEY = "synthetic-test-key-do-not-use"
+
+#: The server's legacy shared-secret variable. Tests set it to prove the
+#: client never sends what a server process holds in its environment.
+_SERVER_KEY_VAR = "TRELLIS_API_KEY"
 
 
 def _recording_handler(calls: list[dict[str, str]]):
@@ -41,23 +41,17 @@ def _recording_handler(calls: list[dict[str, str]]):
 def _install_mock_transport(
     client: TrellisClient | AsyncTrellisClient, handler
 ) -> None:
-    """Swap the client's own httpx transport for a MockTransport.
+    """Swap the transport of the httpx client the constructor built.
 
-    ``api_key=`` only takes effect on the ``httpx.Client``/``AsyncClient``
-    the constructor builds itself (the ``base_url=`` path), so these tests
-    build a real client and then replace its transport — unlike the
-    existing SDK tests, which inject a pre-built ``http=`` and therefore
-    can't exercise ``api_key=`` at all (that combination is rejected, see
-    ``TestApiKeyRejectsInjectedHttp`` below).
+    ``api_key=`` only applies on the ``base_url=`` path (it is refused
+    beside an injected ``http=``), so these tests build a real client and
+    then replace its transport.
     """
     client._http._transport = httpx.MockTransport(handler)
 
 
 class TestApiKeyHeaderSync:
-    def test_header_sent_on_handshake_and_call(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv(API_KEY_ENV_VAR, raising=False)
+    def test_header_sent_on_handshake_and_call(self) -> None:
         calls: list[dict[str, str]] = []
         client = TrellisClient(base_url="http://testserver", api_key=_SYNTHETIC_KEY)
         _install_mock_transport(client, _recording_handler(calls))
@@ -68,10 +62,10 @@ class TestApiKeyHeaderSync:
         for headers in calls:
             assert headers.get(API_KEY_HEADER.lower()) == _SYNTHETIC_KEY
 
-    def test_no_header_when_api_key_is_none(
+    def test_no_header_without_api_key_even_with_env_set(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(API_KEY_ENV_VAR, raising=False)
+        monkeypatch.setenv(_SERVER_KEY_VAR, _SYNTHETIC_KEY)
         calls: list[dict[str, str]] = []
         client = TrellisClient(base_url="http://testserver")
         _install_mock_transport(client, _recording_handler(calls))
@@ -82,62 +76,9 @@ class TestApiKeyHeaderSync:
         for headers in calls:
             assert API_KEY_HEADER.lower() not in headers
 
-    def test_env_fallback_used_when_api_key_omitted(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(API_KEY_ENV_VAR, "env-fallback-key")
-        calls: list[dict[str, str]] = []
-        client = TrellisClient(base_url="http://testserver")
-        _install_mock_transport(client, _recording_handler(calls))
-
-        client.assemble_pack("intent")
-
-        assert calls[0].get(API_KEY_HEADER.lower()) == "env-fallback-key"
-
-    def test_explicit_api_key_wins_over_env(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv(API_KEY_ENV_VAR, "env-fallback-key")
-        calls: list[dict[str, str]] = []
-        client = TrellisClient(base_url="http://testserver", api_key="explicit-key")
-        _install_mock_transport(client, _recording_handler(calls))
-
-        client.assemble_pack("intent")
-
-        assert calls[0].get(API_KEY_HEADER.lower()) == "explicit-key"
-
-
-class TestApiKeyRejectsInjectedHttp:
-    """Mutual exclusion with ``http=``, mirroring ``base_url``/``http``.
-
-    An injected ``http=`` client's headers belong to the caller: silently
-    setting a header on it (or silently ignoring ``api_key=``) would be a
-    footgun either way, so construction refuses the combination outright
-    instead of guessing which of the two was meant.
-    """
-
-    def test_sync_rejects_api_key_with_http(self) -> None:
-        http = httpx.Client(
-            transport=httpx.MockTransport(_recording_handler([])),
-            base_url="http://testserver",
-        )
-        with pytest.raises(ValueError, match="api_key"):
-            TrellisClient(http=http, api_key=_SYNTHETIC_KEY)
-
-    def test_async_rejects_api_key_with_http(self) -> None:
-        http = httpx.AsyncClient(
-            transport=httpx.MockTransport(_recording_handler([])),
-            base_url="http://testserver",
-        )
-        with pytest.raises(ValueError, match="api_key"):
-            AsyncTrellisClient(http=http, api_key=_SYNTHETIC_KEY)
-
 
 class TestApiKeyHeaderAsync:
-    async def test_header_sent_on_handshake_and_call(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv(API_KEY_ENV_VAR, raising=False)
+    async def test_header_sent_on_handshake_and_call(self) -> None:
         calls: list[dict[str, str]] = []
         client = AsyncTrellisClient(
             base_url="http://testserver", api_key=_SYNTHETIC_KEY
@@ -150,31 +91,39 @@ class TestApiKeyHeaderAsync:
         for headers in calls:
             assert headers.get(API_KEY_HEADER.lower()) == _SYNTHETIC_KEY
 
-    async def test_no_header_when_api_key_is_none(
+    async def test_no_header_without_api_key_even_with_env_set(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv(API_KEY_ENV_VAR, raising=False)
+        monkeypatch.setenv(_SERVER_KEY_VAR, _SYNTHETIC_KEY)
         calls: list[dict[str, str]] = []
         client = AsyncTrellisClient(base_url="http://testserver")
         _install_mock_transport(client, _recording_handler(calls))
 
         await client.assemble_pack("intent")
 
+        assert len(calls) == 2
         for headers in calls:
             assert API_KEY_HEADER.lower() not in headers
 
 
+class TestApiKeyRefused:
+    @pytest.mark.parametrize(
+        ("client_cls", "http_cls"),
+        [(TrellisClient, httpx.Client), (AsyncTrellisClient, httpx.AsyncClient)],
+    )
+    def test_refused_beside_injected_http(self, client_cls: Any, http_cls: Any) -> None:
+        http = http_cls(base_url="http://testserver")
+        with pytest.raises(ValueError, match="api_key"):
+            client_cls(http=http, api_key=_SYNTHETIC_KEY)
+
+    @pytest.mark.parametrize("client_cls", [TrellisClient, AsyncTrellisClient])
+    def test_empty_key_refused(self, client_cls: Any) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            client_cls(base_url="http://testserver", api_key="")
+
+
 class TestApiKeyNeverLeaks:
-    def test_key_absent_from_repr(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(API_KEY_ENV_VAR, raising=False)
-        client = TrellisClient(base_url="http://testserver", api_key=_SYNTHETIC_KEY)
-        assert _SYNTHETIC_KEY not in repr(client)
-
-    def test_key_absent_from_401_exception_text(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv(API_KEY_ENV_VAR, raising=False)
-
+    def test_key_absent_from_401_exception_text(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/api/version":
                 return httpx.Response(
@@ -193,11 +142,7 @@ class TestApiKeyNeverLeaks:
         assert _SYNTHETIC_KEY not in str(excinfo.value)
         assert _SYNTHETIC_KEY not in repr(excinfo.value)
 
-    def test_key_absent_from_transport_error_text(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv(API_KEY_ENV_VAR, raising=False)
-
+    def test_key_absent_from_transport_error_text(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             connect_error_message = "boom"
             raise httpx.ConnectError(connect_error_message, request=request)
@@ -215,18 +160,12 @@ class TestApiKeyNeverLeaks:
 
 
 class TestEndToEndAuthRequired:
-    """Exercises real `TRELLIS_AUTH_MODE` enforcement through the in-memory
-    API client, not a mocked transport.
+    """``api_key=`` against the real auth layer, through the in-memory app.
 
-    ``trellis.testing.inmemory._build_app`` does not replicate production
-    ``create_app()``'s router-level ``dependencies=[Depends(require_scope(...))]``
-    wiring, so most routes (``assemble_pack`` among them) skip auth
-    entirely in this fixture regardless of ``TRELLIS_AUTH_MODE`` — verified
-    by probe before writing this test. ``POST /api/v1/observations``
-    (``record_observation``) is the one route whose auth dependency is
-    declared inline on the route itself, so it is the one case this
-    fixture can use to prove the header the SDK now sends is what the
-    server's auth layer actually requires.
+    ``trellis.testing.inmemory._build_app`` wires no router-level auth, so
+    ``record_observation``, whose route declares ``require_scope`` inline,
+    is the SDK call this fixture can use to prove the server accepts the
+    header the client sends.
     """
 
     _PAYLOAD: ClassVar[dict[str, Any]] = {
@@ -236,16 +175,26 @@ class TestEndToEndAuthRequired:
         "content": "synthetic observation for the api-key auth test",
     }
 
-    def test_credential_required_end_to_end(
+    def test_api_key_authenticates_and_env_secret_is_not_sent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
-        monkeypatch.setenv(API_KEY_ENV_VAR, _SYNTHETIC_KEY)
-        with in_memory_client(tmp_path / "stores") as client:
+        monkeypatch.setenv(_SERVER_KEY_VAR, _SYNTHETIC_KEY)
+        with in_memory_client(tmp_path / "stores") as app_client:
+            app_transport = app_client._http._transport
+
+            anonymous = TrellisClient(
+                base_url="http://testserver", verify_version=False
+            )
+            anonymous._http._transport = app_transport
             with pytest.raises(TrellisClientError) as excinfo:
-                client.record_observation(dict(self._PAYLOAD))
+                anonymous.record_observation(dict(self._PAYLOAD))
             assert excinfo.value.status_code == 401
 
-            client._http.headers[API_KEY_HEADER] = _SYNTHETIC_KEY
-            observation_id = client.record_observation(dict(self._PAYLOAD))
-            assert observation_id
+            keyed = TrellisClient(
+                base_url="http://testserver",
+                api_key=_SYNTHETIC_KEY,
+                verify_version=False,
+            )
+            keyed._http._transport = app_transport
+            assert keyed.record_observation(dict(self._PAYLOAD))

@@ -13,7 +13,6 @@ pointed at it.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -23,10 +22,9 @@ from trellis_sdk._format import (
     format_sectioned_pack_as_markdown,
 )
 from trellis_sdk._http import (
-    API_KEY_ENV_VAR,
-    API_KEY_HEADER,
     SDK_API_MAJOR,
     SDK_API_MINOR,
+    api_key_headers,
     check_handshake,
     pack_attribution,
     raise_for_status,
@@ -59,15 +57,12 @@ class TrellisClient:
     an injected ``httpx.Client`` (for tests — see
     :func:`trellis.testing.in_memory_client`).
 
-    Pass ``api_key=`` together with ``base_url=`` to send it as
-    ``X-API-Key`` on every request, including the version handshake,
-    against a server running with ``TRELLIS_AUTH_MODE=required`` or
-    ``optional``. Omitted, it falls back to the ``$TRELLIS_API_KEY``
-    env var — the same one ``trellis admin smoke-test`` reads and a
-    server's legacy shared-secret path accepts — so one variable
-    authenticates both sides. ``api_key=`` is not accepted together
-    with an injected ``http=``: that client's headers are the
-    caller's to set.
+    Pass ``api_key=`` with ``base_url=`` to send it as ``X-API-Key`` on
+    every request, including the version handshake, to a server running
+    ``TRELLIS_AUTH_MODE=required`` or ``optional``. Nothing is read from
+    the environment. An empty ``api_key=``, or one beside an injected
+    ``http=`` (whose headers are the caller's to set), raises
+    ``ValueError``.
 
     The version handshake fires lazily on the first request, not in
     ``__init__`` — so constructing a client never issues network IO.
@@ -94,22 +89,12 @@ class TrellisClient:
         if http is not None and base_url is not None:
             msg = "Pass base_url OR http, not both."
             raise ValueError(msg)
-        if http is not None and api_key is not None:
-            msg = (
-                "Pass api_key= only with base_url=, not http=. An "
-                "injected http= client's headers are the caller's to "
-                "set directly."
-            )
-            raise ValueError(msg)
+        headers = api_key_headers(api_key, http_injected=http is not None)
 
         self._owns_http = http is None
         if http is not None:
             self._http = http
         else:
-            resolved_key = (
-                api_key if api_key is not None else os.environ.get(API_KEY_ENV_VAR)
-            )
-            headers = {API_KEY_HEADER: resolved_key} if resolved_key else None
             self._http = httpx.Client(
                 base_url=cast("str", base_url).rstrip("/"),
                 timeout=timeout,

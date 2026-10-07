@@ -51,14 +51,6 @@ SDK_VERSION = "0.1.0"
 #: ``Authorization: Bearer`` when both are present).
 API_KEY_HEADER = "X-API-Key"
 
-#: Env var already read client-side by ``trellis admin smoke-test``
-#: (``trellis_cli.admin``) as the default ``--api-key``, and server-side by
-#: the legacy shared-secret path (``trellis_api.auth.API_KEY_ENV``). Both
-#: clients fall back to it so the one variable that turns on
-#: ``TRELLIS_AUTH_MODE=required`` on a server also authenticates an SDK
-#: client pointed at it — no second name to remember.
-API_KEY_ENV_VAR = "TRELLIS_API_KEY"
-
 _HTTP_OK_MAX = 299
 _HTTP_CLIENT_MIN = 400
 _HTTP_CLIENT_MAX = 499
@@ -130,6 +122,32 @@ def wrap_transport_error(exc: Exception, *, request_path: str) -> TrellisTranspo
     wrapped = TrellisTransportError(str(exc), request_path=request_path)
     wrapped.__cause__ = exc
     return wrapped
+
+
+def api_key_headers(
+    api_key: str | None, *, http_injected: bool
+) -> dict[str, str] | None:
+    """Constructor headers carrying ``api_key``, or ``None`` without one.
+
+    Shared by both clients so the sync and async rules cannot drift. The
+    key is never read from the environment: it goes only to the
+    ``base_url`` the caller names. An empty key is refused rather than
+    dropped, since dropping it would turn the client anonymous without a
+    word, and so is a key beside an injected ``http=``, whose headers are
+    the caller's to set.
+    """
+    if api_key is None:
+        return None
+    if http_injected:
+        msg = (
+            "Pass api_key= only with base_url=, not http=. An injected "
+            "http= client's headers are the caller's to set directly."
+        )
+        raise ValueError(msg)
+    if not api_key:
+        msg = "api_key= is empty; pass a key or omit the argument."
+        raise ValueError(msg)
+    return {API_KEY_HEADER: api_key}
 
 
 def pack_attribution(
@@ -279,7 +297,6 @@ def _parse_retry_after(header: str | None) -> float | None:
 
 
 __all__ = [
-    "API_KEY_ENV_VAR",
     "API_KEY_HEADER",
     "SDK_API_MAJOR",
     "SDK_API_MINOR",
