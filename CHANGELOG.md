@@ -1583,6 +1583,18 @@ All notable changes to Trellis will be documented in this file.
   state, reusing the one `describe_axes` report both lines are built from; a
   clean pack, or one with only a failed axis, is unchanged.
   (follow-up F2 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
+- **`POST /api/v1/packs/sectioned` refuses `sections=[]` instead of answering
+  `200` with `axes` null.** MCP's `get_context`/`get_sectioned_context` already
+  reject an empty `sections` list with `"sections must not be empty"` before
+  any build runs; REST let it through, ran `build_sectioned()`'s pool-level
+  strategy pass anyway (so `PACK_ASSEMBLED.strategy_failures` genuinely
+  recorded a raised axis), then answered `200` with `axes: null` because an
+  empty `sections` list produces zero `PackSection`s for the route to read
+  `strategies_used` off. The route now raises the same `422` REST already
+  uses for a malformed section dict, with MCP's own wording, so the two
+  surfaces give the same reason for the same input and a `200` sectioned
+  response always has at least one section to read `axes` from.
+  (follow-up F4 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
 
 ## [0.9.0] - 2026-05-13
 
