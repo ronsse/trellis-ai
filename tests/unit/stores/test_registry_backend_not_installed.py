@@ -443,6 +443,127 @@ def test_embedding_fn_unimportable_env_var_raises_rather_than_using_config(
         _ = registry.embedding_fn
 
 
+# -- F2: ConfigError's setting names the source that was wrong ------------
+#
+# (#794 gate follow-up.) A bad dotted path raises ConfigError either way,
+# but the *setting* it names must point at whichever of the env var or the
+# YAML key actually supplied the path.
+
+_BAD_DOTTED_PATHS = [
+    pytest.param(
+        "no_such_module_for_embedding_fn_setting_test.embed", id="missing_module"
+    ),
+    pytest.param(
+        "trellis.errors.no_such_attr_for_embedding_fn_setting_test",
+        id="missing_attribute",
+    ),
+    pytest.param("trellis.errors.__doc__", id="not_callable"),
+]
+
+
+@pytest.mark.parametrize("bad_path", _BAD_DOTTED_PATHS)
+def test_embedding_fn_env_var_bad_path_setting_names_the_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_path: str
+) -> None:
+    """A bad ``TRELLIS_EMBEDDING_FN`` path's ConfigError names the env var.
+
+    Not ``embeddings.provider``: that YAML key was never read, so pointing
+    an operator there sends them to edit the wrong setting.
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", bad_path)
+    registry = StoreRegistry.from_config_dir(
+        config_dir=tmp_path / "cfg", data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        _ = registry.embedding_fn
+    assert exc_info.value.setting == "TRELLIS_EMBEDDING_FN"
+
+
+@pytest.mark.parametrize("bad_path", _BAD_DOTTED_PATHS)
+def test_embedding_fn_config_provider_bad_path_setting_names_the_yaml_key(
+    tmp_path: Path, bad_path: str
+) -> None:
+    """The same bad path via ``embeddings.provider`` keeps naming the YAML key."""
+    config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": bad_path})
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        _ = registry.embedding_fn
+    assert exc_info.value.setting == "embeddings.provider"
+
+
+def test_import_callable_setting_kwarg_overrides_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_import_callable``'s own ``setting=`` parameter is honoured directly."""
+    with pytest.raises(ConfigError) as exc_info:
+        _import_callable(_UNIMPORTABLE_PATH, setting="TRELLIS_EMBEDDING_FN")
+    assert exc_info.value.setting == "TRELLIS_EMBEDDING_FN"
+
+
+# -- F1: a dotted path's own import-time failure is not a bad path --------
+
+
+@pytest.mark.parametrize("via_env", [True, False], ids=["env_var", "config_provider"])
+def test_embedding_fn_dotted_path_import_time_error_propagates_unwrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, via_env: bool
+) -> None:
+    """A dotted-path module whose own top-level code raises is not a bad path.
+
+    ``_import_callable`` catches only ``ImportError``; an unrelated exception
+    raised while the target module executes (not a missing module, not a
+    missing or non-callable attribute) is that module's bug and propagates
+    as itself — the dotted-path counterpart of #794's
+    ``test_openai_constructor_non_openai_error_propagates_unwrapped``.
+    """
+    monkeypatch.syspath_prepend(str(tmp_path))
+    module_name = "efp_raises_at_import_env" if via_env else "efp_raises_at_import_cfg"
+    (tmp_path / f"{module_name}.py").write_text(
+        "raise RuntimeError('synthetic import-time failure')\n"
+    )
+    dotted_path = f"{module_name}.target"
+    if via_env:
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", dotted_path)
+        config_dir = tmp_path / "cfg"
+    else:
+        config_dir = _write_config(
+            tmp_path / "cfg", embeddings={"provider": dotted_path}
+        )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    # `pytest.raises(RuntimeError, ...)` alone proves "unwrapped": a
+    # `ConfigError` (TrellisError, not a RuntimeError) raised instead would
+    # already fail this context manager, so a further `isinstance` assertion
+    # here could never fail (#794 gate finding #5 flagged the same pattern).
+    with pytest.raises(RuntimeError, match="synthetic import-time failure"):
+        _ = registry.embedding_fn
+
+
+# -- F3: an empty TRELLIS_EMBEDDING_FN is not "set" ------------------------
+
+
+def test_embedding_fn_empty_env_var_falls_through_to_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``TRELLIS_EMBEDDING_FN=""`` is falsy, so config still resolves.
+
+    An env file that declares the var but leaves it blank should not be
+    treated as "set to an empty, malformed path" — ``if custom_path:``
+    falls through to ``embeddings.provider`` instead (#794 gate M4).
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "")
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        embeddings={"provider": "trellis.stores.registry._mask_api_key"},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    assert registry.embedding_fn is _mask_api_key
+
+
 def test_embedding_fn_not_configured_is_still_cached(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -472,9 +593,9 @@ def test_embedding_fn_success_is_resolved_once_across_calls(
     calls: list[str] = []
     real_import_callable = _import_callable
 
-    def counting_import_callable(dotted_path: str) -> Any:
+    def counting_import_callable(dotted_path: str, **kwargs: Any) -> Any:
         calls.append(dotted_path)
-        return real_import_callable(dotted_path)
+        return real_import_callable(dotted_path, **kwargs)
 
     monkeypatch.setattr(
         "trellis.stores.registry._import_callable", counting_import_callable

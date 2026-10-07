@@ -506,11 +506,20 @@ def _try_llm_embedder_plugin(
     )
 
 
-def _import_callable(dotted_path: str) -> Callable[[str], list[float]]:
+def _import_callable(
+    dotted_path: str, *, setting: str = "embeddings.provider"
+) -> Callable[[str], list[float]]:
     """Import a callable from a dotted module path (e.g. ``pkg.mod.func``).
 
-    Raises :class:`ConfigError` when the path is malformed, the module
-    cannot be imported, or the named attribute is not callable. Returning
+    Raises :class:`ConfigError` (naming *setting*) when — and only when —
+    the *path itself* is wrong: malformed, the module cannot be found, or
+    the named attribute is missing or not callable. *setting* should name
+    whichever of ``TRELLIS_EMBEDDING_FN`` (the env var) or
+    ``embeddings.provider`` (the YAML key) supplied *dotted_path*, so the
+    operator edits the right one. An exception raised by the target
+    module's own top-level code while it imports — anything other than
+    :class:`ImportError` — is that module's bug, not a bad path, and
+    propagates unchanged rather than being caught here (#794). Returning
     ``None`` silently here would let a misconfigured ``TRELLIS_EMBEDDING_FN``
     propagate as ``embedding_fn is None`` downstream, which masks the typo
     behind a "no embeddings configured" branch.
@@ -523,7 +532,7 @@ def _import_callable(dotted_path: str) -> Callable[[str], list[float]]:
             f"Invalid embedding callable path {dotted_path!r} —"
             " expected a dotted path like 'pkg.module.func'."
         )
-        raise ConfigError(msg, setting="embeddings.provider")
+        raise ConfigError(msg, setting=setting)
     try:
         module = importlib.import_module(module_path)
     except ImportError as exc:
@@ -531,20 +540,20 @@ def _import_callable(dotted_path: str) -> Callable[[str], list[float]]:
             f"Could not import embedding callable {dotted_path!r}:"
             f" module {module_path!r} is not importable ({exc})."
         )
-        raise ConfigError(msg, setting="embeddings.provider") from exc
+        raise ConfigError(msg, setting=setting) from exc
     fn = getattr(module, attr_name, None)
     if fn is None:
         msg = (
             f"Embedding callable path {dotted_path!r} resolved, but"
             f" attribute {attr_name!r} is missing from {module_path!r}."
         )
-        raise ConfigError(msg, setting="embeddings.provider")
+        raise ConfigError(msg, setting=setting)
     if not callable(fn):
         msg = (
             f"Embedding callable path {dotted_path!r} resolved, but"
             f" {attr_name!r} is not callable."
         )
-        raise ConfigError(msg, setting="embeddings.provider")
+        raise ConfigError(msg, setting=setting)
     return fn  # type: ignore[no-any-return]
 
 
@@ -1664,10 +1673,14 @@ class StoreRegistry:
         (no env var, no ``embeddings.provider``). Raises
         :class:`BackendNotInstalledError` when ``provider: openai`` is
         configured but the ``llm-openai`` extra is missing, and
-        :class:`ConfigError` when ``provider: openai`` finds no API key or
-        the dotted-path provider can't be imported or doesn't resolve to a
-        callable. A raise caches nothing, so the next access resolves
-        again; a callable or ``None`` is cached.
+        :class:`ConfigError` when ``provider: openai`` finds no API key, or
+        a dotted-path provider's module can't be found or its attribute is
+        missing or not callable — naming ``TRELLIS_EMBEDDING_FN`` when the
+        path came from the env var, ``embeddings.provider`` when it came
+        from config. An exception raised by the target module's own code
+        while it imports (not a bad path) propagates unchanged. A raise
+        caches nothing, so the next access resolves again; a callable or
+        ``None`` is cached.
         """
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]
@@ -1679,7 +1692,7 @@ class StoreRegistry:
 
         custom_path = os.environ.get("TRELLIS_EMBEDDING_FN")
         if custom_path:
-            resolved = _import_callable(custom_path)
+            resolved = _import_callable(custom_path, setting="TRELLIS_EMBEDDING_FN")
             if resolved is not None:
                 logger.info("embedding_fn_loaded", source="env", path=custom_path)
         else:
