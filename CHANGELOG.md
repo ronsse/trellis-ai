@@ -1509,6 +1509,16 @@ All notable changes to Trellis will be documented in this file.
   the value fine. The backend-error line now renders `str(error)`; a string
   `error` is unchanged.
   (follow-up F1 from [#791](https://github.com/ronsse/trellis-ai/pull/791))
+- **A `supersedes=` stamp failure no longer leaks driver text to an MCP
+  caller.** `supersede_document` and `supersede_entity` returned the caught
+  exception's raw text, which `save_knowledge` and `save_memory` put into an
+  `McpError` message or into a saved memory's warning. They now render it
+  through `trellis.core.error_sanitize.render_exception_detail`, the rule
+  `trellis.mcp.server`'s other caught-exception sites already used: a
+  `TrellisError`'s text and a clean message (a timeout) read through
+  unchanged, and a leak-shaped one comes back as the sanitizer's marker
+  after the exception's type name.
+  (follow-up 5 from the [#793](https://github.com/ronsse/trellis-ai/pull/793) gate)
 - **`trellis ingest corpus --prune` and `ingest conversations --prune` keep
   a long withheld path or title on one line.** The yellow `withheld` line
   each prints before its exit-`5` carries a relpath, title or doc id plus

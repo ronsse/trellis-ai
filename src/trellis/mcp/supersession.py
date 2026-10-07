@@ -34,6 +34,7 @@ from typing import Any
 
 import structlog
 
+from trellis.core.error_sanitize import render_exception_detail
 from trellis.core.hashing import content_hash
 from trellis.mutate import (
     Command,
@@ -270,7 +271,8 @@ def supersede_document(
         logger.exception(
             "supersession_stamp_failed", target=doc_id, successor=successor
         )
-        return f"{type(exc).__name__}: {exc}"
+        # This string reaches the MCP caller, so driver text is sanitized.
+        return f"{type(exc).__name__}: {render_exception_detail(exc)}"
 
 
 def _stamp_document(
@@ -316,7 +318,7 @@ def supersede_entity(
         logger.exception(
             "supersession_stamp_failed", target=node_id, successor=successor
         )
-        return f"{type(exc).__name__}: {exc}"
+        return f"{type(exc).__name__}: {render_exception_detail(exc)}"
 
 
 def _stamp_entity(

@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from trellis.errors import TrellisError
+
 #: Upper bound for a passed-through message. Exception text beyond this
 #: is almost always a wrapped stack dump or an echoed payload; the
 #: interesting part (the leading error statement) survives truncation.
@@ -196,6 +198,23 @@ def describe_yaml_error(exc: BaseException) -> str:
         f"a value could not be constructed ({type(exc).__name__}); check"
         " explicit tags such as !!int, !!float or !!bool, and dates"
     )
+
+
+def render_exception_detail(exc: BaseException) -> str:
+    """Render a caught exception's text for a caller-facing message.
+
+    A ``TrellisError`` keeps its own text, on the convention that Trellis
+    composes it without raw driver text (a ``StoreError`` names its cause
+    by type). Any other exception's text can be a driver's, such as a
+    Postgres DETAIL line, so it goes through :func:`sanitize_error_message`:
+    a clean message (a timeout) still reads, and a leak-shaped one becomes
+    the static marker. The sanitizer is a deny-list, so a leak in a shape
+    it does not know still passes. Log the full text on an operator
+    channel first; this decides only what the caller sees.
+    """
+    if isinstance(exc, TrellisError):
+        return str(exc)
+    return sanitize_error_message(str(exc))
 
 
 def sanitized_error_payload(exc: BaseException, **context: Any) -> dict[str, Any]:
