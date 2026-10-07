@@ -326,18 +326,17 @@ def test_openai_embed_network_error_survives_as_itself(
 def test_openai_constructor_non_openai_error_propagates_unwrapped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A non-``OpenAIError`` from ``openai.OpenAI(...)`` is not a ``ConfigError``.
+    """A non-``OpenAIError`` from ``openai.OpenAI(...)`` propagates unwrapped.
 
-    Only ``openai.OpenAIError`` is translated (#786); any other exception the
-    constructor might raise — a synthetic stand-in here, so the test holds
-    whatever the installed SDK version actually raises in practice — reaches
-    the ``embedding_fn`` property caller unchanged.
+    Only ``openai.OpenAIError`` becomes a ``ConfigError`` (#786); any other
+    exception reaches the ``embedding_fn`` caller as itself. The constructor is
+    replaced, so the result does not depend on which SDK version is installed.
     """
     openai = pytest.importorskip("openai")  # optional extra; skip when unavailable
+    synthetic_error = RuntimeError("synthetic")
 
     def _raise_non_openai_error(**kwargs: Any) -> Any:
-        synthetic_msg = "synthetic"
-        raise RuntimeError(synthetic_msg)
+        raise synthetic_error
 
     monkeypatch.setattr(openai, "OpenAI", _raise_non_openai_error)
     config_dir = _write_config(
@@ -347,9 +346,9 @@ def test_openai_constructor_non_openai_error_propagates_unwrapped(
     registry = StoreRegistry.from_config_dir(
         config_dir=config_dir, data_dir=tmp_path / "data"
     )
-    with pytest.raises(RuntimeError, match="synthetic") as exc_info:
+    with pytest.raises(RuntimeError) as exc_info:
         _ = registry.embedding_fn
-    assert not isinstance(exc_info.value, ConfigError)
+    assert exc_info.value is synthetic_error
 
 
 # -- a failed resolution is not cached (#775 follow-up F1) -----------------

@@ -1656,9 +1656,9 @@ class StoreRegistry:
         dotted import path (e.g. ``mypackage.embeddings.embed``) for fully
         custom providers.
 
-        ``TRELLIS_EMBEDDING_FN`` outranks ``embeddings.provider``: when it is
-        set, the config block is never consulted, and a path that fails to
-        import raises :class:`ConfigError` rather than falling back to it.
+        A non-empty ``TRELLIS_EMBEDDING_FN`` outranks ``embeddings.provider``:
+        the config block is never consulted, so a path that fails to resolve
+        raises rather than falling back to it.
 
         Returns ``None`` only when no embedding is configured at all
         (no env var, no ``embeddings.provider``). Raises
