@@ -61,11 +61,19 @@ edge likewise waits for the first and reads its row as ``old``. The
 sorted order keeps writers of ``x->y`` and ``y->x`` from deadlocking.
 ArcadeDB takes no lock: a conflicting writer fails at commit and the
 driver retries it, but two concurrent writers of one edge can still both
-commit there and leave two current rows. Only single-row writers take the
-lock: ``upsert_edges_bulk`` does not (it would need a sorted per-row lock
-order across every row it writes, like Postgres's bulk edge path), so a
-bulk write racing another writer of the same edge can still leave two
-current rows.
+commit there and leave two current rows. ``upsert_edges_bulk`` takes the
+same lock, on every distinct endpoint the whole batch touches, in one
+sorted ``node_id`` order, before any row in the batch resolves its
+endpoints -- so on Neo4j a bulk writer and a single-row writer of the
+same triplet, or two bulk writers, serialize in the same global order a
+single-row writer would use, and two bulk writers whose batches share
+endpoints in different row orders don't deadlock. ArcadeDB's bulk path
+takes no lock from this either, for the same reason as the single-row
+path: a conflicting writer fails at commit and the driver retries it,
+not a row lock. A pre-existing ArcadeDB duplicate between a bulk and a
+single-row writer of the same triplet is therefore governed by OCC
+retry timing, not by this fix, whichever way a given measurement
+happens to land.
 
 Per-backend subclasses override the **seams**:
 
@@ -1555,7 +1563,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         with self._driver.session(database=self._database) as session:
             # Round trip 1 — validate that every source + target has a
             # current version. Done up front so a bad row gets a precise
-            # error pointing at its index before the write runs.
+            # error pointing at its index before the write runs. The same
+            # sorted, de-duplicated id list is reused below to lock every
+            # endpoint the batch touches, in one order, before round
+            # trip 2 resolves any of them.
             endpoint_ids = sorted(
                 {spec["source_id"] for spec in edges}
                 | {spec["target_id"] for spec in edges}
@@ -1592,7 +1603,37 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # rows), so ``old`` would always be NULL and the prior
             # version would not get closed. Both Neo4j and ArcadeDB
             # accept the WHERE form.
+            #
+            # Lock prelude: write ``_cas_lock`` to every distinct
+            # endpoint's current row across the whole batch, in the one
+            # sorted ``endpoint_ids`` order, before any row resolves its
+            # endpoints below -- the same idiom ``upsert_edge`` uses for
+            # its two endpoints, extended to however many distinct nodes
+            # this batch touches. One explicit MATCH/SET/REMOVE/WITH
+            # per id, not an UNWIND, so the lock order is the literal
+            # statement order rather than relying on UNWIND row order
+            # being sequential. A missing endpoint just locks nothing
+            # (count 0); round trip 1 and the per-row MATCH below still
+            # own raising for that. On Neo4j this takes each row's lock,
+            # so single-row and bulk writers of one edge serialize in the
+            # same global order; ArcadeDB takes no lock from this touch
+            # (module docstring).
+            lock_params: dict[str, Any] = {}
+            lock_clauses: list[str] = []
+            for idx, node_id in enumerate(endpoint_ids):
+                pname = f"lock_id_{idx}"
+                lock_params[pname] = node_id
+                lock_clauses.append(
+                    f"MATCH (lock{idx}:Node {{node_id: ${pname}}}) "
+                    f"WHERE lock{idx}.valid_to IS NULL\n"
+                    f"            SET lock{idx}._cas_lock = true\n"
+                    f"            REMOVE lock{idx}._cas_lock\n"
+                    f"            WITH count(lock{idx}) AS _locked{idx}"
+                )
+            lock_prelude = "\n            ".join(lock_clauses)
+
             cypher = f"""
+            {lock_prelude}
             UNWIND $rows AS row
             MATCH (s:Node {{node_id: row.source_id}}) WHERE s.valid_to IS NULL
             MATCH (t:Node {{node_id: row.target_id}}) WHERE t.valid_to IS NULL
@@ -1623,7 +1664,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             """
 
             def _tx(tx: ManagedTransaction) -> list[Any]:
-                records = list(tx.run(cypher, rows=rows))
+                records = list(tx.run(cypher, rows=rows, **lock_params))
                 # Compare row indices, not counts: one UNWIND row yields
                 # exactly one RETURN row (the FOREACH above collapses
                 # every matched old edge into one close), but comparing

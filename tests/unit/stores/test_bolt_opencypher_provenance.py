@@ -247,6 +247,66 @@ class TestBoltUpsertEdgesBulkShape:
 
 
 # ---------------------------------------------------------------------------
+# upsert_edges_bulk — lock prelude precedes resolution, sorted endpoint order
+#
+# Not provenance, but reuses this file's mock-driver harness rather than
+# duplicating it: a deterministic, no-server counterpart to the live races in
+# bolt_edge_create_race.py (check_concurrent_bulk_edge_create_leaves_one_
+# current_row and friends), which prove the behavior but can't pin the shape
+# of the fix (how many ids, which order, where in the Cypher text).
+# ---------------------------------------------------------------------------
+
+
+class TestBoltUpsertEdgesBulkLockPrelude:
+    def test_lock_ids_are_the_sorted_distinct_endpoint_set(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store, known_endpoint_ids={"a", "b", "c", "z"})
+        store.upsert_edges_bulk(
+            [
+                # Row order deliberately disagrees with sorted order ("z"
+                # before "a") so a lock order that merely followed row /
+                # batch-encounter order would disagree with this assertion.
+                {"source_id": "z", "target_id": "a", "edge_type": "links_to"},
+                {"source_id": "b", "target_id": "c", "edge_type": "links_to"},
+            ]
+        )
+        write_call = next(c for c in captured if "UNWIND $rows" in str(c["cypher"]))
+        params = write_call["params"]
+        lock_params = {k: v for k, v in params.items() if k.startswith("lock_id_")}
+        assert set(lock_params) == {f"lock_id_{i}" for i in range(4)}
+        ordered = [lock_params[f"lock_id_{i}"] for i in range(4)]
+        assert ordered == sorted(ordered) == ["a", "b", "c", "z"]
+
+    def test_lock_prelude_text_precedes_unwind(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store, known_endpoint_ids={"a", "b"})
+        store.upsert_edges_bulk(
+            [{"source_id": "a", "target_id": "b", "edge_type": "links_to"}]
+        )
+        write_call = next(c for c in captured if "UNWIND $rows" in str(c["cypher"]))
+        cypher = str(write_call["cypher"])
+        assert "_cas_lock" in cypher
+        assert cypher.index("_cas_lock") < cypher.index("UNWIND $rows")
+
+    def test_lock_prelude_locks_every_distinct_endpoint_not_just_one(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(
+            store, known_endpoint_ids={"src1", "tgt1", "src2", "tgt2"}
+        )
+        store.upsert_edges_bulk(
+            [
+                {"source_id": "src1", "target_id": "tgt1", "edge_type": "links_to"},
+                {"source_id": "src2", "target_id": "tgt2", "edge_type": "links_to"},
+            ]
+        )
+        write_call = next(c for c in captured if "UNWIND $rows" in str(c["cypher"]))
+        lock_params = {
+            k: v for k, v in write_call["params"].items() if k.startswith("lock_id_")
+        }
+        assert set(lock_params.values()) == {"src1", "tgt1", "src2", "tgt2"}
+
+
+# ---------------------------------------------------------------------------
 # _edge_props_to_dict — read path surfaces provenance fields
 # ---------------------------------------------------------------------------
 

@@ -180,6 +180,24 @@ def test_edge_write_racing_node_upsert_keeps_one_current_node(graph_store):
     )
 
 
+def test_concurrent_bulk_edge_create_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_concurrent_bulk_edge_create_leaves_one_current_row(
+        graph_store, _second_neo4j_store
+    )
+
+
+def test_bulk_edge_create_racing_single_edge_write_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_bulk_edge_create_racing_single_edge_write_leaves_one_current_row(
+        graph_store, _second_neo4j_store
+    )
+
+
+def test_bulk_edge_writes_opposite_row_order_do_not_deadlock(graph_store):
+    bolt_edge_create_race.check_bulk_edge_writes_opposite_row_order_do_not_deadlock(
+        graph_store, _second_neo4j_store
+    )
+
+
 def _wait_for_blocked_write(store, needle: str) -> bool:
     """Poll until a statement containing ``needle`` is blocked on a lock (20 s cap)."""
     cypher = (

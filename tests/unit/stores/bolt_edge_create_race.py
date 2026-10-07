@@ -38,6 +38,8 @@ class _GraphStore(Protocol):
         properties: dict[str, Any] | None = None,
     ) -> str: ...
 
+    def upsert_edges_bulk(self, edges: list[dict[str, Any]]) -> list[str]: ...
+
     def get_edges(
         self, node_id: str, direction: str = "both", edge_type: str | None = None
     ) -> list[dict[str, Any]]: ...
@@ -177,5 +179,151 @@ def check_edge_write_racing_node_upsert_keeps_one_current_node(
                 if row["valid_to"] is None
             ]
             assert len(current) == 1, (i, len(current))
+    finally:
+        second.close()
+
+
+def check_concurrent_bulk_edge_create_leaves_one_current_row(
+    store: _GraphStore, make_second_store: Any
+) -> None:
+    """Two instances calling ``upsert_edges_bulk`` for the same new edge
+    leave exactly one current row.
+
+    The bulk-vs-bulk shape of the create race: both writers' batches carry
+    one row apiece, for the same triplet. Repeated :data:`REPS` times with a
+    fresh triplet each rep, mirroring
+    :func:`check_concurrent_edge_create_leaves_one_current_row` at the bulk
+    entry point.
+    """
+    second = make_second_store()
+    try:
+        for i in range(REPS):
+            source_id = f"race-bulk-create-src-{i}"
+            target_id = f"race-bulk-create-tgt-{i}"
+            store.upsert_node(source_id, "race-node", {})
+            store.upsert_node(target_id, "race-node", {})
+
+            _race(
+                functools.partial(
+                    store.upsert_edges_bulk,
+                    [
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "edge_type": "race-rel",
+                            "properties": {"writer": "a"},
+                        }
+                    ],
+                ),
+                functools.partial(
+                    second.upsert_edges_bulk,
+                    [
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "edge_type": "race-rel",
+                            "properties": {"writer": "b"},
+                        }
+                    ],
+                ),
+            )
+
+            current = store.get_edges(
+                source_id, direction="outgoing", edge_type="race-rel"
+            )
+            assert len(current) == 1, (i, [row["edge_id"] for row in current])
+    finally:
+        second.close()
+
+
+def check_bulk_edge_create_racing_single_edge_write_leaves_one_current_row(
+    store: _GraphStore, make_second_store: Any
+) -> None:
+    """``upsert_edges_bulk`` racing single-row ``upsert_edge`` on the same
+    triplet leaves exactly one current row.
+
+    The mixed shape #782 follow-up 2 named: one writer uses the bulk entry
+    point, the other the single-row one, both for the same new edge.
+    Repeated :data:`REPS` times with a fresh triplet each rep.
+    """
+    second = make_second_store()
+    try:
+        for i in range(REPS):
+            source_id = f"race-bulk-single-src-{i}"
+            target_id = f"race-bulk-single-tgt-{i}"
+            store.upsert_node(source_id, "race-node", {})
+            store.upsert_node(target_id, "race-node", {})
+
+            _race(
+                functools.partial(
+                    store.upsert_edges_bulk,
+                    [
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "edge_type": "race-rel",
+                            "properties": {"writer": "a"},
+                        }
+                    ],
+                ),
+                functools.partial(
+                    second.upsert_edge,
+                    source_id,
+                    target_id,
+                    "race-rel",
+                    {"writer": "b"},
+                ),
+            )
+
+            current = store.get_edges(
+                source_id, direction="outgoing", edge_type="race-rel"
+            )
+            assert len(current) == 1, (i, [row["edge_id"] for row in current])
+    finally:
+        second.close()
+
+
+def check_bulk_edge_writes_opposite_row_order_do_not_deadlock(
+    store: _GraphStore, make_second_store: Any
+) -> None:
+    """Two ``upsert_edges_bulk`` calls carrying the same two triplets in
+    opposite row order neither deadlock nor leave a duplicate current row.
+
+    Each writer's batch touches the same 4 endpoint nodes but orders its
+    two rows oppositely (writer one: triplet 1 then triplet 2; writer two:
+    triplet 2 then triplet 1), exercising the sorted lock order's deadlock
+    avoidance at batch granularity -- the shape the single-row ``x->y`` vs
+    ``y->x`` race exercises per edge. Repeated :data:`REPS` times with
+    fresh ids each rep.
+    """
+    second = make_second_store()
+    try:
+        for i in range(REPS):
+            s1, t1 = f"race-order-s1-{i}", f"race-order-t1-{i}"
+            s2, t2 = f"race-order-s2-{i}", f"race-order-t2-{i}"
+            for node_id in (s1, t1, s2, t2):
+                store.upsert_node(node_id, "race-node", {})
+            row1 = {
+                "source_id": s1,
+                "target_id": t1,
+                "edge_type": "race-rel",
+                "properties": {"writer": "a"},
+            }
+            row2 = {
+                "source_id": s2,
+                "target_id": t2,
+                "edge_type": "race-rel",
+                "properties": {"writer": "b"},
+            }
+
+            _race(
+                functools.partial(store.upsert_edges_bulk, [row1, row2]),
+                functools.partial(second.upsert_edges_bulk, [row2, row1]),
+            )
+
+            current_1 = store.get_edges(s1, direction="outgoing", edge_type="race-rel")
+            current_2 = store.get_edges(s2, direction="outgoing", edge_type="race-rel")
+            assert len(current_1) == 1, (i, [row["edge_id"] for row in current_1])
+            assert len(current_2) == 1, (i, [row["edge_id"] for row in current_2])
     finally:
         second.close()
