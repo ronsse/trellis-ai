@@ -75,15 +75,17 @@ print(result.action)   # "created" | "updated" | "unchanged" | "error"
 Once indexed, notes participate in every `assemble_pack` / `get_context` call:
 
 ```python
+import os
+
 from trellis_sdk import TrellisClient
 
-client = TrellisClient()
+client = TrellisClient(base_url=os.environ.get("TRELLIS_URL", "http://localhost:8420"))
 pack = client.assemble_pack(
     intent="how does our team handle on-call rotations",
     max_tokens=2000,
 )
 for item in pack["items"]:
-    print(item["item_id"], item["content"][:100])
+    print(item["item_id"], item["excerpt"][:100])
 ```
 
 ## Limitations

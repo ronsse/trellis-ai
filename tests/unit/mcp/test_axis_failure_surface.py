@@ -15,6 +15,15 @@ back on, so a caller who never inspects
 3. both hold for the four tools built on ``_sectioned_context``
    (``get_context(sections=...)``, ``get_objective_context``,
    ``get_task_context``, ``get_sectioned_context``).
+
+A ``misconfigured`` semantic axis (#783 gate, follow-up F2) is a fourth,
+independent state ``describe_axes`` reports: an embedder resolved but the
+vector backend never initialised, so the axis never reaches ``available``
+at all and ``format_failed_axes_note`` — built from ``axes["failed"]`` —
+cannot see it. This module also pins that every tool above adds a second,
+separate line for that state, that the two lines coexist when both apply,
+and that a clean pack, a pack with only a failed axis, and a pack whose
+semantic axis was built (and ran or raised) gain no such line.
 """
 
 from __future__ import annotations
@@ -31,6 +40,7 @@ from trellis.mcp.server import get_context as _get_context
 from trellis.mcp.server import get_objective_context as _get_objective_context
 from trellis.mcp.server import get_sectioned_context as _get_sectioned_context
 from trellis.mcp.server import get_task_context as _get_task_context
+from trellis.mcp.server import search as _search
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.schemas.pack import PackItem
@@ -42,10 +52,15 @@ get_context = unwrap_tool(_get_context)
 get_objective_context = unwrap_tool(_get_objective_context)
 get_task_context = unwrap_tool(_get_task_context)
 get_sectioned_context = unwrap_tool(_get_sectioned_context)
+search = unwrap_tool(_search)
 
 INTENT = "alpha bravo runbook"
 _AXIS_FAILURE_SENTINEL = "SENTINEL_MCP_AXIS_FAILURE_3b7a1d"
 _CUSTOM_SECTIONS = [{"name": "docs", "content_types": ["document"], "max_items": 5}]
+_MISCONFIGURED_SEMANTIC_LINE = (
+    "**Semantic retrieval misconfigured:** the vector store did not"
+    " initialise; results are keyword and graph only."
+)
 
 
 def _axis_item(item_id: str) -> PackItem:
@@ -95,6 +110,49 @@ def _builder_failing_axis_empty_survivor(
     return PackBuilder(strategies=[bad, empty])
 
 
+def _builder_clean_without_semantic(*_args: object, **_kwargs: object) -> PackBuilder:
+    """Keyword and graph both run and both find something; no axis failed.
+
+    Used only together with ``_configure_embedder`` -- that combination is
+    what ``describe_axes`` reads as "misconfigured" rather than
+    "not_configured" (tests/unit/retrieve/test_builder_factory.py's
+    ``TestDescribeAxes.test_absent_with_an_embedder_is_misconfigured``)."""
+    keyword = _make_axis_strategy("keyword", [_axis_item("d1")])
+    graph = _make_axis_strategy("graph", [_axis_item("d2")])
+    return PackBuilder(strategies=[keyword, graph])
+
+
+def _builder_empty_without_semantic(*_args: object, **_kwargs: object) -> PackBuilder:
+    """Keyword and graph both run and both find nothing; no axis failed."""
+    keyword = _make_axis_strategy("keyword", [])
+    graph = _make_axis_strategy("graph", [])
+    return PackBuilder(strategies=[keyword, graph])
+
+
+def _builder_held_out_empty_without_semantic(
+    *_args: object, **_kwargs: object
+) -> PackBuilder:
+    keyword = _make_axis_strategy("keyword", [])
+    graph = _make_axis_strategy("graph", [])
+    return PackBuilder(strategies=[keyword, graph], holdout_rate=1.0)
+
+
+def _configure_embedder(
+    monkeypatch: pytest.MonkeyPatch, registry: StoreRegistry
+) -> None:
+    """Force ``registry.embedding_fn`` truthy without touching config.
+
+    ``embedding_fn`` is a read-only property with internal lazy caching
+    (``StoreRegistry._embedding_fn_cache``, sentinel-valued until resolved)
+    and no setter, so the cache is set directly -- the one-layer-up
+    equivalent of ``describe_axes``'s own ``embedder_configured=True``
+    parameter in tests/unit/retrieve/test_builder_factory.py, needed here
+    because ``_flat_context``/``_sectioned_context`` read the registry
+    property themselves rather than taking a bool.
+    """
+    monkeypatch.setattr(registry, "_embedding_fn_cache", lambda text: [0.1])
+
+
 @pytest.mark.parametrize("index", [False, True])
 def test_get_context_reports_failed_axis_for_a_populated_pack(
     temp_registry: StoreRegistry, monkeypatch, index: bool
@@ -113,6 +171,10 @@ def test_get_context_reports_failed_axis_for_a_populated_pack(
     assert "**Retrieval axis failed:** keyword." in lines
     assert result.count("Retrieval axis failed") == 1
     assert _AXIS_FAILURE_SENTINEL not in result
+    # No embedder was configured in this scenario, so the missing semantic
+    # axis reads "not_configured", not "misconfigured" -- this must not
+    # print regardless.
+    assert "Semantic retrieval misconfigured" not in result
 
 
 def test_get_context_reports_failed_axis_for_an_empty_pack(
@@ -132,6 +194,7 @@ def test_get_context_reports_failed_axis_for_an_empty_pack(
     assert lines[0] == f"No context found for: {INTENT}"
     assert "**Retrieval axis failed:** keyword." in lines
     assert _AXIS_FAILURE_SENTINEL not in result
+    assert "Semantic retrieval misconfigured" not in result
 
 
 def test_get_context_reports_failed_axis_for_a_held_out_empty_pack(
@@ -153,6 +216,7 @@ def test_get_context_reports_failed_axis_for_a_held_out_empty_pack(
     assert lines[0] == f"# Context for: {INTENT}"
     assert "**Retrieval axis failed:** keyword." in lines
     assert _AXIS_FAILURE_SENTINEL not in result
+    assert "Semantic retrieval misconfigured" not in result
 
 
 def test_get_context_clean_pack_has_no_axis_note(
@@ -175,6 +239,7 @@ def test_get_context_clean_pack_has_no_axis_note(
     # exactly as it was before this change.
     assert lines[2] == ""
     assert "Retrieval axis failed" not in result
+    assert "Semantic retrieval misconfigured" not in result
 
 
 def test_get_context_clean_empty_pack_is_unchanged(
@@ -183,6 +248,135 @@ def test_get_context_clean_empty_pack_is_unchanged(
     result = get_context(INTENT)
 
     assert result == f"No context found for: {INTENT}"
+
+
+# ---------------------------------------------------------------------------
+# A misconfigured semantic axis (#783 gate, follow-up F2): an embedder
+# resolved but the vector backend never initialised, so the axis never
+# reaches ``available`` and ``format_failed_axes_note`` cannot see it.
+# ---------------------------------------------------------------------------
+
+
+def test_get_context_reports_misconfigured_semantic_for_a_populated_pack(
+    temp_registry: StoreRegistry, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        server_mod, "_build_pack_builder", _builder_clean_without_semantic
+    )
+    _configure_embedder(monkeypatch, temp_registry)
+
+    result = get_context(INTENT)
+    lines = result.split("\n")
+
+    assert _MISCONFIGURED_SEMANTIC_LINE in lines
+    assert result.count("Semantic retrieval misconfigured") == 1
+    assert "Retrieval axis failed" not in result
+
+
+def test_get_context_reports_misconfigured_semantic_for_an_empty_pack(
+    temp_registry: StoreRegistry, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        server_mod, "_build_pack_builder", _builder_empty_without_semantic
+    )
+    _configure_embedder(monkeypatch, temp_registry)
+
+    result = get_context(INTENT)
+    lines = result.split("\n")
+
+    assert lines[0] == f"No context found for: {INTENT}"
+    assert _MISCONFIGURED_SEMANTIC_LINE in lines
+
+
+def test_get_context_reports_misconfigured_semantic_for_a_held_out_empty_pack(
+    temp_registry: StoreRegistry, monkeypatch
+) -> None:
+    """With the pack holdout on, an empty pack renders through the
+    formatter instead of the one-liner; the misconfigured note must survive
+    that path too (mirrors test_get_context_reports_failed_axis_for_a_held_
+    out_empty_pack for the failed-axis case)."""
+    monkeypatch.setattr(
+        server_mod, "_build_pack_builder", _builder_held_out_empty_without_semantic
+    )
+    _configure_embedder(monkeypatch, temp_registry)
+
+    result = get_context(INTENT)
+    lines = result.split("\n")
+
+    assert lines[0] == f"# Context for: {INTENT}"
+    assert _MISCONFIGURED_SEMANTIC_LINE in lines
+
+
+def test_get_context_reports_both_failed_and_misconfigured_axes(
+    temp_registry: StoreRegistry, monkeypatch
+) -> None:
+    """A failed keyword axis and a misconfigured semantic axis are
+    independent states a single build can hit together (the failing
+    stand-in already lacks a semantic strategy); both lines render, each
+    exactly once, and neither carries the other's exception text."""
+    monkeypatch.setattr(
+        server_mod, "_build_pack_builder", _builder_one_failing_one_surviving
+    )
+    _configure_embedder(monkeypatch, temp_registry)
+
+    result = get_context(INTENT)
+    lines = result.split("\n")
+
+    assert "**Retrieval axis failed:** keyword." in lines
+    assert _MISCONFIGURED_SEMANTIC_LINE in lines
+    assert result.count("Retrieval axis failed") == 1
+    assert result.count("Semantic retrieval misconfigured") == 1
+    assert _AXIS_FAILURE_SENTINEL not in result
+
+
+def test_search_reports_misconfigured_semantic_axis(
+    temp_registry: StoreRegistry, monkeypatch
+) -> None:
+    """``search`` shares ``_flat_context`` with ``get_context`` but had no
+    direct coverage of the axis-note behaviour in this module; pin it
+    separately so a future split of the two paths cannot silently drop the
+    note from one of them."""
+    monkeypatch.setattr(
+        server_mod, "_build_pack_builder", _builder_clean_without_semantic
+    )
+    _configure_embedder(monkeypatch, temp_registry)
+
+    result = search(INTENT)
+    lines = result.split("\n")
+
+    assert _MISCONFIGURED_SEMANTIC_LINE in lines
+
+
+@pytest.mark.parametrize("semantic_raises", [False, True])
+def test_get_context_built_semantic_axis_is_never_misconfigured(
+    temp_registry: StoreRegistry, monkeypatch, semantic_raises: bool
+) -> None:
+    """With an embedder configured and the semantic strategy built, the
+    axis is "ran" or "failed", never "misconfigured": a semantic axis that
+    raised is named by the failed-axis line alone, and one that ran adds
+    no line at all."""
+    keyword = _make_axis_strategy("keyword", [_axis_item("d1")])
+    semantic = (
+        _make_failing_axis_strategy("semantic", _AXIS_FAILURE_SENTINEL)
+        if semantic_raises
+        else _make_axis_strategy("semantic", [_axis_item("d2")])
+    )
+    monkeypatch.setattr(
+        server_mod,
+        "_build_pack_builder",
+        lambda *_args, **_kwargs: PackBuilder(strategies=[keyword, semantic]),
+    )
+    _configure_embedder(monkeypatch, temp_registry)
+
+    result = get_context(INTENT)
+    lines = result.split("\n")
+
+    assert "Semantic retrieval misconfigured" not in result
+    assert _AXIS_FAILURE_SENTINEL not in result
+    if semantic_raises:
+        assert "**Retrieval axis failed:** semantic." in lines
+    else:
+        assert "Retrieval axis failed" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +409,26 @@ def test_sectioned_tools_report_failed_axis_in_exactly_one_line(
     assert "**Retrieval axis failed:** keyword." in lines
     assert result.count("Retrieval axis failed") == 1
     assert _AXIS_FAILURE_SENTINEL not in result
+    assert "Semantic retrieval misconfigured" not in result
+
+
+@pytest.mark.parametrize("tool_name", sorted(_SECTIONED_CALLS))
+def test_sectioned_tools_report_misconfigured_semantic_axis(
+    temp_registry: StoreRegistry, monkeypatch, tool_name: str
+) -> None:
+    """The misconfigured-semantic line reaches all four sectioned tools too,
+    one line, not combined with a failed-axis note that does not apply."""
+    monkeypatch.setattr(
+        server_mod, "_build_pack_builder", _builder_clean_without_semantic
+    )
+    _configure_embedder(monkeypatch, temp_registry)
+
+    result = _SECTIONED_CALLS[tool_name]()
+    lines = result.split("\n")
+
+    assert _MISCONFIGURED_SEMANTIC_LINE in lines
+    assert result.count("Semantic retrieval misconfigured") == 1
+    assert "Retrieval axis failed" not in result
 
 
 def test_get_sectioned_context_clean_pack_has_no_axis_note(
@@ -236,3 +450,4 @@ def test_get_sectioned_context_clean_pack_has_no_axis_note(
     assert lines[1].startswith("**pack_id:**")
     assert lines[2:4] == ["", "## docs"]
     assert "Retrieval axis failed" not in result
+    assert "Semantic retrieval misconfigured" not in result

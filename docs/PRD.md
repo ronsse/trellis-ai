@@ -37,7 +37,7 @@ Honesty note: verified deployments today = the author's dogfood + that paused pi
 ## 3. Current state (verified)
 
 - **v0.9.0** tagged (`git tag`), published on PyPI as `trellis-ai`; Python ≥3.11, MIT (`pyproject.toml`).
-- **Six shipped packages** — `trellis`, `trellis_cli`, `trellis_api`, `trellis_sdk`, `trellis_workers`, `trellis_wire` (`pyproject.toml [tool.hatch.build.targets.wheel]`); entry points `trellis` / `trellis-mcp` / `trellis-api`.
+- **Six shipped packages** — `trellis`, `trellis_cli`, `trellis_api`, `trellis_sdk`, `trellis_workers`, `trellis_wire` (`pyproject.toml [tool.hatch.build.targets.wheel]`); entry points `trellis` / `trellis-mcp` / `trellis-api` / `trellis-session-capture`.
 - **Six store ABCs, multi-backend**: graph = SQLite/Postgres/ArcadeDB/Neo4j, vector = SQLite/pgvector/ArcadeDB/Neo4j, blob = local/S3 (`src/trellis/stores/`, table in `CLAUDE.md`). Backends pass shared contract suites (`tests/unit/stores/contracts/` — 106 graph + 38 vector tests per backend, `grep -c 'def test_' tests/unit/stores/contracts/{graph,vector}_store_contract.py`, 2026-09-20).
 - **16 MCP tools** (`grep -c '@mcp.tool' src/trellis/mcp/server.py` → 16), markdown output, opt-in HTTP transport with scoped API keys (#252, `docs/design/adr-mcp-http-transport.md`).
 - **REST API with scoped auth** (`TRELLIS_AUTH_MODE`, PR #242) + Memory Explorer UI (`src/trellis_api/`); HTTP-only Python SDK (`src/trellis_sdk/`).

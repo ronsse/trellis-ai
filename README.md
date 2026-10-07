@@ -474,7 +474,7 @@ The Claude Code / Cursor / Claude Desktop rows are first-class — `trellis-mcp`
 
 ## Examples & skill templates
 
-- [**examples/**](https://github.com/ronsse/trellis-ai/tree/main/examples) — runnable scripts: SDK local + remote, retrieve→act→record loop, custom extractor, custom classifier, LangGraph agent, batch ingest.
+- [**examples/**](https://github.com/ronsse/trellis-ai/tree/main/examples) — runnable scripts: SDK in-memory + remote, retrieve→act→record loop, custom extractor, custom classifier, LangGraph agent, batch ingest.
 - [**skills/**](https://github.com/ronsse/trellis-ai/tree/main/skills) — drop-in Claude Code skills: `retrieve-before-task`, `record-after-task`, `link-evidence`. Install with `trellis admin install-skills user` (or `trellis admin quickstart --with-skills user`).
 - [**docs/getting-started/**](https://github.com/ronsse/trellis-ai/tree/main/docs/getting-started) — IDE-specific MCP setup walkthroughs.
 

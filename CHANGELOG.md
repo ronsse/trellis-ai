@@ -1572,6 +1572,28 @@ All notable changes to Trellis will be documented in this file.
   soft-wrapped by #807; the scan that found that one is red-only too. All
   three now pass `soft_wrap=True`.
   (follow-ups 1 and 2 from the [#807](https://github.com/ronsse/trellis-ai/pull/807) gate)
+- **`upsert_edge` on Neo4j locks both endpoints before resolving them.** It
+  resolved the source and target rows unlocked and then locked only the
+  source row, so an `upsert_node` re-versioning either endpoint at the same
+  moment could make it raise `ValueError: ... has no current version` for a
+  node that had one, or attach the edge to the source row that re-version
+  had just closed. It now locks the current rows of both endpoints, in
+  sorted `node_id` order so writers of `x->y` and `y->x` cannot deadlock,
+  and resolves them after. ArcadeDB, which takes no locks, and
+  `upsert_edges_bulk` behave as before. (follow-up 1 from
+  [#790](https://github.com/ronsse/trellis-ai/pull/790))
+- **`get_context`, `search`, `get_context(sections=...)`, `get_objective_context`,
+  `get_task_context` and `get_sectioned_context` now report a misconfigured
+  semantic axis.** These MCP tools already added a `**Retrieval axis failed:**`
+  line for an axis named in `axes.failed`, but a `misconfigured` semantic axis
+  (an embedder resolved and the vector backend never initialised) never lands
+  in that list — it's absent from `axes.available` entirely — so an agent on
+  MCP got a silent keyword-and-graph-only pack while REST's `axes.semantic`
+  and the CLI's text sentence both reported the gap. The same tools now add a
+  second, independent `**Semantic retrieval misconfigured:**` line for that
+  state, reusing the one `describe_axes` report both lines are built from; a
+  clean pack, or one with only a failed axis, is unchanged.
+  (follow-up F2 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
 
 ## [0.9.0] - 2026-05-13
 

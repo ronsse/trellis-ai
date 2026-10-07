@@ -180,6 +180,73 @@ def test_edge_write_racing_node_upsert_keeps_one_current_node(graph_store):
     )
 
 
+def _wait_for_blocked_write(store, needle: str) -> bool:
+    """Poll until a statement containing ``needle`` is blocked on a lock (20 s cap)."""
+    cypher = (
+        "SHOW TRANSACTIONS YIELD currentQuery, status "
+        f"WHERE status STARTS WITH 'Blocked' AND currentQuery CONTAINS '{needle}' "
+        "RETURN count(*) AS n"
+    )
+    deadline = time.monotonic() + 20
+    with store._driver.session(database=store._database) as session:
+        while time.monotonic() < deadline:
+            if session.run(cypher).single()["n"]:
+                return True
+            time.sleep(0.005)
+    return False
+
+
+@pytest.mark.parametrize("endpoint", ["source", "target"])
+def test_upsert_edge_binds_the_row_a_concurrent_reversion_left_current(
+    graph_store, monkeypatch, endpoint
+):
+    # upsert_node re-versions an endpoint and holds its transaction open
+    # while upsert_edge starts. upsert_edge must wait on that endpoint's
+    # lock, then attach the edge to the row the re-version left current:
+    # attached to the closed row, the edge is unreachable from its source
+    # in get_subgraph.
+    import neo4j
+
+    store = graph_store
+    store.upsert_node("a", "service", {})
+    store.upsert_node("b", "service", {})
+    raced_id = "a" if endpoint == "source" else "b"
+    second = _second_neo4j_store()
+    holder = threading.get_ident()
+    original = neo4j.Session.execute_write
+    state: dict[str, Any] = {}
+
+    def edge_writer() -> None:
+        state["edge_id"] = second.upsert_edge("a", "b", "depends_on", {})
+
+    def gated(session: Any, transaction_function: Any, *args: Any, **kwargs: Any):
+        if threading.get_ident() != holder:
+            return original(session, transaction_function, *args, **kwargs)
+
+        def held(tx: Any, *a: Any, **k: Any) -> Any:
+            result = transaction_function(tx, *a, **k)
+            state["writer"] = threading.Thread(target=edge_writer)
+            state["writer"].start()
+            state["blocked"] = _wait_for_blocked_write(store, "$candidate_edge_id")
+            return result
+
+        return original(session, held, *args, **kwargs)
+
+    try:
+        monkeypatch.setattr(neo4j.Session, "execute_write", gated)
+        store.upsert_node(raced_id, "service", {"reversioned": True})
+        state["writer"].join(timeout=20)
+
+        assert state["blocked"], (
+            f"upsert_edge never waited on the {endpoint} endpoint's re-version"
+        )
+        assert not state["writer"].is_alive()
+        edges = store.get_subgraph(["a"], depth=1)["edges"]
+        assert [e["edge_id"] for e in edges] == [state["edge_id"]]
+    finally:
+        second.close()
+
+
 def test_get_edges_incoming(graph_store):
     graph_store.upsert_node("a", "s", {})
     graph_store.upsert_node("b", "s", {})
@@ -453,18 +520,7 @@ def _wait_for_blocked_purge(store) -> bool:
     ``delete_node``'s statements, and no other statement the store runs,
     bind ``$nid``.
     """
-    cypher = (
-        "SHOW TRANSACTIONS YIELD currentQuery, status "
-        "WHERE status STARTS WITH 'Blocked' AND currentQuery CONTAINS '$nid' "
-        "RETURN count(*) AS n"
-    )
-    deadline = time.monotonic() + 20
-    with store._driver.session(database=store._database) as session:
-        while time.monotonic() < deadline:
-            if session.run(cypher).single()["n"]:
-                return True
-            time.sleep(0.005)
-    return False
+    return _wait_for_blocked_write(store, "$nid")
 
 
 def _rows_left(store, node_id: str) -> dict[str, int]:

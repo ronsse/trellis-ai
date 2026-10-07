@@ -21,11 +21,10 @@ from trellis_sdk import TrellisClient
 
 def main() -> None:
     client = TrellisClient(base_url="http://localhost:8420")
-    assert client.is_remote, "Client should be in remote mode"
 
     trace_id = client.ingest_trace(
         {
-            "source": "examples.sdk_remote_demo",
+            "source": "agent",
             "intent": "Investigate slow checkout endpoint",
             "steps": [
                 {
