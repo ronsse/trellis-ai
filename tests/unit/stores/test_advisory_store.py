@@ -1280,11 +1280,12 @@ class TestTheRecoveryCommandRuns:
         """A bracket is quoted on its own, not because a space came with it.
 
         ``[`` opens a glob, so an unquoted ``d[staging]/…`` can expand to
-        another path. The case above pairs its bracket with a space, so a
-        ``recovery`` that quoted only on a space would pass it; this one
-        fails that rewrite. The path is relative, after ``chdir``, because
-        under a ``--basetemp`` holding a space an absolute ``tmp_path``
-        would be quoted for the space and the bracket would go untested.
+        another path. The refused-write case above pairs its bracket with a
+        space, so a ``recovery`` that quoted only on a space would pass it;
+        this one catches that rewrite. The path is relative, after
+        ``chdir``, because under a ``--basetemp`` holding a space an absolute
+        ``tmp_path`` would be quoted for the space and the bracket would go
+        untested.
         """
         monkeypatch.chdir(tmp_path)
         data_dir = Path("d[staging]")
@@ -1305,8 +1306,8 @@ class TestTheRecoveryCommandRuns:
         on the common case would be a regression in the thing this string
         exists for. A literal on a relative path, after ``chdir``: under a
         ``--basetemp`` holding a space, an absolute ``tmp_path`` needs
-        quoting, so comparing it with ``expected_recovery`` would quote both
-        sides and check nothing.
+        quoting, so a comparison with ``expected_recovery`` would quote both
+        sides and pass without testing the unquoted case.
         """
         monkeypatch.chdir(tmp_path)
         path = Path("advisories.json")
