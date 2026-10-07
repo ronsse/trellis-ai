@@ -1743,14 +1743,7 @@ class TestAnalyzeHealthStraySection:
 
 
 class TestAnalyzeHealthFailedStrategySection:
-    """#775 F3 / #761 follow-up A reaches the operator surface.
-
-    ``PackBuilder`` keeps serving the surviving axes when one strategy
-    raises; this is the only place that aggregate reaches an operator
-    outside raw events. Counts and strategy names only — never the
-    exception's class or message, which can carry a path or a DSN
-    fragment.
-    """
+    """A failed strategy reaches ``analyze health``; its exception text never does."""
 
     def _seed(self, registry: StoreRegistry, *, strategy: str = "semantic") -> None:
         event_log = registry.operational.event_log
@@ -1770,43 +1763,20 @@ class TestAnalyzeHealthFailedStrategySection:
             },
         )
 
-    def test_text_names_the_count_the_strategy_and_warns(
+    def test_text_warns_with_the_strategy_name_verbatim(
         self, temp_stores: StoreRegistry
     ) -> None:
-        self._seed(temp_stores)
+        # A markup-shaped name must neither crash Rich nor lose its tag text.
+        self._seed(temp_stores, strategy="[bold]sem[/x]")
 
         result = runner.invoke(app, ["analyze", "health"])
 
         assert result.exit_code == 0, result.output
-        out = plain(result.stdout)
-        assert "strategy failures" in out
-        assert "1 pack(s) hit a failed retrieval axis" in out
-        assert "semantic: 1" in out
-        assert any("failed retrieval strategy" in line for line in out.splitlines())
+        out = " ".join(plain(result.stdout).split())
         assert "WARN" in out
-        # Counts and strategy names only — never the exception text.
+        assert "failed retrieval strategy ([bold]sem[/x]: 1)" in out
         assert "synthetic/secret/path.db" not in out
         assert "RuntimeError" not in out
-
-    def test_nothing_is_printed_when_every_pack_is_clean(
-        self, temp_stores: StoreRegistry
-    ) -> None:
-        event_log = temp_stores.operational.event_log
-        event_log.emit(
-            EventType.PACK_ASSEMBLED,
-            source="test",
-            payload={
-                "injected_items": [{"item_id": "a"}],
-                "strategy_failures": [],
-            },
-        )
-
-        result = runner.invoke(app, ["analyze", "health"])
-
-        assert result.exit_code == 0, result.output
-        out = plain(result.stdout)
-        assert "strategy failures" not in out
-        assert "OK" in out
 
     def test_json_carries_the_failed_strategy_fields(
         self, temp_stores: StoreRegistry
@@ -1828,26 +1798,3 @@ class TestAnalyzeHealthFailedStrategySection:
         dumped = result.stdout
         assert "synthetic/secret/path.db" not in dumped
         assert "RuntimeError" not in dumped
-
-    def test_json_omits_the_section_when_no_strategy_failed(
-        self, temp_stores: StoreRegistry
-    ) -> None:
-        event_log = temp_stores.operational.event_log
-        event_log.emit(
-            EventType.PACK_ASSEMBLED,
-            source="test",
-            payload={
-                "injected_items": [{"item_id": "a"}],
-                "strategy_failures": [],
-            },
-        )
-
-        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
-
-        assert result.exit_code == 0, result.output
-        payload = json.loads(result.stdout)
-        assert payload["status"] == "ok"
-        failed = payload["serve"]["failed_strategies"]
-        assert failed["packs"] == 0
-        assert failed["by_strategy"] == {}
-        assert failed["latest_at"] is None

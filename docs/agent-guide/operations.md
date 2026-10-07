@@ -1531,7 +1531,7 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
 
 #### `PACK_ASSEMBLED` event payload
 
-Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBLED` event with `entity_id` = `pack_id`. It is the read side of three loops — `trellis analyze pack-telemetry` reads the rejection/budget/strategy keys, the learning join in `learning/pack_observations.py` joins it to `FEEDBACK_RECORDED` on `pack_id`, and `trellis analyze health` reads `strategy_failures[]` for its failed-strategy count, per-strategy breakdown and latest-occurrence timestamp (#775 F3 / #761 follow-up A).
+Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBLED` event with `entity_id` = `pack_id`. It is the read side of three loops — `trellis analyze pack-telemetry` reads the rejection/budget/strategy keys, the learning join in `learning/pack_observations.py` joins it to `FEEDBACK_RECORDED` on `pack_id`, and `trellis analyze health` reads `strategy_failures[]` for its failed-strategy count, per-strategy breakdown and latest-occurrence timestamp.
 
 **Two payload shapes, told apart by `entity_type`.** `build()` emits `"pack"`; `build_sectioned()` — behind `get_objective_context` / `get_task_context` / `get_sectioned_context` — emits `"sectioned_pack"` with a *different* key set (below). Branch on `entity_type`, or read with `.get()`. `_emit_telemetry` / `_emit_sectioned_telemetry` in `retrieve/pack_builder.py` are the exhaustive key lists; the table covers the flat payload's non-obvious semantics.
 

@@ -616,20 +616,12 @@ class WriteHealthReport(TrellisModel):
 
 
 class FailedStrategyReport(TrellisModel):
-    """Packs in this window whose build survived a retrieval strategy failure.
+    """Packs in the window whose build continued after a strategy raised.
 
-    ``PackBuilder`` keeps serving the surviving axes when one
-    ``SearchStrategy`` raises, and records the failure only in the
-    ``PACK_ASSEMBLED`` event's ``strategy_failures`` payload field plus one
-    ERROR log line (#775 F3 / #761 follow-up A) — an axis that fails on
-    every pack for a week was otherwise invisible to an operator. This
-    tally rides the same ``PACK_ASSEMBLED`` scan :func:`summarize_serve_attribution`
-    already reads, over every scanned pack including a withheld one: a
-    holdout pack still ran its strategies, so excluding it would undercount
-    a real axis defect by the holdout rate for no reason connected to
-    retrieval health. Counts and strategy names only — never the
-    exception's class or message, which can carry a path or a DSN
-    fragment.
+    Tallied from ``PACK_ASSEMBLED.strategy_failures`` over every scanned
+    pack, a withheld one included, since it still ran its strategies.
+    Counts and strategy names only, never the exception's class or message,
+    which can carry a path or a DSN fragment.
     """
 
     #: Packs in the window whose build continued after at least one
@@ -694,10 +686,6 @@ class ServeAttributionReport(TrellisModel):
     keeps meaning exactly what it has always meant, because a metric that
     starts measuring something new under the same name is the failure
     this report already exists to expose once.
-
-    ``failed_strategies`` (#775 F3 / #761 follow-up A) rides the same
-    ``PACK_ASSEMBLED`` scan this report already performs rather than
-    opening a second query — see :class:`FailedStrategyReport`.
     """
 
     packs: int = 0
@@ -758,10 +746,7 @@ class ServeAttributionReport(TrellisModel):
     #: Coverage of the PACK_ASSEMBLED / FEEDBACK_RECORDED reads (#374).
     scan: ScanCoverage = Field(default_factory=ScanCoverage)
 
-    # -- Failed retrieval strategies (#775 F3 / #761 follow-up A) ------
-    #: Packs in this window whose build continued after one retrieval
-    #: strategy raised. See :class:`FailedStrategyReport` for shape and
-    #: scope.
+    #: See :class:`FailedStrategyReport`.
     failed_strategies: FailedStrategyReport = Field(
         default_factory=FailedStrategyReport
     )
@@ -933,21 +918,19 @@ def summarize_serve_attribution(
         event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
     )
     # Every scanned pack, not the holdout-filtered population below: a
-    # withheld pack still ran its retrieval strategies, so excluding it
-    # here would undercount a real axis defect by the holdout rate for no
-    # reason connected to retrieval health. Counts and strategy names
-    # only — never error_class or message, which can carry a path or a
-    # DSN fragment (#775 F3 / #761 follow-up A).
+    # withheld pack still ran its strategies. A malformed entry is skipped
+    # or counted as "unknown", because one bad event must not fail health.
     failed_packs = 0
     failures_by_strategy: dict[str, int] = {}
     latest_failure_at: datetime | None = None
     for event in pack_scan.events:
-        failures = event.payload.get("strategy_failures") or []
-        if not failures:
+        failures = event.payload.get("strategy_failures")
+        if not isinstance(failures, list) or not failures:
             continue
         failed_packs += 1
         for failure in failures:
-            strategy = str(failure.get("strategy") or "unknown")
+            name = failure.get("strategy") if isinstance(failure, dict) else None
+            strategy = str(name or "unknown")
             failures_by_strategy[strategy] = failures_by_strategy.get(strategy, 0) + 1
         if latest_failure_at is None or event.occurred_at > latest_failure_at:
             latest_failure_at = event.occurred_at
@@ -1061,10 +1044,6 @@ def summarize_backend_health(
             f"{_ATTRIBUTION_COVERAGE_WARN:.0%} coverage"
         )
     if serve.failed_strategies.packs > 0:
-        # Counts and strategy names only, never error_class or message —
-        # those can carry a path or a DSN fragment (#775 F3 / #761
-        # follow-up A). The surviving axis still served a pack, so this is
-        # the only place this defect surfaces outside raw events.
         by_strategy = ", ".join(
             f"{name}: {count}"
             for name, count in sorted(
@@ -1076,8 +1055,7 @@ def summarize_backend_health(
         latest_str = f"{latest:%Y-%m-%d %H:%M} UTC" if latest else "unknown"
         reasons.append(
             f"{serve.failed_strategies.packs} pack(s) in window hit a failed "
-            f"retrieval strategy ({by_strategy}), latest {latest_str} — the "
-            "surviving axis still served, so nothing else surfaces this"
+            f"retrieval strategy ({by_strategy}), latest {latest_str}"
         )
     if serve.feedback_events > 0 and serve.feedback_attributed == 0:
         # Same trigger condition as before — ``status`` is read by the
