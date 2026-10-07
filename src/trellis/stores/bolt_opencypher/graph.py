@@ -51,20 +51,16 @@ by ``CREATE`` lets two concurrent writers on the same
 ``(source_id, target_id, edge_type)`` both observe "no current edge" and
 both create one, leaving two current rows for one logical edge (there is
 no uniqueness constraint to fall back on, because historical rows share
-the same key). ``upsert_edge`` write-locks both endpoints' current-candidate
-rows, by ``node_id`` in a fixed lexicographic order, before resolving
-either one, with the scratch-property write ``update_node_if_current``
-uses: a concurrent ``upsert_node`` re-versioning either endpoint
-serializes against this lock instead of racing it, and the endpoint
-``MATCH`` that follows always sees the post-lock state — closing the
-window where an endpoint mid-re-version briefly has no current row at
-all, and the window where two writers bound to an endpoint's old and
-re-versioned rows could each act on the same prior edge unlocked against
-each other. The fixed lock order means two writers racing ``x->y`` and
-``y->x`` on the same pair of nodes always lock the same node first, so
-they cannot deadlock on each other. On ArcadeDB the engine's
-optimistic-concurrency retry already serializes the remaining
-existing-edge race. Only single-row writers take the lock:
+the same key). ``upsert_edge`` therefore first writes ``_cas_lock`` to
+the current rows of both endpoints, in sorted ``node_id`` order, and only
+then resolves the endpoints and reads the existing edge. On Neo4j that
+write takes each row's lock, so an ``upsert_node`` on either endpoint
+that is already in flight commits before the endpoints are resolved, and
+the edge lands on the row it left current; a second writer of the same
+edge likewise waits for the first and reads its row as ``old``. The
+sorted order keeps writers of ``x->y`` and ``y->x`` from deadlocking.
+ArcadeDB takes no lock: a conflicting writer fails at commit and the
+driver retries it. Only single-row writers take the lock:
 ``upsert_edges_bulk`` does not (it would need a sorted per-row lock order
 across every row it writes, like Postgres's bulk edge path), so a bulk
 write racing another writer of the same edge can still leave two current
@@ -1423,28 +1419,16 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "evidence_ref": evidence_ref,
             "extractor_tier": extractor_tier,
         }
-        # Lock both endpoints by node_id, in a fixed lexicographic order,
-        # before resolving either one -- the ``update_node_if_current``
-        # idiom (module docstring), extended to both sides of an edge.
-        # Sorting the pair means two writers racing the same two node_ids
-        # with source/target reversed (x->y and y->x) still lock in the
-        # same relative order, so they cannot deadlock on each other.
+        # Sorted, so writers of x->y and y->x take the locks in one order.
         lo_id, hi_id = sorted((source_id, target_id))
 
         cypher = f"""
-        // Lock every current-candidate row of each endpoint by node_id,
-        // lowest id first, before any resolution happens. A concurrent
-        // upsert_node re-versioning either endpoint writes `valid_to` on
-        // the same row this lock writes `_cas_lock` to, so it serializes
-        // against this transaction instead of racing it: whichever gets
-        // there first finishes (commit) before the other proceeds. The
-        // MATCH/resolve pair below runs only after both locks are held,
-        // so it always sees the post-lock-acquisition state -- the
-        // lock-then-recheck idiom, with the recheck folded into a fresh
-        // MATCH instead of re-filtering a captured row. A pure-aggregate
-        // `WITH count(...)` (no co-projected field) always yields exactly
-        // one row, so a missing endpoint (0 matches) does not collapse
-        // this prelude to zero rows and skip the rest of the statement.
+        // Lock both endpoints' current rows, lowest node_id first, before
+        // resolving either: a concurrent upsert_node writes `valid_to` on
+        // the row this writes `_cas_lock` to, so the endpoint MATCHes
+        // below see the state after it commits. `WITH count(...)` yields
+        // one row even when nothing matched, so a missing endpoint still
+        // reaches `WHERE s IS NOT NULL`.
         MATCH (lo_cand:Node {{node_id: $lo_id}}) WHERE lo_cand.valid_to IS NULL
         SET lo_cand._cas_lock = true
         REMOVE lo_cand._cas_lock

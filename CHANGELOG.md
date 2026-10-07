@@ -1544,23 +1544,15 @@ All notable changes to Trellis will be documented in this file.
   non-callable attribute) and that any other import-time exception
   propagates unchanged.
   ([#794](https://github.com/ronsse/trellis-ai/pull/794) follow-ups F1-F3)
-- **`BoltOpenCypherGraphStore.upsert_edge` (Neo4j and ArcadeDB) locks both
-  endpoints by `node_id`, in a fixed order, before resolving them.** The
-  single-row path matched `s`/`t` with a plain `MATCH ... WHERE valid_to IS
-  NULL`, unlocked, then took a `_cas_lock` on the shown **source** row
-  only, after both endpoints had already been resolved — leaving the
-  target unprotected outright. A concurrent `upsert_node` re-versioning
-  either endpoint in that window could close the row `upsert_edge` had
-  already read, raising `ValueError: Cannot upsert edge: ... has no
-  current version` for a node that genuinely has a current version.
-  `upsert_edge` now locks every current-candidate row of both endpoints
-  first, via `lo_id, hi_id = sorted((source_id, target_id))` so two writers
-  racing reversed source/target roles on the same pair cannot deadlock each
-  other, then resolves `s` and `t` the same lock-then-recheck way
-  `update_node_if_current` already handles a single node. The existing
-  any-row edge lookup and close-all-matches behavior are unchanged, as is
-  `upsert_edges_bulk`.
-  (follow-up 1 from [#790](https://github.com/ronsse/trellis-ai/pull/790); no tracking issue)
+- **`upsert_edge` on Neo4j and ArcadeDB locks both endpoints before resolving
+  them.** It resolved the source and target rows unlocked and then locked
+  only the source row, so an `upsert_node` re-versioning either endpoint at
+  the same moment could make it raise `ValueError: ... has no current
+  version` for a node that had one, or attach the edge to the source row
+  that re-version had just closed. It now locks the current rows of both
+  endpoints, in sorted `node_id` order so writers of `x->y` and `y->x`
+  cannot deadlock, and resolves them after. `upsert_edges_bulk` is
+  unchanged. (follow-up 1 from [#790](https://github.com/ronsse/trellis-ai/pull/790))
 
 ## [0.9.0] - 2026-05-13
 
