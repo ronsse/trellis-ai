@@ -109,8 +109,8 @@ def pack(
       chunk rows on purpose, the excerpt is what the budget prices, and
       the flag would now suppress candidates the agent-facing path keeps.
     * ``--format json`` returns the pack, not a list of ids — same shape
-      as ``POST /api/v1/packs`` plus the axis report, so an operator's
-      preview and an agent's pack are directly comparable.
+      as ``POST /api/v1/packs``, so an operator's preview and an agent's
+      pack are directly comparable.
     """
     registry = _get_registry()
     builder = build_pack_builder(registry, surface="cli.retrieve")

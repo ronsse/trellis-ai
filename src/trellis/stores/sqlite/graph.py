@@ -924,25 +924,31 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             extractor_tier=extractor_tier,
         )
 
-        # Check if a current edge already exists by (source, target, type)
-        cursor = self._conn.execute(
-            """
-            SELECT edge_id FROM edges
-            WHERE source_id = ? AND target_id = ? AND edge_type = ?
-              AND valid_to IS NULL
-            """,
-            (source_id, target_id, edge_type),
-        )
-        row = cursor.fetchone()
-
         now = utc_now()
         now_iso = now.isoformat()
         properties_json = json.dumps(properties or {})
 
         conn = self._conn
-        # Commits on success and rolls back on an exception. With commit=False
-        # the caller's transaction() does both, so the write only joins it.
+        # Take the write lock before reading the current row, so a second
+        # writer of the same edge waits for this one's commit and then reads
+        # its row (idx_edges_upsert is not unique). A transaction already open
+        # on this connection is joined, not nested. Commits on success and
+        # rolls back on an exception; with commit=False the caller's
+        # transaction() does both.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         with conn if commit else nullcontext():
+            # Check if a current edge already exists by (source, target, type)
+            cursor = conn.execute(
+                """
+                SELECT edge_id FROM edges
+                WHERE source_id = ? AND target_id = ? AND edge_type = ?
+                  AND valid_to IS NULL
+                """,
+                (source_id, target_id, edge_type),
+            )
+            row = cursor.fetchone()
+
             if row:
                 edge_id: str = row["edge_id"]
                 # Close current version
@@ -1060,59 +1066,63 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         }
         sources = {spec["source_id"] for spec in edges}
         placeholders = ",".join("?" for _ in sources)
-        cursor = self._conn.execute(
-            f"""
-            SELECT edge_id, source_id, target_id, edge_type, created_at
-            FROM edges
-            WHERE source_id IN ({placeholders}) AND valid_to IS NULL
-            """,
-            list(sources),
-        )
-        existing_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
-        for row in cursor.fetchall():
-            key = (row["source_id"], row["target_id"], row["edge_type"])
-            if key in triplets:
-                existing_edges[key] = dict(row)
-
         now_iso = utc_now().isoformat()
-        edge_ids: list[str] = []
-        insert_rows: list[tuple[Any, ...]] = []
-        for i, spec in enumerate(edges):
-            key = (spec["source_id"], spec["target_id"], spec["edge_type"])
-            prior = existing_edges.get(key)
-            if prior is not None:
-                edge_id = str(prior["edge_id"])
-                created_at = prior["created_at"]
-            else:
-                edge_id = generate_ulid()
-                created_at = now_iso
-            edge_ids.append(edge_id)
-            prov = extract_edge_provenance(spec)
-            try:
-                validate_edge_provenance(**prov)
-            except (ValueError, TypeError) as exc:
-                msg = f"upsert_edges_bulk[{i}]: {exc}"
-                raise type(exc)(msg) from exc
-            insert_rows.append(
-                (
-                    generate_ulid(),
-                    edge_id,
-                    spec["source_id"],
-                    spec["target_id"],
-                    spec["edge_type"],
-                    json.dumps(spec.get("properties") or {}),
-                    created_at,
-                    now_iso,
-                    prov["source_trace_id"],
-                    prov["agent_id"],
-                    prov["confidence"],
-                    prov["evidence_ref"],
-                    prov["extractor_tier"],
-                )
-            )
 
         conn = self._conn
+        # Lock before the read, as upsert_edge does.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         with conn:  # one transaction: a failed row rolls back the whole batch
+            cursor = conn.execute(
+                f"""
+                SELECT edge_id, source_id, target_id, edge_type, created_at
+                FROM edges
+                WHERE source_id IN ({placeholders}) AND valid_to IS NULL
+                """,
+                list(sources),
+            )
+            existing_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
+            for row in cursor.fetchall():
+                key = (row["source_id"], row["target_id"], row["edge_type"])
+                if key in triplets:
+                    existing_edges[key] = dict(row)
+
+            edge_ids: list[str] = []
+            insert_rows: list[tuple[Any, ...]] = []
+            for i, spec in enumerate(edges):
+                key = (spec["source_id"], spec["target_id"], spec["edge_type"])
+                prior = existing_edges.get(key)
+                if prior is not None:
+                    edge_id = str(prior["edge_id"])
+                    created_at = prior["created_at"]
+                else:
+                    edge_id = generate_ulid()
+                    created_at = now_iso
+                edge_ids.append(edge_id)
+                prov = extract_edge_provenance(spec)
+                try:
+                    validate_edge_provenance(**prov)
+                except (ValueError, TypeError) as exc:
+                    msg = f"upsert_edges_bulk[{i}]: {exc}"
+                    raise type(exc)(msg) from exc
+                insert_rows.append(
+                    (
+                        generate_ulid(),
+                        edge_id,
+                        spec["source_id"],
+                        spec["target_id"],
+                        spec["edge_type"],
+                        json.dumps(spec.get("properties") or {}),
+                        created_at,
+                        now_iso,
+                        prov["source_trace_id"],
+                        prov["agent_id"],
+                        prov["confidence"],
+                        prov["evidence_ref"],
+                        prov["extractor_tier"],
+                    )
+                )
+
             # Close any prior current edges in one shot. ``IN`` against
             # the indexed ``edge_id`` column for the subset we found.
             if existing_edges:
