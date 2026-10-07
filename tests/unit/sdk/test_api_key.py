@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 import httpx
 import pytest
 
-from trellis.testing import in_memory_client
+from trellis.testing import in_memory_async_client
 from trellis_sdk._http import API_KEY_HEADER
 from trellis_sdk.async_client import AsyncTrellisClient
 from trellis_sdk.client import TrellisClient
@@ -165,7 +165,10 @@ class TestEndToEndAuthRequired:
     ``trellis.testing.inmemory._build_app`` wires no router-level auth, so
     ``record_observation``, whose route declares ``require_scope`` inline,
     is the SDK call this fixture can use to prove the server accepts the
-    header the client sends.
+    header the client sends. The async fixture is used because its
+    transport is plain ``httpx.ASGITransport``; the sync fixture's
+    Starlette transport may be built on another httpx package, so it
+    cannot be lent to a client the SDK built.
     """
 
     _PAYLOAD: ClassVar[dict[str, Any]] = {
@@ -175,26 +178,26 @@ class TestEndToEndAuthRequired:
         "content": "synthetic observation for the api-key auth test",
     }
 
-    def test_api_key_authenticates_and_env_secret_is_not_sent(
+    async def test_api_key_authenticates_and_env_secret_is_not_sent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
         monkeypatch.setenv(_SERVER_KEY_VAR, _SYNTHETIC_KEY)
-        with in_memory_client(tmp_path / "stores") as app_client:
+        async with in_memory_async_client(tmp_path / "stores") as app_client:
             app_transport = app_client._http._transport
 
-            anonymous = TrellisClient(
+            anonymous = AsyncTrellisClient(
                 base_url="http://testserver", verify_version=False
             )
             anonymous._http._transport = app_transport
             with pytest.raises(TrellisClientError) as excinfo:
-                anonymous.record_observation(dict(self._PAYLOAD))
+                await anonymous.record_observation(dict(self._PAYLOAD))
             assert excinfo.value.status_code == 401
 
-            keyed = TrellisClient(
+            keyed = AsyncTrellisClient(
                 base_url="http://testserver",
                 api_key=_SYNTHETIC_KEY,
                 verify_version=False,
             )
             keyed._http._transport = app_transport
-            assert keyed.record_observation(dict(self._PAYLOAD))
+            assert await keyed.record_observation(dict(self._PAYLOAD))
