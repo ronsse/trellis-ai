@@ -188,7 +188,7 @@ def test_every_cli_failure_line_passes_soft_wrap() -> None:
 #: ``HAND_READ_FAILURE_LINE_COUNT`` above, so a roster entry quietly
 #: dropped (or renamed past what it matches) shrinks the *measured*
 #: population below this floor instead of moving the floor with it.
-HAND_READ_CROSS_FUNCTION_COUNT = 10
+HAND_READ_CROSS_FUNCTION_COUNT = 14
 
 #: (file, function, message fragment) for each cross-function failure line:
 #: a helper prints it in red or yellow, and a caller in the same file
@@ -196,18 +196,24 @@ HAND_READ_CROSS_FUNCTION_COUNT = 10
 #: same way a red one does: ``_named_function_print_calls`` collects every
 #: ``*console.print`` in the named function regardless of colour, and the
 #: fragment is what narrows it to one. The fragment tells apart entries
-#: that share a function: admin.py's ``_render_smoke_text`` (two reds) and
-#: ingest_corpus.py's ``_render_report`` (its ``prune``/``withheld`` pair).
+#: that share a function: admin.py's ``_render_smoke_text`` (two reds),
+#: ingest_conversations.py's ``_render_report`` (its ``warning``/
+#: ``withheld`` pair), and ingest_corpus.py's ``_render_report`` (its
+#: ``prune``/``warning``/``withheld`` trio).
 CROSS_FUNCTION_FAILURE_LINES = (
     ("admin.py", "_print_skills_summary", "failed"),
     ("admin.py", "_print_check_extractors_report", "not configurable from"),
     ("admin.py", "_render_smoke_text", "check['error']"),
     ("admin.py", "_render_smoke_text", "info['error']"),
     ("admin_api_keys.py", "_store_error", "store error"),
+    ("ingest_conversations.py", "_render_report", "warning['kind']"),
     ("ingest_conversations.py", "_render_report", "withheld_name"),
     ("ingest_corpus.py", "_render_report", "pruned_name"),
+    ("ingest_corpus.py", "_render_report", "warning['kind']"),
     ("ingest_corpus.py", "_render_report", "withheld_name"),
     ("policy.py", "_render_degradation", "POLICY STORE DEGRADED"),
+    ("retrieve.py", "entity", "Entity not found"),
+    ("retrieve.py", "trace", "Trace not found"),
     ("worker.py", "_render_embed_traces_text", "trace_id"),
 )
 
