@@ -92,6 +92,77 @@ class TestCuratePromote:
         rendered = " ".join(assert_coloured(result.stdout).split())
         assert "Message: Precedent promoted: [bold]t[/x]" in rendered
 
+    def test_message_long_text_prints_as_one_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_execute_command``'s ``Message:`` line (``markup=False``) echoes
+        ``result.message`` verbatim before raising on a refusal, in the
+        same function as that raise; a long one must not split at the
+        console width."""
+        monkeypatch.setenv("COLUMNS", "60")
+        long_message = "synthetic-rejection-message-" + "0123456789abcdef" * 4
+        executor = MagicMock(spec=MutationExecutor)
+        executor.execute.return_value = CommandResult(
+            command_id="cmd-msg-1",
+            status=CommandStatus.FAILED,
+            operation=Operation.PRECEDENT_PROMOTE,
+            message=long_message,
+        )
+        monkeypatch.setattr(
+            curate_cli, "build_curate_executor", lambda *_a, **_k: executor
+        )
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "promote",
+                "trace_123",
+                "--title",
+                "t",
+                "--description",
+                "d",
+            ],
+        )
+        assert result.exit_code != 0, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(long_message in line for line in lines), result.stdout
+
+    def test_warning_long_detail_prints_as_one_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_print_warnings`` prints a policy id and condition, or an audit
+        error, of any length; its callers (here ``_execute_command``) exit
+        non-zero after it on a refusal, and it must not split one at the
+        console width."""
+        monkeypatch.setenv("COLUMNS", "60")
+        long_detail = "synthetic-policy-detail-" + "0123456789abcdef" * 4
+        executor = MagicMock(spec=MutationExecutor)
+        executor.execute.return_value = CommandResult(
+            command_id="cmd-warn-1",
+            status=CommandStatus.REJECTED,
+            operation=Operation.PRECEDENT_PROMOTE,
+            message="rejected",
+            warnings=[long_detail],
+        )
+        monkeypatch.setattr(
+            curate_cli, "build_curate_executor", lambda *_a, **_k: executor
+        )
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "promote",
+                "trace_123",
+                "--title",
+                "t",
+                "--description",
+                "d",
+            ],
+        )
+        assert result.exit_code != 0, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(long_detail in line for line in lines), result.stdout
+
 
 class TestCurateEntity:
     def test_text_echoes_type_name_and_properties_verbatim(

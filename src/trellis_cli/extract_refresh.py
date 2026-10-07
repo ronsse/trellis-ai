@@ -274,7 +274,8 @@ def _print_results(
     if first is not None:
         console.print(
             f"  [yellow]{counts['failed'] + counts['rejected']} failed or "
-            f"rejected; first: {escape(first.message)}[/yellow]"
+            f"rejected; first: {escape(first.message)}[/yellow]",
+            soft_wrap=True,
         )
 
 
@@ -566,7 +567,8 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
                 for key, (b, a) in (diff.get("changed") or {}).items():
                     console.print(
                         f"      [yellow]~[/yellow] {escape(key)}: "
-                        f"{escape(repr(b))} -> {escape(repr(a))}"
+                        f"{escape(repr(b))} -> {escape(repr(a))}",
+                        soft_wrap=True,
                     )
     if refusal is not None:
         raise typer.Exit(code=refusal_exit_code(refusal))

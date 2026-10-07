@@ -1569,6 +1569,14 @@ All notable changes to Trellis will be documented in this file.
   non-string is named by its type, never echoed, since a mapping can hold a
   credential.
   (follow-ups B and C from the [#800](https://github.com/ronsse/trellis-ai/pull/800) gate)
+- **`trellis curate`'s `Warning:` and `Message:` lines, and `extract
+  refresh`'s `first:` failure line, keep a long value on one line.** Each
+  can carry a policy condition, audit error or command message before a
+  refused write exits non-zero, and none is a red line in the function that
+  exits, so the red-only soft-wrap scan could not see them. All three now
+  pass `soft_wrap=True` and are listed by hand beside that scan. `extract
+  refresh`'s `~ key: before -> after` diff line passes it too.
+  (follow-ups 1 and 2 from the [#807](https://github.com/ronsse/trellis-ai/pull/807) gate)
 - **`upsert_edge` on Neo4j locks both endpoints before resolving them.** It
   resolved the source and target rows unlocked and then locked only the
   source row, so an `upsert_node` re-versioning either endpoint at the same
