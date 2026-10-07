@@ -1,5 +1,5 @@
 """A failed retrieval axis has to reach the surface ``get_context`` renders
-markdown for (#775 gate, finding F2).
+markdown for (#775 gate, finding F2; #783 gate, finding F1).
 
 ``POST /api/v1/packs`` reports a failed axis in its JSON ``axes`` block
 (#775). ``get_context``'s default (flat) path renders markdown sized for an
@@ -11,15 +11,15 @@ back on, so a caller who never inspects
    text, in the populated-pack reply (plain and index), the empty-pack
    one-liner, and the formatter-rendered empty pack the holdout uses;
 2. a clean pack's reply carries no such line and its header shape is
-   unchanged.
-
-Out of scope (per the gate's F2 scope note): ``get_context(sections=...)``,
-``get_objective_context`` and ``get_task_context`` share
-``_sectioned_context`` -- a separate helper this change does not touch.
+   unchanged;
+3. both hold for the four tools built on ``_sectioned_context``
+   (``get_context(sections=...)``, ``get_objective_context``,
+   ``get_task_context``, ``get_sectioned_context``).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -28,6 +28,9 @@ import pytest
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.mcp.server import get_context as _get_context
+from trellis.mcp.server import get_objective_context as _get_objective_context
+from trellis.mcp.server import get_sectioned_context as _get_sectioned_context
+from trellis.mcp.server import get_task_context as _get_task_context
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.schemas.pack import PackItem
@@ -36,9 +39,13 @@ if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
 
 get_context = unwrap_tool(_get_context)
+get_objective_context = unwrap_tool(_get_objective_context)
+get_task_context = unwrap_tool(_get_task_context)
+get_sectioned_context = unwrap_tool(_get_sectioned_context)
 
 INTENT = "alpha bravo runbook"
 _AXIS_FAILURE_SENTINEL = "SENTINEL_MCP_AXIS_FAILURE_3b7a1d"
+_CUSTOM_SECTIONS = [{"name": "docs", "content_types": ["document"], "max_items": 5}]
 
 
 def _axis_item(item_id: str) -> PackItem:
@@ -176,3 +183,56 @@ def test_get_context_clean_empty_pack_is_unchanged(
     result = get_context(INTENT)
 
     assert result == f"No context found for: {INTENT}"
+
+
+# ---------------------------------------------------------------------------
+# The four tools sharing ``_sectioned_context`` (#783 gate, F1)
+# ---------------------------------------------------------------------------
+
+_SECTIONED_CALLS: dict[str, Callable[[], str]] = {
+    "get_context_sections": lambda: get_context(INTENT, sections=_CUSTOM_SECTIONS),
+    "get_objective_context": lambda: get_objective_context(INTENT),
+    "get_task_context": lambda: get_task_context(INTENT),
+    "get_sectioned_context": lambda: get_sectioned_context(INTENT, _CUSTOM_SECTIONS),
+}
+
+
+@pytest.mark.parametrize("tool_name", sorted(_SECTIONED_CALLS))
+def test_sectioned_tools_report_failed_axis_in_exactly_one_line(
+    temp_registry: StoreRegistry, monkeypatch, tool_name: str
+) -> None:
+    """One line, axis name only, no exception text, as on the flat path.
+
+    The objective and task presets filter out the fixture's item, so those
+    two cases also pin the reply whose every section is empty."""
+    monkeypatch.setattr(
+        server_mod, "_build_pack_builder", _builder_one_failing_one_surviving
+    )
+
+    result = _SECTIONED_CALLS[tool_name]()
+    lines = result.split("\n")
+
+    assert "**Retrieval axis failed:** keyword." in lines
+    assert result.count("Retrieval axis failed") == 1
+    assert _AXIS_FAILURE_SENTINEL not in result
+
+
+def test_get_sectioned_context_clean_pack_has_no_axis_note(
+    temp_registry: StoreRegistry,
+) -> None:
+    """A clean reply gains no line, blank or otherwise: the separator after
+    ``pack_id`` runs straight into the first section heading."""
+    store = temp_registry.knowledge.document_store
+    store.put(
+        "doc-a",
+        "alpha bravo runbook drain queue " * 10,
+        {"content_tags": {"domain": "alpha"}},
+    )
+
+    result = get_sectioned_context(INTENT, _CUSTOM_SECTIONS)
+    lines = result.split("\n")
+
+    assert lines[0] == f"# Context for: {INTENT}"
+    assert lines[1].startswith("**pack_id:**")
+    assert lines[2:4] == ["", "## docs"]
+    assert "Retrieval axis failed" not in result
