@@ -168,10 +168,20 @@ def vector_store(tmp_path: Path) -> Iterator[SQLiteVectorStore]:
 
 @pytest.fixture
 def document_store(tmp_path: Path) -> Iterator[SQLiteDocumentStore]:
-    """Two "hello" documents, neither holding the NUL key."""
+    """Four "hello" documents covering the NUL-key value shapes.
+
+    ``doc-a``/``doc-b`` lack the plain NUL key ``a\\x00b``. ``doc-c`` holds
+    it with a non-``None`` value — what makes the ``None``-value test
+    discriminating: without it, that filter and no filter at all return the
+    same two rows, so dropping the comparison entirely would still pass.
+    ``doc-d`` holds the NUL-*and*-quote key ``a\\x00"b``, for the key shape
+    that builds no JSON path either way.
+    """
     store = SQLiteDocumentStore(tmp_path / "documents.db")
     store.put("doc-a", "hello world", metadata={"owner_team": "platform"})
     store.put("doc-b", "hello world", metadata={"owner_team": "data"})
+    store.put("doc-c", "hello world", metadata={"a\x00b": "platform"})
+    store.put("doc-d", "hello world", metadata={'a\x00"b': "platform"})
     yield store
     store.close()
 
@@ -327,9 +337,12 @@ class TestDocumentSearchNulKey:
     def test_a_nul_key_with_a_none_value_matches_every_row_lacking_it(
         self, document_store: SQLiteDocumentStore
     ) -> None:
-        """Neither document holds ``a\\x00b``, so each reads as ``None`` there."""
+        """``doc-a``, ``doc-b`` and ``doc-d`` all lack the plain key
+        ``a\\x00b`` (``doc-d`` holds the *different* key ``a\\x00"b``) and
+        read as ``None`` there; ``doc-c`` holds ``a\\x00b`` with a
+        non-``None`` value and is excluded."""
         rows = document_store.search("hello", filters={"a\x00b": None})
-        assert _doc_ids(rows) == {"doc-a", "doc-b"}
+        assert _doc_ids(rows) == {"doc-a", "doc-b", "doc-d"}
 
     @pytest.mark.parametrize("value", [["platform"], {"x": 1}], ids=["list", "dict"])
     def test_a_nul_key_with_a_container_value_matches_no_row(
@@ -337,3 +350,99 @@ class TestDocumentSearchNulKey:
     ) -> None:
         rows = document_store.search("hello", filters={"a\x00b": value})
         assert rows == []
+
+    def test_a_nul_and_quote_key_with_a_str_value_matches_its_document(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """A key holding a NUL *and* a ``"`` builds no JSON path, so the NUL
+        check that runs for a path-bound key never sees it — the key is
+        compared in Python exactly as a quote-holding key without a NUL is.
+        """
+        rows = document_store.search("hello", filters={'a\x00"b': "platform"})
+        assert _doc_ids(rows) == {"doc-d"}
+
+
+class TestDocumentSearchTagFacetName:
+    """``SQLiteDocumentStore.search(filters={"content_tags": {...}})`` on a
+    facet name holding JSON path syntax.
+
+    ``_build_tag_conditions`` used to splice the facet name unquoted into
+    ``$.content_tags.{facet}``, so a ``.`` or a leading ``"`` in it changed
+    which path the filter read instead of naming the literal facet. (A
+    bare ``"`` *not* at the start of an unquoted label, and a ``\\``, are
+    not actually path syntax to SQLite's JSON functions — probed directly
+    against this build's ``sqlite3`` — so they are not exercised here; the
+    fix quotes every facet alike regardless.)
+
+    Every condition this builder emits default-passes an UNTAGGED document
+    (``json_extract(...) IS NULL OR ...``), so a document that simply lacks
+    the facet being queried matches either way and cannot discriminate
+    quoted from unquoted. The documents below are each tagged WITH the
+    colliding facet, holding a value that does not match the filter — the
+    only shape where a wrong path and a right one disagree: the unquoted
+    ``.`` path reads through to an unrelated value instead of the literal
+    facet's own ``"notmatch"``, and an unquoted path starting ``."`` is not
+    malformed-but-silent, it is a ``sqlite3.OperationalError`` SQLite raises
+    outright — so a facet starting with ``"`` cannot be filtered on at all
+    today, let alone correctly.
+    """
+
+    @pytest.fixture
+    def facet_store(self, tmp_path: Path) -> Iterator[SQLiteDocumentStore]:
+        store = SQLiteDocumentStore(tmp_path / "facets.db")
+        store.put(
+            "doc-dot-mismatch",
+            "hello world",
+            metadata={"content_tags": {"domain.zzz": "notmatch"}},
+        )
+        store.put(
+            "doc-quote-mismatch",
+            "hello world",
+            metadata={"content_tags": {'"domainzzz': "notmatch"}},
+        )
+        store.put(
+            "doc-plain-domain",
+            "hello world",
+            metadata={"content_tags": {"domain": "irrelevant"}},
+        )
+        yield store
+        store.close()
+
+    def test_a_nul_in_a_facet_name_is_refused_before_sql(
+        self, facet_store: SQLiteDocumentStore
+    ) -> None:
+        with (
+            _statements(facet_store) as seen,
+            pytest.raises(ValueError, match="NUL"),
+        ):
+            facet_store.search(
+                "hello",
+                filters={"content_tags": {"domain\x00zzz": {"eq": "alpha"}}},
+            )
+        assert seen == []
+
+    def test_a_dot_in_a_facet_name_excludes_its_mismatched_document(
+        self, facet_store: SQLiteDocumentStore
+    ) -> None:
+        """Unquoted, ``$.content_tags.domain.zzz`` reads through to a
+        different value than the literal facet's own ``"notmatch"`` —
+        the only way that document could pass ``eq: "alpha"`` is a path
+        that is not naming the facet it claims to."""
+        rows = facet_store.search(
+            "hello", filters={"content_tags": {"domain.zzz": {"eq": "alpha"}}}
+        )
+        assert _doc_ids(rows) == {"doc-quote-mismatch", "doc-plain-domain"}
+
+    def test_a_leading_quote_in_a_facet_name_excludes_its_mismatched_document(
+        self, facet_store: SQLiteDocumentStore
+    ) -> None:
+        """Unquoted, ``$.content_tags."domainzzz`` opens a quoted label it
+        never closes — SQLite raises ``sqlite3.OperationalError: bad JSON
+        path`` for it, uncaught, rather than comparing the document's real,
+        non-matching ``"notmatch"``. Quoted, the leading ``"`` is escaped
+        like any other character and the literal facet is read and excluded
+        on its value, same as the ``.`` case above."""
+        rows = facet_store.search(
+            "hello", filters={"content_tags": {'"domainzzz': {"eq": "alpha"}}}
+        )
+        assert _doc_ids(rows) == {"doc-dot-mismatch", "doc-plain-domain"}
