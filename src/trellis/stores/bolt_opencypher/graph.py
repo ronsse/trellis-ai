@@ -36,8 +36,20 @@ next write of the node heals the duplicate rather than failing on it,
 except a bulk spec equal to the shown row, which stays a no-op.
 ``upsert_edge`` and ``upsert_edges_bulk`` attach the new edge version to
 the shown row of each endpoint, so such a node does not double an edge
-written from or to it; they close the edge's current version only where
-it joins those two rows.
+written from or to it. The existing-edge lookup that closes the prior
+version matches by each endpoint's ``node_id`` property, not the two
+*current* (shown) rows: ``upsert_node`` re-versions a node by closing its
+current row and opening a new one without moving the row's relationships
+(above), so an edge created before an endpoint's later re-version still
+hangs off that now-closed row. Matching through ``node_id`` rather than
+the shown-row binding finds it there too; collecting every current match
+and closing all of them with ``FOREACH`` (as ``upsert_node`` does for its
+own rows) keeps the write to one round trip and self-heals a graph that
+already has more than one, carrying ``edge_id``/``created_at`` forward
+from the :func:`_shown_row` pick among them (#782 follow-up 1 — before
+this, the lookup silently missed a re-versioned endpoint's edge and left
+two current edges for one logical triplet). The new edge is still
+created between the two current shown rows, exactly as before.
 
 ``upsert_edge`` has its own race, separate from the node-duplication one
 above: an unprotected ``OPTIONAL MATCH`` for the existing edge followed
@@ -1428,12 +1440,20 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         SET s._cas_lock = true
         REMOVE s._cas_lock
         WITH s, t
-        OPTIONAL MATCH (s)-[old:EDGE {{edge_type: $edge_type}}]->(t)
+        // Match the existing edge by each endpoint's node_id, not the
+        // `s`/`t` shown-row bindings above: see the module docstring. The
+        // node patterns here are deliberately not `s`/`t` -- they match
+        // any row (closed or current) carrying that node_id, so an edge
+        // left on a since-closed endpoint row is still found and closed.
+        OPTIONAL MATCH (:Node {{node_id: $source_id}})
+          -[old:EDGE {{edge_type: $edge_type}}]->(:Node {{node_id: $target_id}})
           WHERE old.valid_to IS NULL
-        WITH s, t, old,
+        WITH s, t, collect(old) AS old_rows
+        WITH s, t, old_rows, {_shown_row("old_rows")} AS old
+        WITH s, t, old_rows,
              coalesce(old.edge_id, $candidate_edge_id) AS edge_id_carry,
              coalesce(old.created_at, $now) AS created_at_carry
-        SET old.valid_to = $now
+        FOREACH (o IN old_rows | SET o.valid_to = $now)
         WITH s, t, edge_id_carry, created_at_carry
         CREATE (s)-[new:EDGE]->(t)
         SET new = $base_props
@@ -1561,14 +1581,15 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
             # across versions, matching the single-row method's collapsed
             # pattern.
-            # NB: the existing-edge check filters ``edge_type`` in
-            # the WHERE clause rather than via property-pattern
-            # binding ``{edge_type: row.edge_type}``. ArcadeDB's
-            # OPTIONAL MATCH does not resolve UNWIND row references
-            # inside relationship property-pattern binders (the
-            # match silently produces no rows), so ``old`` would
-            # always be NULL and the prior version would not get
-            # closed. Both Neo4j and ArcadeDB accept the WHERE form.
+            # NB: both the existing-edge node_id check and the
+            # ``edge_type`` check filter in the WHERE clause rather
+            # than via property-pattern binding (``{node_id: row...}``
+            # / ``{edge_type: row.edge_type}``). ArcadeDB's OPTIONAL
+            # MATCH does not resolve UNWIND row references inside
+            # property-pattern binders (the match silently produces no
+            # rows), so ``old`` would always be NULL and the prior
+            # version would not get closed. Both Neo4j and ArcadeDB
+            # accept the WHERE form.
             cypher = f"""
             UNWIND $rows AS row
             MATCH (s:Node {{node_id: row.source_id}}) WHERE s.valid_to IS NULL
@@ -1577,13 +1598,23 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                  collect(DISTINCT t) AS target_rows
             WITH row, {_shown_row("source_rows")} AS s,
                  {_shown_row("target_rows")} AS t
-            OPTIONAL MATCH (s)-[old:EDGE]->(t)
-              WHERE old.edge_type = row.edge_type AND old.valid_to IS NULL
-            WITH s, t, row, old,
+            // Match the existing edge by each endpoint's node_id, not
+            // the `s`/`t` shown-row bindings above: see the module
+            // docstring and upsert_edge. A row's source/target can
+            // still carry an edge hanging off a since-closed row, so
+            // old_s/old_t are matched to ANY row for that node_id.
+            OPTIONAL MATCH (old_s:Node)-[old:EDGE]->(old_t:Node)
+              WHERE old_s.node_id = row.source_id
+                AND old_t.node_id = row.target_id
+                AND old.edge_type = row.edge_type
+                AND old.valid_to IS NULL
+            WITH s, t, row, collect(old) AS old_rows
+            WITH s, t, row, old_rows, {_shown_row("old_rows")} AS old
+            WITH s, t, row, old_rows,
                  coalesce(old.edge_id, row.candidate_edge_id) AS edge_id_carry,
                  coalesce(old.created_at, row.props.valid_from)
                    AS created_at_carry
-            SET old.valid_to = row.props.valid_from
+            FOREACH (o IN old_rows | SET o.valid_to = row.props.valid_from)
             WITH s, t, row, edge_id_carry, created_at_carry
             CREATE (s)-[new:EDGE]->(t)
             SET new = row.props
@@ -1594,9 +1625,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
 
             def _tx(tx: ManagedTransaction) -> list[Any]:
                 records = list(tx.run(cypher, rows=rows))
-                # Compare row indices, not counts: an edge with two current
-                # versions returns a record for each, which would hide a
-                # dropped row from a count.
+                # Compare row indices, not counts: one UNWIND row yields
+                # exactly one RETURN row (the FOREACH above collapses
+                # every matched old edge into one close), but comparing
+                # indices rather than counts still catches a dropped row.
                 written = {int(r["row_index"]) for r in records}
                 for i in range(len(edges)):
                     if i not in written:

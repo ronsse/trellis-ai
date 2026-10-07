@@ -1453,6 +1453,22 @@ All notable changes to Trellis will be documented in this file.
   `INTERNAL_ERROR` with that message. A failed embeddings call still
   raises `openai.OpenAIError`.
   (follow-up F-a from [#779](https://github.com/ronsse/trellis-ai/pull/779))
+- **`BoltOpenCypherGraphStore.upsert_edge` and `upsert_edges_bulk` (Neo4j and
+  ArcadeDB) find an edge hanging off a re-versioned endpoint.** `upsert_node`
+  closes a node's current row and opens a new one without moving its
+  relationships. The existing-edge lookup matched only between the two
+  *current* endpoint rows, so once either endpoint was re-versioned, an edge
+  created before that re-version was invisible to the lookup: the next
+  `upsert_edge` on the same triplet minted a second current edge instead of
+  updating the first, leaving two current edges for one logical
+  `(source_id, target_id, edge_type)`. The lookup now matches by each
+  endpoint's `node_id` on any row, closed or current, closing every match it
+  finds and carrying the surviving row's `edge_id`/`created_at` forward, so a
+  graph already left in that doubled state self-heals on the next upsert.
+  Relationships still do not move on re-version; SQLite and Postgres key
+  edges by `node_id` string columns rather than row identity and were never
+  affected.
+  ([#782](https://github.com/ronsse/trellis-ai/pull/782) follow-up 1)
 
 ## [0.9.0] - 2026-05-13
 

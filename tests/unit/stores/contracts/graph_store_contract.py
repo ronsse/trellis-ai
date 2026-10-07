@@ -844,6 +844,102 @@ class GraphStoreContractTests:
         assert len(edges) == 1
         assert edges[0]["properties"]["v"] == 2
 
+    def test_upsert_edge_survives_source_reversion(self, store: GraphStore) -> None:
+        """Re-versioning the source after the edge exists still finds it.
+
+        #782 follow-up 1.
+
+        ``upsert_node`` closes a node's current row and opens a new one;
+        relationships are not moved onto the new row (the Bolt module
+        docstring). A later ``upsert_edge`` on the same triplet must still
+        locate the edge wherever it hangs -- off the now-closed source row,
+        not only a current one -- close it there, and carry the same
+        ``edge_id`` forward, leaving exactly one current edge.
+        """
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        first_edge_id = store.upsert_edge("a", "b", "depends_on", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_node("a", "service", {"reversioned": True})
+        _sleep_for_ordering()
+        second_edge_id = store.upsert_edge("a", "b", "depends_on", {"v": 2})
+
+        assert second_edge_id == first_edge_id
+        edges = store.get_edges("a", direction="outgoing", edge_type="depends_on")
+        assert len(edges) == 1
+        assert edges[0]["edge_id"] == first_edge_id
+        assert edges[0]["properties"]["v"] == 2
+
+    def test_upsert_edge_survives_target_reversion(self, store: GraphStore) -> None:
+        """Twin of ``test_upsert_edge_survives_source_reversion`` for the target."""
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        first_edge_id = store.upsert_edge("a", "b", "depends_on", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_node("b", "service", {"reversioned": True})
+        _sleep_for_ordering()
+        second_edge_id = store.upsert_edge("a", "b", "depends_on", {"v": 2})
+
+        assert second_edge_id == first_edge_id
+        edges = store.get_edges("a", direction="outgoing", edge_type="depends_on")
+        assert len(edges) == 1
+        assert edges[0]["edge_id"] == first_edge_id
+        assert edges[0]["properties"]["v"] == 2
+
+    def test_upsert_edges_bulk_survives_source_reversion(
+        self, store: GraphStore
+    ) -> None:
+        """Bulk twin of ``test_upsert_edge_survives_source_reversion``."""
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        first_edge_id = store.upsert_edge("a", "b", "depends_on", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_node("a", "service", {"reversioned": True})
+        _sleep_for_ordering()
+        (second_edge_id,) = store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "a",
+                    "target_id": "b",
+                    "edge_type": "depends_on",
+                    "properties": {"v": 2},
+                }
+            ]
+        )
+
+        assert second_edge_id == first_edge_id
+        edges = store.get_edges("a", direction="outgoing", edge_type="depends_on")
+        assert len(edges) == 1
+        assert edges[0]["edge_id"] == first_edge_id
+        assert edges[0]["properties"]["v"] == 2
+
+    def test_upsert_edges_bulk_survives_target_reversion(
+        self, store: GraphStore
+    ) -> None:
+        """Bulk twin of ``test_upsert_edge_survives_target_reversion``."""
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        first_edge_id = store.upsert_edge("a", "b", "depends_on", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_node("b", "service", {"reversioned": True})
+        _sleep_for_ordering()
+        (second_edge_id,) = store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "a",
+                    "target_id": "b",
+                    "edge_type": "depends_on",
+                    "properties": {"v": 2},
+                }
+            ]
+        )
+
+        assert second_edge_id == first_edge_id
+        edges = store.get_edges("a", direction="outgoing", edge_type="depends_on")
+        assert len(edges) == 1
+        assert edges[0]["edge_id"] == first_edge_id
+        assert edges[0]["properties"]["v"] == 2
+
     def test_reingest_same_graph_is_idempotent(self, store: GraphStore) -> None:
         """Re-ingesting the same nodes + edges leaves both counts stable (#195).
 
