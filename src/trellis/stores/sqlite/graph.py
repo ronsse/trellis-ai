@@ -924,25 +924,43 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             extractor_tier=extractor_tier,
         )
 
-        # Check if a current edge already exists by (source, target, type)
-        cursor = self._conn.execute(
-            """
-            SELECT edge_id FROM edges
-            WHERE source_id = ? AND target_id = ? AND edge_type = ?
-              AND valid_to IS NULL
-            """,
-            (source_id, target_id, edge_type),
-        )
-        row = cursor.fetchone()
-
         now = utc_now()
         now_iso = now.isoformat()
         properties_json = json.dumps(properties or {})
 
         conn = self._conn
-        # Commits on success and rolls back on an exception. With commit=False
-        # the caller's transaction() does both, so the write only joins it.
-        with conn if commit else nullcontext():
+        # Take SQLite's write lock (BEGIN IMMEDIATE) before the current-row
+        # SELECT below, not after it. idx_edges_upsert (source_id, target_id,
+        # edge_type) is NOT unique -- only idx_edges_current (edge_id) is --
+        # so two connections that each run the SELECT as a bare autocommit
+        # read, with no lock held, can both see "no current row" and both
+        # mint a fresh edge_id, leaving two current rows for one logical
+        # key. BEGIN IMMEDIATE makes the second connection wait out the
+        # busy timeout (PRAGMA busy_timeout, sqlite/base.py) for the
+        # first's commit, then read its committed row, so the read and the
+        # write are one serialized transaction.
+        #
+        # Commits on success and rolls back on an exception. With
+        # commit=False the caller's transaction() does both: if that
+        # transaction already holds the write lock (its first write already
+        # ran, so ``conn.in_transaction`` is True), this call joins it
+        # rather than nesting a second BEGIN; if it doesn't yet, this call
+        # opens it on the caller's behalf and leaves it open.
+        if commit or not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+
+        try:
+            # Check if a current edge already exists by (source, target, type)
+            cursor = conn.execute(
+                """
+                SELECT edge_id FROM edges
+                WHERE source_id = ? AND target_id = ? AND edge_type = ?
+                  AND valid_to IS NULL
+                """,
+                (source_id, target_id, edge_type),
+            )
+            row = cursor.fetchone()
+
             if row:
                 edge_id: str = row["edge_id"]
                 # Close current version
@@ -1008,6 +1026,13 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                         extractor_tier,
                     ),
                 )
+        except Exception:
+            if commit:
+                conn.rollback()
+            raise
+
+        if commit:
+            conn.commit()
         return edge_id
 
     def upsert_edges_bulk(self, edges: list[dict[str, Any]]) -> list[str]:
@@ -1060,59 +1085,71 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         }
         sources = {spec["source_id"] for spec in edges}
         placeholders = ",".join("?" for _ in sources)
-        cursor = self._conn.execute(
-            f"""
-            SELECT edge_id, source_id, target_id, edge_type, created_at
-            FROM edges
-            WHERE source_id IN ({placeholders}) AND valid_to IS NULL
-            """,
-            list(sources),
-        )
-        existing_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
-        for row in cursor.fetchall():
-            key = (row["source_id"], row["target_id"], row["edge_type"])
-            if key in triplets:
-                existing_edges[key] = dict(row)
-
         now_iso = utc_now().isoformat()
-        edge_ids: list[str] = []
-        insert_rows: list[tuple[Any, ...]] = []
-        for i, spec in enumerate(edges):
-            key = (spec["source_id"], spec["target_id"], spec["edge_type"])
-            prior = existing_edges.get(key)
-            if prior is not None:
-                edge_id = str(prior["edge_id"])
-                created_at = prior["created_at"]
-            else:
-                edge_id = generate_ulid()
-                created_at = now_iso
-            edge_ids.append(edge_id)
-            prov = extract_edge_provenance(spec)
-            try:
-                validate_edge_provenance(**prov)
-            except (ValueError, TypeError) as exc:
-                msg = f"upsert_edges_bulk[{i}]: {exc}"
-                raise type(exc)(msg) from exc
-            insert_rows.append(
-                (
-                    generate_ulid(),
-                    edge_id,
-                    spec["source_id"],
-                    spec["target_id"],
-                    spec["edge_type"],
-                    json.dumps(spec.get("properties") or {}),
-                    created_at,
-                    now_iso,
-                    prov["source_trace_id"],
-                    prov["agent_id"],
-                    prov["confidence"],
-                    prov["evidence_ref"],
-                    prov["extractor_tier"],
-                )
-            )
 
         conn = self._conn
-        with conn:  # one transaction: a failed row rolls back the whole batch
+        # Take SQLite's write lock (BEGIN IMMEDIATE) before the existing-
+        # edges SELECT below, not after it, for the same reason as
+        # upsert_edge: idx_edges_upsert is not unique, so two overlapping
+        # batches that each read "no current row" for an overlapping key
+        # as a bare autocommit read would both mint a fresh edge_id and
+        # leave two current rows for it. Taking the lock first makes the
+        # second batch wait out the busy timeout for the first's commit,
+        # then read its committed row, so the whole batch — read, close,
+        # insert — is one serialized transaction, a failed row rolling
+        # back the lot.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = conn.execute(
+                f"""
+                SELECT edge_id, source_id, target_id, edge_type, created_at
+                FROM edges
+                WHERE source_id IN ({placeholders}) AND valid_to IS NULL
+                """,
+                list(sources),
+            )
+            existing_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
+            for row in cursor.fetchall():
+                key = (row["source_id"], row["target_id"], row["edge_type"])
+                if key in triplets:
+                    existing_edges[key] = dict(row)
+
+            edge_ids: list[str] = []
+            insert_rows: list[tuple[Any, ...]] = []
+            for i, spec in enumerate(edges):
+                key = (spec["source_id"], spec["target_id"], spec["edge_type"])
+                prior = existing_edges.get(key)
+                if prior is not None:
+                    edge_id = str(prior["edge_id"])
+                    created_at = prior["created_at"]
+                else:
+                    edge_id = generate_ulid()
+                    created_at = now_iso
+                edge_ids.append(edge_id)
+                prov = extract_edge_provenance(spec)
+                try:
+                    validate_edge_provenance(**prov)
+                except (ValueError, TypeError) as exc:
+                    msg = f"upsert_edges_bulk[{i}]: {exc}"
+                    raise type(exc)(msg) from exc
+                insert_rows.append(
+                    (
+                        generate_ulid(),
+                        edge_id,
+                        spec["source_id"],
+                        spec["target_id"],
+                        spec["edge_type"],
+                        json.dumps(spec.get("properties") or {}),
+                        created_at,
+                        now_iso,
+                        prov["source_trace_id"],
+                        prov["agent_id"],
+                        prov["confidence"],
+                        prov["evidence_ref"],
+                        prov["extractor_tier"],
+                    )
+                )
+
             # Close any prior current edges in one shot. ``IN`` against
             # the indexed ``edge_id`` column for the subset we found.
             if existing_edges:
@@ -1133,6 +1170,10 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 """,
                 insert_rows,
             )
+        except Exception:
+            conn.rollback()
+            raise
+        conn.commit()
         return edge_ids
 
     def get_edges(
