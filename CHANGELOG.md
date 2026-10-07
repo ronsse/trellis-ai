@@ -1409,6 +1409,14 @@ All notable changes to Trellis will be documented in this file.
   resolves again until one succeeds, so `/packs` keeps answering `409`
   and MCP `get_context` keeps erroring while the configuration is broken.
   ([#779](https://github.com/ronsse/trellis-ai/pull/779))
+- **`trellis analyze health` surfaces a failed retrieval strategy.** When one
+  `PackBuilder` strategy raised, the surviving axes kept serving and the
+  failure reached only the `PACK_ASSEMBLED` event's `strategy_failures` and
+  an ERROR log line. `trellis analyze health` now counts the window's packs
+  with a failed strategy, per strategy name with the latest occurrence, in
+  text and `--format json`, and any such pack adds a `warn` reason. Counts
+  and strategy names only, never exception text.
+  ([#781](https://github.com/ronsse/trellis-ai/pull/781))
 
 ## [0.9.0] - 2026-05-13
 
