@@ -1561,6 +1561,16 @@ All notable changes to Trellis will be documented in this file.
   non-string is named by its type, never echoed, since a mapping can hold a
   credential.
   (follow-ups B and C from the [#800](https://github.com/ronsse/trellis-ai/pull/800) gate)
+- **`upsert_edge` on Neo4j locks both endpoints before resolving them.** It
+  resolved the source and target rows unlocked and then locked only the
+  source row, so an `upsert_node` re-versioning either endpoint at the same
+  moment could make it raise `ValueError: ... has no current version` for a
+  node that had one, or attach the edge to the source row that re-version
+  had just closed. It now locks the current rows of both endpoints, in
+  sorted `node_id` order so writers of `x->y` and `y->x` cannot deadlock,
+  and resolves them after. ArcadeDB, which takes no locks, and
+  `upsert_edges_bulk` behave as before. (follow-up 1 from
+  [#790](https://github.com/ronsse/trellis-ai/pull/790))
 
 ## [0.9.0] - 2026-05-13
 
