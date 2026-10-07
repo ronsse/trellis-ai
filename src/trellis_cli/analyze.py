@@ -3127,7 +3127,7 @@ def graph_shape(
         roles = ", ".join(f"{name}={n}" for name, n in report.node_roles.items())
         console.print(f"  roles: {escape(roles)}")
         if report.scan.truncated:
-            console.print(f"  [red]truncated[/red] {report.scan.note}")
+            console.print(f"  [red]truncated[/red] {report.scan.note}", soft_wrap=True)
         console.print()
         _print_graph_types(report)
         console.print()
