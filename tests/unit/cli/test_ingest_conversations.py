@@ -398,3 +398,40 @@ class TestPruneNeedsTheWholeExport:
         assert "withheld [wip] Bread notes: export not fully read" in text, text
         assert "withheld [/x] Tide notes: export not fully read" in text, text
         assert "warning unreadable_export: path=" in text, text
+
+
+# ---------------------------------------------------------------------------
+# F1 (#777 follow-up): the yellow ``withheld`` line, printed from this
+# module's own ``_render_report`` before ``ingest_conversations`` raises
+# its non-zero exit, carries a title an operator would copy -- same shape
+# as the red ``prune`` line in ``ingest_corpus.py``, which already has
+# ``soft_wrap=True``.
+# ---------------------------------------------------------------------------
+
+#: One token, no whitespace, longer than an 80-column console on its own --
+#: a word that length must be split *inside itself* to fit any line, so
+#: Rich hard-wraps it mid-token unless soft_wrap=True leaves it to the
+#: terminal, same as the corpus relpath above.
+_LONG_WITHHELD_TITLE = (
+    "synthetic-conversation-title-0123456789abcdef0123456789abcdef"
+    "0123456789abcdef0123456789abcdef"
+)
+
+
+class TestWithheldLineDoesNotWrap:
+    def test_long_withheld_title_prints_as_one_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "80")
+        seed = _write_export(
+            tmp_path / "seed.json",
+            [_conversation("c1", _LONG_WITHHELD_TITLE, "Hi there", "Hello")],
+        )
+        assert _run(seed, "--format", "json").exit_code == 0
+        export_dir = _empty_directory(tmp_path)
+
+        result = _run(export_dir, "--prune")
+
+        assert result.exit_code == 5, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(_LONG_WITHHELD_TITLE in line for line in lines), result.stdout

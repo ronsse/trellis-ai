@@ -462,3 +462,38 @@ class TestPruneFailsClosed:
             assert "root is not a directory" in entry["detail"]
         for relpath in _TREE:
             assert _stored(relpath), relpath
+
+
+# ---------------------------------------------------------------------------
+# F1 (#777 follow-up): the yellow ``withheld`` line, printed from
+# ``_render_report`` before ``ingest_corpus`` raises its non-zero exit,
+# carries a relpath an operator would copy -- same shape as the red
+# ``prune`` line above it, which already has ``soft_wrap=True``.
+# ---------------------------------------------------------------------------
+
+#: One token, no whitespace, longer than an 80-column console minus the
+#: "  withheld " prefix -- Rich must hard-wrap *inside* it unless
+#: soft_wrap=True leaves the line to the terminal.
+_LONG_WITHHELD_RELPATH = (
+    "synthetic-area-0123456789abcdef/synthetic-topic-0123456789abcdef/"
+    "synthetic-note-0123456789abcdef0123456789abcdef.md"
+)
+
+
+class TestWithheldLineDoesNotWrap:
+    def test_long_withheld_path_prints_as_one_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "80")
+        root = tmp_path / "corpus"
+        long_path = root / _LONG_WITHHELD_RELPATH
+        long_path.parent.mkdir(parents=True)
+        long_path.write_text("Quartz outlasts feldspar.\n", encoding="utf-8")
+        assert _ingest_json(str(root))[0] == 0
+
+        with unreadable(_shape("symlink_loop"), long_path):
+            result = _ingest(str(root), "--prune")
+
+        assert result.exit_code == 5, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(_LONG_WITHHELD_RELPATH in line for line in lines), result.stdout

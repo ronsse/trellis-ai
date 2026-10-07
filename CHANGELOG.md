@@ -1509,6 +1509,14 @@ All notable changes to Trellis will be documented in this file.
   the value fine. The backend-error line now renders `str(error)`; a string
   `error` is unchanged.
   (follow-up F1 from [#791](https://github.com/ronsse/trellis-ai/pull/791))
+- **`trellis ingest corpus --prune` and `ingest conversations --prune` keep
+  a long withheld path or title on one line.** The yellow `withheld` line
+  each prints before its exit-`5` carries a relpath or doc id plus error
+  text, same shape as the red `prune` line beside it, but lacked that
+  line's `soft_wrap=True`: Rich hard-wrapped a long one at the console
+  width, splitting mid-token, so an operator could not copy it whole.
+  Both now pass `soft_wrap=True`, matching `prune`.
+  ([#777](https://github.com/ronsse/trellis-ai/pull/777) follow-up 1)
 
 ## [0.9.0] - 2026-05-13
 
