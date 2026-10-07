@@ -20,7 +20,7 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 _COMMAND_ID = "cmd-synthetic-optdeps-1"
 
@@ -65,18 +65,25 @@ def test_importing_the_executor_imports_neither_driver() -> None:
 
 
 @pytest.mark.parametrize(
-    ("module", "class_name"),
+    "load_class",
     [
-        ("psycopg", "Error"),
-        ("neo4j.exceptions", "DriverError"),
-        ("neo4j.exceptions", "Neo4jError"),
+        pytest.param(lambda: pytest.importorskip("psycopg").Error, id="Error"),
+        pytest.param(
+            lambda: pytest.importorskip("neo4j").exceptions.DriverError,
+            id="DriverError",
+        ),
+        pytest.param(
+            lambda: pytest.importorskip("neo4j").exceptions.Neo4jError,
+            id="Neo4jError",
+        ),
     ],
 )
 def test_driver_base_error_is_a_handled_panic(
-    event_log: SQLiteEventLog, module: str, class_name: str
+    event_log: SQLiteEventLog, load_class: Callable[[], type[Exception]]
 ) -> None:
     # The base class itself, so a catch narrowed to a subclass fails here.
-    exc = getattr(pytest.importorskip(module), class_name)("synthetic-driver-text")
+    exc_class = load_class()
+    exc = exc_class("synthetic-driver-text")
     executor = MutationExecutor(
         event_log=event_log, handlers={Operation.ENTITY_CREATE: _Raises(exc)}
     )
@@ -90,7 +97,7 @@ def test_driver_base_error_is_a_handled_panic(
     result = executor.execute(command)
 
     assert result.status == CommandStatus.FAILED
-    assert result.message == f"Execution failed: {class_name}"
+    assert result.message == f"Execution failed: {exc_class.__name__}"
     events = event_log.get_events(event_type=EventType.MUTATION_REJECTED, limit=50)
     failed = [e.payload for e in events if e.payload.get("status") == "failed"]
     assert [p["command_id"] for p in failed] == [_COMMAND_ID]
