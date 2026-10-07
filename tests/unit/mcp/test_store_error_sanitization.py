@@ -1,10 +1,8 @@
 """A store/driver exception that escapes ``executor.execute`` unwrapped must
-not reach the calling agent's response verbatim — the F2 shape from the
-#748 gate (``gates/748.md`` follow-up 1). #748 fixed ``execute_mutation``'s
-own ``executor.execute`` wrapper; this pins the same fix at the remaining
-caller-facing sites in ``src/trellis/mcp/server.py`` where a store or driver
-error can reach the text, and proves a caller-input site left alone still
-returns its detail.
+not reach the calling agent's response verbatim (trellis-ai#748). This pins
+``_exception_detail`` at two caller-facing sites in
+``src/trellis/mcp/server.py``, and proves a caller-input site left alone
+still returns its detail.
 
 The forced exception below stands in for an unwrapped driver error (a
 Postgres DETAIL line, a Neo4j constraint message): it is not a

@@ -1,15 +1,14 @@
-"""Ratchet for raw exception text reaching an MCP caller (#748 follow-up 1).
+"""Ratchet for raw exception text reaching an MCP caller (trellis-ai#748).
 
-#748 fixed ``execute_mutation``'s own ``executor.execute`` wrapper.
-``_exception_detail`` (``src/trellis/mcp/server.py``) carries the same fix to
-every other caller-facing site in this module where a store or driver
-exception could reach the text (``gates/748.md`` follow-up 1;
-``tests/unit/mcp/test_store_error_sanitization.py`` pins two of them). What
-remains is caller-input exceptions — the caller's own JSON/pydantic payload,
-which they need back to fix their call — and one site already rendered safe
-by ``MutationExecutor``'s own design. The roster below is that exhaustive,
-hand-read exemption list, not a todo list: a new site fails the build, and a
-fixed site must shrink this roster and its count.
+A caller-facing site in ``src/trellis/mcp/server.py`` renders a caught
+exception through ``_exception_detail``, which sanitizes text Trellis did
+not write (``test_store_error_sanitization.py`` pins two sites). The sites
+below still embed the exception on purpose: the caller's own JSON/pydantic
+payload errors, which the caller needs to fix its call, and one message
+``MutationExecutor`` already rendered safe. The roster is the exhaustive,
+hand-read exemption list, not a todo list: a new site fails the build, and
+a fixed site must shrink this roster and its count. The scan cannot see an
+exception that a tool never catches.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ import inspect
 from pathlib import Path
 
 import trellis.mcp.server as server_mod
-from tests.ast_rules import assert_hand_read_floor, name_of
+from tests.ast_rules import name_of
 
 #: Calls whose arguments never reach the caller: structlog methods (full
 #: driver text in a log line is the house pattern) and this module's own
@@ -62,7 +61,7 @@ EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
     ),
 }
 
-# Hand count at worktree HEAD (trellis-ai#748 follow-up 1): 1 in
+# Hand count (trellis-ai#748): 1 in
 # save_experience, 2 in _resolve_evidence_pointer, 1 in record_observation,
 # 1 in execute_mutation. Re-grep '{exc}\|str(exc)' in src/trellis/mcp/server.py
 # and subtract the helper's own internal use and the one log-only site
@@ -139,16 +138,6 @@ def test_every_raw_exception_text_site_is_a_declared_exemption() -> None:
         f"found {total} raw exception text sites, expected the hand-read "
         f"{_HAND_READ_SITE_COUNT}. A new site must not inherit an existing "
         "function-level exemption; a fixed site must shrink this count."
-    )
-
-
-def test_hand_read_count_has_not_shrunk_silently() -> None:
-    total = sum(len(hits) for hits in _server_scan().values())
-    assert_hand_read_floor(
-        total,
-        _HAND_READ_SITE_COUNT,
-        subject="raw exception text reaching an MCP caller",
-        hint="Re-run the grep from gates/748.md follow-up 1 and reconcile.",
     )
 
 

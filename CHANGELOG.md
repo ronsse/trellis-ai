@@ -1288,23 +1288,17 @@ All notable changes to Trellis will be documented in this file.
   error type alone, so the entry covers a caller handed the driver's error.
   ArcadeDB's client-visible text for the same failure quotes no value.
   ([#753](https://github.com/ronsse/trellis-ai/pull/753) follow-up 1)
-- **A store or driver exception reaching an MCP caller is sanitized, not
-  quoted verbatim.** #748 fixed this shape at `execute_mutation`'s own
-  `executor.execute` wrapper; 14 more caller-facing sites in
-  `src/trellis/mcp/server.py` — including `save_memory`'s governed write and
-  `record_observation`'s execute path, the two sites the #748 gate named —
-  embedded `{exc}`/`str(exc)` from a caught exception the same way, so a
-  Postgres `DETAIL` line or a Neo4j constraint message could still quote a
-  row value back to the calling agent. All 14 now render the exception
-  through a new `_exception_detail` helper: a `TrellisError` keeps its own
-  text (nothing to strip), anything else goes through the existing
-  `sanitize_error_message`. Five remaining sites embed the exception
-  unchanged on purpose — caller-input validation errors the caller needs to
-  fix their own payload, and one site already rendered safe by
-  `MutationExecutor`'s own design — and a new AST roster rule
-  (`tests/unit/mcp/test_exception_text_roster.py`) pins that exhaustive
-  exemption list so a new unrostered site fails the build.
-  (trellis-ai#748 follow-up 1)
+- **An MCP tool that catches a store or driver exception sanitizes its text
+  before replying.** 14 sites in `src/trellis/mcp/server.py`, among them
+  `save_memory`'s governed write and `record_observation`, quoted the
+  exception verbatim, so a Postgres `DETAIL` line could return a row value
+  to the agent. They now render it through `_exception_detail`: a
+  `TrellisError` keeps its text, and anything else goes through
+  `sanitize_error_message`. The sites left quote caller-input errors or the
+  executor's own message, and `tests/unit/mcp/test_exception_text_roster.py`
+  fails the build on a new one. An exception a tool does not catch, such as
+  one from `save_knowledge`'s write, still reaches the caller through
+  FastMCP's generic error. (trellis-ai#748)
 
 ## [0.9.0] - 2026-05-13
 

@@ -218,7 +218,8 @@ def _exception_detail(exc: BaseException) -> Any:
     (a timeout, a connection refusal) still reaches the caller while a
     leak-shaped one comes back as the sanitizer's static marker. The
     ``logger.exception`` call at each site keeps the full text for the
-    operator. See ``gates/748.md`` follow-up 1 (trellis-ai#748).
+    operator. The sanitizer is a deny-list, so a leak in a shape it does
+    not know still passes (trellis-ai#748).
     """
     if isinstance(exc, TrellisError):
         return exc
