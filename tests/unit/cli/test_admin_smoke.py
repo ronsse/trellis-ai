@@ -280,11 +280,7 @@ class TestSmokeTestFailures:
 # ---------------------------------------------------------------------------
 
 
-#: Long enough to wrap at 80 columns without ``soft_wrap``. Free of any
-#: ``[...]``-shaped substring on purpose: the error text *is* escaped
-#: (see ``TestSmokeTestErrorTextEscaped`` below for that), and this
-#: fixture isolates the wrap behaviour from the escape behaviour so a
-#: future escape regression doesn't also make this test fail.
+#: Long enough to wrap at 80 columns without ``soft_wrap``.
 _LONG_BACKEND_ERROR = (
     "synthetic probe failure: the connection to the backend was refused "
     "after the configured retry budget of three attempts was exhausted "
@@ -317,84 +313,49 @@ class TestSmokeTestFailureLineDoesNotWrap:
 
 
 # ---------------------------------------------------------------------------
-# A backend error is untrusted text (CLAUDE.md: "No copyable handle reaches
-# a Rich renderer raw"). A bracketed substring is parsed as a markup tag and
-# deleted unless the value is ``escape()``-d, so the operator sees a
-# different error than the one raised. Covers both unescaped sites in
-# ``_render_smoke_text``: a top-level check's own ``error`` and a
-# ``readyz`` backend's nested ``error``.
+# Error text prints as raised: Rich deletes a ``[...]`` it reads as a style
+# tag unless the value is escaped.
 # ---------------------------------------------------------------------------
 
 
-#: Mirrors the shape in CLAUDE.md's F2 finding: a bracketed host-ish token
-#: Rich would otherwise eat as a style tag.
-_UNTRUSTED_BACKEND_ERROR = "connect failed [db-staging] :warning:"
+_BRACKETED_ERROR = "connect failed [db-staging]"
 
 
-class TestSmokeTestErrorTextEscaped:
-    def test_check_error_keeps_its_brackets(
-        self, monkeypatch: pytest.MonkeyPatch
+def _healthz_raises(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/healthz":
+        raise httpx.ConnectError(_BRACKETED_ERROR)
+    return _healthy_handler("secret")(request)
+
+
+def _readyz_backend_fails(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/readyz":
+        backend = {"status": "degraded", "error": _BRACKETED_ERROR}
+        return httpx.Response(
+            503, json={"status": "degraded", "backends": {"graph_store": backend}}
+        )
+    return _healthy_handler("secret")(request)
+
+
+class TestSmokeTestErrorTextVerbatim:
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    @pytest.mark.parametrize(
+        "handler", [_healthz_raises, _readyz_backend_fails], ids=["check", "backend"]
+    )
+    def test_error_keeps_its_brackets(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        handler: Callable[[httpx.Request], httpx.Response],
+        output_format: str,
     ) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/healthz":
-                raise httpx.ConnectError(_UNTRUSTED_BACKEND_ERROR)
-            return _healthy_handler("secret")(request)
-
-        _patch_client(monkeypatch, handler)
-
-        result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
-
-        assert result.exit_code == 1, result.stdout
-        assert _UNTRUSTED_BACKEND_ERROR in plain(result.stdout)
-
-    def test_backend_error_keeps_its_brackets(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/readyz":
-                return httpx.Response(
-                    503,
-                    json={
-                        "status": "degraded",
-                        "backends": {
-                            "graph_store": {
-                                "status": "degraded",
-                                "error": _UNTRUSTED_BACKEND_ERROR,
-                            },
-                        },
-                    },
-                )
-            return _healthy_handler("secret")(request)
-
-        _patch_client(monkeypatch, handler)
-
-        result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
-
-        assert result.exit_code == 1, result.stdout
-        assert _UNTRUSTED_BACKEND_ERROR in plain(result.stdout)
-
-    def test_format_json_keeps_the_error_field_unescaped(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """``--format json`` carries the raw value either way — only the
-        Rich-rendered text path needs escaping. Pins that the fix does not
-        touch the JSON payload."""
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/healthz":
-                raise httpx.ConnectError(_UNTRUSTED_BACKEND_ERROR)
-            return _healthy_handler("secret")(request)
-
         _patch_client(monkeypatch, handler)
 
         result = runner.invoke(
-            app, ["admin", "smoke-test", "--api-key", "secret", "--format", "json"]
+            app,
+            ["admin", "smoke-test", "--api-key", "secret", "--format", output_format],
         )
 
         assert result.exit_code == 1, result.stdout
-        payload = json.loads(result.stdout)
-        healthz = next(c for c in payload["checks"] if c["name"] == "healthz")
-        assert healthz["error"] == _UNTRUSTED_BACKEND_ERROR
+        assert _BRACKETED_ERROR in plain(result.stdout)
 
 
 # ---------------------------------------------------------------------------

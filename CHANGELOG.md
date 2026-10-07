@@ -1399,13 +1399,11 @@ All notable changes to Trellis will be documented in this file.
   the error's text, which can quote the values being written.
   ([#773](https://github.com/ronsse/trellis-ai/pull/773))
 - **`admin smoke-test` and `admin install-skills`/`quickstart` keep a
-  bracketed backend or OS error intact.** A check's and a backend's
-  `error` in `_render_smoke_text`, and a failed skill copy's `error` in
-  `_print_skills_summary`, printed straight into Rich markup: a
-  `[...]`-shaped substring (a bracketed host, a list repr) was read as a
-  style tag and deleted, so the operator saw a different error than the
-  one raised. Both now wrap the value in `rich.markup.escape`, matching
-  every other error line in `admin.py`. `--format json` is unchanged.
+  bracketed backend or OS error intact.** A check's or readyz backend's
+  `error`, and a failed skill copy's, went into Rich markup raw, so a
+  `[...]` in it (a bracketed host or path) was read as a style tag and
+  deleted: the operator saw a different error from the one raised. Each
+  is now escaped; `--format json` is unchanged.
   ([#777](https://github.com/ronsse/trellis-ai/pull/777) follow-up 2)
 
 ## [0.9.0] - 2026-05-13
