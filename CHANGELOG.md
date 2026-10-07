@@ -1356,6 +1356,21 @@ All notable changes to Trellis will be documented in this file.
   line whose exit is raised in a different function from the print is still
   outside the rule; two such lines are wrapped here by hand.
   ([#766](https://github.com/ronsse/trellis-ai/pull/766) follow-ups 1-2)
+- **`POST /api/v1/packs` reports a failed retrieval axis instead of
+  absorbing it.** When one strategy raises during `PackBuilder.build()`,
+  the builder already continues with the survivors and records the
+  failure in `PACK_ASSEMBLED.strategy_failures` and an ERROR log line —
+  but the REST response carried neither, so a caller saw HTTP 200 and a
+  keyword-only pack indistinguishable from a complete one.
+  `trellis retrieve pack --format json` has reported this via an `axes`
+  block (`builder_factory.describe_axes`) since #410; `PackResponse` now
+  carries the same mapping (`available`, `ran`, `failed`, `semantic`),
+  built by the route the same way the CLI builds it, with no exception
+  text in the field. `SectionedPackResponse` and `trellis analyze health`
+  are unchanged — no sectioned CLI path calls `describe_axes`, and MCP
+  `get_context` still renders a degraded pack with nothing surfaced
+  beyond it, both out of scope here.
+  ([#761](https://github.com/ronsse/trellis-ai/pull/761) follow-up A)
 
 ## [0.9.0] - 2026-05-13
 

@@ -132,6 +132,20 @@ class WithholdingResponse(WireModel):
     served_count: int
 
 
+class AxisReportResponse(WireModel):
+    """Which retrieval axes this pack has, ran, and did not.
+
+    Mirrors :class:`trellis.retrieve.builder_factory.AxisReport` verbatim —
+    names and states only, never an exception message (see
+    ``describe_axes``'s own docstring for why).
+    """
+
+    available: list[str]
+    ran: list[str]
+    failed: list[str]
+    semantic: str
+
+
 class PackResponse(WireModel):
     """Response containing an assembled context pack."""
 
@@ -147,6 +161,12 @@ class PackResponse(WireModel):
     #: Verbatim ``Pack.metadata["withholding"]`` telemetry. ``None`` means
     #: the response came from a server older than API 1.2.
     withholding: WithholdingResponse | None = None
+    #: Which axes were available, ran, and failed during this build —
+    #: :func:`~trellis.retrieve.builder_factory.describe_axes`'s mapping,
+    #: the same one ``trellis retrieve pack --format json`` has reported
+    #: since #410. ``None`` means the response came from a server older
+    #: than the version that added this field (see api_version.py).
+    axes: AxisReportResponse | None = None
 
 
 class SectionedPackRequest(WireRequestModel):

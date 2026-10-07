@@ -1,5 +1,41 @@
 components:
   schemas:
+    AxisReportResponse:
+      additionalProperties: false
+      description: 'Which retrieval axes this pack has, ran, and did not.
+
+
+        Mirrors :class:`trellis.retrieve.builder_factory.AxisReport` verbatim —
+
+        names and states only, never an exception message (see
+
+        ``describe_axes``''s own docstring for why).'
+      properties:
+        available:
+          items:
+            type: string
+          title: Available
+          type: array
+        failed:
+          items:
+            type: string
+          title: Failed
+          type: array
+        ran:
+          items:
+            type: string
+          title: Ran
+          type: array
+        semantic:
+          title: Semantic
+          type: string
+      required:
+      - available
+      - ran
+      - failed
+      - semantic
+      title: AxisReportResponse
+      type: object
     BatchCommandItem:
       additionalProperties: false
       description: A single command within a batch request.
@@ -1268,6 +1304,10 @@ components:
           - type: string
           - type: 'null'
           title: Agent Id
+        axes:
+          anyOf:
+          - $ref: '#/components/schemas/AxisReportResponse'
+          - type: 'null'
         count:
           title: Count
           type: integer
