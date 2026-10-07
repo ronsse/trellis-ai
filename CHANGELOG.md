@@ -1260,6 +1260,17 @@ All notable changes to Trellis will be documented in this file.
   `entity.create` reads `Execution failed: ValueError`, and an invalid trace
   sent to `trace.ingest` reads `Execution failed: ValidationError`.
   ([#748](https://github.com/ronsse/trellis-ai/pull/748))
+- **`trellis admin migrate-graph` sanitizes a destination store's failure
+  text before printing it.** The `Migration aborted:` line,
+  `--continue-on-error`'s `Errors:` list, and the `--format json`
+  `errors[].message` and `step_failures[].message` printed the store's
+  exception text verbatim, which can quote the row value behind a
+  duplicate-key or constraint violation. All four now go through
+  `sanitize_error_message`, and the payload drops
+  `step_failures[].traceback`, which repeats every chained exception's
+  text. `MigrationReport` keeps the raw text, as does the
+  `--continue-on-error` error log on stderr.
+  ([#757](https://github.com/ronsse/trellis-ai/pull/757))
 - **Four more CLI failure lines are no longer hard-wrapped at the console
   width.** The same exposure #750 fixed for 16 sites also applied to
   `admin migrate-graph`'s "Invalid YAML in ..." line and to the
