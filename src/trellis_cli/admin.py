@@ -2064,7 +2064,7 @@ def _render_smoke_text(
         "info": "INFO",
         "skip": "SKIP",
     }
-    console.print(f"[bold]Trellis API smoke test[/bold] → {base_url}")
+    console.print(f"[bold]Trellis API smoke test[/bold] → {escape(base_url)}")
     console.print()
     for check in checks:
         status = check["status"]
@@ -2082,7 +2082,7 @@ def _render_smoke_text(
             console.print(f"        [dim]{escape(check['note'])}[/dim]")
         if check.get("reason"):
             console.print(f"        [dim]{check['reason']}[/dim]")
-        if check["name"] == "readyz" and check.get("backends"):
+        if check["name"] == "readyz" and isinstance(check.get("backends"), dict):
             for backend, info in check["backends"].items():
                 if not isinstance(info, dict):
                     continue
@@ -2092,7 +2092,10 @@ def _render_smoke_text(
                 detail = f"{b_status}"
                 if b_latency is not None:
                     detail += f" ({b_latency}ms)"
-                console.print(f"        [{b_style}]{backend}[/{b_style}]: {detail}")
+                b_name = escape(backend)
+                console.print(
+                    f"        [{b_style}]{b_name}[/{b_style}]: {escape(detail)}"
+                )
                 if info.get("error"):
                     console.print(
                         f"          [red]{escape(info['error'])}[/red]",

@@ -723,6 +723,7 @@ def format_sectioned_pack_as_markdown(
     *,
     pack_id: str | None = None,
     withholding: WithholdingSummary | None = None,
+    axis_note: str = "",
 ) -> str:
     """Format a sectioned pack as markdown with section headings.
 
@@ -744,6 +745,7 @@ def format_sectioned_pack_as_markdown(
             whole candidate pool — rendered in the header, above the first
             section, for the reason given in
             :func:`format_pack_as_markdown`.
+        axis_note: As in :func:`format_pack_as_markdown`.
 
     Returns:
         Markdown-formatted string within token budget.
@@ -751,6 +753,8 @@ def format_sectioned_pack_as_markdown(
     lines = [f"# Context for: {intent}"]
     if pack_id:
         lines.append(f"**pack_id:** `{pack_id}`")
+    if axis_note:
+        lines.append(axis_note)
     note = format_withholding_note(withholding)
     if note:
         lines.append(note)

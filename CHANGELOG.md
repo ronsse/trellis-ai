@@ -1453,6 +1453,45 @@ All notable changes to Trellis will be documented in this file.
   `INTERNAL_ERROR` with that message. A failed embeddings call still
   raises `openai.OpenAIError`.
   (follow-up F-a from [#779](https://github.com/ronsse/trellis-ai/pull/779))
+- **`admin smoke-test`'s header and readyz backend rows keep a bracketed URL
+  or backend name intact.** The header's URL and a readyz backend's name and
+  status/latency detail went into Rich markup raw, so an IPv6 host led by a
+  lowercase letter (`http://[fd00::1]:8420`) or a backend key or status
+  carrying `[...]` was read as a style tag and deleted. All three are now
+  escaped; `--format json` is unchanged.
+  ([#784](https://github.com/ronsse/trellis-ai/pull/784) follow-up 1)
+- **`admin smoke-test`'s text mode no longer crashes on a non-dict readyz
+  `backends`.** A `/readyz` body whose `backends` is a list or a string (a
+  server or proxy that is not Trellis) raised `AttributeError` in text mode
+  while `--format json` printed it. Text mode now skips the backend rows for
+  such a value, as it already did for a non-dict backend entry; json still
+  shows it raw, and both formats exit with the same code.
+  (follow-up F1 from [#788](https://github.com/ronsse/trellis-ai/pull/788))
+- **`trellis admin migrate-provenance` prints each per-edge error
+  verbatim.** An error line carries the store's exception text, which went
+  into Rich markup raw, so a `[...]` in it was read as a style tag and
+  deleted, and a line wider than the console was hard-wrapped, folding a
+  long token mid-way. The text is now escaped and printed with
+  `soft_wrap=True`; `--format json` is unchanged.
+  (follow-up F2 from [#777](https://github.com/ronsse/trellis-ai/pull/777))
+- **A broken driver install no longer replaces a handler's own failure in
+  `MutationExecutor`.** The handler-panic catch imported `psycopg` and
+  `neo4j.exceptions` to find their base errors, so a driver whose import
+  raised anything but `ImportError` (a native library that fails to load)
+  escaped `execute()` in place of the handler's FAILED result, on every
+  call. The classes are now read from `sys.modules` and nothing is
+  imported: a driver's exception can only exist once its module is.
+  ([#773](https://github.com/ronsse/trellis-ai/pull/773) follow-up 2)
+- **`get_context(sections=...)`, `get_objective_context`, `get_task_context`
+  and `get_sectioned_context` report a failed retrieval axis too.** These
+  four share `_sectioned_context`, the one helper #783 left silent: a
+  failed axis reached neither the markdown reply nor any JSON block, so the
+  gap #783 closed for the flat path and the sectioned REST route stayed
+  open on these MCP tools. Same one-line note, same `describe_axes` /
+  `format_failed_axes_note` helpers, same header placement (after
+  `pack_id`, before the withholding note, outside the token budget) as the
+  flat path; a clean reply is unchanged.
+  ([#783](https://github.com/ronsse/trellis-ai/pull/783) follow-up)
 - **`BoltOpenCypherGraphStore.upsert_edge` and `upsert_edges_bulk` (Neo4j and
   ArcadeDB) find an edge left on a re-versioned endpoint.** `upsert_node`
   re-versions a node without moving its relationships, and the existing-edge
