@@ -266,6 +266,34 @@ def _rows_left(dsn: str, node_id: str) -> dict[str, int]:
         }
 
 
+def _current_edge_rows(
+    dsn: str, source_id: str, target_id: str, edge_type: str
+) -> list[dict[str, Any]]:
+    """Every ``valid_to IS NULL`` row for one logical edge key."""
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT edge_id, properties FROM edges"
+            " WHERE source_id = %s AND target_id = %s AND edge_type = %s"
+            " AND valid_to IS NULL",
+            (source_id, target_id, edge_type),
+        ).fetchall()
+    return [{"edge_id": r[0], "properties": r[1]} for r in rows]
+
+
+def test_edge_lock_key_keeps_distinct_triples_from_colliding() -> None:
+    """Distinct edge triples get distinct lock keys.
+
+    Bare concatenation would give ``("ab", "c")`` and ``("a", "bc")`` one
+    key, and dropping ``edge_type`` would give every edge type between two
+    nodes one key. Either stays correct but makes unrelated writers wait for
+    each other.
+    """
+    from trellis.stores.postgres.graph import _edge_lock_key
+
+    assert _edge_lock_key("ab", "c", "knows") != _edge_lock_key("a", "bc", "knows")
+    assert _edge_lock_key("s", "t", "knows") != _edge_lock_key("s", "t", "related_to")
+
+
 def _write_after_a_freed_page(store: Any, dsn: str, node_id: str) -> None:
     """Write ``node_id`` on a page after one VACUUM has emptied.
 
@@ -522,7 +550,7 @@ class TestPostgresGraphStore:
         store.upsert_node("race-node-synthetic-pk-1", "t", {})
         with pytest.raises(psycopg.errors.UniqueViolation) as exc_info:
             store.upsert_node("race-node-synthetic-pk-2", "t", {})
-        assert exc_info.value.diag.constraint_name != "idx_nodes_current"
+        assert exc_info.value.diag.constraint_name == "nodes_pkey"
 
     def test_upsert_node_retry_exhausted_raises_store_error(
         self, store, monkeypatch
@@ -626,6 +654,251 @@ class TestPostgresGraphStore:
         edges = store.get_edges("n1", direction="outgoing")
         assert len(edges) == 1
         assert edges[0]["edge_type"] == "knows"
+
+    def test_upsert_edge_create_race_leaves_one_current_row(self, store) -> None:
+        """Two writers creating one new logical edge leave one current row.
+
+        ``idx_edges_current`` is unique on the random ``edge_id``, not on the
+        logical key, so only the edge lock stops both writers from reading
+        "no current row" and each committing an ``edge_id`` of its own. A
+        barrier starts both calls together.
+        """
+        source_id, target_id, edge_type = (
+            "race-edge-synthetic-create-src",
+            "race-edge-synthetic-create-tgt",
+            "synthetic_rel",
+        )
+        store.upsert_node(source_id, "synthetic_type", {})
+        store.upsert_node(target_id, "synthetic_type", {})
+
+        barrier = threading.Barrier(2)
+        outcome: dict[str, Any] = {}
+
+        def call_upsert(name: str, writer: str) -> None:
+            try:
+                barrier.wait(10)
+                outcome[name] = store.upsert_edge(
+                    source_id, target_id, edge_type, {"writer": writer}
+                )
+            except Exception as exc:
+                outcome[name] = exc
+
+        writer_a = threading.Thread(target=call_upsert, args=("a", "a"))
+        writer_b = threading.Thread(target=call_upsert, args=("b", "b"))
+        writer_a.start()
+        writer_b.start()
+        writer_a.join(timeout=20)
+        writer_b.join(timeout=20)
+
+        assert not writer_a.is_alive()
+        assert not writer_b.is_alive()
+        for name in ("a", "b"):
+            assert not isinstance(outcome[name], Exception), outcome[name]
+
+        current = _current_edge_rows(PG_DSN, source_id, target_id, edge_type)
+        assert len(current) == 1, current
+        assert current[0]["edge_id"] in (outcome["a"], outcome["b"])
+
+    def test_upsert_edge_update_race_leaves_one_current_row(self, store) -> None:
+        """Two writers updating one existing logical edge leave one current
+        row.
+
+        Without the edge lock, the loser's ``FOR UPDATE`` read waits for the
+        winner, then finds that row closed and the winner's new row not yet
+        visible to its snapshot, and mints an ``edge_id`` of its own.
+        """
+        source_id, target_id, edge_type = (
+            "race-edge-synthetic-update-src",
+            "race-edge-synthetic-update-tgt",
+            "synthetic_rel",
+        )
+        store.upsert_node(source_id, "synthetic_type", {})
+        store.upsert_node(target_id, "synthetic_type", {})
+        store.upsert_edge(source_id, target_id, edge_type, {"writer": "seed"})
+
+        barrier = threading.Barrier(2)
+        outcome: dict[str, Any] = {}
+
+        def call_upsert(name: str, writer: str) -> None:
+            try:
+                barrier.wait(10)
+                outcome[name] = store.upsert_edge(
+                    source_id, target_id, edge_type, {"writer": writer}
+                )
+            except Exception as exc:
+                outcome[name] = exc
+
+        writer_a = threading.Thread(target=call_upsert, args=("a", "a"))
+        writer_b = threading.Thread(target=call_upsert, args=("b", "b"))
+        writer_a.start()
+        writer_b.start()
+        writer_a.join(timeout=20)
+        writer_b.join(timeout=20)
+
+        assert not writer_a.is_alive()
+        assert not writer_b.is_alive()
+        for name in ("a", "b"):
+            assert not isinstance(outcome[name], Exception), outcome[name]
+
+        current = _current_edge_rows(PG_DSN, source_id, target_id, edge_type)
+        assert len(current) == 1, current
+        assert current[0]["properties"]["writer"] in ("a", "b")
+
+    def test_upsert_edge_stamps_its_version_after_the_lock_wait(self, store) -> None:
+        """A writer that waits for the edge lock stamps its version after the
+        wait.
+
+        A clock read before the lock lets a queued writer close the winner's
+        version at an earlier time than that version's ``valid_from``, so an
+        ``as_of`` read in the gap serves two versions of one edge.
+        """
+        from trellis.core.base import utc_now
+        from trellis.stores.postgres.graph import _edge_lock_key
+
+        key = (
+            "lock-clock-synthetic-src",
+            "lock-clock-synthetic-tgt",
+            "synthetic_rel",
+        )
+        store.upsert_node(key[0], "synthetic_type", {})
+        store.upsert_node(key[1], "synthetic_type", {})
+        store.upsert_edge(*key, {"writer": "seed"})
+
+        outcome: dict[str, Any] = {}
+
+        def call_upsert() -> None:
+            try:
+                outcome["edge_id"] = store.upsert_edge(*key, {"writer": "queued"})
+            except Exception as exc:
+                outcome["edge_id"] = exc
+
+        writer = threading.Thread(target=call_upsert)
+        holder = psycopg.connect(PG_DSN)
+        try:
+            holder.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (_edge_lock_key(*key),),
+            )
+            writer.start()
+            queued = False
+            deadline = time.monotonic() + 10
+            with psycopg.connect(PG_DSN, autocommit=True) as watcher:
+                while not queued and time.monotonic() < deadline:
+                    queued = watcher.execute(
+                        "SELECT count(*) > 0 FROM pg_locks"
+                        " WHERE locktype = 'advisory' AND NOT granted"
+                        " AND %s = ANY(pg_blocking_pids(pid))",
+                        (holder.info.backend_pid,),
+                    ).fetchone()[0]
+                    if not queued:
+                        time.sleep(0.01)
+            released_at = utc_now()
+            holder.commit()
+        finally:
+            holder.close()
+        writer.join(timeout=20)
+
+        assert queued, "upsert_edge did not wait for the edge lock"
+        assert not writer.is_alive()
+        assert not isinstance(outcome["edge_id"], Exception), outcome["edge_id"]
+        with psycopg.connect(PG_DSN, autocommit=True) as conn:
+            versions = conn.execute(
+                "SELECT valid_from, valid_to FROM edges"
+                " WHERE source_id = %s AND target_id = %s AND edge_type = %s"
+                " ORDER BY valid_from",
+                key,
+            ).fetchall()
+        assert len(versions) == 2, versions
+        assert versions[1][0] >= released_at, versions
+
+    def test_upsert_edges_bulk_overlapping_batches_leave_one_current_row(
+        self, store
+    ) -> None:
+        """Two batches sharing two edges, listed in opposite order, leave one
+        current row per key without deadlocking.
+
+        ``edge_w`` sorts first and is in the first batch only, so a batch
+        that locked only its first sorted key would not wait for the other.
+        """
+        for n in range(5):
+            store.upsert_node(f"race-bulk-n{n}", "synthetic_type", {})
+
+        edge_w = ("race-bulk-n0", "race-bulk-n2", "synthetic_rel")
+        edge_x = ("race-bulk-n1", "race-bulk-n2", "synthetic_rel")
+        edge_y = ("race-bulk-n3", "race-bulk-n4", "synthetic_rel")
+
+        def spec(key: tuple[str, str, str], writer: str) -> dict[str, Any]:
+            return {
+                "source_id": key[0],
+                "target_id": key[1],
+                "edge_type": key[2],
+                "properties": {"writer": writer},
+            }
+
+        batch1 = [spec(edge_w, "p"), spec(edge_x, "p"), spec(edge_y, "p")]
+        batch2 = [spec(edge_y, "q"), spec(edge_x, "q")]
+
+        barrier = threading.Barrier(2)
+        outcome: dict[str, Any] = {}
+
+        def call_bulk(name: str, batch: list[dict[str, Any]]) -> None:
+            try:
+                barrier.wait(10)
+                outcome[name] = store.upsert_edges_bulk(batch)
+            except Exception as exc:
+                outcome[name] = exc
+
+        writer_1 = threading.Thread(target=call_bulk, args=("1", batch1))
+        writer_2 = threading.Thread(target=call_bulk, args=("2", batch2))
+        writer_1.start()
+        writer_2.start()
+        writer_1.join(timeout=20)
+        writer_2.join(timeout=20)
+
+        assert not writer_1.is_alive()
+        assert not writer_2.is_alive()
+        for name in ("1", "2"):
+            assert not isinstance(outcome[name], Exception), outcome[name]
+
+        for key in (edge_w, edge_x, edge_y):
+            current = _current_edge_rows(PG_DSN, *key)
+            assert len(current) == 1, (key, current)
+
+    def test_lock_edge_keys_acquires_locks_in_one_sorted_order(
+        self, store, monkeypatch
+    ) -> None:
+        """``_lock_edge_keys`` takes its locks in one sorted order, whatever
+        the input order.
+
+        A deadlock between two real batches is too timing-dependent to
+        assert, so this records the lock calls instead. With nine keys, an
+        unsorted set iterating in sorted order by chance is a 1-in-362880
+        event.
+        """
+        from trellis.stores.postgres.graph import _edge_lock_key, _lock_edge_keys
+
+        keys = [
+            (f"race-lk-s{i}", f"race-lk-t{i}", "knows")
+            for i in (3, 1, 4, 0, 5, 2, 8, 6, 7)
+        ]
+        expected_order = sorted({_edge_lock_key(*key) for key in keys})
+
+        seen: list[str] = []
+        original_execute = psycopg.Cursor.execute
+
+        def recording_execute(cur, query, params=None, **kwargs):  # type: ignore[no-untyped-def]
+            sql = str(query)
+            if "pg_advisory_xact_lock" in sql and params:
+                seen.append(params[0])
+            return original_execute(cur, query, params, **kwargs)
+
+        monkeypatch.setattr(psycopg.Cursor, "execute", recording_execute)
+
+        for ordering in (keys, list(reversed(keys))):
+            seen.clear()
+            with store._conn() as conn:
+                _lock_edge_keys(conn, ordering)
+            assert seen == expected_order
 
     def test_delete_node(self, store) -> None:
         store.upsert_node("n1", "person", {})
