@@ -1364,17 +1364,13 @@ All notable changes to Trellis will be documented in this file.
   passes `max_len` today, so this was unreachable; it now raises
   `ValueError` for any `max_len < 0`, and `max_len=0` is unchanged.
   ([#767](https://github.com/ronsse/trellis-ai/pull/767) follow-up 2)
-- **`MutationExecutor` now catches an unmapped Postgres or Bolt driver
-  panic the same way it already caught `sqlite3.Error`.** A handler backed
-  by a Postgres graph store (`psycopg.Error`) or a Bolt-backed one (Neo4j
-  or ArcadeDB, which share the driver's `DriverError`/`Neo4jError`) that
-  raised its own driver's base error unmapped escaped `execute()` raw: no
-  FAILED `CommandResult`, no `MUTATION_REJECTED` audit event, and a
-  `CONTINUE_ON_ERROR` batch aborted instead of continuing. Each class is
-  appended to the handler-panic tuple only when its package is importable,
-  checked lazily on first use so `import trellis.mutate.executor` still
-  does not import either optional driver. The FAILED message still names
-  only the exception's type (#748's fix, unchanged).
+- **A Postgres or Bolt driver error no longer escapes `MutationExecutor`.**
+  A Postgres graph store's `psycopg.Error`, or a Neo4j or ArcadeDB store's
+  `DriverError`/`Neo4jError`, raised unmapped from a handler now yields a
+  FAILED `CommandResult` and a `MUTATION_REJECTED` audit event, as
+  `sqlite3.Error` already did, so a `CONTINUE_ON_ERROR` batch carries on
+  past it. The result names the error's type alone; the audit event keeps
+  the error's text, which can quote the values being written.
   ([#773](https://github.com/ronsse/trellis-ai/pull/773))
 
 ## [0.9.0] - 2026-05-13

@@ -59,12 +59,10 @@ _AUDIT_EMIT_FAILED_TEMPLATE = (
 # new backends should map their own errors into ``StoreError`` (one
 # of the typed catches above) rather than relying on this fallback.
 # ``sqlite3.Error`` is listed because the default SQLite stores raise it
-# unmapped, from writes that share no seam to map it at. ``psycopg.Error``
-# and the Bolt driver's (neo4j, shared by the Neo4j and ArcadeDB stores)
-# ``DriverError``/``Neo4jError`` belong here for the same reason — Postgres's
-# edge and alias writers and the Bolt writers raise their driver's base
-# error unmapped — but both are optional extras, so they are not listed as
-# literals here; see ``_optional_driver_panics`` below.
+# unmapped, from writes that share no seam to map it at. Most Postgres and
+# Bolt (Neo4j, ArcadeDB) graph writes raise their driver's own errors the
+# same way, but both drivers are optional extras, so
+# ``_optional_driver_panics`` below supplies those classes.
 _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
     RuntimeError,
     OSError,
@@ -83,15 +81,12 @@ _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
 @functools.lru_cache(maxsize=1)
 def _optional_driver_panics() -> tuple[type[BaseException], ...]:
     """``psycopg.Error`` and the Bolt driver's ``DriverError``/``Neo4jError``,
-    appended to the handler-panic tuple only when each package is importable.
+    for each of the two packages that is installed.
 
-    Both are optional extras (see pyproject.toml's ``postgres``/``neo4j``/
-    ``arcadedb`` extras) — importing ``trellis.mutate.executor`` must not
-    import either, so unlike a module-level guarded import, this one is
-    deferred to the first command the executor actually runs rather than
-    happening at module load (tests/unit/mutate/test_executor_optional_deps.py
-    pins this). ``lru_cache`` means a missing extra is not retried on every
-    call.
+    Importing ``trellis.mutate.executor`` must not import either optional
+    driver (``tests/unit/mutate/test_executor_optional_deps.py``), so this
+    runs when an exception first reaches a catch that calls it, and
+    ``lru_cache`` keeps a missing extra from being retried after that.
     """
     panics: list[type[BaseException]] = []
     try:
