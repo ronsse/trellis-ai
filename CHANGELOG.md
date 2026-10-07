@@ -1467,6 +1467,13 @@ All notable changes to Trellis will be documented in this file.
   such a value, as it already did for a non-dict backend entry; json still
   shows it raw, and both formats exit with the same code.
   (follow-up F1 from [#788](https://github.com/ronsse/trellis-ai/pull/788))
+- **`trellis admin migrate-provenance` prints each per-edge error
+  verbatim.** An error line carries the store's exception text, which went
+  into Rich markup raw, so a `[...]` in it was read as a style tag and
+  deleted, and a line wider than the console was hard-wrapped, folding a
+  long token mid-way. The text is now escaped and printed with
+  `soft_wrap=True`; `--format json` is unchanged.
+  (follow-up F2 from [#777](https://github.com/ronsse/trellis-ai/pull/777))
 - **A broken driver install no longer replaces a handler's own failure in
   `MutationExecutor`.** The handler-panic catch imported `psycopg` and
   `neo4j.exceptions` to find their base errors, so a driver whose import

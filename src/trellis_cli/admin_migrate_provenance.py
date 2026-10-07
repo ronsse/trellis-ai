@@ -303,7 +303,7 @@ def _print_text_report(report: MigrateProvenanceReport) -> None:
     if report.errors:
         console.print(f"[red]errors ({len(report.errors)}):[/red]")
         for err in report.errors[:_ERROR_PREVIEW_LIMIT]:
-            console.print(f"  [red]{err}[/red]")
+            console.print(f"  [red]{escape(err)}[/red]", soft_wrap=True)
         if len(report.errors) > _ERROR_PREVIEW_LIMIT:
             extra = len(report.errors) - _ERROR_PREVIEW_LIMIT
             console.print(f"  [red]… and {extra} more[/red]")
