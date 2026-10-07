@@ -728,7 +728,7 @@ class GraphStoreContractTests:
             "syn-closed-x", direction="outgoing", edge_type="syn_rel"
         )
         assert len(v2_current) == 1
-        v2_created_at = _parse_instant(v2_current[0]["created_at"])
+        v2_created_at = datetime.fromisoformat(v2_current[0]["created_at"])
 
         historical_before = store.get_edges(
             "syn-closed-x", direction="outgoing", edge_type="syn_rel", as_of=between
@@ -766,7 +766,7 @@ class GraphStoreContractTests:
         # through a different wire rendering of the same timestamp
         # (e.g. ArcadeDB renders one as ``+00:00`` and another as ``Z``)
         # without the carry having failed.
-        assert _parse_instant(current[0]["created_at"]) == v2_created_at
+        assert datetime.fromisoformat(current[0]["created_at"]) == v2_created_at
 
     def test_upsert_edge_leaves_closed_version_alone(self, store: GraphStore) -> None:
         """Twin of ``test_upsert_edges_bulk_leaves_closed_version_alone``
@@ -2403,22 +2403,6 @@ def _now() -> datetime:
     from trellis.core.base import utc_now
 
     return utc_now()
-
-
-def _parse_instant(value: datetime | str) -> datetime:
-    """Parse a stored timestamp field to an aware ``datetime``.
-
-    Backends disagree on the wire shape: Postgres already returns an
-    aware ``datetime``, while SQLite and the Bolt stores return an ISO
-    string — and a value carried forward unchanged can still come back
-    through a different rendering of the same instant on a later read
-    (ArcadeDB has been observed to render one version's timestamp with
-    a ``+00:00`` offset and another's with a ``Z`` suffix). Comparing
-    parsed instants avoids a spurious mismatch from formatting alone.
-    """
-    if isinstance(value, datetime):
-        return value
-    return datetime.fromisoformat(value)
 
 
 def _current(store: GraphStore, node_id: str) -> dict[str, Any]:
