@@ -1278,22 +1278,6 @@ All notable changes to Trellis will be documented in this file.
   `dbt-manifest`, `openlineage`, `conversations` and `corpus`. They now
   print unwrapped the same way. Text, colour, JSON output and exit codes
   are unchanged. ([#758](https://github.com/ronsse/trellis-ai/pull/758))
-- **#755 follow-up measurement: `upsert_alias` never races; `upsert_edge`
-  races every time, but silently.** `upsert_alias`'s `pg_advisory_xact_lock`
-  fully serialises two writers of one key — measured over 30 concurrent runs
-  each for a new and an existing alias, zero exceptions, always one current
-  row. `upsert_edge` does race on every run, but `idx_edges_current` is
-  unique on the random `edge_id`, not the logical `(source_id, target_id,
-  edge_type)` tuple `upsert_edges_bulk`'s contract names, so two writers of
-  "the same" edge never collide on it and both inserts succeed — two current
-  rows for one logical edge, no `UniqueViolation` raised, so #755's
-  catch-and-retry has nothing to catch. Fixing the duplication needs a new
-  unique index and is left to a separate, larger follow-up. Added a pytest
-  test pinning the existing node update-race fix (fails raising a raw
-  `UniqueViolation` at #755's parent commit, passes at head) and a test
-  proving `upsert_nodes_bulk` still re-raises a `UniqueViolation` on any
-  constraint but `idx_nodes_current` unchanged.
-  ([#755](https://github.com/ronsse/trellis-ai/pull/755) follow-ups 1, 4, 5)
 
 ## [0.9.0] - 2026-05-13
 

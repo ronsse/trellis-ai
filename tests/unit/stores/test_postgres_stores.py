@@ -440,15 +440,11 @@ class TestPostgresGraphStore:
 
     def test_upsert_node_update_race_becomes_new_version(self, store) -> None:
         """Two writers updating the same *existing* node race on
-        ``idx_nodes_current`` too, not only the create case (#755 follow-up
-        4 / gate scenario S2): the ``FOR UPDATE`` waiter re-checks the
-        specific row it blocked on, finds it closed, and cannot see the row
-        inserted while it waited -- so it INSERTs its own, collides with
-        that row on ``idx_nodes_current``, and retries. Pins the gate's S2
-        finding; the create-race retry loop already covers it, so this may
-        (and does) already pass at #755's head -- confirmed by running this
-        test directly against #755's parent commit, where it fails with a
-        raw ``UniqueViolation`` because that commit has no retry at all.
+        ``idx_nodes_current`` too, not only the create case: the
+        ``FOR UPDATE`` waiter re-checks the specific row it blocked on,
+        finds it closed, and cannot see the row inserted while it waited --
+        so it INSERTs its own, collides with that row on
+        ``idx_nodes_current``, and retries.
         """
         node_id = "race-node-synthetic-update"
         store.upsert_node(node_id, "synthetic_type", {"writer": "seed"})
@@ -590,8 +586,8 @@ class TestPostgresGraphStore:
         self, store, monkeypatch
     ) -> None:
         """A bulk ``UniqueViolation`` on a constraint *other* than
-        ``idx_nodes_current`` (#755 follow-up 5 / gate mutant G3) must
-        propagate unchanged, never be mistaken for the bulk create race.
+        ``idx_nodes_current`` must propagate unchanged, never be mistaken
+        for the bulk create race.
 
         Forced by making both rows in one batch reuse the same
         ``version_id`` (the table's real primary key) -- a genuine,
@@ -619,7 +615,7 @@ class TestPostgresGraphStore:
                     },
                 ]
             )
-        assert exc_info.value.diag.constraint_name != "idx_nodes_current"
+        assert exc_info.value.diag.constraint_name == "nodes_pkey"
 
     def test_upsert_and_get_edge(self, store) -> None:
         store.upsert_node("n1", "person", {})
