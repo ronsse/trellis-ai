@@ -1168,6 +1168,17 @@ def _sectioned_context(
             }
             for s in sectioned_pack.sections
         ]
+        # As on the sectioned REST route: every section carries the one
+        # strategies_used list build_sectioned() computed, so the first
+        # section's stands for all. No caller passes sections=[].
+        axis_note = ""
+        if sectioned_pack.sections:
+            axes = describe_axes(
+                builder,
+                sectioned_pack.sections[0].retrieval_report.strategies_used,
+                embedder_configured=registry.embedding_fn is not None,
+            )
+            axis_note = format_failed_axes_note(axes["failed"])
         result = format_sectioned_pack_as_markdown(
             section_dicts,
             intent,
@@ -1176,6 +1187,7 @@ def _sectioned_context(
             withholding=withholding_from_payload(
                 sectioned_pack.metadata.get("withholding")
             ),
+            axis_note=axis_note,
         )
         adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
         if adv_md:

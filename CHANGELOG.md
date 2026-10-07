@@ -1460,6 +1460,13 @@ All notable changes to Trellis will be documented in this file.
   carrying `[...]` was read as a style tag and deleted. All three are now
   escaped; `--format json` is unchanged.
   ([#784](https://github.com/ronsse/trellis-ai/pull/784) follow-up 1)
+- **`admin smoke-test`'s text mode no longer crashes on a non-dict readyz
+  `backends`.** A `/readyz` body whose `backends` is a list or a string (a
+  server or proxy that is not Trellis) raised `AttributeError` in text mode
+  while `--format json` printed it. Text mode now skips the backend rows for
+  such a value, as it already did for a non-dict backend entry; json still
+  shows it raw, and both formats exit with the same code.
+  (follow-up F1 from [#788](https://github.com/ronsse/trellis-ai/pull/788))
 - **`trellis admin migrate-provenance` prints each per-edge error
   verbatim.** An error line carries the store's exception text, which went
   into Rich markup raw, so a `[...]` in it was read as a style tag and
@@ -1475,6 +1482,16 @@ All notable changes to Trellis will be documented in this file.
   call. The classes are now read from `sys.modules` and nothing is
   imported: a driver's exception can only exist once its module is.
   ([#773](https://github.com/ronsse/trellis-ai/pull/773) follow-up 2)
+- **`get_context(sections=...)`, `get_objective_context`, `get_task_context`
+  and `get_sectioned_context` report a failed retrieval axis too.** These
+  four share `_sectioned_context`, the one helper #783 left silent: a
+  failed axis reached neither the markdown reply nor any JSON block, so the
+  gap #783 closed for the flat path and the sectioned REST route stayed
+  open on these MCP tools. Same one-line note, same `describe_axes` /
+  `format_failed_axes_note` helpers, same header placement (after
+  `pack_id`, before the withholding note, outside the token budget) as the
+  flat path; a clean reply is unchanged.
+  ([#783](https://github.com/ronsse/trellis-ai/pull/783) follow-up)
 
 ## [0.9.0] - 2026-05-13
 
