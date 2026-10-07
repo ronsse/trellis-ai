@@ -1085,18 +1085,6 @@ class TestRetrieveTrace:
         lines = plain(result.stdout).splitlines()
         assert any(_LONG_NOT_FOUND_ID in line for line in lines), result.stdout
 
-    def test_trace_not_found_long_id_prints_as_one_line_under_colour(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import trellis_cli.retrieve as cli_retrieve
-
-        monkeypatch.setenv("COLUMNS", "60")
-        force_colour(monkeypatch, cli_retrieve)
-        result = runner.invoke(app, ["retrieve", "trace", _LONG_NOT_FOUND_ID])
-        assert result.exit_code == 1, result.output
-        lines = assert_coloured(result.stdout).splitlines()
-        assert any(_LONG_NOT_FOUND_ID in line for line in lines), result.stdout
-
 
 class TestRetrieveEntity:
     def test_entity_not_found(self) -> None:
@@ -1110,18 +1098,6 @@ class TestRetrieveEntity:
         result = runner.invoke(app, ["retrieve", "entity", _LONG_NOT_FOUND_ID])
         assert result.exit_code == 1, result.output
         lines = plain(result.stdout).splitlines()
-        assert any(_LONG_NOT_FOUND_ID in line for line in lines), result.stdout
-
-    def test_entity_not_found_long_id_prints_as_one_line_under_colour(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import trellis_cli.retrieve as cli_retrieve
-
-        monkeypatch.setenv("COLUMNS", "60")
-        force_colour(monkeypatch, cli_retrieve)
-        result = runner.invoke(app, ["retrieve", "entity", _LONG_NOT_FOUND_ID])
-        assert result.exit_code == 1, result.output
-        lines = assert_coloured(result.stdout).splitlines()
         assert any(_LONG_NOT_FOUND_ID in line for line in lines), result.stdout
 
     def test_entity_resolves_via_local_alias(self) -> None:

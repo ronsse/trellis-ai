@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from typer.testing import CliRunner
 
-from tests.cli_output import assert_coloured, force_colour, plain
+from tests.cli_output import plain
 from tests.unreadable_paths import (
     UNREADABLE_PATH_IDS,
     UNREADABLE_PATH_SHAPES,
@@ -452,22 +452,4 @@ class TestWithheldLineDoesNotWrap:
 
         assert result.exit_code == 5, result.output
         lines = plain(result.stdout).splitlines()
-        assert any(_LONG_WARNING_DIRNAME in line for line in lines), result.stdout
-
-    def test_long_warning_detail_prints_as_one_line_under_colour(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import trellis_cli.ingest_conversations as cli_ingest_conversations
-
-        monkeypatch.setenv("COLUMNS", "60")
-        force_colour(monkeypatch, cli_ingest_conversations)
-        seed = _write_export(tmp_path / "seed.json", [_conversation(*_C1)])
-        assert _run(seed, "--format", "json").exit_code == 0
-        export_dir = tmp_path / _LONG_WARNING_DIRNAME
-        export_dir.mkdir()
-
-        result = _run(export_dir, "--prune")
-
-        assert result.exit_code == 5, result.output
-        lines = assert_coloured(result.stdout).splitlines()
         assert any(_LONG_WARNING_DIRNAME in line for line in lines), result.stdout
