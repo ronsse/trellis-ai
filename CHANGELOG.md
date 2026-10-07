@@ -1577,21 +1577,12 @@ All notable changes to Trellis will be documented in this file.
   line for an axis named in `axes.failed`, but a `misconfigured` semantic axis
   (an embedder resolved and the vector backend never initialised) never lands
   in that list — it's absent from `axes.available` entirely — so an agent on
-  MCP got a silent keyword-and-graph-only pack while REST's `axes.semantic`
+  MCP heard nothing of it while REST's `axes.semantic`
   and the CLI's text sentence both reported the gap. The same tools now add a
   second, independent `**Semantic retrieval misconfigured:**` line for that
   state, reusing the one `describe_axes` report both lines are built from; a
   clean pack, or one with only a failed axis, is unchanged.
   (follow-up F2 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
-- **The misconfigured-semantic-axis sentence no longer claims a result mix
-  that didn't happen.** Both the MCP line (`format_misconfigured_semantic_note`)
-  and the CLI's `SEMANTIC_AXIS_NOTES["misconfigured"]` said "results are
-  keyword and graph only" — false whenever keyword or graph also failed in
-  the same build, which a reply could show right next to it as
-  `**Retrieval axis failed:** keyword.`. Both now say only what's true in
-  every case: the vector store did not initialise, so the pack has no
-  semantic results. Wording only; nothing about when either line prints
-  changed. (finding 9 from the [#805](https://github.com/ronsse/trellis-ai/pull/805) gate)
 
 ## [0.9.0] - 2026-05-13
 
