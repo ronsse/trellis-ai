@@ -51,14 +51,14 @@ pytest tests/unit/stores/test_graph_store.py::test_upsert_and_get_node -v
 
 ### Five Packages, One Core
 
-All packages depend on `trellis` (core library) and share configuration via `StoreRegistry.from_config_dir()` reading `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`) or env vars.
+All but `trellis_sdk` depend on `trellis` (core library) and share configuration via `StoreRegistry.from_config_dir()` reading `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`) or env vars.
 
 | Package | Entry Point | Access Pattern |
 |---------|-------------|----------------|
 | `trellis` | (library) | Schemas, stores, mutation executor, retrieval, MCP server |
 | `trellis_cli` | `trellis` | Direct imports + StoreRegistry |
 | `trellis_api` | `trellis-api` | StoreRegistry in FastAPI lifespan + `Depends()` injection |
-| `trellis_sdk` | (library) | **HTTP-only**: httpx to REST API; no runtime `trellis` import (test_isolation.py) |
+| `trellis_sdk` | (library) | **HTTP-only**: httpx to REST API; no `trellis` import (`test_isolation.py`) |
 | `trellis_workers` | (library) | Direct imports; submits Commands to MutationExecutor |
 
 ### Governed Mutation Pipeline (`src/trellis/mutate/`)
