@@ -1383,6 +1383,13 @@ All notable changes to Trellis will be documented in this file.
   one's row; a write on a connection already in a transaction joins it.
   Duplicate rows already stored stay.
   ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 2)
+- **6 more red CLI failure lines no longer hard-wrap.** Each prints an id,
+  path or error text from a helper whose caller then exits non-zero, so the
+  soft-wrap rule cannot see it: `admin install-skills`, `admin
+  check-extractors`, `admin smoke-test` (x2), `worker embed-traces` and
+  `ingest corpus --prune`. A hand-listed roster test pins these and two
+  earlier hand-wrapped lines of the same shape.
+  ([#771](https://github.com/ronsse/trellis-ai/pull/771) follow-ups 1 and 3)
 - **A Postgres or Bolt driver error no longer escapes `MutationExecutor`.**
   A Postgres graph store's `psycopg.Error`, or a Neo4j or ArcadeDB store's
   `DriverError`/`Neo4jError`, raised unmapped from a handler now yields a

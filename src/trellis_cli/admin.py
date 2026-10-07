@@ -994,7 +994,10 @@ def _print_skills_summary(
                 f"    [dim]skipped[/dim] {name} (already present; --force to overwrite)"
             )
         elif status == "failed":
-            console.print(f"    [red]failed[/red] {name}: {entry.get('error', '')}")
+            console.print(
+                f"    [red]failed[/red] {name}: {entry.get('error', '')}",
+                soft_wrap=True,
+            )
         else:
             console.print(f"    [green]{status}[/green] {name}")
 
@@ -1408,7 +1411,8 @@ def _print_check_extractors_report(report: dict[str, Any]) -> None:
     else:
         suffix = f" ({via.removesuffix(', ')})" if via else ""
         console.print(
-            f"  [red]MISSING[/red] not configurable from {escape(config_path)}{suffix}"
+            f"  [red]MISSING[/red] not configurable from {escape(config_path)}{suffix}",
+            soft_wrap=True,
         )
     if llm["env_fallback_available"] and llm["env_fallback_applies"]:
         console.print(
@@ -2071,7 +2075,7 @@ def _render_smoke_text(
             line += f"  ({check['latency_ms']}ms)"
         console.print(line)
         if check.get("error"):
-            console.print(f"        [red]{check['error']}[/red]")
+            console.print(f"        [red]{check['error']}[/red]", soft_wrap=True)
         if check.get("note"):
             console.print(f"        [dim]{escape(check['note'])}[/dim]")
         if check.get("reason"):
@@ -2088,7 +2092,9 @@ def _render_smoke_text(
                     detail += f" ({b_latency}ms)"
                 console.print(f"        [{b_style}]{backend}[/{b_style}]: {detail}")
                 if info.get("error"):
-                    console.print(f"          [red]{info['error']}[/red]")
+                    console.print(
+                        f"          [red]{info['error']}[/red]", soft_wrap=True
+                    )
     console.print()
     total = sum(summary.values())
     console.print(
