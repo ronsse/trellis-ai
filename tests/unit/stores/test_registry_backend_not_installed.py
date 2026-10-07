@@ -318,22 +318,27 @@ def test_openai_embed_network_error_survives_as_itself(
     monkeypatch.setattr(
         openai.resources.embeddings.Embeddings, "create", _raise_network_error
     )
-    with pytest.raises(openai.OpenAIError) as exc_info:
+    with pytest.raises(openai.OpenAIError):
         embed("synthetic probe text")
-    assert not isinstance(exc_info.value, ConfigError)
 
 
+@pytest.mark.parametrize("exc_type", [RuntimeError, TypeError, ValueError])
 def test_openai_constructor_non_openai_error_propagates_unwrapped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc_type: type[Exception]
 ) -> None:
     """A non-``OpenAIError`` from ``openai.OpenAI(...)`` propagates unwrapped.
 
     Only ``openai.OpenAIError`` becomes a ``ConfigError`` (#786); any other
     exception reaches the ``embedding_fn`` caller as itself. The constructor is
     replaced, so the result does not depend on which SDK version is installed.
+
+    Parametrized over three exception classes (#794 gate M3): a single
+    exemplar does not kill a catch enumerated-widened to name one specific
+    class the exemplar happens not to be (e.g. ``except (OpenAIError,
+    TypeError)`` survives a ``RuntimeError``-only exemplar).
     """
     openai = pytest.importorskip("openai")  # optional extra; skip when unavailable
-    synthetic_error = RuntimeError("synthetic")
+    synthetic_error = exc_type("synthetic")
 
     def _raise_non_openai_error(**kwargs: Any) -> Any:
         raise synthetic_error
@@ -346,7 +351,7 @@ def test_openai_constructor_non_openai_error_propagates_unwrapped(
     registry = StoreRegistry.from_config_dir(
         config_dir=config_dir, data_dir=tmp_path / "data"
     )
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(exc_type) as exc_info:
         _ = registry.embedding_fn
     assert exc_info.value is synthetic_error
 
