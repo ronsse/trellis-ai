@@ -3902,10 +3902,11 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
     Required stores build eagerly and fail loud. The degradable
     singletons below build best-effort: winning the init race is worth
     it, but a build failure must NOT sink the server — the tool paths
-    already fall back (semantic search → keyword/graph, embed-on-ingest
-    is fail-soft, memory extraction is feature-flagged). Forcing them to
-    succeed would turn graceful degradation into a hard http boot
-    dependency the stdio path never had.
+    handle it at call time (semantic search → keyword/graph, an embedder
+    that failed to resolve is resolved again by each later call and
+    errors while it still fails, embed-on-ingest is fail-soft, memory
+    extraction is feature-flagged). Forcing them to succeed would make
+    each one a hard http boot dependency the stdio path never had.
     """
     for name in _REQUIRED_KNOWLEDGE_STORES:
         getattr(registry.knowledge, name)
