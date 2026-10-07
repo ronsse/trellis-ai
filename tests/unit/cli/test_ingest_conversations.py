@@ -401,17 +401,14 @@ class TestPruneNeedsTheWholeExport:
 
 
 # ---------------------------------------------------------------------------
-# F1 (#777 follow-up): the yellow ``withheld`` line, printed from this
-# module's own ``_render_report`` before ``ingest_conversations`` raises
-# its non-zero exit, carries a title an operator would copy -- same shape
-# as the red ``prune`` line in ``ingest_corpus.py``, which already has
-# ``soft_wrap=True``.
+# The yellow ``withheld`` line, printed from ``_render_report`` before
+# ``ingest_conversations`` exits 5, carries a title an operator would
+# copy, so it passes ``soft_wrap=True``.
 # ---------------------------------------------------------------------------
 
-#: One token, no whitespace, longer than an 80-column console on its own --
-#: a word that length must be split *inside itself* to fit any line, so
-#: Rich hard-wraps it mid-token unless soft_wrap=True leaves it to the
-#: terminal, same as the corpus relpath above.
+#: One token, no whitespace, longer than an 80-column console on its own:
+#: Rich must split it mid-token to fit unless soft_wrap=True leaves the
+#: line to the terminal.
 _LONG_WITHHELD_TITLE = (
     "synthetic-conversation-title-0123456789abcdef0123456789abcdef"
     "0123456789abcdef0123456789abcdef"

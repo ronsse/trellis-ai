@@ -465,10 +465,9 @@ class TestPruneFailsClosed:
 
 
 # ---------------------------------------------------------------------------
-# F1 (#777 follow-up): the yellow ``withheld`` line, printed from
-# ``_render_report`` before ``ingest_corpus`` raises its non-zero exit,
-# carries a relpath an operator would copy -- same shape as the red
-# ``prune`` line above it, which already has ``soft_wrap=True``.
+# The yellow ``withheld`` line, printed from ``_render_report`` before
+# ``ingest_corpus`` exits 5, carries a relpath an operator would copy, so
+# it passes ``soft_wrap=True`` like the red ``prune`` line it follows.
 # ---------------------------------------------------------------------------
 
 #: One token, no whitespace, longer than an 80-column console minus the
