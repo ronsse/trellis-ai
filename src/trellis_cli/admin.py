@@ -995,7 +995,7 @@ def _print_skills_summary(
             )
         elif status == "failed":
             console.print(
-                f"    [red]failed[/red] {name}: {entry.get('error', '')}",
+                f"    [red]failed[/red] {name}: {escape(entry.get('error', ''))}",
                 soft_wrap=True,
             )
         else:
@@ -2075,7 +2075,9 @@ def _render_smoke_text(
             line += f"  ({check['latency_ms']}ms)"
         console.print(line)
         if check.get("error"):
-            console.print(f"        [red]{check['error']}[/red]", soft_wrap=True)
+            console.print(
+                f"        [red]{escape(check['error'])}[/red]", soft_wrap=True
+            )
         if check.get("note"):
             console.print(f"        [dim]{escape(check['note'])}[/dim]")
         if check.get("reason"):
@@ -2093,7 +2095,8 @@ def _render_smoke_text(
                 console.print(f"        [{b_style}]{backend}[/{b_style}]: {detail}")
                 if info.get("error"):
                     console.print(
-                        f"          [red]{info['error']}[/red]", soft_wrap=True
+                        f"          [red]{escape(info['error'])}[/red]",
+                        soft_wrap=True,
                     )
     console.print()
     total = sum(summary.values())

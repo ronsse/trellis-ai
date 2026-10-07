@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from trellis_cli import claude_integration
 from trellis_cli.claude_integration import (
     get_skills_target_dir,
     install_skills,
@@ -203,3 +204,52 @@ class TestInstallSkillsCommand:
             plain(result.stdout).strip()
             == "Error: scope must be 'user' or 'project', got '[user]'"
         )
+
+
+# ---------------------------------------------------------------------------
+# A failed skill copy carries a backend/OS error through
+# ``_print_skills_summary`` (CLAUDE.md: "No copyable handle reaches a Rich
+# renderer raw"). A bracketed substring in that text is parsed as a style
+# tag and deleted unless the value is ``escape()``-d.
+# ---------------------------------------------------------------------------
+
+
+#: Mirrors the shape in CLAUDE.md's F2 finding: a bracketed host-ish token
+#: Rich would otherwise eat as a style tag.
+_UNTRUSTED_COPY_ERROR = "connect failed [db-staging] :warning:"
+
+
+class TestInstallSkillsFailureTextEscaped:
+    @pytest.fixture(autouse=True)
+    def _setup_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+    def _fail_every_copy(self, monkeypatch):
+        def raiser(_src, _dest):
+            raise OSError(_UNTRUSTED_COPY_ERROR)
+
+        monkeypatch.setattr(claude_integration.shutil, "copytree", raiser)
+
+    def test_failed_skill_text_output_keeps_its_brackets(self, monkeypatch):
+        self._fail_every_copy(monkeypatch)
+
+        result = runner.invoke(app, ["admin", "install-skills", "user"])
+
+        assert _UNTRUSTED_COPY_ERROR in plain(result.stdout)
+
+    def test_failed_skill_json_output_keeps_the_error_field_unescaped(
+        self, monkeypatch
+    ):
+        """``--format json`` carries the raw value either way — only the
+        Rich-rendered text path needs escaping. Pins that the fix does not
+        touch the JSON payload."""
+        self._fail_every_copy(monkeypatch)
+
+        result = runner.invoke(
+            app, ["admin", "install-skills", "user", "--format", "json"]
+        )
+
+        data = json.loads(result.stdout.strip())
+        errors = {s["name"]: s["error"] for s in data["skills"]}
+        assert all(err == _UNTRUSTED_COPY_ERROR for err in errors.values())
