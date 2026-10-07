@@ -1356,6 +1356,14 @@ All notable changes to Trellis will be documented in this file.
   line whose exit is raised in a different function from the print is still
   outside the rule; two such lines are wrapped here by hand.
   ([#766](https://github.com/ronsse/trellis-ai/pull/766) follow-ups 1-2)
+- **`sanitize_error_message` rejects a negative `max_len`.** A negative
+  value made `text[:max_len]` keep everything but the last few
+  characters instead of a short prefix, so the returned text could run
+  past the `max_len + 500`-character window the leak heuristics scan —
+  a secret starting beyond that window printed unscanned. No caller
+  passes `max_len` today, so this was unreachable; it now raises
+  `ValueError` for any `max_len < 0`, and `max_len=0` is unchanged.
+  ([#767](https://github.com/ronsse/trellis-ai/pull/767) follow-up 2)
 - **`MutationExecutor` now catches an unmapped Postgres or Bolt driver
   panic the same way it already caught `sqlite3.Error`.** A handler backed
   by a Postgres graph store (`psycopg.Error`) or a Bolt-backed one (Neo4j
