@@ -242,14 +242,10 @@ SEMANTIC_AXIS_NOTES: dict[str, str] = {
     ),
 }
 
-#: ``format_failed_axes_note`` and ``format_misconfigured_semantic_note``
-#: render the markdown-surface notes above as one or two lines. They take
-#: no ``PackBuilder`` (unlike :func:`describe_axes`), so they live in
-#: :mod:`trellis_wire.axes` — imported and re-exported here — the one
-#: source MCP, the CLI and the SDK's HTTP-only markdown all render from,
-#: the same move :mod:`trellis.retrieve.withholding` made for
-#: ``format_withholding_note``. ``tests/unit/wire/test_axes.py`` pins the
-#: identity.
+# ``format_failed_axes_note`` and ``format_misconfigured_semantic_note``
+# take no ``PackBuilder``, so they live in :mod:`trellis_wire.axes`, where
+# the HTTP-only SDK can import them, and are re-exported here for MCP.
+# ``tests/unit/wire/test_axes.py`` pins the identity.
 
 
 __all__ = [

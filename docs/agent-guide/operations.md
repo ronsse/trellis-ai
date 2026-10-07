@@ -1529,7 +1529,7 @@ A `misconfigured` semantic axis (an embedder resolved but the vector backend nev
 
 Same facts as the CLI's `misconfigured` sentence (`SEMANTIC_AXIS_NOTES`), never the exception text. A failed axis and a misconfigured semantic axis are independent states a single build can hit together, so both lines render when both apply; a reply with neither has no such line.
 
-**The Python SDK renders the same two lines from the wire `axes` block**, not from a live `PackBuilder`. `TrellisClient.get_objective_context` / `get_task_context`, sync and async, format their own local markdown (`trellis_sdk._format.format_sectioned_pack_as_markdown`) but no longer ignore the response's `axes` key: `trellis_wire.axes.axis_note_from_payload` parses it defensively and renders the identical wording MCP renders (`format_failed_axes_note` / `format_misconfigured_semantic_note` moved to `trellis_wire.axes`, re-exported unchanged from `trellis.retrieve.builder_factory`). A server old enough to omit `axes` entirely, or a response where it is `null`, renders no note rather than raising. (follow-up F3 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
+**The Python SDK renders the same two lines from the response's `axes` block.** `TrellisClient.get_objective_context` / `get_task_context`, sync and async, pass it to `trellis_wire.axes.axis_note_from_payload`, which renders MCP's wording through the same two formatters (defined in `trellis_wire.axes`, re-exported from `trellis.retrieve.builder_factory`). A response without `axes`, or with `axes: null`, renders no line.
 
 > **This is a CLI contract change.** Before #410 the payload was
 > `{"status", "intent", "domain", "agent_id", "count", "include_chunks", "items"}`

@@ -65,8 +65,7 @@ class TestFormatMisconfiguredSemanticNote:
 
 class TestAxisNoteFromPayload:
     def test_none_renders_nothing(self) -> None:
-        """An older server with no ``axes`` field, or a sectioned request
-        with no sections to report one for — never raises, never notes."""
+        """An older server with no ``axes`` field: never raises, never notes."""
         assert axis_note_from_payload(None) == ""
 
     def test_wrong_shaped_payload_renders_nothing(self) -> None:

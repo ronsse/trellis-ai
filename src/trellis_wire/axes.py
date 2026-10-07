@@ -8,13 +8,10 @@ surface has no JSON ``axes`` block for a caller to fall back on, so it
 renders the same facts as one or two plain-text lines instead — same
 shape and same reasoning as :mod:`trellis_wire.withholding`.
 
-These functions used to live only in
-:mod:`trellis.retrieve.builder_factory`, duplicated by hand into
-:mod:`trellis_sdk._format` the way :mod:`trellis.retrieve.withholding`
-was before it moved. ``trellis.retrieve.builder_factory`` now imports
-and re-exports :func:`format_failed_axes_note` and
-:func:`format_misconfigured_semantic_note` from here, so MCP, the CLI
-and the SDK render byte-identical wording from one source
+:mod:`trellis.retrieve.builder_factory` re-exports
+:func:`format_failed_axes_note` and
+:func:`format_misconfigured_semantic_note` from here, so MCP and the
+SDK render the same wording from one source
 (``tests/unit/wire/test_axes.py`` pins the identity).
 
 :func:`axis_note_from_payload` is the SDK-specific half: it has no
@@ -24,9 +21,8 @@ carries (``trellis_wire.dtos.AxisReportResponse``, serialized). It
 parses that dict defensively, the same posture
 :func:`trellis_wire.withholding.withholding_from_payload` takes: a
 missing or malformed field contributes nothing to the note rather than
-raising, so an older server with no ``axes`` block (or a sectioned
-request with no sections to read one from) renders no note instead of
-breaking the SDK caller.
+raising, so an older server with no ``axes`` block renders no note
+instead of breaking the SDK caller.
 """
 
 from __future__ import annotations
@@ -76,8 +72,7 @@ def axis_note_from_payload(axes: dict[str, Any] | None) -> str:
     ``axes`` is the raw ``axes`` field of a decoded
     ``PackResponse``/``SectionedPackResponse`` JSON body — e.g.
     ``{"available": [...], "ran": [...], "failed": [...], "semantic":
-    "ran"}`` — or ``None`` (a server older than the field, or a
-    sectioned request with no sections to report one for). A failed
+    "ran"}`` — or ``None`` (a server older than the field). A failed
     axis and a misconfigured semantic axis are independent states one
     build can hit together, so both lines render when both apply — the
     same join :func:`trellis.mcp.server._axis_note` does from a live
