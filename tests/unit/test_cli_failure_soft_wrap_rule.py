@@ -26,7 +26,7 @@ SRC = Path(__file__).parents[2] / "src" / "trellis_cli"
 
 #: 74 sites found by a tokenize recount written independently of this scan
 #: (site-for-site equal to it), less classify.py's shadow summary, which
-#: exits ``EXIT_OK``. A floor read off the tree, not computed by the scan.
+#: exits ``EXIT_OK``. Counted outside this scan, never computed by it.
 HAND_READ_FAILURE_LINE_COUNT = 73
 
 #: Spellings this repo raises to end the process.
