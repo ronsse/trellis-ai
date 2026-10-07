@@ -721,6 +721,15 @@ class GraphStoreContractTests:
         _sleep_for_ordering()
         store.upsert_edge("syn-closed-x", "syn-closed-y", "syn_rel", {"v": 2})
 
+        # v2's created_at, read while it is still current. The bulk
+        # re-upsert below must carry it forward onto v3 rather than
+        # stamping a fresh one (follow-up 2 from the #759 gate).
+        v2_current = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel"
+        )
+        assert len(v2_current) == 1
+        v2_created_at = _parse_instant(v2_current[0]["created_at"])
+
         historical_before = store.get_edges(
             "syn-closed-x", direction="outgoing", edge_type="syn_rel", as_of=between
         )
@@ -740,6 +749,68 @@ class GraphStoreContractTests:
                 }
             ]
         )
+
+        historical_after = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel", as_of=between
+        )
+        assert len(historical_after) == 1
+        assert historical_after[0]["valid_from"] == closed_valid_from
+        assert historical_after[0]["valid_to"] == closed_valid_to
+
+        current = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel"
+        )
+        assert len(current) == 1
+        assert current[0]["properties"]["v"] == 3
+        # Instants, not strings: a carried-forward value can come back
+        # through a different wire rendering of the same timestamp
+        # (e.g. ArcadeDB renders one as ``+00:00`` and another as ``Z``)
+        # without the carry having failed.
+        assert _parse_instant(current[0]["created_at"]) == v2_created_at
+
+    def test_upsert_edge_leaves_closed_version_alone(self, store: GraphStore) -> None:
+        """Twin of ``test_upsert_edges_bulk_leaves_closed_version_alone``
+        for the single-row path: closing the current version through
+        :meth:`~trellis.stores.base.graph.GraphStore.upsert_edge` must
+        not touch an already-closed (historical) version of the same
+        edge.
+
+        Dropping the ``valid_to IS NULL`` guard from the single-row
+        close statement (SQLite, Postgres, or the Bolt
+        ``OPTIONAL MATCH``) would re-close every version sharing the
+        edge's ``edge_id`` — including this historical one — and
+        rewrite its ``valid_to``. Follow-up 1 from the #759 gate: the
+        bulk path already pins this guard; the single-row path shares
+        the same close statement shape but had no case of its own.
+        """
+        store.upsert_nodes_bulk(
+            [
+                {"node_id": "syn-closed-x", "node_type": "service", "properties": {}},
+                {"node_id": "syn-closed-y", "node_type": "service", "properties": {}},
+            ]
+        )
+        store.upsert_edge("syn-closed-x", "syn-closed-y", "syn_rel", {"v": 1})
+        _sleep_for_ordering()
+        # A timestamp strictly between the first and second versions
+        # reads back the first version by its (now-closed) valid_to,
+        # once the second upsert_edge below closes it.
+        between = _now()
+        _sleep_for_ordering()
+        store.upsert_edge("syn-closed-x", "syn-closed-y", "syn_rel", {"v": 2})
+
+        historical_before = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel", as_of=between
+        )
+        assert len(historical_before) == 1
+        closed_valid_from = historical_before[0]["valid_from"]
+        closed_valid_to = historical_before[0]["valid_to"]
+        assert closed_valid_to is not None
+
+        _sleep_for_ordering()
+        # The third write goes through upsert_edge (single-row), not
+        # upsert_edges_bulk — that's the only difference from the bulk
+        # case above.
+        store.upsert_edge("syn-closed-x", "syn-closed-y", "syn_rel", {"v": 3})
 
         historical_after = store.get_edges(
             "syn-closed-x", direction="outgoing", edge_type="syn_rel", as_of=between
@@ -2332,6 +2403,22 @@ def _now() -> datetime:
     from trellis.core.base import utc_now
 
     return utc_now()
+
+
+def _parse_instant(value: datetime | str) -> datetime:
+    """Parse a stored timestamp field to an aware ``datetime``.
+
+    Backends disagree on the wire shape: Postgres already returns an
+    aware ``datetime``, while SQLite and the Bolt stores return an ISO
+    string — and a value carried forward unchanged can still come back
+    through a different rendering of the same instant on a later read
+    (ArcadeDB has been observed to render one version's timestamp with
+    a ``+00:00`` offset and another's with a ``Z`` suffix). Comparing
+    parsed instants avoids a spurious mismatch from formatting alone.
+    """
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(value)
 
 
 def _current(store: GraphStore, node_id: str) -> dict[str, Any]:
