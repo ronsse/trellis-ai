@@ -39,6 +39,23 @@ the shown row of each endpoint, so such a node does not double an edge
 written from or to it; they close the edge's current version only where
 it joins those two rows.
 
+``upsert_edge`` has its own race, separate from the node-duplication one
+above: an unprotected ``OPTIONAL MATCH`` for the existing edge followed
+by ``CREATE`` lets two concurrent writers on the same
+``(source_id, target_id, edge_type)`` both observe "no current edge" and
+both create one, leaving two current rows for one logical edge (there is
+no uniqueness constraint to fall back on, because historical rows share
+the same key). ``upsert_edge`` write-locks the source endpoint's shown
+row before the read, with the scratch-property write
+``update_node_if_current`` uses, so a second writer waits for the first
+to commit and then reads its row as ``old``. On ArcadeDB the engine's
+optimistic-concurrency retry already serializes the race. On Neo4j the
+source-first lock lets concurrent writes of ``x->y`` and ``y->x``
+deadlock; the driver retries the loser. Only single-row writers take the
+lock: ``upsert_edges_bulk`` does not (it would need a sorted per-row lock
+order, like Postgres's bulk edge path), so a bulk write racing another
+writer of the same edge can still leave two current rows.
+
 Per-backend subclasses override the **seams**:
 
 - ``SCHEMA_STATEMENTS`` (class attribute) — DDL run by
@@ -1399,6 +1416,18 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         WITH collect(DISTINCT s) AS source_rows, collect(DISTINCT t) AS target_rows
         WITH {_shown_row("source_rows")} AS s, {_shown_row("target_rows")} AS t
         WHERE s IS NOT NULL
+        // Write-lock the source endpoint's shown row before reading for an
+        // existing edge, so a second upsert_edge on the same (source,
+        // target, edge_type) waits here for the first to commit, then reads
+        // its row as `old` instead of racing it to CREATE. The lock writes
+        // a scratch property, never valid_to: a SET's right-hand side is
+        // read before the lock is granted, so `SET s.valid_to = s.valid_to`
+        // would write a stale null over a concurrent upsert_node's close
+        // and reopen the row. Cypher needs a `WITH` between this write and
+        // the read that follows.
+        SET s._cas_lock = true
+        REMOVE s._cas_lock
+        WITH s, t
         OPTIONAL MATCH (s)-[old:EDGE {{edge_type: $edge_type}}]->(t)
           WHERE old.valid_to IS NULL
         WITH s, t, old,

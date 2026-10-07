@@ -1433,6 +1433,26 @@ All notable changes to Trellis will be documented in this file.
   reply is unchanged. `get_context(sections=...)`, `get_objective_context`,
   `get_task_context` and `get_sectioned_context` do not report it yet.
   ([#783](https://github.com/ronsse/trellis-ai/pull/783))
+- **`BoltOpenCypherGraphStore.upsert_edge` (Neo4j and ArcadeDB) leaves one
+  current row per logical edge under concurrency.** Two concurrent writers
+  on the same `(source_id, target_id, edge_type)` could both read "no
+  current edge" and both create one. `upsert_edge` now write-locks the
+  source endpoint's current row before that read, so the second writer
+  reads the first one's row. `upsert_edges_bulk` takes no such lock, so a
+  bulk write racing another writer of the same edge can still duplicate it.
+  ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 2, also
+  the Bolt item from the [#774](https://github.com/ronsse/trellis-ai/pull/774) gate)
+- **A missing OpenAI API key answers like a config error, not a 500.**
+  `embeddings: provider: openai` with the `llm-openai` extra installed and
+  no key anywhere let the SDK client constructor's untyped
+  `openai.OpenAIError` escape, so every `POST /api/v1/packs` answered
+  `500` and the CLI exited `1` uncaught. It is now a `ConfigError` naming
+  `embeddings.api_key_env`, `embeddings.api_key` and `OPENAI_API_KEY`,
+  never the SDK's wording or a key value: REST answers `409`
+  `config_error`, the CLI exits `5`, and MCP `get_context` keeps
+  `INTERNAL_ERROR` with that message. A failed embeddings call still
+  raises `openai.OpenAIError`.
+  (follow-up F-a from [#779](https://github.com/ronsse/trellis-ai/pull/779))
 - **`admin smoke-test`'s header and readyz backend rows keep a bracketed URL
   or backend name intact.** The header's URL and a readyz backend's name and
   status/latency detail went into Rich markup raw, so an IPv6 host led by a
