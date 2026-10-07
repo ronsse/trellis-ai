@@ -323,6 +323,35 @@ def test_openai_embed_network_error_survives_as_itself(
     assert not isinstance(exc_info.value, ConfigError)
 
 
+def test_openai_constructor_non_openai_error_propagates_unwrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-``OpenAIError`` from ``openai.OpenAI(...)`` is not a ``ConfigError``.
+
+    Only ``openai.OpenAIError`` is translated (#786); any other exception the
+    constructor might raise — a synthetic stand-in here, so the test holds
+    whatever the installed SDK version actually raises in practice — reaches
+    the ``embedding_fn`` property caller unchanged.
+    """
+    openai = pytest.importorskip("openai")  # optional extra; skip when unavailable
+
+    def _raise_non_openai_error(**kwargs: Any) -> Any:
+        synthetic_msg = "synthetic"
+        raise RuntimeError(synthetic_msg)
+
+    monkeypatch.setattr(openai, "OpenAI", _raise_non_openai_error)
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        embeddings={"provider": "openai", "api_key": "sk-test-1234"},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(RuntimeError, match="synthetic") as exc_info:
+        _ = registry.embedding_fn
+    assert not isinstance(exc_info.value, ConfigError)
+
+
 # -- a failed resolution is not cached (#775 follow-up F1) -----------------
 
 _UNIMPORTABLE_PATH = "no_such_module_for_embedding_fn_cache_test.embed"
