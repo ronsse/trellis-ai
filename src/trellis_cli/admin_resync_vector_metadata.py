@@ -179,7 +179,7 @@ def register(admin_app: typer.Typer) -> None:
             if output_format == "json":
                 print(json.dumps({"status": "error", "message": str(exc)}))
             else:
-                console.print(f"[red]{escape(str(exc))}[/red]")
+                console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
             raise typer.Exit(code=EXIT_INTERNAL) from exc
 
         if output_format == "json":

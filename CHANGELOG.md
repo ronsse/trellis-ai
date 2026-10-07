@@ -1311,6 +1311,14 @@ All notable changes to Trellis will be documented in this file.
   fails the build on a new one. An exception a tool does not catch, such as
   one from `save_knowledge`'s write, still reaches the caller through
   FastMCP's generic error. (trellis-ai#748)
+- **49 more red CLI lines are no longer hard-wrapped at the console width.**
+  Each now passes `soft_wrap=True`, and `extract refresh`'s
+  undeclared-source line also escapes the source name. A new rule,
+  `tests/unit/test_cli_failure_soft_wrap_rule.py`, fails on an unwrapped red
+  `console.print` with an interpolation that a non-zero exit follows in its
+  own or an enclosing block; an exit under a later `if`, an `Exit` a helper
+  returns and a conditional-expression message are not policed yet.
+  ([#766](https://github.com/ronsse/trellis-ai/pull/766))
 
 ## [0.9.0] - 2026-05-13
 
