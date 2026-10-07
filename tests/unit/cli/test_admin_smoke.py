@@ -336,26 +336,64 @@ def _readyz_backend_fails(request: httpx.Request) -> httpx.Response:
     return _healthy_handler("secret")(request)
 
 
+def _readyz_backend_name_mangled(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/readyz":
+        backend = {"status": "degraded [warm]"}
+        return httpx.Response(
+            503, json={"status": "degraded", "backends": {"store [shard-a]": backend}}
+        )
+    return _healthy_handler("secret")(request)
+
+
+_IPV6_URL = "http://[fd00::1]:8420"
+
+# handler, extra CLI args, expected exit code, substrings that must survive verbatim.
+_SMOKE_TEXT_SCENARIOS: dict[
+    str, tuple[Callable[[httpx.Request], httpx.Response], tuple[str, ...], int, tuple[str, ...]]
+] = {
+    "check": (_healthz_raises, (), 1, (_BRACKETED_ERROR,)),
+    "backend": (_readyz_backend_fails, (), 1, (_BRACKETED_ERROR,)),
+    "url": (_healthy_handler("secret"), ("--url", _IPV6_URL), 0, (_IPV6_URL,)),
+    "backend_name": (
+        _readyz_backend_name_mangled,
+        (),
+        1,
+        ("store [shard-a]", "degraded [warm]"),
+    ),
+}
+
+
 class TestSmokeTestErrorTextVerbatim:
     @pytest.mark.parametrize("output_format", ["text", "json"])
     @pytest.mark.parametrize(
-        "handler", [_healthz_raises, _readyz_backend_fails], ids=["check", "backend"]
+        "scenario", list(_SMOKE_TEXT_SCENARIOS), ids=list(_SMOKE_TEXT_SCENARIOS)
     )
     def test_error_keeps_its_brackets(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        handler: Callable[[httpx.Request], httpx.Response],
+        scenario: str,
         output_format: str,
     ) -> None:
+        handler, extra, expected_exit, needles = _SMOKE_TEXT_SCENARIOS[scenario]
         _patch_client(monkeypatch, handler)
 
         result = runner.invoke(
             app,
-            ["admin", "smoke-test", "--api-key", "secret", "--format", output_format],
+            [
+                "admin",
+                "smoke-test",
+                "--api-key",
+                "secret",
+                "--format",
+                output_format,
+                *extra,
+            ],
         )
 
-        assert result.exit_code == 1, result.stdout
-        assert _BRACKETED_ERROR in plain(result.stdout)
+        assert result.exit_code == expected_exit, result.stdout
+        text = plain(result.stdout)
+        for needle in needles:
+            assert needle in text
 
 
 # ---------------------------------------------------------------------------
