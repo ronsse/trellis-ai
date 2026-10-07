@@ -12,11 +12,16 @@ does (LLM call, tool sequence, etc.) — the retrieve/record bookends stay
 the same.
 
 Run:
+    trellis admin init                 # one-time
+    trellis admin serve                # in another terminal (defaults to :8420)
     python examples/retrieve_before_task.py
+    # or point at a different server:
+    #   TRELLIS_URL=http://host:port python examples/retrieve_before_task.py
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from trellis_sdk import TrellisClient
@@ -43,7 +48,9 @@ def do_the_work(intent: str, context_md: str) -> dict[str, Any]:
 
 
 def run(intent: str, domain: str | None = None) -> str:
-    client = TrellisClient()
+    client = TrellisClient(
+        base_url=os.environ.get("TRELLIS_URL", "http://localhost:8420")
+    )
 
     # 1. RETRIEVE — pull a token-budgeted markdown summary of relevant context.
     context_md = get_context_for_task(
@@ -56,7 +63,7 @@ def run(intent: str, domain: str | None = None) -> str:
     # 3. RECORD — write a trace so this work is searchable next time.
     trace_id = client.ingest_trace(
         {
-            "source": "examples.retrieve_before_task",
+            "source": "agent",
             "intent": intent,
             "steps": outcome["steps"],
             "outcome": {
