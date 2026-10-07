@@ -85,7 +85,7 @@ pack = client.assemble_pack(
     max_tokens=2000,
 )
 for item in pack["items"]:
-    print(item["item_id"], item["content"][:100])
+    print(item["item_id"], item["excerpt"][:100])
 ```
 
 ## Limitations
