@@ -2098,7 +2098,7 @@ def _render_smoke_text(
                 )
                 if info.get("error"):
                     console.print(
-                        f"          [red]{escape(info['error'])}[/red]",
+                        f"          [red]{escape(str(info['error']))}[/red]",
                         soft_wrap=True,
                     )
     console.print()
