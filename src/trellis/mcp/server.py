@@ -1168,13 +1168,9 @@ def _sectioned_context(
             }
             for s in sectioned_pack.sections
         ]
-        # Same axis report the sectioned REST route computes (#775/#783):
-        # build_sectioned() runs every strategy once over one pool and gives
-        # every section the identical strategies_used list, so the first
-        # section's is as good as any. No section (an empty ``sections``
-        # request, unreachable from every caller of this helper today, since
-        # each validates a non-empty list before calling in) means nothing
-        # to report, the same posture the REST route takes.
+        # As on the sectioned REST route: every section carries the one
+        # strategies_used list build_sectioned() computed, so the first
+        # section's stands for all. No caller passes sections=[].
         axis_note = ""
         if sectioned_pack.sections:
             axes = describe_axes(

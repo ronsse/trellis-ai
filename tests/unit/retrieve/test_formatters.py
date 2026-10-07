@@ -126,10 +126,8 @@ def test_format_sectioned_pack_omits_relevance_score():
 
 
 def test_format_sectioned_pack_axis_note_appears_once_across_sections():
-    """``axis_note`` is a header-level fact about the whole pack, not a
-    per-section one -- it must render exactly once no matter how many
-    sections carry items (mcp-sectioned-tools-report-failed-axis follow-up
-    to the #783 gate)."""
+    """``axis_note`` describes the whole pack, so it renders once however
+    many sections carry items."""
     sections = [
         {
             "name": "Domain",

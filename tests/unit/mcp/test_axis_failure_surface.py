@@ -12,16 +12,9 @@ back on, so a caller who never inspects
    one-liner, and the formatter-rendered empty pack the holdout uses;
 2. a clean pack's reply carries no such line and its header shape is
    unchanged;
-3. the same line reaches the four tools built on ``_sectioned_context``
+3. both hold for the four tools built on ``_sectioned_context``
    (``get_context(sections=...)``, ``get_objective_context``,
-   ``get_task_context``, ``get_sectioned_context``) -- #783 shipped the flat
-   note and the sectioned REST ``axes`` block but left these four MCP tools
-   silent (#783 gate, F1).
-
-Out of scope (per the #783 gate's remaining findings): a misconfigured
-semantic axis (F2), the SDK's remote markdown rendering (F3), and
-``sections=[]`` exposing ``strategies_used`` (F4) -- none of those are
-touched here.
+   ``get_task_context``, ``get_sectioned_context``).
 """
 
 from __future__ import annotations
@@ -208,11 +201,10 @@ _SECTIONED_CALLS: dict[str, Callable[[], str]] = {
 def test_sectioned_tools_report_failed_axis_in_exactly_one_line(
     temp_registry: StoreRegistry, monkeypatch, tool_name: str
 ) -> None:
-    """``get_context(sections=...)``, ``get_objective_context``,
-    ``get_task_context`` and ``get_sectioned_context`` all route through
-    ``_sectioned_context`` and, before this change, absorbed a failed axis
-    silently -- the same defect the tests above pinned as fixed on the flat
-    path. One line, axis name only, no exception text."""
+    """One line, axis name only, no exception text, as on the flat path.
+
+    The objective and task presets filter out the fixture's item, so those
+    two cases also pin the reply whose every section is empty."""
     monkeypatch.setattr(
         server_mod, "_build_pack_builder", _builder_one_failing_one_surviving
     )
@@ -228,9 +220,8 @@ def test_sectioned_tools_report_failed_axis_in_exactly_one_line(
 def test_get_sectioned_context_clean_pack_has_no_axis_note(
     temp_registry: StoreRegistry,
 ) -> None:
-    """A clean pack's header shape on a sectioned tool is unchanged by this
-    fix -- no axis note line is inserted, mirroring the flat-path pin
-    above."""
+    """A clean reply gains no line, blank or otherwise: the separator after
+    ``pack_id`` runs straight into the first section heading."""
     store = temp_registry.knowledge.document_store
     store.put(
         "doc-a",
@@ -243,8 +234,5 @@ def test_get_sectioned_context_clean_pack_has_no_axis_note(
 
     assert lines[0] == f"# Context for: {INTENT}"
     assert lines[1].startswith("**pack_id:**")
-    # No axis note and no withholding note inserted: the header's third line
-    # is the blank separator that precedes the first section heading, exactly
-    # as it was before this change.
-    assert lines[2] == ""
+    assert lines[2:4] == ["", "## docs"]
     assert "Retrieval axis failed" not in result

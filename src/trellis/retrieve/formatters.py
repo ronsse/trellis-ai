@@ -745,11 +745,7 @@ def format_sectioned_pack_as_markdown(
             whole candidate pool — rendered in the header, above the first
             section, for the reason given in
             :func:`format_pack_as_markdown`.
-        axis_note: One line naming a failed retrieval axis (from
-            :func:`~trellis.retrieve.builder_factory.format_failed_axes_note`),
-            or ``""`` when none failed. Same header placement, relative to
-            ``withholding``, and not-charged-to-budget rule as
-            :func:`format_pack_as_markdown`.
+        axis_note: As in :func:`format_pack_as_markdown`.
 
     Returns:
         Markdown-formatted string within token budget.
