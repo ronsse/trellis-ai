@@ -1300,21 +1300,14 @@ All notable changes to Trellis will be documented in this file.
   filter key, so it names the literal facet; a NUL now raises `ValueError`
   before any SQL runs.
   ([#756](https://github.com/ronsse/trellis-ai/pull/756) follow-up 1)
-- **Every remaining CLI failure line is wrapped, and a rule now stops a new
-  one from going unwrapped.** #750 and #758 each hand-fixed a batch of
-  these lines; each left same-shaped ones behind, and nothing caught the
-  next batch forming. The 49 lines the #758 gate's own scan found still
-  missing `soft_wrap=True` — a `*console.print` of a `[red]`/`[bold red]`
-  f-string with an interpolation, followed by a non-zero `typer.Exit` /
-  `SystemExit` — now carry it; text, escaping, exit codes and `--format
-  json` output are unchanged. `extract_refresh.py`'s `Source {source!r}
-  not declared in ...` line (one of the 49) also gets `escape(repr(...))`,
-  matching the house pattern used at its neighboring sites — an identical
-  `[yellow]` line three statements below was left as a follow-up. A new
-  AST rule, `tests/unit/test_cli_failure_soft_wrap_rule.py`, now fails if a
-  future failure line goes unwrapped.
-  ([#766](https://github.com/ronsse/trellis-ai/pull/766), follow-up to
-  [#758](https://github.com/ronsse/trellis-ai/pull/758))
+- **49 more red CLI lines are no longer hard-wrapped at the console width.**
+  Each now passes `soft_wrap=True`, and `extract refresh`'s
+  undeclared-source line also escapes the source name. A new rule,
+  `tests/unit/test_cli_failure_soft_wrap_rule.py`, fails on an unwrapped red
+  `console.print` with an interpolation that a non-zero exit follows in its
+  own or an enclosing block; an exit under a later `if`, an `Exit` a helper
+  returns and a conditional-expression message are not policed yet.
+  ([#766](https://github.com/ronsse/trellis-ai/pull/766))
 
 ## [0.9.0] - 2026-05-13
 
