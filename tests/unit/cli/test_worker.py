@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
 from tests.document_recency import fake_document_clock
+from tests.recovery_command import expected_recovery
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.errors import BackendNotInstalledError
 from trellis.llm import LLMResponse, Message
@@ -863,9 +864,7 @@ class TestCurateSurvivesADegradedAdvisoryStore:
         assert data["status"] == "degraded"
         assert data["advisory_store_degraded"] is not None
         assert data["advisory_store_degraded"]["reason"] == "malformed_json"
-        assert (
-            data["advisory_store_degraded"]["recovery"] == f"mv {path} {path}.corrupt"
-        )
+        assert data["advisory_store_degraded"]["recovery"] == expected_recovery(path)
         assert "advisories" in data["skipped_stages"]
         # The rest of the cycle still ran — this is a skip, not a crash.
         assert data["learning_observations"] >= 3
@@ -886,7 +885,7 @@ class TestCurateSurvivesADegradedAdvisoryStore:
         assert result.exit_code == EXIT_STORE, result.output
         rendered = plain(result.output)
         assert "ADVISORY STORE DEGRADED" in rendered
-        assert f"mv {path}" in rendered.replace("\n", "")
+        assert expected_recovery(path) in rendered.replace("\n", "")
 
     def test_a_clean_cycle_carries_no_degradation(
         self, tmp_path: Path, temp_stores: StoreRegistry
