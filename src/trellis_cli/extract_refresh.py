@@ -600,7 +600,8 @@ def _print_backfill(
         if row["entities"] or row["edges"]:
             console.print(
                 f"    - {escape(row['trace_id'])} ({escape(row['domain'] or '-')}): "
-                f"{row['entities']} entities, {row['edges']} edges"
+                f"{row['entities']} entities, {row['edges']} edges",
+                soft_wrap=True,
             )
 
 

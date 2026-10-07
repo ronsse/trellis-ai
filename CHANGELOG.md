@@ -1611,6 +1611,15 @@ All notable changes to Trellis will be documented in this file.
   surfaces give the same reason for the same input and a `200` sectioned
   response always has at least one section to read `axes` from.
   (follow-up F4 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
+- **`trellis extract traces`'s per-trace backfill row keeps a long domain on
+  one line.** `_print_backfill` prints `- {trace_id} ({domain}): N
+  entities, M edges` for every trace with drafts, and those counts come
+  from extraction, before the governed batch runs — so the row still
+  prints on a refused (deny-all) backfill. It is uncoloured and printed in
+  a different function than the one that exits non-zero after it, past the
+  red-only soft-wrap scan. It now passes `soft_wrap=True` and is listed by
+  hand beside that scan (`CROSS_FUNCTION_FAILURE_LINES`, 17 -> 18).
+  (follow-up from the [#811](https://github.com/ronsse/trellis-ai/pull/811) gate)
 
 ## [0.9.0] - 2026-05-13
 
