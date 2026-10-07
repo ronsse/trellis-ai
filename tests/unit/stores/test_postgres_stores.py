@@ -233,6 +233,25 @@ def _wait_for_insert_lock_wait(dsn: str, table: str) -> bool:
     return False
 
 
+def _wait_for_select_for_update_lock_wait(dsn: str, table: str) -> bool:
+    """Poll until a ``SELECT ... FOR UPDATE`` on ``table`` waits on a lock
+    (20 s cap).
+    """
+    sql = (
+        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+        " AND wait_event_type = 'Lock'"
+        " AND query LIKE '%%FROM ' || %s || '%%FOR UPDATE%%'"
+    )
+    deadline = time.monotonic() + 20
+    with psycopg.connect(dsn, autocommit=True) as mon:
+        while time.monotonic() < deadline:
+            row = mon.execute(sql, (table,)).fetchone()
+            if row and row[0]:
+                return True
+            time.sleep(0.005)
+    return False
+
+
 def _rows_left(dsn: str, node_id: str) -> dict[str, int]:
     """Count the raw rows, any version, each table still holds for a node."""
     queries = {
@@ -419,6 +438,70 @@ class TestPostgresGraphStore:
         assert len(current) == 1
         assert current[0]["properties"] == {"writer": "a"}
 
+    def test_upsert_node_update_race_becomes_new_version(self, store) -> None:
+        """Two writers updating the same *existing* node race on
+        ``idx_nodes_current`` too, not only the create case: the
+        ``FOR UPDATE`` waiter re-checks the specific row it blocked on,
+        finds it closed, and cannot see the row inserted while it waited --
+        so it INSERTs its own, collides with that row on
+        ``idx_nodes_current``, and retries.
+        """
+        node_id = "race-node-synthetic-update"
+        store.upsert_node(node_id, "synthetic_type", {"writer": "seed"})
+
+        # The "other writer": take the row lock, close it and insert its
+        # own new current version, all uncommitted -- so the store's own
+        # ``FOR UPDATE`` read blocks on this held lock instead of finding an
+        # already-closed row outright.
+        other = psycopg.connect(PG_DSN)
+        other.execute(
+            "SELECT 1 FROM nodes WHERE node_id = %s AND valid_to IS NULL FOR UPDATE",
+            (node_id,),
+        )
+        (now_other,) = other.execute("SELECT now()").fetchone()
+        other.execute(
+            "UPDATE nodes SET valid_to = %s WHERE node_id = %s AND valid_to IS NULL",
+            (now_other, node_id),
+        )
+        other.execute(
+            "INSERT INTO nodes (version_id, node_id, node_type, created_at,"
+            " updated_at, valid_from)"
+            " VALUES ('race-other-writer-update-v1', %s, 'synthetic_type',"
+            " %s, %s, %s)",
+            (node_id, now_other, now_other, now_other),
+        )
+
+        outcome: dict[str, Any] = {}
+
+        def call_upsert() -> None:
+            try:
+                outcome["node_id"] = store.upsert_node(
+                    node_id, "synthetic_type", {"writer": "a"}
+                )
+            except Exception as exc:
+                outcome["error"] = exc
+
+        writer_a = threading.Thread(target=call_upsert)
+        writer_a.start()
+
+        try:
+            waited = _wait_for_select_for_update_lock_wait(PG_DSN, "nodes")
+            other.commit()
+            writer_a.join(timeout=20)
+        finally:
+            other.close()
+
+        assert waited, "writer A never blocked on writer B's held row lock"
+        assert not writer_a.is_alive()
+        assert "error" not in outcome, outcome.get("error")
+        assert outcome["node_id"] == node_id
+
+        history = store.get_node_history(node_id)
+        assert len(history) == 3
+        current = [v for v in history if v["valid_to"] is None]
+        assert len(current) == 1
+        assert current[0]["properties"] == {"writer": "a"}
+
     def test_upsert_node_other_unique_violation_is_not_retried(
         self, store, monkeypatch
     ) -> None:
@@ -498,6 +581,41 @@ class TestPostgresGraphStore:
                 [{"node_id": node_id, "node_type": "t", "properties": {}}]
             )
         assert node_id not in str(exc_info.value)
+
+    def test_upsert_nodes_bulk_other_unique_violation_is_not_caught(
+        self, store, monkeypatch
+    ) -> None:
+        """A bulk ``UniqueViolation`` on a constraint *other* than
+        ``idx_nodes_current`` must propagate unchanged, never be mistaken
+        for the bulk create race.
+
+        Forced by making both rows in one batch reuse the same
+        ``version_id`` (the table's real primary key) -- a genuine,
+        unrelated ``UniqueViolation`` from Postgres rather than a
+        fabricated one.
+        """
+        import trellis.stores.postgres.graph as graph_mod
+
+        monkeypatch.setattr(
+            graph_mod, "generate_ulid", lambda: "fixed-bulk-version-id-synthetic"
+        )
+
+        with pytest.raises(psycopg.errors.UniqueViolation) as exc_info:
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": "race-node-synthetic-bulk-pk-1",
+                        "node_type": "t",
+                        "properties": {},
+                    },
+                    {
+                        "node_id": "race-node-synthetic-bulk-pk-2",
+                        "node_type": "t",
+                        "properties": {},
+                    },
+                ]
+            )
+        assert exc_info.value.diag.constraint_name == "nodes_pkey"
 
     def test_upsert_and_get_edge(self, store) -> None:
         store.upsert_node("n1", "person", {})
