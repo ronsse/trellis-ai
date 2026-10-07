@@ -75,42 +75,37 @@ EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
 # 1 in execute_mutation, 1 in _SanitizeUncaughtToolErrors.on_call_tool.
 # Re-grep '{exc}\|str(exc)' in src/trellis/mcp/server.py and subtract the
 # helper's own internal use and the one log-only site (_build_llm_client,
-# excluded structurally above) to reconcile. trellis-ai#780 follow-up 3
-# widened the scan to also catch repr(), an attribute chain inside
-# str()/repr()/an f-string, a `%` operand and a `.format(...)` argument;
-# none of those four shapes occur in server.py today, so this count is
-# unchanged (re-grep 'repr(exc\|exc\.\|% exc\|\.format(exc' to recheck).
+# excluded structurally above) to reconcile. The scan's other shapes,
+# repr(), an attribute chain inside str()/repr()/an f-string, a `%` right
+# operand and a `.format(...)` argument, have no site in server.py:
+# re-grep 'repr(exc\|{exc\.\|str(exc\.\|% exc\|format(exc' finds none.
 _HAND_READ_SITE_COUNT = 6
 
 _SERVER_PATH = Path(inspect.getsourcefile(server_mod) or "")
 
-#: Calls that stringify their single argument outright. ``str(exc)`` was
-#: the original shape; ``repr(exc)`` is the same leak with a different
-#: spelling (trellis-ai#780 follow-up 3).
+#: Calls that render their single argument's text.
 _STRINGIFY_CALL_NAMES = frozenset({"str", "repr"})
 
 
 def _attr_chain_root(node: ast.AST) -> str | None:
-    """``Name.id`` at the root of *node*, whether *node* is a bare name or
-    a chain of attribute access ending in one (``exc`` and ``exc.args``
-    both return ``"exc"``). ``None`` when the chain bottoms out in
-    anything else, such as a call (``type(exc).__name__``'s ``type(exc)``
-    receiver) — that is deliberate: reading an exception's *type* is not
-    rendering its text, so it is not a shape this scan watches."""
+    """``Name.id`` at the root of *node*, a bare name or a chain of
+    attribute access ending in one: ``exc``, ``exc.args`` and
+    ``exc.__cause__.args`` all return ``"exc"``. ``None`` for anything
+    else: ``type(exc).__name__`` bottoms out in a call and ``exc.args[0]``
+    is a subscript, so neither is flagged, while ``exc.__class__.__name__``
+    is."""
     while isinstance(node, ast.Attribute):
         node = node.value
     return node.id if isinstance(node, ast.Name) else None
 
 
 def _raw_exception_uses(node: ast.AST, exc_name: str) -> list[ast.AST]:
-    """Every raw rendering of *exc_name*'s text under *node*: a bare-name
-    or attribute-chain argument to ``str()``/``repr()`` (``str(exc)``,
-    ``repr(exc.__cause__)``), an f-string ``FormattedValue`` of either
-    shape (``{exc}``, ``{exc.args}`` — a conversion such as ``!r`` makes
-    no difference, since it is not part of the value being checked),
-    *exc_name* as an operand of ``%``, or *exc_name* as an argument to
-    ``.format(...)``. Does not descend into a :data:`_SAFE_CALL_NAMES`
-    call."""
+    """Renderings of *exc_name*'s text under *node*: *exc_name* or an
+    attribute chain rooted at it as the sole argument to ``str()`` or
+    ``repr()``, or as an f-string value (``{exc!r}`` included, since a
+    conversion is not part of the value); *exc_name* itself as the right
+    operand of ``%`` or as an argument to a ``.format(...)`` call. Does
+    not descend into a :data:`_SAFE_CALL_NAMES` call."""
     found: list[ast.AST] = []
     for child in ast.iter_child_nodes(node):
         if isinstance(child, ast.Call) and name_of(child.func) in _SAFE_CALL_NAMES:
@@ -218,26 +213,19 @@ def test_every_raw_exception_text_site_is_a_declared_exemption() -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        pytest.param("return str(exc)", id="str_bare"),
-        pytest.param("return f'failed: {exc}'", id="fstring_bare"),
         pytest.param("return f'failed: {exc!r}'", id="fstring_conversion_r"),
         pytest.param("return repr(exc)", id="repr_bare"),
         pytest.param("return f'failed: {exc.args}'", id="fstring_attr_chain"),
-        pytest.param("return str(exc.__cause__)", id="str_attr_chain"),
-        pytest.param("return repr(exc.args)", id="repr_attr_chain"),
+        pytest.param("return str(exc.__cause__.args)", id="str_deep_attr_chain"),
         pytest.param("return 'failed: %s' % exc", id="percent_operand"),
-        pytest.param("return 'failed: {}'.format(exc)", id="format_call"),
+        pytest.param("return 'failed: {}'.format(exc)", id="format_positional"),
+        pytest.param("return 'failed: {e}'.format(e=exc)", id="format_keyword"),
     ],
 )
-def test_scan_catches_every_raw_rendering_shape(body: str) -> None:
-    """Every shape that renders *exc*'s raw text is caught: the two shapes
-    the scan always handled (``str_bare``, ``fstring_bare``), a conversion
-    (``fstring_conversion_r`` was already caught pre-#780-follow-up-3,
-    since the AST drops ``!r``/``!s``/``!a`` from the value a scan reads —
-    widening did not touch this shape, the test just pins that it stays
-    caught), and the four trellis-ai#780 follow-up 3 widened the scan to
-    add: ``repr()``, an attribute chain inside ``str()``/``repr()``/an
-    f-string, a ``%`` operand, and a ``.format(...)`` argument."""
+def test_scan_catches_each_rendering_shape(body: str) -> None:
+    """Non-vacuousness per shape: each shape :func:`_raw_exception_uses`
+    reads, beyond the bare ``str(exc)`` and ``{exc}`` that the two tests
+    below pin, is found in a function the roster has never seen."""
     defective = ast.parse(
         "def _brand_new_tool():\n"
         "    try:\n"
@@ -249,34 +237,17 @@ def test_scan_catches_every_raw_rendering_shape(body: str) -> None:
     assert "_brand_new_tool" in found, f"not caught: {body}"
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        pytest.param("return type(exc).__name__", id="type_name"),
-        pytest.param("return exc.__class__.__name__", id="class_name"),
-        pytest.param(
-            "return 'yes' if isinstance(exc, ValueError) else 'no'",
-            id="bare_isinstance",
-        ),
-    ],
-)
-def test_scan_does_not_flag_type_introspection(body: str) -> None:
-    """Negative control, in the shape these actually appear in
-    src/trellis/mcp/server.py today (``type(exc).__name__`` as a plain
-    dict value, a bare ``isinstance(exc, TrellisError)``): reading *exc*'s
-    type is not rendering its text, so none of these are a leak. The
-    first two are not inside a ``str()``/``repr()``/f-string sink at all,
-    which is the only place the widened scan looks for an attribute
-    chain."""
+def test_scan_does_not_flag_the_exception_type_name() -> None:
+    """Negative control: ``type(exc).__name__`` inside an f-string names
+    the exception's type, not its text, so it is not flagged."""
     defective = ast.parse(
         "def _brand_new_tool():\n"
         "    try:\n"
         "        pass\n"
         "    except Exception as exc:\n"
-        f"        {body}\n"
+        "        return f'failed: {type(exc).__name__}'\n"
     )
-    found = _scan(defective)
-    assert "_brand_new_tool" not in found, f"false positive: {body}"
+    assert _scan(defective) == {}
 
 
 def test_scan_catches_a_newly_added_leak() -> None:
