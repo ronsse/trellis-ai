@@ -82,26 +82,23 @@ def _optional_driver_panics() -> tuple[type[BaseException], ...]:
     """``psycopg.Error`` and the Bolt driver's ``DriverError``/``Neo4jError``,
     for whichever of the two packages is already imported.
 
-    Looked up in ``sys.modules`` rather than imported: an exception of a
-    driver's class can only exist if that driver's module is already
-    imported (the Postgres and Bolt stores import theirs directly), so this
-    never needs to import anything itself, and
-    ``trellis.mutate.executor`` importing neither optional driver
-    (``tests/unit/mutate/test_executor_optional_deps.py``) follows for free.
-    Not cached: a store that imports its driver for the first time *after*
-    an earlier catch must still be recognised on the next one, and a cached
-    result taken before that import would stay stale for the rest of the
-    process.
+    Read from ``sys.modules``, never imported: a driver's exception can
+    only exist once its module is imported, so an import here would add
+    nothing but a way for a broken install to raise in place of the
+    handler's own error. ``getattr`` has a default because a module that
+    another thread is still importing is in ``sys.modules`` before its
+    classes are. Not cached, so a driver first imported after an earlier
+    catch is found on the next one.
     """
-    panics: list[type[BaseException]] = []
-    psycopg = sys.modules.get("psycopg")
-    if psycopg is not None:
-        panics.append(psycopg.Error)
-    neo4j_exceptions = sys.modules.get("neo4j.exceptions")
-    if neo4j_exceptions is not None:
-        panics.append(neo4j_exceptions.DriverError)
-        panics.append(neo4j_exceptions.Neo4jError)
-    return tuple(panics)
+    found = (
+        getattr(sys.modules.get(module), name, None)
+        for module, name in (
+            ("psycopg", "Error"),
+            ("neo4j.exceptions", "DriverError"),
+            ("neo4j.exceptions", "Neo4jError"),
+        )
+    )
+    return tuple(cls for cls in found if cls is not None)
 
 
 def _handler_panic_classes() -> tuple[type[BaseException], ...]:

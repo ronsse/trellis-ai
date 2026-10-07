@@ -79,7 +79,7 @@ def test_broken_driver_import_does_not_replace_handler_panic() -> None:
         "from pathlib import Path\n"
         "\n"
         "class _BoomFinder(importlib.abc.MetaPathFinder):\n"
-        "    def find_module(self, fullname, path=None):\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
         "        if fullname == 'psycopg':\n"
         "            raise RuntimeError('synthetic broken install')\n"
         "        return None\n"
@@ -125,15 +125,19 @@ def test_broken_driver_import_does_not_replace_handler_panic() -> None:
 def test_driver_imported_after_first_catch_is_still_recognised(
     event_log: SQLiteEventLog, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A driver a store imports for the first time *after* the executor's
-    first handler-panic catch must still be recognised on the very next
-    catch — a cached lookup, fixed at the first catch, would stay stale for
-    the rest of the process once a store imports the driver later.
+    """A driver still being imported when a catch runs is skipped rather
+    than raising from the lookup, and is recognised on the next catch once
+    its import completes: a lookup cached at the first catch would stay
+    stale for the rest of the process.
     """
-    monkeypatch.delitem(sys.modules, "psycopg", raising=False)
 
     class _SyntheticDriverError(Exception):
-        """Stands in for ``psycopg.Error`` before the module is imported."""
+        """Stands in for ``psycopg.Error``."""
+
+    # Mid-import (in another thread, say), the module is already in
+    # sys.modules but its classes are not bound yet.
+    fake_psycopg = types.ModuleType("psycopg")
+    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
 
     executor = MutationExecutor(
         event_log=event_log,
@@ -149,18 +153,13 @@ def test_driver_imported_after_first_catch_is_still_recognised(
         command_id="cmd-stale-cache-1",
         requested_by="test:synthetic",
     )
-    # Before anything has imported a "psycopg" module, this class is not a
-    # recognised handler-panic class — it is a genuine unmapped exception,
-    # so it is expected to propagate. This call only exercises the lookup
-    # once with "psycopg" absent from sys.modules.
+    # Not a recognised class yet, so it propagates like any unmapped
+    # exception, not replaced by an AttributeError from the lookup.
     with pytest.raises(_SyntheticDriverError):
         executor.execute(first_command)
 
-    # A store now imports the driver for the first time, later in the same
-    # process.
-    fake_psycopg = types.ModuleType("psycopg")
+    # The import completes.
     fake_psycopg.Error = _SyntheticDriverError  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
 
     second_command = Command(
         operation=Operation.ENTITY_CREATE,
