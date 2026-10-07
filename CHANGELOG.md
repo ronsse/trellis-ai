@@ -1453,6 +1453,13 @@ All notable changes to Trellis will be documented in this file.
   `INTERNAL_ERROR` with that message. A failed embeddings call still
   raises `openai.OpenAIError`.
   (follow-up F-a from [#779](https://github.com/ronsse/trellis-ai/pull/779))
+- **`admin smoke-test`'s header and readyz backend rows keep a bracketed URL
+  or backend name intact.** The header's URL and a readyz backend's name and
+  status/latency detail went into Rich markup raw, so an IPv6 host led by a
+  lowercase letter (`http://[fd00::1]:8420`) or a backend key or status
+  carrying `[...]` was read as a style tag and deleted. All three are now
+  escaped; `--format json` is unchanged.
+  ([#784](https://github.com/ronsse/trellis-ai/pull/784) follow-up 1)
 
 ## [0.9.0] - 2026-05-13
 
