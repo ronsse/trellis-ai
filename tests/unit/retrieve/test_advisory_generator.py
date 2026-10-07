@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 from structlog.testing import capture_logs
 
+from tests.recovery_command import expected_recovery
 from trellis.retrieve.advisory_generator import AdvisoryGenerator
 from trellis.retrieve.effectiveness import run_advisory_fitness_loop
 from trellis.retrieve.formatters import format_advisories_as_markdown
@@ -1044,7 +1045,7 @@ class TestDegradedStoreCannotUnsuppress:
 
         assert report.store_degradation is not None
         assert report.store_degradation["reason"] == "malformed_json"
-        assert report.store_degradation["recovery"] == f"mv {path} {path}.corrupt"
+        assert report.store_degradation["recovery"] == expected_recovery(path)
 
         lines = [
             e
@@ -1053,7 +1054,7 @@ class TestDegradedStoreCannotUnsuppress:
         ]
         assert len(lines) == 1
         assert lines[0]["log_level"] == "error"
-        assert lines[0]["recovery"] == f"mv {path} {path}.corrupt"
+        assert lines[0]["recovery"] == expected_recovery(path)
 
     def test_the_event_log_is_never_read(self, tmp_path: Path) -> None:
         """Refuse before analysing, not after.

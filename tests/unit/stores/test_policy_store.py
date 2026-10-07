@@ -11,6 +11,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from tests.policy_shapes import DEGENERATE_POLICY_FILES, DEGENERATE_POLICY_IDS
+from tests.recovery_command import expected_recovery
 from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
@@ -436,7 +437,7 @@ class TestDegradationIsLoggedWhereOperatorsSee:
         assert lines[0]["log_level"] == "error"
         assert lines[0]["reason"] == "malformed_json"
         assert lines[0]["path"] == str(path)
-        assert lines[0]["recovery"] == f"mv {path} {path}.corrupt"
+        assert lines[0]["recovery"] == expected_recovery(path)
 
     def test_a_clean_load_says_nothing_alarming(self, tmp_path: Path) -> None:
         """A warning on every load would train the reader to skip it."""

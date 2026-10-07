@@ -127,7 +127,15 @@ def sanitize_error_message(text: str, *, max_len: int = DEFAULT_MAX_LEN) -> str:
     the input. A match that cannot complete inside that window is missed:
     a leak wholly past it no longer suppresses the visible prefix, and a
     secret straddling the cut by more than the margin shows its start.
+
+    Raises:
+        ValueError: if ``max_len`` is negative — ``text[:max_len]`` then
+            keeps everything but the last few characters, which can run
+            past the scanned window and return an unscanned secret.
     """
+    if max_len < 0:
+        msg = f"max_len must be >= 0; got {max_len!r}"
+        raise ValueError(msg)
     window = text[: max_len + _SCAN_MARGIN]
     if any(pattern.search(window) for pattern in _LEAK_PATTERNS):
         return SUPPRESSED_MARKER
