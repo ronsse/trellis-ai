@@ -462,6 +462,45 @@ class TestSmokeTestNonDictBackends:
 
 
 # ---------------------------------------------------------------------------
+# A dict readyz backend whose own ``error`` is not a string (an int, an
+# object). ``rich.markup.escape`` takes only ``str``, so text mode prints
+# ``str(error)``; json keeps the raw value. The string case is the control.
+# ---------------------------------------------------------------------------
+
+
+_BACKEND_ERRORS: dict[str, object] = {
+    "int": 500,
+    "dict": {"code": "x"},
+    "string": "connection refused",
+}
+
+
+class TestSmokeTestNonStringBackendError:
+    @pytest.mark.parametrize(
+        "scenario", list(_BACKEND_ERRORS), ids=list(_BACKEND_ERRORS)
+    )
+    def test_text_mode_survives_and_matches_json_exit_code(
+        self, monkeypatch: pytest.MonkeyPatch, scenario: str
+    ) -> None:
+        error = _BACKEND_ERRORS[scenario]
+        backends = {"graph": {"status": "error", "error": error}}
+        _patch_client(monkeypatch, _readyz_backends(backends))
+
+        json_result = runner.invoke(
+            app, ["admin", "smoke-test", "--api-key", "secret", "--format", "json"]
+        )
+        text_result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
+
+        assert text_result.exception is None, text_result.output
+        assert text_result.exit_code == json_result.exit_code
+        # The value itself, as str() prints it: a string has no repr quotes.
+        assert f"          {error}" in plain(text_result.stdout)
+        payload = json.loads(json_result.stdout)
+        readyz = next(c for c in payload["checks"] if c["name"] == "readyz")
+        assert readyz["backends"] == backends  # json keeps the raw value
+
+
+# ---------------------------------------------------------------------------
 # Tolerable non-pass — observability not wired
 # ---------------------------------------------------------------------------
 
