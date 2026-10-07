@@ -1232,9 +1232,8 @@ All notable changes to Trellis will be documented in this file.
 - **`SQLiteDocumentStore.search` refuses a scalar metadata filter on a
   NUL-holding key with the `ValueError` the SQLite graph and vector stores
   raise**, before any SQL runs, where it raised a raw
-  `sqlite3.OperationalError`. A key that also holds `"` or `\`, which the
-  store compared in Python, is refused too. A `None`, list or dict value is
-  still compared in Python and does not raise.
+  `sqlite3.OperationalError`. A key that also holds `"` or `\`, and a
+  `None`, list or dict value, are still compared in Python and do not raise.
   ([#743](https://github.com/ronsse/trellis-ai/issues/743) follow-up 3)
 - **Concurrent `upsert_node` writes of one node on Postgres no longer
   raise a raw `UniqueViolation`.** The `FOR UPDATE` read serialises
@@ -1288,6 +1287,19 @@ All notable changes to Trellis will be documented in this file.
   error type alone, so the entry covers a caller handed the driver's error.
   ArcadeDB's client-visible text for the same failure quotes no value.
   ([#753](https://github.com/ronsse/trellis-ai/pull/753) follow-up 1)
+- **`SQLiteDocumentStore.search`'s `content_tags` facet filter quotes the
+  facet name before building its JSON path.** A `.` or `[` in a facet name
+  changed which path `$.content_tags.{facet}` read instead of naming the
+  literal facet; a NUL silently truncated it; a facet starting with `"`,
+  or an empty one, raised an uncaught `sqlite3.OperationalError: bad JSON
+  path`. Reachable from `POST /api/v1/packs` `tag_filters`, which answers
+  200 for every shape while another axis serves the pack: `PackBuilder`
+  drops a failing keyword axis and records it in the `PACK_ASSEMBLED`
+  event's `strategy_failures`, not in the response. The facet is now
+  quoted by `json_key_path`, as the SQLite graph and vector stores quote a
+  filter key, so it names the literal facet; a NUL now raises `ValueError`
+  before any SQL runs.
+  ([#756](https://github.com/ronsse/trellis-ai/pull/756) follow-up 1)
 - **An MCP tool that catches a store or driver exception sanitizes its text
   before replying.** 14 sites in `src/trellis/mcp/server.py`, among them
   `save_memory`'s governed write and `record_observation`, quoted the
