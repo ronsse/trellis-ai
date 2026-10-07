@@ -39,6 +39,23 @@ the shown row of each endpoint, so such a node does not double an edge
 written from or to it; they close the edge's current version only where
 it joins those two rows.
 
+``upsert_edge`` has its own race, separate from the node-duplication one
+above: an unprotected ``OPTIONAL MATCH`` for the existing edge followed
+by ``CREATE`` lets two concurrent writers on the same
+``(source_id, target_id, edge_type)`` both observe "no current edge" and
+both create one, leaving two current rows for one logical edge (there is
+no uniqueness constraint to fall back on, because historical rows share
+the same key). ``upsert_edge`` closes this by write-locking the source
+endpoint's shown row (a no-op self-assignment) before the read, so a
+second writer blocks until the first commits and then sees its row as
+``old``. Measured against ``neo4j:2025.12``: reproduces on every rep
+without the lock, zero reps with it. ``arcadedb:26.8.1``'s own
+optimistic-concurrency retry already serialized this case at base, so
+the lock is a no-op there in practice but keeps the shared Cypher
+correct for both engines. ``upsert_edges_bulk`` does not take this lock
+(out of scope: UNWIND would need a sorted per-row key order, like
+Postgres's bulk edge path, to avoid a new cross-row deadlock class).
+
 Per-backend subclasses override the **seams**:
 
 - ``SCHEMA_STATEMENTS`` (class attribute) — DDL run by
@@ -1399,6 +1416,19 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         WITH collect(DISTINCT s) AS source_rows, collect(DISTINCT t) AS target_rows
         WITH {_shown_row("source_rows")} AS s, {_shown_row("target_rows")} AS t
         WHERE s IS NOT NULL
+        // Write-lock the source endpoint's shown row before reading for an
+        // existing edge, so a second concurrent upsert_edge on the same
+        // (source, target, edge_type) blocks here until the first writer
+        // commits, then sees its row as `old` instead of racing it to
+        // CREATE. The self-assignment is a no-op value write, chosen
+        // because this logical key cannot carry a uniqueness constraint
+        // (historical rows share it). Measured: reproduces 20/20 and
+        // 30/30 on Neo4j without this lock (create and update shapes),
+        // 0/30 with it, on both Neo4j and ArcadeDB. A `WITH` must
+        // separate this write from the `OPTIONAL MATCH` read that follows
+        // (Cypher forbids a read clause directly after a write clause).
+        SET s.valid_to = s.valid_to
+        WITH s, t
         OPTIONAL MATCH (s)-[old:EDGE {{edge_type: $edge_type}}]->(t)
           WHERE old.valid_to IS NULL
         WITH s, t, old,
