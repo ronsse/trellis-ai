@@ -118,9 +118,11 @@ from trellis.ops import (
     format_capture_warning,
 )
 from trellis.retrieve.builder_factory import (
+    AxisReport,
     build_pack_builder,
     describe_axes,
     format_failed_axes_note,
+    format_misconfigured_semantic_note,
 )
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.retrieve.file_context import build_file_context
@@ -937,6 +939,22 @@ def _capture_warning_banner(registry: StoreRegistry) -> str:
         return ""
 
 
+def _axis_note(axes: AxisReport) -> str:
+    """Every markdown axis note ``axes`` calls for, joined.
+
+    Shared by ``_flat_context`` and ``_sectioned_context``. A failed axis
+    (:func:`format_failed_axes_note`) and a misconfigured semantic axis
+    (:func:`format_misconfigured_semantic_note`) are independent states —
+    ``describe_axes`` can report either, or both, for the same build — so
+    both render when present rather than one shadowing the other.
+    """
+    notes = [
+        format_failed_axes_note(axes["failed"]),
+        format_misconfigured_semantic_note(axes["semantic"]),
+    ]
+    return "\n\n".join(note for note in notes if note)
+
+
 def _flat_context(
     registry: StoreRegistry,
     intent: str,
@@ -1033,7 +1051,7 @@ def _flat_context(
         pack.retrieval_report.strategies_used,
         embedder_configured=registry.embedding_fn is not None,
     )
-    axis_note = format_failed_axes_note(axes["failed"])
+    axis_note = _axis_note(axes)
 
     if not pack.items:
         # The case #404 was filed about. An empty pack whose candidates
@@ -1162,7 +1180,7 @@ def _sectioned_context(
                 sectioned_pack.sections[0].retrieval_report.strategies_used,
                 embedder_configured=registry.embedding_fn is not None,
             )
-            axis_note = format_failed_axes_note(axes["failed"])
+            axis_note = _axis_note(axes)
         result = format_sectioned_pack_as_markdown(
             section_dicts,
             intent,

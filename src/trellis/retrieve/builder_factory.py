@@ -257,6 +257,30 @@ def format_failed_axes_note(failed: list[str]) -> str:
     return f"**Retrieval axis failed:** {', '.join(failed)}."
 
 
+def format_misconfigured_semantic_note(semantic_state: str) -> str:
+    """One line for a ``misconfigured`` semantic axis, or ``""`` otherwise.
+
+    :func:`format_failed_axes_note` only names axes in ``axes["failed"]`` —
+    axes that exist and raised during *this* build. A ``misconfigured``
+    semantic axis never reaches that list: :func:`describe_axes` reports it
+    when the axis is absent from ``available`` altogether, because
+    ``build_strategies`` swallowed the vector backend's init failure before
+    any build ran. Left uncovered, a markdown-only surface (MCP) says
+    nothing while REST's ``axes.semantic`` and the CLI's
+    :data:`SEMANTIC_AXIS_NOTES` sentence both report it — the same gap
+    :func:`format_failed_axes_note` closes for a failed axis, drawn here
+    for the one state that function's input can't see. Same facts as the
+    CLI sentence, no exception text, same markdown-note shape as
+    ``format_failed_axes_note``.
+    """
+    if semantic_state != "misconfigured":
+        return ""
+    return (
+        "**Semantic retrieval misconfigured:** the vector store did not"
+        " initialise; results are keyword and graph only."
+    )
+
+
 __all__ = [
     "GRAPH_SEEDING_ENV",
     "SEMANTIC_AXIS",
@@ -265,4 +289,5 @@ __all__ = [
     "build_pack_builder",
     "describe_axes",
     "format_failed_axes_note",
+    "format_misconfigured_semantic_note",
 ]
