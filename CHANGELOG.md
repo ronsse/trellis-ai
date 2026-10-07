@@ -1398,6 +1398,21 @@ All notable changes to Trellis will be documented in this file.
   past it. The result names the error's type alone; the audit event keeps
   the error's text, which can quote the values being written.
   ([#773](https://github.com/ronsse/trellis-ai/pull/773))
+- **`POST /api/v1/packs/sectioned` and MCP `get_context` say which retrieval
+  axes ran, too.** `POST /api/v1/packs` stopped absorbing a failed axis
+  (above), but the sectioned route and `get_context`'s markdown reply still
+  did: a degraded sectioned pack carried no `axes` block, and a degraded
+  `get_context` reply could read as a genuinely empty corpus with no hint an
+  axis never ran. `SectionedPackResponse` now carries the same optional
+  `axes` block, read off the first section's `retrieval_report` (`None` for
+  a server predating this field, or for a `sections=[]` request, which has
+  no section to read it from). `get_context`'s default (flat) reply gains
+  one line, **`Retrieval axis failed: <names>`**, only when an axis failed —
+  axis names only, never exception text, and a clean pack's reply is
+  byte-for-byte unchanged. `get_context(sections=...)`,
+  `get_objective_context` and `get_task_context` share a different helper
+  and are unchanged.
+  ([#775](https://github.com/ronsse/trellis-ai/pull/775) follow-up 2)
 
 ## [0.9.0] - 2026-05-13
 

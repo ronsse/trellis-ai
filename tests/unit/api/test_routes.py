@@ -1011,6 +1011,43 @@ def test_assemble_pack_reports_failed_axis_when_a_strategy_raises(
     assert _AXIS_FAILURE_SENTINEL not in response.text
 
 
+def test_assemble_sectioned_pack_reports_no_failed_axes_when_none_raise(
+    client,
+) -> None:
+    """A clean sectioned pack's axes block matches the flat route's shape."""
+    response = client.post(
+        "/api/v1/packs/sectioned",
+        json={"intent": "quiet sectioned pack", "sections": [{"name": "all"}]},
+    )
+
+    assert response.status_code == 200
+    axes = response.json()["axes"]
+    assert axes["failed"] == []
+    assert axes["ran"]  # at least one axis ran -- not vacuously empty
+
+
+def test_assemble_sectioned_pack_reports_failed_axis_when_a_strategy_raises(
+    client, monkeypatch
+) -> None:
+    """F2 (#775 gate): the sectioned route must not absorb a failed axis."""
+    monkeypatch.setattr(
+        retrieve, "build_pack_builder", _builder_with_one_failing_strategy
+    )
+
+    response = client.post(
+        "/api/v1/packs/sectioned",
+        json={"intent": "degraded sectioned pack", "sections": [{"name": "all"}]},
+    )
+
+    assert response.status_code == 200
+    axes = response.json()["axes"]
+    assert axes["failed"] == ["semantic"]
+    assert sorted(axes["ran"]) == ["graph", "keyword"]
+    assert sorted(axes["available"]) == ["graph", "keyword", "semantic"]
+    # Names and states only, never the exception text.
+    assert _AXIS_FAILURE_SENTINEL not in response.text
+
+
 def test_assemble_sectioned_pack_returns_routed_ids_and_served_count(client) -> None:
     store = app_module._registry.knowledge.document_store
     body = "failover runbook drain queue promote replica restart sidecar " * 20

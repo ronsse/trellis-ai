@@ -239,6 +239,24 @@ SEMANTIC_AXIS_NOTES: dict[str, str] = {
 }
 
 
+def format_failed_axes_note(failed: list[str]) -> str:
+    """One line naming axes that failed to run, or ``""`` when none did.
+
+    Axis names only, never the exception text — that lives in
+    ``PACK_ASSEMBLED.strategy_failures`` for offline analysis, the same
+    split :data:`SEMANTIC_AXIS_NOTES` draws for the semantic axis alone.
+    This covers any axis (keyword, graph, semantic, ...), for a markdown
+    surface that has no JSON ``axes`` block to fall back on: an MCP reply
+    that goes silent on a failed axis reads as a genuinely empty corpus
+    (see :mod:`trellis.retrieve.withholding` for the same problem on
+    withheld items), so the note renders unconditionally here rather than
+    only in a structured response a human might think to check.
+    """
+    if not failed:
+        return ""
+    return f"**Retrieval axis failed:** {', '.join(failed)}."
+
+
 __all__ = [
     "GRAPH_SEEDING_ENV",
     "SEMANTIC_AXIS",
@@ -246,4 +264,5 @@ __all__ = [
     "AxisReport",
     "build_pack_builder",
     "describe_axes",
+    "format_failed_axes_note",
 ]

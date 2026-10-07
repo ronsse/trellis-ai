@@ -181,6 +181,25 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         intent_family=req.intent_family,
         filters=filters,
     )
+
+    # Same axis report as POST /api/v1/packs (#775). build_sectioned()
+    # does not attach strategy_failures to the returned SectionedPack (only
+    # to the PACK_ASSEMBLED event payload), but describe_axes only ever
+    # needs the "ran" list, and every section's retrieval_report carries
+    # the identical list computed once before section-filling — so the
+    # first section's is as good as any. A sections=[] request has no
+    # section to read a "ran" list off; axes is None for that request,
+    # same posture PackResponse.axes takes for a pre-#775 server.
+    axes = None
+    if pack.sections:
+        axes = AxisReportResponse(
+            **describe_axes(
+                builder,
+                pack.sections[0].retrieval_report.strategies_used,
+                embedder_configured=registry.embedding_fn is not None,
+            )
+        )
+
     return SectionedPackResponse(
         pack_id=pack.pack_id,
         intent=pack.intent,
@@ -189,6 +208,7 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         sections=[s.model_dump(mode="json") for s in pack.sections],
         advisories=[a.model_dump(mode="json") for a in pack.advisories],
         withholding=pack.metadata.get("withholding"),
+        axes=axes,
     )
 
 
