@@ -44,6 +44,7 @@ from trellis.stores.registry import (
     StoreRegistry,
     _build_openai_embedding_fn,
     _import_callable,
+    _mask_api_key,
 )
 
 
@@ -267,6 +268,94 @@ def test_embedding_fn_property_propagates_backend_error(
     )
     with pytest.raises(BackendNotInstalledError):
         _ = registry.embedding_fn
+
+
+# -- a failed resolution is not cached (#775 follow-up F1) -----------------
+
+_UNIMPORTABLE_PATH = "no_such_module_for_embedding_fn_cache_test.embed"
+
+
+def test_embedding_fn_retries_a_failed_env_var_until_it_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``TRELLIS_EMBEDDING_FN`` that fails to import raises on every call.
+
+    A raise caches nothing, so once the path imports, the next call
+    returns the callable rather than a cached error or "not configured".
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _UNIMPORTABLE_PATH)
+    registry = StoreRegistry.from_config_dir(
+        config_dir=tmp_path / "cfg", data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError):
+        _ = registry.embedding_fn
+    with pytest.raises(ConfigError):
+        _ = registry.embedding_fn
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "trellis.stores.registry._mask_api_key")
+    assert registry.embedding_fn is _mask_api_key
+
+
+def test_embedding_fn_raises_again_on_second_call_config_path(
+    tmp_path: Path,
+) -> None:
+    """An unimportable ``embeddings.provider`` raises on every call too."""
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        embeddings={"provider": _UNIMPORTABLE_PATH},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError):
+        _ = registry.embedding_fn
+    with pytest.raises(ConfigError):
+        _ = registry.embedding_fn
+
+
+def test_embedding_fn_not_configured_is_still_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``None`` for "not configured" is cached, not re-resolved per call.
+
+    An embedder configured after the first ``None`` answer does not change
+    the second answer.
+    """
+    registry = StoreRegistry.from_config_dir(
+        config_dir=tmp_path / "cfg", data_dir=tmp_path / "data"
+    )
+    assert registry.embedding_fn is None
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "trellis.stores.registry._mask_api_key")
+    assert registry.embedding_fn is None
+
+
+def test_embedding_fn_success_is_resolved_once_across_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful resolution is cached: the callable is built once.
+
+    Counts calls into ``_import_callable`` rather than asserting on
+    identity alone, so the test fails if a future change re-resolves on
+    every access even when the returned object happens to be memoized
+    some other way.
+    """
+    calls: list[str] = []
+    real_import_callable = _import_callable
+
+    def counting_import_callable(dotted_path: str) -> Any:
+        calls.append(dotted_path)
+        return real_import_callable(dotted_path)
+
+    monkeypatch.setattr(
+        "trellis.stores.registry._import_callable", counting_import_callable
+    )
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "trellis.stores.registry._mask_api_key")
+    registry = StoreRegistry.from_config_dir(
+        config_dir=tmp_path / "cfg", data_dir=tmp_path / "data"
+    )
+    first = registry.embedding_fn
+    second = registry.embedding_fn
+    assert first is second
+    assert calls == ["trellis.stores.registry._mask_api_key"]
 
 
 # -- _import_callable raises ----------------------------------------------

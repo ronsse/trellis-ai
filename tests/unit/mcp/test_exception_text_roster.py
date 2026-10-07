@@ -38,9 +38,10 @@ _SAFE_CALL_NAMES = frozenset(
     }
 )
 
-#: Enclosing top-level function -> why its raw exception text stays.
-#: Keyed by function name, not line number, so moving the function does
-#: not desync the roster.
+#: Enclosing function or method -> why its raw exception text stays. A
+#: method is keyed ``ClassName.method`` so it reads the same way a
+#: top-level function does; keyed by name, not line number, so moving the
+#: def does not desync the roster.
 EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
     "save_experience": (
         "a pydantic ValidationError on the caller's own trace JSON; the "
@@ -59,14 +60,21 @@ EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
         "a pydantic ValidationError on the caller's own Command op/args, "
         "the same shape #748 itself left alone in this function."
     ),
+    "_SanitizeUncaughtToolErrors.on_call_tool": (
+        "str(exc) feeds a startswith(prefix) comparison that decides "
+        "whether to rebuild the message through _exception_detail; it is "
+        "never written into a reply itself, and the rebuilt message uses "
+        "the safe helper."
+    ),
 }
 
 # Hand count (trellis-ai#748): 1 in
 # save_experience, 2 in _resolve_evidence_pointer, 1 in record_observation,
-# 1 in execute_mutation. Re-grep '{exc}\|str(exc)' in src/trellis/mcp/server.py
-# and subtract the helper's own internal use and the one log-only site
-# (_build_llm_client, excluded structurally above) to reconcile.
-_HAND_READ_SITE_COUNT = 5
+# 1 in execute_mutation, 1 in _SanitizeUncaughtToolErrors.on_call_tool.
+# Re-grep '{exc}\|str(exc)' in src/trellis/mcp/server.py and subtract the
+# helper's own internal use and the one log-only site (_build_llm_client,
+# excluded structurally above) to reconcile.
+_HAND_READ_SITE_COUNT = 6
 
 _SERVER_PATH = Path(inspect.getsourcefile(server_mod) or "")
 
@@ -98,20 +106,39 @@ def _raw_exception_uses(node: ast.AST, exc_name: str) -> list[ast.AST]:
     return found
 
 
+def _def_hits(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
+    """Raw exception-text sites in every ``except`` block under *func*,
+    one in a def nested inside it included (``ast.walk`` descends into
+    nested defs)."""
+    hits: list[ast.AST] = []
+    for node in ast.walk(func):
+        if isinstance(node, ast.ExceptHandler) and node.name:
+            for stmt in node.body:
+                hits.extend(_raw_exception_uses(stmt, node.name))
+    return hits
+
+
 def _scan(tree: ast.Module) -> dict[str, list[ast.AST]]:
-    """Raw exception-text sites in *tree*, grouped by enclosing top-level
-    function name."""
+    """Raw exception-text sites in *tree*, grouped by enclosing def: a
+    top-level function by its own name, a method of a top-level class by
+    ``ClassName.method``. Same-named defs, such as a property and its
+    setter, share a key and their sites add up. A def nested inside a
+    function or method counts toward it; a class nested inside a class is
+    not scanned."""
     by_function: dict[str, list[ast.AST]] = {}
     for top in tree.body:
-        if not isinstance(top, ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        hits: list[ast.AST] = []
-        for node in ast.walk(top):
-            if isinstance(node, ast.ExceptHandler) and node.name:
-                for stmt in node.body:
-                    hits.extend(_raw_exception_uses(stmt, node.name))
-        if hits:
-            by_function[top.name] = hits
+        if isinstance(top, ast.FunctionDef | ast.AsyncFunctionDef):
+            hits = _def_hits(top)
+            if hits:
+                by_function.setdefault(top.name, []).extend(hits)
+        elif isinstance(top, ast.ClassDef):
+            for member in top.body:
+                if not isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef):
+                    continue
+                hits = _def_hits(member)
+                if hits:
+                    key = f"{top.name}.{member.name}"
+                    by_function.setdefault(key, []).extend(hits)
     return by_function
 
 
@@ -153,3 +180,34 @@ def test_scan_catches_a_newly_added_leak() -> None:
     )
     found = _scan(defective)
     assert "_brand_new_tool" in found
+
+
+def test_scan_catches_a_newly_added_leak_in_a_class_method() -> None:
+    """Non-vacuousness for methods: every method of a class is found under
+    ``ClassName.method``, and a property and its setter, which share that
+    key, count both their sites."""
+    defective = ast.parse(
+        "class _BrandNewMiddleware:\n"
+        "    async def on_call_tool(self, context, call_next):\n"
+        "        try:\n"
+        "            return await call_next(context)\n"
+        "        except Exception as exc:\n"
+        "            return f'failed: {exc}'\n"
+        "    @property\n"
+        "    def state(self):\n"
+        "        try:\n"
+        "            pass\n"
+        "        except Exception as exc:\n"
+        "            return str(exc)\n"
+        "    @state.setter\n"
+        "    def state(self, value):\n"
+        "        try:\n"
+        "            pass\n"
+        "        except Exception as exc:\n"
+        "            raise ValueError(f'bad state: {exc}') from exc\n"
+    )
+    found = {key: len(hits) for key, hits in _scan(defective).items()}
+    assert found == {
+        "_BrandNewMiddleware.on_call_tool": 1,
+        "_BrandNewMiddleware.state": 2,
+    }
