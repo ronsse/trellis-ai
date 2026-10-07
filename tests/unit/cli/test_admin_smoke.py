@@ -270,21 +270,19 @@ class TestSmokeTestFailures:
 
 
 # ---------------------------------------------------------------------------
-# A failure line printed from a different function than the one that exits
-# (#771 follow-up F1). ``_render_smoke_text`` prints a check's ``error`` in
-# red; ``smoke_test`` raises the non-zero exit afterwards, in its own frame,
-# which is why tests/unit/test_cli_failure_soft_wrap_rule.py's same-function
-# scan cannot see this site. Without ``soft_wrap=True`` Rich word-wraps a
+# A failure line printed from a different function than the one that exits.
+# ``_render_smoke_text`` prints a check's ``error`` in red; ``smoke_test``
+# raises the non-zero exit afterwards, in its own frame, which is why
+# tests/unit/test_cli_failure_soft_wrap_rule.py's same-function scan cannot
+# see this site. Without ``soft_wrap=True`` Rich word-wraps a
 # long error at the console width (80 columns — no standard stream is a
 # terminal), splitting one failure across multiple lines of output.
 # ---------------------------------------------------------------------------
 
 
 #: Long enough to wrap at 80 columns without ``soft_wrap``, and free of any
-#: ``[...]``-shaped substring: unlike the worker.py / ingest_conversations.py
-#: cross-function sites, this line does not ``escape()`` the error text, so
-#: real markup here would be parsed by Rich rather than merely proving it is
-#: inert.
+#: ``[...]``-shaped substring: this line does not ``escape()`` the error
+#: text, so markup in it would be parsed by Rich.
 _LONG_BACKEND_ERROR = (
     "synthetic probe failure: the connection to the backend was refused "
     "after the configured retry budget of three attempts was exhausted "

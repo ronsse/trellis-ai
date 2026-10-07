@@ -96,7 +96,7 @@ def _render_report(report: CorpusSyncReport) -> None:
         )
     for entry in report.pruned:
         pruned_name = entry.get("source_path") or entry["doc_id"]
-        console.print(f"  [red]prune [/red] {escape(pruned_name)}")
+        console.print(f"  [red]prune [/red] {escape(pruned_name)}", soft_wrap=True)
     for entry in report.prune_withheld:
         withheld_name = entry.get("source_path") or entry["doc_id"]
         console.print(

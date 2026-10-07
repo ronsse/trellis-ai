@@ -18,18 +18,12 @@ It does not see an exit raised in a *different* function than the print
 -- a helper that returns an ``Exit`` for its caller to raise
 (``admin_api_keys.py``'s ``_store_error``), or one that only prints and
 leaves the exit to its caller (extract_refresh.py's ``_print_backfill``)
--- nor a receiver not named ``*console``. Lines of those shapes are not
-policed here and stay out of the hand-read floor, wrapped or not.
-
-#771's gate hand-identified 14 such cross-function sites in one file each
-(a helper prints, a different function in the same file exits non-zero
-afterward). Re-reading all 14 against current ``main`` found 5 that still
-carry an unbounded id/path/free-text value *and* a confirmed non-zero
-exit after the call; the other 9 interpolate a bounded vocabulary or
-count, or (``ingest_conversations.py``'s prune line) sit on a path that
-can never co-occur with the one non-zero exit. Those 5 are pinned below,
-by function and message fragment, without teaching the scanner above the
-cross-function hop -- doing that is left to a future follow-up (#771 F2).
+-- nor a receiver not named ``*console``. Those lines stay out of the
+hand-read floor below. A cross-function line that can print an unbounded
+id, path or error text before a non-zero exit is listed by hand in
+``CROSS_FUNCTION_FAILURE_LINES`` instead, and the second test checks it;
+one that interpolates only a fixed vocabulary or a count, or that cannot
+print on a non-zero exit, is left off.
 """
 
 from __future__ import annotations
@@ -194,17 +188,20 @@ def test_every_cli_failure_line_passes_soft_wrap() -> None:
 #: ``HAND_READ_FAILURE_LINE_COUNT`` above, so a roster entry quietly
 #: dropped (or renamed past what it matches) shrinks the *measured*
 #: population below this floor instead of moving the floor with it.
-HAND_READ_CROSS_FUNCTION_COUNT = 5
+HAND_READ_CROSS_FUNCTION_COUNT = 8
 
-#: #771 follow-up F1/F3: the 5 cross-function failure lines hand-verified
-#: against current ``main`` (see the module docstring). Each entry is
-#: (file, function, message fragment); the fragment tells apart the two
-#: entries that share a function (admin.py's ``_render_smoke_text``).
+#: (file, function, message fragment) for each cross-function failure line:
+#: a helper prints it in red, and a caller in the same file raises a
+#: non-zero exit after the call. The fragment tells apart the two entries
+#: that share a function (admin.py's ``_render_smoke_text``).
 CROSS_FUNCTION_FAILURE_LINES = (
     ("admin.py", "_print_skills_summary", "failed"),
     ("admin.py", "_print_check_extractors_report", "not configurable from"),
     ("admin.py", "_render_smoke_text", "check['error']"),
     ("admin.py", "_render_smoke_text", "info['error']"),
+    ("admin_api_keys.py", "_store_error", "store error"),
+    ("ingest_corpus.py", "_render_report", "pruned_name"),
+    ("policy.py", "_render_degradation", "POLICY STORE DEGRADED"),
     ("worker.py", "_render_embed_traces_text", "trace_id"),
 )
 
@@ -257,23 +254,20 @@ def _cross_function_roster_matches(root: Path) -> list[CallSite]:
 
 
 def test_cross_function_failure_lines_pass_soft_wrap() -> None:
-    """#771 follow-up F1/F3: a hand-listed roster of failure lines whose
-    print and whose non-zero exit sit in *different* functions of the
-    same file -- a shape ``failure_line_sites`` above is blind to by
-    design (module docstring). This test does not teach that scanner the
-    cross-function hop; it locates each roster entry independently, by
-    its function and a literal fragment of its message.
-    """
+    """Each roster entry resolves to exactly one print, and it passes
+    ``soft_wrap=True``. Entries are found by function and message
+    fragment, not by ``failure_line_sites``, which cannot see an exit
+    raised in another function."""
     sites = _cross_function_roster_matches(SRC)
     assert_hand_read_floor(
         len(sites),
         HAND_READ_CROSS_FUNCTION_COUNT,
-        subject="cross-function CLI failure line (#771 follow-up F1 roster)",
+        subject="cross-function CLI failure line",
         hint=(
-            "Recount CROSS_FUNCTION_FAILURE_LINES by hand against #771's "
-            "gate (xfunc-samefile.txt) before lowering this floor; a "
-            "dropped or renamed entry should show up here as a shrunk "
-            "population, not just a shorter tuple."
+            "Recount the cross-function failure lines under src/trellis_cli "
+            "by hand before lowering this floor; a dropped or renamed entry "
+            "should show up here as a shrunk population, not just a shorter "
+            "tuple."
         ),
     )
     unwrapped = [site.describe(SRC) for site in sites if not _has_soft_wrap(site.node)]

@@ -1364,20 +1364,12 @@ All notable changes to Trellis will be documented in this file.
   passes `max_len` today, so this was unreachable; it now raises
   `ValueError` for any `max_len < 0`, and `max_len=0` is unchanged.
   ([#767](https://github.com/ronsse/trellis-ai/pull/767) follow-up 2)
-- **5 more cross-function CLI failure lines wrapped by hand.** The
-  soft-wrap rule only sees a non-zero exit raised in the *same* function
-  as the red `console.print`; #771's gate hand-identified 14 sites where
-  a helper prints and a different function in the same file raises the
-  exit afterward. Re-reading all 14 against current `main` found 5 that
-  still carry an unbounded id/path/free-text value and a confirmed
-  non-zero exit: `admin.py`'s `_print_skills_summary`,
-  `_print_check_extractors_report` and `_render_smoke_text` (x2), and
-  `worker.py`'s `_render_embed_traces_text`. The other 9 interpolate a
-  bounded vocabulary or count, or (`ingest_conversations.py`'s prune
-  line) sit on a path that can never co-occur with the one non-zero exit
-  that file raises. The 5 are pinned by a new roster test, independent of
-  the existing scan, so dropping one fails CI without teaching that scan
-  the cross-function hop.
+- **6 more red CLI failure lines no longer hard-wrap.** Each prints an id,
+  path or error text from a helper whose caller then exits non-zero, so the
+  soft-wrap rule cannot see it: `admin install-skills`, `admin
+  check-extractors`, `admin smoke-test` (x2), `worker embed-traces` and
+  `ingest corpus --prune`. A hand-listed roster test pins these and two
+  earlier hand-wrapped lines of the same shape.
   ([#771](https://github.com/ronsse/trellis-ai/pull/771) follow-ups 1 and 3)
 
 ## [0.9.0] - 2026-05-13
