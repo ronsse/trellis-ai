@@ -270,6 +270,51 @@ class TestSmokeTestFailures:
 
 
 # ---------------------------------------------------------------------------
+# A failure line printed from a different function than the one that exits.
+# ``_render_smoke_text`` prints a check's ``error`` in red; ``smoke_test``
+# raises the non-zero exit afterwards, in its own frame, which is why
+# tests/unit/test_cli_failure_soft_wrap_rule.py's same-function scan cannot
+# see this site. Without ``soft_wrap=True`` Rich word-wraps a
+# long error at the console width (80 columns — no standard stream is a
+# terminal), splitting one failure across multiple lines of output.
+# ---------------------------------------------------------------------------
+
+
+#: Long enough to wrap at 80 columns without ``soft_wrap``, and free of any
+#: ``[...]``-shaped substring: this line does not ``escape()`` the error
+#: text, so markup in it would be parsed by Rich.
+_LONG_BACKEND_ERROR = (
+    "synthetic probe failure: the connection to the backend was refused "
+    "after the configured retry budget of three attempts was exhausted "
+    "while waiting for a response from the health endpoint"
+)
+
+
+class TestSmokeTestFailureLineDoesNotWrap:
+    @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
+    def test_a_long_backend_error_prints_as_one_line(
+        self, monkeypatch: pytest.MonkeyPatch, colour: bool
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "80")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/healthz":
+                raise httpx.ConnectError(_LONG_BACKEND_ERROR)
+            return _healthy_handler("secret")(request)
+
+        _patch_client(monkeypatch, handler)
+        if colour:
+            force_colour(monkeypatch, admin_module)
+
+        result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
+
+        assert result.exit_code == 1, result.stdout
+        text = assert_coloured(result.stdout) if colour else plain(result.stdout)
+        lines = [ln for ln in text.splitlines() if _LONG_BACKEND_ERROR in ln]
+        assert lines == [f"        {_LONG_BACKEND_ERROR}"], text
+
+
+# ---------------------------------------------------------------------------
 # Tolerable non-pass — observability not wired
 # ---------------------------------------------------------------------------
 
