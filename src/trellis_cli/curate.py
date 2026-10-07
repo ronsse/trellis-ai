@@ -76,7 +76,8 @@ def _execute_command(cmd: Command, output_format: str) -> None:
             console.print(f"[green]\u2713 Command executed[/green]: {result.operation}")
         else:
             console.print(
-                f"[red]\u2717 Command {result.status}[/red]: {result.operation}"
+                f"[red]\u2717 Command {result.status}[/red]: {result.operation}",
+                soft_wrap=True,
             )
         console.print(f"  ID: {escape(result.command_id)}")
         console.print(f"  Message: {result.message}", markup=False, highlight=False)

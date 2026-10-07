@@ -1348,6 +1348,14 @@ All notable changes to Trellis will be documented in this file.
   A pydantic `ValidationError` raised inside a tool body is not wrapped that
   way, so it still reaches the caller raw.
   ([#765](https://github.com/ronsse/trellis-ai/pull/765) follow-up 1)
+- **10 more red CLI lines, and one yellow one, no longer hard-wrap at the
+  console width**, which could split an id or path mid-token. The soft-wrap
+  rule now also sees an exit raised inside a later `if` (`admin.py` x2,
+  `analyze.py`, `curate.py`, `extract_refresh.py`) and the red arm of a
+  conditional-expression message (`extract_refresh.py`, `ingest.py` x2). A
+  line whose exit is raised in a different function from the print is still
+  outside the rule; two such lines are wrapped here by hand.
+  ([#766](https://github.com/ronsse/trellis-ai/pull/766) follow-ups 1-2)
 - **`sanitize_error_message` rejects a negative `max_len`.** A negative
   value made `text[:max_len]` keep everything but the last few
   characters instead of a short prefix, so the returned text could run

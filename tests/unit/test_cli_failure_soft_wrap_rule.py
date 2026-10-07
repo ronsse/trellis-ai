@@ -2,17 +2,24 @@
 
 A failure line is a ``*console.print`` of an f-string carrying ``[red]`` or
 ``[bold red]`` and an interpolation, with a non-zero ``typer.Exit`` or
-``SystemExit`` raised after it in its own block or an enclosing one. Rich
-hard-wraps a long line at the console width, splitting the path or id it
-carries mid-token; ``soft_wrap=True`` leaves wrapping to the terminal, so
-the copied text stays whole.
+``SystemExit`` raised on the same path after it. Rich hard-wraps a long
+line at the console width, splitting the path or id it carries mid-token;
+``soft_wrap=True`` leaves wrapping to the terminal, so the copied text
+stays whole.
 
-The scan sees only that shape. It does not see an exit raised under a later
-condition (``if error is not None: raise typer.Exit(...)``, the shape
-``test_format_exit_parity_rule.py`` asks for), an ``Exit`` a helper returns
-for its caller to raise, a print whose argument is a conditional
-expression, or a receiver not named ``*console``. Lines of those shapes are
-not policed here.
+The scan sees three shapes: the message as a direct f-string, with the
+exit a later statement in its own block or an enclosing one, OR nested
+inside a later sibling statement such as ``if error is not None: raise
+typer.Exit(...)`` (the shape ``test_format_exit_parity_rule.py`` asks
+for); and the message as the red arm of a conditional expression
+(``ast.IfExp``), on either side of it.
+
+It does not see an exit raised in a *different* function than the print
+-- a helper that returns an ``Exit`` for its caller to raise
+(``admin_api_keys.py``'s ``_store_error``), or one that only prints and
+leaves the exit to its caller (extract_refresh.py's ``_print_backfill``)
+-- nor a receiver not named ``*console``. Lines of those shapes are not
+policed here and stay out of the hand-read floor, wrapped or not.
 """
 
 from __future__ import annotations
@@ -25,9 +32,15 @@ from tests.ast_rules import CallSite, assert_hand_read_floor, iter_modules, name
 SRC = Path(__file__).parents[2] / "src" / "trellis_cli"
 
 #: 74 sites found by a tokenize recount written independently of this scan
-#: (site-for-site equal to it), less classify.py's shadow summary, which
-#: exits ``EXIT_OK``. Counted outside this scan, never computed by it.
-HAND_READ_FAILURE_LINE_COUNT = 73
+#: (site-for-site equal to it at #766's head), less classify.py's shadow
+#: summary, which exits ``EXIT_OK`` (73), plus 8 sites this widening makes
+#: visible: admin.py:1533 and :1884, analyze.py:3130, curate.py:78 and
+#: extract_refresh.py:565 (an exit under a later ``if``);
+#: extract_refresh.py:539, ingest.py:448 and :524 (an ``IfExp`` red arm).
+#: Lines whose exit is raised in a different function than the print stay
+#: out of this count; see the module docstring. Counted outside this scan,
+#: never computed by it.
+HAND_READ_FAILURE_LINE_COUNT = 81
 
 #: Spellings this repo raises to end the process.
 _EXIT_NAMES = frozenset({"typer.Exit", "SystemExit", "Exit", "click.exceptions.Exit"})
@@ -50,9 +63,30 @@ def _raises_nonzero_exit(stmt: ast.stmt) -> bool:
     return bool(codes) and ast.unparse(codes[0]).rsplit(".", 1)[-1] not in _ZERO_CODES
 
 
+def _raises_within(node: ast.AST) -> list[ast.Raise]:
+    """Every ``raise`` reachable from *node* without crossing into a nested
+    function or class body -- the raises a later sibling statement such as
+    ``if error is not None: raise typer.Exit(...)`` can reach on some path
+    through itself, not just as a direct statement."""
+    if isinstance(node, ast.Raise):
+        return [node]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return []
+    found: list[ast.Raise] = []
+    for child in ast.iter_child_nodes(node):
+        found.extend(_raises_within(child))
+    return found
+
+
 def _exit_follows(call: ast.Call, parents: dict[ast.AST, ast.AST]) -> bool:
     """A non-zero exit is raised after *call*'s statement, in its own block
-    or an enclosing one, before the enclosing function ends."""
+    or an enclosing one, before the enclosing function ends.
+
+    "After" reaches into a later sibling statement's own body too (a later
+    ``if``'s nested ``raise``, not only a direct one): a fair approximation
+    of "on the same path" that does not flag a line whose only later exit
+    is zero, since ``_raises_nonzero_exit`` still judges each raise found.
+    """
     current: ast.AST = call
     while not isinstance(current, ast.stmt):
         current = parents[current]
@@ -62,10 +96,32 @@ def _exit_follows(call: ast.Call, parents: dict[ast.AST, ast.AST]) -> bool:
             block = getattr(owner, field, None)
             if isinstance(block, list) and current in block:
                 later = block[block.index(current) + 1 :]
-                if any(_raises_nonzero_exit(stmt) for stmt in later):
+                if any(
+                    _raises_nonzero_exit(raise_stmt)
+                    for stmt in later
+                    for raise_stmt in _raises_within(stmt)
+                ):
                     return True
         current = owner
     return False
+
+
+def _find_red_message(expr: ast.expr) -> ast.JoinedStr | None:
+    """The f-string carrying ``[red]``/``[bold red]``: *expr* itself, or
+    whichever arm of a conditional expression (``ast.IfExp``) is red.
+
+    Recurses so a conditional expression nested inside another is found
+    too; a plain (non-f) string arm is an ``ast.Constant``, which neither
+    branch matches, same as today.
+    """
+    if isinstance(expr, ast.JoinedStr):
+        literal = "".join(p.value for p in expr.values if isinstance(p, ast.Constant))
+        if "[red]" in literal or "[bold red]" in literal:
+            return expr
+        return None
+    if isinstance(expr, ast.IfExp):
+        return _find_red_message(expr.body) or _find_red_message(expr.orelse)
+    return None
 
 
 def failure_line_sites(root: Path) -> list[CallSite]:
@@ -85,13 +141,14 @@ def failure_line_sites(root: Path) -> list[CallSite]:
             receiver = name_of(node.func.value) or ""
             if node.func.attr != "print" or not receiver.lower().endswith("console"):
                 continue
-            if not node.args or not isinstance(node.args[0], ast.JoinedStr):
+            if not node.args:
                 continue
-            parts = node.args[0].values
-            literal = "".join(p.value for p in parts if isinstance(p, ast.Constant))
-            if "[red]" not in literal and "[bold red]" not in literal:
+            red_message = _find_red_message(node.args[0])
+            if red_message is None:
                 continue
-            interpolated = any(isinstance(p, ast.FormattedValue) for p in parts)
+            interpolated = any(
+                isinstance(p, ast.FormattedValue) for p in red_message.values
+            )
             if interpolated and _exit_follows(node, parents):
                 sites.append(CallSite(path=path, node=node))
     return sites
@@ -181,3 +238,73 @@ def test_rule_discriminates_wrap_exit_code_and_block(tmp_path: Path) -> None:
     assert found == ["compliant.py", "enclosing.py", "missing.py"], found
     unwrapped = sorted(s.path.name for s in sites if not _has_soft_wrap(s.node))
     assert unwrapped == ["enclosing.py", "missing.py"], unwrapped
+
+
+def test_rule_finds_later_if_and_ifexp_shapes(tmp_path: Path) -> None:
+    """An exit raised inside a *later* sibling ``if`` rather than as a
+    direct statement (``later_if.py``, the shape
+    ``test_format_exit_parity_rule.py`` requires), and the red arm of a
+    conditional expression, on either side of it (``ifexp_red_orelse.py``,
+    ``ifexp_red_body.py``). A zero exit under a later ``if`` stays out, as
+    ``zero_exit.py`` does above, and so does a raise inside a nested
+    function, which is not on the print's path (``nested_def.py``)."""
+    header = "import typer\nfrom trellis_cli.output import console\n\n"
+    files = {
+        "later_if.py": (
+            "def run(output_format, path):\n"
+            "    error = None\n"
+            "    if output_format == 'json':\n"
+            "        pass\n"
+            "    elif path:\n"
+            "        console.print(f'[red]Later-if failure: {path}[/red]')\n"
+            "        error = path\n"
+            "    if error is not None:\n"
+            "        raise typer.Exit(code=1)\n"
+        ),
+        "later_if_zero.py": (
+            "def run(output_format, path):\n"
+            "    error = None\n"
+            "    if output_format == 'json':\n"
+            "        pass\n"
+            "    elif path:\n"
+            "        console.print(f'[red]Later-if zero: {path}[/red]')\n"
+            "        error = path\n"
+            "    if error is not None:\n"
+            "        raise typer.Exit(code=EXIT_OK)\n"
+        ),
+        "ifexp_red_orelse.py": (
+            "def run(refusal, label):\n"
+            "    console.print(\n"
+            "        f'[green]OK {label}[/green]'\n"
+            "        if refusal is None\n"
+            "        else f'[red]Failed {label}[/red]'\n"
+            "    )\n"
+            "    if refusal is not None:\n"
+            "        raise typer.Exit(code=1)\n"
+        ),
+        "ifexp_red_body.py": (
+            "def run(refusal, label):\n"
+            "    console.print(\n"
+            "        f'[red]Failed {label}[/red]'\n"
+            "        if refusal is not None\n"
+            "        else f'[green]OK {label}[/green]'\n"
+            "    )\n"
+            "    if refusal is not None:\n"
+            "        raise typer.Exit(code=1)\n"
+        ),
+        "nested_def.py": (
+            "def run(path):\n"
+            "    console.print(f'[red]Nested-def failure: {path}[/red]')\n"
+            "\n"
+            "    def _abort():\n"
+            "        raise typer.Exit(code=1)\n"
+            "\n"
+            "    return _abort\n"
+        ),
+    }
+    for name, body in files.items():
+        (tmp_path / name).write_text(header + body, encoding="utf-8")
+
+    sites = failure_line_sites(tmp_path)
+    found = sorted(site.path.name for site in sites)
+    assert found == ["ifexp_red_body.py", "ifexp_red_orelse.py", "later_if.py"], found
