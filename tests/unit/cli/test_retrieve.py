@@ -444,6 +444,12 @@ class TestRetrievePack:
         # The wrong advice for this state, and the one a merged
         # "is semantic missing?" boolean would have printed.
         assert "no embeddings provider" not in out
+        # The sentence must say only what's true in every misconfigured
+        # case, not "keyword + graph only" -- false whenever keyword or
+        # graph also failed in the same build (#805 gate, finding 9).
+        assert "has no semantic results" in out
+        assert "keyword + graph only" not in out
+        assert "keyword and graph only" not in out
 
     def test_pack_item_ids_are_printed_verbatim_not_emojified(self) -> None:
         r"""``emoji=False`` is load-bearing, and nothing else pins it.
