@@ -925,7 +925,7 @@ def test_assemble_pack_returns_typed_withholding(client) -> None:
     assert withholding["served_count"] == 1
 
 
-# -- #761 follow-up A: a failed retrieval axis reaches the REST caller --
+# -- axes: which retrieval axes a pack ran, and which failed --
 
 _AXIS_FAILURE_SENTINEL = "SENTINEL_AXIS_FAILURE_f91e7c"
 
@@ -961,7 +961,28 @@ def _builder_with_one_failing_strategy(
     return PackBuilder(strategies=[good_a, bad, good_b])
 
 
-def test_assemble_pack_reports_no_failed_axes_when_none_raise(client) -> None:
+def _semantic_init_fails(*_args: object, **_kwargs: object) -> object:
+    msg = "vector backend unavailable"
+    raise RuntimeError(msg)
+
+
+@pytest.mark.parametrize(
+    ("embedding_fn", "semantic"),
+    [(None, "not_configured"), (_EMBED_FN_PATH, "misconfigured")],
+)
+def test_assemble_pack_reports_no_failed_axes_when_none_raise(
+    client, monkeypatch, embedding_fn: str | None, semantic: str
+) -> None:
+    """Only the route's ``embedder_configured`` argument separates a missing
+    embedder from a resolved one whose vector search failed to initialise."""
+    if embedding_fn is None:
+        monkeypatch.delenv("TRELLIS_EMBEDDING_FN", raising=False)
+    else:
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", embedding_fn)
+        monkeypatch.setattr(
+            "trellis.retrieve.strategies.SemanticSearch", _semantic_init_fails
+        )
+
     response = client.post("/api/v1/packs", json={"intent": "quiet pack"})
 
     assert response.status_code == 200
@@ -969,6 +990,7 @@ def test_assemble_pack_reports_no_failed_axes_when_none_raise(client) -> None:
     assert axes["failed"] == []
     assert axes["ran"] == response.json()["retrieval_report"]["strategies_used"]
     assert axes["ran"]  # at least the keyword axis ran — not a vacuous empty list
+    assert axes["semantic"] == semantic
 
 
 def test_assemble_pack_reports_failed_axis_when_a_strategy_raises(
@@ -985,20 +1007,7 @@ def test_assemble_pack_reports_failed_axis_when_a_strategy_raises(
     assert axes["failed"] == ["semantic"]
     assert sorted(axes["ran"]) == ["graph", "keyword"]
     assert sorted(axes["available"]) == ["graph", "keyword", "semantic"]
-
-
-def test_assemble_pack_response_omits_the_exception_message(
-    client, monkeypatch
-) -> None:
-    """``describe_axes`` returns names and states only (CLAUDE.md: no
-    message text from the exception goes into the response)."""
-    monkeypatch.setattr(
-        retrieve, "build_pack_builder", _builder_with_one_failing_strategy
-    )
-
-    response = client.post("/api/v1/packs", json={"intent": "degraded pack"})
-
-    assert response.status_code == 200
+    # Names and states only, never the exception text.
     assert _AXIS_FAILURE_SENTINEL not in response.text
 
 

@@ -130,10 +130,8 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         tag_filters=req.tag_filters,
     )
 
-    # Which axes this deployment has, which ran, and which did not — the
-    # same call `trellis retrieve pack --format json` has made since #410
-    # (builder_factory.describe_axes), so a REST caller stops mistaking a
-    # degraded, keyword-only pack for a full one (#761 follow-up A).
+    # The axis report `trellis retrieve pack --format json` prints, so a
+    # caller can tell a pack missing a failed axis from a full one.
     axes = describe_axes(
         builder,
         pack.retrieval_report.strategies_used,

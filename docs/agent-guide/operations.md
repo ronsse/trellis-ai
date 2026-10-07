@@ -1477,7 +1477,7 @@ Text output prints a sentence for every state but `ran`.
 trellis retrieve pack --intent "deploy checklist for staging" --domain platform --max-items 10 --format json
 ```
 
-**JSON output** (same shape as `POST /api/v1/packs`, plus `axes`, `budget` and `withholding`):
+**JSON output** (same shape as `POST /api/v1/packs`, plus `intent_family` and `budget`):
 
 ```json
 {

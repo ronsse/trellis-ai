@@ -5,11 +5,9 @@ components:
       description: 'Which retrieval axes this pack has, ran, and did not.
 
 
-        Mirrors :class:`trellis.retrieve.builder_factory.AxisReport` verbatim —
+        Mirrors :class:`trellis.retrieve.builder_factory.AxisReport`: axis names
 
-        names and states only, never an exception message (see
-
-        ``describe_axes``''s own docstring for why).'
+        and states only, never an exception message.'
       properties:
         available:
           items:

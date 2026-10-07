@@ -1364,20 +1364,14 @@ All notable changes to Trellis will be documented in this file.
   passes `max_len` today, so this was unreachable; it now raises
   `ValueError` for any `max_len < 0`, and `max_len=0` is unchanged.
   ([#767](https://github.com/ronsse/trellis-ai/pull/767) follow-up 2)
-- **`POST /api/v1/packs` reports a failed retrieval axis instead of
-  absorbing it.** When one strategy raises during `PackBuilder.build()`,
-  the builder already continues with the survivors and records the
-  failure in `PACK_ASSEMBLED.strategy_failures` and an ERROR log line —
-  but the REST response carried neither, so a caller saw HTTP 200 and a
-  keyword-only pack indistinguishable from a complete one.
-  `trellis retrieve pack --format json` has reported this via an `axes`
-  block (`builder_factory.describe_axes`) since #410; `PackResponse` now
-  carries the same mapping (`available`, `ran`, `failed`, `semantic`),
-  built by the route the same way the CLI builds it, with no exception
-  text in the field. `SectionedPackResponse` and `trellis analyze health`
-  are unchanged — no sectioned CLI path calls `describe_axes`, and MCP
-  `get_context` still renders a degraded pack with nothing surfaced
-  beyond it, both out of scope here.
+- **`POST /api/v1/packs` says which retrieval axes ran.** When one strategy
+  raises, `PackBuilder` serves the surviving axes and records the failure in
+  `PACK_ASSEMBLED.strategy_failures` and the log, so a REST caller got a 200
+  and a degraded pack it could not tell from a full one. `PackResponse` now
+  carries the optional `axes` block (`available`, `ran`, `failed`,
+  `semantic`) that `trellis retrieve pack --format json` already prints,
+  from the same `describe_axes` call: axis names and states, never exception
+  text. The sectioned route and MCP `get_context` are unchanged.
   ([#761](https://github.com/ronsse/trellis-ai/pull/761) follow-up A)
 
 ## [0.9.0] - 2026-05-13

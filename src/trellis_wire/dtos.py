@@ -135,9 +135,8 @@ class WithholdingResponse(WireModel):
 class AxisReportResponse(WireModel):
     """Which retrieval axes this pack has, ran, and did not.
 
-    Mirrors :class:`trellis.retrieve.builder_factory.AxisReport` verbatim —
-    names and states only, never an exception message (see
-    ``describe_axes``'s own docstring for why).
+    Mirrors :class:`trellis.retrieve.builder_factory.AxisReport`: axis names
+    and states only, never an exception message.
     """
 
     available: list[str]
@@ -161,11 +160,10 @@ class PackResponse(WireModel):
     #: Verbatim ``Pack.metadata["withholding"]`` telemetry. ``None`` means
     #: the response came from a server older than API 1.2.
     withholding: WithholdingResponse | None = None
-    #: Which axes were available, ran, and failed during this build —
-    #: :func:`~trellis.retrieve.builder_factory.describe_axes`'s mapping,
-    #: the same one ``trellis retrieve pack --format json`` has reported
-    #: since #410. ``None`` means the response came from a server older
-    #: than the version that added this field (see api_version.py).
+    #: Which axes were available, ran, and failed during this build — the
+    #: :func:`~trellis.retrieve.builder_factory.describe_axes` mapping that
+    #: ``trellis retrieve pack --format json`` also prints. ``None`` means a
+    #: server that predates this field.
     axes: AxisReportResponse | None = None
 
 
