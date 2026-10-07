@@ -343,3 +343,37 @@ class TestHandlerRegistration:
         assert TrellisError in handlers
         assert ConfigError not in handlers
         assert Exception in handlers
+
+
+class TestOpenAIEmbedderMissingKeyAnswersLikeAConfigError:
+    """#779 F-a: a missing OpenAI key is a config error, not an opaque 500.
+
+    ``_build_openai_embedding_fn`` (``src/trellis/stores/registry.py``) left
+    the SDK's own ``openai.OpenAIError`` uncaught around the client
+    constructor, so every ``POST /api/v1/packs`` with ``embeddings:
+    provider: openai`` and no key anywhere answered 500 ``internal_error``
+    instead of the 409 ``config_error`` a missing credential already gets
+    when the extra itself is missing (``BackendNotInstalledError``).
+    """
+
+    def test_pack_request_answers_409_config_error_not_500(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("openai")  # optional extra; skip when unavailable
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        reg = StoreRegistry(
+            stores_dir=tmp_path / "stores",
+            embedding_config={"provider": "openai"},
+        )
+        app_module._registry = reg
+        try:
+            client = TestClient(create_app(), raise_server_exceptions=False)
+            resp = client.post("/api/v1/packs", json={"intent": "probe"})
+            body = resp.json()
+
+            assert resp.status_code == CONFIG_ERROR_STATUS
+            assert body["code"] == "config_error"
+            assert "OPENAI_API_KEY" in body["message"]
+        finally:
+            reg.close()
+            app_module._registry = None

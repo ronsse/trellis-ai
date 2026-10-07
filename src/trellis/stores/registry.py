@@ -602,6 +602,12 @@ def _build_openai_embedding_fn(
     is not installed — returning ``None`` here silently demoted
     ``embeddings: provider: openai`` configs to no-embedding mode
     instead of telling the operator the extra is missing.
+
+    Raises :class:`ConfigError` when the SDK is installed but no
+    credential can be found: the client constructor itself rejects a
+    missing key with an untyped ``openai.OpenAIError``, which would
+    otherwise reach callers as an opaque 500 (or a generic MCP internal
+    error) instead of the 409 ``config_error`` a missing credential is.
     """
     try:
         import openai  # noqa: PLC0415
@@ -621,7 +627,16 @@ def _build_openai_embedding_fn(
     if config.get("base_url"):
         kwargs["base_url"] = config["base_url"]
 
-    client = openai.OpenAI(**kwargs)
+    try:
+        client = openai.OpenAI(**kwargs)
+    except openai.OpenAIError as exc:
+        msg = (
+            "OpenAI embeddings are configured but no API key was found."
+            " Set embeddings.api_key_env to the name of an environment"
+            " variable holding the key, embeddings.api_key to a literal"
+            " value, or export OPENAI_API_KEY."
+        )
+        raise ConfigError(msg, setting="embeddings.api_key_env") from exc
 
     def _embed(text: str) -> list[float]:
         resp = client.embeddings.create(input=[text], model=model)
