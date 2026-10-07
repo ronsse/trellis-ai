@@ -1348,6 +1348,18 @@ All notable changes to Trellis will be documented in this file.
   A pydantic `ValidationError` raised inside a tool body is not wrapped that
   way, so it still reaches the caller raw.
   ([#765](https://github.com/ronsse/trellis-ai/pull/765) follow-up 1)
+- **`MutationExecutor` now catches an unmapped Postgres or Bolt driver
+  panic the same way it already caught `sqlite3.Error`.** A handler backed
+  by a Postgres graph store (`psycopg.Error`) or a Bolt-backed one (Neo4j
+  or ArcadeDB, which share the driver's `DriverError`/`Neo4jError`) that
+  raised its own driver's base error unmapped escaped `execute()` raw: no
+  FAILED `CommandResult`, no `MUTATION_REJECTED` audit event, and a
+  `CONTINUE_ON_ERROR` batch aborted instead of continuing. Each class is
+  appended to the handler-panic tuple only when its package is importable,
+  checked lazily on first use so `import trellis.mutate.executor` still
+  does not import either optional driver. The FAILED message still names
+  only the exception's type (#748's fix, unchanged).
+  ([#PLACEHOLDER](https://github.com/ronsse/trellis-ai/pull/PLACEHOLDER))
 
 ## [0.9.0] - 2026-05-13
 

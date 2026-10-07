@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import sqlite3
 from collections import OrderedDict
 from typing import Protocol
@@ -58,7 +59,12 @@ _AUDIT_EMIT_FAILED_TEMPLATE = (
 # new backends should map their own errors into ``StoreError`` (one
 # of the typed catches above) rather than relying on this fallback.
 # ``sqlite3.Error`` is listed because the default SQLite stores raise it
-# unmapped, from writes that share no seam to map it at.
+# unmapped, from writes that share no seam to map it at. ``psycopg.Error``
+# and the Bolt driver's (neo4j, shared by the Neo4j and ArcadeDB stores)
+# ``DriverError``/``Neo4jError`` belong here for the same reason — Postgres's
+# edge and alias writers and the Bolt writers raise their driver's base
+# error unmapped — but both are optional extras, so they are not listed as
+# literals here; see ``_optional_driver_panics`` below.
 _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
     RuntimeError,
     OSError,
@@ -73,6 +79,45 @@ _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
     sqlite3.Error,
 )
 
+
+@functools.lru_cache(maxsize=1)
+def _optional_driver_panics() -> tuple[type[BaseException], ...]:
+    """``psycopg.Error`` and the Bolt driver's ``DriverError``/``Neo4jError``,
+    appended to the handler-panic tuple only when each package is importable.
+
+    Both are optional extras (see pyproject.toml's ``postgres``/``neo4j``/
+    ``arcadedb`` extras) — importing ``trellis.mutate.executor`` must not
+    import either, so unlike a module-level guarded import, this one is
+    deferred to the first command the executor actually runs rather than
+    happening at module load (tests/unit/mutate/test_executor_optional_deps.py
+    pins this). ``lru_cache`` means a missing extra is not retried on every
+    call.
+    """
+    panics: list[type[BaseException]] = []
+    try:
+        import psycopg  # noqa: PLC0415 — deferred, see the docstring above
+
+        has_psycopg = True
+    except ImportError:
+        has_psycopg = False
+    if has_psycopg:
+        panics.append(psycopg.Error)
+    try:
+        from neo4j.exceptions import DriverError, Neo4jError  # noqa: PLC0415
+
+        has_neo4j = True
+    except ImportError:
+        has_neo4j = False
+    if has_neo4j:
+        panics.extend((DriverError, Neo4jError))
+    return tuple(panics)
+
+
+def _handler_panic_classes() -> tuple[type[BaseException], ...]:
+    """The full ``except`` tuple for an unexpected handler panic."""
+    return (*_UNEXPECTED_HANDLER_FAILURE, *_optional_driver_panics())
+
+
 # Exception classes the audit-emit guard in ``_emit_event`` catches, and
 # Stage 3's persisted idempotency read, a call on the same event log. Same
 # enumerate-don't-bare-except discipline as the tuple above, and for the same
@@ -83,11 +128,9 @@ _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
 # raises; the panic tuple covers a backend that does not, because an event
 # log that raises ``ConnectionError`` instead must not be the difference
 # between a degraded result and an aborted batch.
-_AUDIT_EMIT_FAILURE: tuple[type[BaseException], ...] = (
-    StoreError,
-    TrellisError,
-    *_UNEXPECTED_HANDLER_FAILURE,
-)
+def _audit_emit_failure_classes() -> tuple[type[BaseException], ...]:
+    """The full ``except`` tuple for the audit-emit guard."""
+    return (StoreError, TrellisError, *_handler_panic_classes())
 
 
 def _audit_warnings(audit_warning: str | None) -> list[str]:
@@ -366,7 +409,7 @@ class MutationExecutor:
                 message=f"Execution failed: {exc}",
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
-        except _UNEXPECTED_HANDLER_FAILURE as exc:
+        except _handler_panic_classes() as exc:
             # An untyped exception escaped the handler — almost
             # certainly a programming bug or a backend/network panic
             # rather than an expected failure mode. Log with
@@ -598,7 +641,7 @@ class MutationExecutor:
         # log recovers runs.
         try:
             persisted = self._event_log.has_idempotency_key(command.idempotency_key)
-        except _AUDIT_EMIT_FAILURE as exc:
+        except _audit_emit_failure_classes() as exc:
             message = f"Idempotency check failed: {type(exc).__name__}"
             log.error(  # noqa: TRY400 — no traceback on purpose; see above
                 "idempotency_check_failed",
@@ -755,7 +798,7 @@ class MutationExecutor:
                 entity_type=command.target_type,
                 payload=payload,
             )
-        except _AUDIT_EMIT_FAILURE as exc:
+        except _audit_emit_failure_classes() as exc:
             # No traceback, and no text Trellis did not write; see the
             # docstring.
             logger.error(  # noqa: TRY400 — no traceback on purpose; see above
