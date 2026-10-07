@@ -1236,6 +1236,19 @@ All notable changes to Trellis will be documented in this file.
   store compared in Python, is refused too. A `None`, list or dict value is
   still compared in Python and does not raise.
   ([#743](https://github.com/ronsse/trellis-ai/issues/743) follow-up 3)
+- **Concurrent `upsert_node` writes of one node on Postgres no longer
+  raise a raw `UniqueViolation`.** The `FOR UPDATE` read serialises
+  neither two creates of a new `node_id`, which have no row to lock, nor
+  two updates of an existing one, where the writer that waited finds no
+  current row. The later `INSERT` hit the partial unique index
+  `idx_nodes_current` and its write was lost. `upsert_node` now retries
+  once in a fresh transaction, which writes a new version over the
+  winner's row, and matches the index by `exc.diag.constraint_name`
+  because the message text follows the server's locale. A second
+  conflict, or any conflict in `upsert_nodes_bulk`, which does not retry,
+  raises a `StoreError` naming only the exception type. Other unique
+  violations are unchanged.
+  ([#755](https://github.com/ronsse/trellis-ai/pull/755))
 - **`trellis admin migrate-graph` sanitizes a destination store's failure
   text before printing it.** The `Migration aborted:` line,
   `--continue-on-error`'s `Errors:` list, and the `--format json`
