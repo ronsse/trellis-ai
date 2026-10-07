@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from trellis.errors import TrellisError
+
 #: Upper bound for a passed-through message. Exception text beyond this
 #: is almost always a wrapped stack dump or an echoed payload; the
 #: interesting part (the leading error statement) survives truncation.
@@ -196,6 +198,33 @@ def describe_yaml_error(exc: BaseException) -> str:
         f"a value could not be constructed ({type(exc).__name__}); check"
         " explicit tags such as !!int, !!float or !!bool, and dates"
     )
+
+
+def render_exception_detail(exc: BaseException) -> str:
+    """Render a caught exception's text for a caller-facing message.
+
+    A ``TrellisError`` keeps its own text: Trellis wrote it, and every
+    ``StoreError`` across ``src/trellis/stores/`` already names its cause
+    by type alone rather than embedding raw driver text, so there is
+    nothing left to strip. Any other exception's text can be a driver's —
+    a Postgres DETAIL line, a Neo4j constraint message — and is rendered
+    through :func:`sanitize_error_message` instead of discarded outright,
+    so a clean message (a timeout, a connection refusal) still reaches the
+    caller while a leak-shaped one comes back as the sanitizer's static
+    marker. Callers that also log keep the full text on an operator
+    channel first (``logger.exception`` or equivalent); this function
+    only decides what a caller-facing message gets. The sanitizer is a
+    deny-list, so a leak in a shape it does not know still passes
+    (trellis-ai#748).
+
+    Shared by ``trellis.mcp.server``'s ``_exception_detail`` and
+    ``trellis.mcp.supersession``'s stamp functions so the two render a
+    caught exception the same way rather than keeping two copies of this
+    rule (trellis-ai#793 follow-up).
+    """
+    if isinstance(exc, TrellisError):
+        return str(exc)
+    return sanitize_error_message(str(exc))
 
 
 def sanitized_error_payload(exc: BaseException, **context: Any) -> dict[str, Any]:
