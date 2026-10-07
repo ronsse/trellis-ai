@@ -15,12 +15,16 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import assert_coloured, force_colour, plain
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.graph import SQLiteGraphStore
+from trellis_cli import admin_migrate_provenance as migrate_provenance_module
 from trellis_cli.admin import admin_app
 from trellis_cli.admin_migrate_provenance import (
+    MigrateProvenanceReport,
     MigrationDriftError,
+    _print_text_report,
     run_migrate_provenance,
 )
 
@@ -252,6 +256,49 @@ class TestRunMigrateProvenance:
 
 
 runner = CliRunner()
+
+
+# ---------------------------------------------------------------------------
+# ``_print_text_report``'s per-edge error line, verbatim and unwrapped.
+# ``_migrate_one_edge`` builds each ``report.errors`` entry from a live
+# exception's ``str()``, so it can carry anything, brackets included; Rich
+# reads an unescaped ``[...]`` as a style tag and deletes it, and
+# hard-wraps a long id at the console width without ``soft_wrap=True``
+# (#777 follow-up F2; matches admin.py's ``_render_smoke_text`` and
+# ``_print_skills_summary``, and ingest_corpus.py's ``_render_report``).
+# The print sits in ``_print_text_report``, a different function than
+# ``migrate_provenance_command``, which is the only place that exits —
+# the same cross-function shape as those sites, invisible to
+# ``tests/unit/test_cli_failure_soft_wrap_rule.py``'s same-function scan.
+# ---------------------------------------------------------------------------
+
+
+#: Long enough to wrap at 80 columns without ``soft_wrap``.
+_LONG_EDGE_ID = "edge-" + "a" * 90
+_UPSERT_ERROR = (
+    f"edge:{_LONG_EDGE_ID}: upsert failed: ValueError: [bold]x[/bold] and a [tag] too"
+)
+
+
+class TestPrintTextReportErrorVerbatim:
+    @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
+    def test_error_line_prints_verbatim_and_unwrapped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        colour: bool,
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "80")
+        if colour:
+            force_colour(monkeypatch, migrate_provenance_module)
+
+        report = MigrateProvenanceReport(dry_run=False, errors=[_UPSERT_ERROR])
+        _print_text_report(report)
+
+        out = capsys.readouterr().out
+        text = assert_coloured(out) if colour else plain(out)
+        lines = [ln for ln in text.splitlines() if _LONG_EDGE_ID in ln]
+        assert lines == [f"  {_UPSERT_ERROR}"], text
 
 
 class TestMigrateProvenanceCLI:
