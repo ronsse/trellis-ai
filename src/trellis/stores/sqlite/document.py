@@ -20,7 +20,7 @@ from trellis.stores.base.document import (
     encode_filter_value,
 )
 from trellis.stores.base.tag_filters import normalize_facet_filter
-from trellis.stores.sqlite.base import SQLiteStoreBase, reject_nul_key
+from trellis.stores.sqlite.base import SQLiteStoreBase, json_key_path, reject_nul_key
 
 logger = structlog.get_logger(__name__)
 
@@ -71,8 +71,17 @@ def _build_tag_conditions(
         operator, values = normalized
         # Bound, not interpolated: ``facet`` arrives from wire input, and a
         # JSON path spliced into SQL is an injection surface. SQLite's JSON
-        # functions take the path as an ordinary parameter.
-        json_path = f"$.content_tags.{facet}"
+        # functions take the path as an ordinary parameter. The member is
+        # quoted via :func:`~trellis.stores.sqlite.base.json_key_path`, the
+        # escaping and NUL check the graph and vector stores share, so a
+        # ``.``, ``[``, ``"`` or NUL in ``facet`` cannot change which path
+        # this reads; a NUL raises the same ``ValueError`` those stores
+        # raise.
+        # ContentTags facets are an open vocabulary (``domain``,
+        # ``content_type``, ``scope`` and ``signal_quality`` are merely
+        # well-known), so this quotes whatever name a caller sends rather
+        # than validating it against a list.
+        json_path = "$.content_tags" + json_key_path(facet)[1:]
         if facet in LIST_FACETS:
             sub_parts = " OR ".join("je.value = ?" for _ in values)
             inner = (
@@ -173,12 +182,18 @@ def _bindable_json_path(key: str) -> str | None:
     Python, needs no path and matches on every SQLite release.
 
     Raises:
-        ValueError: *key* holds a NUL character, even alongside a ``"`` or a
+        ValueError: *key* holds a NUL character and neither a ``"`` nor a
             ``\``. :func:`~trellis.stores.sqlite.base.reject_nul_key` raises
-            it, with the message the graph and vector stores give.
+            it, with the message the graph and vector stores give. A key
+            holding a ``"`` or a ``\`` returns ``None`` before this check
+            runs, whether or not it also holds a NUL — that routes the
+            caller to :func:`_metadata_matches`, which builds no JSON path,
+            so a NUL there cannot name one wrong.
     """
+    if '"' in key or "\\" in key:
+        return None
     reject_nul_key(key)
-    return None if '"' in key or "\\" in key else f'$."{key}"'
+    return f'$."{key}"'
 
 
 class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
