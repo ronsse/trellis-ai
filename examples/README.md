@@ -15,7 +15,7 @@ trellis demo load     # optional — seeds 106 realistic items so retrieval has 
 | Example | What it shows |
 |---------|---------------|
 | [sdk_local_demo.py](sdk_local_demo.py) | Use the Python SDK against the **in-memory** API (no server) — ingest a trace, search, assemble a context pack. |
-| [sdk_remote_demo.py](sdk_remote_demo.py) | Same flow against the **REST API** (`trellis admin serve`). One line change. |
+| [sdk_remote_demo.py](sdk_remote_demo.py) | Ingest a trace and assemble a pack against a real **REST API** server (`trellis admin serve`) via `TrellisClient(base_url=...)`, instead of the in-memory client. |
 | [retrieve_before_task.py](retrieve_before_task.py) | The "retrieve → act → record" loop, the canonical pattern for agents with institutional memory. |
 | [custom_extractor.py](custom_extractor.py) | Define your own deterministic extractor that turns a JSON source into entity/edge drafts. |
 | [custom_classifier.py](custom_classifier.py) | Add a domain-specific `Classifier` that tags items at ingest time. |

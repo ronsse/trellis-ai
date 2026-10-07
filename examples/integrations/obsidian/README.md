@@ -37,7 +37,7 @@ indexer = VaultIndexer(
 )
 
 summary = indexer.index_vault()
-print(f"indexed={summary.indexed} updated={summary.updated} unchanged={summary.unchanged}")
+print(f"created={summary.created} updated={summary.updated} unchanged={summary.unchanged}")
 ```
 
 After indexing, the notes are searchable through every Trellis interface:
@@ -48,7 +48,7 @@ trellis retrieve search "rate limiting" --format json
 
 ## Re-indexing
 
-`VaultIndexer` keeps an in-memory hash cache, so calling `index_vault()` twice in the same process is cheap. Across runs, the document-store `content_hash` metadata is the source of truth — pass `force=True` to rebuild from scratch:
+`VaultIndexer` keeps its hash cache in memory, on the instance — calling `index_vault()` twice on the *same* `VaultIndexer` is cheap, because the second call sees its own cache and skips unchanged notes. That cache does not persist: a new process (or a fresh `VaultIndexer`) starts empty, so re-indexing a vault from a new process reports every note as `created` and rewrites it, even though the document store's `content_hash` metadata from the prior run is still sitting there unread. Keep one long-lived `VaultIndexer` per process if you want cross-call dedup. `force=True` skips the in-memory cache check and rewrites every note on the current instance:
 
 ```python
 indexer.index_vault(force=True)
