@@ -1,6 +1,6 @@
 """The ``mv`` command a degraded ``DegradableJsonStore`` recovery advises.
 
-:attr:`~trellis.stores.degradable_json_store.FileLoadFailure.recovery`
+:attr:`~trellis.stores.degradable_json_store.LoadDegradation.recovery`
 ``shlex.quote``s both operands (#427): an unquoted ``mv`` word-splits on a
 data directory containing a space — ``~/Library/Application Support/…`` —
 into four operands rather than two. A test that builds its *expected*
@@ -22,7 +22,7 @@ import shlex
 from pathlib import Path
 
 
-def expected_recovery(path: Path | str) -> str:
-    """The exact string ``FileLoadFailure.recovery`` builds for ``path``."""
+def expected_recovery(path: Path) -> str:
+    """The exact string ``LoadDegradation.recovery`` builds for ``path``."""
     quoted = shlex.quote(str(path))
     return f"mv {quoted} {shlex.quote(str(path) + '.corrupt')}"
