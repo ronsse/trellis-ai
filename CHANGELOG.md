@@ -1492,6 +1492,16 @@ All notable changes to Trellis will be documented in this file.
   `pack_id`, before the withholding note, outside the token budget) as the
   flat path; a clean reply is unchanged.
   ([#783](https://github.com/ronsse/trellis-ai/pull/783) follow-up)
+- **`BoltOpenCypherGraphStore.upsert_edge` and `upsert_edges_bulk` (Neo4j and
+  ArcadeDB) find an edge left on a re-versioned endpoint.** `upsert_node`
+  re-versions a node without moving its relationships, and the existing-edge
+  lookup matched only between the two current endpoint rows, so the next
+  upsert of a triplet with a re-versioned endpoint minted a second current
+  edge. The lookup now matches each endpoint's `node_id` on any row and
+  closes every current match, carrying the `edge_id` forward, so a triplet
+  already doubled heals on its next upsert. SQLite and Postgres were not
+  affected.
+  ([#782](https://github.com/ronsse/trellis-ai/pull/782) follow-up 1)
 
 ## [0.9.0] - 2026-05-13
 

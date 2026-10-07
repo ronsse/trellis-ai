@@ -779,6 +779,14 @@ class TestDuplicateCurrentRow:
             graph_store, duplicated_end
         )
 
+    def test_upsert_edge_heals_a_duplicate_edge(self, graph_store):
+        bolt_duplicate_current.check_upsert_edge_heals_a_duplicate_edge(graph_store)
+
+    def test_upsert_edges_bulk_heals_a_duplicate_edge(self, graph_store):
+        bolt_duplicate_current.check_upsert_edges_bulk_heals_a_duplicate_edge(
+            graph_store
+        )
+
     def test_get_nodes_bulk_shows_one_version(self, graph_store):
         bolt_duplicate_current.check_get_nodes_bulk_shows_one_version(graph_store)
 

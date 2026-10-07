@@ -35,6 +35,7 @@ from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from typing import Any
 
+from trellis.core.ids import generate_ulid
 from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis.stores.base.graph_query import FilterClause, NodeQuery
 
@@ -773,3 +774,131 @@ def check_upsert_edges_bulk_writes_one_version(store: Any, duplicated_end: str) 
             _assert_one_current_edge(
                 store, source_id, target_id, edge_id=edge_id, step=step, rows=rows
             )
+
+
+def add_duplicate_current_edge(
+    store: Any,
+    source_id: str,
+    target_id: str,
+    edge_type: str,
+    *,
+    step: int,
+    shift: timedelta,
+) -> str:
+    """Write a second current ``EDGE`` row for one (source, target, type).
+
+    The new row has its own ``edge_id`` and a ``valid_from`` *shift* later:
+    what a lookup that misses the prior version leaves, two current edges
+    for one triplet. Returns the new row's ``edge_id``.
+    """
+    with store._driver.session(database=store._database) as session:
+        record = session.run(
+            "MATCH (s:Node {node_id: $source_id})-[r:EDGE {edge_type: $edge_type}]->"
+            "(t:Node {node_id: $target_id}) WHERE r.valid_to IS NULL "
+            "RETURN r {.*} AS r LIMIT 1",
+            source_id=source_id,
+            target_id=target_id,
+            edge_type=edge_type,
+        ).single()
+        row = dict(record["r"])
+        new_edge_id = generate_ulid()
+        row["edge_id"] = new_edge_id
+        row["version_id"] = generate_ulid()
+        properties = json.loads(row.get("properties_json", "{}"))
+        properties["step"] = step
+        row["properties_json"] = json.dumps(properties)
+        row["valid_from"] = (
+            datetime.fromisoformat(str(row["valid_from"])) + shift
+        ).isoformat()
+        row["created_at"] = row["valid_from"]
+        session.run(
+            "MATCH (s:Node {node_id: $source_id}) WHERE s.valid_to IS NULL "
+            "MATCH (t:Node {node_id: $target_id}) WHERE t.valid_to IS NULL "
+            "CREATE (s)-[r:EDGE]->(t) SET r = $row",
+            source_id=source_id,
+            target_id=target_id,
+            row=row,
+        ).consume()
+    return new_edge_id
+
+
+def _current_edge_count(
+    store: Any, source_id: str, target_id: str, edge_type: str
+) -> int:
+    return sum(
+        version.get("valid_to") is None and version["edge_type"] == edge_type
+        for version in _edge_versions(store, source_id, target_id)
+    )
+
+
+def check_upsert_edge_heals_a_duplicate_edge(store: Any) -> None:
+    """``upsert_edge`` closes every current edge of a doubled triplet, not one.
+
+    The reversion contract cases leave one prior version to close, so
+    only these checks tell closing every match from closing one.
+    """
+    store.upsert_node("dup-edge-a", "kind-a", {})
+    store.upsert_node("dup-edge-b", "kind-b", {})
+    first_edge_id = store.upsert_edge(
+        "dup-edge-a", "dup-edge-b", "relates_to", {"step": 1}
+    )
+    duplicate_edge_id = add_duplicate_current_edge(
+        store, "dup-edge-a", "dup-edge-b", "relates_to", step=2, shift=LATER
+    )
+    assert duplicate_edge_id != first_edge_id
+    assert _current_edge_count(store, "dup-edge-a", "dup-edge-b", "relates_to") == 2
+
+    healed_id = store.upsert_edge("dup-edge-a", "dup-edge-b", "relates_to", {"step": 3})
+
+    # _shown_row picks the later valid_from -- the duplicate -- so its
+    # edge_id, not the original upsert_edge call's, carries forward.
+    assert healed_id == duplicate_edge_id
+    assert _current_edge_count(store, "dup-edge-a", "dup-edge-b", "relates_to") == 1
+    edges = [
+        e
+        for e in store.get_edges("dup-edge-a", direction="outgoing")
+        if e["edge_id"] == healed_id
+    ]
+    assert len(edges) == 1, edges
+    assert edges[0]["properties"] == {"step": 3}
+
+
+def check_upsert_edges_bulk_heals_a_duplicate_edge(store: Any) -> None:
+    """Bulk twin of :func:`check_upsert_edge_heals_a_duplicate_edge`."""
+    store.upsert_node("dup-edge-bulk-a", "kind-a", {})
+    store.upsert_node("dup-edge-bulk-b", "kind-b", {})
+    first_edge_id = store.upsert_edge(
+        "dup-edge-bulk-a", "dup-edge-bulk-b", "relates_to", {"step": 1}
+    )
+    duplicate_edge_id = add_duplicate_current_edge(
+        store, "dup-edge-bulk-a", "dup-edge-bulk-b", "relates_to", step=2, shift=LATER
+    )
+    assert duplicate_edge_id != first_edge_id
+    assert (
+        _current_edge_count(store, "dup-edge-bulk-a", "dup-edge-bulk-b", "relates_to")
+        == 2
+    )
+
+    (healed_id,) = store.upsert_edges_bulk(
+        [
+            {
+                "source_id": "dup-edge-bulk-a",
+                "target_id": "dup-edge-bulk-b",
+                "edge_type": "relates_to",
+                "properties": {"step": 3},
+            }
+        ]
+    )
+
+    assert healed_id == duplicate_edge_id
+    assert (
+        _current_edge_count(store, "dup-edge-bulk-a", "dup-edge-bulk-b", "relates_to")
+        == 1
+    )
+    edges = [
+        e
+        for e in store.get_edges("dup-edge-bulk-a", direction="outgoing")
+        if e["edge_id"] == healed_id
+    ]
+    assert len(edges) == 1, edges
+    assert edges[0]["properties"] == {"step": 3}
