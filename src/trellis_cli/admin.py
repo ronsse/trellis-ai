@@ -1531,7 +1531,8 @@ def llm_routes(
         emit_json({"status": status, "routes": routes, "error": error})
     elif error is not None:
         console.print(
-            f"[red]{escape(str(error['setting']))}: {escape(error['message'])}[/red]"
+            f"[red]{escape(str(error['setting']))}: {escape(error['message'])}[/red]",
+            soft_wrap=True,
         )
     else:
         table = Table(title="LLM routes")
@@ -1880,7 +1881,9 @@ def migrate_graph(
                 # on — an identifier the operator re-runs against. ``msg``
                 # is sanitized as in the JSON branch above.
                 sanitized_msg = escape(sanitize_error_message(msg))
-                console.print(f"  [red]{escape(target)}[/red]: {sanitized_msg}")
+                console.print(
+                    f"  [red]{escape(target)}[/red]: {sanitized_msg}", soft_wrap=True
+                )
 
     if failed:
         raise typer.Exit(code=EXIT_STORE)
