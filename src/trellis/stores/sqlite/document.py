@@ -72,11 +72,11 @@ def _build_tag_conditions(
         # Bound, not interpolated: ``facet`` arrives from wire input, and a
         # JSON path spliced into SQL is an injection surface. SQLite's JSON
         # functions take the path as an ordinary parameter. The member is
-        # quoted via :func:`~trellis.stores.sqlite.base.json_key_path` — the
-        # same escaping and NUL check the document store's own scalar-key
-        # path and the graph/vector stores already share — so a ``.``,
-        # ``[``, ``"`` or NUL in ``facet`` cannot change which path this
-        # reads; a NUL raises the same ``ValueError`` those stores raise.
+        # quoted via :func:`~trellis.stores.sqlite.base.json_key_path`, the
+        # escaping and NUL check the graph and vector stores share, so a
+        # ``.``, ``[``, ``"`` or NUL in ``facet`` cannot change which path
+        # this reads; a NUL raises the same ``ValueError`` those stores
+        # raise.
         # ContentTags facets are an open vocabulary (``domain``,
         # ``content_type``, ``scope`` and ``signal_quality`` are merely
         # well-known), so this quotes whatever name a caller sends rather
