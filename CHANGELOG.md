@@ -1367,7 +1367,7 @@ All notable changes to Trellis will be documented in this file.
   checked lazily on first use so `import trellis.mutate.executor` still
   does not import either optional driver. The FAILED message still names
   only the exception's type (#748's fix, unchanged).
-  ([#PLACEHOLDER](https://github.com/ronsse/trellis-ai/pull/PLACEHOLDER))
+  ([#773](https://github.com/ronsse/trellis-ai/pull/773))
 
 ## [0.9.0] - 2026-05-13
 
