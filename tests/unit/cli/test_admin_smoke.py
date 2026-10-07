@@ -397,6 +397,7 @@ class TestSmokeTestErrorTextVerbatim:
         text = plain(result.stdout)
         for needle in needles:
             assert needle in text
+        assert "[/" not in text  # a tag printed as text: the whole line was escaped
 
 
 # ---------------------------------------------------------------------------
