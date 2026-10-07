@@ -13,14 +13,25 @@ tests drive the real dispatch through an in-memory ``fastmcp.Client``
 (``Client(server_mod.mcp)``). ``test_store_error_sanitization.py``'s
 ``unwrap_tool`` pattern calls the bare function directly and never reaches
 FastMCP's wrapping layer at all, so it cannot exercise this fix.
+
+``TestCarveOutsLeaveTheirCauseUntouched`` below pins the three cases the
+middleware leaves alone by design. The dispatch tests above reach only one
+of them, the ``McpError`` from ``save_memory``'s caught path, and its text
+is already sanitized, so they pass with any carve-out removed. Those tests
+build a fresh ``FastMCP`` instance with the middleware and synthetic probe
+tools, so no probe tool registers on the shared ``server_mod.mcp``.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
-from fastmcp import Client
+from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
+from mcp.shared.exceptions import McpError
+from mcp.types import INVALID_PARAMS, ErrorData
 
 import trellis.mcp.server as server_mod
 from trellis.errors import StoreError
@@ -70,8 +81,8 @@ def _allow_in_memory_client() -> None:
     set_auth_enforced(enforced=False)
 
 
-async def _call(name: str, args: dict[str, Any]) -> Any:
-    async with Client(server_mod.mcp) as client:
+async def _call(name: str, args: dict[str, Any], app: FastMCP = server_mod.mcp) -> Any:
+    async with Client(app) as client:
         return await client.call_tool(name, args, raise_on_error=False)
 
 
@@ -149,3 +160,74 @@ class TestCaughtPathsUnchangedByTheMiddleware:
         assert not result.is_error
         text = result.content[0].text
         assert text.startswith("Entity created: ")
+
+
+def _fresh_carve_out_app() -> FastMCP:
+    """A ``FastMCP`` instance with the middleware installed, so a synthetic
+    probe tool never touches the shared ``server_mod.mcp``."""
+    app = FastMCP("test-carve-outs")
+    app.add_middleware(server_mod._SanitizeUncaughtToolErrors())
+    return app
+
+
+class TestCarveOutsLeaveTheirCauseUntouched:
+    """The three cases ``_SanitizeUncaughtToolErrors`` leaves alone by
+    design: ``cause is None``, an ``McpError`` cause, and a ``ToolError``
+    whose text lacks FastMCP's ``"Error calling tool {name!r}:"`` prefix.
+    Each must reach the caller exactly as FastMCP rendered it."""
+
+    async def test_mcp_error_cause_is_not_resanitized(self) -> None:
+        """An ``McpError`` comes from a site that already rendered its text
+        through ``_exception_detail``, or echoes the caller's own input, so
+        the middleware must not sanitize it again. The sanitizer would
+        suppress this ``token=...`` text, so a second pass would show."""
+        message = f"token={SECRET}-should-not-be-resanitized"
+        app = _fresh_carve_out_app()
+
+        @app.tool
+        def probe_mcp_error() -> str:
+            raise McpError(ErrorData(code=INVALID_PARAMS, message=message))
+
+        result = await _call("probe_mcp_error", {}, app)
+        text = result.content[0].text
+        assert result.is_error
+        assert text == f"Error calling tool 'probe_mcp_error': {message}"
+
+    async def test_non_prefixed_cause_keeps_its_retry_hint(self) -> None:
+        """FastMCP turns an ``httpx`` 429 into its own retry message, chained
+        from the ``httpx`` error. That message lacks the generic wrap's
+        prefix, so the middleware must pass it on rather than replace it
+        with a rendering of the cause."""
+        app = _fresh_carve_out_app()
+
+        @app.tool
+        def probe_rate_limited() -> str:
+            request = httpx.Request("GET", "https://upstream.invalid/v1")
+            response = httpx.Response(429, request=request)
+            message = "upstream returned 429"
+            raise httpx.HTTPStatusError(message, request=request, response=response)
+
+        result = await _call("probe_rate_limited", {}, app)
+        text = result.content[0].text
+        assert result.is_error
+        assert text == "Rate limited by upstream API, please retry later"
+
+    async def test_bare_tool_error_with_no_cause_is_unchanged(self) -> None:
+        """A ``ToolError`` raised with no cause carries text its author chose
+        (FastMCP's own ``Client`` raises one when relaying a remote tool's
+        error reply). This text starts with FastMCP's prefix, so the prefix
+        gate cannot save it: without the ``cause is None`` check the reply
+        would become ``"Error calling tool 'probe_bare_tool_error': None"``.
+        """
+        app = _fresh_carve_out_app()
+        prefix = "Error calling tool 'probe_bare_tool_error':"
+        message = f"{prefix} token={SECRET}-author-chose-this"
+
+        @app.tool
+        def probe_bare_tool_error() -> str:
+            raise ToolError(message)
+
+        result = await _call("probe_bare_tool_error", {}, app)
+        text = result.content[0].text
+        assert result.is_error
+        assert text == message
