@@ -1535,6 +1535,15 @@ All notable changes to Trellis will be documented in this file.
   `StoreRegistry`'s builders and `mcp.server`'s env fallback treat a missing
   key as "not configured" before constructing a client.
   (follow-up 2 from [#786](https://github.com/ronsse/trellis-ai/pull/786))
+- **A bad `TRELLIS_EMBEDDING_FN` path's `ConfigError` names the env var, not
+  `embeddings.provider`.** `_import_callable` hardcoded `setting=` to the
+  config key, so an operator chasing a typo'd env var was pointed at the
+  wrong YAML key; the env-var call site now passes
+  `setting="TRELLIS_EMBEDDING_FN"`. The docstrings now state which failures
+  are a `ConfigError` (a malformed path, an `ImportError`, a missing or
+  non-callable attribute) and that any other import-time exception
+  propagates unchanged.
+  ([#794](https://github.com/ronsse/trellis-ai/pull/794) follow-ups F1-F3)
 
 ## [0.9.0] - 2026-05-13
 
