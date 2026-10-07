@@ -202,11 +202,8 @@ class SectionedPackResponse(WireModel):
     #: Which axes were available, ran, and failed during this build — the
     #: same :func:`~trellis.retrieve.builder_factory.describe_axes` mapping
     #: ``POST /api/v1/packs`` reports. ``None`` means a server that
-    #: predates this field. ``sections=[]`` never reaches a 200 (refused
-    #: 422, "sections must not be empty" — #783 gate, follow-up F4, the
-    #: same reason MCP's ``get_context``/``get_sectioned_context`` use), so
-    #: every 200 response here carries at least one section to read the
-    #: "ran" axes off.
+    #: predates this field. The server refuses ``sections=[]`` (422), so
+    #: every 200 has a section to read the "ran" axes off.
     axes: AxisReportResponse | None = None
 
 

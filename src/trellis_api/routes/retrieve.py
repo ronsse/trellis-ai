@@ -160,11 +160,8 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
     dicts are validated into ``SectionRequest`` models here (the wire
     DTO keeps them untyped so trellis_wire stays core-free).
     """
-    # MCP refuses the same input before any build runs (get_context and
-    # get_sectioned_context, "sections must not be empty"): an empty
-    # sections list has no section for a caller to read, so it carries no
-    # meaning on either surface. Mirror that reason here rather than
-    # answering 200 with axes null (#783 gate, follow-up F4).
+    # An empty list has no section to read, so it is refused before any
+    # build, with the reason MCP's get_context and get_sectioned_context give.
     if not req.sections:
         raise HTTPException(status_code=422, detail="sections must not be empty")
 
@@ -195,18 +192,16 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
     # to the PACK_ASSEMBLED event payload), but describe_axes only ever
     # needs the "ran" list, and every section's retrieval_report carries
     # the identical list computed once before section-filling — so the
-    # first section's is as good as any. The guard above means pack.sections
-    # is never empty here; kept defensive since build_sectioned's own
-    # 1:1 section contract is not re-asserted at this layer.
-    axes = None
-    if pack.sections:
-        axes = AxisReportResponse(
-            **describe_axes(
-                builder,
-                pack.sections[0].retrieval_report.strategies_used,
-                embedder_configured=registry.embedding_fn is not None,
-            )
+    # first section's is as good as any. build_sectioned returns one section
+    # per requested section and the guard above refuses an empty list, so
+    # sections[0] exists.
+    axes = AxisReportResponse(
+        **describe_axes(
+            builder,
+            pack.sections[0].retrieval_report.strategies_used,
+            embedder_configured=registry.embedding_fn is not None,
         )
+    )
 
     return SectionedPackResponse(
         pack_id=pack.pack_id,

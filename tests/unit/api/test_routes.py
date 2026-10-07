@@ -1062,17 +1062,18 @@ def test_assemble_sectioned_pack_reports_failed_axis_when_a_strategy_raises(
 
 
 def test_assemble_sectioned_pack_with_no_sections_is_refused(client) -> None:
-    """F4 (#783 gate): ``sections=[]`` has no section to read ``axes`` from,
-    and MCP already refuses the same input before any build runs
-    (``get_context``/``get_sectioned_context``, "sections must not be
-    empty"). REST mirrors that reason instead of answering 200 with
-    ``axes`` null."""
+    """``sections=[]`` has no section to read ``axes`` from, so it is refused
+    before any build, with the reason MCP gives for the same input."""
     response = client.post(
         "/api/v1/packs/sectioned", json={"intent": "no sections", "sections": []}
     )
 
     assert response.status_code == 422
     assert response.json()["detail"] == "sections must not be empty"
+    # Refused before the build, so no PACK_ASSEMBLED is recorded for it.
+    assert not app_module._registry.operational.event_log.get_events(
+        event_type=EventType.PACK_ASSEMBLED
+    )
 
 
 def test_assemble_sectioned_pack_returns_routed_ids_and_served_count(client) -> None:
