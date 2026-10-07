@@ -1328,6 +1328,16 @@ All notable changes to Trellis will be documented in this file.
   within 500 characters past the cut; a leak lying wholly past the window
   now yields the truncated prefix instead of the marker.
   ([#763](https://github.com/ronsse/trellis-ai/pull/763) follow-up 2)
+- **`PostgresGraphStore.upsert_edge` and `upsert_edges_bulk` leave one
+  current row per logical edge under concurrency.** `idx_edges_current` is
+  unique on the random `edge_id`, not on `(source_id, target_id,
+  edge_type)`, and `FOR UPDATE` cannot serialize writers that find no
+  current row, so two concurrent writers of one edge could each commit a
+  current row. Both paths now take a `pg_advisory_xact_lock` on that key
+  before reading, as `upsert_alias` does; the bulk path takes its keys in
+  sorted order so overlapping batches cannot deadlock, and each version is
+  stamped after its lock is granted. Duplicate rows already stored stay.
+  (trellis-ai#768)
 - **10 more red CLI lines, plus one yellow one, are no longer hard-wrapped at
   the console width.** The soft-wrap rule now also catches an exit raised
   under a later `if` (`admin.py` x2, `curate.py`) and the red arm of a

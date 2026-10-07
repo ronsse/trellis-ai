@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -49,6 +50,42 @@ logger = structlog.get_logger(__name__)
 def _alias_lock_key(source_system: str, raw_id: str) -> str:
     """Encode an alias tuple as PostgreSQL-safe advisory-lock text."""
     return json.dumps([source_system, raw_id], separators=(",", ":"))
+
+
+def _edge_lock_key(source_id: str, target_id: str, edge_type: str) -> str:
+    """Return the advisory-lock text for one logical edge.
+
+    JSON-encoding (as ``_alias_lock_key`` does) keeps distinct triples
+    distinct, and the ``"edge:"`` prefix keeps this text apart from
+    ``_alias_lock_key``'s bare JSON arrays, which share the database-wide
+    advisory-lock key space. Distinct texts can still collide once
+    ``hashtextextended`` maps them to 64 bits; the odds are negligible,
+    and the cost is a wait, or a deadlock Postgres detects and aborts.
+    """
+    return "edge:" + json.dumps(
+        [source_id, target_id, edge_type], separators=(",", ":")
+    )
+
+
+def _lock_edge_keys(
+    conn: psycopg.Connection, keys: Iterable[tuple[str, str, str]]
+) -> None:
+    """Take a transaction-scoped advisory lock on every distinct edge key.
+
+    Locks are acquired in one sorted, de-duplicated order (sorted on the
+    encoded lock key, not caller-supplied order) so two writers whose
+    batches touch an overlapping set of edges in different orders can't
+    deadlock: both converge on the same lock sequence, so the second
+    writer blocks behind the first instead of forming a wait cycle.
+    ``pg_advisory_xact_lock`` releases automatically at commit or
+    rollback, same as :func:`_alias_lock_key`'s callers.
+    """
+    with conn.cursor() as cur:
+        for lock_key in sorted({_edge_lock_key(*key) for key in keys}):
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (lock_key,),
+            )
 
 
 #: How many times ``delete_node`` runs a purge that PostgreSQL aborts as a
@@ -975,14 +1012,22 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             extractor_tier=extractor_tier,
         )
 
-        now = utc_now()
         properties_json = json.dumps(properties or {})
 
         # Single connection for the read+write so the SCD-2 close-and-
-        # reinsert is transactional. ``FOR UPDATE`` row-locks any current
-        # version, blocking concurrent upserts of the same edge tuple
-        # until this txn commits.
+        # reinsert is transactional. ``FOR UPDATE`` alone does NOT
+        # serialize two concurrent upserts of the same edge tuple: on a
+        # miss (no current row yet, or the row another writer just
+        # closed) there is nothing for it to lock, so both writers can
+        # mint their own edge_id and both commit a current row. What
+        # actually serializes this is the ``pg_advisory_xact_lock`` taken
+        # below, on the logical key, before the read — the same idiom
+        # ``upsert_alias`` uses on the alias key.
         with self._conn() as conn:
+            _lock_edge_keys(conn, [(source_id, target_id, edge_type)])
+            # Read the clock under the lock, so versions are stamped in the
+            # order they commit.
+            now = utc_now()
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -1106,10 +1151,13 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         sources = {spec["source_id"] for spec in edges}
         # Single connection for the bulk pre-fetch + UPDATE + INSERT so
         # the SCD-2 close-and-reinsert is transactional across all edges
-        # in this batch. (Concurrent batches against overlapping source
-        # nodes still race — that's the same window the single-row path
-        # closes via FOR UPDATE; bulk callers accept it for throughput.)
+        # in this batch. Two overlapping batches are serialized by the
+        # advisory locks below, taken on every triplet's logical key in
+        # one sorted, de-duplicated order before the pre-fetch — sorted
+        # so two batches that share edges in different orders converge
+        # on the same lock sequence instead of deadlocking.
         with self._conn() as conn:
+            _lock_edge_keys(conn, triplets)
             with conn.cursor() as cur:
                 cur.execute(
                     """
