@@ -42,6 +42,7 @@ from pydantic import ValidationError
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.core.document_write import put_document
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.project import project_override, resolve_project
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.core.write_config import (
@@ -202,6 +203,27 @@ def _raise_mutation_failed(
 ) -> NoReturn:
     """Raise ``McpError(MUTATION_FAILED, …)`` — app-layer code."""
     raise McpError(ErrorData(code=MUTATION_FAILED, message=message, data=data))
+
+
+def _exception_detail(exc: BaseException) -> Any:
+    """Render a caught exception for a caller-facing message.
+
+    A ``TrellisError`` keeps its own text: Trellis wrote it, and every
+    ``StoreError`` across ``src/trellis/stores/`` already names its cause
+    by type alone rather than embedding raw driver text, so there is
+    nothing left to strip (the ``execute_mutation`` fix in #748 is the
+    same rule). Any other exception's text can be a driver's — a Postgres
+    DETAIL line, a Neo4j constraint message — and is rendered through the
+    shared sanitizer instead of discarded outright, so a clean message
+    (a timeout, a connection refusal) still reaches the caller while a
+    leak-shaped one comes back as the sanitizer's static marker. The
+    ``logger.exception`` call at each site keeps the full text for the
+    operator. The sanitizer is a deny-list, so a leak in a shape it does
+    not know still passes (trellis-ai#748).
+    """
+    if isinstance(exc, TrellisError):
+        return exc
+    return sanitize_error_message(str(exc))
 
 
 def _record_boundary_rejection(
@@ -417,8 +439,9 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
         raise
     except Exception as exc:
         logger.exception("memory_extractor_init_failed")
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"memory extractor construction failed: {exc}",
+            f"memory extractor construction failed: {detail}",
             cause=exc,
             data={"stage": "memory_extractor_init"},
         )
@@ -501,8 +524,9 @@ def _build_llm_client_from_env() -> Any:
             logger.debug("llm_client_openai_not_installed")
         except Exception as exc:
             logger.exception("llm_client_openai_init_failed")
+            detail = _exception_detail(exc)
             _raise_internal(
-                f"OpenAI client construction failed: {exc}",
+                f"OpenAI client construction failed: {detail}",
                 cause=exc,
                 data={"provider": "openai"},
             )
@@ -521,8 +545,9 @@ def _build_llm_client_from_env() -> Any:
             logger.debug("llm_client_anthropic_not_installed")
         except Exception as exc:
             logger.exception("llm_client_anthropic_init_failed")
+            detail = _exception_detail(exc)
             _raise_internal(
-                f"Anthropic client construction failed: {exc}",
+                f"Anthropic client construction failed: {detail}",
                 cause=exc,
                 data={"provider": "anthropic"},
             )
@@ -756,8 +781,9 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
                 )
     except Exception as exc:
         logger.exception("minhash_index_init_failed")
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"MinHash dedup index initialisation failed: {exc}",
+            f"MinHash dedup index initialisation failed: {detail}",
             cause=exc,
             data={"stage": "minhash_index_init"},
         )
@@ -930,9 +956,10 @@ def _flat_context(
         raise
     except Exception as exc:
         logger.exception("flat_context_failed", operation=operation)
+        detail = _exception_detail(exc)
         _raise_internal(
             f"failed to assemble {_TOOL_LABEL.get(operation, 'context')} "
-            f"for intent={intent!r}: {exc}",
+            f"for intent={intent!r}: {detail}",
             cause=exc,
             data={"tool": operation, "intent": intent},
         )
@@ -1081,9 +1108,10 @@ def _sectioned_context(
         raise
     except Exception as exc:
         logger.exception("sectioned_context_failed", tool=tool)
+        detail = _exception_detail(exc)
         _raise_internal(
             f"failed to assemble {_TOOL_LABEL.get(tool, 'context')} "
-            f"for intent={intent!r}: {exc}",
+            f"for intent={intent!r}: {detail}",
             cause=exc,
             data={"tool": tool, "intent": intent},
         )
@@ -1697,8 +1725,9 @@ def _emit_memory_stored_and_enrich(
         )
     except Exception as exc:
         logger.exception("memory_stored_event_emission_failed", doc_id=stored_id)
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"MEMORY_STORED event emit failed: {exc}",
+            f"MEMORY_STORED event emit failed: {detail}",
             cause=exc,
             data={"stage": "memory_stored_emit", "doc_id": stored_id},
         )
@@ -1932,8 +1961,9 @@ def save_memory(
             raise
         except Exception as exc:
             logger.exception("save_memory_minhash_failed")
+            detail = _exception_detail(exc)
             _raise_internal(
-                f"fuzzy dedup query failed: {exc}",
+                f"fuzzy dedup query failed: {detail}",
                 cause=exc,
                 data={"stage": "minhash_find"},
             )
@@ -1959,8 +1989,9 @@ def save_memory(
             raise
         except Exception as exc:
             logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)
+            detail = _exception_detail(exc)
             _raise_internal(
-                f"failed to index stored memory for fuzzy dedup: {exc}",
+                f"failed to index stored memory for fuzzy dedup: {detail}",
                 cause=exc,
                 data={"stage": "minhash_add", "doc_id": stored_id},
             )
@@ -1995,8 +2026,9 @@ def _index_stored_memory(registry: StoreRegistry, stored_id: str, content: str) 
         raise
     except Exception as exc:
         logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"failed to index stored memory for fuzzy dedup: {exc}",
+            f"failed to index stored memory for fuzzy dedup: {detail}",
             cause=exc,
             data={"stage": "minhash_add", "doc_id": stored_id},
         )
@@ -2041,8 +2073,9 @@ def _store_new_memory(
             "memory_governed_write_failed",
             doc_id=command.target_id,
         )
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"governed memory write failed: {exc}",
+            f"governed memory write failed: {detail}",
             cause=exc,
             data={
                 "stage": "evidence_ingest",
@@ -2654,8 +2687,9 @@ def get_items(
         raise
     except Exception as exc:
         logger.exception("get_items_failed")
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"failed to fetch items: {exc}",
+            f"failed to fetch items: {detail}",
             cause=exc,
             data={"tool": "get_items", "item_ids": unique_ids},
         )
@@ -3481,7 +3515,8 @@ def record_observation(
     # error response.
     except Exception as exc:
         logger.exception("record_observation_failed")
-        return json.dumps({"status": "error", "message": f"Execution failed: {exc}"})
+        detail = _exception_detail(exc)
+        return json.dumps({"status": "error", "message": f"Execution failed: {detail}"})
 
     if result.status != CommandStatus.SUCCESS:
         return json.dumps(
@@ -3536,7 +3571,8 @@ def query_observations(
     # error response.
     except Exception as exc:
         logger.exception("query_observations_failed")
-        return json.dumps({"status": "error", "message": f"Query failed: {exc}"})
+        detail = _exception_detail(exc)
+        return json.dumps({"status": "error", "message": f"Query failed: {detail}"})
 
     projected: list[dict[str, Any]] = []
     for row in rows:
