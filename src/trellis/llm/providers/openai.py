@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
+from trellis.errors import ConfigError
 from trellis.llm.types import EmbeddingResponse, LLMResponse, Message, TokenUsage
 
 if TYPE_CHECKING:
@@ -27,10 +28,21 @@ def _build_async_client(
     *,
     api_key: str | None,
     base_url: str | None,
+    setting: str,
 ) -> AsyncOpenAI:
-    """Construct an ``AsyncOpenAI`` client, deferring the SDK import."""
+    """Construct an ``AsyncOpenAI`` client, deferring the SDK import.
+
+    Raises :class:`~trellis.errors.ConfigError` naming *setting* when the
+    SDK is installed but resolves no API key — neither *api_key* nor the
+    SDK's own ``OPENAI_API_KEY`` env var fallback. The constructor's
+    untyped ``openai.OpenAIError`` is chained as the cause; its text stays
+    out of the message, mirroring
+    ``trellis.stores.registry._build_openai_embedding_fn`` (#786). *setting*
+    is a parameter because :class:`OpenAIClient` and :class:`OpenAIEmbedder`
+    are configured under different ``llm:`` sub-keys.
+    """
     try:
-        from openai import AsyncOpenAI  # noqa: PLC0415
+        from openai import AsyncOpenAI, OpenAIError  # noqa: PLC0415
     except ModuleNotFoundError as exc:  # pragma: no cover - import guard
         msg = (
             "openai is required for OpenAI providers. "
@@ -43,7 +55,17 @@ def _build_async_client(
         kwargs["api_key"] = api_key
     if base_url:
         kwargs["base_url"] = base_url
-    return AsyncOpenAI(**kwargs)
+    try:
+        return AsyncOpenAI(**kwargs)
+    except OpenAIError as exc:
+        literal_setting = setting.removesuffix("_env")
+        msg = (
+            "OpenAI is configured but no API key was found. Set"
+            f" {setting} to the name of an environment variable holding"
+            f" the key, {literal_setting} to a literal value, or export"
+            " OPENAI_API_KEY."
+        )
+        raise ConfigError(msg, setting=setting) from exc
 
 
 class OpenAIClient:
@@ -58,7 +80,9 @@ class OpenAIClient:
         client: AsyncOpenAI | None = None,
     ) -> None:
         self._default_model = default_model
-        self._client = client or _build_async_client(api_key=api_key, base_url=base_url)
+        self._client = client or _build_async_client(
+            api_key=api_key, base_url=base_url, setting="llm.api_key_env"
+        )
 
     async def generate(
         self,
@@ -100,7 +124,9 @@ class OpenAIEmbedder:
         client: AsyncOpenAI | None = None,
     ) -> None:
         self._default_model = default_model
-        self._client = client or _build_async_client(api_key=api_key, base_url=base_url)
+        self._client = client or _build_async_client(
+            api_key=api_key, base_url=base_url, setting="llm.embedding.api_key_env"
+        )
 
     async def embed(
         self,
