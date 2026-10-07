@@ -1364,29 +1364,16 @@ All notable changes to Trellis will be documented in this file.
   passes `max_len` today, so this was unreachable; it now raises
   `ValueError` for any `max_len < 0`, and `max_len=0` is unchanged.
   ([#767](https://github.com/ronsse/trellis-ai/pull/767) follow-up 2)
-- **`SQLiteGraphStore.upsert_edge` and `upsert_edges_bulk` take SQLite's
-  write lock before reading whether a logical edge already exists, not
-  after.** `idx_edges_upsert` (source_id, target_id, edge_type) — the
-  logical key the contract in `stores/base/graph.py` promises exactly one
-  current row for — is not a unique index; only `idx_edges_current`
-  (`edge_id`, a separate generated id) is. The current-row `SELECT` ran as
-  a bare autocommit read before any transaction opened, so two connections
-  racing to create the same logical edge could both read "no current row"
-  and both insert, leaving two current rows with no error. Both methods
-  now open with `BEGIN IMMEDIATE`, so a second writer waits out
-  `busy_timeout` (10s) and then reads the first writer's committed row;
-  `commit=False` callers join an already-open transaction instead of
-  nesting a second `BEGIN`. Measured: a concurrent create and a bulk-batch
-  overlap each left 2 current rows before the fix and 1 after, with zero
-  `database is locked` errors; a concurrent *update* of an already-current
-  edge left 1 current row both before and after (SQLite's single global
-  writer lock gives updates "last write wins," unlike Postgres's `FOR
-  UPDATE` race on the same contract). `upsert_node` reads outside a
-  transaction the same way, but a race there raises `IntegrityError`
-  (`node_id` is both the physical and logical key) instead of silently
-  duplicating, and is not changed here. No schema change, no healing of
-  existing duplicate rows, no signature change.
-  (follow-up 2 from the #762 gate)
+- **`SQLiteGraphStore.upsert_edge` and `upsert_edges_bulk` leave one current
+  row per logical edge under concurrency.** `idx_edges_upsert` on
+  `(source_id, target_id, edge_type)` is not unique, and both methods read
+  the current row before taking the write lock, so two connections (two
+  processes, or two threads of one store) creating the same edge could each
+  insert a current row. Both now run `BEGIN IMMEDIATE` before that read, so
+  a second writer waits (up to the busy timeout) and then reads the first
+  one's row; a write on a connection already in a transaction joins it.
+  Duplicate rows already stored stay.
+  ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 2)
 
 ## [0.9.0] - 2026-05-13
 

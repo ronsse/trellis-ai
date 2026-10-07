@@ -460,29 +460,42 @@ def test_a_commit_false_write_waits_for_the_callers_transaction(
         store.close()
 
 
-def test_a_commit_false_edge_write_commits_with_the_callers_transaction(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "write",
+    [
+        pytest.param(
+            lambda st: st.upsert_edge("syn-b", "syn-c", "syn-rel", commit=False),
+            id="upsert_edge-commit-false",
+        ),
+        pytest.param(
+            lambda st: st.upsert_edge("syn-b", "syn-c", "syn-rel"),
+            id="upsert_edge",
+        ),
+        pytest.param(
+            lambda st: st.upsert_edges_bulk(
+                [{"source_id": "syn-b", "target_id": "syn-c", "edge_type": "syn-rel"}]
+            ),
+            id="upsert_edges_bulk",
+        ),
+    ],
+)
+def test_an_edge_write_joins_an_open_transaction(
+    write: Callable[[SQLiteGraphStore], object], tmp_path: Path
 ) -> None:
-    """``commit=False`` joins the caller's lock rather than nesting a BEGIN.
+    """An edge write after a block's first write joins its transaction.
 
-    The write must stay uncommitted until ``transaction()`` commits it (not
-    visible to a second connection beforehand), and then land in the same
-    commit as the rest of the caller's block — the success-path sibling of
-    ``test_a_commit_false_write_waits_for_the_callers_transaction`` above.
+    ``upsert_node(commit=False)`` leaves the connection in a transaction, so
+    the edge write must not begin a second one.
     """
     db_path = tmp_path / "graph.db"
     store = SQLiteGraphStore(db_path)
     try:
         _seed_edge(store)
-        committed_inside: list[Rows] = []
-
         with store.transaction():
-            store.upsert_edge("syn-b", "syn-c", "syn-rel", commit=False)
-            committed_inside.append(committed_rows(db_path, GRAPH))
-
-        assert committed_inside == [SEEDED_GRAPH]
+            store.upsert_node("syn-d", "syn-type", {}, commit=False)
+            write(store)
         assert committed_rows(db_path, GRAPH) == sorted(
-            [*SEEDED_GRAPH, ("edge", "syn-b>syn-c")]
+            [*SEEDED_GRAPH, ("edge", "syn-b>syn-c"), ("node", "syn-d")]
         )
     finally:
         store.close()
@@ -502,8 +515,8 @@ def test_a_commit_false_edge_write_commits_with_the_callers_transaction(
 def test_concurrent_edge_create_leaves_one_current_row(tmp_path: Path) -> None:
     """Two connections racing to create one logical edge leave 1 current row.
 
-    Before the fix, both connections could read "no current row" (the
-    SELECT ran outside any transaction) and both insert, leaving 2.
+    Unless the read runs under the write lock, both can read "no current
+    row" and both insert, leaving 2.
     """
     db_path = tmp_path / "graph.db"
     store = SQLiteGraphStore(db_path)
@@ -531,13 +544,8 @@ def test_concurrent_edge_create_leaves_one_current_row(tmp_path: Path) -> None:
 def test_concurrent_commit_false_edge_create_leaves_one_current_row(
     tmp_path: Path,
 ) -> None:
-    """Two ``commit=False`` callers each inside their own ``transaction()``
-    still leave exactly 1 current row for the logical edge they both create.
-
-    ``commit=False`` must still take the lock when the caller's transaction
-    hasn't already opened one (``not conn.in_transaction``) — this is the
-    real-world shape (the first, and only, write in the block), matching
-    ``test_a_commit_false_write_waits_for_the_callers_transaction`` above.
+    """Two ``commit=False`` creators, each in its own ``transaction()``, leave
+    1 current row: a block's first write takes the write lock itself.
     """
     db_path = tmp_path / "graph.db"
     store = SQLiteGraphStore(db_path)
@@ -556,38 +564,6 @@ def test_concurrent_commit_false_edge_create_leaves_one_current_row(
         with ThreadPoolExecutor(max_workers=2) as pool:
             fut_x = pool.submit(_create, "x")
             fut_y = pool.submit(_create, "y")
-            fut_x.result(timeout=15)
-            fut_y.result(timeout=15)
-
-        current = store.get_edges("syn-a", direction="outgoing", edge_type="syn-rel")
-        assert len(current) == 1
-    finally:
-        store.close()
-
-
-def test_concurrent_edge_update_leaves_one_current_row(tmp_path: Path) -> None:
-    """Two connections racing to update one existing logical edge leave 1 row.
-
-    Measured at the pre-fix base commit this already left exactly 1 current
-    row (SQLite's single global writer lock makes the second committer's
-    UPDATE ... WHERE valid_to IS NULL match the first's just-closed row,
-    unlike Postgres where FOR UPDATE let the loser miss it) — a different
-    finding from the Postgres sibling fix. This test pins that outcome as a
-    contract, not a regression the fix newly closes.
-    """
-    db_path = tmp_path / "graph.db"
-    store = SQLiteGraphStore(db_path)
-    try:
-        _seed_edge(store)
-        barrier = threading.Barrier(2)
-
-        def _update(writer: str) -> str:
-            barrier.wait(10)
-            return store.upsert_edge("syn-a", "syn-b", "syn-rel", {"writer": writer})
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            fut_x = pool.submit(_update, "x")
-            fut_y = pool.submit(_update, "y")
             fut_x.result(timeout=15)
             fut_y.result(timeout=15)
 

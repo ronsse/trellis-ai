@@ -929,27 +929,15 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         properties_json = json.dumps(properties or {})
 
         conn = self._conn
-        # Take SQLite's write lock (BEGIN IMMEDIATE) before the current-row
-        # SELECT below, not after it. idx_edges_upsert (source_id, target_id,
-        # edge_type) is NOT unique -- only idx_edges_current (edge_id) is --
-        # so two connections that each run the SELECT as a bare autocommit
-        # read, with no lock held, can both see "no current row" and both
-        # mint a fresh edge_id, leaving two current rows for one logical
-        # key. BEGIN IMMEDIATE makes the second connection wait out the
-        # busy timeout (PRAGMA busy_timeout, sqlite/base.py) for the
-        # first's commit, then read its committed row, so the read and the
-        # write are one serialized transaction.
-        #
-        # Commits on success and rolls back on an exception. With
-        # commit=False the caller's transaction() does both: if that
-        # transaction already holds the write lock (its first write already
-        # ran, so ``conn.in_transaction`` is True), this call joins it
-        # rather than nesting a second BEGIN; if it doesn't yet, this call
-        # opens it on the caller's behalf and leaves it open.
-        if commit or not conn.in_transaction:
+        # Take the write lock before reading the current row, so a second
+        # writer of the same edge waits for this one's commit and then reads
+        # its row (idx_edges_upsert is not unique). A transaction already open
+        # on this connection is joined, not nested. Commits on success and
+        # rolls back on an exception; with commit=False the caller's
+        # transaction() does both.
+        if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
-
-        try:
+        with conn if commit else nullcontext():
             # Check if a current edge already exists by (source, target, type)
             cursor = conn.execute(
                 """
@@ -1026,13 +1014,6 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                         extractor_tier,
                     ),
                 )
-        except Exception:
-            if commit:
-                conn.rollback()
-            raise
-
-        if commit:
-            conn.commit()
         return edge_id
 
     def upsert_edges_bulk(self, edges: list[dict[str, Any]]) -> list[str]:
@@ -1088,18 +1069,10 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         now_iso = utc_now().isoformat()
 
         conn = self._conn
-        # Take SQLite's write lock (BEGIN IMMEDIATE) before the existing-
-        # edges SELECT below, not after it, for the same reason as
-        # upsert_edge: idx_edges_upsert is not unique, so two overlapping
-        # batches that each read "no current row" for an overlapping key
-        # as a bare autocommit read would both mint a fresh edge_id and
-        # leave two current rows for it. Taking the lock first makes the
-        # second batch wait out the busy timeout for the first's commit,
-        # then read its committed row, so the whole batch — read, close,
-        # insert — is one serialized transaction, a failed row rolling
-        # back the lot.
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+        # Lock before the read, as upsert_edge does.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        with conn:  # one transaction: a failed row rolls back the whole batch
             cursor = conn.execute(
                 f"""
                 SELECT edge_id, source_id, target_id, edge_type, created_at
@@ -1170,10 +1143,6 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 """,
                 insert_rows,
             )
-        except Exception:
-            conn.rollback()
-            raise
-        conn.commit()
         return edge_ids
 
     def get_edges(
