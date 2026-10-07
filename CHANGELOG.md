@@ -1485,6 +1485,13 @@ All notable changes to Trellis will be documented in this file.
   `pack_id`, before the withholding note, outside the token budget) as the
   flat path; a clean reply is unchanged.
   ([#783](https://github.com/ronsse/trellis-ai/pull/783) follow-up)
+- **`admin smoke-test`'s text mode no longer crashes on a non-string readyz
+  backend `error`.** A dict backend entry whose own `error` was a truthy
+  non-string (an int, an object, a list, `true`) raised `TypeError` at
+  `rich.markup.escape`, which requires `str`, while `--format json` printed
+  the value fine. The backend-error line now renders `str(error)`; a string
+  `error` is unchanged.
+  (follow-up F1 from [#791](https://github.com/ronsse/trellis-ai/pull/791))
 
 ## [0.9.0] - 2026-05-13
 
