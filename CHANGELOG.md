@@ -1319,6 +1319,23 @@ All notable changes to Trellis will be documented in this file.
   own or an enclosing block; an exit under a later `if`, an `Exit` a helper
   returns and a conditional-expression message are not policed yet.
   ([#766](https://github.com/ronsse/trellis-ai/pull/766))
+- **An uncaught tool exception is sanitized too, closing the gap the entry
+  above left open.** `save_knowledge`'s and `save_experience`'s own
+  `executor.execute` calls have no `try/except`, so a driver exception
+  escaping either reached FastMCP's own tool dispatch with nothing
+  upstream to sanitize it: `mask_error_details` defaults to `False`, and
+  FastMCP wraps any uncaught exception as `Error calling tool '<name>':
+  {e}`, embedding `str(e)` raw. A new `_SanitizeUncaughtToolErrors`
+  middleware (`mcp.add_middleware`) is the one choke point for every
+  present and future tool: it inspects the wrapped `ToolError`'s
+  `__cause__` and, unless that cause is an already-sanitized `McpError`
+  (the 14 sites above) or a tool's own explicit `ToolError`, rebuilds the
+  message through `_exception_detail` — the same function the sites above
+  use, so a `TrellisError`'s own text still survives and anything else
+  goes through `sanitize_error_message`. `mask_error_details=True` alone
+  was rejected: it strips `{e}` entirely, which would also blank the
+  already-safe detail the 14 sites above raise down to the bare tool name.
+  (trellis-ai#765 gate follow-up 1)
 
 ## [0.9.0] - 2026-05-13
 
