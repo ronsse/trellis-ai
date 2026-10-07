@@ -8,7 +8,8 @@ back on, so a caller who never inspects
 ``PACK_ASSEMBLED.strategy_failures`` sees nothing. This module pins:
 
 1. a failing strategy adds exactly one line naming it, with no exception
-   text, in both the populated-pack and the empty-pack reply;
+   text, in the populated-pack reply (plain and index), the empty-pack
+   one-liner, and the formatter-rendered empty pack the holdout uses;
 2. a clean pack's reply carries no such line and its header shape is
    unchanged.
 
@@ -21,6 +22,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
+
+import pytest
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
@@ -85,14 +88,15 @@ def _builder_failing_axis_empty_survivor(
     return PackBuilder(strategies=[bad, empty])
 
 
+@pytest.mark.parametrize("index", [False, True])
 def test_get_context_reports_failed_axis_for_a_populated_pack(
-    temp_registry: StoreRegistry, monkeypatch
+    temp_registry: StoreRegistry, monkeypatch, index: bool
 ) -> None:
     monkeypatch.setattr(
         server_mod, "_build_pack_builder", _builder_one_failing_one_surviving
     )
 
-    result = get_context(INTENT)
+    result = get_context(INTENT, index=index)
     lines = result.split("\n")
 
     # Pin the exact line, not just a substring: a note that also carried
@@ -119,6 +123,27 @@ def test_get_context_reports_failed_axis_for_an_empty_pack(
     lines = result.split("\n")
 
     assert lines[0] == f"No context found for: {INTENT}"
+    assert "**Retrieval axis failed:** keyword." in lines
+    assert _AXIS_FAILURE_SENTINEL not in result
+
+
+def test_get_context_reports_failed_axis_for_a_held_out_empty_pack(
+    temp_registry: StoreRegistry, monkeypatch
+) -> None:
+    """With the pack holdout on, an empty pack renders through the
+    formatter instead of the one-liner; the note must survive that path."""
+
+    def _builder(*_args: object, **_kwargs: object) -> PackBuilder:
+        bad = _make_failing_axis_strategy("keyword", _AXIS_FAILURE_SENTINEL)
+        empty = _make_axis_strategy("graph", [])
+        return PackBuilder(strategies=[bad, empty], holdout_rate=1.0)
+
+    monkeypatch.setattr(server_mod, "_build_pack_builder", _builder)
+
+    result = get_context(INTENT)
+    lines = result.split("\n")
+
+    assert lines[0] == f"# Context for: {INTENT}"
     assert "**Retrieval axis failed:** keyword." in lines
     assert _AXIS_FAILURE_SENTINEL not in result
 
