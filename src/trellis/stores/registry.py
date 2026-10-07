@@ -1647,40 +1647,40 @@ class StoreRegistry:
         :class:`BackendNotInstalledError` when ``provider: openai`` is
         configured but the ``llm-openai`` extra is missing, and
         :class:`ConfigError` when the dotted-path provider can't be
-        imported or doesn't resolve to a callable.
+        imported or doesn't resolve to a callable. A raise caches nothing,
+        so the next access resolves again; a callable or ``None`` is cached.
         """
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]
 
-        self._embedding_fn_cache = None  # default: not configured
+        resolved: Callable[[str], list[float]] | None = None
 
         # 1. Check env var for custom dotted-path callable
         import os  # noqa: PLC0415
 
         custom_path = os.environ.get("TRELLIS_EMBEDDING_FN")
         if custom_path:
-            self._embedding_fn_cache = _import_callable(custom_path)
-            if self._embedding_fn_cache is not None:
+            resolved = _import_callable(custom_path)
+            if resolved is not None:
                 logger.info("embedding_fn_loaded", source="env", path=custom_path)
-                return self._embedding_fn_cache
-
-        # 2. Check config
-        provider = self._embedding_config.get("provider")
-        if not provider:
-            return None
-
-        if provider == "openai":
-            self._embedding_fn_cache = _build_openai_embedding_fn(
-                self._embedding_config
-            )
         else:
-            # Treat provider as a dotted import path
-            self._embedding_fn_cache = _import_callable(provider)
+            # 2. Check config
+            provider = self._embedding_config.get("provider")
+            if provider:
+                if provider == "openai":
+                    resolved = _build_openai_embedding_fn(self._embedding_config)
+                else:
+                    # Treat provider as a dotted import path
+                    resolved = _import_callable(provider)
 
-        if self._embedding_fn_cache is not None:
-            logger.info("embedding_fn_loaded", source="config", provider=provider)
+                if resolved is not None:
+                    logger.info(
+                        "embedding_fn_loaded", source="config", provider=provider
+                    )
 
-        return self._embedding_fn_cache
+        # Assigned only after resolution returns, so a raise leaves _UNSET.
+        self._embedding_fn_cache = resolved
+        return resolved
 
     @property
     def budget_config(self) -> Any:
