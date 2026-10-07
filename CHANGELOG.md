@@ -1519,6 +1519,22 @@ All notable changes to Trellis will be documented in this file.
   unchanged, and a leak-shaped one comes back as the sanitizer's marker
   after the exception's type name.
   (follow-up 5 from the [#793](https://github.com/ronsse/trellis-ai/pull/793) gate)
+- **`trellis ingest corpus --prune` and `ingest conversations --prune` keep
+  a long withheld path or title on one line.** The yellow `withheld` line
+  each prints before its exit-`5` carries a relpath, title or doc id plus
+  error text; Rich hard-wrapped a long one at the console width, splitting
+  it mid-token so it could not be copied whole. Both lines now pass
+  `soft_wrap=True`.
+  ([#777](https://github.com/ronsse/trellis-ai/pull/777) follow-up 1)
+- **A missing OpenAI API key on the provider classes is a config error, not
+  a raw SDK exception.** Constructing `OpenAIClient` or `OpenAIEmbedder`
+  (`trellis.llm.providers.openai`) with no key anywhere raised the SDK's
+  untyped `openai.OpenAIError`; it now raises `ConfigError` naming
+  `llm.api_key_env` or `llm.embedding.api_key_env`, with the SDK error
+  chained as `__cause__`. No in-repo caller reaches it today:
+  `StoreRegistry`'s builders and `mcp.server`'s env fallback treat a missing
+  key as "not configured" before constructing a client.
+  (follow-up 2 from [#786](https://github.com/ronsse/trellis-ai/pull/786))
 - **A bad `TRELLIS_EMBEDDING_FN` path's `ConfigError` names the env var, not
   `embeddings.provider`.** `_import_callable` hardcoded `setting=` to the
   config key, so an operator chasing a typo'd env var was pointed at the

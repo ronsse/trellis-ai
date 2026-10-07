@@ -57,7 +57,8 @@ def _render_report(report: CorpusSyncReport) -> None:
         withheld_name = entry.get("source_path") or entry["doc_id"]
         console.print(
             f"  [yellow]withheld[/yellow] {escape(withheld_name)}: "
-            f"{escape(str(entry['detail']))}"
+            f"{escape(str(entry['detail']))}",
+            soft_wrap=True,
         )
     console.print(
         f"  new={counts['ingested']} updated={counts['updated']} "
