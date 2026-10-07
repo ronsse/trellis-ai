@@ -1426,16 +1426,14 @@ All notable changes to Trellis will be documented in this file.
   ([#777](https://github.com/ronsse/trellis-ai/pull/777) follow-up 2)
 - **A missing OpenAI API key answers like a config error, not a 500.**
   `embeddings: provider: openai` with the `llm-openai` extra installed and
-  no key anywhere let `openai.OpenAI(**kwargs)`'s own untyped
-  `openai.OpenAIError` escape `_build_openai_embedding_fn`, and since #779
-  a failed resolution is retried rather than cached, so every
-  `POST /api/v1/packs` answered an opaque `500` and MCP `get_context` a
-  generic internal error — where a missing *extra* already answers `409`
-  `config_error` via `BackendNotInstalledError`. The constructor call is
-  now wrapped to raise `ConfigError`, naming `embeddings.api_key_env`,
-  `embeddings.api_key` and `OPENAI_API_KEY` without ever repeating the
-  SDK's own wording or a key value. `_embed`'s network call is unchanged
-  and still raises `openai.OpenAIError` directly.
+  no key anywhere let the SDK client constructor's untyped
+  `openai.OpenAIError` escape, so every `POST /api/v1/packs` answered
+  `500` and the CLI exited `1` uncaught. It is now a `ConfigError` naming
+  `embeddings.api_key_env`, `embeddings.api_key` and `OPENAI_API_KEY`,
+  never the SDK's wording or a key value: REST answers `409`
+  `config_error`, the CLI exits `5`, and MCP `get_context` keeps
+  `INTERNAL_ERROR` with that message. A failed embeddings call still
+  raises `openai.OpenAIError`.
   (follow-up F-a from [#779](https://github.com/ronsse/trellis-ai/pull/779))
 
 ## [0.9.0] - 2026-05-13

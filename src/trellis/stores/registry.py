@@ -603,11 +603,10 @@ def _build_openai_embedding_fn(
     ``embeddings: provider: openai`` configs to no-embedding mode
     instead of telling the operator the extra is missing.
 
-    Raises :class:`ConfigError` when the SDK is installed but no
-    credential can be found: the client constructor itself rejects a
-    missing key with an untyped ``openai.OpenAIError``, which would
-    otherwise reach callers as an opaque 500 (or a generic MCP internal
-    error) instead of the 409 ``config_error`` a missing credential is.
+    Raises :class:`ConfigError` when the SDK is installed but no API key
+    resolves from ``embeddings.api_key_env``, ``embeddings.api_key`` or
+    ``OPENAI_API_KEY``. The constructor's untyped ``openai.OpenAIError``
+    is chained as the cause; its text stays out of the message.
     """
     try:
         import openai  # noqa: PLC0415
@@ -1661,9 +1660,10 @@ class StoreRegistry:
         (no env var, no ``embeddings.provider``). Raises
         :class:`BackendNotInstalledError` when ``provider: openai`` is
         configured but the ``llm-openai`` extra is missing, and
-        :class:`ConfigError` when the dotted-path provider can't be
-        imported or doesn't resolve to a callable. A raise caches nothing,
-        so the next access resolves again; a callable or ``None`` is cached.
+        :class:`ConfigError` when ``provider: openai`` finds no API key or
+        the dotted-path provider can't be imported or doesn't resolve to a
+        callable. A raise caches nothing, so the next access resolves
+        again; a callable or ``None`` is cached.
         """
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]

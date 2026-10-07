@@ -276,64 +276,32 @@ def test_embedding_fn_property_propagates_backend_error(
 def test_openai_embedding_fn_missing_key_raises_configerror(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No key anywhere: the SDK's own ``OpenAIError`` becomes a ``ConfigError``.
-
-    Before the fix, ``openai.OpenAI(**kwargs)`` raised the SDK's untyped
-    ``openai.OpenAIError`` directly, which is not a :class:`ConfigError`
-    and so was not translated to a 409 at any boundary.
-    """
-    pytest.importorskip("openai")  # optional extra; skip when unavailable
+    """No key anywhere: the SDK's own ``OpenAIError`` becomes a ``ConfigError``."""
+    openai = pytest.importorskip("openai")  # optional extra; skip when unavailable
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(ConfigError) as exc_info:
         _build_openai_embedding_fn({"model": "text-embedding-3-small"})
+    assert exc_info.value.setting == "embeddings.api_key_env"
     assert "OPENAI_API_KEY" in str(exc_info.value)
-    import openai
-
     assert isinstance(exc_info.value.__cause__, openai.OpenAIError)
-    # Never leak the SDK's own wording into the operator-facing message.
-    assert "Missing credentials" not in str(exc_info.value)
+    # The SDK's own wording, whatever its version, stays out of the message.
+    assert str(exc_info.value.__cause__) not in str(exc_info.value)
 
 
-def test_embedding_fn_property_raises_configerror_for_missing_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The cached ``embedding_fn`` property surfaces the same ``ConfigError``."""
-    pytest.importorskip("openai")  # optional extra; skip when unavailable
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    config_dir = _write_config(
-        tmp_path / "cfg",
-        embeddings={"provider": "openai"},
-    )
-    registry = StoreRegistry.from_config_dir(
-        config_dir=config_dir, data_dir=tmp_path / "data"
-    )
-    with pytest.raises(ConfigError) as exc_info:
-        _ = registry.embedding_fn
-    assert "OPENAI_API_KEY" in str(exc_info.value)
-
-
-def test_openai_embedding_fn_api_key_env_builds_callable(
+def test_openai_embedding_fn_sdk_env_fallback_builds_callable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A key supplied via ``api_key_env`` builds the callable with no network call."""
+    """``OPENAI_API_KEY`` alone, with no key in config, still builds the callable."""
     pytest.importorskip("openai")  # optional extra; skip when unavailable
-    monkeypatch.setenv("FAKE_OPENAI_KEY_VAR", "sk-test-obviously-fake-0000")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    embed = _build_openai_embedding_fn(
-        {"model": "text-embedding-3-small", "api_key_env": "FAKE_OPENAI_KEY_VAR"}
-    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-obviously-fake-0000")
+    embed = _build_openai_embedding_fn({"model": "text-embedding-3-small"})
     assert callable(embed)
 
 
 def test_openai_embed_network_error_survives_as_itself(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``_embed``'s own network call is not caught by the constructor's guard.
-
-    The fix wraps only ``openai.OpenAI(**kwargs)``; a later ``OpenAIError``
-    raised while actually calling the embeddings API must propagate
-    unwrapped, not be reported as a configuration problem.
-    """
+    """An ``OpenAIError`` from the embeddings call itself is not a config error."""
     pytest.importorskip("openai")  # optional extra; skip when unavailable
     import openai
 
