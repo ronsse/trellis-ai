@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import sqlite3
 from collections import OrderedDict
 from typing import Protocol
@@ -58,7 +59,10 @@ _AUDIT_EMIT_FAILED_TEMPLATE = (
 # new backends should map their own errors into ``StoreError`` (one
 # of the typed catches above) rather than relying on this fallback.
 # ``sqlite3.Error`` is listed because the default SQLite stores raise it
-# unmapped, from writes that share no seam to map it at.
+# unmapped, from writes that share no seam to map it at. Most Postgres and
+# Bolt (Neo4j, ArcadeDB) graph writes raise their driver's own errors the
+# same way, but both drivers are optional extras, so
+# ``_optional_driver_panics`` below supplies those classes.
 _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
     RuntimeError,
     OSError,
@@ -73,6 +77,42 @@ _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
     sqlite3.Error,
 )
 
+
+@functools.lru_cache(maxsize=1)
+def _optional_driver_panics() -> tuple[type[BaseException], ...]:
+    """``psycopg.Error`` and the Bolt driver's ``DriverError``/``Neo4jError``,
+    for each of the two packages that is installed.
+
+    Importing ``trellis.mutate.executor`` must not import either optional
+    driver (``tests/unit/mutate/test_executor_optional_deps.py``), so this
+    runs when an exception first reaches a catch that calls it, and
+    ``lru_cache`` keeps a missing extra from being retried after that.
+    """
+    panics: list[type[BaseException]] = []
+    try:
+        import psycopg  # noqa: PLC0415 — deferred, see the docstring above
+
+        has_psycopg = True
+    except ImportError:
+        has_psycopg = False
+    if has_psycopg:
+        panics.append(psycopg.Error)
+    try:
+        from neo4j.exceptions import DriverError, Neo4jError  # noqa: PLC0415
+
+        has_neo4j = True
+    except ImportError:
+        has_neo4j = False
+    if has_neo4j:
+        panics.extend((DriverError, Neo4jError))
+    return tuple(panics)
+
+
+def _handler_panic_classes() -> tuple[type[BaseException], ...]:
+    """The full ``except`` tuple for an unexpected handler panic."""
+    return (*_UNEXPECTED_HANDLER_FAILURE, *_optional_driver_panics())
+
+
 # Exception classes the audit-emit guard in ``_emit_event`` catches, and
 # Stage 3's persisted idempotency read, a call on the same event log. Same
 # enumerate-don't-bare-except discipline as the tuple above, and for the same
@@ -83,11 +123,9 @@ _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
 # raises; the panic tuple covers a backend that does not, because an event
 # log that raises ``ConnectionError`` instead must not be the difference
 # between a degraded result and an aborted batch.
-_AUDIT_EMIT_FAILURE: tuple[type[BaseException], ...] = (
-    StoreError,
-    TrellisError,
-    *_UNEXPECTED_HANDLER_FAILURE,
-)
+def _audit_emit_failure_classes() -> tuple[type[BaseException], ...]:
+    """The full ``except`` tuple for the audit-emit guard."""
+    return (StoreError, TrellisError, *_handler_panic_classes())
 
 
 def _audit_warnings(audit_warning: str | None) -> list[str]:
@@ -366,7 +404,7 @@ class MutationExecutor:
                 message=f"Execution failed: {exc}",
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
-        except _UNEXPECTED_HANDLER_FAILURE as exc:
+        except _handler_panic_classes() as exc:
             # An untyped exception escaped the handler — almost
             # certainly a programming bug or a backend/network panic
             # rather than an expected failure mode. Log with
@@ -598,7 +636,7 @@ class MutationExecutor:
         # log recovers runs.
         try:
             persisted = self._event_log.has_idempotency_key(command.idempotency_key)
-        except _AUDIT_EMIT_FAILURE as exc:
+        except _audit_emit_failure_classes() as exc:
             message = f"Idempotency check failed: {type(exc).__name__}"
             log.error(  # noqa: TRY400 — no traceback on purpose; see above
                 "idempotency_check_failed",
@@ -755,7 +793,7 @@ class MutationExecutor:
                 entity_type=command.target_type,
                 payload=payload,
             )
-        except _AUDIT_EMIT_FAILURE as exc:
+        except _audit_emit_failure_classes() as exc:
             # No traceback, and no text Trellis did not write; see the
             # docstring.
             logger.error(  # noqa: TRY400 — no traceback on purpose; see above

@@ -1390,6 +1390,14 @@ All notable changes to Trellis will be documented in this file.
   `ingest corpus --prune`. A hand-listed roster test pins these and two
   earlier hand-wrapped lines of the same shape.
   ([#771](https://github.com/ronsse/trellis-ai/pull/771) follow-ups 1 and 3)
+- **A Postgres or Bolt driver error no longer escapes `MutationExecutor`.**
+  A Postgres graph store's `psycopg.Error`, or a Neo4j or ArcadeDB store's
+  `DriverError`/`Neo4jError`, raised unmapped from a handler now yields a
+  FAILED `CommandResult` and a `MUTATION_REJECTED` audit event, as
+  `sqlite3.Error` already did, so a `CONTINUE_ON_ERROR` batch carries on
+  past it. The result names the error's type alone; the audit event keeps
+  the error's text, which can quote the values being written.
+  ([#773](https://github.com/ronsse/trellis-ai/pull/773))
 
 ## [0.9.0] - 2026-05-13
 
