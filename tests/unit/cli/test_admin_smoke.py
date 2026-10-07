@@ -280,9 +280,7 @@ class TestSmokeTestFailures:
 # ---------------------------------------------------------------------------
 
 
-#: Long enough to wrap at 80 columns without ``soft_wrap``, and free of any
-#: ``[...]``-shaped substring: this line does not ``escape()`` the error
-#: text, so markup in it would be parsed by Rich.
+#: Long enough to wrap at 80 columns without ``soft_wrap``.
 _LONG_BACKEND_ERROR = (
     "synthetic probe failure: the connection to the backend was refused "
     "after the configured retry budget of three attempts was exhausted "
@@ -312,6 +310,52 @@ class TestSmokeTestFailureLineDoesNotWrap:
         text = assert_coloured(result.stdout) if colour else plain(result.stdout)
         lines = [ln for ln in text.splitlines() if _LONG_BACKEND_ERROR in ln]
         assert lines == [f"        {_LONG_BACKEND_ERROR}"], text
+
+
+# ---------------------------------------------------------------------------
+# Error text prints as raised: Rich deletes a ``[...]`` it reads as a style
+# tag unless the value is escaped.
+# ---------------------------------------------------------------------------
+
+
+_BRACKETED_ERROR = "connect failed [db-staging]"
+
+
+def _healthz_raises(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/healthz":
+        raise httpx.ConnectError(_BRACKETED_ERROR)
+    return _healthy_handler("secret")(request)
+
+
+def _readyz_backend_fails(request: httpx.Request) -> httpx.Response:
+    if request.url.path == "/readyz":
+        backend = {"status": "degraded", "error": _BRACKETED_ERROR}
+        return httpx.Response(
+            503, json={"status": "degraded", "backends": {"graph_store": backend}}
+        )
+    return _healthy_handler("secret")(request)
+
+
+class TestSmokeTestErrorTextVerbatim:
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    @pytest.mark.parametrize(
+        "handler", [_healthz_raises, _readyz_backend_fails], ids=["check", "backend"]
+    )
+    def test_error_keeps_its_brackets(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        handler: Callable[[httpx.Request], httpx.Response],
+        output_format: str,
+    ) -> None:
+        _patch_client(monkeypatch, handler)
+
+        result = runner.invoke(
+            app,
+            ["admin", "smoke-test", "--api-key", "secret", "--format", output_format],
+        )
+
+        assert result.exit_code == 1, result.stdout
+        assert _BRACKETED_ERROR in plain(result.stdout)
 
 
 # ---------------------------------------------------------------------------

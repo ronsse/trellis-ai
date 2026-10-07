@@ -1398,6 +1398,32 @@ All notable changes to Trellis will be documented in this file.
   past it. The result names the error's type alone; the audit event keeps
   the error's text, which can quote the values being written.
   ([#773](https://github.com/ronsse/trellis-ai/pull/773))
+- **A failed embedder resolution is retried, not cached as "not
+  configured".** One raising resolution of `TRELLIS_EMBEDDING_FN` or
+  `embeddings.provider` (an unimportable dotted path, the `llm-openai`
+  extra missing) left `StoreRegistry.embedding_fn` returning `None` for
+  the life of the process: `POST /api/v1/packs` answered `409` once and
+  then `200` with `axes.semantic: "not_configured"`, and an MCP http
+  server, whose boot prewarm absorbed the raise, served every pack
+  without the semantic axis and recorded no failure. Each call now
+  resolves again until one succeeds, so `/packs` keeps answering `409`
+  and MCP `get_context` keeps erroring while the configuration is broken.
+  ([#779](https://github.com/ronsse/trellis-ai/pull/779))
+- **`trellis analyze health` surfaces a failed retrieval strategy.** When one
+  `PackBuilder` strategy raised, the surviving axes kept serving and the
+  failure reached only the `PACK_ASSEMBLED` event's `strategy_failures` and
+  an ERROR log line. `trellis analyze health` now counts the window's packs
+  with a failed strategy, per strategy name with the latest occurrence, in
+  text and `--format json`, and any such pack adds a `warn` reason. Counts
+  and strategy names only, never exception text.
+  ([#781](https://github.com/ronsse/trellis-ai/pull/781))
+- **`admin smoke-test` and `admin install-skills`/`quickstart` keep a
+  bracketed backend or OS error intact.** A check's or readyz backend's
+  `error`, and a failed skill copy's, went into Rich markup raw, so a
+  `[...]` in it (a bracketed host or path) was read as a style tag and
+  deleted: the operator saw a different error from the one raised. Each
+  is now escaped; `--format json` is unchanged.
+  ([#777](https://github.com/ronsse/trellis-ai/pull/777) follow-up 2)
 - **`POST /api/v1/packs/sectioned`, MCP `get_context` and `search` report a
   failed retrieval axis.** The sectioned response gains the optional `axes`
   block `POST /api/v1/packs` has (`null` for `sections=[]`). `get_context`
