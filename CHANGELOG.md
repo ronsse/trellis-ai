@@ -1424,6 +1424,24 @@ All notable changes to Trellis will be documented in this file.
   deleted: the operator saw a different error from the one raised. Each
   is now escaped; `--format json` is unchanged.
   ([#777](https://github.com/ronsse/trellis-ai/pull/777) follow-up 2)
+- **`POST /api/v1/packs/sectioned`, MCP `get_context` and `search` report a
+  failed retrieval axis.** The sectioned response gains the optional `axes`
+  block `POST /api/v1/packs` has (`null` for `sections=[]`). `get_context`
+  without `sections` and `search` add one line,
+  `**Retrieval axis failed:** <names>.`, naming only the axes that raised,
+  so a degraded empty pack no longer reads like an empty corpus; a clean
+  reply is unchanged. `get_context(sections=...)`, `get_objective_context`,
+  `get_task_context` and `get_sectioned_context` do not report it yet.
+  ([#783](https://github.com/ronsse/trellis-ai/pull/783))
+- **`BoltOpenCypherGraphStore.upsert_edge` (Neo4j and ArcadeDB) leaves one
+  current row per logical edge under concurrency.** Two concurrent writers
+  on the same `(source_id, target_id, edge_type)` could both read "no
+  current edge" and both create one. `upsert_edge` now write-locks the
+  source endpoint's current row before that read, so the second writer
+  reads the first one's row. `upsert_edges_bulk` takes no such lock, so a
+  bulk write racing another writer of the same edge can still duplicate it.
+  ([#762](https://github.com/ronsse/trellis-ai/pull/762) follow-up 2, also
+  the Bolt item from the [#774](https://github.com/ronsse/trellis-ai/pull/774) gate)
 - **A missing OpenAI API key answers like a config error, not a 500.**
   `embeddings: provider: openai` with the `llm-openai` extra installed and
   no key anywhere let the SDK client constructor's untyped

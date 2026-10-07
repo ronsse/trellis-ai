@@ -1644,6 +1644,10 @@ components:
           - type: string
           - type: 'null'
           title: Agent Id
+        axes:
+          anyOf:
+          - $ref: '#/components/schemas/AxisReportResponse'
+          - type: 'null'
         domain:
           anyOf:
           - type: string

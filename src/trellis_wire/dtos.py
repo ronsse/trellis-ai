@@ -199,6 +199,12 @@ class SectionedPackResponse(WireModel):
     #: Verbatim ``SectionedPack.metadata["withholding"]`` telemetry. ``None``
     #: means the response came from a server older than API 1.2.
     withholding: WithholdingResponse | None = None
+    #: Which axes were available, ran, and failed during this build — the
+    #: same :func:`~trellis.retrieve.builder_factory.describe_axes` mapping
+    #: ``POST /api/v1/packs`` reports. ``None`` means a server that
+    #: predates this field, or a request with no sections (no section
+    #: carries a ``retrieval_report`` to read the "ran" axes off).
+    axes: AxisReportResponse | None = None
 
 
 # -- Curate --

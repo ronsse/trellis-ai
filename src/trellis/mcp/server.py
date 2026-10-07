@@ -117,7 +117,11 @@ from trellis.ops import (
     check_capture_health,
     format_capture_warning,
 )
-from trellis.retrieve.builder_factory import build_pack_builder
+from trellis.retrieve.builder_factory import (
+    build_pack_builder,
+    describe_axes,
+    format_failed_axes_note,
+)
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.retrieve.file_context import build_file_context
 from trellis.retrieve.formatters import (
@@ -1036,6 +1040,16 @@ def _flat_context(
     banner = _capture_warning_banner(registry)
     # #404: read the summary the builder stamped, do not re-derive one.
     withholding = withholding_from_payload(pack.metadata.get("withholding"))
+    # A missing axis is reported in the pack's axes block on the REST
+    # surface (#775); this is the markdown equivalent — an agent reading
+    # the reply never sees a JSON axes block, so the gap is stated in the
+    # one place it will read it. Names only, never the exception text.
+    axes = describe_axes(
+        builder,
+        pack.retrieval_report.strategies_used,
+        embedder_configured=registry.embedding_fn is not None,
+    )
+    axis_note = format_failed_axes_note(axes["failed"])
 
     if not pack.items:
         # The case #404 was filed about. An empty pack whose candidates
@@ -1060,8 +1074,11 @@ def _flat_context(
                 pack_id=pack.pack_id,
                 withholding=withholding,
                 empty_text=empty,
+                axis_note=axis_note,
             )
             return f"{banner}\n\n{result}" if banner else result
+        if axis_note:
+            empty = f"{empty}\n\n{axis_note}"
         note = format_withholding_note(withholding)
         if note:
             empty = f"{empty}\n\n{note}"
@@ -1087,6 +1104,7 @@ def _flat_context(
         max_tokens=max_tokens,
         pack_id=pack.pack_id,
         withholding=withholding,
+        axis_note=axis_note,
     )
     if banner:
         result = f"{banner}\n\n{result}"
