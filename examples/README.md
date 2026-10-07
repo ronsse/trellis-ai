@@ -1,6 +1,6 @@
 # Trellis Examples
 
-> **Status: preview.** These examples are in flux while parallel work lands (SDK is going HTTP-only, stores are being reshaped). Expect breaking changes before the next minor release. Copy with care — treat them as illustrative scaffolds, not stable contracts.
+> **Status: preview.** These examples are in flux while parallel work lands (stores are being reshaped). Expect breaking changes before the next minor release. Copy with care — treat them as illustrative scaffolds, not stable contracts.
 
 Runnable examples that demonstrate the most common ways to integrate Trellis into an agent or workflow.
 

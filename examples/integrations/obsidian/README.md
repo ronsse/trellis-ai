@@ -8,7 +8,7 @@ Index an Obsidian vault into Trellis so notes become first-class evidence in ret
 
 - Every note appears in `trellis retrieve search` results.
 - Wiki-link graph (`[[other-note]]`) becomes typed `wiki_link` edges in the GraphStore.
-- Re-indexing is content-hash aware — unchanged notes are skipped.
+- Re-indexing with the same `VaultIndexer` skips unchanged notes (see [Re-indexing](#re-indexing)).
 - Notes are usable from any agent: MCP tool calls, the SDK, the REST API.
 
 ## Prerequisites
@@ -48,7 +48,7 @@ trellis retrieve search "rate limiting" --format json
 
 ## Re-indexing
 
-`VaultIndexer` keeps its hash cache in memory, on the instance — calling `index_vault()` twice on the *same* `VaultIndexer` is cheap, because the second call sees its own cache and skips unchanged notes. That cache does not persist: a new process (or a fresh `VaultIndexer`) starts empty, so re-indexing a vault from a new process reports every note as `created` and rewrites it, even though the document store's `content_hash` metadata from the prior run is still sitting there unread. Keep one long-lived `VaultIndexer` per process if you want cross-call dedup. `force=True` skips the in-memory cache check and rewrites every note on the current instance:
+`VaultIndexer` caches content hashes on the instance, so a second `index_vault()` call on the same `VaultIndexer` skips unchanged notes. The cache is not persisted, and the indexer never reads back the `content_hash` it stores, so a new process (or a new `VaultIndexer`) reports every note as `created` and rewrites it. `force=True` skips the cache check and rewrites every note:
 
 ```python
 indexer.index_vault(force=True)
