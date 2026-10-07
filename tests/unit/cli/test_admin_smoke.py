@@ -401,6 +401,67 @@ class TestSmokeTestErrorTextVerbatim:
 
 
 # ---------------------------------------------------------------------------
+# A readyz body whose ``backends`` is not a mapping, from a server or proxy
+# that is not Trellis. Text mode skips the backend rows; json keeps the value.
+# ---------------------------------------------------------------------------
+
+
+_NON_DICT_BACKENDS: dict[str, object] = {
+    "list": ["event_log", "graph_store"],
+    "string": "all backends reachable",
+}
+
+
+def _readyz_backends(backends: object) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/readyz":
+            return httpx.Response(200, json={"status": "ready", "backends": backends})
+        return _healthy_handler("secret")(request)
+
+    return handler
+
+
+class TestSmokeTestNonDictBackends:
+    @pytest.mark.parametrize(
+        "scenario", list(_NON_DICT_BACKENDS), ids=list(_NON_DICT_BACKENDS)
+    )
+    def test_text_mode_survives_and_matches_json_exit_code(
+        self, monkeypatch: pytest.MonkeyPatch, scenario: str
+    ) -> None:
+        handler = _readyz_backends(_NON_DICT_BACKENDS[scenario])
+
+        _patch_client(monkeypatch, handler)
+        json_result = runner.invoke(
+            app, ["admin", "smoke-test", "--api-key", "secret", "--format", "json"]
+        )
+
+        _patch_client(monkeypatch, handler)
+        text_result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
+
+        assert text_result.exception is None, text_result.output
+        assert text_result.exit_code == json_result.exit_code, (
+            text_result.exit_code,
+            json_result.exit_code,
+        )
+        payload = json.loads(json_result.stdout)
+        readyz = next(c for c in payload["checks"] if c["name"] == "readyz")
+        assert readyz["backends"] == _NON_DICT_BACKENDS[scenario]  # json keeps it raw
+
+    def test_dict_backends_still_render_per_backend_detail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The normal (dict) shape is unaffected by the non-dict guard."""
+        _patch_client(monkeypatch, _healthy_handler("secret"))
+
+        result = runner.invoke(app, ["admin", "smoke-test", "--api-key", "secret"])
+
+        assert result.exit_code == 0, result.stdout
+        rendered = plain(result.stdout)
+        assert "event_log" in rendered
+        assert "graph_store" in rendered
+
+
+# ---------------------------------------------------------------------------
 # Tolerable non-pass — observability not wired
 # ---------------------------------------------------------------------------
 

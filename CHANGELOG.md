@@ -1460,6 +1460,13 @@ All notable changes to Trellis will be documented in this file.
   carrying `[...]` was read as a style tag and deleted. All three are now
   escaped; `--format json` is unchanged.
   ([#784](https://github.com/ronsse/trellis-ai/pull/784) follow-up 1)
+- **`admin smoke-test`'s text mode no longer crashes on a non-dict readyz
+  `backends`.** A `/readyz` body whose `backends` is a list or a string (a
+  server or proxy that is not Trellis) raised `AttributeError` in text mode
+  while `--format json` printed it. Text mode now skips the backend rows for
+  such a value, as it already did for a non-dict backend entry; json still
+  shows it raw, and both formats exit with the same code.
+  (follow-up F1 from [#788](https://github.com/ronsse/trellis-ai/pull/788))
 - **A broken driver install no longer replaces a handler's own failure in
   `MutationExecutor`.** The handler-panic catch imported `psycopg` and
   `neo4j.exceptions` to find their base errors, so a driver whose import
