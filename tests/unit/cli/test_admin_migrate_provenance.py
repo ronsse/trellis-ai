@@ -260,23 +260,18 @@ runner = CliRunner()
 
 # ---------------------------------------------------------------------------
 # ``_print_text_report``'s per-edge error line, verbatim and unwrapped.
-# ``_migrate_one_edge`` builds each ``report.errors`` entry from a live
-# exception's ``str()``, so it can carry anything, brackets included; Rich
-# reads an unescaped ``[...]`` as a style tag and deletes it, and
-# hard-wraps a long id at the console width without ``soft_wrap=True``
-# (#777 follow-up F2; matches admin.py's ``_render_smoke_text`` and
-# ``_print_skills_summary``, and ingest_corpus.py's ``_render_report``).
-# The print sits in ``_print_text_report``, a different function than
-# ``migrate_provenance_command``, which is the only place that exits —
-# the same cross-function shape as those sites, invisible to
-# ``tests/unit/test_cli_failure_soft_wrap_rule.py``'s same-function scan.
+# Each ``report.errors`` entry carries a store exception's text, so Rich
+# must neither drop a ``[...]`` nor turn a ``:name:`` into an emoji, nor
+# hard-wrap a long token at the console width. The command exits 0 after
+# this line, so ``tests/unit/test_cli_failure_soft_wrap_rule.py`` does not
+# list it.
 # ---------------------------------------------------------------------------
 
 
 #: Long enough to wrap at 80 columns without ``soft_wrap``.
 _LONG_EDGE_ID = "edge-" + "a" * 90
 _UPSERT_ERROR = (
-    f"edge:{_LONG_EDGE_ID}: upsert failed: ValueError: [bold]x[/bold] and a [tag] too"
+    f"edge:{_LONG_EDGE_ID}: upsert failed: ValueError: [bold]x[/bold] [tag] :smile:"
 )
 
 

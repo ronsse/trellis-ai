@@ -1460,13 +1460,12 @@ All notable changes to Trellis will be documented in this file.
   carrying `[...]` was read as a style tag and deleted. All three are now
   escaped; `--format json` is unchanged.
   ([#784](https://github.com/ronsse/trellis-ai/pull/784) follow-up 1)
-- **`trellis admin migrate-provenance`'s per-edge error line survives
-  verbatim.** Each entry in its text report's error list is a live
-  exception's `str()`, so it can carry anything, brackets included; Rich
-  read an unescaped `[...]` as a style tag and deleted it, and hard-wrapped
-  a long edge id mid-token at the console width. The value is now escaped
-  and the print passes `soft_wrap=True`, matching `admin.py`'s
-  `_render_smoke_text` and `_print_skills_summary`.
+- **`trellis admin migrate-provenance` prints each per-edge error
+  verbatim.** An error line carries the store's exception text, which went
+  into Rich markup raw, so a `[...]` in it was read as a style tag and
+  deleted, and a line wider than the console was hard-wrapped, folding a
+  long token mid-way. The text is now escaped and printed with
+  `soft_wrap=True`; `--format json` is unchanged.
   (follow-up F2 from [#777](https://github.com/ronsse/trellis-ai/pull/777))
 - **A broken driver install no longer replaces a handler's own failure in
   `MutationExecutor`.** The handler-panic catch imported `psycopg` and
