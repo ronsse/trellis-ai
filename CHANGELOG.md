@@ -1611,6 +1611,23 @@ All notable changes to Trellis will be documented in this file.
   surfaces give the same reason for the same input and a `200` sectioned
   response always has at least one section to read `axes` from.
   (follow-up F4 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
+- **`upsert_edges_bulk` on Neo4j locks every distinct endpoint in the batch
+  before resolving them.** `upsert_edge`'s endpoint lock, above, left
+  `upsert_edges_bulk` unprotected: two bulk writers of the same
+  `(source_id, target_id, edge_type)` triplet, or a bulk writer racing a
+  single-row `upsert_edge` of that triplet, could each see "no current
+  edge" and both create one, leaving two current rows for one logical
+  edge. It now writes the same `_cas_lock` touch to every distinct
+  endpoint id the whole batch touches, in one ascending `node_id` order,
+  before any row in the batch resolves its endpoints — so on Neo4j a bulk
+  writer and a single-row writer of the same triplet, or two bulk
+  writers, serialize in the same global order a single-row writer alone
+  would use, and two bulk writers whose batches share endpoints in
+  different row orders don't deadlock. ArcadeDB takes no lock from this
+  touch, as before, and is unaffected by design.
+  (follow-up 2 from the [#782](https://github.com/ronsse/trellis-ai/pull/782)
+  gate, repeated as follow-up 2 by the
+  [#803](https://github.com/ronsse/trellis-ai/pull/803) gate)
 
 ## [0.9.0] - 2026-05-13
 
