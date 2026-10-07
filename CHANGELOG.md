@@ -1585,7 +1585,7 @@ All notable changes to Trellis will be documented in this file.
   line for an axis named in `axes.failed`, but a `misconfigured` semantic axis
   (an embedder resolved and the vector backend never initialised) never lands
   in that list — it's absent from `axes.available` entirely — so an agent on
-  MCP got a silent keyword-and-graph-only pack while REST's `axes.semantic`
+  MCP heard nothing of it while REST's `axes.semantic`
   and the CLI's text sentence both reported the gap. The same tools now add a
   second, independent `**Semantic retrieval misconfigured:**` line for that
   state, reusing the one `describe_axes` report both lines are built from; a

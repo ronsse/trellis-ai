@@ -24,6 +24,11 @@ cannot see it. This module also pins that every tool above adds a second,
 separate line for that state, that the two lines coexist when both apply,
 and that a clean pack, a pack with only a failed axis, and a pack whose
 semantic axis was built (and ran or raised) gain no such line.
+
+The misconfigured sentence itself only claims what is true in every case
+(#805 gate, finding 9): earlier wording said "results are keyword and
+graph only", which is false exactly when keyword or graph also failed in
+the same build -- a combination the "both" test below exercises.
 """
 
 from __future__ import annotations
@@ -59,7 +64,7 @@ _AXIS_FAILURE_SENTINEL = "SENTINEL_MCP_AXIS_FAILURE_3b7a1d"
 _CUSTOM_SECTIONS = [{"name": "docs", "content_types": ["document"], "max_items": 5}]
 _MISCONFIGURED_SEMANTIC_LINE = (
     "**Semantic retrieval misconfigured:** the vector store did not"
-    " initialise; results are keyword and graph only."
+    " initialise, so this pack has no semantic results."
 )
 
 
@@ -313,7 +318,11 @@ def test_get_context_reports_both_failed_and_misconfigured_axes(
     """A failed keyword axis and a misconfigured semantic axis are
     independent states a single build can hit together (the failing
     stand-in already lacks a semantic strategy); both lines render, each
-    exactly once, and neither carries the other's exception text."""
+    exactly once, and neither carries the other's exception text.
+
+    The misconfigured note must not claim results came from "keyword and
+    graph" when keyword is one of the axes that just failed -- that claim
+    was false in exactly this combination (#805 gate, finding 9)."""
     monkeypatch.setattr(
         server_mod, "_build_pack_builder", _builder_one_failing_one_surviving
     )
@@ -327,6 +336,8 @@ def test_get_context_reports_both_failed_and_misconfigured_axes(
     assert result.count("Retrieval axis failed") == 1
     assert result.count("Semantic retrieval misconfigured") == 1
     assert _AXIS_FAILURE_SENTINEL not in result
+    assert "keyword and graph only" not in result
+    assert "keyword + graph only" not in result
 
 
 def test_search_reports_misconfigured_semantic_axis(

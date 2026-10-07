@@ -229,7 +229,7 @@ SEMANTIC_AXIS_NOTES: dict[str, str] = {
     ),
     "misconfigured": (
         "Semantic axis unavailable: an embedder is configured but the vector"
-        " backend did not initialise, so this pack is keyword + graph only."
+        " backend did not initialise, so this pack has no semantic results."
         " Re-run with TRELLIS_LOG_LEVEL=WARNING to see the backend error."
     ),
     "failed": (
@@ -277,7 +277,7 @@ def format_misconfigured_semantic_note(semantic_state: str) -> str:
         return ""
     return (
         "**Semantic retrieval misconfigured:** the vector store did not"
-        " initialise; results are keyword and graph only."
+        " initialise, so this pack has no semantic results."
     )
 
 
