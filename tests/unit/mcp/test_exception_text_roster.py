@@ -13,11 +13,8 @@ exception that a tool never catches.
 The scan reads every module under ``src/trellis/mcp``, not just
 ``server.py``, because any of them can build caller-facing text.
 ``_MODULE_EXEMPTIONS`` is keyed by each module's path relative to the
-package (:func:`_module_key`) -- a top-level module keys by its bare
-filename, exactly as before, but a nested module keys by its full
-relative path, so an exemption in one module never covers a same-named
-function in another, and a roster key naming a module the scan never
-visits fails the build instead of passing silently.
+package, so an exemption in one module never covers a same-named function
+in another, and a key naming a module the scan does not visit fails.
 """
 
 from __future__ import annotations
@@ -79,14 +76,13 @@ EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
     ),
 }
 
-#: Per-module exemption rosters, keyed by each module's path relative to
-#: the package (see :func:`_module_key`) -- a top-level module keys by its
-#: bare filename, so this reads the same regardless of where the package
-#: is installed. A module absent here must scan clean: every one of its
-#: raw exception-text sites is unrostered, which fails the build exactly
-#: like an undeclared function in server.py does. A key here naming a
-#: module the scan never visits -- renamed or deleted -- fails the build
-#: too, rather than being silently ignored.
+#: Per-module exemption rosters, keyed by POSIX path relative to the
+#: package (``server.py``; a subpackage module would be ``sub/name.py``),
+#: so this reads the same wherever the package is installed. A module
+#: absent here must scan clean: every one of its raw exception-text sites
+#: is unrostered, which fails the build exactly like an undeclared function
+#: in server.py does. A key naming a module the scan does not visit, one
+#: renamed or deleted, fails the build too.
 _MODULE_EXEMPTIONS: dict[str, dict[str, str]] = {
     "server.py": EXCEPTION_TEXT_EXEMPTIONS,
 }
@@ -208,23 +204,16 @@ def _scan(tree: ast.Module) -> dict[str, list[ast.AST]]:
     return by_function
 
 
-def _mcp_scan(root: Path | None = None) -> dict[Path, dict[str, list[ast.AST]]]:
+def _mcp_scan(root: Path | None = None) -> dict[str, dict[str, list[ast.AST]]]:
     """Raw exception-text sites for every ``*.py`` module under *root*
     (default: the real ``src/trellis/mcp`` package this process imported),
-    keyed by path so two files' same-named functions cannot collide."""
+    keyed by POSIX path relative to *root*, the ``_MODULE_EXEMPTIONS`` key,
+    so two files' same-named functions cannot collide."""
     package_dir = root if root is not None else _MCP_PACKAGE_DIR
-    return {path: _scan(tree) for path, tree in iter_modules(package_dir)}
-
-
-def _module_key(path: Path, root: Path) -> str:
-    """*path*'s roster key: its location relative to *root*, POSIX
-    separators. A top-level module keys by its bare filename
-    (``server.py``), unchanged from before. A module in a subpackage keys
-    by its full relative path (``sub/server.py``) rather than by basename
-    -- basename keying would let it inherit a same-named top-level
-    module's exemptions, or (if it has none of its own) report under the
-    wrong module's path when it fails to scan clean."""
-    return path.relative_to(root).as_posix()
+    return {
+        path.relative_to(package_dir).as_posix(): _scan(tree)
+        for path, tree in iter_modules(package_dir)
+    }
 
 
 def _roster_problems(
@@ -232,17 +221,10 @@ def _roster_problems(
     roster: dict[str, dict[str, str]],
 ) -> list[str]:
     """Reconcile a scan (module key -> function name -> sites) against
-    *roster* (module key -> function name -> reason), both keyed by
-    :func:`_module_key`. One problem string per module key that needs
-    attention:
-
-    - A roster key the scan never produced (its module was renamed or
-      deleted) is reported on its own, since there is no scanned module
-      left to diff function names against.
-    - A key the scan did produce is checked against *only that key's*
-      declared names, never the roster as a whole: a function exempted
-      under a different module's key does not count as declaring an
-      exemption here, even when two modules define a same-named function.
+    *roster* (module key -> function name -> reason), one line per module
+    key that differs. A roster key with no scanned module is reported on
+    its own. A scanned module is checked against its own key's names only,
+    so an exemption under another module's key never excuses a site here.
     """
     problems: list[str] = []
     for key in sorted(set(found_by_module) | set(roster)):
@@ -261,13 +243,11 @@ def _roster_problems(
 
 
 def test_every_raw_exception_text_site_is_a_declared_exemption() -> None:
-    found_by_module = {
-        _module_key(path, _MCP_PACKAGE_DIR): found
-        for path, found in _mcp_scan().items()
-    }
+    found_by_module = _mcp_scan()
     problems = _roster_problems(found_by_module, _MODULE_EXEMPTIONS)
     assert not problems, (
-        "raw exception text sites differ from the roster:\n" + "\n".join(problems)
+        "raw exception text sites under src/trellis/mcp differ from the "
+        "roster:\n" + "\n".join(problems)
     )
     total = sum(
         len(hits) for found in found_by_module.values() for hits in found.values()
@@ -287,20 +267,29 @@ def test_every_raw_exception_text_site_is_a_declared_exemption() -> None:
     )
 
 
-def test_module_key_uses_the_relative_path_not_the_bare_filename() -> None:
-    """F1: a nested module's roster key is its path relative to the
-    package, not its bare filename -- looking modules up by bare filename
-    would key a nested ``sub/server.py`` identically to the top-level
-    ``server.py`` and let it inherit that module's exemptions."""
-    root = Path("/pkg")
-    assert _module_key(root / "server.py", root) == "server.py"
-    assert _module_key(root / "sub" / "server.py", root) == "sub/server.py"
+def test_a_nested_module_is_keyed_by_its_relative_path(tmp_path: Path) -> None:
+    """A subpackage module is scanned and keyed by its relative path: a
+    nested ``sub/server.py`` neither inherits the top-level ``server.py``'s
+    exemptions nor merges into its scan, so its same-named site is
+    reported."""
+    leak = (
+        "def leaky_tool():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as exc:\n"
+        "        return f'failed: {exc}'\n"
+    )
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "server.py").write_text(leak, encoding="utf-8")
+    (tmp_path / "sub" / "server.py").write_text(leak, encoding="utf-8")
+    roster = {"server.py": {"leaky_tool": "exempt only at the top level"}}
+    problems = _roster_problems(_mcp_scan(tmp_path), roster)
+    assert problems == ["sub/server.py: unrostered=['leaky_tool']; stale=[]"]
 
 
 def test_roster_problems_catches_a_stale_module_key() -> None:
-    """F1: a roster entry naming a module the scan never visited -- its
-    file renamed or deleted -- fails naming that key, instead of passing
-    silently because the comparison only ever walked the scanned files."""
+    """A roster key naming a module the scan did not visit, one renamed or
+    deleted, is reported by name."""
     found_by_module: dict[str, dict[str, list[ast.AST]]] = {"server.py": {}}
     roster = {
         "server.py": {},
@@ -308,22 +297,6 @@ def test_roster_problems_catches_a_stale_module_key() -> None:
     }
     problems = _roster_problems(found_by_module, roster)
     assert problems == ["deleted_module.py: roster names a module that was not scanned"]
-
-
-def test_roster_problems_keys_exemptions_per_module() -> None:
-    """F2: an exemption declared under module A's key does not excuse a
-    same-named function's site in module B. Pooling exemption names across
-    modules is the gap the exact total alone does not pin -- it only fails
-    on a net change in site count, so a pooled lookup that both gains and
-    loses a site of the same name slips through."""
-    site_a, site_b = ast.parse("1").body[0], ast.parse("2").body[0]
-    found_by_module = {
-        "a.py": {"leaky_tool": [site_a]},
-        "b.py": {"leaky_tool": [site_b]},
-    }
-    roster = {"a.py": {"leaky_tool": "exempt only in a.py"}}
-    problems = _roster_problems(found_by_module, roster)
-    assert problems == ["b.py: unrostered=['leaky_tool']; stale=[]"]
 
 
 @pytest.mark.parametrize(
@@ -383,7 +356,7 @@ def test_scan_catches_a_newly_added_leak() -> None:
 def test_the_scan_covers_every_module_not_just_server() -> None:
     """Non-vacuousness for the file discovery: the real scan visits the
     package's other modules, not just server.py."""
-    scanned = {path.name for path in _mcp_scan()}
+    scanned = set(_mcp_scan())
     assert scanned >= {
         "server.py",
         "supersession.py",
@@ -412,7 +385,7 @@ def test_scan_catches_a_newly_added_leak_in_a_non_server_module(tmp_path: Path) 
     )
     (package_dir / "supersession.py").write_text(defective, encoding="utf-8")
     found = _mcp_scan(package_dir)
-    assert "_brand_new_tool" in found[package_dir / "supersession.py"]
+    assert "_brand_new_tool" in found["supersession.py"]
 
 
 def test_scan_catches_a_newly_added_leak_in_a_class_method() -> None:
