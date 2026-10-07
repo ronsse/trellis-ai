@@ -290,6 +290,17 @@ class TestBounding:
         out = sanitize_error_message("abcdef", max_len=3)
         assert out == "abc…[truncated]"
 
+    def test_max_len_zero_truncates_to_empty(self) -> None:
+        assert sanitize_error_message("abcdef", max_len=0) == "…[truncated]"
+
+    @pytest.mark.parametrize("max_len", [-1, -500])
+    def test_negative_max_len_raises(self, max_len: int) -> None:
+        # Below base: text[:max_len] with a negative max_len drops chars
+        # from the END, so it can be LONGER than the scanned window
+        # (max_len + _SCAN_MARGIN) and return an unscanned secret.
+        with pytest.raises(ValueError, match="max_len"):
+            sanitize_error_message("abcdef", max_len=max_len)
+
 
 class TestScanWindowBound:
     """``sanitize_error_message`` scans ``max_len`` plus a fixed margin, not

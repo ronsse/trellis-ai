@@ -1328,6 +1328,14 @@ All notable changes to Trellis will be documented in this file.
   within 500 characters past the cut; a leak lying wholly past the window
   now yields the truncated prefix instead of the marker.
   ([#763](https://github.com/ronsse/trellis-ai/pull/763) follow-up 2)
+- **`sanitize_error_message` rejects a negative `max_len`.** A negative
+  value made `text[:max_len]` keep everything but the last few
+  characters instead of a short prefix, so the returned text could run
+  past the `max_len + 500`-character window the leak heuristics scan —
+  a secret starting beyond that window printed unscanned. No caller
+  passes `max_len` today, so this was unreachable; it now raises
+  `ValueError` for any `max_len < 0`, and `max_len=0` is unchanged.
+  ([#767](https://github.com/ronsse/trellis-ai/pull/767) follow-up 2)
 
 ## [0.9.0] - 2026-05-13
 
