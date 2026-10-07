@@ -1470,6 +1470,14 @@ All notable changes to Trellis will be documented in this file.
   non-dict `backends` is skipped silently, matching that sibling guard, and
   the exit code is unchanged (it is computed before the format branch).
   (#784 follow-up 1 / #788 gate finding 3, follow-up F1)
+- **A broken driver install no longer replaces a handler's own failure in
+  `MutationExecutor`.** The handler-panic catch imported `psycopg` and
+  `neo4j.exceptions` to find their base errors, so a driver whose import
+  raised anything but `ImportError` (a native library that fails to load)
+  escaped `execute()` in place of the handler's FAILED result, on every
+  call. The classes are now read from `sys.modules` and nothing is
+  imported: a driver's exception can only exist once its module is.
+  ([#773](https://github.com/ronsse/trellis-ai/pull/773) follow-up 2)
 
 ## [0.9.0] - 2026-05-13
 
