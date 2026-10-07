@@ -16,6 +16,10 @@ guarantee here is that the branching picks the right shape.
 ``node_id`` is refused before the store opens a session.
 ``TestUpsertEdgesBulkDroppedRow`` checks the message for a row the write
 dropped though both its endpoints read as current afterwards.
+``TestUpsertEdgesBulkTransactionRunsOnce`` pins, for the same scenario,
+that nothing retries the write: not a loop around ``session.execute_write``,
+not a second statement inside the transaction function, and not the
+driver's managed-transaction loop.
 """
 
 from __future__ import annotations
@@ -251,6 +255,44 @@ class TestUpsertEdgesBulkDroppedRow:
                     {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
                 ]
             )
+
+
+class TestUpsertEdgesBulkTransactionRunsOnce:
+    def test_execute_write_is_called_exactly_once_when_a_row_vanishes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The vanished-endpoint ``ValueError`` comes from a single write
+        attempt. #754's gate: the no-retry claim rested on driver source and
+        one probe's event order rather than on a test. The mock's
+        ``execute_write`` runs the transaction function once per call with
+        one shared ``tx``, so a retry around ``session.execute_write(_tx)``
+        raises ``execute_write.call_count`` and a retry inside ``_tx`` raises
+        ``tx.run.call_count``; the ``ValueError`` looks the same either way.
+        The mock replaces the driver's managed-transaction loop, which
+        retries only a retryable ``DriverError`` or ``Neo4jError``, so the
+        last assertion pins that the sentinel ``_tx`` raises is neither."""
+        from neo4j.exceptions import DriverError, Neo4jError
+
+        from trellis.stores.bolt_opencypher.graph import _MissingEdgeRowError
+
+        store, session = _build_store_with_mock_driver(monkeypatch)
+        current = [{"node_id": node_id} for node_id in ("a", "b", "c", "d")]
+        session.execute_read.return_value = current
+        tx = MagicMock(name="tx")
+        tx.run.return_value = [{"row_index": 1, "edge_id": "e1"}]  # drops row 0
+        session.execute_write.side_effect = lambda fn: fn(tx)
+
+        with pytest.raises(ValueError):
+            store.upsert_edges_bulk(  # type: ignore[attr-defined]
+                [
+                    {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
+                    {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
+                ]
+            )
+
+        assert session.execute_write.call_count == 1
+        assert tx.run.call_count == 1
+        assert not issubclass(_MissingEdgeRowError, (DriverError, Neo4jError))
 
 
 class TestUpsertEdgesBulkMissingEndpointMessageIsShared:

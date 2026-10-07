@@ -1277,6 +1277,16 @@ All notable changes to Trellis will be documented in this file.
   `dbt-manifest`, `openlineage`, `conversations` and `corpus`. They now
   print unwrapped the same way. Text, colour, JSON output and exit codes
   are unchanged. ([#758](https://github.com/ronsse/trellis-ai/pull/758))
+- **The error sanitizer also suppresses Neo4j's constraint-*creation* text,
+  not just the write-time violation #753 covers.** When the stores' startup
+  schema DDL, `CREATE CONSTRAINT ... IS UNIQUE`, runs over nodes that
+  already duplicate a value, Neo4j's error quotes it: `` Both Node(<n>) and
+  Node(<n>) have the label `<Label>` and property `<prop>` = '<value>' ``
+  (gql_status `50N11`). `sanitize_error_message` kept that value and now
+  returns the static marker. The stores already report this failure by its
+  error type alone, so the entry covers a caller handed the driver's error.
+  ArcadeDB's client-visible text for the same failure quotes no value.
+  ([#753](https://github.com/ronsse/trellis-ai/pull/753) follow-up 1)
 - **`SQLiteDocumentStore.search`'s `content_tags` facet filter quotes the
   facet name before building its JSON path.** A `.` or `[` in a facet name
   changed which path `$.content_tags.{facet}` read instead of naming the
