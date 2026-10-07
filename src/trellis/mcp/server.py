@@ -48,7 +48,7 @@ from pydantic import ValidationError
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.core.document_write import put_document
-from trellis.core.error_sanitize import sanitize_error_message
+from trellis.core.error_sanitize import render_exception_detail
 from trellis.core.project import project_override, resolve_project
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.core.write_config import (
@@ -215,25 +215,9 @@ def _raise_mutation_failed(
     raise McpError(ErrorData(code=MUTATION_FAILED, message=message, data=data))
 
 
-def _exception_detail(exc: BaseException) -> Any:
-    """Render a caught exception for a caller-facing message.
-
-    A ``TrellisError`` keeps its own text: Trellis wrote it, and every
-    ``StoreError`` across ``src/trellis/stores/`` already names its cause
-    by type alone rather than embedding raw driver text, so there is
-    nothing left to strip (the ``execute_mutation`` fix in #748 is the
-    same rule). Any other exception's text can be a driver's — a Postgres
-    DETAIL line, a Neo4j constraint message — and is rendered through the
-    shared sanitizer instead of discarded outright, so a clean message
-    (a timeout, a connection refusal) still reaches the caller while a
-    leak-shaped one comes back as the sanitizer's static marker. The
-    ``logger.exception`` call at each site keeps the full text for the
-    operator. The sanitizer is a deny-list, so a leak in a shape it does
-    not know still passes (trellis-ai#748).
-    """
-    if isinstance(exc, TrellisError):
-        return exc
-    return sanitize_error_message(str(exc))
+def _exception_detail(exc: BaseException) -> str:
+    """Render a caught exception for a caller-facing message."""
+    return render_exception_detail(exc)
 
 
 def _record_boundary_rejection(
