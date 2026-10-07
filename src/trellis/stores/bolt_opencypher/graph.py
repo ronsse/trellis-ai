@@ -60,11 +60,12 @@ the edge lands on the row it left current; a second writer of the same
 edge likewise waits for the first and reads its row as ``old``. The
 sorted order keeps writers of ``x->y`` and ``y->x`` from deadlocking.
 ArcadeDB takes no lock: a conflicting writer fails at commit and the
-driver retries it. Only single-row writers take the lock:
-``upsert_edges_bulk`` does not (it would need a sorted per-row lock order
-across every row it writes, like Postgres's bulk edge path), so a bulk
-write racing another writer of the same edge can still leave two current
-rows.
+driver retries it, but two concurrent writers of one edge can still both
+commit there and leave two current rows. Only single-row writers take the
+lock: ``upsert_edges_bulk`` does not (it would need a sorted per-row lock
+order across every row it writes, like Postgres's bulk edge path), so a
+bulk write racing another writer of the same edge can still leave two
+current rows.
 
 Per-backend subclasses override the **seams**:
 
