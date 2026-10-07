@@ -1561,6 +1561,17 @@ All notable changes to Trellis will be documented in this file.
   non-string is named by its type, never echoed, since a mapping can hold a
   credential.
   (follow-ups B and C from the [#800](https://github.com/ronsse/trellis-ai/pull/800) gate)
+- **`trellis curate`'s `Warning:` and `Message:` lines, and `extract
+  refresh`'s `~ key: before -> after` diff line, keep a long value on one
+  line.** `curate`'s `Warning:` line (a policy id, condition or audit error,
+  printed by every curate write that shows warnings before a refused or
+  failed command exits non-zero) and its uncoloured `Message:` line were
+  cross-function or carried no colour tag, so the red-only soft-wrap scan
+  could not see either. `extract refresh`'s yellow diff line, printed in
+  the same function as its own refusal exit, has a red `-` sibling already
+  soft-wrapped by #807; the scan that found that one is red-only too. All
+  three now pass `soft_wrap=True`.
+  (follow-ups 1 and 2 from the [#807](https://github.com/ronsse/trellis-ai/pull/807) gate)
 
 ## [0.9.0] - 2026-05-13
 

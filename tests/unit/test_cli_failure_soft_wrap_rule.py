@@ -23,9 +23,11 @@ hand-read floor below. A cross-function line that can print an unbounded
 id, path or error text before a non-zero exit is listed by hand in
 ``CROSS_FUNCTION_FAILURE_LINES`` instead, and the second test checks it;
 so is a yellow line of that kind whose exit is in its own function
-(retrieve.py's ``Trace not found``), which the red-only scan skips. One
-that interpolates only a fixed vocabulary or a count, or that cannot
-print on a non-zero exit, is left off.
+(retrieve.py's ``Trace not found``), and so is a same-function line that
+carries no colour tag at all (curate.py's ``_execute_command``, its
+uncoloured ``Message:`` line) -- the red-only scan skips both. One that
+interpolates only a fixed vocabulary or a count, or that cannot print on a
+non-zero exit, is left off.
 """
 
 from __future__ import annotations
@@ -190,27 +192,35 @@ def test_every_cli_failure_line_passes_soft_wrap() -> None:
 #: ``HAND_READ_FAILURE_LINE_COUNT`` above, so a roster entry quietly
 #: dropped (or renamed past what it matches) shrinks the *measured*
 #: population below this floor instead of moving the floor with it.
-HAND_READ_CROSS_FUNCTION_COUNT = 14
+HAND_READ_CROSS_FUNCTION_COUNT = 17
 
 #: (file, function, message fragment) for each cross-function failure line:
 #: a helper prints it in red or yellow, and a caller in the same file
 #: raises a non-zero exit after the call -- a yellow line qualifies the
-#: same way a red one does: ``_named_function_print_calls`` collects every
-#: ``*console.print`` in the named function regardless of colour, and the
-#: fragment is what narrows it to one. retrieve.py's ``trace`` and
-#: ``entity`` entries print and exit in the same function; they are here
-#: because they are yellow, which ``failure_line_sites`` does not scan.
-#: The fragment tells apart entries that share a function: admin.py's
-#: ``_render_smoke_text`` (two reds), ingest_conversations.py's
-#: ``_render_report`` (its ``warning``/``withheld`` pair), and
-#: ingest_corpus.py's ``_render_report`` (its ``prune``/``warning``/
-#: ``withheld`` trio).
+#: same way a red one does, and so does a line with no colour tag at all:
+#: ``_named_function_print_calls`` collects every ``*console.print`` in the
+#: named function regardless of colour or markup, and the fragment is what
+#: narrows it to one. retrieve.py's ``trace``/``entity`` entries and
+#: extract_refresh.py's ``refresh`` print and exit in the same function;
+#: they are here because they are yellow, which ``failure_line_sites`` does
+#: not scan. curate.py's ``_execute_command`` is also same-function, but
+#: its ``Message:`` line carries no colour tag at all, so the red-only scan
+#: cannot see it either. curate.py's ``_print_warnings`` is the original
+#: cross-function shape: its callers (``_execute_command`` and ``link``,
+#: among others) exit non-zero after calling it. The fragment tells apart
+#: entries that share a function: admin.py's ``_render_smoke_text`` (two
+#: reds), ingest_conversations.py's ``_render_report`` (its
+#: ``warning``/``withheld`` pair), and ingest_corpus.py's ``_render_report``
+#: (its ``prune``/``warning``/``withheld`` trio).
 CROSS_FUNCTION_FAILURE_LINES = (
     ("admin.py", "_print_skills_summary", "failed"),
     ("admin.py", "_print_check_extractors_report", "not configurable from"),
     ("admin.py", "_render_smoke_text", "check['error']"),
     ("admin.py", "_render_smoke_text", "info['error']"),
     ("admin_api_keys.py", "_store_error", "store error"),
+    ("curate.py", "_execute_command", "Message:"),
+    ("curate.py", "_print_warnings", "Warning:"),
+    ("extract_refresh.py", "refresh", "~[/yellow]"),
     ("ingest_conversations.py", "_render_report", "warning['kind']"),
     ("ingest_conversations.py", "_render_report", "withheld_name"),
     ("ingest_corpus.py", "_render_report", "pruned_name"),

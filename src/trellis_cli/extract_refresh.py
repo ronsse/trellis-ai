@@ -566,7 +566,8 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
                 for key, (b, a) in (diff.get("changed") or {}).items():
                     console.print(
                         f"      [yellow]~[/yellow] {escape(key)}: "
-                        f"{escape(repr(b))} -> {escape(repr(a))}"
+                        f"{escape(repr(b))} -> {escape(repr(a))}",
+                        soft_wrap=True,
                     )
     if refusal is not None:
         raise typer.Exit(code=refusal_exit_code(refusal))

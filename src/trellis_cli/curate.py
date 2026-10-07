@@ -37,7 +37,7 @@ def _print_warnings(warnings: list[str]) -> None:
     lives in this one place.
     """
     for warning in warnings:
-        console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}")
+        console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}", soft_wrap=True)
 
 
 def _execute_command(cmd: Command, output_format: str) -> None:
@@ -80,7 +80,12 @@ def _execute_command(cmd: Command, output_format: str) -> None:
                 soft_wrap=True,
             )
         console.print(f"  ID: {escape(result.command_id)}")
-        console.print(f"  Message: {result.message}", markup=False, highlight=False)
+        console.print(
+            f"  Message: {result.message}",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
         _print_warnings(result.warnings)
 
     # Below the format branch, so both formats exit alike
