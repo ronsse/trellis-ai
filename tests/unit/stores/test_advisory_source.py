@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 from structlog.testing import capture_logs
 
+from tests.recovery_command import expected_recovery
 from tests.unreadable_paths import (
     UNREADABLE_PATH_IDS,
     UNREADABLE_PATH_SHAPES,
@@ -431,7 +432,7 @@ class TestDegradedFileIsVisibleAtTheReadSurfaces:
         assert lines[0]["log_level"] == "error"
         assert lines[0]["surface"] == "mcp"
         assert lines[0]["path"] == str(path)
-        assert lines[0]["recovery"] == f"mv {path} {path}.corrupt"
+        assert lines[0]["recovery"] == expected_recovery(path)
 
     def test_the_reassuring_line_is_not_also_emitted(
         self, dirs: tuple[Path, Path]
