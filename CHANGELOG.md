@@ -419,7 +419,7 @@ All notable changes to Trellis will be documented in this file.
   fix the setting, restart (the resolve is memoized per process), then run
   `trellis admin reindex-vectors` for documents that arrived while it was
   broken.
-  (PR-LINK-PLACEHOLDER)
+  ([#830](https://github.com/ronsse/trellis-ai/pull/830))
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
