@@ -393,6 +393,7 @@ All notable changes to Trellis will be documented in this file.
   10,000-edge scan still exits non-zero, because a corpus with even one
   row this command could not write is a state an operator needs to see,
   not one that nets out as a quiet partial success.
+  ([#824](https://github.com/ronsse/trellis-ai/pull/824))
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
