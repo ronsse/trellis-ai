@@ -24,6 +24,7 @@ from trellis.auth import (
     SCOPE_READ,
     generate_api_key,
 )
+from trellis.learning.scoring import prepare_learning_promotions
 from trellis.schemas.parameters import (
     ParameterProposal,
     ParameterScope,
@@ -426,25 +427,50 @@ class TestLearningCandidates:
     def test_promotable_flag_matches_prepare_learning_promotions(
         self, client, tmp_path, monkeypatch
     ):
-        """Each row's ``promotable`` is the same verdict the promote route
-        would reach via ``PROMOTE_RECOMMENDATIONS`` — a Review-queue reader
-        (the UI's Approve gate, or any other caller) does not have to
-        re-derive the rule to tell which rows a promotion would accept."""
-        promotable = _learning_candidate(candidate_id="source_analysis:promotable")
-        guidance = _learning_candidate(
-            candidate_id="source_analysis:guidance",
-            recommendation_type="promote_guidance",
-        )
-        noise = _learning_candidate(
-            candidate_id="source_analysis:noise",
-            recommendation_type="investigate_noise",
-        )
-        _write_learning_candidates(tmp_path, monkeypatch, [promotable, guidance, noise])
+        """Each row's ``promotable`` is the verdict the promote route reaches
+        for it — ``prepare_learning_promotions`` answers ``ready`` rather than
+        ``skipped_non_promotable`` — so a Review-queue reader (the UI's
+        Approve gate, or any other caller) does not have to re-derive the
+        rule. The padded, null, numeric, list and missing values pin the
+        rule's ``str(...).strip()`` normalisation, not only the set."""
+        recommendations = {
+            "source_analysis:precedent": "promote_precedent",
+            "source_analysis:guidance": "promote_guidance",
+            "source_analysis:padded": " promote_guidance\n",
+            "source_analysis:noise": "investigate_noise",
+            "source_analysis:null": None,
+            "source_analysis:number": 7,
+            "source_analysis:list": ["promote_precedent"],
+        }
+        candidates = [
+            _learning_candidate(candidate_id=cid, recommendation_type=rec)
+            for cid, rec in recommendations.items()
+        ]
+        missing = _learning_candidate(candidate_id="source_analysis:missing")
+        del missing["recommendation_type"]
+        candidates.append(missing)
+        _write_learning_candidates(tmp_path, monkeypatch, candidates)
+
         data = client.get("/api/v1/learning/candidates").json()
-        by_id = {c["candidate_id"]: c for c in data["candidates"]}
-        assert by_id["source_analysis:promotable"]["promotable"] is True
-        assert by_id["source_analysis:guidance"]["promotable"] is True
-        assert by_id["source_analysis:noise"]["promotable"] is False
+        promotable = {c["candidate_id"]: c["promotable"] for c in data["candidates"]}
+        plan = prepare_learning_promotions(
+            candidates_payload={"candidates": candidates},
+            decisions_payload={
+                "decisions": [
+                    {"candidate_id": c["candidate_id"], "approved": True}
+                    for c in candidates
+                ]
+            },
+        )
+        ready = {r["candidate_id"]: r["status"] == "ready" for r in plan["results"]}
+        assert promotable == ready
+        assert all(type(flag) is bool for flag in promotable.values())
+        # Both verdicts are populated, so the equality cannot hold vacuously.
+        assert sorted(promotable.values()) == [False] * 5 + [True] * 3
+        assert promotable["source_analysis:precedent"] is True
+        assert promotable["source_analysis:guidance"] is True
+        assert promotable["source_analysis:padded"] is True
+        assert promotable["source_analysis:noise"] is False
 
     def test_promotion_routes_through_executor(
         self, client, registry, tmp_path, monkeypatch

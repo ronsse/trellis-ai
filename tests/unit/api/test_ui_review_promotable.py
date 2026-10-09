@@ -44,6 +44,9 @@ def test_sort_places_promotable_candidates_first() -> None:
     # of that key puts promotable rows first; ties keep original order.
     assert re.search(r"a\.c\.promotable \? 0 : 1", clause)
     assert re.search(r"b\.c\.promotable \? 0 : 1", clause)
+    # ...and the comparator is ascending on that key: `pb - pa` would bury
+    # the promotable rows under the report-only ones instead.
+    assert re.search(r"return pa - pb \|\| a\.i - b\.i;", clause)
 
 
 def test_approve_checkbox_is_rendered_only_for_promotable_rows() -> None:
@@ -71,6 +74,9 @@ def test_approve_checkbox_is_rendered_only_for_promotable_rows() -> None:
     # `.learn-approve` exists only on the promotable side.
     assert 'class="learn-approve"' in promotable_branch
     assert 'class="learn-approve"' not in non_promotable_branch
+    # ...and that arm holds the card's only one, so no markup outside the
+    # ternary can add an ungated checkbox back.
+    assert body.count('class="learn-approve"') == 1
 
     # The non-promotable side is report-only: a badge, no checkbox, no
     # rationale textarea (nothing a submit could pick up).
