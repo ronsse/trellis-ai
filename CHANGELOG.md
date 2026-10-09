@@ -393,6 +393,8 @@ All notable changes to Trellis will be documented in this file.
   payloads; no schema or contract pins the payload key set other than
   `test_pack_holdout_seam.py`'s hand-read base snapshot, which is updated
   to expect it alongside the two holdout keys.
+  ([#832](https://github.com/ronsse/trellis-ai/pull/832))
+  to expect it alongside the two holdout keys.
 
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
