@@ -3959,10 +3959,19 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
     ):
         try:
             build()
-        except Exception:
-            # GRACEFUL-DEGRADATION: log the component, not the exception —
-            # the same fail-soft posture the call sites take at runtime.
-            logger.warning("mcp_prewarm_optional_unavailable", component=label)
+        except Exception as exc:
+            # GRACEFUL-DEGRADATION: log the component and the error type,
+            # not a traceback. Only embed-on-ingest and memory extraction
+            # stay fail-soft once the server is serving traffic — a
+            # vector_store or embedding_fn that fails here still raises at
+            # every retrieval call site until the setting is fixed (see
+            # the docstring above), so this is a startup signal to act on,
+            # not evidence the server degrades quietly for all three.
+            logger.warning(
+                "mcp_prewarm_optional_unavailable",
+                component=label,
+                error_type=type(exc).__name__,
+            )
 
     logger.info("mcp_registry_prewarmed")
 

@@ -43,6 +43,7 @@ the flag is off the hook returns ``None`` and does nothing.
 
 from __future__ import annotations
 
+import functools
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -147,6 +148,33 @@ def build_vector_row(
     return {"item_id": doc_id, "vector": vector, "metadata": row_metadata}
 
 
+@functools.cache
+def _warn_embedder_resolve_failed_once(error_type: str, setting: str | None) -> None:
+    """Emit ``embed_on_ingest_embedder_resolve_failed`` once per cause.
+
+    A broken embedder config (missing provider extra, missing API key, a
+    malformed ``TRELLIS_EMBEDDING_FN``/``embeddings.provider`` path) fails
+    ``registry.embedding_fn`` identically on every ingest until an operator
+    fixes the setting, so logging a full traceback per document — the
+    prior behaviour — turned one misconfiguration into a traceback per
+    write. ``functools.cache`` makes a repeat call with the same arguments
+    a no-op: the body (and its ``logger.warning``) runs on the first call
+    for a given ``(error_type, setting)``, and every later failure with
+    the same cause returns the cached ``None`` without logging again.
+    WARNING, not ``.exception`` — the type and setting are what an
+    operator acts on; the traceback is noise after the first one.
+
+    ``_warn_embedder_resolve_failed_once.cache_clear()`` is test-facing
+    only, to isolate cases within one process — a production process
+    does not reset it mid-flight.
+    """
+    logger.warning(
+        "embed_on_ingest_embedder_resolve_failed",
+        error_type=error_type,
+        setting=setting,
+    )
+
+
 def run_embed_on_ingest(
     registry: StoreRegistry,
     doc_id: str,
@@ -170,7 +198,15 @@ def run_embed_on_ingest(
         ``{"embedded": True, "dimensions": int}`` on success, or
         ``{"embedded": False, "reason": "..."}`` when skipped (empty
         content, embedder/vector store unconfigured) or failed. Any
-        failure is caught and logged — it never propagates.
+        failure is caught and logged — it never propagates. When
+        ``registry.embedding_fn`` itself fails to resolve, ``reason``
+        carries only the exception's type name and, when the exception
+        names one (see :class:`~trellis.errors.ConfigError`'s
+        ``setting``), the broken setting — e.g. ``"ConfigError:
+        embeddings.provider"`` — never the exception's message text,
+        which can echo a credential or document content. The matching
+        warning is logged once per distinct cause per process, not once
+        per call; see :func:`_warn_embedder_resolve_failed_once`.
     """
     if not embed_on_ingest_enabled():
         return None
@@ -182,10 +218,15 @@ def run_embed_on_ingest(
         embedding_fn = registry.embedding_fn
     except Exception as exc:
         # A misconfigured embedder (bad TRELLIS_EMBEDDING_FN path, missing
-        # provider extra) raises at resolve time — same fail-soft contract
-        # as an embed failure: log it, never fail the ingest.
-        logger.exception("embed_on_ingest_embedder_resolve_failed", doc_id=doc_id)
-        return {"embedded": False, "reason": str(exc)}
+        # provider extra) raises at resolve time, and the same cause fails
+        # every later ingest identically — same fail-soft contract as an
+        # embed failure (never fail the ingest), but made loud once per
+        # cause instead of once per document.
+        error_type = type(exc).__name__
+        setting = getattr(exc, "setting", None)
+        _warn_embedder_resolve_failed_once(error_type, setting)
+        reason = f"{error_type}: {setting}" if setting else error_type
+        return {"embedded": False, "reason": reason}
     vector_store = getattr(registry.knowledge, "vector_store", None)
     if embedding_fn is None or vector_store is None:
         logger.warning(

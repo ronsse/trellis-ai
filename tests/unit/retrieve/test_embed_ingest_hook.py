@@ -8,6 +8,10 @@ contract guarantees the wiring depends on:
 * unavailable   -> missing embedding_fn / vector store no-ops with a
                    reason instead of failing the ingest.
 * failure       -> caught + logged, returns an error summary, never raises.
+* resolve loud  -> an embedder that fails to *resolve* (config error)
+                   warns once per distinct (type, setting) per process,
+                   not once per document, and the returned reason names
+                   only the type and setting, never the exception text.
 * row shape     -> ``build_vector_row`` carries the ``content`` excerpt
                    SemanticSearch renders — boundary-cut and size-marked
                    here, the last stage holding the full document — plus
@@ -16,15 +20,18 @@ contract guarantees the wiring depends on:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
 
 from trellis.core.elision import format_char_count
+from trellis.errors import ConfigError
 from trellis.retrieve.embed_ingest_hook import (
     EMBED_INPUT_CHAR_CAP,
     EMBED_ON_INGEST_FLAG,
     VECTOR_METADATA_EXCERPT_CHARS,
+    _warn_embedder_resolve_failed_once,
     build_vector_row,
     embed_on_ingest_enabled,
     run_embed_on_ingest,
@@ -32,6 +39,22 @@ from trellis.retrieve.embed_ingest_hook import (
 from trellis.retrieve.excerpts import EXCERPT_ELLIPSIS
 
 _EMBEDDING = [0.1, 0.2, 0.3]
+
+
+@pytest.fixture(autouse=True)
+def _reset_resolve_failure_log_cache() -> Iterator[None]:
+    """Isolate the once-per-process dedup cache between tests.
+
+    Without this, two tests that each hit a resolve failure with the
+    same ``(error_type, setting)`` — plausible, since most of this
+    file's failures are a plain ``RuntimeError`` with no ``setting`` —
+    would see the SECOND test's warning silently swallowed by the
+    FIRST test's cache entry, an order-dependent flake exactly like the
+    one :mod:`trellis.core.write_provenance`'s tests guard against.
+    """
+    _warn_embedder_resolve_failed_once.cache_clear()
+    yield
+    _warn_embedder_resolve_failed_once.cache_clear()
 
 
 def _registry(
@@ -210,7 +233,10 @@ class TestHook:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A bad TRELLIS_EMBEDDING_FN path raises at property-resolve time —
-        that too must never fail the ingest."""
+        that too must never fail the ingest, and the exception's own
+        message text must never reach the summary (Q8: describe, don't
+        quote — a resolve failure can be raised by arbitrary imported
+        code, so the message is untrusted)."""
         from unittest.mock import PropertyMock
 
         monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
@@ -219,9 +245,128 @@ class TestHook:
             side_effect=RuntimeError("no module named 'typo'")
         )
         summary = run_embed_on_ingest(registry, "d1", "content", source="t")
-        assert summary is not None
-        assert summary["embedded"] is False
-        assert "typo" in summary["reason"]
+        assert summary == {"embedded": False, "reason": "RuntimeError"}
+        assert "typo" not in summary["reason"]
+
+    def test_embedder_resolve_failure_reason_names_the_setting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``ConfigError`` names the setting to fix; the reason carries
+        it, still without the message text."""
+        from unittest.mock import PropertyMock
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry).embedding_fn = PropertyMock(
+            side_effect=ConfigError(
+                "no OPENAI_API_KEY set", setting="embeddings.provider"
+            )
+        )
+        summary = run_embed_on_ingest(registry, "d1", "content", source="t")
+        assert summary == {
+            "embedded": False,
+            "reason": "ConfigError: embeddings.provider",
+        }
+
+    def test_embedder_resolve_failure_logged_once_per_distinct_cause(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A persistently-broken embedder fails every ingest the same way.
+
+        Two ingests must produce exactly ONE warning record, not a
+        traceback per document — the pre-fix behaviour used
+        ``logger.exception`` unconditionally, so this fails at main with
+        two ``error`` records instead of one ``warning`` record."""
+        from unittest.mock import PropertyMock
+
+        from structlog.testing import capture_logs
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry).embedding_fn = PropertyMock(
+            side_effect=ConfigError("missing extra", setting="llm-openai")
+        )
+
+        with capture_logs() as logs:
+            first = run_embed_on_ingest(registry, "d1", "content", source="t")
+            second = run_embed_on_ingest(registry, "d2", "content", source="t")
+
+        assert first == {"embedded": False, "reason": "ConfigError: llm-openai"}
+        assert second == {"embedded": False, "reason": "ConfigError: llm-openai"}
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "embed_on_ingest_embedder_resolve_failed"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["log_level"] == "warning"
+        assert matching[0]["error_type"] == "ConfigError"
+        assert matching[0]["setting"] == "llm-openai"
+
+    def test_embedder_resolve_failure_logs_again_for_a_different_cause(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deduping is per-cause, not a global silence switch: a second,
+        distinct resolve failure in the same process still warns."""
+        from unittest.mock import PropertyMock
+
+        from structlog.testing import capture_logs
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry).embedding_fn = PropertyMock(
+            side_effect=ConfigError("bad path", setting="TRELLIS_EMBEDDING_FN")
+        )
+
+        with capture_logs() as logs:
+            run_embed_on_ingest(registry, "d1", "content", source="t")
+            type(registry).embedding_fn = PropertyMock(
+                side_effect=RuntimeError("different cause")
+            )
+            run_embed_on_ingest(registry, "d2", "content", source="t")
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "embed_on_ingest_embedder_resolve_failed"
+        ]
+        assert len(matching) == 2
+        assert {m["error_type"] for m in matching} == {"ConfigError", "RuntimeError"}
+
+    def test_embedder_resolve_failure_logs_again_for_a_different_setting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same exception type, different ``setting`` — still two distinct
+        causes, so still two warnings. Dedup keys on BOTH (type, setting);
+        a mutant that keys on type alone would wrongly swallow the
+        second."""
+        from unittest.mock import PropertyMock
+
+        from structlog.testing import capture_logs
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry).embedding_fn = PropertyMock(
+            side_effect=ConfigError("bad path", setting="TRELLIS_EMBEDDING_FN")
+        )
+
+        with capture_logs() as logs:
+            run_embed_on_ingest(registry, "d1", "content", source="t")
+            type(registry).embedding_fn = PropertyMock(
+                side_effect=ConfigError("no key", setting="embeddings.provider")
+            )
+            run_embed_on_ingest(registry, "d2", "content", source="t")
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "embed_on_ingest_embedder_resolve_failed"
+        ]
+        assert len(matching) == 2
+        assert {m["setting"] for m in matching} == {
+            "TRELLIS_EMBEDDING_FN",
+            "embeddings.provider",
+        }
 
     def test_upsert_failure_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")

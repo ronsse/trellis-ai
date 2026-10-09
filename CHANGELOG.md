@@ -398,6 +398,28 @@ All notable changes to Trellis will be documented in this file.
   row this command could not write is a state an operator needs to see,
   not one that nets out as a quiet partial success.
   ([#824](https://github.com/ronsse/trellis-ai/pull/824))
+- **A broken embedder config is now loud once per cause, not once per
+  document.** `run_embed_on_ingest` caught a failed `registry.embedding_fn`
+  resolve (a bad `TRELLIS_EMBEDDING_FN`/`embeddings.provider` path, a
+  missing provider extra, a missing API key — all config errors that fail
+  every subsequent ingest identically) with `logger.exception`, so a
+  misconfiguration logged a full traceback per ingested document. It now
+  logs `embed_on_ingest_embedder_resolve_failed` at WARNING once per
+  distinct `(error_type, setting)` per process, and the hook's returned
+  `reason` carries only the exception's type name and, when the exception
+  names one, the broken setting (e.g. `"ConfigError: embeddings.provider"`)
+  — never the exception's message text, which can echo a credential or
+  document content. The MCP http prewarm's `mcp_prewarm_optional_unavailable`
+  warning now names `error_type` too, and its comment no longer claims every
+  prewarmed component is fail-soft at runtime — a broken `vector_store` or
+  `embedding_fn` still raises at every retrieval call site until the setting
+  is fixed; only embed-on-ingest and memory extraction degrade quietly.
+  Added a recovery runbook,
+  [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config):
+  fix the setting, restart (the resolve is memoized per process), then run
+  `trellis admin reindex-vectors` for documents that arrived while it was
+  broken.
+  (PR-LINK-PLACEHOLDER)
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited

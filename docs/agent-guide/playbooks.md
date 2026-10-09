@@ -1005,3 +1005,50 @@ back; nothing is lost on the host side. See
 [examples/hooks_generic_workflow.py](../../examples/hooks_generic_workflow.py)
 for a runnable end-to-end demo.
 
+## Playbook 15: Recovering from a broken embedder config
+
+**When to use:** `embed_on_ingest_embedder_resolve_failed` (ingest-time, from
+`run_embed_on_ingest`) or `mcp_prewarm_optional_unavailable` with
+`component=embedding_fn` (http startup) shows up in the logs. Both mean
+`registry.embedding_fn` is raising — a config error (bad
+`TRELLIS_EMBEDDING_FN` / `embeddings.provider` path, missing provider extra,
+missing API key), not a transient outage. The cause fails every ingest and
+every semantic-axis read identically until the setting is fixed, so the hook
+logs the resolve failure **once per distinct `(error_type, setting)` per
+process** rather than once per document — see each event's `error_type` and
+`setting` fields for what to fix; `reason` in a `run_embed_on_ingest` summary
+carries the same two fields and never the exception's own message text.
+
+### Steps
+
+1. **Read the fields, not a traceback.** `setting` names the env var or
+   config key to edit (`TRELLIS_EMBEDDING_FN` or `embeddings.provider`);
+   `error_type` narrows the cause (`BackendNotInstalledError` → missing
+   extra, `ConfigError` → bad path or missing key, anything else → the
+   target module's own import-time bug).
+2. **Fix the setting** (install the extra, set the API key, correct the
+   dotted path) and **restart** the process — the embedder resolve is
+   memoized per `StoreRegistry` instance, so a config edit alone does not
+   take effect in an already-running server.
+3. **Backfill what arrived while it was broken.** With
+   `TRELLIS_ENABLE_EMBED_ON_INGEST` on, documents written during the outage
+   were stored (ingest never fails on this) but never embedded. Run:
+
+   ```bash
+   trellis admin reindex-vectors --format json
+   ```
+
+   It walks every document missing a vector and embeds it through the now-fixed
+   `embedding_fn`, via the same `build_vector_row` core the live hook uses. See
+   [operations.md → `trellis admin reindex-vectors`](operations.md#trellis-admin-reindex-vectors-backfill)
+   for flags (`--batch-size`, `--limit`, `--force`, `--dry-run`).
+
+### If It Fails
+
+A fix that doesn't stick (the warning keeps recurring with the same
+`(error_type, setting)` after a restart) means the edited setting isn't the
+one actually read in this environment — check for an env var shadowing
+`config.yaml`, or a `TRELLIS_CONFIG_DIR` pointed somewhere other than
+expected. `trellis admin reindex-vectors` itself exits loudly (not silently
+indexing nothing) when the embedder or vector store is still unconfigured.
+
