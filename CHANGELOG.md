@@ -389,7 +389,7 @@ All notable changes to Trellis will be documented in this file.
   number" (422 at the REST boundary, `REJECTED` through
   `MutationExecutor`, before any node is written); the field docstring no
   longer calls Infinity an open question.
-  ([#NNN](https://github.com/ronsse/trellis-ai/pull/NNN))
+  ([#827](https://github.com/ronsse/trellis-ai/pull/827))
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
