@@ -2320,9 +2320,29 @@
                     body.innerHTML = reviewEmpty(data.hint || 'No learning candidates found.');
                     return;
                 }
-                const cards = items.map((c, i) => {
+                // `promotable` is server-computed (same PROMOTE_RECOMMENDATIONS
+                // set prepare_learning_promotions checks) — sort it to the top
+                // so the rows an Approve actually works on aren't buried, but
+                // never hide the rest: they are the majority of what the
+                // nightly run produces.
+                const sorted = items.map((c, i) => ({ c, i })).sort((a, b) => {
+                    const pa = a.c.promotable ? 0 : 1;
+                    const pb = b.c.promotable ? 0 : 1;
+                    return pa - pb || a.i - b.i;
+                });
+                const cards = sorted.map(({ c, i }) => {
                     const m = c.metrics || {};
                     const cid = c.candidate_id || ('cand-' + i);
+                    const promotable = c.promotable === true;
+                    const approveControl = promotable
+                        ? `<label style="font-size:0.82rem; display:flex; align-items:center; gap:0.4rem;">
+                            <input type="checkbox" class="learn-approve" data-candidate="${escHtml(cid)}"> Approve
+                        </label>
+                        <textarea class="review-rationale" data-candidate="${escHtml(cid)}" placeholder="Rationale (optional)"></textarea>`
+                        : `<div class="review-actions">
+                            <span class="badge badge-warn">report-only — not promotable</span>
+                            <span class="review-tooltip" title="recommendation_type '${escHtml(c.recommendation_type || '')}' is not in PROMOTE_RECOMMENDATIONS, so prepare_learning_promotions would skip it as skipped_non_promotable. There is deliberately no Approve control here.">Why no approve?</span>
+                        </div>`;
                     return `
                     <div class="review-card fade-in" data-candidate="${escHtml(cid)}">
                         <h4>${escHtml(c.precedent_name || c.title || cid)}</h4>
@@ -2333,10 +2353,7 @@
                             <span>retry_rate: ${m.retry_rate == null ? '—' : escHtml(m.retry_rate)}</span>
                             <span>served: ${m.times_served == null ? '—' : escHtml(m.times_served)}</span>
                         </div>
-                        <label style="font-size:0.82rem; display:flex; align-items:center; gap:0.4rem;">
-                            <input type="checkbox" class="learn-approve" data-candidate="${escHtml(cid)}"> Approve
-                        </label>
-                        <textarea class="review-rationale" data-candidate="${escHtml(cid)}" placeholder="Rationale (optional)"></textarea>
+                        ${approveControl}
                     </div>`;
                 }).join('');
                 body.innerHTML = cards +

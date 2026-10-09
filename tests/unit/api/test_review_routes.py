@@ -164,12 +164,18 @@ def _write_learning_candidates(tmp_path, monkeypatch, candidates):
     return artifacts
 
 
-def _learning_candidate(candidate_id="source_analysis:abc"):
-    """A promotable learning candidate (matches scoring.py output shape)."""
+def _learning_candidate(
+    candidate_id="source_analysis:abc", recommendation_type="promote_precedent"
+):
+    """A learning candidate (matches scoring.py output shape).
+
+    Defaults to a promotable recommendation; pass
+    ``recommendation_type="investigate_noise"`` for a non-promotable one.
+    """
     return {
         "candidate_id": candidate_id,
         "intent_family": "source_analysis",
-        "recommendation_type": "promote_precedent",
+        "recommendation_type": recommendation_type,
         "item_id": "item-1",
         "item_type": "precedent",
         "title": "Profiling sales orders",
@@ -417,6 +423,29 @@ class TestLearningCandidates:
         assert data["candidate_count"] == 1
         assert data["candidates"][0]["candidate_id"] == "source_analysis:abc"
 
+    def test_promotable_flag_matches_prepare_learning_promotions(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Each row's ``promotable`` is the same verdict the promote route
+        would reach via ``PROMOTE_RECOMMENDATIONS`` — a Review-queue reader
+        (the UI's Approve gate, or any other caller) does not have to
+        re-derive the rule to tell which rows a promotion would accept."""
+        promotable = _learning_candidate(candidate_id="source_analysis:promotable")
+        guidance = _learning_candidate(
+            candidate_id="source_analysis:guidance",
+            recommendation_type="promote_guidance",
+        )
+        noise = _learning_candidate(
+            candidate_id="source_analysis:noise",
+            recommendation_type="investigate_noise",
+        )
+        _write_learning_candidates(tmp_path, monkeypatch, [promotable, guidance, noise])
+        data = client.get("/api/v1/learning/candidates").json()
+        by_id = {c["candidate_id"]: c for c in data["candidates"]}
+        assert by_id["source_analysis:promotable"]["promotable"] is True
+        assert by_id["source_analysis:guidance"]["promotable"] is True
+        assert by_id["source_analysis:noise"]["promotable"] is False
+
     def test_promotion_routes_through_executor(
         self, client, registry, tmp_path, monkeypatch
     ):
@@ -480,6 +509,29 @@ class TestLearningCandidates:
             },
         )
         assert resp.json()["promoted_count"] == 0
+
+    def test_approving_a_non_promotable_candidate_is_reported_skipped(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        """Bypassing the UI's Approve gate and approving a non-promotable
+        candidate directly against the API must not read as success: the
+        route already forwards ``prepare_learning_promotions``'s
+        ``skipped_non_promotable`` verdict unchanged rather than folding it
+        into ``promoted_count``."""
+        cand = _learning_candidate(recommendation_type="investigate_noise")
+        _write_learning_candidates(tmp_path, monkeypatch, [cand])
+        before = _count_events(registry, EventType.ENTITY_CREATED)
+        resp = client.post(
+            "/api/v1/learning/promotions",
+            json={
+                "decisions": [{"candidate_id": cand["candidate_id"], "approved": True}]
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["promoted_count"] == 0
+        assert body["results"][0]["status"] == "skipped_non_promotable"
+        assert _count_events(registry, EventType.ENTITY_CREATED) == before
 
 
 # ---------------------------------------------------------------------------

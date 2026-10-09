@@ -2972,7 +2972,18 @@ paths:
 
         ``status="error"``, a ``code`` saying which, and a ``hint`` naming the
 
-        path, so an unwritten artifact never reads as an empty review queue.'
+        path, so an unwritten artifact never reads as an empty review queue.
+
+
+        Each candidate dict gets a server-computed ``promotable`` boolean —
+
+        ``recommendation_type in PROMOTE_RECOMMENDATIONS``, the same set
+
+        :func:`prepare_learning_promotions` checks before submitting a
+
+        promotion — so a UI (or any other caller) can gate its own Approve
+
+        control on that field instead of re-deriving the rule.'
       operationId: list_learning_candidates_api_v1_learning_candidates_get
       responses:
         '200':
