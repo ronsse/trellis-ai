@@ -400,6 +400,7 @@ All notable changes to Trellis will be documented in this file.
   `rating` (#741/#751) and the tuner's `effect_size` (#620) were already
   closed, and `Measurement.metric_value` — the one still-open vector, fixed
   separately at the schema layer — has zero rows in production.
+  ([#831](https://github.com/ronsse/trellis-ai/pull/831))
 
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
