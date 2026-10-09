@@ -24,6 +24,7 @@ from trellis.auth import (
     SCOPE_READ,
     generate_api_key,
 )
+from trellis.learning.scoring import prepare_learning_promotions
 from trellis.schemas.parameters import (
     ParameterProposal,
     ParameterScope,
@@ -164,12 +165,18 @@ def _write_learning_candidates(tmp_path, monkeypatch, candidates):
     return artifacts
 
 
-def _learning_candidate(candidate_id="source_analysis:abc"):
-    """A promotable learning candidate (matches scoring.py output shape)."""
+def _learning_candidate(
+    candidate_id="source_analysis:abc", recommendation_type="promote_precedent"
+):
+    """A learning candidate (matches scoring.py output shape).
+
+    Defaults to a promotable recommendation; pass
+    ``recommendation_type="investigate_noise"`` for a non-promotable one.
+    """
     return {
         "candidate_id": candidate_id,
         "intent_family": "source_analysis",
-        "recommendation_type": "promote_precedent",
+        "recommendation_type": recommendation_type,
         "item_id": "item-1",
         "item_type": "precedent",
         "title": "Profiling sales orders",
@@ -469,6 +476,54 @@ class TestLearningCandidates:
         assert data["candidate_count"] == 1
         assert data["candidates"][0]["candidate_id"] == "source_analysis:abc"
 
+    def test_promotable_flag_matches_prepare_learning_promotions(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Each row's ``promotable`` is the verdict the promote route reaches
+        for it — ``prepare_learning_promotions`` answers ``ready`` rather than
+        ``skipped_non_promotable`` — so a Review-queue reader (the UI's
+        Approve gate, or any other caller) does not have to re-derive the
+        rule. The padded, null, numeric, list and missing values pin the
+        rule's ``str(...).strip()`` normalisation, not only the set."""
+        recommendations = {
+            "source_analysis:precedent": "promote_precedent",
+            "source_analysis:guidance": "promote_guidance",
+            "source_analysis:padded": " promote_guidance\n",
+            "source_analysis:noise": "investigate_noise",
+            "source_analysis:null": None,
+            "source_analysis:number": 7,
+            "source_analysis:list": ["promote_precedent"],
+        }
+        candidates = [
+            _learning_candidate(candidate_id=cid, recommendation_type=rec)
+            for cid, rec in recommendations.items()
+        ]
+        missing = _learning_candidate(candidate_id="source_analysis:missing")
+        del missing["recommendation_type"]
+        candidates.append(missing)
+        _write_learning_candidates(tmp_path, monkeypatch, candidates)
+
+        data = client.get("/api/v1/learning/candidates").json()
+        promotable = {c["candidate_id"]: c["promotable"] for c in data["candidates"]}
+        plan = prepare_learning_promotions(
+            candidates_payload={"candidates": candidates},
+            decisions_payload={
+                "decisions": [
+                    {"candidate_id": c["candidate_id"], "approved": True}
+                    for c in candidates
+                ]
+            },
+        )
+        ready = {r["candidate_id"]: r["status"] == "ready" for r in plan["results"]}
+        assert promotable == ready
+        assert all(type(flag) is bool for flag in promotable.values())
+        # Both verdicts are populated, so the equality cannot hold vacuously.
+        assert sorted(promotable.values()) == [False] * 5 + [True] * 3
+        assert promotable["source_analysis:precedent"] is True
+        assert promotable["source_analysis:guidance"] is True
+        assert promotable["source_analysis:padded"] is True
+        assert promotable["source_analysis:noise"] is False
+
     def test_promotion_routes_through_executor(
         self, client, registry, tmp_path, monkeypatch
     ):
@@ -532,6 +587,29 @@ class TestLearningCandidates:
             },
         )
         assert resp.json()["promoted_count"] == 0
+
+    def test_approving_a_non_promotable_candidate_is_reported_skipped(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        """Bypassing the UI's Approve gate and approving a non-promotable
+        candidate directly against the API must not read as success: the
+        route already forwards ``prepare_learning_promotions``'s
+        ``skipped_non_promotable`` verdict unchanged rather than folding it
+        into ``promoted_count``."""
+        cand = _learning_candidate(recommendation_type="investigate_noise")
+        _write_learning_candidates(tmp_path, monkeypatch, [cand])
+        before = _count_events(registry, EventType.ENTITY_CREATED)
+        resp = client.post(
+            "/api/v1/learning/promotions",
+            json={
+                "decisions": [{"candidate_id": cand["candidate_id"], "approved": True}]
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["promoted_count"] == 0
+        assert body["results"][0]["status"] == "skipped_non_promotable"
+        assert _count_events(registry, EventType.ENTITY_CREATED) == before
 
 
 # ---------------------------------------------------------------------------

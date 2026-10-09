@@ -31,6 +31,7 @@ from trellis.learning.artifacts import (
     resolve_learning_artifacts_dir,
 )
 from trellis.learning.scoring import (
+    PROMOTE_RECOMMENDATIONS,
     prepare_learning_promotions,
     submit_learning_promotion,
 )
@@ -1015,6 +1016,12 @@ def list_learning_candidates() -> LearningCandidateListResponse:
     directory can be resolved), the answer is still 200 but carries
     ``status="error"``, a ``code`` saying which, and a ``hint`` naming the
     path, so an unwritten artifact never reads as an empty review queue.
+
+    Each candidate dict gets a server-computed ``promotable`` boolean —
+    ``recommendation_type in PROMOTE_RECOMMENDATIONS``, the same set
+    :func:`prepare_learning_promotions` checks before submitting a
+    promotion — so a UI (or any other caller) can gate its own Approve
+    control on that field instead of re-deriving the rule.
     """
     try:
         artifacts_dir, payload = _load_learning_candidates()
@@ -1025,7 +1032,18 @@ def list_learning_candidates() -> LearningCandidateListResponse:
             artifacts_dir=None if exc.artifacts_dir is None else str(exc.artifacts_dir),
             hint=exc.message,
         )
-    candidates = payload.get("candidates", [])
+    candidates = [
+        {
+            **candidate,
+            "promotable": (
+                str(candidate.get("recommendation_type", "")).strip()
+                in PROMOTE_RECOMMENDATIONS
+            ),
+        }
+        if isinstance(candidate, dict)
+        else candidate
+        for candidate in payload.get("candidates", [])
+    ]
     return LearningCandidateListResponse(
         artifacts_dir=str(artifacts_dir),
         generated_at_utc=payload.get("generated_at_utc"),
