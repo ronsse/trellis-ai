@@ -458,7 +458,7 @@ curl -fsS -o /dev/null -w "%{http_code}\n" \
 # 4. Metrics — should return Prometheus-format text (404 means the
 #    [observability] extra isn't installed; smoke-test reports this
 #    as INFO rather than FAIL). smoke-test sends the key here too, so
-#    a gated /metrics (TRELLIS_METRICS_PUBLIC unset) doesn't 401.
+#    a gated /metrics (TRELLIS_METRICS_PUBLIC=false) doesn't 401.
 curl -fsS -H "X-API-Key: $TRELLIS_API_KEY" http://localhost:8420/metrics | head
 ```
 

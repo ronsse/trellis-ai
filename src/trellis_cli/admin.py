@@ -1933,37 +1933,52 @@ def _check_healthz(client: httpx.Client) -> dict[str, Any]:
     return _record_check("healthz", "pass", started)
 
 
-def _check_readyz(client: httpx.Client, api_key: str | None = None) -> dict[str, Any]:
-    started = time.monotonic_ns()
-    headers = {"X-API-Key": api_key} if api_key else None
-    try:
-        response = client.get("/readyz", headers=headers)
-    except httpx.HTTPError as exc:
-        return _record_check("readyz", "fail", started, error=str(exc))
+def _get_with_key_retry(
+    client: httpx.Client, path: str, api_key: str | None
+) -> tuple[httpx.Response, list[str], bool]:
+    """GET ``path``, sending ``api_key`` as ``X-API-Key`` when one resolves.
 
+    Key *validity* is ``_check_auth_accepts_valid``'s verdict to render, not
+    this probe's: if the key is rejected (401), re-probe once without the
+    header so the underlying question (is it ready? is metrics reachable?)
+    is still answered rather than reporting unrelated breakage. Returns the
+    final response, any notes earned along the way, and whether the key was
+    rejected (so a caller can decide how to phrase a missing-detail note).
+    """
+    headers = {"X-API-Key": api_key} if api_key else None
+    response = client.get(path, headers=headers)
     notes: list[str] = []
+    key_rejected = False
     if api_key and response.status_code == HTTPStatus.UNAUTHORIZED:
-        # auth_accepts_valid owns the verdict on key validity — a key
-        # rejected here must not read as the deployment being unready.
-        # Re-probe without it so readiness is still answered.
+        key_rejected = True
         notes.append(
-            "API key rejected by /readyz (401); re-probed without it — "
+            f"API key rejected by {path} (401); re-probed without it — "
             "see auth_accepts_valid for key validity"
         )
-        try:
-            response = client.get("/readyz")
-        except httpx.HTTPError as exc:
-            return _record_check(
-                "readyz", "fail", started, error=str(exc), note="; ".join(notes)
-            )
+        response = client.get(path)
+    return response, notes, key_rejected
+
+
+def _check_readyz(client: httpx.Client, api_key: str | None = None) -> dict[str, Any]:
+    started = time.monotonic_ns()
+    try:
+        response, notes, key_rejected = _get_with_key_retry(client, "/readyz", api_key)
+    except httpx.HTTPError as exc:
+        return _record_check("readyz", "fail", started, error=str(exc))
 
     body = _safe_json(response)
     backends = body.get("backends") if isinstance(body, dict) else None
     if isinstance(body, dict) and backends is None:
         # /readyz withholds the per-backend breakdown from a caller with
         # no credential (trellis_api.routes.health.readyz); say so instead
-        # of silently reporting a bare pass/fail with no detail.
-        notes.append("per-backend breakdown withheld (no API key)")
+        # of silently reporting a bare pass/fail with no detail. Only blame
+        # "no API key" when that's actually why — no key was sent, or the
+        # one that was got rejected above; a valid key with no breakdown is
+        # some other cause, so don't misattribute it.
+        if not api_key or key_rejected:
+            notes.append("per-backend breakdown withheld (no API key)")
+        else:
+            notes.append("per-backend breakdown absent")
     extra: dict[str, Any] = {"backends": backends}
     if notes:
         extra["note"] = "; ".join(notes)
@@ -2013,11 +2028,17 @@ def _check_auth_accepts_valid(client: httpx.Client, api_key: str) -> dict[str, A
 
 def _check_metrics(client: httpx.Client, api_key: str | None = None) -> dict[str, Any]:
     started = time.monotonic_ns()
-    headers = {"X-API-Key": api_key} if api_key else None
     try:
-        response = client.get("/metrics", headers=headers)
+        response, notes, _key_rejected = _get_with_key_retry(
+            client, "/metrics", api_key
+        )
     except httpx.HTTPError as exc:
         return _record_check("metrics", "fail", started, error=str(exc))
+
+    def _extra(extra_note: str | None = None) -> dict[str, Any]:
+        all_notes = [*notes, extra_note] if extra_note else notes
+        return {"note": "; ".join(all_notes)} if all_notes else {}
+
     # 404 means the [observability] extra isn't installed — that's a
     # legitimate deploy choice, not a smoke-test failure. Treat as info.
     if response.status_code == HTTPStatus.NOT_FOUND:
@@ -2025,7 +2046,7 @@ def _check_metrics(client: httpx.Client, api_key: str | None = None) -> dict[str
             "metrics",
             "info",
             started,
-            note="not wired (install trellis-ai[observability] to enable)",
+            **_extra("not wired (install trellis-ai[observability] to enable)"),
         )
     if response.status_code != HTTPStatus.OK:
         return _record_check(
@@ -2033,6 +2054,7 @@ def _check_metrics(client: httpx.Client, api_key: str | None = None) -> dict[str
             "fail",
             started,
             error=f"expected 200, got {response.status_code}",
+            **_extra(),
         )
     # Prometheus exposition format starts every metric with a # HELP
     # comment; bail if the body doesn't look like one.
@@ -2042,8 +2064,9 @@ def _check_metrics(client: httpx.Client, api_key: str | None = None) -> dict[str
             "fail",
             started,
             error="response is not Prometheus format (no '# HELP' line in first 4KB)",
+            **_extra(),
         )
-    return _record_check("metrics", "pass", started)
+    return _record_check("metrics", "pass", started, **_extra())
 
 
 def _safe_json(response: httpx.Response) -> Any:
@@ -2107,7 +2130,7 @@ def _render_smoke_text(
                 f"        [red]{escape(check['error'])}[/red]", soft_wrap=True
             )
         if check.get("note"):
-            console.print(f"        [dim]{escape(check['note'])}[/dim]")
+            console.print(f"        [dim]{escape(check['note'])}[/dim]", soft_wrap=True)
         if check.get("reason"):
             console.print(f"        [dim]{check['reason']}[/dim]")
         if check["name"] == "readyz" and isinstance(check.get("backends"), dict):

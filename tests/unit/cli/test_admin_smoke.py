@@ -37,7 +37,7 @@ _METRICS_PROMETHEUS_BODY = (
 
 
 def _advisories_response(request: httpx.Request, api_key: str | None) -> httpx.Response:
-    """Mirror ``require_api_key`` in ``trellis_api.auth``."""
+    """Mirror ``authenticate`` in ``trellis_api.auth``."""
     if api_key is None:
         return httpx.Response(200, json={"advisories": []})
     if request.headers.get("X-API-Key") == api_key:
@@ -86,6 +86,25 @@ def _metrics_response(request: httpx.Request, api_key: str | None) -> httpx.Resp
     return httpx.Response(401, json={"detail": "missing or invalid API credentials"})
 
 
+def _metrics_response_public(request: httpx.Request, valid_key: str) -> httpx.Response:
+    """Mirror the *default* ``TRELLIS_METRICS_PUBLIC`` posture (unset/true):
+
+    ``_require_metrics_access`` depends on ``authenticate_optional``, which
+    lets an absent credential through (public scrape jobs keep working) but
+    still 401s a credential that *was* presented and is wrong — same shape
+    as ``_readyz_response``. Unlike ``_metrics_response`` above, a missing
+    header here is never a failure.
+    """
+    header = request.headers.get("X-API-Key")
+    if header is None or header == valid_key:
+        return httpx.Response(
+            200,
+            text=_METRICS_PROMETHEUS_BODY,
+            headers={"content-type": "text/plain; version=0.0.4"},
+        )
+    return httpx.Response(401, json={"detail": "missing or invalid API credentials"})
+
+
 def _healthy_handler(
     api_key: str | None = "secret",
 ) -> Callable[[httpx.Request], httpx.Response]:
@@ -95,7 +114,7 @@ def _healthy_handler(
     body that ``trellis_api.routes.health.readyz`` produces, withheld from an
     unauthenticated or wrongly-authenticated caller; ``/api/v1/advisories``
     and ``/metrics`` reject requests without ``X-API-Key`` (when ``api_key``
-    is set) the way ``require_api_key`` / ``_require_metrics_access`` in
+    is set) the way ``authenticate`` / ``_require_metrics_access`` in
     ``trellis_api.auth`` / ``trellis_api.observability`` do.
     """
     routes = {
@@ -697,6 +716,44 @@ class TestSmokeTestReadyzAndMetricsSendKey:
 
 
 # ---------------------------------------------------------------------------
+# A wrong key still 401s ``/metrics`` under the *default* (public) posture,
+# because ``authenticate_optional`` validates a presented credential even
+# when none is required. ``_check_metrics`` must re-probe without the key,
+# same as ``_check_readyz``: a key that's wrong everywhere still fails
+# ``auth_accepts_valid`` (the real verdict on key validity), but it must not
+# also sink ``/metrics``, which would have been reachable with no key at
+# all.
+# ---------------------------------------------------------------------------
+
+
+class TestSmokeTestMetricsDefaultPublicPosture:
+    def test_every_route_rejecting_the_key_still_passes_metrics_but_exit_is_1(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # advisories and readyz are gated to "secret" (so auth_accepts_valid
+        # fails on the wrong key, same as any genuinely bad key does today),
+        # and metrics is public-by-default but still rejects a *presented*
+        # wrong key — it must still pass, with a note, on the retry.
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/metrics":
+                return _metrics_response_public(request, "secret")
+            return _healthy_handler("secret")(request)
+
+        _patch_client(monkeypatch, handler)
+
+        result = runner.invoke(
+            app, ["admin", "smoke-test", "--api-key", "wrong-key", "--format", "json"]
+        )
+
+        assert result.exit_code == 1, result.stdout
+        payload = json.loads(result.stdout)
+        by_name = {c["name"]: c for c in payload["checks"]}
+        assert by_name["auth_accepts_valid"]["status"] == "fail"
+        assert by_name["metrics"]["status"] == "pass", by_name["metrics"]
+        assert "rejected" in by_name["metrics"].get("note", "")
+
+
+# ---------------------------------------------------------------------------
 # No key configured at all: ``/readyz`` withholds the breakdown (as real
 # auth-required deployments do), and the smoke test says so rather than
 # silently reporting a bare "pass".
@@ -783,3 +840,119 @@ class TestSmokeTestReadyzKeyRejected:
         text = plain(result.stdout)
         assert "rejected" in text
         assert "event_log" in text  # the fallback probe's backends still render
+
+
+# ---------------------------------------------------------------------------
+# A valid, *accepted* key with ``backends`` still absent is not caused by a
+# missing/rejected key, so the note must not say "(no API key)" there.
+# ---------------------------------------------------------------------------
+
+
+class TestSmokeTestReadyzBackendsAbsentWithAcceptedKey:
+    def test_valid_key_backends_absent_uses_neutral_wording(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # health.py can answer {"status": "initializing"} (no "backends")
+        # even to a caller whose key was accepted — "no API key" would
+        # misattribute the cause here.
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/readyz":
+                return httpx.Response(200, json={"status": "initializing"})
+            return _healthy_handler("secret")(request)
+
+        _patch_client(monkeypatch, handler)
+
+        result = runner.invoke(
+            app, ["admin", "smoke-test", "--api-key", "secret", "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.stdout
+        payload = json.loads(result.stdout)
+        readyz = next(c for c in payload["checks"] if c["name"] == "readyz")
+        assert readyz["status"] == "pass"
+        assert readyz["backends"] is None
+        assert readyz.get("note") == "per-backend breakdown absent"
+
+
+# ---------------------------------------------------------------------------
+# Mutant-killing tests: the withheld/absent-breakdown note must fire
+# regardless of HTTP status (not just 200), the 401-retry must only ever
+# fire when a key was actually sent, and no note is added for a body that
+# isn't JSON at all.
+# ---------------------------------------------------------------------------
+
+
+class TestSmokeTestReadyzNoteMutants:
+    def test_degraded_response_still_notes_the_withheld_breakdown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/readyz":
+                return httpx.Response(503, json={"status": "degraded"})
+            return _healthy_handler(None)(request)
+
+        _patch_client(monkeypatch, handler)
+        monkeypatch.delenv("TRELLIS_API_KEY", raising=False)
+
+        result = runner.invoke(app, ["admin", "smoke-test", "--format", "json"])
+
+        assert result.exit_code == 1, result.stdout
+        payload = json.loads(result.stdout)
+        readyz = next(c for c in payload["checks"] if c["name"] == "readyz")
+        assert readyz["status"] == "fail"
+        assert readyz["backends"] is None
+        assert readyz.get("note") == "per-backend breakdown withheld (no API key)"
+
+    def test_no_key_sent_401_fails_without_a_rejection_note_or_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/readyz":
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return httpx.Response(
+                        401, json={"detail": "missing or invalid X-API-Key"}
+                    )
+                # Only reached if the (buggy) code retries when no key was
+                # ever sent in the first place.
+                return httpx.Response(200, json=_READYZ_OK_BODY)
+            return _healthy_handler(None)(request)
+
+        _patch_client(monkeypatch, handler)
+        monkeypatch.delenv("TRELLIS_API_KEY", raising=False)
+
+        result = runner.invoke(app, ["admin", "smoke-test", "--format", "json"])
+
+        assert result.exit_code == 1, result.stdout
+        payload = json.loads(result.stdout)
+        readyz = next(c for c in payload["checks"] if c["name"] == "readyz")
+        assert readyz["status"] == "fail"
+        assert readyz.get("error") == "expected 200, got 401"
+        assert "rejected" not in readyz.get("note", "")
+        assert calls["n"] == 1
+
+    def test_non_json_body_gets_no_withheld_note(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/readyz":
+                return httpx.Response(
+                    200,
+                    text="<html>not json</html>",
+                    headers={"content-type": "text/html"},
+                )
+            return _healthy_handler(None)(request)
+
+        _patch_client(monkeypatch, handler)
+        monkeypatch.delenv("TRELLIS_API_KEY", raising=False)
+
+        result = runner.invoke(app, ["admin", "smoke-test", "--format", "json"])
+
+        assert result.exit_code == 0, result.stdout
+        payload = json.loads(result.stdout)
+        readyz = next(c for c in payload["checks"] if c["name"] == "readyz")
+        assert readyz["status"] == "pass"
+        assert readyz["backends"] is None
+        assert "note" not in readyz
