@@ -941,7 +941,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             # Check if a current edge already exists by (source, target, type)
             cursor = conn.execute(
                 """
-                SELECT edge_id FROM edges
+                SELECT edge_id, created_at FROM edges
                 WHERE source_id = ? AND target_id = ? AND edge_type = ?
                   AND valid_to IS NULL
                 """,
@@ -951,6 +951,11 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
 
             if row:
                 edge_id: str = row["edge_id"]
+                # Carry created_at forward from the version being closed,
+                # matching upsert_edges_bulk and the Bolt store's coalesce
+                # (docs/design/adr-canonical-graph-layer.md §3): a re-upsert
+                # is a new version of the same logical edge, not a new edge.
+                created_at = row["created_at"]
                 # Close current version
                 conn.execute(
                     """
@@ -977,7 +982,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                         target_id,
                         edge_type,
                         properties_json,
-                        now_iso,
+                        created_at,
                         now_iso,
                         source_trace_id,
                         agent_id,

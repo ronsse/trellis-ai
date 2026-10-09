@@ -825,6 +825,36 @@ class GraphStoreContractTests:
         assert len(current) == 1
         assert current[0]["properties"]["v"] == 3
 
+    def test_upsert_edge_carries_created_at_forward(self, store: GraphStore) -> None:
+        """A single-row re-upsert of the same triplet carries the prior
+        version's ``created_at`` forward onto the new current version,
+        matching :meth:`~trellis.stores.base.graph.GraphStore.upsert_edges_bulk`
+        and the Bolt store's ``coalesce`` (docs/design/adr-canonical-graph-layer.md
+        §3). ``valid_from`` still advances — only ``created_at`` (the
+        logical edge's original mint time) is stable across versions.
+        """
+        store.upsert_node("car-x", "service", {})
+        store.upsert_node("car-y", "service", {})
+        store.upsert_edge("car-x", "car-y", "depends_on", {"v": 1})
+
+        v1 = store.get_edges("car-x", direction="outgoing", edge_type="depends_on")
+        assert len(v1) == 1
+        v1_created_at = datetime.fromisoformat(v1[0]["created_at"])
+        v1_valid_from = datetime.fromisoformat(v1[0]["valid_from"])
+
+        _sleep_for_ordering()
+        store.upsert_edge("car-x", "car-y", "depends_on", {"v": 2})
+
+        v2 = store.get_edges("car-x", direction="outgoing", edge_type="depends_on")
+        assert len(v2) == 1
+        assert v2[0]["properties"]["v"] == 2
+        # Instants, not raw strings: a carried-forward value can come back
+        # through a different wire rendering of the same timestamp (e.g.
+        # ArcadeDB renders one as ``+00:00`` and another as ``Z``) without
+        # the carry having failed.
+        assert datetime.fromisoformat(v2[0]["created_at"]) == v1_created_at
+        assert datetime.fromisoformat(v2[0]["valid_from"]) > v1_valid_from
+
     def test_upsert_edge_same_triplet_is_idempotent(self, store: GraphStore) -> None:
         """Re-upserting the same edge (single-row) keeps one current version.
 
