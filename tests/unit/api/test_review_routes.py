@@ -306,6 +306,58 @@ class TestTunerProposals:
         stored = registry.operational.tuner_state_store.get_proposal(p.proposal_id)
         assert stored.status == "promoted"
 
+    def test_promote_refuses_an_unreachable_scope(self, client, registry):
+        """The prod incident shape: ``intent_family`` set, GraphSearch never
+        supplies it. Promoted through this exact route on 2026-10-03 with
+        ``baseline_values: {}`` — pins that this route now re-checks
+        reachability rather than relying only on generation-time screening.
+        """
+        from trellis.schemas.outcome import GRAPH_SEARCH_COMPONENT_ID
+
+        scope = ParameterScope(
+            component_id=GRAPH_SEARCH_COMPONENT_ID,
+            domain="orders",
+            intent_family="plan",
+        )
+        proposal = ParameterProposal(
+            scope=scope,
+            proposed_values={"domain_match_boost": 1.4},
+            tuner="rule_tuner",
+            sample_size=30,
+        )
+        registry.operational.tuner_state_store.put_proposal(proposal)
+        before = _count_events(registry, EventType.PARAMS_UPDATED)
+
+        preview = client.get(f"/api/v1/proposals/{proposal.proposal_id}/preview").json()
+        assert preview["predicted_status"] == "rejected"
+        assert "unreachable" in preview["reason"]
+
+        resp = client.post(f"/api/v1/proposals/{proposal.proposal_id}/promote")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "rejected"
+        assert "unreachable" in body["reason"]
+        assert _count_events(registry, EventType.PARAMS_UPDATED) == before
+        assert registry.operational.parameter_store.resolve(scope) is None
+
+    def test_promote_refuses_a_reachable_scope_with_no_baseline(self, client, registry):
+        """The Review queue has no ``--force``/threshold flags, unlike the
+        CLI, so its one implicit policy must require a baseline — the
+        prod incident proposal also had ``baseline_values: {}``.
+        """
+        p = _seed_proposal(registry)  # no baseline put() for this scope
+        before = _count_events(registry, EventType.PARAMS_UPDATED)
+
+        preview = client.get(f"/api/v1/proposals/{p.proposal_id}/preview").json()
+        assert preview["predicted_status"] == "rejected"
+
+        resp = client.post(f"/api/v1/proposals/{p.proposal_id}/promote")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "rejected"
+        assert "baseline" in body["reason"]
+        assert _count_events(registry, EventType.PARAMS_UPDATED) == before
+
     def test_promote_emits_review_audit_with_identity(self, registry, monkeypatch):
         monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
         token = _mint(registry, [SCOPE_ADMIN], name="ada")
