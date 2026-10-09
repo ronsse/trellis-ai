@@ -2334,9 +2334,17 @@ each with a live count:
 
 1. **Tuner proposals** — Approve / Reject buttons. Approve first runs the
    dry-run preview and shows the predicted decision before a confirm step.
-   Approve wraps `promote_proposal`; Reject wraps `reject_proposal`. The
-   CLI (`trellis metrics promote`) keeps working identically — both share
-   `trellis.learning.tuners.preview_promotion`.
+   Approve wraps `promote_proposal`; Reject wraps `reject_proposal`. Both
+   routes and the CLI (`trellis metrics promote`) share the same
+   `trellis.learning.tuners.promote_proposal` / `preview_promotion`
+   functions and the same unconditional reachability check (refused even
+   under `force`), but **not the same policy default**: the Review queue
+   exposes no `--force` or threshold override, so it applies a stricter
+   policy that also requires a prior baseline for the scope; the CLI's
+   own default still permits a first, unbaselined promotion (the
+   bootstrap case). The CLI's `--force` skips the whole policy gate, not
+   only the baseline requirement, and never the reachability or
+   immutable-core refusals.
 2. **Learning promotion candidates** — candidate cards with metrics, an
    approve checkbox + rationale field, and a single submit that runs the
    existing `prepare_learning_promotions` → `MutationExecutor` path.
