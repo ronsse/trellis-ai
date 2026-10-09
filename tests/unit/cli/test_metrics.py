@@ -462,6 +462,7 @@ def test_metrics_promote_commit_changes_state(cli_env):
             "5",
             "--min-effect-size",
             "0.01",
+            "--allow-no-baseline",
             "--format",
             "json",
         ],
@@ -472,6 +473,130 @@ def test_metrics_promote_commit_changes_state(cli_env):
     assert payload["params_version"] is not None
 
     assert cli_env["tuner_state"].get_proposal(proposal_id).status == "promoted"
+
+
+def test_metrics_promote_commit_refuses_no_baseline_by_default(cli_env):
+    """The scope's first proposal (no ParameterSet snapshot yet) is refused
+    by bare ``--commit`` — ``PromotionPolicy.allow_no_baseline`` now
+    defaults to ``False``. Before this default flip, a bare ``--commit``
+    promoted a first proposal vacuously (#823's gate finding).
+
+    The refusal must also leave the proposal's stored status untouched
+    (not ``"rejected"``) so a later ``--allow-no-baseline`` call on the
+    *same* proposal can still succeed — see
+    ``test_metrics_promote_commit_with_allow_no_baseline_bootstraps_scope``.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
+
+    result = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "5",
+            "--min-effect-size",
+            "0.01",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "rejected"
+    assert payload["reason"] == "no_baseline_snapshot_for_scope"
+    assert payload["params_version"] is None
+
+    # Non-terminal: the stored proposal is still promotable, not "rejected".
+    assert cli_env["tuner_state"].get_proposal(proposal_id).status == "pending"
+
+
+def test_metrics_promote_commit_with_allow_no_baseline_bootstraps_scope(cli_env):
+    """A no-baseline refusal is recoverable: the *same* proposal promotes
+    on a second call that adds ``--allow-no-baseline``, because the first
+    call's refusal did not mark it ``"rejected"``.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
+
+    refused = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "5",
+            "--min-effect-size",
+            "0.01",
+            "--format",
+            "json",
+        ],
+    )
+    assert json.loads(refused.stdout)["status"] == "rejected"
+
+    bootstrapped = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "5",
+            "--min-effect-size",
+            "0.01",
+            "--allow-no-baseline",
+            "--format",
+            "json",
+        ],
+    )
+    assert bootstrapped.exit_code == 0, bootstrapped.output
+    payload = json.loads(bootstrapped.stdout)
+    assert payload["status"] == "promoted"
+    assert payload["params_version"] is not None
+    assert cli_env["tuner_state"].get_proposal(proposal_id).status == "promoted"
+
+
+def test_metrics_promote_force_alone_still_bypasses_baseline_rule(cli_env):
+    """Decision (see PR body): ``--force`` keeps skipping the *whole*
+    policy gate, baseline rule included, rather than gaining a carve-out.
+
+    ``_apply_policy`` — sample size, effect size, non-numeric, and
+    baseline — has always been entirely inside promote_proposal's
+    ``if not force:`` branch; only the immutable-core and reachability
+    gates are force-proof. Pulling the baseline check out of that branch
+    so ``--force`` could no longer skip it would restructure a function
+    two other test files assert on directly, for a surface that is
+    already non-default and logged — the vacuous-default defect #823
+    found is fixed by the default flip alone. This test pins the
+    (unchanged) behaviour rather than silently letting it drift.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
+
+    result = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--force",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "promoted"
 
 
 def test_metrics_promote_missing_proposal(cli_env):

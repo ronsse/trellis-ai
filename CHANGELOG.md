@@ -376,6 +376,38 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A proposal with no comparable baseline is refused by default, and the
+  refusal is recoverable.** `PromotionPolicy.allow_no_baseline` now
+  defaults to `False`, so a bare `trellis metrics promote --commit` no
+  longer promotes a scope's first proposal vacuously — the gap #823 left
+  open on the CLI after closing it on the Review queue. A new
+  `--allow-no-baseline` flag is the surgical opt-in: unlike `--force`, it
+  skips only the baseline rule, not `--min-sample-size`,
+  `--min-effect-size`, reachability, or the immutable-core check.
+  `--force` still skips the whole policy gate, baseline rule included —
+  that is unchanged, and deliberately so: pulling the baseline check out
+  of `--force`'s reach would restructure a function two test files
+  assert on directly, for a surface that is already non-default and
+  logged. A no-baseline refusal no longer marks the proposal terminally
+  `"rejected"` — every other refusal from the pipeline's three gates
+  still does — so a later `--allow-no-baseline` call on the *same*
+  proposal can still promote it; before this, confirming a reachable
+  no-baseline proposal in the Review queue rejected it with no way back,
+  since `promote_proposal(force=True)` answers
+  `skipped proposal_already_rejected` for an already-rejected proposal
+  from every surface. The Review queue's "Confirm approve" button is now
+  disabled when the preview predicts a rejection, and shows the CLI
+  bootstrap path when the reason is the bootstrap-shaped one. Also:
+  `auto_promote`'s dry-run `_evaluate` now runs the same reachability
+  check `promote_proposal` does, so its reported reason cannot disagree
+  with what a live promotion of the same proposal would do (today this
+  changes nothing `run_auto_promotion` reaches, since `RuleTuner.run`
+  already screens for reachability before a proposal gets here — it
+  closes the gap for a proposal written before that screen existed, or
+  by a tuner that skips it); the admin API's promote-route docstring and
+  the CLI dry-run's "WOULD REJECTED" text are corrected to match.
+  ([#823](https://github.com/ronsse/trellis-ai/pull/823) follow-up)
+
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still

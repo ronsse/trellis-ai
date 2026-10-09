@@ -223,6 +223,54 @@ def test_promote_no_baseline_disallowed(stores):
     assert result.reason == "no_baseline_snapshot_for_scope"
 
 
+def test_promote_no_baseline_refusal_is_not_terminal_and_can_bootstrap_later(stores):
+    """A no-baseline refusal leaves the proposal promotable.
+
+    Unlike every other refusal from the three gates, this one does not
+    call ``tuner_state.update_status(..., "rejected", ...)`` — the
+    store's state is *why* it refused, and ``allow_no_baseline=True`` is
+    the documented remedy, so the proposal must still be reachable by a
+    second ``promote_proposal`` call with that flag. Before this fix,
+    ``update_status`` ran unconditionally and the second call hit
+    ``promote_proposal``'s own ``status in {"promoted", "rejected"}``
+    short-circuit and returned ``skipped proposal_already_rejected``
+    instead — unrecoverable from every surface (#823's gate finding,
+    reproduced against the Review-queue REST routes).
+    """
+    params, state, events = stores
+    p = _proposal()
+    state.put_proposal(p)
+
+    refused = promote_proposal(
+        p.proposal_id,
+        tuner_state=state,
+        parameter_store=params,
+        event_log=events,
+        policy=PromotionPolicy(allow_no_baseline=False),
+    )
+    assert refused.status == "rejected"
+    assert refused.reason == "no_baseline_snapshot_for_scope"
+
+    # The stored proposal was NOT moved to a terminal status.
+    stored = state.get_proposal(p.proposal_id)
+    assert stored.status not in {"promoted", "rejected"}
+
+    rejected_events = events.get_events(event_type=EventType.TUNER_PROPOSAL_REJECTED)
+    assert len(rejected_events) == 1
+    assert rejected_events[0].payload["terminal"] is False
+
+    bootstrapped = promote_proposal(
+        p.proposal_id,
+        tuner_state=state,
+        parameter_store=params,
+        event_log=events,
+        policy=PromotionPolicy(allow_no_baseline=True),
+    )
+    assert bootstrapped.status == "promoted"
+    assert bootstrapped.params_version is not None
+    assert state.get_proposal(p.proposal_id).status == "promoted"
+
+
 # ---------------------------------------------------------------------------
 # Merging behaviour
 # ---------------------------------------------------------------------------

@@ -2333,18 +2333,26 @@ decide which surfaces are human-gated are described in
 each with a live count:
 
 1. **Tuner proposals** — Approve / Reject buttons. Approve first runs the
-   dry-run preview and shows the predicted decision before a confirm step.
-   Approve wraps `promote_proposal`; Reject wraps `reject_proposal`. Both
-   routes and the CLI (`trellis metrics promote`) share the same
+   dry-run preview and shows the predicted decision before a confirm step,
+   and disables the confirm button when that preview predicts a
+   rejection (nothing it could do but spend the one proposal). Approve
+   wraps `promote_proposal`; Reject wraps `reject_proposal`. Both routes
+   and the CLI (`trellis metrics promote`) share the same
    `trellis.learning.tuners.promote_proposal` / `preview_promotion`
-   functions and the same unconditional reachability check (refused even
-   under `force`), but **not the same policy default**: the Review queue
-   exposes no `--force` or threshold override, so it applies a stricter
-   policy that also requires a prior baseline for the scope; the CLI's
-   own default still permits a first, unbaselined promotion (the
-   bootstrap case). The CLI's `--force` skips the whole policy gate, not
-   only the baseline requirement, and never the reachability or
-   immutable-core refusals.
+   functions, the same unconditional reachability check (refused even
+   under `force`), and — since both now default `allow_no_baseline` to
+   `False` — the same baseline requirement: a scope's first promotion is
+   refused by default on either surface. A no-baseline refusal is not
+   terminal (the proposal stays `pending`, not `rejected`), so it can
+   still be bootstrapped later — but only from the CLI, via
+   `trellis metrics promote --allow-no-baseline`, which skips only
+   `PromotionPolicy.allow_no_baseline`, not min-sample-size, min-effect-
+   size, reachability, or the immutable-core check. The Review queue
+   exposes no equivalent override, so a scope with no snapshot yet can
+   never clear its own first refusal from the UI alone. The CLI's
+   `--force` is the coarser, pre-existing escape hatch: it skips the
+   whole policy gate, including the baseline requirement, not only the
+   reachability or immutable-core refusals (which no flag skips).
 2. **Learning promotion candidates** — candidate cards with metrics, an
    approve checkbox + rationale field, and a single submit that runs the
    existing `prepare_learning_promotions` → `MutationExecutor` path.

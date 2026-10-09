@@ -343,6 +343,16 @@ def promote_cmd(
     ),
     min_sample_size: int | None = typer.Option(None, "--min-sample-size"),
     min_effect_size: float | None = typer.Option(None, "--min-effect-size"),
+    allow_no_baseline: bool = typer.Option(
+        False,
+        "--allow-no-baseline",
+        help=(
+            "Allow promoting a proposal with no comparable baseline — the "
+            "scope's first promotion. Surgical: unlike --force, it skips "
+            "only PromotionPolicy.allow_no_baseline, not min-sample-size, "
+            "min-effect-size, reachability, or the immutable-core check."
+        ),
+    ),
     force: bool = typer.Option(False, "--force", help="Skip the policy gate."),
     output_format: str = typer.Option("text", "--format"),
 ) -> None:
@@ -351,6 +361,12 @@ def promote_cmd(
     Dry-run by default — runs validate + policy gate, reports the
     decision, but does **not** mutate the stores or emit any event.
     Pass ``--commit`` to actually write the new ParameterSet.
+
+    A proposal with no comparable baseline (the scope's first promotion)
+    is refused by default — ``PromotionPolicy.allow_no_baseline`` defaults
+    to ``False``. Pass ``--allow-no-baseline`` to bootstrap a scope without
+    also skipping ``--min-sample-size``/``--min-effect-size`` the way
+    ``--force`` does.
     """
     tuner_state = get_tuner_state_store()
     params = get_parameter_store()
@@ -361,6 +377,8 @@ def promote_cmd(
         policy_kwargs["min_sample_size"] = min_sample_size
     if min_effect_size is not None:
         policy_kwargs["min_effect_size"] = min_effect_size
+    if allow_no_baseline:
+        policy_kwargs["allow_no_baseline"] = True
     policy = PromotionPolicy(**policy_kwargs) if policy_kwargs else None
 
     if not commit:
@@ -520,9 +538,15 @@ def _dry_run_promote(
         return
 
     color = "green" if preview.status == "promoted" else "red"
+    # "WOULD" wants an imperative verb, not the past-tense `status` noun —
+    # "WOULD REJECTED" reads as broken grammar, so map it rather than
+    # upper-casing the status string verbatim.
+    verb = {"promoted": "PROMOTE", "rejected": "REJECT"}.get(
+        preview.status, preview.status.upper()
+    )
     console.print("[dim](dry run — pass --commit to apply)[/dim]")
     console.print(
-        f"[{color}]WOULD {preview.status.upper()}[/{color}] {escape(proposal_id)}: "
+        f"[{color}]WOULD {verb}[/{color}] {escape(proposal_id)}: "
         f"{preview.reason if preview.reason != 'ok' else 'policy gate would pass'}"
     )
     console.print(f"  proposed: {json.dumps(preview.proposed_values)}")
