@@ -376,6 +376,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis admin migrate-provenance` exits `5` when any edge fails to
+  migrate, and sanitizes every error it prints.** A per-edge upsert
+  failure was recorded in `report.errors`, but the command still exited
+  `0`, and the raw exception text — including anything secret-shaped a
+  store driver's exception carries — reached stdout and `--format json`
+  unescaped. The exit is now decided once, below the `--format` branch,
+  from the same `report.errors` flag: `0` when empty, `5` otherwise.
+  `--format json` gains a `status` field derived from that flag (`"ok"`,
+  `"partial"` when at least one edge still migrated, `"error"` when none
+  did); dry-run output is unchanged. The per-edge failure line and both
+  store-error payloads now run through `sanitize_error_message`. This is
+  a deliberate departure from `trellis_cli.exit_codes.batch_outcome`
+  (#687, #730), which treats a batch as successful unless every command
+  in it failed: here, one failed edge in an otherwise-clean
+  10,000-edge scan still exits non-zero, because a corpus with even one
+  row this command could not write is a state an operator needs to see,
+  not one that nets out as a quiet partial success.
+
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
   `2`, whatever refused it. A policy refusal, by `deny` or `require_approval`,

@@ -36,16 +36,37 @@ Exit codes follow :mod:`trellis_cli.exit_codes` (the canonical map
 introduced in PR #123 and documented in
 ``docs/design/adr-cli-exit-codes.md``):
 
-* :data:`~trellis_cli.exit_codes.EXIT_OK` (0) — success (including
-  no-op runs).
+* :data:`~trellis_cli.exit_codes.EXIT_OK` (0) — success, including
+  no-op runs and every dry run (a dry run never reaches the write
+  that can populate ``report.errors``).
 * :data:`~trellis_cli.exit_codes.EXIT_INTERNAL` (1) — unexpected
   runtime error.
-* :data:`~trellis_cli.exit_codes.EXIT_STORE` (5) — store error during
-  scan / write.
+* :data:`~trellis_cli.exit_codes.EXIT_STORE` (5) — either a scan- or
+  connect-time store error, or a completed run whose ``report.errors``
+  is non-empty (one or more edges failed to upsert). The two render
+  differently but share the code: an uncaught store exception answers
+  with its own payload shape before the report is even built, while a
+  per-edge failure still emits the full report, with the JSON
+  payload's ``status`` distinguishing ``"ok"`` (no errors), ``"partial"``
+  (errors, and at least one edge migrated) and ``"error"`` (errors, and
+  none migrated). The exit is decided once, below the ``--format``
+  branch, from the same ``report.errors`` flag the ``status`` is
+  derived from, so neither surface can report success where the other
+  reports failure (``tests/unit/test_format_exit_parity_rule.py``).
 
 Drift detection raises :class:`MigrationDriftError` which surfaces as
 ``EXIT_INTERNAL`` (parallel to ``RetentionDriftError`` from PR #116;
 both signal "the data is in a state operators need to look at").
+
+Exiting non-zero on *any* per-edge failure is a deliberate departure
+from the ``trellis_cli.exit_codes.batch_outcome`` rule shared by
+``ingest`` and ``extract`` (#687, #730): that rule treats a batch as
+successful unless *every* command in it was refused or failed, so one
+failure among many successes still exits ``0``. Here a single edge
+that fails to upsert exits ``EXIT_STORE`` even when the rest of a
+10,000-edge scan migrated cleanly — a corpus with even one row this
+CLI could not write is a state an operator needs to see, not one that
+nets out as a quiet partial success.
 """
 
 from __future__ import annotations
@@ -147,6 +168,17 @@ def _all_provenance_columns_null(edge: dict[str, Any]) -> bool:
     return all(edge.get(field) is None for field in EDGE_PROVENANCE_FIELDS)
 
 
+def _report_status(report: MigrateProvenanceReport) -> str:
+    """``"ok"`` / ``"partial"`` / ``"error"`` from the same ``report.errors``
+    flag :func:`migrate_provenance_command` exits on, so the JSON payload's
+    ``status`` can never disagree with the exit code."""
+    if not report.errors:
+        return "ok"
+    if report.edges_migrated:
+        return "partial"
+    return "error"
+
+
 def _migrate_one_edge(
     store: GraphStore,
     edge: dict[str, Any],
@@ -210,7 +242,8 @@ def _migrate_one_edge(
     # final report surfaces the failure count to the operator.
     except Exception as exc:
         report.errors.append(
-            f"edge:{edge.get('edge_id')}: upsert failed: {type(exc).__name__}: {exc}"
+            f"edge:{edge.get('edge_id')}: upsert failed: "
+            f"{type(exc).__name__}: {sanitize_error_message(str(exc))}"
         )
         logger.exception(
             "migrate_provenance_upsert_failed",
@@ -365,28 +398,36 @@ def migrate_provenance_command(
         raise
     except Exception as exc:
         logger.exception("migrate_provenance_failed")
+        sanitized_exc = sanitize_error_message(str(exc))
         if output_format == "json":
             emit_json(
                 {
                     "error": "store_error",
-                    "message": f"{type(exc).__name__}: {exc}",
+                    "message": f"{type(exc).__name__}: {sanitized_exc}",
                 },
                 indent=2,
             )
         else:
             console.print(
                 f"[red]store error: {escape(type(exc).__name__)}: "
-                f"{escape(str(exc))}[/red]",
+                f"{escape(sanitized_exc)}[/red]",
                 soft_wrap=True,
             )
         raise typer.Exit(code=EXIT_STORE) from exc
 
+    # Below the --format branch so JSON and text can't disagree about
+    # whether the run failed (tests/unit/test_format_exit_parity_rule.py):
+    # the exit and the payload's status both read ``report.errors``.
+    status = _report_status(report)
+
     if output_format == "json":
-        emit_json(report.to_payload(), indent=2, default=str)
+        payload = report.to_payload()
+        payload["status"] = status
+        emit_json(payload, indent=2, default=str)
     else:
         _print_text_report(report)
 
-    raise typer.Exit(code=EXIT_OK)
+    raise typer.Exit(code=EXIT_STORE if report.errors else EXIT_OK)
 
 
 def register(admin_app: typer.Typer) -> None:
