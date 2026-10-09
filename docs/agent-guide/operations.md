@@ -2342,7 +2342,9 @@ each with a live count:
    exposes no `--force` or threshold override, so it applies a stricter
    policy that also requires a prior baseline for the scope; the CLI's
    own default still permits a first, unbaselined promotion (the
-   bootstrap case), overridable with `--force`.
+   bootstrap case). The CLI's `--force` skips the whole policy gate, not
+   only the baseline requirement, and never the reachability or
+   immutable-core refusals.
 2. **Learning promotion candidates** — candidate cards with metrics, an
    approve checkbox + rationale field, and a single submit that runs the
    existing `prepare_learning_promotions` → `MutationExecutor` path.

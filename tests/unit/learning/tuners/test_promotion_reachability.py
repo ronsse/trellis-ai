@@ -21,6 +21,7 @@ from trellis.learning.tuners import (
     preview_promotion,
     promote_proposal,
 )
+from trellis.ops.parameter_reachability import reachability_reasons
 from trellis.schemas.outcome import GRAPH_SEARCH_COMPONENT_ID
 from trellis.schemas.parameters import ParameterProposal, ParameterScope, ParameterSet
 from trellis.stores.base.event_log import EventType
@@ -43,7 +44,12 @@ def stores(tmp_path: Path):
 
 
 def _unsupplied_axis_proposal(**kw) -> ParameterProposal:
-    """The exact shape of the prod incident: ``intent_family`` is set."""
+    """``intent_family`` set with ``domain`` set: only the axis reason fires.
+
+    The prod incident left ``domain`` unset as well, which trips both
+    reasons at once; ``test_promote_refuses_the_prod_shape_with_both_reasons``
+    pins that shape.
+    """
     defaults: dict = {
         "proposal_id": "prop_unreachable_axis",
         "scope": ParameterScope(
@@ -75,6 +81,33 @@ def _gated_key_proposal(**kw) -> ParameterProposal:
 # ---------------------------------------------------------------------------
 # promote_proposal refuses, for both unreachable shapes
 # ---------------------------------------------------------------------------
+
+
+def test_promote_refuses_the_prod_shape_with_both_reasons(stores):
+    """``intent_family`` set and ``domain`` unset, as on 2026-10-03.
+
+    That scope fails both checks, so the refusal names both reasons and
+    leaves exactly one ``TUNER_PROPOSAL_REJECTED`` row carrying them.
+    """
+    params, state, events = stores
+    p = _unsupplied_axis_proposal(
+        scope=ParameterScope(
+            component_id=GRAPH_SEARCH_COMPONENT_ID, intent_family="plan"
+        )
+    )
+    state.put_proposal(p)
+    expected = reachability_reasons(p.scope, tuple(p.proposed_values))
+    assert {r.kind for r in expected} == {"unsupplied_axis", "gated_key"}
+
+    result = promote_proposal(
+        p.proposal_id, tuner_state=state, parameter_store=params, event_log=events
+    )
+
+    assert result.status == "rejected"
+    assert all(r.detail in result.reason for r in expected)
+    rejected = events.get_events(event_type=EventType.TUNER_PROPOSAL_REJECTED)
+    assert [e.payload["reason"] for e in rejected] == [result.reason]
+    assert events.get_events(event_type=EventType.PARAMS_UPDATED) == []
 
 
 def test_promote_refuses_unsupplied_axis_scope(stores):

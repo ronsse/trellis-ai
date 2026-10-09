@@ -238,13 +238,14 @@ def _reject(
 ) -> PromotionResult:
     """Mark a proposal rejected, emit the audit event, and shape the result.
 
-    The one refusal constructor for :func:`promote_proposal`'s two gates
-    — the immutable core and :class:`PromotionPolicy` — so the audit
-    payload and the returned ``PromotionResult`` cannot drift between
-    them. The payload is byte-identical to the one the policy branch
-    emitted before this helper existed, ``effect_size`` included: a
-    governing-key refusal passes ``None`` for it, which is the key the
-    policy branch already wrote whenever the effect was incomputable.
+    The one refusal constructor for :func:`promote_proposal`'s three
+    gates — the immutable core, reachability and :class:`PromotionPolicy`
+    — so the audit payload and the returned ``PromotionResult`` cannot
+    drift between them. The payload is byte-identical to the one the
+    policy branch emitted before this helper existed, ``effect_size``
+    included: a governing-key or reachability refusal passes ``None``
+    for it, which is the key the policy branch already wrote whenever
+    the effect was incomputable.
 
     :func:`reject_proposal` deliberately does **not** route through here.
     Its payload carries ``manual: True`` and no ``effect_size`` at all,

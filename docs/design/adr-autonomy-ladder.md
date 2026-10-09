@@ -144,9 +144,10 @@ tighten further per scope but never loosen below the manual floor.
 
 "Manual default" in the table above is the library's own `PromotionPolicy()`
 default, which the CLI (`trellis metrics promote`) still uses unmodified
-(bootstrap promotion allowed, overridable with `--force`). The Review
-queue's REST routes are a second, unattended-adjacent manual path with no
-`--force` or threshold flags of their own, so they apply an explicit
+(bootstrap promotion allowed; `--force` skips the whole policy gate). The
+Review queue's REST routes are a second manual path: a reviewer confirms
+each decision, but the routes have no `--force` or threshold flags of
+their own, so they apply an explicit
 stricter policy (`_REVIEW_QUEUE_POLICY` in `trellis_api.routes.admin`,
 `allow_no_baseline=False`) rather than inheriting the library default —
 closing the exact bootstrap-with-no-baseline shape a 2026-10-03 Review-queue
