@@ -376,6 +376,29 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis admin migrate-provenance` exits `5` when any edge fails to
+  migrate, and sanitizes the errors it reports on stdout.** A per-edge
+  upsert failure was recorded in `report.errors`, but the command still
+  exited `0`, and the raw exception text — including anything
+  secret-shaped a store driver's exception carries — reached stdout and
+  `--format json` unsanitized. The exit is now decided once, below the
+  `--format` branch, from the same `report.errors` flag: `0` when empty,
+  `5` otherwise. `--format json` gains a `status` field derived from that
+  flag (`"ok"`, `"partial"` when at least one edge still migrated,
+  `"error"` when none did); a dry run never writes, so it reports `"ok"`
+  and exits `0`. The exception text in the per-edge failure line and in
+  both store-error outputs now runs through `sanitize_error_message`,
+  which passes an ordinary message through and replaces a leak-shaped one
+  with a marker; the edge id and exception type stay, and the full
+  exception still goes to the stderr log. This is
+  a deliberate departure from `trellis_cli.exit_codes.batch_outcome`
+  (#687, #730), which treats a batch as successful unless every command
+  in it failed: here, one failed edge in an otherwise-clean
+  10,000-edge scan still exits non-zero, because a corpus with even one
+  row this command could not write is a state an operator needs to see,
+  not one that nets out as a quiet partial success.
+  ([#824](https://github.com/ronsse/trellis-ai/pull/824))
+
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
   `2`, whatever refused it. A policy refusal, by `deny` or `require_approval`,
@@ -1622,6 +1645,15 @@ All notable changes to Trellis will be documented in this file.
   from `trellis.retrieve.builder_factory`); a response without `axes` renders
   no note.
   (follow-up F3 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
+- **`trellis extract traces`'s per-trace backfill row keeps a long domain on
+  one line.** `_print_backfill` prints `- {trace_id} ({domain}): N
+  entities, M edges` for every trace with drafts, and those counts come
+  from extraction, before the governed batch runs — so the row still
+  prints on a refused (deny-all) backfill. It is uncoloured and printed in
+  a different function than the one that exits non-zero after it, past the
+  red-only soft-wrap scan. It now passes `soft_wrap=True` and is listed by
+  hand beside that scan (`CROSS_FUNCTION_FAILURE_LINES`, 18 -> 19).
+  (follow-up from the [#811](https://github.com/ronsse/trellis-ai/pull/811) gate)
 - **Single-row `upsert_edge` carries `created_at` forward on SQLite and
   Postgres.** Re-upserting the same `(source_id, target_id, edge_type)`
   triplet through the single-row path stamped a fresh `created_at` on the
