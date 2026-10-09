@@ -212,30 +212,37 @@ class TestFiniteErrorsMatchFastApisDefault:
 
 
 class TestMeasurementValue:
-    """``metric_value`` refuses NaN, and only NaN.
+    """``metric_value`` refuses every non-finite float, not only NaN.
 
-    Whether ``Infinity`` is a legitimate measurement is an open owner
-    question; it is accepted, and pinned here.
+    ``Infinity`` used to be accepted; it is refused now because no
+    consumer reads it as "infinite" — Postgres' JSONB refuses it
+    outright, SQLite stores it as invalid JSON, REST shows it as
+    ``null``, and the CLI prints a bare ``Infinity`` token that is not
+    valid JSON (see ``docs/design/claude-md-rationale.md`` Q1).
     """
 
-    def test_nan_answers_422_and_stores_nothing(
+    @pytest.mark.parametrize(
+        "token", ["NaN", "Infinity", "-Infinity", "1e400", '"inf"']
+    )
+    def test_non_finite_answers_422_and_stores_nothing(
         self,
         client: TestClient,
         registry: StoreRegistry,
         logs: list[dict[str, Any]],
+        token: str,
     ) -> None:
-        resp = _post(client, MEASUREMENTS, _measurement_body("NaN"))
+        resp = _post(client, MEASUREMENTS, _measurement_body(token))
         assert (resp.status_code, _unhandled(logs)) == (422, [])
         assert "metric_value" in resp.json()["detail"]
         assert registry.knowledge.graph_store.query(node_type=MEASUREMENT) == []
         assert registry.operational.event_log.count() == 0
 
-    @pytest.mark.parametrize("token", ["Infinity", "-Infinity"])
-    def test_infinity_is_recorded(
-        self, client: TestClient, registry: StoreRegistry, token: str
+    def test_largest_finite_float_is_recorded(
+        self, client: TestClient, registry: StoreRegistry
     ) -> None:
-        resp = _post(client, MEASUREMENTS, _measurement_body(token))
+        """``1e308`` is finite (``1e400`` overflows; this stays well short)."""
+        resp = _post(client, MEASUREMENTS, _measurement_body("1e308"))
         assert resp.status_code == 201, resp.text
         [node] = registry.knowledge.graph_store.query(node_type=MEASUREMENT)
-        assert node["properties"]["metric_value"] == float(token)
+        assert node["properties"]["metric_value"] == 1e308
         assert registry.operational.event_log.count() > 0

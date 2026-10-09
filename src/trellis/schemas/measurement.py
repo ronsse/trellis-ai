@@ -63,10 +63,14 @@ class Measurement(TrellisModel):
     metric_value: float
     """The measured value. ``Measurement`` rows are scalar by
     contract; richer payloads (lists/dicts/strings) belong on
-    :class:`Observation` instead. NaN is refused: it compares false
-    against everything, so no analysis can use it. ``Infinity`` and
-    ``-Infinity`` are accepted; whether they are legitimate
-    measurements is an open owner decision."""
+    :class:`Observation` instead. Must be finite: NaN compares false
+    against everything, so no analysis can use it, and ``Infinity`` /
+    ``-Infinity`` are refused too — Postgres' JSONB has no token for
+    either, SQLite stores them as invalid JSON, and a sum or max over
+    several measurements turns into NaN the moment one is infinite.
+    An undefined result (division by zero, an empty baseline) is not a
+    measurement; record nothing, or a ``None`` plus a reason field at
+    the call site, the pattern ``EffectSize`` already uses."""
 
     unit: str | None = None
     """Optional unit for the scalar value (``"percent"``,
@@ -88,9 +92,9 @@ class Measurement(TrellisModel):
 
     @field_validator("metric_value", mode="after")
     @classmethod
-    def _refuse_nan(cls, value: float) -> float:
-        """Refuse NaN, and only NaN; see ``metric_value``."""
-        if math.isnan(value):
-            msg = "metric_value must be a number, not NaN"
+    def _refuse_non_finite(cls, value: float) -> float:
+        """Refuse NaN, Infinity and -Infinity; see ``metric_value``."""
+        if not math.isfinite(value):
+            msg = "metric_value must be a finite number"
             raise ValueError(msg)
         return value
