@@ -5,10 +5,15 @@ is the governed decision to turn it into an active
 :class:`ParameterSet`. This module runs the decision pipeline:
 
 1. **Validate** — the proposal exists and is still eligible
-   (``status == "pending" or "canary"``, not terminal), and its scope
+   (``status == "pending" or "canary"``, not terminal), its scope
    is not one of :data:`~trellis.mutate.immutable_core.GOVERNING_KEYS`
    — the parameters that gate *another* learning loop, which no tuner
-   may retune and which ``force=True`` does not unlock.
+   may retune and which ``force=True`` does not unlock — and
+   :func:`~trellis.ops.parameter_reachability.reachability_reasons`
+   reports no reason the scope is inert for a reader that resolves
+   it. ``force=True`` does not unlock this either: a promotion no
+   reader can ever resolve is not a risk/reward tradeoff a caller can
+   choose to accept.
 2. **Policy gate** — :class:`PromotionPolicy` check.  Rejects
    proposals that don't meet the minimum sample size or whose
    effect size against the active baseline is too small.
@@ -37,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.mutate.immutable_core import governing_key_refusal
+from trellis.ops.parameter_reachability import reachability_reasons
 from trellis.schemas.parameters import ParameterProposal, ParameterSet
 from trellis.stores.base.event_log import EventLog, EventType
 
@@ -298,8 +304,10 @@ def promote_proposal(
         source: Event source label.  Pipe a human-readable tool name
             when promoting from the CLI.
         force: When ``True`` the policy gate is skipped.  Still
-            requires the proposal to exist and not be in a terminal
-            status; emits a ``force=true`` flag on the event payload.
+            requires the proposal to exist, not be in a terminal
+            status, clear the immutable-core check, and resolve to a
+            reachable scope; emits a ``force=true`` flag on the event
+            payload.
     """
     effective_policy = policy or PromotionPolicy()
 
@@ -331,6 +339,29 @@ def promote_proposal(
             proposal_id=proposal_id,
             proposal=proposal,
             reason=governing,
+            effect=None,
+            baseline_values=None,
+            tuner_state=tuner_state,
+            event_log=event_log,
+            source=source,
+        )
+
+    # Reachability, above ``force`` and above the baseline resolve for the
+    # same reason as the immutable-core check: a promotion into a scope
+    # ParameterStore.resolve can never match is dead weight no value of the
+    # effect size changes, so skipping the policy gate does not reach it
+    # either. The generation-time screen in RuleTuner.run() catches this
+    # for proposals it produces, but a proposal already sitting in the
+    # store (written before that screen existed, or by a tuner that does
+    # not call it) reaches promotion unchecked unless it is re-checked
+    # here. An unrostered component_id yields no reasons — "no claim", not
+    # "reachable" — so it falls through unchanged (parameter_reachability).
+    unreachable = reachability_reasons(proposal.scope, tuple(proposal.proposed_values))
+    if unreachable:
+        return _reject(
+            proposal_id=proposal_id,
+            proposal=proposal,
+            reason="unreachable: " + "; ".join(r.detail for r in unreachable),
             effect=None,
             baseline_values=None,
             tuner_state=tuner_state,
@@ -479,6 +510,20 @@ def preview_promotion(
             proposal_id=proposal_id,
             status="rejected",
             reason=governing,
+            proposed_values=dict(proposal.proposed_values),
+            baseline_values={},
+            sample_size=proposal.sample_size,
+        )
+
+    # Mirrors promote_proposal's reachability refusal, above the baseline
+    # resolve and above ``force``, for the same preview/commit parity
+    # reason the governing-key check above is here.
+    unreachable = reachability_reasons(proposal.scope, tuple(proposal.proposed_values))
+    if unreachable:
+        return PromotionPreview(
+            proposal_id=proposal_id,
+            status="rejected",
+            reason="unreachable: " + "; ".join(r.detail for r in unreachable),
             proposed_values=dict(proposal.proposed_values),
             baseline_values={},
             sample_size=proposal.sample_size,

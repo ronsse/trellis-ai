@@ -142,6 +142,19 @@ the manual defaults — a future edit cannot silently weaken the autonomous gate
 below the human-reviewed one without raising at construction. Operators may
 tighten further per scope but never loosen below the manual floor.
 
+"Manual default" in the table above is the library's own `PromotionPolicy()`
+default, which the CLI (`trellis metrics promote`) still uses unmodified
+(bootstrap promotion allowed, overridable with `--force`). The Review
+queue's REST routes are a second, unattended-adjacent manual path with no
+`--force` or threshold flags of their own, so they apply an explicit
+stricter policy (`_REVIEW_QUEUE_POLICY` in `trellis_api.routes.admin`,
+`allow_no_baseline=False`) rather than inheriting the library default —
+closing the exact bootstrap-with-no-baseline shape a 2026-10-03 Review-queue
+promotion took. This is a per-route override, not a change to
+`PromotionPolicy`'s class default, and is unrelated to the
+`AutoPromotePolicy` asserted-dominance invariant above, which governs only
+the fully unattended path.
+
 Non-qualifying proposals are left `pending`, not rejected — exactly the state
 the manual `trellis metrics promote` path expects. The autonomous pass and the
 manual pass are two readers of the same proposal store; the autonomous one
