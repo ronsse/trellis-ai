@@ -879,18 +879,6 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
         # Admitted deliberately: it exits on every path and defines no
         # ``return``.
         "admin": {"_refuse_option"},
-        # migrate-provenance's body now decides its exit once, below the
-        # ``--format`` branch, on every path including the success report
-        # (previously it just returned there, so it was not a must-exit
-        # helper at all). Admitted deliberately, same shape as the others:
-        # ``migrate_provenance_command`` exits on every path and defines no
-        # ``return``, and its thin ``@admin_app.command`` wrapper
-        # ``migrate_provenance`` inherits that transitively since it does
-        # nothing after the call.
-        "admin_migrate_provenance": {
-            "migrate_provenance_command",
-            "migrate_provenance",
-        },
         "analyze": {"_exit_on_refused_advisory_write"},
         "ingest": {"_fail"},
         # These two are the shared boundary's renderers — #459's for

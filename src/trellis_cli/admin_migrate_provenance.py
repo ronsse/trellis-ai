@@ -427,7 +427,12 @@ def migrate_provenance_command(
     else:
         _print_text_report(report)
 
-    raise typer.Exit(code=EXIT_STORE if report.errors else EXIT_OK)
+    # Two raises rather than one ``code=... if ... else ...``: the parity
+    # rule reads a non-literal code as non-zero, which would list this body
+    # as a helper that exits non-zero on every path.
+    if report.errors:
+        raise typer.Exit(code=EXIT_STORE)
+    raise typer.Exit(code=EXIT_OK)
 
 
 def register(admin_app: typer.Typer) -> None:

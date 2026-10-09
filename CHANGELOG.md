@@ -377,16 +377,20 @@ All notable changes to Trellis will be documented in this file.
 ### Fixed
 
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
-  migrate, and sanitizes every error it prints.** A per-edge upsert
-  failure was recorded in `report.errors`, but the command still exited
-  `0`, and the raw exception text — including anything secret-shaped a
-  store driver's exception carries — reached stdout and `--format json`
-  unescaped. The exit is now decided once, below the `--format` branch,
-  from the same `report.errors` flag: `0` when empty, `5` otherwise.
-  `--format json` gains a `status` field derived from that flag (`"ok"`,
-  `"partial"` when at least one edge still migrated, `"error"` when none
-  did); dry-run output is unchanged. The per-edge failure line and both
-  store-error payloads now run through `sanitize_error_message`. This is
+  migrate, and sanitizes the errors it reports on stdout.** A per-edge
+  upsert failure was recorded in `report.errors`, but the command still
+  exited `0`, and the raw exception text — including anything
+  secret-shaped a store driver's exception carries — reached stdout and
+  `--format json` unsanitized. The exit is now decided once, below the
+  `--format` branch, from the same `report.errors` flag: `0` when empty,
+  `5` otherwise. `--format json` gains a `status` field derived from that
+  flag (`"ok"`, `"partial"` when at least one edge still migrated,
+  `"error"` when none did); a dry run never writes, so it reports `"ok"`
+  and exits `0`. The exception text in the per-edge failure line and in
+  both store-error outputs now runs through `sanitize_error_message`,
+  which passes an ordinary message through and replaces a leak-shaped one
+  with a marker; the edge id and exception type stay, and the full
+  exception still goes to the stderr log. This is
   a deliberate departure from `trellis_cli.exit_codes.batch_outcome`
   (#687, #730), which treats a batch as successful unless every command
   in it failed: here, one failed edge in an otherwise-clean
