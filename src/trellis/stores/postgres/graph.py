@@ -1044,8 +1044,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 edge_id: str = row[0]
                 # Carry created_at forward from the version being closed,
                 # matching upsert_edges_bulk and the Bolt store's coalesce
-                # (docs/design/adr-canonical-graph-layer.md §3): a re-upsert
-                # is a new version of the same logical edge, not a new edge.
+                # (contract: test_upsert_edge_carries_created_at_forward): a
+                # re-upsert is a new version of the same logical edge, not a
+                # new edge.
                 created_at = row[1]
                 with conn.cursor() as cur:
                     cur.execute(
