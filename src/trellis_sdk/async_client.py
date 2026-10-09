@@ -42,6 +42,7 @@ from trellis_wire import (
     PackFeedbackRequest,
     PackFeedbackResponse,
 )
+from trellis_wire.axes import axis_note_from_payload
 from trellis_wire.withholding import withholding_from_payload
 
 if TYPE_CHECKING:
@@ -66,8 +67,9 @@ class AsyncTrellisClient:
     from a single client instance.  Raise it for parallel fan-out
     workloads; lower it to be gentle on shared infrastructure.
 
-    Pass ``api_key=`` with ``base_url=`` to send it as ``X-API-Key`` on
-    every request, including the version handshake; it is refused as
+    Pass ``api_key=`` with ``base_url=`` to send it as
+    ``Authorization: Bearer`` on every request, including the version
+    handshake; it is refused as
     :class:`~trellis_sdk.client.TrellisClient` refuses it.
     """
 
@@ -336,6 +338,7 @@ class AsyncTrellisClient:
             intent,
             max_tokens=max_tokens,
             withholding=withholding_from_payload(pack.get("withholding")),
+            axis_note=axis_note_from_payload(pack.get("axes")),
         )
 
     async def get_task_context(
@@ -374,6 +377,7 @@ class AsyncTrellisClient:
             intent,
             max_tokens=max_tokens,
             withholding=withholding_from_payload(pack.get("withholding")),
+            axis_note=axis_note_from_payload(pack.get("axes")),
         )
 
     async def get_entity(self, entity_id: str) -> dict[str, Any] | None:

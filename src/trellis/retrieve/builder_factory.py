@@ -34,6 +34,10 @@ from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import NamespaceSeedExtractor, build_strategies
 from trellis.stores.advisory_source import load_advisory_store
+from trellis_wire.axes import (
+    format_failed_axes_note,
+    format_misconfigured_semantic_note,
+)
 
 if TYPE_CHECKING:
     from trellis.retrieve.strategies import GraphSeedExtractor
@@ -238,47 +242,10 @@ SEMANTIC_AXIS_NOTES: dict[str, str] = {
     ),
 }
 
-
-def format_failed_axes_note(failed: list[str]) -> str:
-    """One line naming axes that failed to run, or ``""`` when none did.
-
-    Axis names only, never the exception text — that lives in
-    ``PACK_ASSEMBLED.strategy_failures`` for offline analysis, the same
-    split :data:`SEMANTIC_AXIS_NOTES` draws for the semantic axis alone.
-    This covers any axis (keyword, graph, semantic, ...), for a markdown
-    surface that has no JSON ``axes`` block to fall back on: an MCP reply
-    that goes silent on a failed axis reads as a genuinely empty corpus
-    (see :mod:`trellis.retrieve.withholding` for the same problem on
-    withheld items), so the note renders unconditionally here rather than
-    only in a structured response a human might think to check.
-    """
-    if not failed:
-        return ""
-    return f"**Retrieval axis failed:** {', '.join(failed)}."
-
-
-def format_misconfigured_semantic_note(semantic_state: str) -> str:
-    """One line for a ``misconfigured`` semantic axis, or ``""`` otherwise.
-
-    :func:`format_failed_axes_note` only names axes in ``axes["failed"]`` —
-    axes that exist and raised during *this* build. A ``misconfigured``
-    semantic axis never reaches that list: :func:`describe_axes` reports it
-    when the axis is absent from ``available`` altogether, because
-    ``build_strategies`` swallowed the vector backend's init failure before
-    any build ran. Left uncovered, a markdown-only surface (MCP) says
-    nothing while REST's ``axes.semantic`` and the CLI's
-    :data:`SEMANTIC_AXIS_NOTES` sentence both report it — the same gap
-    :func:`format_failed_axes_note` closes for a failed axis, drawn here
-    for the one state that function's input can't see. Same facts as the
-    CLI sentence, no exception text, same markdown-note shape as
-    ``format_failed_axes_note``.
-    """
-    if semantic_state != "misconfigured":
-        return ""
-    return (
-        "**Semantic retrieval misconfigured:** the vector store did not"
-        " initialise, so this pack has no semantic results."
-    )
+# ``format_failed_axes_note`` and ``format_misconfigured_semantic_note``
+# take no ``PackBuilder``, so they live in :mod:`trellis_wire.axes`, where
+# the HTTP-only SDK can import them, and are re-exported here for MCP.
+# ``tests/unit/wire/test_axes.py`` pins the identity.
 
 
 __all__ = [

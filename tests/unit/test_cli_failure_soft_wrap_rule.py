@@ -192,7 +192,7 @@ def test_every_cli_failure_line_passes_soft_wrap() -> None:
 #: ``HAND_READ_FAILURE_LINE_COUNT`` above, so a roster entry quietly
 #: dropped (or renamed past what it matches) shrinks the *measured*
 #: population below this floor instead of moving the floor with it.
-HAND_READ_CROSS_FUNCTION_COUNT = 18
+HAND_READ_CROSS_FUNCTION_COUNT = 19
 
 #: (file, function, message fragment) for each cross-function failure line:
 #: a helper prints it in red or yellow, and a caller in the same file
@@ -214,13 +214,16 @@ HAND_READ_CROSS_FUNCTION_COUNT = 18
 #: ``_render_smoke_text`` (two reds), ingest_conversations.py's
 #: ``_render_report`` (its ``warning``/``withheld`` pair), and
 #: ingest_corpus.py's ``_render_report`` (its ``prune``/``warning``/
-#: ``withheld`` trio).
+#: ``withheld`` trio). admin_migrate_provenance.py's ``_print_text_report``
+#: prints the batch's per-edge errors and returns; its caller now raises a
+#: non-zero exit right after when ``report.errors`` is non-empty.
 CROSS_FUNCTION_FAILURE_LINES = (
     ("admin.py", "_print_skills_summary", "failed"),
     ("admin.py", "_print_check_extractors_report", "not configurable from"),
     ("admin.py", "_render_smoke_text", "check['error']"),
     ("admin.py", "_render_smoke_text", "info['error']"),
     ("admin_api_keys.py", "_store_error", "store error"),
+    ("admin_migrate_provenance.py", "_print_text_report", "escape(err)"),
     ("curate.py", "_execute_command", "Message:"),
     ("curate.py", "_print_warnings", "Warning:"),
     ("extract_refresh.py", "_print_backfill", "row['trace_id']"),

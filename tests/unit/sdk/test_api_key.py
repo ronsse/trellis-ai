@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from trellis.testing import in_memory_async_client
-from trellis_sdk._http import API_KEY_HEADER
+from trellis_sdk._http import AUTHORIZATION_HEADER
 from trellis_sdk.async_client import AsyncTrellisClient
 from trellis_sdk.client import TrellisClient
 from trellis_sdk.exceptions import TrellisClientError, TrellisTransportError
@@ -29,6 +29,24 @@ def _recording_handler(calls: list[dict[str, str]]):
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(dict(request.headers))
+        if request.url.path == "/api/version":
+            return httpx.Response(
+                200, json={"api_major": 1, "api_minor": 2, "sdk_min": "0.0.0"}
+            )
+        return httpx.Response(200, json={"pack_id": "p1", "items": []})
+
+    return handler
+
+
+def _repr_recording_handler(reprs: list[str]):
+    """A handler that records ``repr(request.headers)`` and answers 200.
+
+    ``repr(Headers)`` masks only the ``Authorization`` entry (as
+    ``[secure]``); ``dict()`` or ``.items()`` of the same headers does not.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        reprs.append(repr(request.headers))
         if request.url.path == "/api/version":
             return httpx.Response(
                 200, json={"api_major": 1, "api_minor": 2, "sdk_min": "0.0.0"}
@@ -60,7 +78,9 @@ class TestApiKeyHeaderSync:
 
         assert len(calls) == 2, "expected one handshake call plus one real call"
         for headers in calls:
-            assert headers.get(API_KEY_HEADER.lower()) == _SYNTHETIC_KEY
+            assert (
+                headers.get(AUTHORIZATION_HEADER.lower()) == f"Bearer {_SYNTHETIC_KEY}"
+            )
 
     def test_no_header_without_api_key_even_with_env_set(
         self, monkeypatch: pytest.MonkeyPatch
@@ -74,7 +94,20 @@ class TestApiKeyHeaderSync:
 
         assert len(calls) == 2
         for headers in calls:
-            assert API_KEY_HEADER.lower() not in headers
+            assert AUTHORIZATION_HEADER.lower() not in headers
+            assert all(_SYNTHETIC_KEY not in value for value in headers.values())
+
+    def test_header_repr_masks_key(self) -> None:
+        reprs: list[str] = []
+        client = TrellisClient(base_url="http://testserver", api_key=_SYNTHETIC_KEY)
+        _install_mock_transport(client, _repr_recording_handler(reprs))
+
+        client.assemble_pack("intent")
+
+        assert len(reprs) == 2, "expected one handshake call plus one real call"
+        for header_repr in reprs:
+            assert _SYNTHETIC_KEY not in header_repr
+            assert "[secure]" in header_repr
 
 
 class TestApiKeyHeaderAsync:
@@ -89,7 +122,9 @@ class TestApiKeyHeaderAsync:
 
         assert len(calls) == 2
         for headers in calls:
-            assert headers.get(API_KEY_HEADER.lower()) == _SYNTHETIC_KEY
+            assert (
+                headers.get(AUTHORIZATION_HEADER.lower()) == f"Bearer {_SYNTHETIC_KEY}"
+            )
 
     async def test_no_header_without_api_key_even_with_env_set(
         self, monkeypatch: pytest.MonkeyPatch
@@ -103,7 +138,22 @@ class TestApiKeyHeaderAsync:
 
         assert len(calls) == 2
         for headers in calls:
-            assert API_KEY_HEADER.lower() not in headers
+            assert AUTHORIZATION_HEADER.lower() not in headers
+            assert all(_SYNTHETIC_KEY not in value for value in headers.values())
+
+    async def test_header_repr_masks_key(self) -> None:
+        reprs: list[str] = []
+        client = AsyncTrellisClient(
+            base_url="http://testserver", api_key=_SYNTHETIC_KEY
+        )
+        _install_mock_transport(client, _repr_recording_handler(reprs))
+
+        await client.assemble_pack("intent")
+
+        assert len(reprs) == 2
+        for header_repr in reprs:
+            assert _SYNTHETIC_KEY not in header_repr
+            assert "[secure]" in header_repr
 
 
 class TestApiKeyRefused:
