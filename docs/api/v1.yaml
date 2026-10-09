@@ -3747,7 +3747,13 @@ paths:
 
         promote / reject outcome (and why) before committing. Wraps the same
 
-        :func:`trellis.learning.tuners.preview_promotion` the CLI dry-run uses.'
+        :func:`trellis.learning.tuners.preview_promotion` the CLI dry-run uses,
+
+        with the Review queue''s stricter default policy (see
+
+        ``_REVIEW_QUEUE_POLICY``) so a preview never predicts a promotion the
+
+        commit route below would refuse.'
       operationId: preview_proposal_api_v1_proposals__proposal_id__preview_get
       parameters:
       - in: path
@@ -3787,7 +3793,11 @@ paths:
 
         ``TUNER_PROPOSAL_REJECTED`` on a policy rejection). A second
 
-        ``REVIEW_DECISION_RECORDED`` event records the reviewer identity.'
+        ``REVIEW_DECISION_RECORDED`` event records the reviewer identity.
+
+        Unlike the CLI, this route has no ``--force``/threshold flags, so it
+
+        always applies the stricter ``_REVIEW_QUEUE_POLICY``.'
       operationId: promote_proposal_route_api_v1_proposals__proposal_id__promote_post
       parameters:
       - in: path
