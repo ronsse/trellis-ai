@@ -387,6 +387,28 @@ class VectorStoreContractTests:
         results = store.query(_vec(1, 0, 0), top_k=10, filters={"absent_key": "x"})
         assert results == []
 
+    @pytest.mark.parametrize(
+        "key",
+        ["two words", "a.b", "clé", "it's"],
+        ids=["space", "dot", "unicode", "quote"],
+    )
+    def test_query_filter_key_is_one_flat_key_as_written(
+        self, store: VectorStore, key: str
+    ) -> None:
+        """A metadata filter key names one top-level key, spelled as given.
+
+        The control carries the key with another value. The decoy carries
+        the value where a backend reading ``a.b`` as a path would look.
+        """
+        self.provision_storage(store, "kp-target", "kp-control", "kp-decoy")
+        store.upsert("kp-target", _vec(0, 1, 0), {key: "kp-match"})
+        store.upsert("kp-control", _vec(1, 0, 0), {key: "kp-other"})
+        store.upsert("kp-decoy", _vec(0.9, 0.1, 0), {"a": {"b": "kp-match"}})
+
+        results = store.query(_vec(1, 0, 0), top_k=10, filters={key: "kp-match"})
+
+        assert [r["item_id"] for r in results] == ["kp-target"]
+
     # ------------------------------------------------------------------
     # bulk upsert
     # ------------------------------------------------------------------

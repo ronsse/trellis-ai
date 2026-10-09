@@ -32,16 +32,23 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import structlog
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
+
+if TYPE_CHECKING:
+    import mcp.types as mcp_types
+    from fastmcp.tools.base import ToolResult
 from pydantic import ValidationError
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.core.document_write import put_document
+from trellis.core.error_sanitize import render_exception_detail
 from trellis.core.project import project_override, resolve_project
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.core.write_config import (
@@ -49,9 +56,13 @@ from trellis.core.write_config import (
     WriteBehaviourConfig,
 )
 from trellis.core.write_provenance import get_write_provenance
+from trellis.errors import TrellisError
 from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.extract.memory_ingest_hook import run_memory_extraction
-from trellis.extract.trace_ingest_hook import run_trace_extraction
+from trellis.extract.trace_ingest_hook import (
+    run_trace_extraction,
+    trace_already_ingested,
+)
 from trellis.feedback.attribution import (
     lookup_pack_bodied_item_ids,
     lookup_pack_item_ids,
@@ -106,7 +117,13 @@ from trellis.ops import (
     check_capture_health,
     format_capture_warning,
 )
-from trellis.retrieve.builder_factory import build_pack_builder
+from trellis.retrieve.builder_factory import (
+    AxisReport,
+    build_pack_builder,
+    describe_axes,
+    format_failed_axes_note,
+    format_misconfigured_semantic_note,
+)
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.retrieve.file_context import build_file_context
 from trellis.retrieve.formatters import (
@@ -200,6 +217,11 @@ def _raise_mutation_failed(
     raise McpError(ErrorData(code=MUTATION_FAILED, message=message, data=data))
 
 
+def _exception_detail(exc: BaseException) -> str:
+    """Render a caught exception for a caller-facing message."""
+    return render_exception_detail(exc)
+
+
 def _record_boundary_rejection(
     *,
     tool: str,
@@ -279,6 +301,69 @@ mcp = FastMCP(
         "that returns nothing."
     ),
 )
+
+
+class _SanitizeUncaughtToolErrors(Middleware):
+    """Render an exception no tool caught through ``_exception_detail`` too.
+
+    FastMCP's own tool dispatch wraps any exception a tool does not catch
+    as ``ToolError(f"Error calling tool {name!r}: {e}") from e`` (its
+    ``mask_error_details`` defaults to ``False``), embedding ``str(e)`` raw
+    — a Postgres DETAIL line or a Neo4j constraint message included. The 14
+    sites ``_exception_detail`` already covers (#765) raise an
+    already-sanitized ``McpError`` from inside their own ``try/except``, so
+    by the time FastMCP wraps it here the embedded text is already safe. A
+    tool with no ``try/except`` at all (``save_knowledge``'s and
+    ``save_experience``'s own ``executor.execute`` calls) has nothing
+    upstream to sanitize it, and the cause reaches this wrapping raw.
+
+    Only one level of ``__cause__`` is inspected, following
+    ``fastmcp.server.middleware.error_handling.RetryMiddleware``'s own
+    precedent: middleware below this one must not re-wrap with a new
+    ``from`` clause, or the real cause is hidden here too. Left untouched,
+    by design:
+
+    * ``cause is None`` — a tool (or FastMCP itself) raised ``ToolError``
+      directly; its author already chose the message.
+    * ``isinstance(cause, McpError)`` — one of the 14 sites above (``McpError``
+      is not a ``fastmcp.exceptions.FastMCPError`` subclass, so it reaches
+      this same generic wrap already-safe); re-running ``_exception_detail``
+      would be redundant and, for a validation message that is the caller's
+      own input and was never routed through ``_exception_detail`` at all,
+      could mangle text deliberately preserved verbatim.
+    * the message does not start with FastMCP's own
+      ``"Error calling tool {name!r}:"`` prefix — the two actionable
+      messages ``call_tool`` builds for an ``httpx`` rate-limit or timeout
+      (chained with ``from e`` too) carry no raw driver text to strip, and
+      rewriting them would lose the retry hint they exist to give.
+
+    Everything else is FastMCP's generic wrap of some other uncaught
+    exception, Trellis's own (``TrellisError``) or not — exactly
+    ``_exception_detail``'s two cases, so it decides what survives.
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mcp_types.CallToolRequestParams],
+        call_next: CallNext[mcp_types.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        try:
+            return await call_next(context)
+        except ToolError as exc:
+            cause = exc.__cause__
+            name = context.message.name
+            prefix = f"Error calling tool {name!r}:"
+            if (
+                cause is None
+                or isinstance(cause, McpError)
+                or not str(exc).startswith(prefix)
+            ):
+                raise
+            message = f"{prefix} {_exception_detail(cause)}"
+            raise ToolError(message) from cause
+
+
+mcp.add_middleware(_SanitizeUncaughtToolErrors())
 
 
 _registry: StoreRegistry | None = None
@@ -413,8 +498,9 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
         raise
     except Exception as exc:
         logger.exception("memory_extractor_init_failed")
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"memory extractor construction failed: {exc}",
+            f"memory extractor construction failed: {detail}",
             cause=exc,
             data={"stage": "memory_extractor_init"},
         )
@@ -497,8 +583,9 @@ def _build_llm_client_from_env() -> Any:
             logger.debug("llm_client_openai_not_installed")
         except Exception as exc:
             logger.exception("llm_client_openai_init_failed")
+            detail = _exception_detail(exc)
             _raise_internal(
-                f"OpenAI client construction failed: {exc}",
+                f"OpenAI client construction failed: {detail}",
                 cause=exc,
                 data={"provider": "openai"},
             )
@@ -517,8 +604,9 @@ def _build_llm_client_from_env() -> Any:
             logger.debug("llm_client_anthropic_not_installed")
         except Exception as exc:
             logger.exception("llm_client_anthropic_init_failed")
+            detail = _exception_detail(exc)
             _raise_internal(
-                f"Anthropic client construction failed: {exc}",
+                f"Anthropic client construction failed: {detail}",
                 cause=exc,
                 data={"provider": "anthropic"},
             )
@@ -752,8 +840,9 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
                 )
     except Exception as exc:
         logger.exception("minhash_index_init_failed")
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"MinHash dedup index initialisation failed: {exc}",
+            f"MinHash dedup index initialisation failed: {detail}",
             cause=exc,
             data={"stage": "minhash_index_init"},
         )
@@ -850,6 +939,22 @@ def _capture_warning_banner(registry: StoreRegistry) -> str:
         return ""
 
 
+def _axis_note(axes: AxisReport) -> str:
+    """Every markdown axis note ``axes`` calls for, joined.
+
+    Shared by ``_flat_context`` and ``_sectioned_context``. A failed axis
+    (:func:`format_failed_axes_note`) and a misconfigured semantic axis
+    (:func:`format_misconfigured_semantic_note`) are independent states —
+    ``describe_axes`` can report either, or both, for the same build — so
+    both render when present rather than one shadowing the other.
+    """
+    notes = [
+        format_failed_axes_note(axes["failed"]),
+        format_misconfigured_semantic_note(axes["semantic"]),
+    ]
+    return "\n\n".join(note for note in notes if note)
+
+
 def _flat_context(
     registry: StoreRegistry,
     intent: str,
@@ -926,9 +1031,10 @@ def _flat_context(
         raise
     except Exception as exc:
         logger.exception("flat_context_failed", operation=operation)
+        detail = _exception_detail(exc)
         _raise_internal(
             f"failed to assemble {_TOOL_LABEL.get(operation, 'context')} "
-            f"for intent={intent!r}: {exc}",
+            f"for intent={intent!r}: {detail}",
             cause=exc,
             data={"tool": operation, "intent": intent},
         )
@@ -936,6 +1042,16 @@ def _flat_context(
     banner = _capture_warning_banner(registry)
     # #404: read the summary the builder stamped, do not re-derive one.
     withholding = withholding_from_payload(pack.metadata.get("withholding"))
+    # A missing axis is reported in the pack's axes block on the REST
+    # surface (#775); this is the markdown equivalent — an agent reading
+    # the reply never sees a JSON axes block, so the gap is stated in the
+    # one place it will read it. Names only, never the exception text.
+    axes = describe_axes(
+        builder,
+        pack.retrieval_report.strategies_used,
+        embedder_configured=registry.embedding_fn is not None,
+    )
+    axis_note = _axis_note(axes)
 
     if not pack.items:
         # The case #404 was filed about. An empty pack whose candidates
@@ -944,6 +1060,27 @@ def _flat_context(
         # single most misleading pack this server can return. The note
         # goes here first, before it goes anywhere else.
         empty = empty_message or f"No context found for: {intent}"
+        if builder.holdout_rate > 0:
+            # With the pack holdout on, an empty pack may be a withheld one.
+            # It must still carry the ``pack_id`` header the capture join
+            # reads, and it must read like every other empty pack, so all
+            # empty packs render through the formatter while the rate is
+            # above zero. At rate 0 the one-liner below is unchanged.
+            formatter = (
+                format_pack_as_index_markdown if index else format_pack_as_markdown
+            )
+            result = formatter(
+                [],
+                title or intent,
+                max_tokens=max_tokens,
+                pack_id=pack.pack_id,
+                withholding=withholding,
+                empty_text=empty,
+                axis_note=axis_note,
+            )
+            return f"{banner}\n\n{result}" if banner else result
+        if axis_note:
+            empty = f"{empty}\n\n{axis_note}"
         note = format_withholding_note(withholding)
         if note:
             empty = f"{empty}\n\n{note}"
@@ -969,6 +1106,7 @@ def _flat_context(
         max_tokens=max_tokens,
         pack_id=pack.pack_id,
         withholding=withholding,
+        axis_note=axis_note,
     )
     if banner:
         result = f"{banner}\n\n{result}"
@@ -1032,6 +1170,17 @@ def _sectioned_context(
             }
             for s in sectioned_pack.sections
         ]
+        # As on the sectioned REST route: every section carries the one
+        # strategies_used list build_sectioned() computed, so the first
+        # section's stands for all. No caller passes sections=[].
+        axis_note = ""
+        if sectioned_pack.sections:
+            axes = describe_axes(
+                builder,
+                sectioned_pack.sections[0].retrieval_report.strategies_used,
+                embedder_configured=registry.embedding_fn is not None,
+            )
+            axis_note = _axis_note(axes)
         result = format_sectioned_pack_as_markdown(
             section_dicts,
             intent,
@@ -1040,6 +1189,7 @@ def _sectioned_context(
             withholding=withholding_from_payload(
                 sectioned_pack.metadata.get("withholding")
             ),
+            axis_note=axis_note,
         )
         adv_md = format_advisories_as_markdown(sectioned_pack.advisories)
         if adv_md:
@@ -1059,9 +1209,10 @@ def _sectioned_context(
         raise
     except Exception as exc:
         logger.exception("sectioned_context_failed", tool=tool)
+        detail = _exception_detail(exc)
         _raise_internal(
             f"failed to assemble {_TOOL_LABEL.get(tool, 'context')} "
-            f"for intent={intent!r}: {exc}",
+            f"for intent={intent!r}: {detail}",
             cause=exc,
             data={"tool": tool, "intent": intent},
         )
@@ -1261,6 +1412,9 @@ def save_experience(trace_json: str) -> str:
     trace = _stamp_trace_project(trace)
     registry = _get_registry()
     executor = build_curate_executor(registry)
+    # Read before the write: the handler answers a stored trace_id as a
+    # success that stores nothing, and only its message says which.
+    already_ingested = trace_already_ingested(registry, trace.trace_id)
     result = executor.execute(
         Command(
             operation=Operation.TRACE_INGEST,
@@ -1278,6 +1432,13 @@ def save_experience(trace_json: str) -> str:
                 "command_id": result.command_id,
                 "message": result.message,
             },
+        )
+    if already_ingested:
+        # A duplicate's agent and artifacts would land on the stored
+        # trace's node, so it is not extracted either.
+        return (
+            f"Trace already ingested: {result.created_id}; "
+            "this submission was not stored or extracted."
         )
 
     # Feature-flagged post-ingest trace->graph extraction
@@ -1665,8 +1826,9 @@ def _emit_memory_stored_and_enrich(
         )
     except Exception as exc:
         logger.exception("memory_stored_event_emission_failed", doc_id=stored_id)
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"MEMORY_STORED event emit failed: {exc}",
+            f"MEMORY_STORED event emit failed: {detail}",
             cause=exc,
             data={"stage": "memory_stored_emit", "doc_id": stored_id},
         )
@@ -1900,8 +2062,9 @@ def save_memory(
             raise
         except Exception as exc:
             logger.exception("save_memory_minhash_failed")
+            detail = _exception_detail(exc)
             _raise_internal(
-                f"fuzzy dedup query failed: {exc}",
+                f"fuzzy dedup query failed: {detail}",
                 cause=exc,
                 data={"stage": "minhash_find"},
             )
@@ -1927,8 +2090,9 @@ def save_memory(
             raise
         except Exception as exc:
             logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)
+            detail = _exception_detail(exc)
             _raise_internal(
-                f"failed to index stored memory for fuzzy dedup: {exc}",
+                f"failed to index stored memory for fuzzy dedup: {detail}",
                 cause=exc,
                 data={"stage": "minhash_add", "doc_id": stored_id},
             )
@@ -1963,8 +2127,9 @@ def _index_stored_memory(registry: StoreRegistry, stored_id: str, content: str) 
         raise
     except Exception as exc:
         logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"failed to index stored memory for fuzzy dedup: {exc}",
+            f"failed to index stored memory for fuzzy dedup: {detail}",
             cause=exc,
             data={"stage": "minhash_add", "doc_id": stored_id},
         )
@@ -2009,8 +2174,9 @@ def _store_new_memory(
             "memory_governed_write_failed",
             doc_id=command.target_id,
         )
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"governed memory write failed: {exc}",
+            f"governed memory write failed: {detail}",
             cause=exc,
             data={
                 "stage": "evidence_ingest",
@@ -2622,8 +2788,9 @@ def get_items(
         raise
     except Exception as exc:
         logger.exception("get_items_failed")
+        detail = _exception_detail(exc)
         _raise_internal(
-            f"failed to fetch items: {exc}",
+            f"failed to fetch items: {detail}",
             cause=exc,
             data={"tool": "get_items", "item_ids": unique_ids},
         )
@@ -3449,7 +3616,8 @@ def record_observation(
     # error response.
     except Exception as exc:
         logger.exception("record_observation_failed")
-        return json.dumps({"status": "error", "message": f"Execution failed: {exc}"})
+        detail = _exception_detail(exc)
+        return json.dumps({"status": "error", "message": f"Execution failed: {detail}"})
 
     if result.status != CommandStatus.SUCCESS:
         return json.dumps(
@@ -3504,7 +3672,8 @@ def query_observations(
     # error response.
     except Exception as exc:
         logger.exception("query_observations_failed")
-        return json.dumps({"status": "error", "message": f"Query failed: {exc}"})
+        detail = _exception_detail(exc)
+        return json.dumps({"status": "error", "message": f"Query failed: {detail}"})
 
     projected: list[dict[str, Any]] = []
     for row in rows:
@@ -3624,8 +3793,12 @@ def execute_mutation(
         result = executor.execute(command)
     except Exception as exc:
         logger.exception("execute_mutation_failed", operation=str(op))
+        # A TrellisError keeps its text, which Trellis wrote. Any other
+        # exception is named by its type: its text can be a driver's. The
+        # log above and the chained cause keep it for the operator.
+        detail = exc if isinstance(exc, TrellisError) else type(exc).__name__
         _raise_internal(
-            f"execution failed: {exc}",
+            f"execution failed: {detail}",
             cause=exc,
             data={
                 "command_id": command.command_id,
@@ -3761,10 +3934,11 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
     Required stores build eagerly and fail loud. The degradable
     singletons below build best-effort: winning the init race is worth
     it, but a build failure must NOT sink the server — the tool paths
-    already fall back (semantic search → keyword/graph, embed-on-ingest
-    is fail-soft, memory extraction is feature-flagged). Forcing them to
-    succeed would turn graceful degradation into a hard http boot
-    dependency the stdio path never had.
+    handle it at call time (semantic search → keyword/graph, an embedder
+    that failed to resolve is resolved again by each later call and
+    errors while it still fails, embed-on-ingest is fail-soft, memory
+    extraction is feature-flagged). Forcing them to succeed would make
+    each one a hard http boot dependency the stdio path never had.
     """
     for name in _REQUIRED_KNOWLEDGE_STORES:
         getattr(registry.knowledge, name)

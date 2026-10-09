@@ -1,0 +1,455 @@
+"""A filter key reaches the SQLite graph and vector stores only as a bound value.
+
+Both stores filter on a caller's property or metadata key through
+``json_extract(<column>, ?)``, binding the JSON path ``json_key_path`` spells,
+``$."<key>"``. The statement text is then the same whatever the key holds, and
+the key names one flat object member, as it does on every other backend.
+
+A key that would inject SQL if spliced into the statement text filters as an
+ordinary key. The spelling is one function, so the key shapes it must spell are
+pinned once, on ``query(properties=...)``. Each call site is then pinned on the
+statement it sends, recorded before sqlite3 binds anything: no part of the key
+in the text, its spelled path among the parameters, and exactly the rows that
+carry it.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from trellis.stores.base.graph_query import EdgeQuery, FilterClause, NodeQuery
+from trellis.stores.sqlite.base import SQLiteStoreBase
+from trellis.stores.sqlite.document import SQLiteDocumentStore
+from trellis.stores.sqlite.graph import SQLiteGraphStore
+from trellis.stores.sqlite.vector import SQLiteVectorStore
+
+#: Keys outside ``[A-Za-z0-9_-]+`` whose shape neither ``KEY`` below nor the
+#: contract cases carry: JSON path index syntax, the empty key, text that reads
+#: as a JSON escape, a backslash before a quote, and a lone surrogate, which
+#: sqlite3 can bind only escaped. Each is one flat key, carried by its own node
+#: in ``key_store``.
+FLAT_KEYS = {
+    "index": "tags[0]",
+    "empty": "",
+    "escape-text": "\\u00e9",
+    "backslash-quote": 'a\\"b',
+    "lone-surrogate": "a\ud800b",
+}
+
+#: The key every call site filters on. Spliced raw into ``'$.<key>'``, it
+#: closes the string literal and ORs in a tautology that matches every row.
+#: It also holds a ``.``, both characters a quoted label escapes, a space and
+#: a non-ASCII letter.
+KEY = "team') OR 1=1 OR ('a.b \"c\" \\ é"
+#: Pieces of ``KEY`` a statement's text could carry; none of them is SQL.
+KEY_PARTS = ("team", "1=1", "a.b", "é")
+#: ``KEY`` as bound: as ``json.dumps`` writes it, each ``\"`` then ``\u0022``.
+KEY_PATH = "$.\"team') OR 1=1 OR ('a.b \\u0022c\\u0022 \\\\ \\u00e9\""
+
+Statements = list[tuple[str, tuple[Any, ...]]]
+
+
+class _Recorder:
+    """Stands in for a store's connection and keeps each statement unexpanded.
+
+    ``set_trace_callback`` cannot tell a bound key from a spliced one: from
+    Python 3.11 it is handed the statement with its values substituted.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self.statements: Statements = []
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
+        self.statements.append((sql, tuple(params)))
+        return self._conn.execute(sql, params)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+@contextmanager
+def _statements(store: SQLiteStoreBase) -> Iterator[Statements]:
+    """Record every statement the store sends inside the block."""
+    recorder = _Recorder(store._get_conn())
+    # An instance attribute shadows the method ``_conn`` forwards to.
+    store._get_conn = lambda: recorder  # type: ignore[method-assign]
+    try:
+        yield recorder.statements
+    finally:
+        del store._get_conn
+
+
+def _assert_bound(seen: Statements, *, times: int = 1) -> None:
+    """``KEY`` reached SQLite as a bound path, and no statement's text holds it."""
+    assert [sql for sql, _ in seen if any(part in sql for part in KEY_PARTS)] == []
+    assert [value for _, params in seen for value in params].count(KEY_PATH) == times
+
+
+def _owner(team: str) -> dict[str, str]:
+    """The same value under three plain keys."""
+    return {"owner_team": team, "owner-team": team, "OwnerTeam2": team}
+
+
+@pytest.fixture
+def graph_store(tmp_path: Path) -> Iterator[SQLiteGraphStore]:
+    store = SQLiteGraphStore(tmp_path / "graph.db")
+    nodes: dict[str, dict[str, Any]] = {
+        "node-a": {
+            **_owner("platform"),
+            KEY: "platform",
+            "column_names": ["user_id", "email"],
+        },
+        "node-b": {**_owner("platform"), KEY: True, "column_names": ["order_id"]},
+        "node-c": {**_owner("data"), KEY: ["user_id"], "column_names": ["user_id"]},
+        "node-d": {"column_names": []},
+    }
+    for node_id, props in nodes.items():
+        store.upsert_node(node_id, "service", props)
+    edges = [
+        (
+            "node-a",
+            "node-b",
+            {**_owner("platform"), KEY: "platform", "column_names": ["user_id"]},
+        ),
+        (
+            "node-b",
+            "node-c",
+            {**_owner("data"), KEY: ["user_id"], "column_names": ["order_id"]},
+        ),
+        (
+            "node-c",
+            "node-d",
+            {**_owner("platform"), KEY: "data", "column_names": ["email"]},
+        ),
+    ]
+    for source, target, props in edges:
+        store.upsert_edge(source, target, "depends_on", properties=props)
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def key_store(tmp_path: Path) -> Iterator[SQLiteGraphStore]:
+    """One node per ``FLAT_KEYS`` entry, a control and a decoy."""
+    store = SQLiteGraphStore(tmp_path / "keys.db")
+    for key_id, key in FLAT_KEYS.items():
+        store.upsert_node(f"kp-{key_id}", "service", {key: "platform"})
+    store.upsert_node(
+        "kp-control", "service", dict.fromkeys(FLAT_KEYS.values(), "data")
+    )
+    # The value where a misspelled path lands: element 0 of ``tags``, and the
+    # ``é`` the text ``\u00e9`` decodes to unescaped.
+    store.upsert_node("kp-decoy", "service", {"tags": ["platform"], "é": "platform"})
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def vector_store(tmp_path: Path) -> Iterator[SQLiteVectorStore]:
+    store = SQLiteVectorStore(tmp_path / "vectors.db")
+    metas: dict[str, dict[str, Any]] = {
+        "vec-a": {**_owner("platform"), KEY: "platform"},
+        "vec-b": {**_owner("platform"), KEY: "data"},
+        "vec-c": _owner("data"),
+        "vec-d": {},
+    }
+    for i, (item_id, meta) in enumerate(metas.items()):
+        store.upsert(item_id, [1.0, float(i), 0.5], meta)
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def document_store(tmp_path: Path) -> Iterator[SQLiteDocumentStore]:
+    """Four "hello" documents covering the NUL-key value shapes.
+
+    ``doc-a``/``doc-b`` lack the plain NUL key ``a\\x00b``. ``doc-c`` holds
+    it with a non-``None`` value — what makes the ``None``-value test
+    discriminating: without it, that filter and no filter at all return the
+    same rows, so dropping the comparison entirely would still pass.
+    ``doc-d`` holds the NUL-*and*-quote key ``a\\x00"b`` and the
+    NUL-*and*-backslash key ``a\\x00\\\\b``, the key shapes that build no
+    JSON path either way.
+    """
+    store = SQLiteDocumentStore(tmp_path / "documents.db")
+    store.put("doc-a", "hello world", metadata={"owner_team": "platform"})
+    store.put("doc-b", "hello world", metadata={"owner_team": "data"})
+    store.put("doc-c", "hello world", metadata={"a\x00b": "platform"})
+    store.put(
+        "doc-d",
+        "hello world",
+        metadata={'a\x00"b': "platform", "a\x00\\b": "platform"},
+    )
+    yield store
+    store.close()
+
+
+def _doc_ids(rows: list[dict[str, Any]]) -> set[str]:
+    return {row["doc_id"] for row in rows}
+
+
+def _node_ids(rows: list[dict[str, Any]]) -> set[str]:
+    return {row["node_id"] for row in rows}
+
+
+def _edge_pairs(rows: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    return {(row["source_id"], row["target_id"]) for row in rows}
+
+
+def _eq(key: str) -> tuple[FilterClause, ...]:
+    return (FilterClause(f"properties.{key}", "eq", "platform"),)
+
+
+class TestTheSpelling:
+    """``json_key_path``: each key names its own member on the SQLite in use."""
+
+    @pytest.mark.parametrize("key_id", list(FLAT_KEYS))
+    def test_a_key_filters_as_one_flat_member(
+        self, key_store: SQLiteGraphStore, key_id: str
+    ) -> None:
+        rows = key_store.query(properties={FLAT_KEYS[key_id]: "platform"})
+        assert _node_ids(rows) == {f"kp-{key_id}"}
+
+    def test_a_nul_is_refused_before_sql(self, key_store: SQLiteGraphStore) -> None:
+        """No spelling names it.
+
+        A raw NUL ends the path where SQLite reads it, and ``\\u0000``
+        decodes to the same terminator and matches the key's prefix.
+        """
+        with _statements(key_store) as seen, pytest.raises(ValueError, match="NUL"):
+            key_store.query(properties={"a\x00b": "platform"})
+        assert seen == []
+
+
+class TestGraphQuery:
+    """``query(properties=...)``: the scalar, bool and ``None`` branches."""
+
+    def test_the_scalar_branch_binds_the_key(
+        self, graph_store: SQLiteGraphStore
+    ) -> None:
+        with _statements(graph_store) as seen:
+            rows = graph_store.query(properties={KEY: "platform"})
+        assert _node_ids(rows) == {"node-a"}
+        _assert_bound(seen)
+
+    def test_the_bool_branch_binds_the_key(self, graph_store: SQLiteGraphStore) -> None:
+        with _statements(graph_store) as seen:
+            rows = graph_store.query(properties={KEY: True})
+        assert _node_ids(rows) == {"node-b"}
+        _assert_bound(seen)
+
+    def test_the_none_branch_binds_the_key(self, graph_store: SQLiteGraphStore) -> None:
+        with _statements(graph_store) as seen:
+            rows = graph_store.query(properties={KEY: None})
+        assert _node_ids(rows) == {"node-d"}
+        _assert_bound(seen)
+
+
+class TestNodeQueryDsl:
+    """``execute_node_query`` on ``properties.<key>`` (``_field_to_sql_expr``)."""
+
+    @pytest.mark.parametrize(
+        ("op", "value", "expected"),
+        [
+            ("eq", "platform", {"node-a"}),
+            ("in", ("platform", "data"), {"node-a"}),
+            ("exists", None, {"node-a", "node-b", "node-c"}),
+            ("gte", "platform", {"node-a"}),
+        ],
+        ids=["eq", "in", "exists", "range"],
+    )
+    def test_every_op_binds_the_key(
+        self,
+        graph_store: SQLiteGraphStore,
+        op: str,
+        value: object,
+        expected: set[str],
+    ) -> None:
+        clause = FilterClause(f"properties.{KEY}", op, value)  # type: ignore[arg-type]
+        with _statements(graph_store) as seen:
+            rows = graph_store.execute_node_query(NodeQuery(filters=(clause,)))
+        assert _node_ids(rows) == expected
+        _assert_bound(seen)
+
+
+class TestContainsDsl:
+    """``contains`` on nodes and edges (both use ``_render_contains_sqlite``)."""
+
+    def test_the_key_is_bound_for_both_its_uses(
+        self, graph_store: SQLiteGraphStore
+    ) -> None:
+        clause = FilterClause(f"properties.{KEY}", "contains", "user_id")
+        with _statements(graph_store) as node_seen:
+            nodes = graph_store.execute_node_query(NodeQuery(filters=(clause,)))
+        with _statements(graph_store) as edge_seen:
+            edges = graph_store.execute_edge_query(EdgeQuery(filters=(clause,)))
+        assert _node_ids(nodes) == {"node-c"}
+        assert _edge_pairs(edges) == {("node-b", "node-c")}
+        _assert_bound(node_seen, times=2)
+        _assert_bound(edge_seen, times=2)
+
+
+class TestEdgeQueryDsl:
+    """``execute_edge_query`` on ``properties.<key>`` (``_edge_field_to_sql_expr``)."""
+
+    def test_the_key_is_bound(self, graph_store: SQLiteGraphStore) -> None:
+        with _statements(graph_store) as seen:
+            rows = graph_store.execute_edge_query(EdgeQuery(filters=_eq(KEY)))
+        assert _edge_pairs(rows) == {("node-a", "node-b")}
+        _assert_bound(seen)
+
+
+class TestVectorQuery:
+    """``SQLiteVectorStore.query(filters=...)``."""
+
+    def test_the_key_is_bound(self, vector_store: SQLiteVectorStore) -> None:
+        with _statements(vector_store) as seen:
+            rows = vector_store.query(
+                [1.0, 0.0, 0.0], top_k=10, filters={KEY: "platform"}
+            )
+        assert {row["item_id"] for row in rows} == {"vec-a"}
+        _assert_bound(seen)
+
+
+class TestDocumentSearchNulKey:
+    """``SQLiteDocumentStore.search(filters=...)`` on a NUL-holding key.
+
+    A scalar value is refused with the ``ValueError`` :func:`json_key_path`
+    raises, before any SQL runs, unless the key also holds a ``"`` or a
+    ``\\``. Such a key, and a ``None``, list or dict value, are compared in
+    Python, where no JSON path is built, so the key filters as any other.
+    """
+
+    @pytest.mark.parametrize(
+        "value", ["platform", 7, 1.5, True], ids=["str", "int", "float", "bool"]
+    )
+    def test_a_nul_is_refused_before_sql(
+        self, document_store: SQLiteDocumentStore, value: object
+    ) -> None:
+        with (
+            _statements(document_store) as seen,
+            pytest.raises(ValueError, match="NUL"),
+        ):
+            document_store.search("hello", filters={"a\x00b": value})
+        assert seen == []
+
+    def test_a_nul_key_with_a_none_value_matches_every_row_lacking_it(
+        self, document_store: SQLiteDocumentStore
+    ) -> None:
+        """``doc-a``, ``doc-b`` and ``doc-d`` all lack the plain key
+        ``a\\x00b`` (``doc-d`` holds the *different* key ``a\\x00"b``) and
+        read as ``None`` there; ``doc-c`` holds ``a\\x00b`` with a
+        non-``None`` value and is excluded."""
+        rows = document_store.search("hello", filters={"a\x00b": None})
+        assert _doc_ids(rows) == {"doc-a", "doc-b", "doc-d"}
+
+    @pytest.mark.parametrize("value", [["platform"], {"x": 1}], ids=["list", "dict"])
+    def test_a_nul_key_with_a_container_value_matches_no_row(
+        self, document_store: SQLiteDocumentStore, value: object
+    ) -> None:
+        rows = document_store.search("hello", filters={"a\x00b": value})
+        assert rows == []
+
+    @pytest.mark.parametrize("key", ['a\x00"b', "a\x00\\b"], ids=["quote", "backslash"])
+    def test_a_nul_and_quote_key_with_a_str_value_matches_its_document(
+        self, document_store: SQLiteDocumentStore, key: str
+    ) -> None:
+        """A key holding a NUL *and* a ``"`` or a ``\\`` builds no JSON path,
+        so the NUL check that runs for a path-bound key never sees it — the
+        key is compared in Python exactly as such a key without a NUL is.
+        """
+        rows = document_store.search("hello", filters={key: "platform"})
+        assert _doc_ids(rows) == {"doc-d"}
+
+
+class TestDocumentSearchTagFacetName:
+    """``SQLiteDocumentStore.search(filters={"content_tags": {...}})`` on a
+    facet name holding JSON path syntax.
+
+    ``_build_tag_conditions`` used to splice the facet name unquoted into
+    ``$.content_tags.{facet}``, so a ``.`` or a leading ``"`` in it changed
+    which path the filter read instead of naming the literal facet. (A
+    bare ``"`` *not* at the start of an unquoted label, and a ``\\``, are
+    not actually path syntax to SQLite's JSON functions — probed directly
+    against this build's ``sqlite3`` — so they are not exercised here; the
+    fix quotes every facet alike regardless.)
+
+    Every condition this builder emits default-passes an UNTAGGED document
+    (``json_extract(...) IS NULL OR ...``), so a document that simply lacks
+    the facet being queried matches either way and cannot discriminate
+    quoted from unquoted. The documents below are each tagged WITH the
+    colliding facet, holding a value that does not match the filter — the
+    only shape where a wrong path and a right one disagree: the unquoted
+    ``.`` path reads an absent member, which default-passes, instead of the
+    literal facet's own ``"notmatch"``, and an unquoted path starting
+    ``."`` is not malformed-but-silent, it is a ``sqlite3.OperationalError``
+    SQLite raises outright.
+    """
+
+    @pytest.fixture
+    def facet_store(self, tmp_path: Path) -> Iterator[SQLiteDocumentStore]:
+        store = SQLiteDocumentStore(tmp_path / "facets.db")
+        store.put(
+            "doc-dot-mismatch",
+            "hello world",
+            metadata={"content_tags": {"domain.zzz": "notmatch"}},
+        )
+        store.put(
+            "doc-quote-mismatch",
+            "hello world",
+            metadata={"content_tags": {'"domainzzz': "notmatch"}},
+        )
+        store.put(
+            "doc-plain-domain",
+            "hello world",
+            metadata={"content_tags": {"domain": "irrelevant"}},
+        )
+        yield store
+        store.close()
+
+    def test_a_nul_in_a_facet_name_is_refused_before_sql(
+        self, facet_store: SQLiteDocumentStore
+    ) -> None:
+        with (
+            _statements(facet_store) as seen,
+            pytest.raises(ValueError, match="NUL"),
+        ):
+            facet_store.search(
+                "hello",
+                filters={"content_tags": {"domain\x00zzz": {"eq": "alpha"}}},
+            )
+        assert seen == []
+
+    def test_a_dot_in_a_facet_name_excludes_its_mismatched_document(
+        self, facet_store: SQLiteDocumentStore
+    ) -> None:
+        """Unquoted, ``$.content_tags.domain.zzz`` reads the absent member
+        ``domain`` and default-passes, rather than reading the literal
+        facet's own ``"notmatch"`` — the only way that document could pass
+        ``eq: "alpha"`` is a path that is not naming the facet it claims
+        to."""
+        rows = facet_store.search(
+            "hello", filters={"content_tags": {"domain.zzz": {"eq": "alpha"}}}
+        )
+        assert _doc_ids(rows) == {"doc-quote-mismatch", "doc-plain-domain"}
+
+    def test_a_leading_quote_in_a_facet_name_excludes_its_mismatched_document(
+        self, facet_store: SQLiteDocumentStore
+    ) -> None:
+        """Unquoted, ``$.content_tags."domainzzz`` opens a quoted label it
+        never closes — SQLite raises ``sqlite3.OperationalError: bad JSON
+        path`` for it, uncaught, rather than comparing the document's real,
+        non-matching ``"notmatch"``. Quoted, the leading ``"`` is escaped
+        like any other character and the literal facet is read and excluded
+        on its value, same as the ``.`` case above."""
+        rows = facet_store.search(
+            "hello", filters={"content_tags": {'"domainzzz': {"eq": "alpha"}}}
+        )
+        assert _doc_ids(rows) == {"doc-dot-mismatch", "doc-plain-domain"}

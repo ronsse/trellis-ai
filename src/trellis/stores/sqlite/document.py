@@ -20,7 +20,7 @@ from trellis.stores.base.document import (
     encode_filter_value,
 )
 from trellis.stores.base.tag_filters import normalize_facet_filter
-from trellis.stores.sqlite.base import SQLiteStoreBase
+from trellis.stores.sqlite.base import SQLiteStoreBase, json_key_path, reject_nul_key
 
 logger = structlog.get_logger(__name__)
 
@@ -71,8 +71,17 @@ def _build_tag_conditions(
         operator, values = normalized
         # Bound, not interpolated: ``facet`` arrives from wire input, and a
         # JSON path spliced into SQL is an injection surface. SQLite's JSON
-        # functions take the path as an ordinary parameter.
-        json_path = f"$.content_tags.{facet}"
+        # functions take the path as an ordinary parameter. The member is
+        # quoted via :func:`~trellis.stores.sqlite.base.json_key_path`, the
+        # escaping and NUL check the graph and vector stores share, so a
+        # ``.``, ``[``, ``"`` or NUL in ``facet`` cannot change which path
+        # this reads; a NUL raises the same ``ValueError`` those stores
+        # raise.
+        # ContentTags facets are an open vocabulary (``domain``,
+        # ``content_type``, ``scope`` and ``signal_quality`` are merely
+        # well-known), so this quotes whatever name a caller sends rather
+        # than validating it against a list.
+        json_path = "$.content_tags" + json_key_path(facet)[1:]
         if facet in LIST_FACETS:
             sub_parts = " OR ".join("je.value = ?" for _ in values)
             inner = (
@@ -154,32 +163,37 @@ def _metadata_matches(metadata_json: str, key: str, expected_json: str) -> bool:
 
 
 def _bindable_json_path(key: str) -> str | None:
-    r"""``$."key"`` for *key*, or ``None`` if SQLite cannot address it.
+    r"""``$."key"`` for *key*, or ``None`` if *key* holds a ``"`` or a ``\``.
 
     Quoted so a key holding a ``.`` or a ``[`` is read as a literal member
     name rather than as path syntax, and returned to be **bound** rather
     than spliced: the key arrives from wire input, and the
     ``content_tags`` branch already binds its paths for that reason.
 
-    Two character classes have no SQLite JSON-path spelling at all, and both
-    parse as a *miss* rather than an error — so a key containing either would
-    silently match nothing. Measured against SQLite 3.45:
+    Inside the quotes a ``"`` ends the label and a ``\`` starts an escape
+    sequence, so such a key misses, names another key or raises a bad-path
+    error. :func:`~trellis.stores.sqlite.base.json_key_path` spells both on
+    SQLite 3.45 and later, but before 3.45 its spelling of a key holding a
+    ``"`` matches nothing.
 
-    * a double quote, because a backslash-escaped quote inside the component
-      is not read as a literal quote;
-    * a backslash, because inside a quoted component SQLite reads it as the
-      start of an escape sequence. For a key spelled ``a\b`` in Python,
-      ``json_extract`` under the path ``$."a\b"`` returns ``NULL`` while the
-      doubled ``$."a\\b"`` returns the value.
+    Postgres binds the key directly (``metadata -> %s``) and matches such a
+    key as written. Keys holding either character are handed to
+    :func:`_metadata_matches` instead, which compares the parsed object in
+    Python, needs no path and matches on every SQLite release.
 
-    The backslash case was a live backend divergence, found by the #455
-    review gate: Postgres binds the key directly (``metadata -> %s``) and
-    matched the same document, inside the change (#409) whose whole point is
-    that the two backends cannot disagree about what a filter means. Both
-    classes are handed to :func:`_metadata_matches` instead, which compares
-    the parsed object in Python and needs no path.
+    Raises:
+        ValueError: *key* holds a NUL character and neither a ``"`` nor a
+            ``\``. :func:`~trellis.stores.sqlite.base.reject_nul_key` raises
+            it, with the message the graph and vector stores give. A key
+            holding a ``"`` or a ``\`` returns ``None`` before this check
+            runs, whether or not it also holds a NUL — that routes the
+            caller to :func:`_metadata_matches`, which builds no JSON path,
+            so a NUL there cannot name one wrong.
     """
-    return None if '"' in key or "\\" in key else f'$."{key}"'
+    if '"' in key or "\\" in key:
+        return None
+    reject_nul_key(key)
+    return f'$."{key}"'
 
 
 class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
@@ -261,31 +275,32 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         metadata_json = json.dumps(metadata)
         chash = _content_hash(content)
 
-        # `preserve_updated_at` is bound, not spliced: an f-string here would
-        # couple the generated SQL to this block's indentation.
-        self._conn.execute(
-            """
-            INSERT INTO documents
-                (doc_id, content, content_hash,
-                 metadata_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(doc_id) DO UPDATE SET
-                content = excluded.content,
-                content_hash = excluded.content_hash,
-                metadata_json = excluded.metadata_json,
-                updated_at = CASE WHEN ?
-                    THEN documents.updated_at ELSE excluded.updated_at END
-            """,
-            (doc_id, content, chash, metadata_json, now, now, preserve_updated_at),
-        )
-        # FTS5 doesn't support ON CONFLICT — delete+insert
-        self._conn.execute("DELETE FROM documents_fts WHERE doc_id = ?", (doc_id,))
-        self._conn.execute(
-            "INSERT INTO documents_fts (doc_id, content) VALUES (?, ?)",
-            (doc_id, content),
-        )
+        conn = self._conn
+        with conn:  # one transaction: the document and its full-text row, or neither
+            # `preserve_updated_at` is bound, not spliced: an f-string here would
+            # couple the generated SQL to this block's indentation.
+            conn.execute(
+                """
+                INSERT INTO documents
+                    (doc_id, content, content_hash,
+                     metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(doc_id) DO UPDATE SET
+                    content = excluded.content,
+                    content_hash = excluded.content_hash,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = CASE WHEN ?
+                        THEN documents.updated_at ELSE excluded.updated_at END
+                """,
+                (doc_id, content, chash, metadata_json, now, now, preserve_updated_at),
+            )
+            # FTS5 doesn't support ON CONFLICT — delete+insert
+            conn.execute("DELETE FROM documents_fts WHERE doc_id = ?", (doc_id,))
+            conn.execute(
+                "INSERT INTO documents_fts (doc_id, content) VALUES (?, ?)",
+                (doc_id, content),
+            )
 
-        self._conn.commit()
         logger.debug("document_stored", doc_id=doc_id)
         return doc_id
 
@@ -299,9 +314,10 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         return self._row_to_dict(row)
 
     def delete(self, doc_id: str) -> bool:
-        cursor = self._conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
-        self._conn.execute("DELETE FROM documents_fts WHERE doc_id = ?", (doc_id,))
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # one transaction: both rows go, or neither
+            cursor = conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
+            conn.execute("DELETE FROM documents_fts WHERE doc_id = ?", (doc_id,))
         deleted = cursor.rowcount > 0
         if deleted:
             logger.debug("document_deleted", doc_id=doc_id)
@@ -368,8 +384,8 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
                     )
                     filter_params.extend([path, value, path])
                 else:
-                    # Lists, dicts, ``None``, and keys SQLite cannot spell
-                    # a path for. SQLite has no structural JSON equality
+                    # Lists, dicts, ``None``, and keys holding a ``"`` or a
+                    # ``\``. SQLite has no structural JSON equality
                     # and ``json_extract`` returns a container as *text*,
                     # so a SQL comparison would call ``{"a": 1, "b": 2}``
                     # and ``{"b": 2, "a": 1}`` unequal — while Python and

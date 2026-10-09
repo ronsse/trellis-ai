@@ -179,6 +179,69 @@ def validate_document_ids(document_ids: list[str] | None) -> None:
         seen.add(doc_id)
 
 
+def validate_version_token(expected_valid_from: str) -> None:
+    """Refuse a compare-and-set token that cannot be a ``valid_from``.
+
+    :meth:`GraphStore.get_node` returns ``valid_from`` as an ISO 8601
+    string, so anything else is a caller bug. Checking before the query
+    makes every backend raise for it; past this point a SQL backend
+    compares it as text and refuses, while a Bolt backend fails inside
+    the engine.
+
+    Raises:
+        TypeError: if ``expected_valid_from`` is not a ``str``.
+        ValueError: if it does not parse as an ISO 8601 timestamp.
+    """
+    if not isinstance(expected_valid_from, str):
+        msg = (
+            "expected_valid_from must be the valid_from string get_node "
+            f"returned, got {type(expected_valid_from).__name__}"
+        )
+        raise TypeError(msg)
+    try:
+        datetime.fromisoformat(expected_valid_from)
+    except ValueError:
+        msg = (
+            "expected_valid_from must be the valid_from string get_node "
+            f"returned, got {expected_valid_from!r}"
+        )
+        raise ValueError(msg) from None
+
+
+# The orderings GraphStore.search_nodes accepts.
+NODE_SEARCH_SORTS = frozenset({"created_at", "name", "node_type"})
+
+
+def validate_node_search_args(*, sort: str, limit: int, offset: int) -> None:
+    """Refuse a :meth:`GraphStore.search_nodes` page before the query runs.
+
+    Called by every implementation, so each refuses the same arguments:
+    left to the engines, SQLite reads a negative ``LIMIT`` as no limit and
+    a negative ``OFFSET`` as zero, while PostgreSQL refuses both.
+
+    Raises:
+        ValueError: if ``sort`` is not in :data:`NODE_SEARCH_SORTS`, or
+            ``limit`` or ``offset`` is negative.
+    """
+    if sort not in NODE_SEARCH_SORTS:
+        msg = f"sort must be one of {sorted(NODE_SEARCH_SORTS)}, got {sort!r}"
+        raise ValueError(msg)
+    if limit < 0 or offset < 0:
+        msg = f"limit and offset must be >= 0, got limit={limit}, offset={offset}"
+        raise ValueError(msg)
+
+
+def node_search_like_pattern(search: str) -> str:
+    r"""SQL ``LIKE`` pattern matching any value that contains *search*.
+
+    Read with ``ESCAPE '\'``, which keeps ``%``, ``_`` and ``\`` in
+    *search* literal. The backslash is escaped first, so the escapes added
+    for ``%`` and ``_`` are not escaped again.
+    """
+    escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def check_node_role_immutable(
     node_id: str,
     existing: dict[str, Any],
@@ -249,6 +312,10 @@ class GraphStore(ABC):
 
         When updating an existing (current) node, the old version is
         closed (``valid_to`` set) and a new version row is inserted.
+        When no version is current it creates the node, so it re-creates
+        a purged id: a write that lost a race to :meth:`delete_node`
+        brings the node back. :meth:`update_node_if_current` writes only
+        over the version the caller read.
 
         Args:
             node_id: Logical entity ID, or ``None`` to auto-generate.
@@ -309,21 +376,24 @@ class GraphStore(ABC):
         (:func:`validate_node_role_args`, :func:`validate_document_ids`,
         :func:`check_node_role_immutable`) runs against every row
         *before any write*. If any row fails validation, no rows are
-        written. Pass-through implementations should call
-        :meth:`_pre_validate_nodes_bulk` to honor this contract.
-        Backends with single-statement bulk paths (Neo4j) extend the
-        guarantee to write-time failures via a single transaction;
-        pass-through backends (SQLite, Postgres) loop over
-        :meth:`upsert_node` after pre-validation, so a mid-batch IO
-        failure can leave a partial commit. Callers needing strict
-        write-time atomicity should drive the bulk call inside their
-        own transaction.
+        written. A ``node_id`` given twice in one call is refused the
+        same way, by a :class:`ValueError` naming the second
+        occurrence's index. An implementation that does not inline these
+        checks should call :meth:`_pre_validate_nodes_bulk` to honor this
+        contract; SQLite and Postgres do. Every shipped backend also
+        writes the batch in one transaction: SQLite and Postgres run the
+        ``UPDATE`` that closes current versions and one ``executemany``
+        ``INSERT`` in a transaction that an error rolls back, and the
+        Bolt backends (Neo4j, ArcadeDB) run one ``UNWIND`` statement in
+        one write transaction, so a write-time failure leaves none of
+        the batch's rows.
 
-        On backends with network round-trip cost (Neo4j), implementations
-        SHOULD consolidate the work into a small constant number of
-        round trips per batch — typically one fetch of existing rows
-        plus one UNWIND-style upsert. On in-process backends a simple
-        loop over :meth:`upsert_node` is acceptable.
+        On backends with network round-trip cost (Neo4j, ArcadeDB),
+        implementations SHOULD consolidate the work into a small constant
+        number of round trips per batch — typically one fetch of existing
+        rows plus one UNWIND-style upsert. On in-process backends, round
+        trips cost little either way, but the batch is still written in
+        one transaction, as described above.
 
         Args:
             nodes: List of node-spec dicts. Order is preserved in the
@@ -331,8 +401,9 @@ class GraphStore(ABC):
 
         Raises:
             ValueError / TypeError: with the same conditions as
-                :meth:`upsert_node`. Errors mention the offending list
-                index so callers can map them back.
+                :meth:`upsert_node`, and ``ValueError`` for a ``node_id``
+                given twice. Errors mention the offending list index so
+                callers can map them back.
 
         Returns:
             List of node IDs in the same order as the input.
@@ -355,13 +426,19 @@ class GraphStore(ABC):
 
         Same SCD-2 semantics as :meth:`upsert_edge`: an existing
         current edge between ``(source_id, target_id, edge_type)`` is
-        closed before the new version is inserted, and ``created_at``
-        is carried forward.
+        closed before the new version is inserted. This method carries
+        ``created_at`` forward from the closed version on every
+        backend, but :meth:`upsert_edge` does not share that behaviour
+        everywhere: on Neo4j and ArcadeDB it also carries ``created_at``
+        forward, while on SQLite and Postgres its single-row path
+        stamps a fresh ``created_at`` on each new version instead.
 
         Round-trip-cost guidance is the same as
         :meth:`upsert_nodes_bulk`. Endpoints must already be current
         nodes; otherwise :class:`ValueError` is raised mentioning the
-        offending list index.
+        offending list index. A ``(source_id, target_id, edge_type)``
+        triplet given twice in one call is refused before any write, by a
+        :class:`ValueError` naming the second occurrence's index.
 
         Returns:
             List of edge IDs in the same order as the input.
@@ -450,6 +527,52 @@ class GraphStore(ABC):
         """
 
     @abstractmethod
+    def update_node_if_current(
+        self,
+        node_id: str,
+        expected_valid_from: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str,
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        """Write a new version of a node only over the version the caller read.
+
+        ``expected_valid_from`` is the current version's ``valid_from``
+        exactly as :meth:`get_node` returned it. When that version is
+        still current it is closed and a new version is inserted, with
+        ``created_at`` carried forward, as :meth:`upsert_node` does.
+        Otherwise nothing is written and the call returns ``False``: the
+        id has no current version (it never existed, or
+        :meth:`delete_node` purged it), or a later write replaced the
+        version (including a purge followed by a re-create). It never
+        creates a node.
+
+        The check and the write commit together. Of concurrent calls
+        holding the same current token exactly one returns ``True``, and
+        once a :meth:`delete_node` has committed, a call holding a token
+        read before it returns ``False``. A concurrent :meth:`upsert_node`
+        reads no token, so nothing here orders this call against it: on
+        Neo4j the two can leave two current versions, as two concurrent
+        :meth:`upsert_node` calls can. Two versions written within one
+        microsecond share a token, which this cannot tell apart.
+
+        Raises:
+            ValueError / TypeError: under the same conditions as
+                :meth:`upsert_node`, and before anything is read when
+                ``expected_valid_from`` is not a string that parses as an
+                ISO 8601 timestamp. Role immutability is checked against
+                the version the call would replace.
+
+        Backend failures raise rather than being reported as ``False``.
+
+        Returns:
+            ``True`` when the new version was written.
+        """
+
+    @abstractmethod
     def resolve_alias(
         self,
         source_system: str,
@@ -532,7 +655,14 @@ class GraphStore(ABC):
 
         Args:
             node_type: Optional node type filter.
-            properties: Optional property filters.
+            properties: Optional property filters. Each key is one flat
+                property key, compared as written: ``"a.b"`` is the key
+                ``a.b``, not a path to ``b`` inside ``a``, and a space, quote
+                or non-ASCII character is part of the key. On SQLite a
+                scalar or ``None`` value is compared through a JSON path: a
+                NUL character in its key raises :class:`ValueError`, and
+                before SQLite 3.45 a key holding a ``"`` reads as absent from
+                every node, so a scalar matches none and ``None`` matches all.
             limit: Max results.
             as_of: Optional point-in-time filter.
         """
@@ -558,8 +688,22 @@ class GraphStore(ABC):
         (``test_delete_node_purges_all_versions`` and siblings), which any
         new backend must pass.
 
-        Returns ``True`` if the node existed (i.e. this call performed the
-        purge — under concurrent deletion exactly one caller sees ``True``).
+        The purge removes every version committed before it returns,
+        including one written by a concurrent transaction it waited on: a
+        backend whose delete can wait on a writer's lock repeats each delete
+        until it removes nothing (PostgreSQL, Neo4j). The exception is a new
+        edge or alias row whose writer touched no row the purge holds, which
+        can commit between the purge's last delete and its commit. An
+        ``upsert_node`` after the purge re-creates the node.
+
+        Returns ``True`` if this call removed a version of the node. Two
+        concurrent purges both see ``True`` only if a writer creates a
+        version while one of them runs, and each has then removed one; on
+        Neo4j both can instead count one version, created after one of them
+        took its locks. On Neo4j and ArcadeDB a purge whose connection drops
+        during its commit reads the node back and takes no version left as
+        its own purge: when it rolled back while the other committed, both
+        see ``True`` too.
         """
 
     @abstractmethod
@@ -572,6 +716,56 @@ class GraphStore(ABC):
     @abstractmethod
     def count_nodes(self) -> int:
         """Total current node count (valid_to IS NULL)."""
+
+    @abstractmethod
+    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+        """Current node count (valid_to IS NULL) per stored ``node_type``.
+
+        Keys keep their stored case, so ``"concept"`` and ``"Concept"`` are
+        counted apart; a type with no current node is absent. A non-empty
+        *search* keeps only nodes whose ``name`` property, ``node_id`` or
+        ``node_type`` contains it, ignoring case: the filter that
+        :meth:`search_nodes` applies for ``GET /graph/search``'s ``q``.
+        Every character of *search* is literal, ``%``, ``_`` and the
+        backslash included. SQLite's ``LIKE`` ignores the case of ASCII
+        letters only.
+        """
+
+    @abstractmethod
+    def search_nodes(
+        self,
+        *,
+        search: str | None = None,
+        node_type: str | None = None,
+        sort: str = "created_at",
+        descending: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return one page of matching current nodes, and how many match.
+
+        Answers ``GET /graph/search``. A non-empty *search* matches exactly
+        as it does in :meth:`count_nodes_by_type`, and a non-empty
+        *node_type* keeps only nodes of that stored type, so the count
+        equals ``count_nodes_by_type(search=search)`` summed, or its entry
+        for *node_type*. Only current versions (``valid_to IS NULL``) match.
+
+        The page holds rows shaped as :meth:`get_node` returns them, ordered
+        by *sort* (``created_at``, the ``name`` property or ``node_type``)
+        and then by ``node_id``, both descending unless *descending* is
+        false, then skipped by *offset* and cut at *limit*. A current
+        ``node_id`` is unique, so rows that tie on *sort* still have one
+        order: while the graph does not change, walking every page shows
+        each match once, and the ascending walk is the descending one
+        reversed. Each backend compares names, types and ids its own way.
+
+        Abstract with no default: a backend outside this repository must
+        implement it.
+
+        Raises:
+            ValueError: if *sort* is not in :data:`NODE_SEARCH_SORTS`, or
+                *limit* or *offset* is negative.
+        """
 
     @abstractmethod
     def count_edges(self) -> int:
@@ -681,17 +875,17 @@ class GraphStore(ABC):
     def _pre_validate_nodes_bulk(self, nodes: list[dict[str, Any]]) -> None:
         """Run every per-row validator against ``nodes`` before any write.
 
-        Pass-through bulk implementations (SQLite, Postgres) loop over
-        :meth:`upsert_node` after this call. Without it, validators that
-        live inside :meth:`upsert_node` (``validate_node_role_args``,
-        ``validate_document_ids``, ``check_node_role_immutable``) would
-        only fire mid-loop — by which point earlier rows have already
-        been committed. Calling this helper up-front honors the ABC's
-        atomicity-of-validation contract.
+        SQLite and Postgres call this before their one bulk write (an
+        ``UPDATE`` closing any current versions plus one ``executemany``
+        ``INSERT``), which skips the checks :meth:`upsert_node` runs per
+        row (``validate_node_role_args``, ``validate_document_ids``,
+        ``check_node_role_immutable``). This pre-pass runs those checks,
+        so a bad row raises before anything is written, which honors the
+        ABC's atomicity-of-validation contract.
 
-        Backends with a single-statement bulk path (Neo4j) inline the
-        same validation in their own pre-pass and don't need this
-        helper — using it would require a redundant
+        Backends with a single-statement bulk path (Neo4j, ArcadeDB)
+        inline the same validation in their own pre-pass and don't need
+        this helper — using it would require a redundant
         :meth:`get_nodes_bulk` round trip.
 
         Errors are tagged with the offending row index so callers can
@@ -710,6 +904,7 @@ class GraphStore(ABC):
             except (ValueError, TypeError) as exc:
                 msg = f"upsert_nodes_bulk[{i}]: {exc}"
                 raise type(exc)(msg) from exc
+        self._reject_repeated_node_ids(nodes)
 
         # Role immutability requires an existing-row lookup. Only rows
         # with an explicit node_id can collide; auto-assigned IDs are
@@ -731,6 +926,33 @@ class GraphStore(ABC):
             except ValueError as exc:
                 msg = f"upsert_nodes_bulk[{i}]: {exc}"
                 raise ValueError(msg) from exc
+
+    @staticmethod
+    def _reject_repeated_node_ids(nodes: list[dict[str, Any]]) -> None:
+        """Reject a ``node_id`` given twice in one bulk call, before any write.
+
+        One call writes one version per node. Without this check the SQL
+        backends' one-current-row unique index would fail the statement
+        mid-batch, and a Bolt statement, which has no such index, would
+        write each occurrence that differs from the stored version as a
+        current row. The error names the second occurrence's index, as
+        :meth:`_pre_validate_edges_bulk` does for a repeated edge. A
+        missing, ``None`` or empty ``node_id`` is auto-assigned, so it never
+        repeats.
+        """
+        seen: set[str] = set()
+        for i, spec in enumerate(nodes):
+            node_id = spec.get("node_id")
+            if not node_id:
+                continue
+            if node_id in seen:
+                msg = (
+                    f"upsert_nodes_bulk[{i}]: duplicate node_id={node_id!r} in "
+                    "batch; deduplicate before calling, since one call writes "
+                    "one version per node"
+                )
+                raise ValueError(msg)
+            seen.add(node_id)
 
     @staticmethod
     def _pre_validate_edges_bulk(edges: list[dict[str, Any]]) -> None:

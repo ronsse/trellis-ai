@@ -31,7 +31,8 @@ $ trellis admin version --format json | jq '{api_version, mcp_tools_version}'
 
 - `api_major` bumps on REST breaking changes.  SDK refuses to talk
   to a different major.
-- `api_minor` bumps on REST additive changes.
+- `api_minor` bumps when the SDK comes to rely on a REST addition,
+  not on every additive change (see `src/trellis/api_version.py`).
 - `mcp_tools_version` bumps on MCP breaking changes.  Decoupled from
   `api_major` so MCP deployments don't move with REST migrations.
 

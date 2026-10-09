@@ -1,16 +1,19 @@
 """Data structures for Claude Code session auto-capture.
 
 Plain dataclasses (mirroring :mod:`trellis.ingest_corpus.models`) for the
-reader → distiller → writer flow. Nothing here is persisted or wire-shaped,
-so these are dataclasses rather than ``TrellisModel`` schemas; the one
-persisted contract the worker emits is the existing leak-safe
-:class:`~trellis.schemas.memory_op.MemoryOpJudgedPayload`.
+reader → distiller → writer flow. None of them is wire-shaped, so these are
+dataclasses rather than ``TrellisModel`` schemas. What the worker persists
+from them is plain event payloads (the sweep funnel and each session's pack
+join, both in :mod:`trellis_workers.session_capture.capture`) beside the
+existing leak-safe :class:`~trellis.schemas.memory_op.MemoryOpJudgedPayload`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+
+from trellis_workers.session_capture.outcome import SessionOutcome
 
 
 @dataclass
@@ -20,7 +23,9 @@ class ToolCall:
     Tool *inputs* (a bash command line, a file path with an inline token)
     and tool *outputs* (``op read`` results, env dumps) are deliberately
     excluded from the digest: only the tool name and whether its result
-    errored survive parsing, so no raw tool payload can reach the distiller.
+    errored survive parsing on the call, so no raw tool payload can reach
+    the distiller. :attr:`SessionDigest.outcome` keeps counts read from a
+    ``Bash`` command and its result, never their text.
 
     ``is_error`` is set by :meth:`SessionDigest.mark_tool_result`, which
     joins a ``tool_result`` block back to the ``tool_use`` it answers on
@@ -76,9 +81,13 @@ class Turn:
 class SessionDigest:
     """A secret-free structured view of one transcript file.
 
-    Carries only natural-language turns, tool *names*, and structural
-    signals. Raw ``tool_result`` / ``toolUseResult`` content — the fields
-    that embed secrets — never lands here (F8 threat model, #255 guide).
+    Carries only natural-language turns, tool *names*, the pack ids of the
+    session's Trellis retrieval results, the session's outcome as counts,
+    and structural signals. Raw ``tool_result`` / ``toolUseResult`` content
+    — the fields that embed secrets — never lands here (F8 threat model,
+    #255 guide): a pack id is read out of a result and kept only once it
+    matches the alphabet the server generates it in, and the outcome keeps
+    only what it counts.
     """
 
     session_id: str
@@ -107,6 +116,25 @@ class SessionDigest:
     #: Rides the captured memory's metadata so a reader can tell that the
     #: "user" turns were an orchestrator's prompt, not a person's.
     is_subagent: bool = False
+    #: Distinct pack ids the session's Trellis retrieval results named, in
+    #: the order first served. Read from the sidechain records too: a
+    #: sub-agent's retrieval is still this file's.
+    pack_ids: list[str] = field(default_factory=list)
+    #: Results of the Trellis retrieval tools, errored ones included. The
+    #: denominator that tells a session that never retrieved (``0``) from one
+    #: whose retrievals served no pack.
+    retrieval_results: int = 0
+    #: How many of :attr:`retrieval_results` came back as errors.
+    retrieval_errors: int = 0
+    #: Non-error retrieval results that yielded no pack id although they
+    #: mention the ``pack_id`` label or arrived in a shape the parser does
+    #: not know: a truncated result, or a header off the formatters' layout.
+    #: Non-zero means :attr:`pack_ids` may be missing a pack.
+    pack_ids_unparsed: int = 0
+    #: What the session did, as counts, a duration and flags, read from the
+    #: whole file and from nothing a pack touched. Counts derived from tool
+    #: inputs and results, never their text.
+    outcome: SessionOutcome = field(default_factory=SessionOutcome)
 
     def add_turn(self, role: str, text: str, *, sidechain: bool = False) -> None:
         """Append one turn, preserving transcript order."""
@@ -124,6 +152,11 @@ class SessionDigest:
         self.tool_calls.append(call)
         if use_id:
             self._calls_by_use_id[use_id] = call
+
+    def tool_name(self, use_id: str | None) -> str | None:
+        """The name of the call *use_id* identifies, if this file held it."""
+        call = self._calls_by_use_id.get(use_id or "")
+        return call.name if call is not None else None
 
     def mark_tool_result(self, use_id: str | None, *, errored: bool) -> None:
         """Attribute one ``tool_result`` back to its ``tool_use``.
@@ -298,16 +331,16 @@ class CaptureReport:
     #: They remain judged and are watermarked, preserving the retry posture,
     #: but are distinct from a valid empty judgment.
     sessions_judge_malformed: int = 0
-    #: Sessions that raised mid-sweep — a fault in reading, distilling,
-    #: gating, reconciling or hashing one session, caught at
-    #: ``run_capture``'s per-session boundary so it cannot end the sweep. No
-    #: memory or training pair from such a session is written, and it is left
-    #: un-watermarked, so a transient fault retries next sweep and a
-    #: deterministic one is counted here every night until it is fixed. What
-    #: the session did before the fault is not rolled back: the counters it
-    #: moved (``sessions_parsed``, ``sessions_triggered``, the candidate
-    #: counters) keep their increments, and a reconcile verdict it emitted
-    #: stays emitted.
+    #: Sessions that raised mid-sweep — a fault in reading, recording the
+    #: pack join, distilling, gating, reconciling or hashing one session,
+    #: caught at ``run_capture``'s per-session boundary so it cannot end the
+    #: sweep. No memory or training pair from such a session is written, and
+    #: it is left un-watermarked, so a transient fault retries next sweep and
+    #: a deterministic one is counted here every night until it is fixed.
+    #: What the session did before the fault is not rolled back: the counters
+    #: it moved (``sessions_parsed``, ``pack_ids_unparsed``,
+    #: ``sessions_triggered``, the candidate counters) keep their increments,
+    #: and a pack join or reconcile verdict it emitted stays emitted.
     sessions_errored: int = 0
     #: Distinct sessions that yielded at least one memory surviving every
     #: gate — the coverage numerator. Counted per **session**, not per
@@ -316,6 +349,20 @@ class CaptureReport:
     #: anything at all".
     sessions_with_memory: int = 0
     malformed_lines: int = 0
+    #: Sessions whose pack join — the ``CAPTURE_SESSION_PACKS`` event naming
+    #: the packs a session was served — this sweep wrote, an empty one
+    #: included. Every parsed transcript with a turn or a tool call lands
+    #: here, in :attr:`pack_joins_unchanged`, or in :attr:`sessions_errored`
+    #: when recording its join raised. A dry run counts the joins it would
+    #: write and writes none.
+    pack_joins_recorded: int = 0
+    #: Sessions parsed again whose join was already on record as it stands,
+    #: so nothing was written: a judge-outage retry, a watermark reset.
+    pack_joins_unchanged: int = 0
+    #: :attr:`SessionDigest.pack_ids_unparsed` summed over the sessions this
+    #: sweep considered for a join. Non-zero means some join may be missing
+    #: a pack; each join's own payload says which.
+    pack_ids_unparsed: int = 0
     candidates_distilled: int = 0
     #: Total rejections at the worthiness gate. Kept as the total — not
     #: narrowed to the judged subset — so a figure taken from a sweep before
@@ -388,6 +435,9 @@ class CaptureReport:
             "sessions_errored": self.sessions_errored,
             "sessions_with_memory": self.sessions_with_memory,
             "malformed_lines": self.malformed_lines,
+            "pack_joins_recorded": self.pack_joins_recorded,
+            "pack_joins_unchanged": self.pack_joins_unchanged,
+            "pack_ids_unparsed": self.pack_ids_unparsed,
             "candidates_distilled": self.candidates_distilled,
             "candidates_rejected_worthiness": self.candidates_rejected_worthiness,
             "candidates_rejected_judged_unworthy": (

@@ -83,6 +83,11 @@ class IngestResponse(WireModel):
     status: str = "ok"
     trace_id: str | None = None
     evidence_id: str | None = None
+    #: Set by ``POST /traces``: ``True`` when the store already held the
+    #: ``trace_id``, so this call stored and extracted nothing (traces are
+    #: immutable). ``None`` on ``POST /evidence``, and from a server that
+    #: predates the field.
+    already_ingested: bool | None = None
 
 
 # -- Retrieve --
@@ -127,6 +132,19 @@ class WithholdingResponse(WireModel):
     served_count: int
 
 
+class AxisReportResponse(WireModel):
+    """Which retrieval axes this pack has, ran, and did not.
+
+    Mirrors :class:`trellis.retrieve.builder_factory.AxisReport`: axis names
+    and states only, never an exception message.
+    """
+
+    available: list[str]
+    ran: list[str]
+    failed: list[str]
+    semantic: str
+
+
 class PackResponse(WireModel):
     """Response containing an assembled context pack."""
 
@@ -142,6 +160,11 @@ class PackResponse(WireModel):
     #: Verbatim ``Pack.metadata["withholding"]`` telemetry. ``None`` means
     #: the response came from a server older than API 1.2.
     withholding: WithholdingResponse | None = None
+    #: Which axes were available, ran, and failed during this build — the
+    #: :func:`~trellis.retrieve.builder_factory.describe_axes` mapping that
+    #: ``trellis retrieve pack --format json`` also prints. ``None`` means a
+    #: server that predates this field.
+    axes: AxisReportResponse | None = None
 
 
 class SectionedPackRequest(WireRequestModel):
@@ -176,6 +199,12 @@ class SectionedPackResponse(WireModel):
     #: Verbatim ``SectionedPack.metadata["withholding"]`` telemetry. ``None``
     #: means the response came from a server older than API 1.2.
     withholding: WithholdingResponse | None = None
+    #: Which axes were available, ran, and failed during this build — the
+    #: same :func:`~trellis.retrieve.builder_factory.describe_axes` mapping
+    #: ``POST /api/v1/packs`` reports. ``None`` means a server that
+    #: predates this field. The server refuses ``sections=[]`` (422), so
+    #: every 200 has a section to read the "ran" axes off.
+    axes: AxisReportResponse | None = None
 
 
 # -- Curate --
@@ -227,7 +256,10 @@ class FeedbackRequest(WireRequestModel):
     """Request to record feedback on a target."""
 
     target_id: str
-    rating: float
+    #: Explicit 0.0-1.0 score. Bounded here because it lands at
+    #: ``payload["rating"]``, the key the fitness loops threshold against —
+    #: the MCP surface enforces the same range.
+    rating: float = Field(ge=0.0, le=1.0)
     comment: str | None = None
     pack_id: str | None = None  # Link feedback to a context pack
 
@@ -545,9 +577,20 @@ class ProposalRejectRequest(WireRequestModel):
 
 
 class LearningCandidateListResponse(WireModel):
-    """Most-recent learning-candidate artifact, or an empty hint."""
+    """Most-recent learning-candidate artifact, or why none could be served.
+
+    ``status`` is ``"ok"`` when the artifact was read (``candidates`` may
+    still be empty) and ``"error"`` when there was none to read; then
+    ``code`` says why (``learning_artifacts_dir_missing``,
+    ``learning_candidates_missing``, ``learning_candidates_unreadable`` or
+    ``stores_dir_unconfigured``) and ``hint`` names the path and how to
+    produce the artifact. ``artifacts_dir`` names the directory looked in,
+    ``None`` only when none could be resolved.
+    """
 
     status: str = "ok"
+    code: str | None = None
+    artifacts_dir: str | None = None
     generated_at_utc: str | None = None
     candidate_count: int = 0
     candidates: list[dict[str, Any]] = Field(default_factory=list)

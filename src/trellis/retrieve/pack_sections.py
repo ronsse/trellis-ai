@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.core.pack_holdout import drop_holdout
 from trellis.stores.base.event_log import (
     EventLog,
     EventType,
@@ -92,9 +93,11 @@ def analyze_pack_sections(
         event_log, event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
     )
 
+    # A withheld sectioned pack's sections are all empty by design, not
+    # because retrieval missed: drop it before counting empties.
     sectioned = [
         e
-        for e in scan.events
+        for e in drop_holdout(scan.events, ())[0]
         if e.entity_type == "sectioned_pack" or e.payload.get("sections")
     ]
 

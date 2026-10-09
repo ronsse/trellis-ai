@@ -109,8 +109,8 @@ def pack(
       chunk rows on purpose, the excerpt is what the budget prices, and
       the flag would now suppress candidates the agent-facing path keeps.
     * ``--format json`` returns the pack, not a list of ids — same shape
-      as ``POST /api/v1/packs`` plus the axis report, so an operator's
-      preview and an agent's pack are directly comparable.
+      as ``POST /api/v1/packs``, so an operator's preview and an agent's
+      pack are directly comparable.
     """
     registry = _get_registry()
     builder = build_pack_builder(registry, surface="cli.retrieve")
@@ -294,7 +294,10 @@ def trace(
         if output_format == "json":
             emit_json({"status": "not_found", "trace_id": trace_id})
         else:
-            console.print(f"[yellow]Trace not found[/yellow]: {escape(trace_id)}")
+            console.print(
+                f"[yellow]Trace not found[/yellow]: {escape(trace_id)}",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
@@ -332,7 +335,10 @@ def entity(
         if output_format == "json":
             emit_json({"status": "not_found", "entity_id": entity_id})
         else:
-            console.print(f"[yellow]Entity not found[/yellow]: {escape(entity_id)}")
+            console.print(
+                f"[yellow]Entity not found[/yellow]: {escape(entity_id)}",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
@@ -470,7 +476,8 @@ def file_context(
     if output_format not in ("text", "json", "jsonl"):
         console.print(
             f"[red]Unsupported --format {output_format!r};"
-            " expected one of: text, json, jsonl[/red]"
+            " expected one of: text, json, jsonl[/red]",
+            soft_wrap=True,
         )
         raise typer.Exit(EXIT_VALIDATION)
 

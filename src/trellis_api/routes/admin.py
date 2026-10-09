@@ -15,7 +15,6 @@ proposals are read-only here.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +22,14 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from trellis.core.error_sanitize import sanitize_error_message
+from trellis.core.path_presence import path_is_present
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import StaleStoreWriteError
+from trellis.learning.artifacts import (
+    LEARNING_ARTIFACTS_DIR_ENV,
+    LEARNING_CANDIDATES_FILENAME,
+    resolve_learning_artifacts_dir,
+)
 from trellis.learning.scoring import (
     prepare_learning_promotions,
     submit_learning_promotion,
@@ -681,15 +686,14 @@ def reset_vectors(response: Response) -> dict[str, Any]:
 # audit event, so the EventLog attributes each human decision to a
 # credential.
 
-#: Env var pointing at the directory the learning-candidate artifacts are
-#: written to (``trellis analyze learning-candidates --output-dir``). When
-#: unset we fall back to ``<data_dir>/learning`` (sibling of ``stores/``)
-#: so a conventional install resolves without extra config.
-LEARNING_ARTIFACTS_DIR_ENV = "TRELLIS_LEARNING_ARTIFACTS_DIR"
-
-#: Filename the CLI writes the scored learning report to. Must match
-#: ``trellis.learning.scoring.write_learning_review_artifacts``.
-_LEARNING_CANDIDATES_FILENAME = "intent_learning_candidates.json"
+#: How an operator produces the artifact the learning routes read, appended
+#: to every answer that found none.
+_LEARNING_WRITER_REMEDY = (
+    "'trellis worker curate' and 'trellis analyze learning-candidates' write "
+    f"{LEARNING_CANDIDATES_FILENAME} there when run without --output-dir "
+    "against the same data directory; to use another directory, set "
+    f"{LEARNING_ARTIFACTS_DIR_ENV} on the writer and on the API alike."
+)
 
 
 def _audit_identity(ctx: AuthContext) -> dict[str, str | None]:
@@ -726,20 +730,101 @@ def _emit_review_decision(
     )
 
 
-def _resolve_learning_artifacts_dir() -> Path | None:
-    """Return the directory holding learning-candidate artifacts, or ``None``.
+class _LearningCandidatesUnavailableError(Exception):
+    """No learning-candidate artifact the learning routes can serve.
 
-    Honours ``TRELLIS_LEARNING_ARTIFACTS_DIR`` first, then falls back to
-    ``<data_dir>/learning`` derived from the registry's ``stores_dir``.
+    ``code`` is the machine-readable reason, ``path`` the directory or file
+    at fault (``None`` when no directory could be resolved), and
+    ``artifacts_dir`` the directory the routes looked in. Both routes catch
+    it: the ``GET`` answers 200 with ``status="error"``, the ``POST`` 409.
     """
-    override = os.environ.get(LEARNING_ARTIFACTS_DIR_ENV)
-    if override and override.strip():
-        return Path(override.strip())
-    stores_dir = get_registry().stores_dir
-    if stores_dir is None:
-        return None
-    # stores_dir is ``<data_dir>/stores``; artifacts live beside it.
-    return stores_dir.parent / "learning"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        path: Path | None,
+        artifacts_dir: Path | None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.path = path
+        self.artifacts_dir = artifacts_dir
+
+
+def _load_learning_candidates() -> tuple[Path, dict[str, Any]]:
+    """Return the learning-artifacts directory and its parsed candidates file.
+
+    The directory comes from :func:`resolve_learning_artifacts_dir`, the
+    resolver the writers default ``--output-dir`` from. Raises
+    :class:`_LearningCandidatesUnavailableError` naming what is missing
+    rather than letting a missing directory read as "no candidates".
+    """
+    artifacts_dir = resolve_learning_artifacts_dir(get_registry().stores_dir)
+    if artifacts_dir is None:
+        msg = (
+            "No learning-candidate directory: the deployment has no stores_dir "
+            f"and {LEARNING_ARTIFACTS_DIR_ENV} is unset. Set "
+            f"{LEARNING_ARTIFACTS_DIR_ENV} on the writer and on the API alike."
+        )
+        raise _LearningCandidatesUnavailableError(
+            msg, code="stores_dir_unconfigured", path=None, artifacts_dir=None
+        )
+    # ``path_is_present``: a directory that cannot be stat'ed for any reason
+    # but absence falls through to the read below, which names the error.
+    if not path_is_present(artifacts_dir):
+        msg = (
+            f"No learning candidates have been written for review: {artifacts_dir} "
+            f"does not exist. {_LEARNING_WRITER_REMEDY}"
+        )
+        raise _LearningCandidatesUnavailableError(
+            msg,
+            code="learning_artifacts_dir_missing",
+            path=artifacts_dir,
+            artifacts_dir=artifacts_dir,
+        )
+    candidates_path = artifacts_dir / LEARNING_CANDIDATES_FILENAME
+    if not path_is_present(candidates_path):
+        msg = (
+            f"No learning candidates have been written for review: "
+            f"{candidates_path} does not exist. {_LEARNING_WRITER_REMEDY}"
+        )
+        raise _LearningCandidatesUnavailableError(
+            msg,
+            code="learning_candidates_missing",
+            path=candidates_path,
+            artifacts_dir=artifacts_dir,
+        )
+    try:
+        payload = json.loads(candidates_path.read_text(encoding="utf-8"))
+    # ValueError covers JSONDecodeError and UnicodeDecodeError.
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "learning_candidates_read_failed", path=str(candidates_path), error=str(exc)
+        )
+        msg = f"Could not read learning candidates from {candidates_path}: {exc}"
+        raise _LearningCandidatesUnavailableError(
+            msg,
+            code="learning_candidates_unreadable",
+            path=candidates_path,
+            artifacts_dir=artifacts_dir,
+        ) from exc
+    if not isinstance(payload, dict) or not isinstance(
+        payload.get("candidates", []), list
+    ):
+        msg = (
+            f"Could not read learning candidates from {candidates_path}: it is "
+            "not a JSON object with a 'candidates' list."
+        )
+        raise _LearningCandidatesUnavailableError(
+            msg,
+            code="learning_candidates_unreadable",
+            path=candidates_path,
+            artifacts_dir=artifacts_dir,
+        )
+    return artifacts_dir, payload
 
 
 # -- Section 1: Tuner proposals --------------------------------------------
@@ -903,47 +988,49 @@ def reject_proposal_route(
 def list_learning_candidates() -> LearningCandidateListResponse:
     """Serve the most-recent ``intent_learning_candidates.json`` artifact.
 
-    The CLI writes this file via ``trellis analyze learning-candidates
-    --output-dir <dir>``. We resolve ``<dir>`` from
-    ``TRELLIS_LEARNING_ARTIFACTS_DIR`` (or ``<data_dir>/learning``). When
-    no artifact is found we return an empty list plus a ``hint`` telling
-    the operator how to generate one — never a 5xx.
+    ``trellis worker curate`` and ``trellis analyze learning-candidates``
+    write it, by default to ``TRELLIS_LEARNING_ARTIFACTS_DIR`` when set and
+    otherwise to ``<data_dir>/learning``, the directory this route reads;
+    ``artifacts_dir`` names it. When there is nothing to serve (the
+    directory or the file is missing, the file is unreadable, or no
+    directory can be resolved), the answer is still 200 but carries
+    ``status="error"``, a ``code`` saying which, and a ``hint`` naming the
+    path, so an unwritten artifact never reads as an empty review queue.
     """
-    artifacts_dir = _resolve_learning_artifacts_dir()
-    hint = (
-        "Run 'trellis analyze learning-candidates --output-dir "
-        f"{artifacts_dir or '<dir>'}' to generate candidates, or set "
-        f"{LEARNING_ARTIFACTS_DIR_ENV} to point at an existing artifacts "
-        "directory."
-    )
-    if artifacts_dir is None:
-        return LearningCandidateListResponse(hint=hint)
-
-    candidates_path = artifacts_dir / _LEARNING_CANDIDATES_FILENAME
-    if not candidates_path.is_file():
-        return LearningCandidateListResponse(hint=hint)
-
     try:
-        payload = json.loads(candidates_path.read_text(encoding="utf-8"))
-    # GRACEFUL-DEGRADATION: a malformed artifact must not 500 the inbox;
-    # surface it as an empty list with the file path in the hint.
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("learning_candidates_read_failed", error=str(exc))
+        artifacts_dir, payload = _load_learning_candidates()
+    except _LearningCandidatesUnavailableError as exc:
         return LearningCandidateListResponse(
-            hint=f"Could not read {candidates_path}: {exc}"
+            status="error",
+            code=exc.code,
+            artifacts_dir=None if exc.artifacts_dir is None else str(exc.artifacts_dir),
+            hint=exc.message,
         )
-
     candidates = payload.get("candidates", [])
-    if not isinstance(candidates, list):
-        candidates = []
     return LearningCandidateListResponse(
+        artifacts_dir=str(artifacts_dir),
         generated_at_utc=payload.get("generated_at_utc"),
         candidate_count=len(candidates),
         candidates=candidates,
     )
 
 
-@router.post("/learning/promotions", response_model=LearningPromotionResponse)
+@router.post(
+    "/learning/promotions",
+    response_model=LearningPromotionResponse,
+    responses={
+        409: {
+            "description": (
+                "Nothing was promoted: there is no learning-candidate artifact "
+                "to join the decisions against. `detail.code` says why "
+                "(`learning_artifacts_dir_missing`, `learning_candidates_missing`, "
+                "`learning_candidates_unreadable` or `stores_dir_unconfigured`), "
+                "`detail.path` names the directory or file at fault and "
+                "`detail.message` how to produce it."
+            )
+        }
+    },
+)
 def promote_learning_candidates(
     req: LearningPromotionRequest,
     ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
@@ -951,29 +1038,25 @@ def promote_learning_candidates(
     """Promote approved learning candidates through the governed pipeline.
 
     Builds the decisions payload from the request body, joins it against
-    the most-recent candidate artifact via
+    the most-recent candidate artifact (read from the directory
+    ``GET /learning/candidates`` serves) via
     :func:`trellis.learning.prepare_learning_promotions`, then submits
     each approved promotion as ``ENTITY_CREATE`` + per-target
     ``LINK_CREATE`` commands through :class:`MutationExecutor` — exactly
     the path ``trellis curate promote-learning`` uses. A
     ``REVIEW_DECISION_RECORDED`` event records the reviewer identity.
     """
-    artifacts_dir = _resolve_learning_artifacts_dir()
-    candidates_path = (
-        (artifacts_dir / _LEARNING_CANDIDATES_FILENAME)
-        if artifacts_dir is not None
-        else None
-    )
-    if candidates_path is None or not candidates_path.is_file():
+    try:
+        _, candidates_payload = _load_learning_candidates()
+    except _LearningCandidatesUnavailableError as exc:
         raise HTTPException(
             status_code=409,
-            detail=(
-                "No learning-candidate artifact found. Run 'trellis analyze "
-                "learning-candidates' first, or set "
-                f"{LEARNING_ARTIFACTS_DIR_ENV}."
-            ),
-        )
-    candidates_payload = json.loads(candidates_path.read_text(encoding="utf-8"))
+            detail={
+                "code": exc.code,
+                "message": exc.message,
+                "path": None if exc.path is None else str(exc.path),
+            },
+        ) from exc
 
     decisions_payload = {
         "decisions": [d.model_dump() for d in req.decisions],

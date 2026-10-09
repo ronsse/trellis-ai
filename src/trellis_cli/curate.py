@@ -37,7 +37,7 @@ def _print_warnings(warnings: list[str]) -> None:
     lives in this one place.
     """
     for warning in warnings:
-        console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}")
+        console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}", soft_wrap=True)
 
 
 def _execute_command(cmd: Command, output_format: str) -> None:
@@ -76,10 +76,16 @@ def _execute_command(cmd: Command, output_format: str) -> None:
             console.print(f"[green]\u2713 Command executed[/green]: {result.operation}")
         else:
             console.print(
-                f"[red]\u2717 Command {result.status}[/red]: {result.operation}"
+                f"[red]\u2717 Command {result.status}[/red]: {result.operation}",
+                soft_wrap=True,
             )
         console.print(f"  ID: {escape(result.command_id)}")
-        console.print(f"  Message: {result.message}", markup=False, highlight=False)
+        console.print(
+            f"  Message: {result.message}",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
         _print_warnings(result.warnings)
 
     # Below the format branch, so both formats exit alike
@@ -144,7 +150,7 @@ def link(
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
             _print_warnings(result.warnings)
         raise typer.Exit(code=refusal_exit_code(result))
 
@@ -263,7 +269,7 @@ def prune(
         if output_format == "json":
             emit_json({"status": "error", "message": message})
         else:
-            console.print(f"[red]{message}[/red]")
+            console.print(f"[red]{message}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_VALIDATION)
 
     cmd = Command(
@@ -285,7 +291,7 @@ def prune(
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
             _print_warnings(result.warnings)
         raise typer.Exit(code=refusal_exit_code(result))
 
@@ -345,7 +351,7 @@ def restore(
             if output_format == "json":
                 emit_json({"status": "error", "message": unreadable})
             else:
-                console.print(f"[red]{escape(unreadable)}[/red]")
+                console.print(f"[red]{escape(unreadable)}[/red]", soft_wrap=True)
             raise typer.Exit(code=EXIT_VALIDATION) from exc
         ids.extend(line.strip() for line in text.splitlines() if line.strip())
     if not ids:
@@ -353,7 +359,7 @@ def restore(
         if output_format == "json":
             emit_json({"status": "error", "message": message})
         else:
-            console.print(f"[red]{message}[/red]")
+            console.print(f"[red]{message}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_VALIDATION)
 
     cmd = Command(
@@ -375,7 +381,7 @@ def restore(
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
             _print_warnings(result.warnings)
         raise typer.Exit(code=refusal_exit_code(result))
 
@@ -439,10 +445,10 @@ def redact(
         # Destructive command: error states must exit non-zero so shell
         # pipelines fail loud, and the code follows the exit_codes map —
         # a policy refusal is EXIT_POLICY, any other REJECTED (a blank
-        # reason) EXIT_VALIDATION, and FAILED on this path is a store
-        # outcome such as target-not-found (EXIT_STORE). ``command_id``
-        # rides the JSON so a failed attempt still joins to its
-        # MUTATION_REJECTED audit event.
+        # reason, or a target id that names no node) EXIT_VALIDATION, and
+        # FAILED on this path is a store outcome such as a concurrent purge
+        # or a backend error (EXIT_STORE). ``command_id`` rides the JSON so
+        # a failed attempt still joins to its MUTATION_REJECTED audit event.
         if output_format == "json":
             emit_json(
                 {
@@ -453,7 +459,7 @@ def redact(
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
             _print_warnings(result.warnings)
         raise typer.Exit(code=refusal_exit_code(result))
 
@@ -501,7 +507,8 @@ def entity(
                 )
             else:
                 console.print(
-                    f"[red]Invalid JSON for --properties[/red]: {escape(str(exc))}"
+                    f"[red]Invalid JSON for --properties[/red]: {escape(str(exc))}",
+                    soft_wrap=True,
                 )
             raise typer.Exit(code=EXIT_VALIDATION) from exc
 
@@ -528,7 +535,7 @@ def entity(
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
             _print_warnings(result.warnings)
         raise typer.Exit(code=refusal_exit_code(result))
 
@@ -577,7 +584,18 @@ def feedback(
     only; the per-item ``helpful_item_ids`` / ``unhelpful_item_ids``
     attribution the promote half of the loop consumes is carried by the
     MCP ``record_feedback`` tool and ``POST /packs/{pack_id}/feedback``.
+
+    ``rating`` is held to the MCP tool's inclusive range. Typer parses
+    ``nan`` and ``inf`` as floats, and NaN fails every comparison, so the
+    check is written as "inside the range" rather than "outside it".
     """
+    if not 0.0 <= rating <= 1.0:
+        message = f"rating must be between 0.0 and 1.0, got {rating}"
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{message}[/red]", soft_wrap=True)
+        raise typer.Exit(code=EXIT_VALIDATION)
     args: dict[str, object] = {"target_id": target_id, "rating": rating}
     if comment:
         args["comment"] = comment

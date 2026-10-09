@@ -8,7 +8,10 @@ import structlog
 from fastapi import APIRouter, HTTPException
 
 from trellis.core.ids import generate_ulid
-from trellis.extract.trace_ingest_hook import run_trace_extraction
+from trellis.extract.trace_ingest_hook import (
+    run_trace_extraction,
+    trace_already_ingested,
+)
 from trellis.mutate import build_curate_executor, build_evidence_ingest_command
 from trellis.mutate.commands import (
     BatchStrategy,
@@ -45,6 +48,9 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
 
     registry = get_registry()
     executor = build_curate_executor(registry)
+    # Read before the write: the handler answers a stored trace_id as a
+    # success that stores nothing, and only its message says which.
+    already_ingested = trace_already_ingested(registry, trace.trace_id)
     result = executor.execute(
         Command(
             operation=Operation.TRACE_INGEST,
@@ -54,17 +60,27 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
             requested_by="api:ingest-trace",
         )
     )
+    if result.status == CommandStatus.REJECTED:
+        # A refusal stored nothing, so it is neither extracted nor
+        # answered "ok". 400, as on /evidence and the curate routes.
+        raise HTTPException(status_code=400, detail=result.message)
     if result.status == CommandStatus.FAILED:
-        # TraceStore.append raises StoreError on duplicate trace_id; the
-        # handler propagates that as a FAILED status. 409 is the closest fit.
+        # The handler raised, e.g. StoreError from append. A duplicate
+        # trace_id never lands here: the handler answers it as success.
         raise HTTPException(status_code=409, detail=result.message)
 
     # Feature-flagged post-ingest trace->graph extraction
     # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs after the trace is durably
-    # stored; fail-soft inside the hook so it never fails the request.
-    run_trace_extraction(registry, trace, requested_by="api:ingest-trace")
+    # stored, and not when the read above found the trace_id stored: a
+    # duplicate's agent and artifacts would land on the stored trace's node.
+    # Fail-soft inside the hook so it never fails the request.
+    if not already_ingested:
+        run_trace_extraction(registry, trace, requested_by="api:ingest-trace")
 
-    return IngestResponse(trace_id=result.created_id or trace.trace_id)
+    return IngestResponse(
+        trace_id=result.created_id or trace.trace_id,
+        already_ingested=already_ingested,
+    )
 
 
 @router.post("/evidence", response_model=IngestResponse)

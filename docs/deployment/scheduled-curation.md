@@ -13,11 +13,13 @@ For *what* each command does, its autonomy tier, and where the human-in-the-loop
 | Command | Cadence | Why | LLM? | Autonomy |
 |---|---|---|---|---|
 | `trellis admin reconcile-feedback --log-dir DIR` | Before every curate run (or use `worker curate --reconcile-first`) | Backfills file-only `pack_feedback.jsonl` rows into the EventLog so the curate cycle sees every signal. | no | — |
-| `trellis worker curate --output-dir DIR` | Daily | Demote (noise-tag) + advisory upkeep run unattended; learning candidates are written for human review. | no | Tier 0 + Tier 2 |
+| `trellis worker curate` | Daily | Demote (noise-tag) + advisory upkeep run unattended; learning candidates are written for human review, to the directory the API's Review queue reads (see below). | no | Tier 0 + Tier 2 |
 | `trellis worker tune` | Daily, **only where `auto_promote.enabled`** | Re-monitors recent auto-promotions and rolls back any that degraded; promotes newly-qualifying proposals. With auto-promote off it promotes nothing and only queues `pending` proposals for manual review, as `trellis metrics tune` does — schedule it only once you've opted a scope in. | no | Tier 1 |
 | `trellis worker enrich` | Daily, off-peak | LLM tagging of under-tagged documents — costs money/time, so run when the warehouse and API are quiet. | **yes** | — |
 | `trellis worker mine-precedents` | Weekly | Failure-trace mining is comparatively expensive and the candidates need human review anyway; weekly keeps the review queue manageable. | **yes** | — |
 | `trellis analyze schema-evolution` | Weekly | Surfaces open-string types eligible for canonical promotion. Surface-only — a human authors the ADR amendment. | no | Tier 3 (surface) |
+
+**Where the learning candidates land:** with no `--output-dir`, `worker curate` writes `intent_learning_candidates.json` to `$TRELLIS_LEARNING_ARTIFACTS_DIR` when set, else `<data_dir>/learning` — the directory `GET /api/v1/learning/candidates` reads. Schedule it against the API's data directory (or set the variable on both) and each night's candidates reach the Review queue; pass `--output-dir` only to write somewhere the API does not look. The recipes below rely on that default.
 
 **Ordering within a run:** reconcile → curate → (tune). Reconcile must precede curate so the cycle reads a complete EventLog. `worker curate --reconcile-first` folds the reconcile into the curate invocation if you'd rather not schedule it separately.
 
@@ -43,7 +45,7 @@ TRELLIS_DATA_DIR=/var/lib/trellis/data
 PATH=/usr/local/bin:/usr/bin:/bin
 
 # Daily 02:30 — reconcile-first curate (demote + advisory upkeep + learning artifacts)
-30 2 * * *  trellis-user  trellis worker curate --output-dir /var/lib/trellis/review --reconcile-first --days 30 --format json >> /var/log/trellis/curate.log 2>&1
+30 2 * * *  trellis-user  trellis worker curate --reconcile-first --days 30 --format json >> /var/log/trellis/curate.log 2>&1
 
 # Daily 02:45 — tuner pass (only meaningful with learning.auto_promote.enabled: true)
 45 2 * * *  trellis-user  trellis worker tune --format json >> /var/log/trellis/tune.log 2>&1
@@ -82,7 +84,7 @@ Environment=TRELLIS_DATA_DIR=/var/lib/trellis/data
 # Secrets via EnvironmentFile (keep out of the unit; e.g. rendered by op run):
 # EnvironmentFile=/etc/trellis/secrets.env
 ExecStart=/usr/local/bin/trellis worker curate \
-  --output-dir /var/lib/trellis/review --reconcile-first --days 30 --format json
+  --reconcile-first --days 30 --format json
 ```
 
 `/etc/systemd/system/trellis-curate.timer`:
@@ -153,7 +155,7 @@ spec:
                 - -c
                 - >
                   trellis admin reconcile-feedback --log-dir /data --format json &&
-                  trellis worker curate --output-dir /data/review --days 30 --format json
+                  trellis worker curate --days 30 --format json
               env:
                 - name: TRELLIS_CONFIG_DIR
                   value: /config

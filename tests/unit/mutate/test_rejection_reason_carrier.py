@@ -2,10 +2,11 @@
 
 The CLI picks an exit code from the ``CommandResult`` alone: ``3`` for a
 policy refusal and ``2`` for any other (``docs/design/adr-cli-exit-codes.md``
-§3). ``MutationExecutor`` refuses at four sites, and each copies the
+§3). ``MutationExecutor`` refuses at five sites, and each copies the
 ``reason`` its audit event carries into ``metadata["rejection_reason"]``:
 
 * unattended-writer roster -- ``immutable_core``
+* operation registry, a missing required arg -- ``validate``
 * policy gate, deny and require_approval -- ``policy_violation``
 * handler raises ``ValidationError`` -- its ``code``, or ``handler_validate``
   when it set none
@@ -132,6 +133,34 @@ def test_immutable_core_refusal(event_log: SQLiteEventLog) -> None:
     ]
     results = _run(event_log, _Succeeds(), commands)
     _assert_reasons(event_log, commands, results, ["immutable_core"] * 2)
+
+
+def test_registry_validation_refusal(event_log: SQLiteEventLog) -> None:
+    """A missing required arg is the caller's error: refused, not failed."""
+    commands = [
+        Command(
+            command_id="cid-validate-a",
+            operation=Operation.LINK_CREATE,
+            args={"source_id": "syn-node-a"},
+        ),
+        Command(
+            command_id="cid-validate-b",
+            operation=Operation.ENTITY_CREATE,
+            args={"name": "b"},
+        ),
+    ]
+    results = _run(event_log, _Succeeds(), commands)
+    _assert_reasons(event_log, commands, results, ["validate"] * 2)
+    assert [r.message for r in results] == [
+        "Validation failed: Missing required args: edge_kind, target_id",
+        "Validation failed: Missing required args: entity_type",
+    ]
+    rejected = event_log.get_events(event_type=EventType.MUTATION_REJECTED)
+    assert sorted(e.payload["command_id"] for e in rejected) == [
+        "cid-validate-a",
+        "cid-validate-b",
+    ]
+    assert event_log.get_events(event_type=EventType.MUTATION_EXECUTED) == []
 
 
 def test_policy_gate_refusal(event_log: SQLiteEventLog) -> None:

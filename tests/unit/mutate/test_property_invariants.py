@@ -53,7 +53,9 @@ _OPS_WITH_SIMPLE_ARGS: list[tuple[Operation, dict[str, Any]]] = [
     (Operation.LINK_REMOVE, {"edge_id": "edge_1"}),
     (Operation.LABEL_ADD, {"target_id": "n1", "label": "v1"}),
     (Operation.LABEL_REMOVE, {"target_id": "n1", "label": "v1"}),
-    (Operation.FEEDBACK_RECORD, {"target_id": "p1", "rating": 5}),
+    # "rating" is bound to [0.0, 1.0] at Stage 1 (feedback.record only);
+    # 0.5 keeps this op a member of the valid-commands alphabet.
+    (Operation.FEEDBACK_RECORD, {"target_id": "p1", "rating": 0.5}),
     (Operation.PRECEDENT_PROMOTE, {"trace_id": "t1", "title": "x", "description": "y"}),
     (Operation.PRECEDENT_UPDATE, {"precedent_id": "p1"}),
     (Operation.REDACTION_APPLY, {"target_id": "n1", "reason": "pii"}),
@@ -171,7 +173,8 @@ class TestUniformRejectionEvents:
             handlers=_all_op_handlers(),
         )
         result = executor.execute(cmd)
-        assert result.status == CommandStatus.FAILED
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "validate"
         assert _emitted_event_types(event_log) == ["mutation.rejected"]
         payload = _emitted_payloads(event_log)[0]
         assert payload["reason"] == "validate"
@@ -293,7 +296,7 @@ class TestBatchStopOnError:
         assert len(results) == good_before + 1
         for r in results[:good_before]:
             assert r.status == CommandStatus.SUCCESS
-        assert results[-1].status == CommandStatus.FAILED
+        assert results[-1].status == CommandStatus.REJECTED
 
         # Each SUCCESS before the failure emits one MUTATION_EXECUTED, the
         # validate-stage rejection emits one MUTATION_REJECTED, then nothing

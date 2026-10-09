@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from trellis.learning.artifacts import LEARNING_CANDIDATES_FILENAME
 from trellis.learning.evidence_gate import (
     NOT_SCREENED,
     CitationEvidence,
@@ -400,7 +401,7 @@ def write_learning_review_artifacts(
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    candidates_path = target_dir / "intent_learning_candidates.json"
+    candidates_path = target_dir / LEARNING_CANDIDATES_FILENAME
     candidates_path.write_text(
         json.dumps(dict(report), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

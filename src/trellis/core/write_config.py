@@ -156,6 +156,21 @@ REQUIRE_BODIED_ATTRIBUTION_FLAG = "TRELLIS_REQUIRE_BODIED_ATTRIBUTION"
 #: pairs in it.  See #402.
 MINHASH_SEED_MAX_DOCS_ENV = "TRELLIS_MINHASH_SEED_MAX_DOCS"
 
+#: Share of assembled packs withheld from the caller, in ``[0, 1]``
+#: (``trellis.retrieve.pack_builder.PackBuilder``).  **Default 0, which
+#: withholds nothing.**  A withheld pack reaches the agent as an ordinary
+#: empty pack and its ``PACK_ASSEMBLED`` row keeps the would-be items
+#: apart, so pack effect can be measured against a randomised arm; the
+#: assignment is a hash of the pack id (:mod:`trellis.core.pack_holdout`).
+#:
+#: The one read-path knob in this module, and here on purpose: the
+#: measurement needs the rate in force on every ``PACK_ASSEMBLED`` row's
+#: ``write_provenance.env_flags``, in ``trellis admin write-config`` and
+#: in ``GET /api/version``, which is what this module feeds.  Unparseable
+#: and out-of-range values degrade to ``0`` with a warning, so a typo can
+#: never start withholding packs.
+PACK_HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
+
 # ---------------------------------------------------------------------------
 # Defaults.  Unchanged from the per-module values they were lifted from.
 # ---------------------------------------------------------------------------
@@ -256,6 +271,43 @@ def _seed_max_docs(env: Mapping[str, str]) -> int:
     return _parse_seed_max_docs(raw) if raw else 0
 
 
+@functools.lru_cache(maxsize=8)
+def _parse_pack_holdout_rate(raw: str) -> float:
+    """Parse one holdout-rate spelling, warning at most once for it.
+
+    Cached on the raw string for the same reason
+    :func:`_parse_min_confidence` is.  Unparseable and out-of-range values
+    (NaN and the infinities included) degrade to ``0.0`` — *withhold
+    nothing*, the shipped behaviour — because a typo must never start
+    withholding packs from agents.
+    """
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "pack_holdout_rate_unparseable",
+            flag=PACK_HOLDOUT_RATE_ENV,
+            value=raw,
+        )
+        return 0.0
+    if not 0.0 <= value <= 1.0:
+        logger.warning(
+            "pack_holdout_rate_out_of_range",
+            flag=PACK_HOLDOUT_RATE_ENV,
+            value=value,
+        )
+        return 0.0
+    # ``-0`` passes the range check as ``-0.0``: equal to ``0.0``, but
+    # recorded with its sign in ``env_flags`` and on every row.
+    return 0.0 if value == 0.0 else value
+
+
+def _pack_holdout_rate(env: Mapping[str, str]) -> float:
+    """Pack holdout rate from the environment; ``0.0`` withholds nothing."""
+    raw = env.get(PACK_HOLDOUT_RATE_ENV, "").strip()
+    return _parse_pack_holdout_rate(raw) if raw else 0.0
+
+
 def _reconcile_timeout(env: Mapping[str, str]) -> float:
     """Per-verdict timeout, defaulting on absent / invalid / non-positive."""
     raw = env.get(RECONCILE_TIMEOUT_ENV, "").strip()
@@ -286,6 +338,7 @@ class WriteBehaviourConfig:
     require_pack_attribution: bool = False
     require_bodied_attribution: bool = False
     minhash_seed_max_docs: int = 0
+    pack_holdout_rate: float = 0.0
     reconcile_model: str = DEFAULT_RECONCILE_MODEL
     reconcile_timeout_s: float = DEFAULT_RECONCILE_TIMEOUT_S
 
@@ -303,6 +356,7 @@ class WriteBehaviourConfig:
             require_pack_attribution=_truthy(src, REQUIRE_PACK_ATTRIBUTION_FLAG),
             require_bodied_attribution=_truthy(src, REQUIRE_BODIED_ATTRIBUTION_FLAG),
             minhash_seed_max_docs=_seed_max_docs(src),
+            pack_holdout_rate=_pack_holdout_rate(src),
             reconcile_model=src.get(RECONCILE_MODEL_ENV, "").strip()
             or DEFAULT_RECONCILE_MODEL,
             reconcile_timeout_s=_reconcile_timeout(src),
@@ -349,6 +403,7 @@ ENV_VAR_BY_FIELD: dict[str, str] = {
     "require_pack_attribution": REQUIRE_PACK_ATTRIBUTION_FLAG,
     "require_bodied_attribution": REQUIRE_BODIED_ATTRIBUTION_FLAG,
     "minhash_seed_max_docs": MINHASH_SEED_MAX_DOCS_ENV,
+    "pack_holdout_rate": PACK_HOLDOUT_RATE_ENV,
     "reconcile_model": RECONCILE_MODEL_ENV,
     "reconcile_timeout_s": RECONCILE_TIMEOUT_ENV,
 }
@@ -362,6 +417,7 @@ __all__ = [
     "ENV_VAR_BY_FIELD",
     "MEMORY_EXTRACTION_FLAG",
     "MINHASH_SEED_MAX_DOCS_ENV",
+    "PACK_HOLDOUT_RATE_ENV",
     "RECONCILE_FLAG_ENV",
     "RECONCILE_MODEL_ENV",
     "RECONCILE_TIMEOUT_ENV",

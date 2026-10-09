@@ -492,6 +492,7 @@ class TestCompactVersions:
             def get_nodes_bulk(self, *a, **k): ...  # type: ignore[override]
             def upsert_alias(self, *a, **k): ...  # type: ignore[override]
             def bind_alias_if_absent(self, *a, **k): ...  # type: ignore[override]
+            def update_node_if_current(self, *a, **k): ...  # type: ignore[override]
             def resolve_alias(self, *a, **k): ...  # type: ignore[override]
             def get_aliases(self, *a, **k): ...  # type: ignore[override]
             def upsert_edge(self, *a, **k): ...  # type: ignore[override]
@@ -503,6 +504,8 @@ class TestCompactVersions:
             def delete_node(self, *a, **k): ...  # type: ignore[override]
             def delete_edge(self, *a, **k): ...  # type: ignore[override]
             def count_nodes(self): ...  # type: ignore[override]
+            def count_nodes_by_type(self, *a, **k): ...  # type: ignore[override]
+            def search_nodes(self, *a, **k): ...  # type: ignore[override]
             def count_edges(self): ...  # type: ignore[override]
             def close(self): ...  # type: ignore[override]
 

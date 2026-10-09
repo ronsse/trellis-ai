@@ -6,7 +6,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from typing import Any
 
@@ -28,16 +28,19 @@ from trellis.stores.base.graph import (
     AliasBindStatus,
     GraphStore,
     check_node_role_immutable,
+    node_search_like_pattern,
     validate_document_ids,
     validate_node_role_args,
+    validate_node_search_args,
     validate_subgraph_depth,
+    validate_version_token,
 )
 from trellis.stores.base.graph_query import (
     DOC_LINK_FIELD,
     RANGE_OP_GLYPH,
     check_doc_link_clause,
 )
-from trellis.stores.sqlite.base import SQLiteStoreBase
+from trellis.stores.sqlite.base import SQLiteStoreBase, json_key_path
 
 logger = structlog.get_logger(__name__)
 
@@ -417,17 +420,109 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         existing = self.get_node(node_id)
         if existing:
             check_node_role_immutable(node_id, existing, node_role)
-            # Close the current version
-            self._conn.execute(
+        conn = self._conn
+        # Commits on success and rolls back on an exception. With commit=False
+        # the caller's transaction() does both, so the write only joins it.
+        with conn if commit else nullcontext():
+            if existing:
+                # Close the current version
+                conn.execute(
+                    """
+                    UPDATE nodes SET valid_to = ?
+                    WHERE node_id = ? AND valid_to IS NULL
+                    """,
+                    (now_iso, node_id),
+                )
+                # Insert new version
+                version_id = generate_ulid()
+                conn.execute(
+                    """
+                    INSERT INTO nodes
+                        (version_id, node_id, node_type, node_role,
+                         generation_spec_json, document_ids_json,
+                         properties_json, created_at, updated_at,
+                         valid_from, valid_to)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        version_id,
+                        node_id,
+                        node_type,
+                        node_role,
+                        generation_spec_json,
+                        document_ids_json,
+                        properties_json,
+                        existing["created_at"],
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+            else:
+                version_id = generate_ulid()
+                conn.execute(
+                    """
+                    INSERT INTO nodes
+                        (version_id, node_id, node_type, node_role,
+                         generation_spec_json, document_ids_json,
+                         properties_json, created_at, updated_at,
+                         valid_from, valid_to)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    (
+                        version_id,
+                        node_id,
+                        node_type,
+                        node_role,
+                        generation_spec_json,
+                        document_ids_json,
+                        properties_json,
+                        now_iso,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+        return node_id
+
+    def update_node_if_current(
+        self,
+        node_id: str,
+        expected_valid_from: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str,
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        validate_version_token(expected_valid_from)
+        validate_node_role_args(node_role, generation_spec)
+        validate_document_ids(document_ids)
+        now_iso = utc_now().isoformat()
+        conn = self._conn
+        with conn:
+            # The UPDATE opens the transaction, so it takes the write lock
+            # on a fresh snapshot: the token is checked and the version
+            # closed under one lock, which a concurrent writer or a
+            # committed delete_node cannot slip between.
+            cursor = conn.execute(
                 """
                 UPDATE nodes SET valid_to = ?
-                WHERE node_id = ? AND valid_to IS NULL
+                WHERE node_id = ? AND valid_to IS NULL AND valid_from = ?
                 """,
-                (now_iso, node_id),
+                (now_iso, node_id, expected_valid_from),
             )
-            # Insert new version
-            version_id = generate_ulid()
-            self._conn.execute(
+            if cursor.rowcount == 0:
+                return False
+            closed = conn.execute(
+                """
+                SELECT node_role, created_at FROM nodes
+                WHERE node_id = ? AND valid_from = ? AND valid_to = ?
+                """,
+                (node_id, expected_valid_from, now_iso),
+            ).fetchone()
+            # Raising inside ``with conn`` rolls the close back.
+            check_node_role_immutable(node_id, dict(closed), node_role)
+            conn.execute(
                 """
                 INSERT INTO nodes
                     (version_id, node_id, node_type, node_role,
@@ -437,46 +532,21 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
-                    version_id,
+                    generate_ulid(),
                     node_id,
                     node_type,
                     node_role,
-                    generation_spec_json,
-                    document_ids_json,
-                    properties_json,
-                    existing["created_at"],
+                    json.dumps(generation_spec)
+                    if generation_spec is not None
+                    else None,
+                    json.dumps(document_ids) if document_ids is not None else None,
+                    json.dumps(properties),
+                    closed["created_at"],
                     now_iso,
                     now_iso,
                 ),
             )
-        else:
-            version_id = generate_ulid()
-            self._conn.execute(
-                """
-                INSERT INTO nodes
-                    (version_id, node_id, node_type, node_role,
-                     generation_spec_json, document_ids_json,
-                     properties_json, created_at, updated_at,
-                     valid_from, valid_to)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-                """,
-                (
-                    version_id,
-                    node_id,
-                    node_type,
-                    node_role,
-                    generation_spec_json,
-                    document_ids_json,
-                    properties_json,
-                    now_iso,
-                    now_iso,
-                    now_iso,
-                ),
-            )
-
-        if commit:
-            self._conn.commit()
-        return node_id
+        return True
 
     def upsert_nodes_bulk(self, nodes: list[dict[str, Any]]) -> list[str]:
         # ``executemany`` + a single commit, branched on whether any row
@@ -535,29 +605,30 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 )
             )
 
-        # Close any prior current versions in one shot. ``IN`` against
-        # the (indexed) ``node_id`` column is a single statement; the
-        # subset of nodes without prior versions is a no-op.
-        if existing:
-            placeholders = ",".join("?" for _ in existing)
-            self._conn.execute(
-                f"UPDATE nodes SET valid_to = ? "
-                f"WHERE node_id IN ({placeholders}) AND valid_to IS NULL",
-                (now_iso, *existing.keys()),
-            )
+        conn = self._conn
+        with conn:  # one transaction: a failed row rolls back the whole batch
+            # Close any prior current versions in one shot. ``IN`` against
+            # the (indexed) ``node_id`` column is a single statement; the
+            # subset of nodes without prior versions is a no-op.
+            if existing:
+                placeholders = ",".join("?" for _ in existing)
+                conn.execute(
+                    f"UPDATE nodes SET valid_to = ? "
+                    f"WHERE node_id IN ({placeholders}) AND valid_to IS NULL",
+                    (now_iso, *existing.keys()),
+                )
 
-        self._conn.executemany(
-            """
-            INSERT INTO nodes
-                (version_id, node_id, node_type, node_role,
-                 generation_spec_json, document_ids_json,
-                 properties_json, created_at, updated_at,
-                 valid_from, valid_to)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-            """,
-            insert_rows,
-        )
-        self._conn.commit()
+            conn.executemany(
+                """
+                INSERT INTO nodes
+                    (version_id, node_id, node_type, node_role,
+                     generation_spec_json, document_ids_json,
+                     properties_json, created_at, updated_at,
+                     valid_from, valid_to)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                insert_rows,
+            )
         return node_ids
 
     def get_node(
@@ -618,44 +689,45 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         now_iso = now.isoformat()
 
         existing = self.resolve_alias(source_system, raw_id)
-        if existing:
-            self._conn.execute(
-                """
-                UPDATE entity_aliases SET valid_to = ?
-                WHERE alias_id = ? AND valid_to IS NULL
-                """,
-                (now_iso, existing["alias_id"]),
-            )
-            alias_id = existing["alias_id"]
-            created_at = existing["created_at"]
-        else:
-            alias_id = generate_ulid()
-            created_at = now_iso
+        conn = self._conn
+        with conn:  # one transaction: a failed insert rolls back the close
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE entity_aliases SET valid_to = ?
+                    WHERE alias_id = ? AND valid_to IS NULL
+                    """,
+                    (now_iso, existing["alias_id"]),
+                )
+                alias_id = existing["alias_id"]
+                created_at = existing["created_at"]
+            else:
+                alias_id = generate_ulid()
+                created_at = now_iso
 
-        version_id = generate_ulid()
-        self._conn.execute(
-            """
-            INSERT INTO entity_aliases
-                (version_id, alias_id, entity_id, source_system,
-                 raw_id, raw_name, match_confidence, is_primary,
-                 created_at, updated_at, valid_from, valid_to)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-            """,
-            (
-                version_id,
-                alias_id,
-                entity_id,
-                source_system,
-                raw_id,
-                raw_name,
-                match_confidence,
-                1 if is_primary else 0,
-                created_at,
-                now_iso,
-                now_iso,
-            ),
-        )
-        self._conn.commit()
+            version_id = generate_ulid()
+            conn.execute(
+                """
+                INSERT INTO entity_aliases
+                    (version_id, alias_id, entity_id, source_system,
+                     raw_id, raw_name, match_confidence, is_primary,
+                     created_at, updated_at, valid_from, valid_to)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    version_id,
+                    alias_id,
+                    entity_id,
+                    source_system,
+                    raw_id,
+                    raw_name,
+                    match_confidence,
+                    1 if is_primary else 0,
+                    created_at,
+                    now_iso,
+                    now_iso,
+                ),
+            )
         return str(alias_id)
 
     def bind_alias_if_absent(
@@ -852,89 +924,96 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             extractor_tier=extractor_tier,
         )
 
-        # Check if a current edge already exists by (source, target, type)
-        cursor = self._conn.execute(
-            """
-            SELECT edge_id FROM edges
-            WHERE source_id = ? AND target_id = ? AND edge_type = ?
-              AND valid_to IS NULL
-            """,
-            (source_id, target_id, edge_type),
-        )
-        row = cursor.fetchone()
-
         now = utc_now()
         now_iso = now.isoformat()
         properties_json = json.dumps(properties or {})
 
-        if row:
-            edge_id: str = row["edge_id"]
-            # Close current version
-            self._conn.execute(
+        conn = self._conn
+        # Take the write lock before reading the current row, so a second
+        # writer of the same edge waits for this one's commit and then reads
+        # its row (idx_edges_upsert is not unique). A transaction already open
+        # on this connection is joined, not nested. Commits on success and
+        # rolls back on an exception; with commit=False the caller's
+        # transaction() does both.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        with conn if commit else nullcontext():
+            # Check if a current edge already exists by (source, target, type)
+            cursor = conn.execute(
                 """
-                UPDATE edges SET valid_to = ?
-                WHERE edge_id = ? AND valid_to IS NULL
+                SELECT edge_id FROM edges
+                WHERE source_id = ? AND target_id = ? AND edge_type = ?
+                  AND valid_to IS NULL
                 """,
-                (now_iso, edge_id),
+                (source_id, target_id, edge_type),
             )
-            # Insert new version
-            version_id = generate_ulid()
-            self._conn.execute(
-                """
-                INSERT INTO edges
-                    (version_id, edge_id, source_id, target_id, edge_type,
-                     properties_json, created_at, valid_from, valid_to,
-                     source_trace_id, agent_id, confidence,
-                     evidence_ref, extractor_tier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
-                """,
-                (
-                    version_id,
-                    edge_id,
-                    source_id,
-                    target_id,
-                    edge_type,
-                    properties_json,
-                    now_iso,
-                    now_iso,
-                    source_trace_id,
-                    agent_id,
-                    confidence,
-                    evidence_ref,
-                    extractor_tier,
-                ),
-            )
-        else:
-            edge_id = generate_ulid()
-            version_id = generate_ulid()
-            self._conn.execute(
-                """
-                INSERT INTO edges
-                    (version_id, edge_id, source_id, target_id, edge_type,
-                     properties_json, created_at, valid_from, valid_to,
-                     source_trace_id, agent_id, confidence,
-                     evidence_ref, extractor_tier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
-                """,
-                (
-                    version_id,
-                    edge_id,
-                    source_id,
-                    target_id,
-                    edge_type,
-                    properties_json,
-                    now_iso,
-                    now_iso,
-                    source_trace_id,
-                    agent_id,
-                    confidence,
-                    evidence_ref,
-                    extractor_tier,
-                ),
-            )
+            row = cursor.fetchone()
 
-        if commit:
-            self._conn.commit()
+            if row:
+                edge_id: str = row["edge_id"]
+                # Close current version
+                conn.execute(
+                    """
+                    UPDATE edges SET valid_to = ?
+                    WHERE edge_id = ? AND valid_to IS NULL
+                    """,
+                    (now_iso, edge_id),
+                )
+                # Insert new version
+                version_id = generate_ulid()
+                conn.execute(
+                    """
+                    INSERT INTO edges
+                        (version_id, edge_id, source_id, target_id, edge_type,
+                         properties_json, created_at, valid_from, valid_to,
+                         source_trace_id, agent_id, confidence,
+                         evidence_ref, extractor_tier)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        version_id,
+                        edge_id,
+                        source_id,
+                        target_id,
+                        edge_type,
+                        properties_json,
+                        now_iso,
+                        now_iso,
+                        source_trace_id,
+                        agent_id,
+                        confidence,
+                        evidence_ref,
+                        extractor_tier,
+                    ),
+                )
+            else:
+                edge_id = generate_ulid()
+                version_id = generate_ulid()
+                conn.execute(
+                    """
+                    INSERT INTO edges
+                        (version_id, edge_id, source_id, target_id, edge_type,
+                         properties_json, created_at, valid_from, valid_to,
+                         source_trace_id, agent_id, confidence,
+                         evidence_ref, extractor_tier)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        version_id,
+                        edge_id,
+                        source_id,
+                        target_id,
+                        edge_type,
+                        properties_json,
+                        now_iso,
+                        now_iso,
+                        source_trace_id,
+                        agent_id,
+                        confidence,
+                        evidence_ref,
+                        extractor_tier,
+                    ),
+                )
         return edge_id
 
     def upsert_edges_bulk(self, edges: list[dict[str, Any]]) -> list[str]:
@@ -977,84 +1056,93 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # Pull existing current edges for the (source, target, type)
         # triplets in this batch in one shot. The single-row method
         # uses three-column equality; the bulk path replicates that by
-        # encoding the triplet as a delimited key client-side after
+        # keeping the rows whose triplet the batch names, after
         # one bulk fetch keyed on ``source_id IN (...)``. Choosing
         # source_id over (source, target) for the IN clause keeps the
         # query simple — the indexed ``edges_lookup_idx`` covers it
         # and post-filtering in Python is cheap at this scale.
+        triplets = {
+            (spec["source_id"], spec["target_id"], spec["edge_type"]) for spec in edges
+        }
         sources = {spec["source_id"] for spec in edges}
         placeholders = ",".join("?" for _ in sources)
-        cursor = self._conn.execute(
-            f"""
-            SELECT edge_id, source_id, target_id, edge_type, created_at
-            FROM edges
-            WHERE source_id IN ({placeholders}) AND valid_to IS NULL
-            """,
-            list(sources),
-        )
-        existing_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
-        for row in cursor.fetchall():
-            key = (row["source_id"], row["target_id"], row["edge_type"])
-            existing_edges[key] = dict(row)
-
         now_iso = utc_now().isoformat()
-        edge_ids: list[str] = []
-        insert_rows: list[tuple[Any, ...]] = []
-        for i, spec in enumerate(edges):
-            key = (spec["source_id"], spec["target_id"], spec["edge_type"])
-            prior = existing_edges.get(key)
-            if prior is not None:
-                edge_id = str(prior["edge_id"])
-                created_at = prior["created_at"]
-            else:
-                edge_id = generate_ulid()
-                created_at = now_iso
-            edge_ids.append(edge_id)
-            prov = extract_edge_provenance(spec)
-            try:
-                validate_edge_provenance(**prov)
-            except (ValueError, TypeError) as exc:
-                msg = f"upsert_edges_bulk[{i}]: {exc}"
-                raise type(exc)(msg) from exc
-            insert_rows.append(
-                (
-                    generate_ulid(),
-                    edge_id,
-                    spec["source_id"],
-                    spec["target_id"],
-                    spec["edge_type"],
-                    json.dumps(spec.get("properties") or {}),
-                    created_at,
-                    now_iso,
-                    prov["source_trace_id"],
-                    prov["agent_id"],
-                    prov["confidence"],
-                    prov["evidence_ref"],
-                    prov["extractor_tier"],
-                )
-            )
 
-        # Close any prior current edges in one shot. ``IN`` against
-        # the indexed ``edge_id`` column for the subset we found.
-        if existing_edges:
-            edge_id_placeholders = ",".join("?" for _ in existing_edges)
-            self._conn.execute(
-                f"UPDATE edges SET valid_to = ? "
-                f"WHERE edge_id IN ({edge_id_placeholders}) AND valid_to IS NULL",
-                (now_iso, *(prior["edge_id"] for prior in existing_edges.values())),
+        conn = self._conn
+        # Lock before the read, as upsert_edge does.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        with conn:  # one transaction: a failed row rolls back the whole batch
+            cursor = conn.execute(
+                f"""
+                SELECT edge_id, source_id, target_id, edge_type, created_at
+                FROM edges
+                WHERE source_id IN ({placeholders}) AND valid_to IS NULL
+                """,
+                list(sources),
             )
-        self._conn.executemany(
-            """
-            INSERT INTO edges
-                (version_id, edge_id, source_id, target_id, edge_type,
-                 properties_json, created_at, valid_from, valid_to,
-                 source_trace_id, agent_id, confidence,
-                 evidence_ref, extractor_tier)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
-            """,
-            insert_rows,
-        )
-        self._conn.commit()
+            existing_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
+            for row in cursor.fetchall():
+                key = (row["source_id"], row["target_id"], row["edge_type"])
+                if key in triplets:
+                    existing_edges[key] = dict(row)
+
+            edge_ids: list[str] = []
+            insert_rows: list[tuple[Any, ...]] = []
+            for i, spec in enumerate(edges):
+                key = (spec["source_id"], spec["target_id"], spec["edge_type"])
+                prior = existing_edges.get(key)
+                if prior is not None:
+                    edge_id = str(prior["edge_id"])
+                    created_at = prior["created_at"]
+                else:
+                    edge_id = generate_ulid()
+                    created_at = now_iso
+                edge_ids.append(edge_id)
+                prov = extract_edge_provenance(spec)
+                try:
+                    validate_edge_provenance(**prov)
+                except (ValueError, TypeError) as exc:
+                    msg = f"upsert_edges_bulk[{i}]: {exc}"
+                    raise type(exc)(msg) from exc
+                insert_rows.append(
+                    (
+                        generate_ulid(),
+                        edge_id,
+                        spec["source_id"],
+                        spec["target_id"],
+                        spec["edge_type"],
+                        json.dumps(spec.get("properties") or {}),
+                        created_at,
+                        now_iso,
+                        prov["source_trace_id"],
+                        prov["agent_id"],
+                        prov["confidence"],
+                        prov["evidence_ref"],
+                        prov["extractor_tier"],
+                    )
+                )
+
+            # Close any prior current edges in one shot. ``IN`` against
+            # the indexed ``edge_id`` column for the subset we found.
+            if existing_edges:
+                edge_id_placeholders = ",".join("?" for _ in existing_edges)
+                conn.execute(
+                    f"UPDATE edges SET valid_to = ? "
+                    f"WHERE edge_id IN ({edge_id_placeholders}) AND valid_to IS NULL",
+                    (now_iso, *(prior["edge_id"] for prior in existing_edges.values())),
+                )
+            conn.executemany(
+                """
+                INSERT INTO edges
+                    (version_id, edge_id, source_id, target_id, edge_type,
+                     properties_json, created_at, valid_from, valid_to,
+                     source_trace_id, agent_id, confidence,
+                     evidence_ref, extractor_tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                """,
+                insert_rows,
+            )
         return edge_ids
 
     def get_edges(
@@ -1234,20 +1322,20 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             conditions.append("node_type = ?")
             params.append(node_type)
 
-        # Push simple property filters to SQL via json_extract
+        # Push simple property filters to SQL via json_extract, the key's
+        # path bound like the value
         complex_filters: dict[str, Any] = {}
         if properties:
             for key, value in properties.items():
                 if isinstance(value, bool):
-                    conditions.append(f"json_extract(properties_json, '$.{key}') = ?")
-                    params.append(1 if value else 0)
+                    conditions.append("json_extract(properties_json, ?) = ?")
+                    params.extend([json_key_path(key), 1 if value else 0])
                 elif isinstance(value, str | int | float):
-                    conditions.append(f"json_extract(properties_json, '$.{key}') = ?")
-                    params.append(value)
+                    conditions.append("json_extract(properties_json, ?) = ?")
+                    params.extend([json_key_path(key), value])
                 elif value is None:
-                    conditions.append(
-                        f"json_extract(properties_json, '$.{key}') IS NULL"
-                    )
+                    conditions.append("json_extract(properties_json, ?) IS NULL")
+                    params.append(json_key_path(key))
                 else:
                     complex_filters[key] = value
 
@@ -1280,25 +1368,27 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
     # ------------------------------------------------------------------
 
     def delete_node(self, node_id: str) -> bool:
-        # Cascade: delete all edge versions referencing this node
-        self._conn.execute(
-            "DELETE FROM edges WHERE source_id = ? OR target_id = ?",
-            (node_id, node_id),
-        )
-        self._conn.execute(
-            "DELETE FROM entity_aliases WHERE entity_id = ?",
-            (node_id,),
-        )
-        cursor = self._conn.execute("DELETE FROM nodes WHERE node_id = ?", (node_id,))
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # one transaction: a failed delete rolls back the cascade
+            # Cascade: delete all edge versions referencing this node
+            conn.execute(
+                "DELETE FROM edges WHERE source_id = ? OR target_id = ?",
+                (node_id, node_id),
+            )
+            conn.execute(
+                "DELETE FROM entity_aliases WHERE entity_id = ?",
+                (node_id,),
+            )
+            cursor = conn.execute("DELETE FROM nodes WHERE node_id = ?", (node_id,))
         deleted = cursor.rowcount > 0
         if deleted:
             logger.debug("node_deleted", node_id=node_id)
         return deleted
 
     def delete_edge(self, edge_id: str) -> bool:
-        cursor = self._conn.execute("DELETE FROM edges WHERE edge_id = ?", (edge_id,))
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            cursor = conn.execute("DELETE FROM edges WHERE edge_id = ?", (edge_id,))
         deleted = cursor.rowcount > 0
         if deleted:
             logger.debug("edge_deleted", edge_id=edge_id)
@@ -1316,6 +1406,67 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         assert row is not None
         return int(row["cnt"])
 
+    @staticmethod
+    def _node_search_where(search: str | None) -> tuple[str, list[Any]]:
+        """Current nodes matching GET /graph/search's ``q``, and the params.
+
+        The one predicate behind :meth:`count_nodes_by_type` and
+        :meth:`search_nodes`, so the type chips sum to the list's total.
+        """
+        where = "valid_to IS NULL"
+        params: list[Any] = []
+        if search:
+            where += (
+                " AND (json_extract(properties_json, '$.name') LIKE ? ESCAPE '\\'"
+                " OR node_id LIKE ? ESCAPE '\\'"
+                " OR node_type LIKE ? ESCAPE '\\')"
+            )
+            pattern = node_search_like_pattern(search)
+            params = [pattern, pattern, pattern]
+        return where, params
+
+    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+        where, params = self._node_search_where(search)
+        cursor = self._conn.execute(
+            "SELECT node_type, COUNT(*) AS cnt FROM nodes"
+            f" WHERE {where} GROUP BY node_type",
+            params,
+        )
+        return {row["node_type"]: int(row["cnt"]) for row in cursor.fetchall()}
+
+    def search_nodes(
+        self,
+        *,
+        search: str | None = None,
+        node_type: str | None = None,
+        sort: str = "created_at",
+        descending: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        validate_node_search_args(sort=sort, limit=limit, offset=offset)
+        where, params = self._node_search_where(search)
+        if node_type:
+            where += " AND node_type = ?"
+            params.append(node_type)
+        sort_col = {
+            "name": "json_extract(properties_json, '$.name')",
+            "node_type": "node_type",
+        }.get(sort, "created_at")
+        sort_dir = "DESC" if descending else "ASC"
+        count_row = self._conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {where}",
+            params,
+        ).fetchone()
+        assert count_row is not None
+        cursor = self._conn.execute(
+            f"SELECT * FROM nodes WHERE {where}"
+            f" ORDER BY {sort_col} {sort_dir}, node_id {sort_dir} LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        )
+        rows = [self._node_row_to_dict(row) for row in cursor.fetchall()]
+        return rows, int(count_row[0])
+
     def count_edges(self) -> int:
         cursor = self._conn.execute(
             "SELECT COUNT(*) AS cnt FROM edges WHERE valid_to IS NULL"
@@ -1331,12 +1482,14 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
     def execute_node_query(self, query: Any) -> list[dict[str, Any]]:
         """Compile :class:`NodeQuery` to a SQLite SELECT.
 
-        Supports the full Phase 1 operator surface (``eq`` / ``in`` /
-        ``exists``) on:
-
-        * ``node_type`` (column comparison)
-        * ``node_role`` (column comparison)
-        * ``properties.<key>`` (via ``json_extract``)
+        * ``node_type`` / ``node_role`` / ``node_id``: ``eq``, ``in``,
+          ``exists`` and the range ops compare the column; ``contains``
+          is refused.
+        * ``document_ids``: ``exists`` only.
+        * ``properties.<key>``: ``eq``, ``in`` and the range ops compare
+          the value ``json_extract`` reads at the key, ``exists`` matches a
+          non-null value, and ``contains`` tests membership of the array at
+          the key. Every op binds the key.
         """
         sql, params = self._compile_node_query(query)
         cursor = self._conn.execute(sql, params)
@@ -1371,29 +1524,34 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         return SQLiteGraphStore._render_clause_sqlite(column, clause)
 
     @staticmethod
-    def _render_clause_sqlite(column: str, clause: Any) -> tuple[str, list[Any]]:
+    def _render_clause_sqlite(
+        column: tuple[str, list[Any]], clause: Any
+    ) -> tuple[str, list[Any]]:
         """Render a resolved SQL column expression against the clause op.
 
-        Shared between node and edge compilation so the operator
-        surface (``eq`` / ``in`` / ``exists`` / range) is implemented
-        in exactly one place.  ``contains`` is handled one level up in
+        *column* is the expression and the parameters it binds, which
+        precede the clause's own.  Shared between node and edge
+        compilation so the operator surface (``eq`` / ``in`` /
+        ``exists`` / range) is implemented in exactly one place.
+        ``contains`` is handled one level up in
         :meth:`_compile_clause_sqlite` / :meth:`_compile_edge_query`
         because it needs the raw JSON path, not a pre-rendered
         ``json_extract`` expression.
         """
+        expr, expr_params = column
         op = clause.op
         if op == "eq":
-            return f"{column} = ?", [clause.value]
+            return f"{expr} = ?", [*expr_params, clause.value]
         if op == "in":
             placeholders = ", ".join("?" for _ in clause.value)
-            return f"{column} IN ({placeholders})", list(clause.value)
+            return f"{expr} IN ({placeholders})", [*expr_params, *clause.value]
         if op == "exists":
-            return f"{column} IS NOT NULL", []
+            return f"{expr} IS NOT NULL", list(expr_params)
         sql_op = RANGE_OP_GLYPH.get(op)
         if sql_op is None:
             msg = f"Unknown filter op {clause.op!r}"
             raise ValueError(msg)
-        return f"{column} {sql_op} ?", [clause.value]
+        return f"{expr} {sql_op} ?", [*expr_params, clause.value]
 
     @staticmethod
     def _render_contains_sqlite(field: str, clause: Any) -> tuple[str, list[Any]]:
@@ -1427,10 +1585,9 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                 "not JSON arrays."
             )
             raise ValueError(msg)
-        key = field.split(".", 1)[1]
-        # The JSON path is constructed from the DSL field, not raw user
-        # input — same convention as :meth:`_field_to_sql_expr`.
-        #
+        # The key is the caller's, so its path is bound, once for each of
+        # the two uses below.
+        path = json_key_path(field.split(".", 1)[1])
         # Subtlety: ``json_type(json_extract(j, '$.k'))`` raises
         # "malformed JSON" when the extracted value is a scalar string,
         # because ``json_extract`` returns the raw scalar TEXT and
@@ -1438,35 +1595,32 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         # form ``json_type(j, '$.k')`` walks the path itself and
         # returns the type string ('text' / 'array' / etc.) or NULL
         # for missing keys — exactly the guard we need.
-        json_extract_expr = f"json_extract(properties_json, '$.{key}')"
-        json_type_expr = f"json_type(properties_json, '$.{key}')"
         safe_array = (
-            f"(CASE WHEN {json_type_expr} = 'array' "
-            f"THEN {json_extract_expr} ELSE '[]' END)"
+            "(CASE WHEN json_type(properties_json, ?) = 'array' "
+            "THEN json_extract(properties_json, ?) ELSE '[]' END)"
         )
         return (
             f"EXISTS (SELECT 1 FROM json_each({safe_array}) WHERE json_each.value = ?)",
-            [clause.value],
+            [path, path, clause.value],
         )
 
     @staticmethod
-    def _field_to_sql_expr(field: str) -> str:
-        """Map a DSL field path to a SQLite column / ``json_extract`` expression."""
+    def _field_to_sql_expr(field: str) -> tuple[str, list[Any]]:
+        """Map a DSL field path to a SQLite column / ``json_extract`` expression.
+
+        Returns the expression and the parameters it binds.
+        """
         if field in {"node_type", "node_role", "node_id"}:
-            return field
+            return field, []
         if field == DOC_LINK_FIELD:
             # Stored as a JSON array in its own TEXT column; ``exists``
             # (the only op ``check_doc_link_clause`` lets through)
             # renders as the plain ``IS NOT NULL`` on that column.
-            return "document_ids_json"
+            return "document_ids_json", []
         if field.startswith("properties."):
-            key = field.split(".", 1)[1]
-            # SQLite identifier-quoting on JSON path keys is unnecessary
-            # because keys come from agents and are constrained to JSON;
-            # parameter binding doesn't apply to json paths in
-            # json_extract — but the path string itself is constructed
-            # from the DSL so it's not user input.
-            return f"json_extract(properties_json, '$.{key}')"
+            # The key is the caller's, so its path is bound, not spliced.
+            path = json_key_path(field.split(".", 1)[1])
+            return "json_extract(properties_json, ?)", [path]
         msg = f"Unsupported DSL field path: {field!r}"
         raise ValueError(msg)
 
@@ -1515,13 +1669,16 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         return sql, params
 
     @staticmethod
-    def _edge_field_to_sql_expr(field: str) -> str:
-        """Map a DSL edge-field path to a SQLite column or JSON extract."""
+    def _edge_field_to_sql_expr(field: str) -> tuple[str, list[Any]]:
+        """Map a DSL edge-field path to a SQLite column or JSON extract.
+
+        Returns the expression and the parameters it binds.
+        """
         if field in EDGE_TOP_LEVEL_COLUMNS:
-            return field
+            return field, []
         if field.startswith("properties."):
-            key = field.split(".", 1)[1]
-            return f"json_extract(properties_json, '$.{key}')"
+            path = json_key_path(field.split(".", 1)[1])
+            return "json_extract(properties_json, ?)", [path]
         msg = f"Unsupported DSL edge field path: {field!r}"
         raise ValueError(msg)
 

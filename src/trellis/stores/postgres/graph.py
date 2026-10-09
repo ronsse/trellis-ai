@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
 
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
+from trellis.errors import StoreError
 from trellis.schemas.graph import CompactionReport
 from trellis.schemas.well_known import normalize_entity_name
 from trellis.stores.base.edge_provenance import (
@@ -28,9 +30,12 @@ from trellis.stores.base.graph import (
     AliasBindStatus,
     GraphStore,
     check_node_role_immutable,
+    node_search_like_pattern,
     validate_document_ids,
     validate_node_role_args,
+    validate_node_search_args,
     validate_subgraph_depth,
+    validate_version_token,
 )
 from trellis.stores.base.graph_query import (
     DOC_LINK_FIELD,
@@ -42,21 +47,84 @@ from trellis.stores.postgres.base import PostgresStoreBase
 logger = structlog.get_logger(__name__)
 
 
-def _pg_text_lit(value: str) -> str:
-    """Render a single-quoted SQL TEXT literal with naive escape.
-
-    Used in narrow code paths where the JSON path key is interpolated
-    into a SQL expression rather than bound as a parameter (Postgres
-    can't bind to ``->>`` operands).  Keys originate from the DSL, not
-    raw user input, but escaping single quotes keeps the renderer
-    robust to constants that happen to contain them.
-    """
-    return "'" + value.replace("'", "''") + "'"
-
-
 def _alias_lock_key(source_system: str, raw_id: str) -> str:
     """Encode an alias tuple as PostgreSQL-safe advisory-lock text."""
     return json.dumps([source_system, raw_id], separators=(",", ":"))
+
+
+def _edge_lock_key(source_id: str, target_id: str, edge_type: str) -> str:
+    """Return the advisory-lock text for one logical edge.
+
+    JSON-encoding (as ``_alias_lock_key`` does) keeps distinct triples
+    distinct, and the ``"edge:"`` prefix keeps this text apart from
+    ``_alias_lock_key``'s bare JSON arrays, which share the database-wide
+    advisory-lock key space. Distinct texts can still collide once
+    ``hashtextextended`` maps them to 64 bits; the odds are negligible,
+    and the cost is a wait, or a deadlock Postgres detects and aborts.
+    """
+    return "edge:" + json.dumps(
+        [source_id, target_id, edge_type], separators=(",", ":")
+    )
+
+
+def _lock_edge_keys(
+    conn: psycopg.Connection, keys: Iterable[tuple[str, str, str]]
+) -> None:
+    """Take a transaction-scoped advisory lock on every distinct edge key.
+
+    Locks are acquired in one sorted, de-duplicated order (sorted on the
+    encoded lock key, not caller-supplied order) so two writers whose
+    batches touch an overlapping set of edges in different orders can't
+    deadlock: both converge on the same lock sequence, so the second
+    writer blocks behind the first instead of forming a wait cycle.
+    ``pg_advisory_xact_lock`` releases automatically at commit or
+    rollback, same as :func:`_alias_lock_key`'s callers.
+    """
+    with conn.cursor() as cur:
+        for lock_key in sorted({_edge_lock_key(*key) for key in keys}):
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (lock_key,),
+            )
+
+
+#: How many times ``delete_node`` runs a purge that PostgreSQL aborts as a
+#: deadlock victim or on a serialization failure. The abort rolls the whole
+#: purge back, so running it again is safe.
+_PURGE_ATTEMPTS = 3
+
+#: Name of the partial unique index that enforces one current (``valid_to
+#: IS NULL``) row per ``node_id``. Matched against
+#: ``exc.diag.constraint_name``, never the driver's message text, which
+#: follows the server's ``lc_messages``.
+_NODE_CURRENT_INDEX = "idx_nodes_current"
+
+#: Attempts ``upsert_node`` makes when a concurrent writer of the same
+#: ``node_id`` wins ``_NODE_CURRENT_INDEX``. One retry: the conflict
+#: means that writer has committed, so the retry finds its row.
+_NODE_WRITE_RACE_ATTEMPTS = 2
+
+
+def _delete_until_none(
+    cur: psycopg.Cursor[Any], sql: str, params: tuple[str, ...]
+) -> int:
+    """Repeat a DELETE until it removes no row; return the rows removed.
+
+    Under READ COMMITTED each statement reads a fresh snapshot. A DELETE
+    that waited on a writer's row lock re-checks only the row it waited
+    for, so a version that writer inserted is invisible to that statement
+    and visible to the next one. The loop ends at the first statement that
+    finds no row: a writer that locks the newest version before the next
+    statement reaches it adds one more, so sustained writers lengthen the
+    loop, while a writer that reaches a row this transaction deleted waits
+    for it to commit.
+    """
+    removed = 0
+    while True:
+        cur.execute(sql, params)
+        if cur.rowcount <= 0:
+            return removed
+        removed += cur.rowcount
 
 
 _CREATE_NODES = """\
@@ -73,6 +141,32 @@ CREATE TABLE IF NOT EXISTS nodes (
     valid_from TIMESTAMPTZ NOT NULL,
     valid_to TIMESTAMPTZ DEFAULT NULL
 )"""
+
+# The columns every node SELECT reads, in the order ``_node_row_to_dict``
+# maps them back by name. One list for both sides, so a query and the
+# mapper cannot disagree about a slot. Never ``SELECT *``: a column added
+# by ``ALTER TABLE ... ADD COLUMN`` lands last in the physical order, so
+# on a migrated database ``*`` does not follow ``_CREATE_NODES``.
+_NODE_COLUMNS: tuple[str, ...] = (
+    "version_id",
+    "node_id",
+    "node_type",
+    "node_role",
+    "generation_spec",
+    "document_ids",
+    "properties",
+    "created_at",
+    "updated_at",
+    "valid_from",
+    "valid_to",
+)
+
+
+def _node_select_list(table_alias: str = "") -> str:
+    """Render :data:`_NODE_COLUMNS` as a SELECT list, optionally qualified."""
+    prefix = f"{table_alias}." if table_alias else ""
+    return ", ".join(f"{prefix}{column}" for column in _NODE_COLUMNS)
+
 
 # Additive migrations run after CREATE TABLE so upgrades from older
 # schema versions pick up new columns without a rebuild.
@@ -258,7 +352,6 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         if node_id is None:
             node_id = generate_ulid()
 
-        now = utc_now()
         properties_json = json.dumps(properties)
         generation_spec_json = (
             json.dumps(generation_spec) if generation_spec is not None else None
@@ -267,88 +360,194 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             json.dumps(document_ids) if document_ids is not None else None
         )
 
-        # Hold one pooled connection across the read+write so the
-        # SELECT-then-UPDATE-then-INSERT sees a consistent snapshot.
-        # Without this, under concurrent upserts of the same node_id
-        # two callers could each read "no current version" and both
-        # INSERT — leaving two rows with valid_to=NULL.
-        with self._conn() as conn:
-            existing = self._fetch_current_node_for_update(conn, node_id)
-            if existing:
-                check_node_role_immutable(node_id, existing, node_role)
-                created_at = existing["created_at"]
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE nodes SET valid_to = %s"
-                        " WHERE node_id = %s AND valid_to IS NULL",
-                        (now, node_id),
-                    )
-                    version_id = generate_ulid()
-                    cur.execute(
-                        """
-                        INSERT INTO nodes
-                            (version_id, node_id, node_type, node_role,
-                             generation_spec, document_ids, properties,
-                             created_at, updated_at, valid_from, valid_to)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                        """,
-                        (
-                            version_id,
-                            node_id,
-                            node_type,
-                            node_role,
-                            generation_spec_json,
-                            document_ids_json,
-                            properties_json,
-                            created_at,
-                            now,
-                            now,
-                        ),
-                    )
-            else:
-                version_id = generate_ulid()
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO nodes
-                            (version_id, node_id, node_type, node_role,
-                             generation_spec, document_ids, properties,
-                             created_at, updated_at, valid_from, valid_to)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                        """,
-                        (
-                            version_id,
-                            node_id,
-                            node_type,
-                            node_role,
-                            generation_spec_json,
-                            document_ids_json,
-                            properties_json,
-                            now,
-                            now,
-                            now,
-                        ),
-                    )
+        # Each attempt is one transaction on one pooled connection. Its
+        # ``FOR UPDATE`` read does not keep two writers of the same node_id
+        # from both reaching the INSERT (see
+        # ``_fetch_current_node_for_update``), and the later INSERT raises a
+        # ``UniqueViolation`` on ``_NODE_CURRENT_INDEX`` once the other
+        # writer commits. One retry in a fresh transaction then finds that
+        # writer's row and writes this version over it, as SQLite's single
+        # writer would have.
+        import psycopg.errors  # noqa: PLC0415
 
-        return node_id
+        for attempt in range(_NODE_WRITE_RACE_ATTEMPTS):
+            try:
+                with self._conn() as conn:
+                    self._write_node_version(
+                        conn,
+                        node_id,
+                        node_type,
+                        node_role,
+                        generation_spec_json,
+                        document_ids_json,
+                        properties_json,
+                    )
+            except psycopg.errors.UniqueViolation as exc:
+                if getattr(exc.diag, "constraint_name", None) != _NODE_CURRENT_INDEX:
+                    raise
+                is_last_attempt = attempt == _NODE_WRITE_RACE_ATTEMPTS - 1
+                logger.info(
+                    "pg_node_write_race",
+                    node_type=node_type,
+                    attempt=attempt,
+                    gave_up=is_last_attempt,
+                )
+                if is_last_attempt:
+                    msg = (
+                        "Node write conflicted with a concurrent writer on "
+                        f"retry: {type(exc).__name__}"
+                    )
+                    raise StoreError(msg, store="graph") from exc
+            else:
+                return node_id
+        # Unreachable: the loop above always either returns or raises.
+        unreachable_msg = "unreachable"
+        raise AssertionError(unreachable_msg)  # pragma: no cover
+
+    def _write_node_version(
+        self,
+        conn: psycopg.Connection,
+        node_id: str,
+        node_type: str,
+        node_role: str,
+        generation_spec_json: str | None,
+        document_ids_json: str | None,
+        properties_json: str,
+    ) -> None:
+        """Write one node version on ``conn``: close the current row (if
+        any) and insert the new one. One attempt — callers retry.
+        """
+        now = utc_now()
+        existing = self._fetch_current_node_for_update(conn, node_id)
+        if existing:
+            check_node_role_immutable(node_id, existing, node_role)
+            created_at = existing["created_at"]
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE nodes SET valid_to = %s"
+                    " WHERE node_id = %s AND valid_to IS NULL",
+                    (now, node_id),
+                )
+                version_id = generate_ulid()
+                cur.execute(
+                    """
+                    INSERT INTO nodes
+                        (version_id, node_id, node_type, node_role,
+                         generation_spec, document_ids, properties,
+                         created_at, updated_at, valid_from, valid_to)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                    """,
+                    (
+                        version_id,
+                        node_id,
+                        node_type,
+                        node_role,
+                        generation_spec_json,
+                        document_ids_json,
+                        properties_json,
+                        created_at,
+                        now,
+                        now,
+                    ),
+                )
+        else:
+            version_id = generate_ulid()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO nodes
+                        (version_id, node_id, node_type, node_role,
+                         generation_spec, document_ids, properties,
+                         created_at, updated_at, valid_from, valid_to)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                    """,
+                    (
+                        version_id,
+                        node_id,
+                        node_type,
+                        node_role,
+                        generation_spec_json,
+                        document_ids_json,
+                        properties_json,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+
+    def update_node_if_current(
+        self,
+        node_id: str,
+        expected_valid_from: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str,
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        validate_version_token(expected_valid_from)
+        validate_node_role_args(node_role, generation_spec)
+        validate_document_ids(document_ids)
+        with self._conn() as conn:
+            # ``FOR UPDATE`` waits out a concurrent UPDATE or DELETE of the
+            # row and then re-reads it, so a writer that lost either race
+            # sees the closed or purged version here and refuses.
+            current = self._fetch_current_node_for_update(conn, node_id)
+            if current is None or current["valid_from"] != expected_valid_from:
+                return False
+            check_node_role_immutable(node_id, current, node_role)
+            # Read the clock under the lock, so versions are stamped in
+            # the order they commit.
+            now = utc_now()
+            new_version: dict[str, Any] = {
+                "version_id": generate_ulid(),
+                "node_id": node_id,
+                "node_type": node_type,
+                "node_role": node_role,
+                "generation_spec": (
+                    json.dumps(generation_spec) if generation_spec is not None else None
+                ),
+                "document_ids": (
+                    json.dumps(document_ids) if document_ids is not None else None
+                ),
+                "properties": json.dumps(properties),
+                "created_at": current["created_at"],
+                "updated_at": now,
+                "valid_from": now,
+                "valid_to": None,
+            }
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE nodes SET valid_to = %s"
+                    " WHERE node_id = %s AND valid_to IS NULL",
+                    (now, node_id),
+                )
+                cur.execute(
+                    f"INSERT INTO nodes ({', '.join(_NODE_COLUMNS)})"
+                    f" VALUES ({', '.join(['%s'] * len(_NODE_COLUMNS))})",
+                    tuple(new_version[column] for column in _NODE_COLUMNS),
+                )
+        return True
 
     def _fetch_current_node_for_update(
         self, conn: psycopg.Connection, node_id: str
     ) -> dict[str, Any] | None:
         """Read the current (valid_to IS NULL) node row on ``conn``, with
-        ``FOR UPDATE`` so a concurrent upsert blocks until this txn commits.
+        ``FOR UPDATE`` so a concurrent writer of that row waits until this
+        transaction ends.
 
-        Used inside ``upsert_node``'s pooled-connection block so the
-        read+write happen atomically against a row lock — without this
-        two concurrent upserts of the same node_id could each see "no
-        current version" and both INSERT.
+        The lock does not stop two writers both inserting a current row.
+        A new node_id has no row to lock, and under READ COMMITTED a writer
+        that waited re-checks the row, finds it closed and skips it, and
+        cannot see the version this transaction inserted: it reads no
+        current version. ``upsert_node`` retries the loser of
+        ``_NODE_CURRENT_INDEX``; ``update_node_if_current`` refuses.
         """
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT version_id, node_id, node_type, node_role,
-                       generation_spec, document_ids, properties,
-                       created_at, updated_at, valid_from, valid_to
+                f"""
+                SELECT {_node_select_list()}
                 FROM nodes
                 WHERE node_id = %s AND valid_to IS NULL
                 FOR UPDATE
@@ -411,23 +610,38 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 )
             )
 
-        with self._conn() as conn, conn.cursor() as cur:
-            if existing:
-                cur.execute(
-                    "UPDATE nodes SET valid_to = %s "
-                    "WHERE node_id = ANY(%s) AND valid_to IS NULL",
-                    (now, list(existing.keys())),
+        # No retry here, unlike ``upsert_node``: ``existing`` was read above,
+        # outside this transaction, so a retry would have to repeat that read
+        # and rebuild every row. A conflict on ``_NODE_CURRENT_INDEX`` rolls
+        # the whole batch back, and the caller can re-run it.
+        import psycopg.errors  # noqa: PLC0415
+
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                if existing:
+                    cur.execute(
+                        "UPDATE nodes SET valid_to = %s "
+                        "WHERE node_id = ANY(%s) AND valid_to IS NULL",
+                        (now, list(existing.keys())),
+                    )
+                cur.executemany(
+                    """
+                    INSERT INTO nodes
+                        (version_id, node_id, node_type, node_role,
+                         generation_spec, document_ids, properties,
+                         created_at, updated_at, valid_from, valid_to)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                    """,
+                    insert_rows,
                 )
-            cur.executemany(
-                """
-                INSERT INTO nodes
-                    (version_id, node_id, node_type, node_role,
-                     generation_spec, document_ids, properties,
-                     created_at, updated_at, valid_from, valid_to)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                """,
-                insert_rows,
+        except psycopg.errors.UniqueViolation as exc:
+            if getattr(exc.diag, "constraint_name", None) != _NODE_CURRENT_INDEX:
+                raise
+            msg = (
+                "Bulk node write conflicted with a concurrent writer: "
+                f"{type(exc).__name__}"
             )
+            raise StoreError(msg, store="graph") from exc
         return node_ids
 
     def get_node(
@@ -440,9 +654,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT version_id, node_id, node_type, node_role,
-                       generation_spec, document_ids, properties,
-                       created_at, updated_at, valid_from, valid_to
+                SELECT {_node_select_list()}
                 FROM nodes
                 WHERE node_id = %s AND {temporal}
                 """,
@@ -466,9 +678,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT version_id, node_id, node_type, node_role,
-                       generation_spec, document_ids, properties,
-                       created_at, updated_at, valid_from, valid_to
+                SELECT {_node_select_list()}
                 FROM nodes
                 WHERE node_id = ANY(%s) AND {temporal}
                 """,
@@ -480,10 +690,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     def get_node_history(self, node_id: str) -> list[dict[str, Any]]:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT version_id, node_id, node_type, node_role,
-                       generation_spec, document_ids, properties,
-                       created_at, updated_at, valid_from, valid_to
+                f"""
+                SELECT {_node_select_list()}
                 FROM nodes
                 WHERE node_id = %s
                 ORDER BY valid_from DESC
@@ -804,14 +1012,22 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             extractor_tier=extractor_tier,
         )
 
-        now = utc_now()
         properties_json = json.dumps(properties or {})
 
         # Single connection for the read+write so the SCD-2 close-and-
-        # reinsert is transactional. ``FOR UPDATE`` row-locks any current
-        # version, blocking concurrent upserts of the same edge tuple
-        # until this txn commits.
+        # reinsert is transactional. ``FOR UPDATE`` alone does NOT
+        # serialize two concurrent upserts of the same edge tuple: on a
+        # miss (no current row yet, or the row another writer just
+        # closed) there is nothing for it to lock, so both writers can
+        # mint their own edge_id and both commit a current row. What
+        # actually serializes this is the ``pg_advisory_xact_lock`` taken
+        # below, on the logical key, before the read — the same idiom
+        # ``upsert_alias`` uses on the alias key.
         with self._conn() as conn:
+            _lock_edge_keys(conn, [(source_id, target_id, edge_type)])
+            # Read the clock under the lock, so versions are stamped in the
+            # order they commit.
+            now = utc_now()
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -929,13 +1145,19 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         # side post-filtering on the (source, target, edge_type)
         # triplet is cheap at this scale. ``_pre_validate_edges_bulk``
         # already rejected in-batch duplicate triplets.
+        triplets = {
+            (spec["source_id"], spec["target_id"], spec["edge_type"]) for spec in edges
+        }
         sources = {spec["source_id"] for spec in edges}
         # Single connection for the bulk pre-fetch + UPDATE + INSERT so
         # the SCD-2 close-and-reinsert is transactional across all edges
-        # in this batch. (Concurrent batches against overlapping source
-        # nodes still race — that's the same window the single-row path
-        # closes via FOR UPDATE; bulk callers accept it for throughput.)
+        # in this batch. Two overlapping batches are serialized by the
+        # advisory locks below, taken on every triplet's logical key in
+        # one sorted, de-duplicated order before the pre-fetch — sorted
+        # so two batches that share edges in different orders converge
+        # on the same lock sequence instead of deadlocking.
         with self._conn() as conn:
+            _lock_edge_keys(conn, triplets)
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -946,7 +1168,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                     (list(sources),),
                 )
                 existing_edges: dict[tuple[str, str, str], tuple[Any, ...]] = {
-                    (r[1], r[2], r[3]): r for r in cur.fetchall()
+                    (r[1], r[2], r[3]): r
+                    for r in cur.fetchall()
+                    if (r[1], r[2], r[3]) in triplets
                 }
 
             now = utc_now()
@@ -1100,18 +1324,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             FROM traversal
             GROUP BY node_id
         )
-        SELECT
-            n.version_id,
-            n.node_id,
-            n.node_type,
-            n.node_role,
-            n.generation_spec,
-            n.properties,
-            n.created_at,
-            n.updated_at,
-            n.valid_from,
-            n.valid_to,
-            un.min_depth
+        SELECT {_node_select_list("n")}
         FROM unique_nodes un
         JOIN nodes n ON n.node_id = un.node_id AND {node_temporal}
         ORDER BY un.min_depth, n.node_id
@@ -1135,8 +1348,9 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             collected_nodes: list[dict[str, Any]] = []
             node_id_set: set[str] = set()
             for row in node_rows:
-                node_id_set.add(row[1])  # node_id is index 1
-                collected_nodes.append(self._node_row_to_dict(row))
+                node = self._node_row_to_dict(row)
+                node_id_set.add(node["node_id"])
+                collected_nodes.append(node)
 
             collected_edges: list[dict[str, Any]] = []
             if node_id_set:
@@ -1214,9 +1428,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT version_id, node_id, node_type, node_role,
-                       generation_spec, document_ids, properties,
-                       created_at, updated_at, valid_from, valid_to
+                SELECT {_node_select_list()}
                 FROM nodes
                 WHERE {where_clause}
                 ORDER BY created_at DESC
@@ -1241,17 +1453,63 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     # ------------------------------------------------------------------
 
     def delete_node(self, node_id: str) -> bool:
-        with self._conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM edges WHERE source_id = %s OR target_id = %s",
-                (node_id, node_id),
-            )
-            cur.execute("DELETE FROM entity_aliases WHERE entity_id = %s", (node_id,))
-            cur.execute("DELETE FROM nodes WHERE node_id = %s", (node_id,))
-            deleted = bool(cur.rowcount > 0)
-        if deleted:
-            logger.debug("node_deleted", node_id=node_id)
-        return deleted
+        """Purge the node, running the purge again when PostgreSQL aborts it.
+
+        Each DELETE repeats until it removes nothing, so a version written
+        by a transaction the DELETE waited on is removed too. A purge that
+        locks rows in the opposite order to another purge or a writer can be
+        aborted as the deadlock victim. The abort rolls the purge back whole,
+        so it runs again, at most ``_PURGE_ATTEMPTS`` times in all, and a run
+        that finds the node already purged returns ``False``.
+
+        Raises :class:`StoreError` naming the node and the error's type when
+        every attempt is aborted, and at once on any other database error.
+        A lost connection is not retried: the purge may have committed, and
+        a second run would report it as ``False``.
+        """
+        import psycopg  # noqa: PLC0415
+
+        aborted: psycopg.Error | None = None
+        for attempt in range(1, _PURGE_ATTEMPTS + 1):
+            try:
+                with self._conn() as conn, conn.cursor() as cur:
+                    _delete_until_none(
+                        cur,
+                        "DELETE FROM edges WHERE source_id = %s OR target_id = %s",
+                        (node_id, node_id),
+                    )
+                    _delete_until_none(
+                        cur,
+                        "DELETE FROM entity_aliases WHERE entity_id = %s",
+                        (node_id,),
+                    )
+                    removed = _delete_until_none(
+                        cur, "DELETE FROM nodes WHERE node_id = %s", (node_id,)
+                    )
+            except (
+                psycopg.errors.DeadlockDetected,
+                psycopg.errors.SerializationFailure,
+            ) as exc:
+                aborted = exc
+                logger.warning(
+                    "node_delete_aborted",
+                    node_id=node_id,
+                    attempt=attempt,
+                    attempts=_PURGE_ATTEMPTS,
+                    error_type=type(exc).__name__,
+                )
+                continue
+            except psycopg.Error as exc:
+                msg = f"Purge of node {node_id} failed: {type(exc).__name__}"
+                raise StoreError(msg, store="graph") from exc
+            if removed > 0:
+                logger.debug("node_deleted", node_id=node_id)
+            return removed > 0
+        msg = (
+            f"Purge of node {node_id} was aborted in each of {_PURGE_ATTEMPTS} "
+            f"attempts: {type(aborted).__name__}"
+        )
+        raise StoreError(msg, store="graph") from aborted
 
     def delete_edge(self, edge_id: str) -> bool:
         with self._conn() as conn, conn.cursor() as cur:
@@ -1272,6 +1530,79 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         assert row is not None
         return int(row[0])
 
+    @staticmethod
+    def _node_search_where(search: str | None) -> tuple[str, list[Any]]:
+        """Current nodes matching GET /graph/search's ``q``, and the params.
+
+        The one predicate behind :meth:`count_nodes_by_type` and
+        :meth:`search_nodes`, so the type chips sum to the list's total.
+        """
+        where = "valid_to IS NULL"
+        params: list[Any] = []
+        if search:
+            where += (
+                " AND (properties->>'name' ILIKE %s ESCAPE '\\'"
+                " OR node_id ILIKE %s ESCAPE '\\'"
+                " OR node_type ILIKE %s ESCAPE '\\')"
+            )
+            pattern = node_search_like_pattern(search)
+            params = [pattern, pattern, pattern]
+        return where, params
+
+    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+        where, params = self._node_search_where(search)
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT node_type, COUNT(*) FROM nodes"
+                f" WHERE {where} GROUP BY node_type",
+                params,
+            )
+            rows = cur.fetchall()
+        return {str(row[0]): int(row[1]) for row in rows}
+
+    def search_nodes(
+        self,
+        *,
+        search: str | None = None,
+        node_type: str | None = None,
+        sort: str = "created_at",
+        descending: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        validate_node_search_args(sort=sort, limit=limit, offset=offset)
+        where, params = self._node_search_where(search)
+        if node_type:
+            where += " AND node_type = %s"
+            params.append(node_type)
+        sort_col = {
+            "name": "properties->>'name'",
+            "node_type": "node_type",
+        }.get(sort, "created_at")
+        sort_dir = "DESC" if descending else "ASC"
+        # Both reads share one pooled connection, but under the default READ
+        # COMMITTED isolation each statement takes its own snapshot, so a
+        # write landing between them can make the count disagree with the
+        # page.
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT COUNT(*) FROM nodes WHERE {where}",
+                    params,
+                )
+                count_row = cur.fetchone()
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {_node_select_list()} FROM nodes"
+                    f" WHERE {where}"
+                    f" ORDER BY {sort_col} {sort_dir}, node_id {sort_dir}"
+                    " LIMIT %s OFFSET %s",
+                    [*params, limit, offset],
+                )
+                rows = cur.fetchall()
+        assert count_row is not None
+        return [self._node_row_to_dict(row) for row in rows], int(count_row[0])
+
     def count_edges(self) -> int:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM edges WHERE valid_to IS NULL")
@@ -1284,13 +1615,16 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
     # ------------------------------------------------------------------
 
     def execute_node_query(self, query: Any) -> list[dict[str, Any]]:
-        """Compile :class:`NodeQuery` to a Postgres SELECT.
+        """Compile :class:`NodeQuery` to a Postgres SELECT and run it.
 
-        Supports the full Phase 1 operator surface (``eq`` / ``in`` /
-        ``exists``) on:
-
-        * ``node_type`` / ``node_role`` (column comparison)
-        * ``properties.<key>`` (via JSONB ``->>`` path extractor)
+        * ``node_type`` / ``node_role`` / ``node_id``: ``eq``, ``in``,
+          ``exists`` and the range ops compare the column; ``contains``
+          is refused.
+        * ``document_ids``: ``exists`` only.
+        * ``properties.<key>``: ``eq`` / ``in`` by JSONB containment
+          (``@>``), ``exists`` by key existence (``?``), ``contains`` by
+          membership of the array at the key, and the range ops compare
+          the value cast to ``numeric``. Every op binds the key.
         """
         sql, params = self._compile_node_query(query)
         with self._conn() as conn, conn.cursor() as cur:
@@ -1307,7 +1641,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             where_parts.append(frag)
             params.extend(p)
         sql = (
-            "SELECT * FROM nodes WHERE "
+            f"SELECT {_node_select_list()} FROM nodes WHERE "
             + " AND ".join(where_parts)
             + " ORDER BY created_at DESC LIMIT %s"
         )
@@ -1386,15 +1720,15 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             # ever matching (``'{"a": "x"}' @> '{"a": ["x"]}'`` is
             # already false, but the guard documents the list-only
             # contract and protects against future shape drift).  The
-            # value JSON is bound as a parameter; the key still needs a
-            # literal in ``->`` because that operand isn't a bindable
-            # position.
+            # key and the value JSON are bound as parameters, as every
+            # ``properties.<key>`` op binds its key: psycopg would read
+            # a ``%`` in a spliced key as placeholder syntax.
             return (
                 (
-                    f"(jsonb_typeof(properties->{_pg_text_lit(key)}) = 'array' "
-                    f"AND properties @> %s::jsonb)"
+                    "(jsonb_typeof(properties->%s) = 'array' "
+                    "AND properties @> %s::jsonb)"
                 ),
-                [json.dumps({key: [clause.value]})],
+                [key, json.dumps({key: [clause.value]})],
             )
         sql_op = RANGE_OP_GLYPH.get(clause.op)
         if sql_op is not None:
@@ -1405,8 +1739,8 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             # asking a numeric question.  String range filters on
             # ``properties.<key>`` are not in scope today.
             return (
-                f"(properties->>{_pg_text_lit(key)})::numeric {sql_op} %s",
-                [clause.value],
+                f"(properties->>%s)::numeric {sql_op} %s",
+                [key, clause.value],
             )
         msg = f"Unknown filter op {clause.op!r}"
         raise ValueError(msg)
@@ -1560,12 +1894,13 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
 
     @classmethod
     def _node_row_to_dict(cls, row: tuple[Any, ...]) -> dict[str, Any]:
-        # Row layout (v4 — Phase 4 of ADR planes-and-substrates added
-        # document_ids between generation_spec and properties):
-        # 0 version_id, 1 node_id, 2 node_type, 3 node_role,
-        # 4 generation_spec, 5 document_ids, 6 properties,
-        # 7 created_at, 8 updated_at, 9 valid_from, 10 valid_to
-        gen_spec_raw = row[4]
+        # Read by name from the row a ``_node_select_list()`` query
+        # returned. ``strict=True`` makes a SELECT whose column count
+        # differs from ``_NODE_COLUMNS`` raise here; before it, a missing
+        # column shifted every later field one slot and the isinstance
+        # fallbacks below dropped the misplaced values without a sound.
+        col = dict(zip(_NODE_COLUMNS, row, strict=True))
+        gen_spec_raw = col["generation_spec"]
         if gen_spec_raw is None:
             generation_spec: dict[str, Any] | None = None
         elif isinstance(gen_spec_raw, str):
@@ -1575,7 +1910,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         else:
             generation_spec = None
 
-        doc_ids_raw = row[5]
+        doc_ids_raw = col["document_ids"]
         if doc_ids_raw is None:
             document_ids: list[str] = []
         elif isinstance(doc_ids_raw, str):
@@ -1585,7 +1920,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
         else:
             document_ids = []
 
-        props_raw = row[6]
+        props_raw = col["properties"]
         if isinstance(props_raw, str):
             props = json.loads(props_raw)
         elif isinstance(props_raw, dict):
@@ -1594,16 +1929,16 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             props = {}
 
         return {
-            "node_id": row[1],
-            "node_type": row[2],
-            "node_role": row[3] or "semantic",
+            "node_id": col["node_id"],
+            "node_type": col["node_type"],
+            "node_role": col["node_role"] or "semantic",
             "generation_spec": generation_spec,
             "document_ids": document_ids,
             "properties": props,
-            "created_at": cls._to_iso(row[7]),
-            "updated_at": cls._to_iso(row[8]),
-            "valid_from": cls._to_iso(row[9]),
-            "valid_to": cls._to_iso(row[10]),
+            "created_at": cls._to_iso(col["created_at"]),
+            "updated_at": cls._to_iso(col["updated_at"]),
+            "valid_from": cls._to_iso(col["valid_from"]),
+            "valid_to": cls._to_iso(col["valid_to"]),
         }
 
     @classmethod

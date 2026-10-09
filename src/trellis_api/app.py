@@ -9,6 +9,7 @@ from pathlib import Path
 
 import structlog
 from fastapi import Depends, FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -20,6 +21,7 @@ from trellis.stores.registry import StoreRegistry
 from trellis_api.auth import require_scope, warn_if_unauthenticated
 from trellis_api.middleware import (
     request_id_middleware,
+    request_validation_error_handler,
     trellis_error_handler,
     unhandled_exception_handler,
 )
@@ -61,6 +63,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
     _registry.close()
     _registry = None
     logger.info("api_stores_closed")
+
+
+def register_exception_handlers(app: FastAPI) -> None:
+    """Register the three handlers that shape an error response.
+
+    Shared by :func:`create_app` and the in-process testing shim
+    (:func:`trellis.testing.inmemory._build_app`), so a ``TrellisError`` or
+    a request validation error answers the same status and body from both,
+    except the shim's null ``request_id``. An untyped exception still raises
+    into a shim test: Starlette re-raises it after sending the 500, and the
+    shim's clients propagate it.
+    """
+    # Translate uncaught exceptions into a structured 500 envelope so
+    # responses don't leak internal types or stack frames.
+    app.add_exception_handler(Exception, unhandled_exception_handler)
+
+    # In front of it for the typed hierarchy: those exceptions were
+    # written for an operator and the catch-all discarded every word of
+    # them, answering ``500 internal_error`` for a damaged config file
+    # that names its own recovery command (#459). Registered on the base
+    # class — Starlette resolves a handler by walking the exception's
+    # MRO, so one registration covers every subclass and a new one is
+    # covered the day it is added, rather than the day someone remembers
+    # a roster (#443).
+    app.add_exception_handler(TrellisError, trellis_error_handler)
+
+    # Over FastAPI's default 422 handler, which raises on an error echoing
+    # ``NaN`` or ``Infinity`` from the body, so the catch-all answers 500.
+    # Every finite 422 is unchanged.
+    app.add_exception_handler(RequestValidationError, request_validation_error_handler)
 
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -127,19 +159,9 @@ def create_app() -> FastAPI:
     # version, and /api/v1 routes all log with the same request_id.
     app.add_middleware(BaseHTTPMiddleware, dispatch=request_id_middleware)
 
-    # Translate uncaught exceptions into a structured 500 envelope so
-    # responses don't leak internal types or stack frames.
-    app.add_exception_handler(Exception, unhandled_exception_handler)
-
-    # In front of it for the typed hierarchy: those exceptions were
-    # written for an operator and the catch-all discarded every word of
-    # them, answering ``500 internal_error`` for a damaged config file
-    # that names its own recovery command (#459). Registered on the base
-    # class — Starlette resolves a handler by walking the exception's
-    # MRO, so one registration covers every subclass and a new one is
-    # covered the day it is added, rather than the day someone remembers
-    # a roster (#443).
-    app.add_exception_handler(TrellisError, trellis_error_handler)
+    # The structured-500 / TrellisError / non-finite-422 handlers — shared
+    # with the in-process testing shim, see register_exception_handlers.
+    register_exception_handlers(app)
 
     # OpenTelemetry + Prometheus — no-op when the ``observability``
     # extra isn't installed or ``TRELLIS_DISABLE_OBSERVABILITY`` is set.

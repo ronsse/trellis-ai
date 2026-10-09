@@ -17,6 +17,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from tests.policy_shapes import DEGENERATE_POLICY_FILES, DEGENERATE_POLICY_IDS
+from tests.recovery_command import expected_recovery
 from tests.structlog_isolation import IsolatedCliRunner
 from tests.unreadable_paths import (
     UNREADABLE_PATH_IDS,
@@ -228,7 +229,7 @@ class TestDefaultPostureIsTransparent:
         )
         # entity.create requires args the registry validates.
         result = gated.execute(Command(operation=Operation.ENTITY_CREATE, args={}))
-        assert result.status == CommandStatus.FAILED
+        assert result.status == CommandStatus.REJECTED
 
     def test_build_curate_executor_wires_a_gate(self, tmp_path: Path) -> None:
         """The wiring itself: the factory must attach a gate, not None."""
@@ -714,7 +715,7 @@ class TestTheWriteCannotLaunderTheDamage:
         # 2. The write that used to launder it is refused...
         with pytest.raises(DegradedStoreWriteError) as exc_info:
             store.add(_policy(rules=[PolicyRule(operation="*", action="warn")]))
-        assert exc_info.value.recovery == f"mv {path} {path}.corrupt"
+        assert exc_info.value.recovery == expected_recovery(path)
 
         # 3. ...so the damaged bytes are still on disk...
         assert path.read_bytes() == damaged_bytes

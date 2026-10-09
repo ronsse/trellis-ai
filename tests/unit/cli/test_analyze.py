@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
+from tests.recovery_command import expected_recovery
 from trellis.errors import StaleStoreWriteError
 from trellis.learning import PROMOTE_RECOMMENDATIONS
 from trellis.retrieve.token_pricing import _INPUT_PRICE_PER_MTOK
@@ -652,7 +653,7 @@ class TestAdvisoryCommandsOnADegradedStore:
         assert result.exit_code == EXIT_STORE, result.output
         data = json.loads(result.stdout.strip())
         assert data["store_degradation"]["reason"] == "malformed_json"
-        assert data["store_degradation"]["recovery"] == f"mv {path} {path}.corrupt"
+        assert data["store_degradation"]["recovery"] == expected_recovery(path)
         assert data["advisories_stored"] == 0
 
     def test_effectiveness_exits_store_rather_than_traceback(
@@ -1739,3 +1740,61 @@ class TestAnalyzeHealthStraySection:
         # The pre-existing rate is reported unchanged beside it: the caller
         # did cite, which is exactly why one number cannot carry both facts.
         assert serve["pack_attribution_rate"] == pytest.approx(1.0)
+
+
+class TestAnalyzeHealthFailedStrategySection:
+    """A failed strategy reaches ``analyze health``; its exception text never does."""
+
+    def _seed(self, registry: StoreRegistry, *, strategy: str = "semantic") -> None:
+        event_log = registry.operational.event_log
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="pack_1",
+            entity_type="pack",
+            payload={
+                "strategy_failures": [
+                    {
+                        "strategy": strategy,
+                        "error_class": "RuntimeError",
+                        "message": "synthetic/secret/path.db never-a-real-dsn",
+                    }
+                ]
+            },
+        )
+
+    def test_text_warns_with_the_strategy_name_verbatim(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        # A markup-shaped name must neither crash Rich nor lose its tag text.
+        self._seed(temp_stores, strategy="[bold]sem[/x]")
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert "WARN" in out
+        assert "failed retrieval strategy ([bold]sem[/x]: 1)" in out
+        assert "synthetic/secret/path.db" not in out
+        assert "RuntimeError" not in out
+
+    def test_json_carries_the_failed_strategy_fields(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed(temp_stores, strategy="graph")
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "warn"
+        assert any("graph" in reason for reason in payload["reasons"])
+        failed = payload["serve"]["failed_strategies"]
+        assert failed["packs"] == 1
+        assert failed["by_strategy"] == {"graph": 1}
+        assert failed["latest_at"] is not None
+        # Counts and strategy names only — never the exception text, in
+        # either the dedicated block or anywhere else in the payload.
+        dumped = result.stdout
+        assert "synthetic/secret/path.db" not in dumped
+        assert "RuntimeError" not in dumped

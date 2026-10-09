@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from trellis.errors import TrellisError
+
 #: Upper bound for a passed-through message. Exception text beyond this
 #: is almost always a wrapped stack dump or an echoed payload; the
 #: interesting part (the leading error statement) survives truncation.
@@ -57,12 +59,39 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"(?i)\b(select\s+.+?\s+from\s|insert\s+into\s|update\s+\S+\s+set\s"
         r"|delete\s+from\s|drop\s+(table|database)\s)"
     ),
+    # PostgreSQL row values, quoted by a constraint violation's DETAIL
+    # line: "Key (name)=(value) already exists." (unique, foreign key and
+    # exclusion; the column list can nest parentheses) and "Failing row
+    # contains (...)." (NOT NULL and CHECK). English wording only: a server
+    # with another lc_messages translates both.
+    re.compile(r"\bKey \(.*?\)=\(|\bFailing row contains \("),
+    # Neo4j's uniqueness violation quotes the value: "Node(<n>) already
+    # exists with label `<Label>` and property `<prop>` = '<value>'".
+    re.compile(r"\balready exists with label `[^`]*` and property `[^`]*` = '"),
+    # ArcadeDB's, over Bolt: "Duplicated key [<value>] found on index
+    # '<Label>[<prop>]' ...". The prefix alone, because the value can hold
+    # its own "]": an alias claim key is a JSON array.
+    re.compile(r"\bDuplicated key \["),
+    # Neo4j's *constraint-creation* violation quotes the value too, raised
+    # when the stores' startup schema DDL (``CREATE CONSTRAINT ... IS
+    # UNIQUE``) runs over rows that already duplicate it: "Both Node(<n>)
+    # and Node(<n>) have the label `<Label>` and property `<prop>` =
+    # '<value>'". Distinct wording from the write-time violation above.
+    re.compile(r"\bhave the label `[^`]*` and property `[^`]*` = '"),
 )
 
 _LONG_TOKEN_RUN = re.compile(
     r"(?<![A-Za-z0-9+_-])[A-Za-z0-9+_-]{40,}(?![A-Za-z0-9+_-])"
 )
 _PATH_SEPARATORS = frozenset("/\\")
+
+#: Characters scanned past ``max_len``. Only ``text[:max_len]`` reaches the
+#: output, but a secret starting there can complete its pattern past the
+#: cut: a long-opaque-token run needs 40 characters, and the email,
+#: credential-URL and SQL patterns end on the ``@`` or ``from`` that follows
+#: the sensitive text. 500 covers most DSN userinfo and column lists; the
+#: patterns' worst-case backtracking over a 1000-character window is ~3 ms.
+_SCAN_MARGIN = 500
 
 
 def _is_repeated_character_path_component(text: str, match: re.Match[str]) -> bool:
@@ -91,14 +120,28 @@ def sanitize_error_message(text: str, *, max_len: int = DEFAULT_MAX_LEN) -> str:
     Clean text passes through so operator-authored Trellis error
     messages ("entity_type 'precedent' not registered") stay useful in
     JSON output. Text containing an email, an inline-credential URL, a
-    secret-shaped assignment, a long token-shaped run, or raw SQL is
-    replaced wholesale with :data:`SUPPRESSED_MARKER` — partial
+    secret-shaped assignment, a long token-shaped run, raw SQL, a
+    PostgreSQL row value, or a Neo4j or ArcadeDB duplicate-constraint row
+    value is replaced wholesale with :data:`SUPPRESSED_MARKER` — partial
     redaction is not attempted because any transform of the original
-    text risks leaving a recoverable fragment.
+    text risks leaving a recoverable fragment. The heuristics scan only
+    ``text[:max_len + _SCAN_MARGIN]``, so their cost does not grow with
+    the input. A match that cannot complete inside that window is missed:
+    a leak wholly past it no longer suppresses the visible prefix, and a
+    secret straddling the cut by more than the margin shows its start.
+
+    Raises:
+        ValueError: if ``max_len`` is negative — ``text[:max_len]`` then
+            keeps everything but the last few characters, which can run
+            past the scanned window and return an unscanned secret.
     """
-    if any(pattern.search(text) for pattern in _LEAK_PATTERNS):
+    if max_len < 0:
+        msg = f"max_len must be >= 0; got {max_len!r}"
+        raise ValueError(msg)
+    window = text[: max_len + _SCAN_MARGIN]
+    if any(pattern.search(window) for pattern in _LEAK_PATTERNS):
         return SUPPRESSED_MARKER
-    if _has_long_opaque_token(text):
+    if _has_long_opaque_token(window):
         return SUPPRESSED_MARKER
     if len(text) > max_len:
         return text[:max_len] + "…[truncated]"
@@ -155,6 +198,23 @@ def describe_yaml_error(exc: BaseException) -> str:
         f"a value could not be constructed ({type(exc).__name__}); check"
         " explicit tags such as !!int, !!float or !!bool, and dates"
     )
+
+
+def render_exception_detail(exc: BaseException) -> str:
+    """Render a caught exception's text for a caller-facing message.
+
+    A ``TrellisError`` keeps its own text, on the convention that Trellis
+    composes it without raw driver text (a ``StoreError`` names its cause
+    by type). Any other exception's text can be a driver's, such as a
+    Postgres DETAIL line, so it goes through :func:`sanitize_error_message`:
+    a clean message (a timeout) still reads, and a leak-shaped one becomes
+    the static marker. The sanitizer is a deny-list, so a leak in a shape
+    it does not know still passes. Log the full text on an operator
+    channel first; this decides only what the caller sees.
+    """
+    if isinstance(exc, TrellisError):
+        return str(exc)
+    return sanitize_error_message(str(exc))
 
 
 def sanitized_error_payload(exc: BaseException, **context: Any) -> dict[str, Any]:

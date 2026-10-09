@@ -223,6 +223,51 @@ def _bind_entity_name_alias(
     return result
 
 
+_REWRITE_ATTEMPTS = 5
+
+
+def _rewrite_current_node(
+    store: GraphStore,
+    node_id: str,
+    build: Callable[[dict[str, Any]], dict[str, Any] | None],
+) -> dict[str, Any] | None:
+    """Write a new version of ``node_id`` computed from its current one.
+
+    ``build`` receives the current row and returns the fields to change
+    (``properties``, optionally ``node_type`` or ``document_ids``), or
+    ``None`` to decline. Every other field is carried forward from the row:
+    ``node_role`` and ``generation_spec`` are immutable across versions, and
+    ``document_ids`` is normalised from ``[]`` to ``None`` ("no link").
+
+    The write is a compare-and-set on the row's ``valid_from``, so it never
+    re-creates a node purged after the read. When another writer replaced
+    the version in between, the node is re-read and ``build`` re-applied, at
+    most ``_REWRITE_ATTEMPTS`` times in all.
+
+    Returns the fields written, or ``None`` when the node is absent (never
+    existed, or purged mid-command) or ``build`` declined. Raises
+    :class:`StoreError` when every attempt lost to a concurrent writer.
+    """
+    for _attempt in range(_REWRITE_ATTEMPTS):
+        node = store.get_node(node_id)
+        if node is None:
+            return None
+        changes = build(node)
+        if changes is None:
+            return None
+        fields: dict[str, Any] = {
+            "node_type": node["node_type"],
+            "node_role": node.get("node_role", "semantic"),
+            "generation_spec": node.get("generation_spec"),
+            "document_ids": node.get("document_ids") or None,
+            **changes,
+        }
+        if store.update_node_if_current(node_id, node["valid_from"], **fields):
+            return fields
+    msg = f"Node {node_id} changed during each of {_REWRITE_ATTEMPTS} rewrite attempts"
+    raise StoreError(msg, store="graph")
+
+
 class TraceIngestHandler:
     """Validate a trace, store it, and emit TRACE_INGESTED.
 
@@ -236,6 +281,12 @@ class TraceIngestHandler:
     handler returns the existing id without re-emitting an event. Combined
     with ``Command.idempotency_key`` (executor-level FIFO + EventLog-backed
     cross-restart check), repeated submissions are safe.
+
+    A blank ``trace_id`` (empty or whitespace-only) is refused with
+    ``ValidationError`` code ``trace_id_empty`` before the store is read.
+    Stored under ``""``, it would make every later blank-id trace "already
+    ingested". The check sits here, not on ``Trace``, so a stored trace with
+    an empty id still loads.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -244,6 +295,9 @@ class TraceIngestHandler:
     def handle(self, command: Command) -> tuple[str | None, str]:
         raw = command.args["trace"]
         trace = raw if isinstance(raw, Trace) else Trace.model_validate(raw)
+        if not trace.trace_id.strip():
+            msg = "trace_id must not be empty; omit it to have one generated"
+            raise ValidationError(msg, errors=[msg], code="trace_id_empty")
 
         store = self._registry.operational.trace_store
         if store.get(trace.trace_id) is not None:
@@ -318,7 +372,7 @@ class PrecedentPromoteHandler:
 
 
 class LabelAddHandler:
-    """Read node from graph store, add label to properties, upsert."""
+    """Read node from graph store, add label to properties, write a new version."""
 
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
@@ -328,28 +382,20 @@ class LabelAddHandler:
         label = command.args["label"]
         store = self._registry.knowledge.graph_store
 
-        node = store.get_node(target_id)
-        if node is None:
+        def add(node: dict[str, Any]) -> dict[str, Any]:
+            props = dict(node["properties"])
+            labels = props.get("labels", [])
+            if label not in labels:
+                labels.append(label)
+            props["labels"] = labels
+            return {"properties": props}
+
+        if _rewrite_current_node(store, target_id, add) is None:
             # Raised, not returned: the executor audits any return as a write
-            # that happened. ``code`` becomes the rejection's audit reason.
+            # that happened. ``code`` becomes the rejection's audit reason. A
+            # node purged mid-command is refused the same way.
             msg = f"Node not found: {target_id}"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
-
-        props = dict(node["properties"])
-        labels = props.get("labels", [])
-        if label not in labels:
-            labels.append(label)
-        props["labels"] = labels
-
-        # Preserve node_role + generation_spec — both are immutable across
-        # versions, so re-upsert must carry the existing values forward.
-        store.upsert_node(
-            node_id=target_id,
-            node_type=node["node_type"],
-            properties=props,
-            node_role=node.get("node_role", "semantic"),
-            generation_spec=node.get("generation_spec"),
-        )
 
         self._registry.operational.event_log.emit(
             EventType.LABEL_ADDED,
@@ -361,7 +407,7 @@ class LabelAddHandler:
 
 
 class LabelRemoveHandler:
-    """Read node, remove label from properties, upsert."""
+    """Read node, remove label from properties, write a new version."""
 
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
@@ -371,26 +417,18 @@ class LabelRemoveHandler:
         label = command.args["label"]
         store = self._registry.knowledge.graph_store
 
-        node = store.get_node(target_id)
-        if node is None:
+        def remove(node: dict[str, Any]) -> dict[str, Any]:
+            props = dict(node["properties"])
+            labels = props.get("labels", [])
+            if label in labels:
+                labels.remove(label)
+            props["labels"] = labels
+            return {"properties": props}
+
+        if _rewrite_current_node(store, target_id, remove) is None:
             # Raised, as in LabelAddHandler.
             msg = f"Node not found: {target_id}"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
-
-        props = dict(node["properties"])
-        labels = props.get("labels", [])
-        if label in labels:
-            labels.remove(label)
-        props["labels"] = labels
-
-        # Preserve node_role + generation_spec (immutable across versions).
-        store.upsert_node(
-            node_id=target_id,
-            node_type=node["node_type"],
-            properties=props,
-            node_role=node.get("node_role", "semantic"),
-            generation_spec=node.get("generation_spec"),
-        )
 
         self._registry.operational.event_log.emit(
             EventType.LABEL_REMOVED,
@@ -550,14 +588,16 @@ class EntityUpdateHandler:
     ``entity.update`` command with "No handler registered for:
     entity.update" — this closes that gap.
 
-    **SCD-2 discipline.** The update is never an in-place edit. Reading the
-    current version and re-``upsert_node``-ing closes the old version
-    (``valid_to`` is set) and inserts a fresh version row;
-    ``get_node_history`` is the audit trail. ``node_role`` and
-    ``generation_spec`` are immutable across versions (the graph store
+    **SCD-2 discipline.** The update is never an in-place edit. The new
+    version is written by a compare-and-set on the version read
+    (``_rewrite_current_node``), which closes the old version (``valid_to``
+    is set) and inserts a fresh version row; ``get_node_history`` is the
+    audit trail. A node purged between the read and the write is refused
+    like a missing one, not re-created; a version replaced by another
+    writer in between is re-read and the update re-applied. ``node_role``
+    and ``generation_spec`` are immutable across versions (the graph store
     enforces role immutability via ``check_node_role_immutable``), so they
-    are carried forward from the existing version rather than reset to the
-    ``upsert_node`` defaults — the same discipline
+    are carried forward from the existing version — the same discipline
     :class:`LabelAddHandler` uses.
 
     **Partial update.** ``properties`` is *merged* into the existing bag
@@ -579,67 +619,58 @@ class EntityUpdateHandler:
     def handle(self, command: Command) -> tuple[str | None, str]:
         entity_id = command.args["entity_id"]
         store = self._registry.knowledge.graph_store
-
-        existing = store.get_node(entity_id)
-        if existing is None:
-            # Surface as a typed NotFoundError → the executor maps it to a
-            # FAILED CommandResult (StoreError branch) rather than a silent
-            # success. Updating a nonexistent entity is a caller error.
-            raise NotFoundError(entity_type="entity", entity_id=entity_id)
-
-        # Partial update: merge caller-supplied properties onto the existing
-        # bag, then let an explicit ``name`` win.
-        props: dict[str, Any] = dict(existing["properties"])
-        props.update(command.args.get("properties") or {})
-        if "name" in command.args:
-            props["name"] = command.args["name"]
-
-        # ``node_type`` is mutable across versions but defaults to
-        # carry-forward when the caller omits ``entity_type``.
-        node_type = command.args.get("entity_type") or existing["node_type"]
-
-        # Carry the existing document link forward unless the caller supplies
-        # a replacement. ``get_node`` always returns ``document_ids`` as a
-        # (possibly empty) list; normalise an empty list to ``None`` ("no
-        # link") so ``validate_document_ids`` sees a clean value.
-        if "document_ids" in command.args:
-            document_ids = command.args["document_ids"]
-        else:
-            document_ids = existing.get("document_ids") or None
-
-        node_role = existing.get("node_role", "semantic")
-        node_id = store.upsert_node(
-            node_id=entity_id,
-            node_type=node_type,
-            properties=props,
-            node_role=node_role,
-            generation_spec=existing.get("generation_spec"),
-            document_ids=document_ids,
-        )
-        final_name = props.get("name")
         supplied_properties = command.args.get("properties") or {}
+
+        def update(existing: dict[str, Any]) -> dict[str, Any]:
+            # Partial update: merge caller-supplied properties onto the
+            # existing bag, then let an explicit ``name`` win.
+            props: dict[str, Any] = dict(existing["properties"])
+            props.update(supplied_properties)
+            if "name" in command.args:
+                props["name"] = command.args["name"]
+            changes: dict[str, Any] = {"properties": props}
+            # ``node_type`` is mutable across versions but carries forward
+            # when the caller omits ``entity_type``.
+            if command.args.get("entity_type"):
+                changes["node_type"] = command.args["entity_type"]
+            # The document link carries forward unless the caller supplies a
+            # replacement.
+            if "document_ids" in command.args:
+                changes["document_ids"] = command.args["document_ids"]
+            return changes
+
+        written = _rewrite_current_node(store, entity_id, update)
+        if written is None:
+            # Input to fix, not a store failure: refused like a label on a
+            # missing node (REJECTED, ``code`` the audit reason).
+            msg = f"Node not found: {entity_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
+
+        # Bound and emitted only after the write succeeded, so a refused
+        # update leaves neither an alias nor an event.
+        final_name = written["properties"].get("name")
         name_was_supplied = "name" in command.args or (
             isinstance(supplied_properties, dict) and "name" in supplied_properties
         )
         if name_was_supplied:
             _bind_entity_name_alias(
                 store,
-                entity_id=node_id,
+                entity_id=entity_id,
                 name=final_name,
             )
 
         self._registry.operational.event_log.emit(
             EventType.ENTITY_UPDATED,
             source="mutation_executor",
-            entity_id=node_id,
-            entity_type=node_type,
+            entity_id=entity_id,
+            entity_type=written["node_type"],
             payload={
-                "name": props.get("name"),
-                "node_role": node_role,
-                "document_ids": document_ids or [],
+                "name": final_name,
+                "node_role": written["node_role"],
+                "document_ids": written["document_ids"] or [],
             },
         )
-        return node_id, f"Entity updated: {node_id}"
+        return entity_id, f"Entity updated: {entity_id}"
 
 
 class AliasUpsertHandler:
@@ -1026,17 +1057,21 @@ class RedactionApplyHandler:
     ``subject_entity_id`` as a property, so property-based queries keep
     serving them after the purge; their ids ride the payload so the
     operator can redact each one individually (they are graph nodes — this
-    same verb applies). A ``target_id`` that is not a graph node raises
-    :class:`~trellis.errors.NotFoundError` (→ ``CommandStatus.FAILED``).
+    same verb applies). A ``target_id`` that is not a graph node is refused
+    (``code="target_not_found"`` → ``CommandStatus.REJECTED``).
 
-    Idempotency: re-redacting a purged id fails with ``NotFoundError``, and
-    a concurrent-purge race is detected via ``delete_node``'s return value
-    so the loser never emits a second audit event; use
-    ``Command.idempotency_key`` when at-most-once semantics are required. A
-    blank ``reason`` is rejected (``code="redaction_reason_required"``) and
-    an over-long one too (``code="redaction_reason_too_long"``) — the
-    recorded justification is the point of governed redaction, and it must
-    stay short and content-free.
+    Idempotency: re-redacting a purged id is refused the same way, and a
+    concurrent-purge race is detected via ``delete_node``'s return value:
+    the loser raises :class:`~trellis.errors.NotFoundError`
+    (→ ``CommandStatus.FAILED``) and emits no second
+    ``REDACTION_APPLIED``. Both succeed, each emitting one, only when
+    ``delete_node`` returns ``True`` to both (see ``GraphStore.delete_node``).
+    Use ``Command.idempotency_key`` when at-most-once semantics are
+    required. A blank ``reason`` is rejected
+    (``code="redaction_reason_required"``) and an over-long one too
+    (``code="redaction_reason_too_long"``) — the recorded justification is
+    the point of governed redaction, and it must stay short and
+    content-free.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -1068,7 +1103,10 @@ class RedactionApplyHandler:
         graph = self._registry.knowledge.graph_store
         node = graph.get_node(target_id)
         if node is None:
-            raise NotFoundError(entity_type="entity", entity_id=target_id)
+            # Input to fix, not a store failure: refused like a label on a
+            # missing node (REJECTED, ``code`` the audit reason, CLI exit 2).
+            msg = f"Node not found: {target_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
 
         entity_type = node["node_type"]
         history = graph.get_node_history(target_id)
@@ -1359,17 +1397,23 @@ class RetentionPruneHandler:
         archived = 0
         skipped = 0
         resynced = 0
+        unfinished: Exception | None = None
         if not dry_run:
-            for candidate in report.candidates:
-                if self._archive(candidate, reason):
-                    archived += 1
-                else:
-                    skipped += 1
-            # Self-healing: an item archived before the vector sync existed
-            # still has a stale snapshot, and the semantic path serves from
-            # that snapshot. Re-running the prune repairs them — no new verb
-            # for what is a one-shot consequence of shipping the sync late.
-            resynced = self._resync_archived(report.already_archived_ids)
+            try:
+                for candidate in report.candidates:
+                    if self._archive(candidate, reason):
+                        archived += 1
+                    else:
+                        skipped += 1
+                # Self-healing: an item archived before the vector sync
+                # existed still has a stale snapshot, and the semantic path
+                # serves from that snapshot. Re-running the prune repairs
+                # them — no new verb for what is a one-shot consequence of
+                # shipping the sync late.
+                resynced = self._resync_archived(report.already_archived_ids)
+            except Exception as exc:
+                # Re-raised after the event: what was archived stays archived.
+                unfinished = exc
 
         by_reason: dict[str, int] = {}
         by_kind: dict[str, int] = {}
@@ -1437,6 +1481,8 @@ class RetentionPruneHandler:
                 " (WARNING: RETENTION_PRUNED audit emit failed; "
                 "payload preserved in operator logs)"
             )
+        if unfinished is not None:
+            raise unfinished
         return command.command_id, message
 
     def _resync_archived(self, item_ids: list[str]) -> int:
@@ -1508,23 +1554,16 @@ class RetentionPruneHandler:
             return True
 
         graph = self._registry.knowledge.graph_store
-        node = graph.get_node(candidate.item_id)
-        if node is None:
-            return False
-        props = dict(node["properties"])
-        props[LIFECYCLE_KEY] = lifecycle
-        # SCD-2: re-upserting closes the current version and opens a new one,
+
+        def archive(node: dict[str, Any]) -> dict[str, Any]:
+            props = dict(node["properties"])
+            props[LIFECYCLE_KEY] = lifecycle
+            return {"properties": props}
+
+        # SCD-2: the rewrite closes the current version and opens a new one,
         # so the pre-archival state stays readable via get_node_history and
-        # ``as_of``. Role and generation_spec are immutable across versions.
-        graph.upsert_node(
-            node_id=candidate.item_id,
-            node_type=node["node_type"],
-            properties=props,
-            node_role=node.get("node_role", "semantic"),
-            generation_spec=node.get("generation_spec"),
-            document_ids=node.get("document_ids") or None,
-        )
-        return True
+        # ``as_of``. A node purged since the resolve is skipped, not re-created.
+        return _rewrite_current_node(graph, candidate.item_id, archive) is not None
 
 
 class RetentionRestoreHandler:
@@ -1576,11 +1615,16 @@ class RetentionRestoreHandler:
 
         restored: list[str] = []
         skipped: list[str] = []
-        for item_id in item_ids:
-            if self._restore(item_id):
-                restored.append(item_id)
-            else:
-                skipped.append(item_id)
+        unfinished: Exception | None = None
+        try:
+            for item_id in item_ids:
+                if self._restore(item_id):
+                    restored.append(item_id)
+                else:
+                    skipped.append(item_id)
+        except Exception as exc:
+            # Re-raised after the event: what was restored stays restored.
+            unfinished = exc
 
         payload: dict[str, Any] = {
             "reason": reason,
@@ -1610,6 +1654,8 @@ class RetentionRestoreHandler:
                 exc_info=True,
             )
             message += " (WARNING: RETENTION_RESTORED audit emit failed)"
+        if unfinished is not None:
+            raise unfinished
         return command.command_id, message
 
     def _restore(self, item_id: str) -> bool:
@@ -1641,7 +1687,7 @@ class RetentionRestoreHandler:
             # and since #420 ``GraphSearch`` decays off that same column
             # (``retrieve.strategies.GRAPH_RECENCY_CLOCK_FIELD``). So a
             # restored node neither re-enters the graph axis's candidate
-            # window nor gains rank inside it, and ``upsert_node`` needs no
+            # window nor gains rank inside it, and the rewrite needs no
             # ``preserve_updated_at`` equivalent. Fixed reader-side because
             # the writers that actually move a node's ``updated_at`` are the
             # ordinary ones (``entity.update``, extraction upserts), which no
@@ -1657,23 +1703,16 @@ class RetentionRestoreHandler:
             return True
 
         graph = self._registry.knowledge.graph_store
-        node = graph.get_node(item_id)
-        if node is None:
-            return False
-        props = dict(node["properties"])
-        record = props.get(LIFECYCLE_KEY)
-        if not isinstance(record, dict) or record.get("state") != ARCHIVED_STATE:
-            return False
-        props[LIFECYCLE_KEY] = current
-        graph.upsert_node(
-            node_id=item_id,
-            node_type=node["node_type"],
-            properties=props,
-            node_role=node.get("node_role", "semantic"),
-            generation_spec=node.get("generation_spec"),
-            document_ids=node.get("document_ids") or None,
-        )
-        return True
+
+        def restore(node: dict[str, Any]) -> dict[str, Any] | None:
+            props = dict(node["properties"])
+            record = props.get(LIFECYCLE_KEY)
+            if not isinstance(record, dict) or record.get("state") != ARCHIVED_STATE:
+                return None
+            props[LIFECYCLE_KEY] = current
+            return {"properties": props}
+
+        return _rewrite_current_node(graph, item_id, restore) is not None
 
 
 def create_curate_handlers(

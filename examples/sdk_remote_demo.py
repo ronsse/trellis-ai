@@ -1,9 +1,11 @@
-"""SDK remote-mode demo: same flow as sdk_local_demo, but over the REST API.
+"""SDK remote-mode demo: ingest a trace and assemble a pack over the REST API.
 
 STATUS: PREVIEW — examples are in flux while parallel work lands. Expect
 breaking changes before the next minor release.
 
-The only difference is `base_url=...` on the client. Use this mode when:
+Unlike sdk_local_demo (which talks to the in-memory API client, no server
+process), this one is `TrellisClient(base_url=...)` over HTTP against a
+real running `trellis-api` server. Use this mode when:
 - Multiple agents share one substrate (a centrally hosted Trellis).
 - You want process isolation between agents and stores.
 - You need to deploy stores on Postgres / pgvector / S3 behind a service.
@@ -21,11 +23,10 @@ from trellis_sdk import TrellisClient
 
 def main() -> None:
     client = TrellisClient(base_url="http://localhost:8420")
-    assert client.is_remote, "Client should be in remote mode"
 
     trace_id = client.ingest_trace(
         {
-            "source": "examples.sdk_remote_demo",
+            "source": "agent",
             "intent": "Investigate slow checkout endpoint",
             "steps": [
                 {

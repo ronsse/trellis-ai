@@ -18,7 +18,7 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
-from trellis.core.error_sanitize import describe_yaml_error
+from trellis.core.error_sanitize import describe_yaml_error, sanitize_error_message
 from trellis.core.path_presence import path_is_present
 from trellis.core.version import (
     STALENESS_FRESH,
@@ -994,7 +994,10 @@ def _print_skills_summary(
                 f"    [dim]skipped[/dim] {name} (already present; --force to overwrite)"
             )
         elif status == "failed":
-            console.print(f"    [red]failed[/red] {name}: {entry.get('error', '')}")
+            console.print(
+                f"    [red]failed[/red] {name}: {escape(entry.get('error', ''))}",
+                soft_wrap=True,
+            )
         else:
             console.print(f"    [green]{status}[/green] {name}")
 
@@ -1047,7 +1050,7 @@ def _refuse_option(msg: str, output_format: str) -> NoReturn:
     if output_format == "json":
         typer.echo(json.dumps({"status": "error", "error": msg}))
     else:
-        console.print(f"[red]Error:[/red] {escape(msg)}")
+        console.print(f"[red]Error:[/red] {escape(msg)}", soft_wrap=True)
     raise typer.Exit(EXIT_VALIDATION)
 
 
@@ -1408,7 +1411,8 @@ def _print_check_extractors_report(report: dict[str, Any]) -> None:
     else:
         suffix = f" ({via.removesuffix(', ')})" if via else ""
         console.print(
-            f"  [red]MISSING[/red] not configurable from {escape(config_path)}{suffix}"
+            f"  [red]MISSING[/red] not configurable from {escape(config_path)}{suffix}",
+            soft_wrap=True,
         )
     if llm["env_fallback_available"] and llm["env_fallback_applies"]:
         console.print(
@@ -1531,7 +1535,8 @@ def llm_routes(
         emit_json({"status": status, "routes": routes, "error": error})
     elif error is not None:
         console.print(
-            f"[red]{escape(str(error['setting']))}: {escape(error['message'])}[/red]"
+            f"[red]{escape(str(error['setting']))}: {escape(error['message'])}[/red]",
+            soft_wrap=True,
         )
     else:
         table = Table(title="LLM routes")
@@ -1665,19 +1670,25 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
     # a path through a regular file absent and raises on an unsearchable parent
     # or an overlong name. The read below reports each with the OS's reason.
     if not path_is_present(path):
-        console.print(f"[red]Config file not found: {escape(str(path))}[/red]")
+        console.print(
+            f"[red]Config file not found: {escape(str(path))}[/red]", soft_wrap=True
+        )
         raise typer.Exit(code=EXIT_VALIDATION)
 
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         reason = escape(exc.strerror or str(exc))
-        console.print(f"[red]Could not read {escape(str(path))}: {reason}[/red]")
+        console.print(
+            f"[red]Could not read {escape(str(path))}: {reason}[/red]", soft_wrap=True
+        )
         raise typer.Exit(code=EXIT_VALIDATION) from None
     except UnicodeDecodeError as exc:
         console.print(
             f"[red]Could not read {escape(str(path))}: it is not valid"
-            f" {escape(exc.encoding)} text (byte offset {escape(str(exc.start))})[/red]"
+            f" {escape(exc.encoding)} text (byte offset "
+            f"{escape(str(exc.start))})[/red]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_VALIDATION) from None
     try:
@@ -1685,14 +1696,18 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
     except Exception as exc:
         # ``str(exc)`` prints the offending line, which can hold a password.
         reason = escape(describe_yaml_error(exc))
-        console.print(f"[red]Invalid YAML in {escape(str(path))}: {reason}[/red]")
+        console.print(
+            f"[red]Invalid YAML in {escape(str(path))}: {reason}[/red]",
+            soft_wrap=True,
+        )
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     graph_block = data.get("graph") if isinstance(data, dict) else None
     if not isinstance(graph_block, dict) or "backend" not in graph_block:
         console.print(
             f"[red]{escape(str(path))} must contain a 'graph:' block with a"
-            " 'backend' key[/red]"
+            " 'backend' key[/red]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_VALIDATION)
 
@@ -1798,10 +1813,15 @@ def migrate_graph(
             try:
                 report = migrator.run(dry_run=dry_run, strategy=strategy)
             except MigrationCapacityExceededError as exc:
-                console.print(f"[red]{escape(str(exc))}[/red]")
+                console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
                 raise typer.Exit(code=EXIT_INTERNAL) from exc
             except MigrationStepError as exc:
-                console.print(f"[red]Migration aborted: {escape(str(exc))}[/red]")
+                # str(exc) embeds the destination store's own error
+                # text, which can quote the row value that tripped it.
+                sanitized = escape(sanitize_error_message(str(exc)))
+                console.print(
+                    f"[red]Migration aborted: {sanitized}[/red]", soft_wrap=True
+                )
                 console.print(
                     "[yellow]Re-run with --continue-on-error to capture all "
                     "failures in one pass.[/yellow]"
@@ -1832,11 +1852,19 @@ def migrate_graph(
         from dataclasses import asdict  # noqa: PLC0415
 
         # Errors are list[tuple] which json doesn't serialize directly.
+        # The report keeps the raw text for library callers; only this
+        # payload, which reaches stdout, is sanitized.
         payload = asdict(report)
         payload["errors"] = [
-            {"target": target, "message": msg} for target, msg in payload["errors"]
+            {"target": target, "message": sanitize_error_message(msg)}
+            for target, msg in payload["errors"]
         ]
-        # step_failures already serialize cleanly via asdict (dataclass).
+        # The traceback is dropped, not sanitized: it repeats the text of
+        # every chained exception, and a sanitized traceback is either the
+        # marker or its first 500 characters, which can quote a cause.
+        for failure in payload["step_failures"]:
+            failure["message"] = sanitize_error_message(failure["message"])
+            del failure["traceback"]
         # ``status`` is the house contract for --format json callers
         # (docs/design/adr-cli-exit-codes.md), and it is derived from the
         # same ``failed`` flag as the exit code so the two cannot
@@ -1854,8 +1882,12 @@ def migrate_graph(
             console.print("[red]Errors:[/red]")
             for target, msg in report.errors:
                 # ``target`` is the legacy graph key the migration choked
-                # on — an identifier the operator re-runs against.
-                console.print(f"  [red]{escape(target)}[/red]: {escape(msg)}")
+                # on — an identifier the operator re-runs against. ``msg``
+                # is sanitized as in the JSON branch above.
+                sanitized_msg = escape(sanitize_error_message(msg))
+                console.print(
+                    f"  [red]{escape(target)}[/red]: {sanitized_msg}", soft_wrap=True
+                )
 
     if failed:
         raise typer.Exit(code=EXIT_STORE)
@@ -2032,7 +2064,7 @@ def _render_smoke_text(
         "info": "INFO",
         "skip": "SKIP",
     }
-    console.print(f"[bold]Trellis API smoke test[/bold] → {base_url}")
+    console.print(f"[bold]Trellis API smoke test[/bold] → {escape(base_url)}")
     console.print()
     for check in checks:
         status = check["status"]
@@ -2043,12 +2075,14 @@ def _render_smoke_text(
             line += f"  ({check['latency_ms']}ms)"
         console.print(line)
         if check.get("error"):
-            console.print(f"        [red]{check['error']}[/red]")
+            console.print(
+                f"        [red]{escape(check['error'])}[/red]", soft_wrap=True
+            )
         if check.get("note"):
             console.print(f"        [dim]{escape(check['note'])}[/dim]")
         if check.get("reason"):
             console.print(f"        [dim]{check['reason']}[/dim]")
-        if check["name"] == "readyz" and check.get("backends"):
+        if check["name"] == "readyz" and isinstance(check.get("backends"), dict):
             for backend, info in check["backends"].items():
                 if not isinstance(info, dict):
                     continue
@@ -2058,9 +2092,15 @@ def _render_smoke_text(
                 detail = f"{b_status}"
                 if b_latency is not None:
                     detail += f" ({b_latency}ms)"
-                console.print(f"        [{b_style}]{backend}[/{b_style}]: {detail}")
+                b_name = escape(backend)
+                console.print(
+                    f"        [{b_style}]{b_name}[/{b_style}]: {escape(detail)}"
+                )
                 if info.get("error"):
-                    console.print(f"          [red]{info['error']}[/red]")
+                    console.print(
+                        f"          [red]{escape(str(info['error']))}[/red]",
+                        soft_wrap=True,
+                    )
     console.print()
     total = sum(summary.values())
     console.print(
@@ -2203,7 +2243,7 @@ def _lookup_candidate_payload(event_log: Any, candidate_id: str) -> dict[str, An
         f"No WELL_KNOWN_CANDIDATE event found with candidate_id="
         f"{candidate_id!r}. Run 'trellis analyze schema-evolution' first."
     )
-    console.print(f"[red]{escape(msg)}[/red]")
+    console.print(f"[red]{escape(msg)}[/red]", soft_wrap=True)
     # Not-found is a workflow state (operator must run schema-evolution
     # first), not a malformed input — surface as EXIT_INTERNAL rather
     # than EXIT_VALIDATION.
@@ -2454,7 +2494,7 @@ def draft_promotion_adr(
             f"Refusing to overwrite existing ADR at {output_path}. "
             "Pass --force to overwrite (the prior content will be replaced)."
         )
-        console.print(f"[red]{escape(msg)}[/red]")
+        console.print(f"[red]{escape(msg)}[/red]", soft_wrap=True)
         # Overwrite-without-force is a destructive-action guard rather
         # than a malformed-input error — surface as EXIT_INTERNAL.
         raise typer.Exit(code=EXIT_INTERNAL)

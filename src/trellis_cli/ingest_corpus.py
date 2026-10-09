@@ -53,7 +53,8 @@ def _parse_tags(
                 )
             else:
                 console.print(
-                    f"[red]Invalid --tag {escape(repr(raw))}: expected k=v[/red]"
+                    f"[red]Invalid --tag {escape(repr(raw))}: expected k=v[/red]",
+                    soft_wrap=True,
                 )
             raise typer.Exit(code=EXIT_VALIDATION)
         metadata[key.strip()] = value.strip()
@@ -95,12 +96,13 @@ def _render_report(report: CorpusSyncReport) -> None:
         )
     for entry in report.pruned:
         pruned_name = entry.get("source_path") or entry["doc_id"]
-        console.print(f"  [red]prune [/red] {escape(pruned_name)}")
+        console.print(f"  [red]prune [/red] {escape(pruned_name)}", soft_wrap=True)
     for entry in report.prune_withheld:
         withheld_name = entry.get("source_path") or entry["doc_id"]
         console.print(
             f"  [yellow]withheld[/yellow] {escape(withheld_name)}: "
-            f"{escape(str(entry['detail']))}"
+            f"{escape(str(entry['detail']))}",
+            soft_wrap=True,
         )
     console.print(
         f"  new={counts['ingested']} updated={counts['updated']} "
@@ -121,7 +123,8 @@ def _render_report(report: CorpusSyncReport) -> None:
         )
         console.print(
             f"  [yellow]warning[/yellow] {escape(str(warning['kind']))}: "
-            f"{escape(detail)}"
+            f"{escape(detail)}",
+            soft_wrap=True,
         )
 
 
@@ -187,7 +190,9 @@ def ingest_corpus(
                 json.dumps({"status": "error", "message": f"path {reason}: {path}"})
             )
         else:
-            console.print(f"[red]Path {escape(reason)}: {escape(path)}[/red]")
+            console.print(
+                f"[red]Path {escape(reason)}: {escape(path)}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_VALIDATION)
 
     extra_metadata = _parse_tags(tag, domain, output_format)
@@ -211,7 +216,9 @@ def ingest_corpus(
         if output_format == "json":
             typer.echo(json.dumps(sanitized_error_payload(exc)))
         else:
-            console.print(f"[red]Corpus ingest failed: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Corpus ingest failed: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     status, exit_code = _sync_outcome(report)

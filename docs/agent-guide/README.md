@@ -20,6 +20,6 @@ Operational reference for AI agents interacting with the Trellis. These document
 | Layer | Entry Point | Best For |
 |-------|-------------|----------|
 | CLI (`trellis`) | `trellis <command>` | Scripts, CI/CD, human operators, agent tool calls |
-| REST API | `trellis admin serve` / `trellis-api` | Distributed deployments, SDK remote mode |
+| REST API | `trellis admin serve` / `trellis-api` | Distributed deployments, the SDK (HTTP-only) |
 | MCP Macro Tools | `trellis-mcp` | IDE integrations (Cursor, Cline, Claude Code) |
 | Python SDK | `from trellis_sdk import TrellisClient` | Orchestrators (LangGraph, CrewAI), custom agents |

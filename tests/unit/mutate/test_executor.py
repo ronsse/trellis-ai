@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from trellis.errors import ValidationError
+from trellis.errors import PolicyViolationError, StoreError, ValidationError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     BatchStrategy,
@@ -16,10 +18,12 @@ from trellis.mutate.commands import (
     CommandStatus,
     Operation,
 )
-from trellis.mutate.executor import MutationExecutor
+from trellis.mutate.executor import AUDIT_EMIT_FAILED_MARKER, MutationExecutor
 from trellis.schemas.enums import TraceSource
 from trellis.schemas.trace import Trace, TraceContext
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 
 def _cmd(
@@ -53,7 +57,7 @@ class TestMutationExecutor:
         # missing required args
         cmd = Command(operation=Operation.ENTITY_CREATE, args={})
         result = executor.execute(cmd)
-        assert result.status == CommandStatus.FAILED
+        assert result.status == CommandStatus.REJECTED
         assert "Validation failed" in result.message
 
     def test_policy_rejection(self) -> None:
@@ -115,7 +119,7 @@ class TestMutationExecutor:
         )
         result = executor.execute(_cmd())
         assert result.status == CommandStatus.FAILED
-        assert "DB error" in result.message
+        assert result.message == "Execution failed: RuntimeError"
 
     def test_emits_event_on_success(self) -> None:
         event_log = MagicMock()
@@ -155,7 +159,7 @@ class TestMutationExecutor:
         # Missing required args triggers validate-stage rejection
         result = executor.execute(Command(operation=Operation.ENTITY_CREATE, args={}))
 
-        assert result.status == CommandStatus.FAILED
+        assert result.status == CommandStatus.REJECTED
         event_log.emit.assert_called_once()
         event_type, source = event_log.emit.call_args.args
         assert event_type.value == "mutation.rejected"
@@ -384,6 +388,250 @@ class TestIdempotencyCacheEviction:
         assert result.status == CommandStatus.DUPLICATE
         assert "persisted" in result.message
 
+    def test_a_persisted_hit_enters_the_cache(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A key the event log answers for is cached, so the log is asked once.
+
+        A fresh executor starts with an empty cache, so its first replay of
+        a key an earlier executor ran is answered from the event log. The
+        next replay is answered from the cache.
+        """
+        log = SQLiteEventLog(tmp_path / "events.db")
+        earlier = MutationExecutor(
+            event_log=log, handlers={Operation.ENTITY_CREATE: _handler()}
+        )
+        ran = earlier.execute(_cmd(idempotency_key="syn-key"))
+        assert ran.status == CommandStatus.SUCCESS
+        asked: list[str] = []
+        has_key = log.has_idempotency_key
+
+        def counting_has_key(key: str) -> bool:
+            asked.append(key)
+            return has_key(key)
+
+        monkeypatch.setattr(log, "has_idempotency_key", counting_has_key)
+        handler = _handler()
+        fresh = MutationExecutor(
+            event_log=log, handlers={Operation.ENTITY_CREATE: handler}
+        )
+
+        first = fresh.execute(_cmd(idempotency_key="syn-key"))
+        second = fresh.execute(_cmd(idempotency_key="syn-key"))
+
+        assert (first.status, first.message) == (
+            CommandStatus.DUPLICATE,
+            "Duplicate command (persisted): syn-key",
+        )
+        assert (second.status, second.message) == (
+            CommandStatus.DUPLICATE,
+            "Duplicate command: syn-key",
+        )
+        assert asked == ["syn-key"]
+        handler.handle.assert_not_called()
+
+
+class _RefusesSynBad:
+    """Raises ``exc`` for the command named ``syn-bad``; succeeds otherwise.
+
+    Records every name it was asked to handle, so a test can tell a
+    command that ran from one answered DUPLICATE before reaching it.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.names: list[str] = []
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        name = command.args["name"]
+        self.names.append(name)
+        if name == "syn-bad":
+            raise self.exc
+        return f"ent-{name}", "ok"
+
+
+def _named(name: str, key: str) -> Command:
+    return _cmd(args={"entity_type": "service", "name": name}, idempotency_key=key)
+
+
+class TestIdempotencyKeyRecordedOnlyOnSuccess:
+    """Only a command whose handler succeeded makes its key a duplicate.
+
+    A command the handler refuses (REJECTED) or fails on (FAILED) leaves
+    its key free, so a corrected retry under the same key runs on the
+    same executor, as it does on a fresh one.
+    """
+
+    @pytest.mark.parametrize(
+        ("exc", "first_status"),
+        [
+            pytest.param(
+                ValidationError("syn refused", code="syn_refused"),
+                CommandStatus.REJECTED,
+                id="validation-rejected",
+            ),
+            pytest.param(
+                PolicyViolationError("syn denied", policy_id="syn-policy"),
+                CommandStatus.REJECTED,
+                id="policy-rejected",
+            ),
+            pytest.param(
+                StoreError("syn store down", store="syn"),
+                CommandStatus.FAILED,
+                id="store-failed",
+            ),
+            pytest.param(
+                RuntimeError("syn panic"),
+                CommandStatus.FAILED,
+                id="untyped-failed",
+            ),
+            pytest.param(
+                sqlite3.IntegrityError("syn constraint"),
+                CommandStatus.FAILED,
+                id="sqlite-failed",
+            ),
+        ],
+    )
+    def test_corrected_retry_under_the_same_key_runs(
+        self,
+        tmp_path: Path,
+        exc: Exception,
+        first_status: CommandStatus,
+    ) -> None:
+        log = SQLiteEventLog(tmp_path / "events.db")
+        handler = _RefusesSynBad(exc)
+        executor = MutationExecutor(
+            event_log=log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        first = executor.execute(_named("syn-bad", "syn-key-1"))
+        assert first.status == first_status
+        # The persisted check counts only executed mutations, so the
+        # refusal's own audit event does not make the key a duplicate.
+        assert log.has_idempotency_key("syn-key-1") is False
+
+        retry = executor.execute(_named("syn-fixed", "syn-key-1"))
+        assert retry.status == CommandStatus.SUCCESS, retry.message
+        assert retry.created_id == "ent-syn-fixed"
+        assert handler.names == ["syn-bad", "syn-fixed"]
+
+
+def _store_a_corrupt_row(path: Path) -> Callable[[], None]:
+    """Make the persisted read raise a real ``sqlite3.OperationalError``.
+
+    The read's ``json_extract`` raises on a ``mutation.executed`` row whose
+    payload is not JSON, for any key it has not matched before reaching the
+    row. Appends still work. Returns the step that deletes the row.
+    """
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO events (event_id, event_type, source, occurred_at,"
+        " recorded_at, payload_json) VALUES ('syn-corrupt', 'mutation.executed',"
+        " 'syn', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',"
+        " 'not json')"
+    )
+    conn.commit()
+
+    def recover() -> None:
+        conn.execute("DELETE FROM events WHERE event_id = 'syn-corrupt'")
+        conn.commit()
+        conn.close()
+
+    return recover
+
+
+class TestPersistedIdempotencyReadFails:
+    """An event log that cannot answer Stage 3's read fails the command closed.
+
+    Running the handler without the answer could write a command twice,
+    which is what Stage 3 exists to prevent. So the result is FAILED and the
+    handler does not run. The key is not recorded, so the same command runs
+    once the log can be read again.
+    """
+
+    def test_the_command_fails_closed_and_runs_once_the_log_recovers(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "events.db"
+        log = SQLiteEventLog(path)
+        handler = _handler(created_id="syn-node-1")
+        executor = MutationExecutor(
+            event_log=log, handlers={Operation.ENTITY_CREATE: handler}
+        )
+        earlier = _named("syn-earlier", "syn-key-earlier")
+        assert executor.execute(earlier).status == CommandStatus.SUCCESS
+        command = _named("syn-entity", "syn-key-read")
+        recover = _store_a_corrupt_row(path)
+
+        result = executor.execute(command)
+
+        # The exception's type only: a driver's text stays out of the result
+        # and out of the persisted event.
+        expected = "Idempotency check failed: OperationalError"
+        assert (result.status, result.message, result.warnings) == (
+            CommandStatus.FAILED,
+            expected,
+            [],
+        )
+        assert handler.handle.call_count == 1  # the earlier command's call
+        rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert [
+            (e.payload["command_id"], e.payload["reason"], e.payload["message"])
+            for e in rejected
+        ] == [(command.command_id, "idempotency_check_failed", expected)]
+
+        recover()
+        retry = executor.execute(command)
+
+        assert retry.status == CommandStatus.SUCCESS, retry.message
+        assert handler.handle.call_count == 2
+        executed = log.get_events(event_type=EventType.MUTATION_EXECUTED)
+        assert [e.payload["command_id"] for e in executed] == [
+            earlier.command_id,
+            command.command_id,
+        ]
+
+    def test_an_unwritable_log_fails_closed_with_the_audit_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the rejection event cannot be written either, the result says so."""
+        log = SQLiteEventLog(tmp_path / "events.db")
+        handler = _handler(created_id="syn-node-1")
+        executor = MutationExecutor(
+            event_log=log, handlers={Operation.ENTITY_CREATE: handler}
+        )
+        earlier = _named("syn-earlier", "syn-key-earlier")
+        assert executor.execute(earlier).status == CommandStatus.SUCCESS
+        command = _named("syn-entity", "syn-key-gone")
+
+        def refuse(*args: object) -> None:
+            msg = "syn event log refused"
+            raise sqlite3.OperationalError(msg)
+
+        monkeypatch.setattr(log, "has_idempotency_key", refuse)
+        monkeypatch.setattr(log, "append", refuse)
+
+        result = executor.execute(command)
+
+        assert (result.status, result.message) == (
+            CommandStatus.FAILED,
+            "Idempotency check failed: OperationalError",
+        )
+        assert [w.split(":")[0] for w in result.warnings] == [AUDIT_EMIT_FAILED_MARKER]
+        assert handler.handle.call_count == 1  # the earlier command's call
+
+        monkeypatch.undo()
+        retry = executor.execute(command)
+
+        assert retry.status == CommandStatus.SUCCESS, retry.message
+        assert handler.handle.call_count == 2
+        executed = log.get_events(event_type=EventType.MUTATION_EXECUTED)
+        assert [e.payload["command_id"] for e in executed] == [
+            earlier.command_id,
+            command.command_id,
+        ]
+
 
 class TestBatchExecution:
     def test_batch_sequential(self) -> None:
@@ -407,16 +655,16 @@ class TestBatchExecution:
         batch = CommandBatch(
             commands=[
                 _cmd(),
-                # will fail validation
+                # will be refused by validation
                 Command(operation=Operation.ENTITY_CREATE, args={}),
                 _cmd(),  # should not execute
             ],
             strategy=BatchStrategy.STOP_ON_ERROR,
         )
         results = executor.execute_batch(batch)
-        assert len(results) == 2  # stopped after failure
+        assert len(results) == 2  # stopped after the refusal
         assert results[0].status == CommandStatus.SUCCESS
-        assert results[1].status == CommandStatus.FAILED
+        assert results[1].status == CommandStatus.REJECTED
 
     @pytest.mark.parametrize("source", ["policy_gate", "handler"])
     def test_batch_stop_on_error_stops_on_a_rejection(self, source: str) -> None:
@@ -458,7 +706,7 @@ class TestBatchExecution:
         batch = CommandBatch(
             commands=[
                 _cmd(),
-                # will fail validation
+                # will be refused by validation
                 Command(operation=Operation.ENTITY_CREATE, args={}),
                 _cmd(),
             ],
@@ -467,7 +715,7 @@ class TestBatchExecution:
         results = executor.execute_batch(batch)
         assert len(results) == 3  # all attempted
         assert results[0].status == CommandStatus.SUCCESS
-        assert results[1].status == CommandStatus.FAILED
+        assert results[1].status == CommandStatus.REJECTED
         assert results[2].status == CommandStatus.SUCCESS
 
 
@@ -496,3 +744,35 @@ class TestBuildCurateExecutor:
         assert result.status == CommandStatus.SUCCESS
         assert result.created_id == trace.trace_id
         assert registry.operational.trace_store.get(trace.trace_id) is not None
+
+
+class TestSQLiteDriverError:
+    """A ``sqlite3.Error`` a SQLite store lets out of a handler is FAILED.
+
+    The SQLite stores, the default for every store, raise driver errors
+    unmapped on most write paths. ``query_only`` makes the graph store's
+    connection refuse writes, so the handler raises a real
+    ``sqlite3.OperationalError`` from inside the store.
+    """
+
+    def test_a_refused_write_is_failed_and_audited_once(self, tmp_path: Path) -> None:
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        registry = StoreRegistry(stores_dir=stores_dir)
+        registry.knowledge.graph_store._conn.execute("PRAGMA query_only = ON")
+        command = _cmd(args={"entity_type": "service", "name": "syn-entity"})
+
+        result = build_curate_executor(registry).execute(command)
+
+        assert result.status == CommandStatus.FAILED, result.message
+        events = registry.operational.event_log
+        rejected = events.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert [(e.payload["command_id"], e.payload["status"]) for e in rejected] == [
+            (command.command_id, "failed")
+        ]
+        assert events.get_events(event_type=EventType.MUTATION_EXECUTED) == []
+        # The caller reads the driver error's type and the audit its exact
+        # text: no SQL statement, path or traceback rides along in either.
+        driver_text = "attempt to write a readonly database"
+        assert result.message == "Execution failed: OperationalError"
+        assert rejected[0].payload["message"] == driver_text

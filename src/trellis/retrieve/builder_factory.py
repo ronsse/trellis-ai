@@ -28,11 +28,16 @@ from typing import TYPE_CHECKING, TypedDict
 
 import structlog
 
+from trellis.core.write_config import WriteBehaviourConfig
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import NamespaceSeedExtractor, build_strategies
 from trellis.stores.advisory_source import load_advisory_store
+from trellis_wire.axes import (
+    format_failed_axes_note,
+    format_misconfigured_semantic_note,
+)
 
 if TYPE_CHECKING:
     from trellis.retrieve.strategies import GraphSeedExtractor
@@ -56,6 +61,9 @@ SEMANTIC_AXIS = "semantic"
 #: make ``trellis admin write-config`` report something it does not
 #: govern. Same reasoning, and the same shape, as
 #: ``TRELLIS_CAPTURE_WARN_THRESHOLD`` in :mod:`trellis.ops.capture_health`.
+#: The one read-side exception is ``TRELLIS_PACK_HOLDOUT_RATE``, which
+#: lives there because the pack-effect measurement needs the rate in force
+#: stamped into write provenance on every ``PACK_ASSEMBLED`` row.
 #:
 #: It defaults **on** because the alternative is an opt-in nobody opts
 #: into, which leaves #375's defect — an axis that never consults the
@@ -116,6 +124,9 @@ def build_pack_builder(
         # Jaccard per the config's guidance table.
         semantic_dedup=SemanticDedupConfig(),
         project=project,
+        # The pack-effect holdout (``TRELLIS_PACK_HOLDOUT_RATE``), read per
+        # build like every surface's builder, so no surface escapes it.
+        holdout_rate=WriteBehaviourConfig.from_env().pack_holdout_rate,
     )
 
 
@@ -222,7 +233,7 @@ SEMANTIC_AXIS_NOTES: dict[str, str] = {
     ),
     "misconfigured": (
         "Semantic axis unavailable: an embedder is configured but the vector"
-        " backend did not initialise, so this pack is keyword + graph only."
+        " backend did not initialise, so this pack has no semantic results."
         " Re-run with TRELLIS_LOG_LEVEL=WARNING to see the backend error."
     ),
     "failed": (
@@ -230,6 +241,11 @@ SEMANTIC_AXIS_NOTES: dict[str, str] = {
         " the surviving axes. See PACK_ASSEMBLED.strategy_failures."
     ),
 }
+
+# ``format_failed_axes_note`` and ``format_misconfigured_semantic_note``
+# take no ``PackBuilder``, so they live in :mod:`trellis_wire.axes`, where
+# the HTTP-only SDK can import them, and are re-exported here for MCP.
+# ``tests/unit/wire/test_axes.py`` pins the identity.
 
 
 __all__ = [
@@ -239,4 +255,6 @@ __all__ = [
     "AxisReport",
     "build_pack_builder",
     "describe_axes",
+    "format_failed_axes_note",
+    "format_misconfigured_semantic_note",
 ]

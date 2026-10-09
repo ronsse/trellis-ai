@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.pack_holdout import drop_holdout
 from trellis.feedback.attribution import StrayCitationTally, served_item_ids
 from trellis.stores.base.event_log import EventType, merge_coverage, scan_events
 
@@ -144,6 +145,10 @@ def join_pack_feedback(
     ``entity_id`` and drops falsy ids. Returned so callers needing the
     raw count (e.g. effectiveness ``total_packs``) don't re-scan.
 
+    Withheld packs and the feedback naming them are dropped first
+    (:func:`~trellis.core.pack_holdout.drop_holdout`): every consumer of
+    this join analyses the served arm.
+
     Both reads go through :func:`~trellis.stores.base.event_log.scan_events`,
     so a window with more than ``limit`` events of either type keeps the
     **newest** ones rather than the oldest (#374). Callers that want to
@@ -195,14 +200,15 @@ def join_pack_events_with_coverage(
     feedback_scan = scan_events(
         event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
     )
+    served, feedback_events = drop_holdout(pack_scan.events, feedback_scan.events)
     pack_events: dict[str, Event] = {}
-    for event in pack_scan.events:
+    for event in served:
         if event.entity_id:
             pack_events[event.entity_id] = event
     return (
-        feedback_scan.events,
+        feedback_events,
         pack_events,
-        len(pack_scan.events),
+        len(served),
         merge_coverage(pack_scan.coverage, feedback_scan.coverage),
     )
 

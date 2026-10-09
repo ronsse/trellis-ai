@@ -110,7 +110,7 @@ flowchart TB
 
     subgraph Interfaces["🔌 Interfaces"]
         direction LR
-        CLI("CLI<br/>trellis") ~~~ MCP("MCP Server<br/>16 tools") ~~~ REST("REST API<br/>FastAPI") ~~~ SDK("Python SDK<br/>local + remote") ~~~ UI("Web UI<br/>Memory Explorer")
+        CLI("CLI<br/>trellis") ~~~ MCP("MCP Server<br/>16 tools") ~~~ REST("REST API<br/>FastAPI") ~~~ SDK("Python SDK<br/>HTTP client") ~~~ UI("Web UI<br/>Memory Explorer")
     end
 
     subgraph Core["⚙️ Core engine"]
@@ -361,17 +361,16 @@ trellis admin migrate-graph \
 
 Retrieval tools accept `max_tokens` (default 2000; `get_items` defaults to 4000, and the three sectioned tools to `retrieval.budgets` in `config.yaml`, or 4000 if it is unset). With `TRELLIS_ENABLE_EMBED_ON_INGEST=1` and an embedder configured, documents saved via `save_memory`, `save_knowledge`, `POST /documents`, `POST /evidence`, `trellis ingest corpus` / `conversations` or `trellis ingest dbt-manifest` become semantically retrievable immediately; backfill existing documents with `trellis admin reindex-vectors`.
 
-**Python SDK** — dual-mode (`import trellis_sdk`). Same API, flip `base_url` to go from in-process to HTTP.
+**Python SDK** — HTTP-only (`import trellis_sdk`): point `base_url` at a running `trellis admin serve`, or use `trellis.testing.in_memory_client` in tests. Against a server running `TRELLIS_AUTH_MODE=required`, pass `api_key=` so the client sends it as `Authorization: Bearer` on every request.
 
 ```python
 from trellis_sdk import TrellisClient
 
-client = TrellisClient()                                  # local
-client = TrellisClient(base_url="http://localhost:8420")  # remote
+client = TrellisClient(base_url="http://localhost:8420")
 
 pack = client.assemble_pack("deploy checklist for staging", max_tokens=2000)
 trace_id = client.ingest_trace(trace_dict)
-client.record_feedback(pack.pack_id, task_succeeded=True)
+client.record_feedback(pack["pack_id"], rating=0.8, helpful_item_ids=[...])
 ```
 
 Skill helpers return pre-summarized markdown strings for direct LLM injection:
@@ -475,7 +474,7 @@ The Claude Code / Cursor / Claude Desktop rows are first-class — `trellis-mcp`
 
 ## Examples & skill templates
 
-- [**examples/**](https://github.com/ronsse/trellis-ai/tree/main/examples) — runnable scripts: SDK local + remote, retrieve→act→record loop, custom extractor, custom classifier, LangGraph agent, batch ingest.
+- [**examples/**](https://github.com/ronsse/trellis-ai/tree/main/examples) — runnable scripts: SDK in-memory + remote, retrieve→act→record loop, custom extractor, custom classifier, LangGraph agent, batch ingest.
 - [**skills/**](https://github.com/ronsse/trellis-ai/tree/main/skills) — drop-in Claude Code skills: `retrieve-before-task`, `record-after-task`, `link-evidence`. Install with `trellis admin install-skills user` (or `trellis admin quickstart --with-skills user`).
 - [**docs/getting-started/**](https://github.com/ronsse/trellis-ai/tree/main/docs/getting-started) — IDE-specific MCP setup walkthroughs.
 

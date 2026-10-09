@@ -88,10 +88,10 @@ class CommandResult(VersionedModel):
 
     A REJECTED result names why in ``metadata["rejection_reason"]``, the
     ``reason`` its ``MUTATION_REJECTED`` event carries: ``policy_violation``,
-    ``immutable_core``, or a handler's ``ValidationError.code``
-    (``handler_validate`` when it set none). A caller holding only the
-    result, such as the CLI choosing an exit code, can then tell a policy
-    refusal from any other.
+    ``immutable_core``, ``validate`` (the operation registry's arg check),
+    or a handler's ``ValidationError.code`` (``handler_validate`` when it
+    set none). A caller holding only the result, such as the CLI choosing
+    an exit code, can then tell a policy refusal from any other.
     """
 
     command_id: str
@@ -195,6 +195,22 @@ class OperationRegistry:
         missing = required - set(command.args.keys())
         if missing:
             return False, [f"Missing required args: {', '.join(sorted(missing))}"]
+        # The one value checked here: a feedback rating is a 0.0-1.0 score,
+        # and POST /api/v1/commands/batch and MCP ``execute_mutation`` pass
+        # caller args straight through. The chained comparison is False for
+        # NaN and +/-Infinity, and compares an int too large for a float
+        # exactly, where ``math.isfinite`` would raise OverflowError.
+        if command.operation is Operation.FEEDBACK_RECORD:
+            rating = command.args["rating"]
+            if (
+                isinstance(rating, bool)
+                or not isinstance(rating, int | float)
+                or not 0.0 <= rating <= 1.0
+            ):
+                message = (
+                    f"rating must be a finite number in [0.0, 1.0], got {rating!r}"
+                )
+                return False, [message]
         return True, []
 
     def get_required_args(self, operation: Operation) -> set[str]:

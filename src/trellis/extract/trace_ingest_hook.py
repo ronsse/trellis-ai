@@ -14,6 +14,8 @@ Contract (mirrors the ``save_memory`` extraction stage):
   existing deployment sees byte-identical behaviour.
 * Runs **after** the trace is durably stored.  It only ever *reads* the
   trace; it never mutates it (traces are immutable).
+* Skipped when :func:`trace_already_ingested`, which each calling surface
+  reads before its write, finds the ``trace_id`` already stored.
 * Fully best-effort: any failure is logged and swallowed.  A broken
   extraction must NEVER fail the ingest.
 * Drafts go through ``result_to_batch`` → ``execute_batch`` with the
@@ -66,6 +68,7 @@ __all__ = [
     "batch_draft_counts",
     "extract_trace_batch",
     "run_trace_extraction",
+    "trace_already_ingested",
     "trace_extraction_enabled",
     "trace_extraction_min_confidence",
 ]
@@ -86,6 +89,36 @@ _MAX_LOGGED_FAILURES = 5
 def trace_extraction_enabled() -> bool:
     """``True`` iff ``TRELLIS_ENABLE_TRACE_EXTRACTION`` is set truthy."""
     return WriteBehaviourConfig.from_env().trace_extraction
+
+
+def trace_already_ingested(registry: StoreRegistry, trace_id: str) -> bool:
+    """Whether the trace store already holds ``trace_id``.
+
+    Each trace-ingest surface reads this *before* it submits the trace and
+    skips :func:`run_trace_extraction` when it is ``True``.  The handler
+    answers a stored ``trace_id`` as a success that stores nothing (traces
+    are immutable), with a result that differs from a fresh store's only
+    in its human-readable message, and after the write the store holds
+    the ``trace_id`` either way.  Extracting the submitted trace would
+    attach its agent and artifacts to the *stored* trace's ``trace:<id>``
+    node.
+
+    A trace another writer stores between this read and the handler's is
+    still extracted.  So is a stored trace whose read here fails while the
+    handler's read succeeds: a failed read logs
+    ``trace_duplicate_check_failed`` and answers ``False``.  A store that
+    cannot be read fails the handler's read too, and the surface reports
+    that failure.
+    """
+    try:
+        return registry.operational.trace_store.get(trace_id) is not None
+    except Exception:
+        # GRACEFUL-DEGRADATION: an advisory read on the write path.  An
+        # escaped exception would fail the ingest here, ahead of the
+        # handler, with a different error than the surface reports for
+        # the handler's own failed read.
+        logger.warning("trace_duplicate_check_failed", trace_id=trace_id, exc_info=True)
+        return False
 
 
 def trace_extraction_min_confidence() -> float | None:

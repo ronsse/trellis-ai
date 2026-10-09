@@ -10,6 +10,8 @@ a malformed confidence floor, is pinned too.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import structlog.testing
 
@@ -131,6 +133,7 @@ class TestBooleanRosterIsNotVacuous:
         assert "minhash_seed_max_docs" not in BOOLEAN_FIELDS
         assert "trace_extraction_min_confidence" not in BOOLEAN_FIELDS
         assert "reconcile_timeout_s" not in BOOLEAN_FIELDS
+        assert "pack_holdout_rate" not in BOOLEAN_FIELDS
 
 
 class TestBodiedAttributionFlag:
@@ -291,6 +294,100 @@ class TestMinHashSeedBound:
             name for name, value in config.as_dict().items() if value != defaults[name]
         }
         assert changed == {"minhash_seed_max_docs"}
+
+
+#: Spelled out rather than read from ``ENV_VAR_BY_FIELD``: the name is set
+#: in deployed wrappers, so it is part of the contract this file pins.
+PACK_HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
+
+
+class TestPackHoldoutRate:
+    """``TRELLIS_PACK_HOLDOUT_RATE`` — the share of packs withheld whole.
+
+    A read-side knob living here on purpose: every event carries this
+    module's values in ``write_provenance.env_flags``, so the rate in force
+    is recorded on every row without a second stamp. A value outside
+    ``[0, 1]`` is refused the way the other numeric knobs refuse one — the
+    shipped default (withhold nothing) stands and one warning says why.
+    """
+
+    def test_default_withholds_nothing(self) -> None:
+        assert WriteBehaviourConfig.from_env().pack_holdout_rate == 0.0
+        assert WriteBehaviourConfig().pack_holdout_rate == 0.0
+
+    def test_the_env_var_is_the_declared_one(self) -> None:
+        assert ENV_VAR_BY_FIELD["pack_holdout_rate"] == PACK_HOLDOUT_RATE_ENV
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("0", 0.0),
+            ("0.1", 0.1),
+            (" 0.5 ", 0.5),
+            ("1", 1.0),
+            ("1.0", 1.0),
+            ("2.5e-1", 0.25),
+        ],
+    )
+    def test_rates_in_the_unit_interval_parse(self, raw: str, expected: float) -> None:
+        env = {PACK_HOLDOUT_RATE_ENV: raw}
+        assert WriteBehaviourConfig.from_env(env).pack_holdout_rate == expected
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["-0.1", "-1", "1.5", "2", "lots", "10%", "nan", "inf", "-inf", "", "  "],
+    )
+    def test_unusable_values_degrade_to_withhold_nothing(self, raw: str) -> None:
+        """Never to "withhold everything": a typo must not blank every pack."""
+        env = {PACK_HOLDOUT_RATE_ENV: raw}
+        assert WriteBehaviourConfig.from_env(env).pack_holdout_rate == 0.0
+
+    @pytest.mark.parametrize("raw", ["-0", "-0.0", " -0e3 "])
+    def test_negative_zero_parses_to_zero(self, raw: str) -> None:
+        """Not to ``-0.0``: equal to ``0.0``, but recorded with its sign.
+
+        ``env_flags`` and every ``PACK_ASSEMBLED`` row would carry ``-0.0``.
+        """
+        rate = WriteBehaviourConfig.from_env({PACK_HOLDOUT_RATE_ENV: raw}).as_dict()[
+            "pack_holdout_rate"
+        ]
+        assert (rate, math.copysign(1.0, rate)) == (0.0, 1.0)
+
+    def test_a_malformed_value_warns_once_not_once_per_read(self) -> None:
+        write_config._parse_pack_holdout_rate.cache_clear()
+        env = {PACK_HOLDOUT_RATE_ENV: "a tenth"}
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(5):
+                WriteBehaviourConfig.from_env(env)
+        assert [entry["event"] for entry in logs] == ["pack_holdout_rate_unparseable"]
+
+    @pytest.mark.parametrize("raw", ["-0.25", "1.01", "nan"])
+    def test_an_out_of_range_value_warns_about_its_range(self, raw: str) -> None:
+        write_config._parse_pack_holdout_rate.cache_clear()
+        env = {PACK_HOLDOUT_RATE_ENV: raw}
+        with structlog.testing.capture_logs() as logs:
+            WriteBehaviourConfig.from_env(env)
+        assert [entry["event"] for entry in logs] == ["pack_holdout_rate_out_of_range"]
+
+    def test_it_moves_only_its_own_field(self) -> None:
+        config = WriteBehaviourConfig.from_env({PACK_HOLDOUT_RATE_ENV: "0.2"})
+        defaults = WriteBehaviourConfig().as_dict()
+        changed = {
+            name for name, value in config.as_dict().items() if value != defaults[name]
+        }
+        assert changed == {"pack_holdout_rate"}
+
+    def test_it_reaches_env_flags_and_the_operator_report(self) -> None:
+        config = WriteBehaviourConfig.from_env({PACK_HOLDOUT_RATE_ENV: "0.2"})
+        assert config.as_dict()["pack_holdout_rate"] == 0.2
+        row = next(r for r in config.describe() if r["name"] == "pack_holdout_rate")
+        assert row == {
+            "name": "pack_holdout_rate",
+            "env_var": PACK_HOLDOUT_RATE_ENV,
+            "value": 0.2,
+            "default": 0.0,
+            "overridden": True,
+        }
 
 
 class TestDescribe:

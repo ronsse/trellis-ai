@@ -49,17 +49,18 @@ pytest tests/unit/stores/test_graph_store.py::test_upsert_and_get_node -v
 
 ## Architecture
 
-### Five Packages, One Core
+### Six Packages, One Core
 
-All packages depend on `trellis` (core library) and share configuration via `StoreRegistry.from_config_dir()` reading `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`) or env vars.
+All but `trellis_sdk` and `trellis_wire` depend on `trellis` (core library) and share configuration via `StoreRegistry.from_config_dir()` reading `~/.trellis/config.yaml` (or `$TRELLIS_CONFIG_DIR/config.yaml`) or env vars.
 
 | Package | Entry Point | Access Pattern |
 |---------|-------------|----------------|
-| `trellis` | (library) | Schemas, stores, mutation executor, retrieval, MCP server |
+| `trellis` | `trellis-mcp` | Schemas, stores, mutation executor, retrieval, MCP server |
 | `trellis_cli` | `trellis` | Direct imports + StoreRegistry |
 | `trellis_api` | `trellis-api` | StoreRegistry in FastAPI lifespan + `Depends()` injection |
-| `trellis_sdk` | (library) | **Dual-mode**: local (lazy imports trellis directly) or remote (httpx to REST API) |
-| `trellis_workers` | (library) | Direct imports + SDK client; submits Commands to MutationExecutor |
+| `trellis_sdk` | (library) | **HTTP-only**: httpx to REST API; no `trellis` import (`test_isolation.py`) |
+| `trellis_workers` | `trellis-session-capture` | Direct imports; `trace_embed` submits Commands to MutationExecutor |
+| `trellis_wire` | (library) | Pydantic DTOs shared by core, API and SDK |
 
 ### Governed Mutation Pipeline (`src/trellis/mutate/`)
 
@@ -121,6 +122,7 @@ Items are tagged with `ContentTags` (4 flat facets: `domain`, `content_type`, `s
 - Document recency comes from `resolve_recency_stamp`: a usable source-clock stamp beats the row clock, and `metadata["recency_clock"]` records which won. Retention keeps the row clock, and chunks carry no source clock (decision-ledger T-6).
 - A rule that must hold for every strategy runs at the collect seam, because the strategy set is open: noise ([`noise.py`](src/trellis/retrieve/noise.py)), archived and superseded. Supersession is pairwise ([`partition_superseded`](src/trellis/retrieve/lifecycle.py)): a loser is withheld only while its successor is a candidate, and it gates enabling `TRELLIS_ENABLE_RECONCILE_ON_WRITE`.
 - Every gate records `rejected_items` via `RejectedItem.from_pack_item`, and the pack states what was withheld above its items ([`withholding.py`](src/trellis/retrieve/withholding.py)). A `debug` log line is not a record: no shipped configuration prints it.
+- A held-out pack (`TRELLIS_PACK_HOLDOUT_RATE`, off by default) is blind by design, the one exception to that; an aggregate `PACK_ASSEMBLED` reader drops its rows with `drop_holdout` ([`pack_holdout.py`](src/trellis/core/pack_holdout.py)).
 - Truncate with `truncate_excerpt`; mark pre-LLM cuts with `elide_text`. The content floor (`ContentFloorConfig`) and graduated disclosure (`body_items`, [`disclosure.py`](src/trellis/retrieve/disclosure.py)) demote rather than drop.
 - A vector row's metadata is an embed-time snapshot, so post-embed writers go through `sync_vector_metadata`.
 - Measure a serving change with `trellis analyze replay` ([`pack_replay.py`](src/trellis/retrieve/pack_replay.py)), counting per `(pack_id, item_id)` serving. Replay cannot evaluate a change to which candidates exist, such as seeding; run both arms.
@@ -150,7 +152,7 @@ The **EventLog is the single authoritative path** for the feedback loop. `trelli
 | CLI `trellis curate feedback --pack-id`, REST `POST /feedback` | `Command(FEEDBACK_RECORD)` → `MutationExecutor` → `FeedbackRecordHandler` | **no** | `{target_id, rating, comment, success}` plus `pack_id` when the caller named one — no `feedback_id`, no item attribution |
 
 - Both families derive `success` from `rating` with `SUCCESS_RATING_THRESHOLD`, so they cannot disagree about a rating.
-- `attribution_rate` keeps its original denominator (DoD-3 reads it); `ServeAttributionReport` reports the pack-targeted rates beside it.
+- `attribution_rate` keeps its original denominator (DoD-3 reads it), less feedback naming a held-out pack; `ServeAttributionReport` reports the pack-targeted rates beside it.
 - Promotion reads per-item fields from `PACK_ASSEMBLED.injected_items[]`. Flat packs only: `build_sectioned` emits no `injected_items[]`, so sectioned packs contribute zero per-item rows to the join.
 
 ### Test Structure

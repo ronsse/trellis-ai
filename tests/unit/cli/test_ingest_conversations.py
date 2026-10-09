@@ -398,3 +398,58 @@ class TestPruneNeedsTheWholeExport:
         assert "withheld [wip] Bread notes: export not fully read" in text, text
         assert "withheld [/x] Tide notes: export not fully read" in text, text
         assert "warning unreadable_export: path=" in text, text
+
+
+# ---------------------------------------------------------------------------
+# The yellow ``withheld`` line, printed from ``_render_report`` before
+# ``ingest_conversations`` exits 5, carries a title an operator would
+# copy, so it passes ``soft_wrap=True``.
+# ---------------------------------------------------------------------------
+
+#: One token, no whitespace, longer than an 80-column console on its own:
+#: Rich must split it mid-token to fit unless soft_wrap=True leaves the
+#: line to the terminal.
+_LONG_WITHHELD_TITLE = (
+    "synthetic-conversation-title-0123456789abcdef0123456789abcdef"
+    "0123456789abcdef0123456789abcdef"
+)
+
+#: One token, no whitespace, longer than a 60-column console on its own:
+#: the directory name the yellow ``warning`` line's ``path=`` detail
+#: carries, which must split mid-token unless soft_wrap=True leaves the
+#: line to the terminal.
+_LONG_WARNING_DIRNAME = "synthetic-export-dir-" + "0123456789abcdef" * 4
+
+
+class TestWithheldLineDoesNotWrap:
+    def test_long_withheld_title_prints_as_one_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "80")
+        seed = _write_export(
+            tmp_path / "seed.json",
+            [_conversation("c1", _LONG_WITHHELD_TITLE, "Hi there", "Hello")],
+        )
+        assert _run(seed, "--format", "json").exit_code == 0
+        export_dir = _empty_directory(tmp_path)
+
+        result = _run(export_dir, "--prune")
+
+        assert result.exit_code == 5, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(_LONG_WITHHELD_TITLE in line for line in lines), result.stdout
+
+    def test_long_warning_detail_prints_as_one_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "60")
+        seed = _write_export(tmp_path / "seed.json", [_conversation(*_C1)])
+        assert _run(seed, "--format", "json").exit_code == 0
+        export_dir = tmp_path / _LONG_WARNING_DIRNAME
+        export_dir.mkdir()
+
+        result = _run(export_dir, "--prune")
+
+        assert result.exit_code == 5, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(_LONG_WARNING_DIRNAME in line for line in lines), result.stdout

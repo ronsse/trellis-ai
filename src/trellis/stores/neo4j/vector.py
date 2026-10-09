@@ -28,9 +28,9 @@ Trade-offs vs. shape #1 (separate ``:VectorItem`` label):
 * Couples the two stores on Neo4j (other backends keep their split).
 * Updating a node via ``GraphStore.upsert_node`` creates a new version
   row that does NOT inherit the prior embedding. Callers that update
-  content must re-embed afterwards. The old (closed) version still
-  carries its embedding for audit / time-travel reads, but the
-  ``query`` path filters them out via ``valid_to IS NULL``.
+  content must re-embed afterwards. The old (closed) version keeps its
+  embedding on its row; no ``GraphStore`` read returns it, and the
+  ``query`` path filters it out via ``valid_to IS NULL``.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ import structlog
 
 from trellis.stores.base.registry import RegistryContext
 from trellis.stores.base.vector import VectorStore
+from trellis.stores.bolt_opencypher.base import open_errors_as_store_error
 from trellis.stores.neo4j.base import (
     DriverConfig,
     Neo4jSessionRunner,
@@ -144,7 +145,9 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
         self._m = m
         self._ef_construction = ef_construction
         self._quantization = quantization
-        self._init_schema()
+        # The index DDL is the store's first round trip.
+        with open_errors_as_store_error("vector"):
+            self._init_schema()
         logger.info(
             "neo4j_vector_store_initialized",
             dimensions=dimensions,
@@ -380,9 +383,9 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
     def delete(self, item_id: str) -> bool:
         # Removes the embedding from the current version only — the
         # node itself stays. Historical versions retain their
-        # embeddings (queryable via ``GraphStore.get_node_history``
-        # but excluded from vector search by the ``valid_to IS NULL``
-        # filter).
+        # embeddings on their rows (no GraphStore read returns them,
+        # and the ``valid_to IS NULL`` filter excludes them from
+        # vector search).
         def _tx(tx: Any) -> bool:
             record = tx.run(
                 "MATCH (n:Node {node_id: $id}) "

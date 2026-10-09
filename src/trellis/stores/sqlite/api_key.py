@@ -49,25 +49,25 @@ class SQLiteApiKeyStore(SQLiteStoreBase, ApiKeyStore):
     # -- mutations -----------------------------------------------------------
 
     def create(self, record: ApiKeyRecord) -> ApiKeyRecord:
-        cur = self._conn.cursor()
+        conn = self._conn
         try:
-            cur.execute(
-                "INSERT INTO trellis_api_keys ("
-                "key_id, name, scopes, secret_hash, created_at, revoked_at"
-                ") VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    record.key_id,
-                    record.name,
-                    json.dumps(list(record.scopes)),
-                    record.secret_hash,
-                    record.created_at.isoformat(),
-                    record.revoked_at.isoformat() if record.revoked_at else None,
-                ),
-            )
+            with conn:  # commits on success, rolls back on an exception
+                conn.execute(
+                    "INSERT INTO trellis_api_keys ("
+                    "key_id, name, scopes, secret_hash, created_at, revoked_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        record.key_id,
+                        record.name,
+                        json.dumps(list(record.scopes)),
+                        record.secret_hash,
+                        record.created_at.isoformat(),
+                        record.revoked_at.isoformat() if record.revoked_at else None,
+                    ),
+                )
         except sqlite3.IntegrityError as exc:
             msg = f"API key already exists: {record.key_id}"
             raise StoreError(msg, store="api_key") from exc
-        self._conn.commit()
         logger.info(
             "api_key.created",
             key_id=record.key_id,
@@ -77,13 +77,13 @@ class SQLiteApiKeyStore(SQLiteStoreBase, ApiKeyStore):
         return record
 
     def revoke(self, key_id: str) -> bool:
-        cur = self._conn.cursor()
-        cur.execute(
-            "UPDATE trellis_api_keys SET revoked_at = ?"
-            " WHERE key_id = ? AND revoked_at IS NULL",
-            (utc_now().isoformat(), key_id),
-        )
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            cur = conn.execute(
+                "UPDATE trellis_api_keys SET revoked_at = ?"
+                " WHERE key_id = ? AND revoked_at IS NULL",
+                (utc_now().isoformat(), key_id),
+            )
         if cur.rowcount == 0:
             # Loud on misuse: distinguish unknown vs already-revoked in
             # the log so the operator knows which mistake they made.

@@ -7,6 +7,7 @@ import json
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -14,10 +15,15 @@ from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 import trellis_api.app as app_module
+from tests.duplicate_trace import graph_state, synthetic_trace
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
-from trellis.errors import StaleStoreWriteError
+from trellis.errors import StaleStoreWriteError, StoreError
+from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.strategies import SearchStrategy
 from trellis.schemas.enums import PolicyType
+from trellis.schemas.pack import PackItem
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.schemas.trace import Trace
 from trellis.stores.base import VectorStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -138,6 +144,175 @@ def test_ingest_trace_extraction_failure_does_not_fail_request(client, monkeypat
     monkeypatch.setattr(hook, "result_to_batch", _boom)
     resp = client.post("/api/v1/traces", json=_rich_trace())
     assert resp.status_code == 200
+
+
+# ── a refused or failed trace is neither extracted nor answered 200 ─────
+
+
+@pytest.fixture
+def extraction_calls(monkeypatch):
+    """Trace ids the route handed to ``run_trace_extraction``."""
+    calls: list[str] = []
+
+    def _record(_registry, trace, *, requested_by):
+        calls.append(trace.trace_id)
+
+    monkeypatch.setattr(ingest, "run_trace_extraction", _record)
+    return calls
+
+
+def test_ingest_trace_policy_refusal_answers_400(client, extraction_calls):
+    """A refused trace is not stored, not extracted, and not answered 200.
+
+    The second POST, after the policy is removed, is the control: the same
+    body is stored and extracted, so the refusal is the policy's and the
+    spy sees the route's calls.
+    """
+    policy = Policy(
+        policy_type="mutation",
+        scope=PolicyScope(level="entity_type", value="trace"),
+        rules=[
+            PolicyRule(
+                operation="trace.ingest",
+                condition="synthetic trace refusal",
+                action="deny",
+            )
+        ],
+        enforcement="enforce",
+    )
+    policy_path = app_module._registry.stores_dir / "policies.json"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(
+        json.dumps({"policies": [policy.model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+    body = {**_rich_trace(), "trace_id": "synthetic-refused-trace"}
+    traces = app_module._registry.operational.trace_store
+
+    refused = client.post("/api/v1/traces", json=body)
+
+    assert refused.status_code == 400
+    assert "synthetic trace refusal" in refused.json()["detail"]
+    assert traces.get("synthetic-refused-trace") is None
+    assert extraction_calls == []
+
+    policy_path.unlink()
+    allowed = client.post("/api/v1/traces", json=body)
+
+    assert allowed.status_code == 200
+    assert traces.get("synthetic-refused-trace") is not None
+    assert extraction_calls == ["synthetic-refused-trace"]
+
+
+def test_ingest_trace_store_failure_keeps_409(client, monkeypatch, extraction_calls):
+    """A write the store fails keeps its 409 and is not extracted either."""
+    traces = app_module._registry.operational.trace_store
+
+    def _fail(_trace):
+        msg = "synthetic append failure"
+        raise StoreError(msg)
+
+    monkeypatch.setattr(traces, "append", _fail)
+
+    resp = client.post("/api/v1/traces", json=_rich_trace())
+
+    assert resp.status_code == 409
+    assert "synthetic append failure" in resp.json()["detail"]
+    assert extraction_calls == []
+
+
+def test_ingest_trace_blank_trace_id_answers_400(client, extraction_calls):
+    """A blank trace_id is refused, not answered as the trace stored under "".
+
+    Nothing is stored and nothing is extracted.
+    """
+    traces = app_module._registry.operational.trace_store
+    traces.append(Trace.model_validate({**_rich_trace(), "trace_id": ""}))
+
+    resp = client.post("/api/v1/traces", json={**_rich_trace(), "trace_id": " \t "})
+
+    assert resp.status_code == 400
+    assert "trace_id must not be empty" in resp.json()["detail"]
+    assert traces.count() == 1
+    assert extraction_calls == []
+
+
+# ── a trace_id already stored stores nothing, so nothing is extracted ───
+
+
+def test_ingest_trace_duplicate_id_leaves_the_graph_as_it_was(client, monkeypatch):
+    """A second trace under a stored trace_id adds nothing to the graph.
+
+    The handler keeps the stored trace, so the second trace's agent and
+    artifact must not reach ``trace:<id>``. The duplicate still answers 200
+    and says it was already ingested.
+    """
+    monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+    graph = app_module._registry.knowledge.graph_store
+
+    first = client.post("/api/v1/traces", json=synthetic_trace("syn-dup-rest", "first"))
+    after_first = graph_state(graph, "syn-dup-rest")
+    second = client.post(
+        "/api/v1/traces", json=synthetic_trace("syn-dup-rest", "second")
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert graph.get_node("agent:syn-agent-first") is not None
+    assert graph_state(graph, "syn-dup-rest") == after_first
+    assert graph.get_node("agent:syn-agent-second") is None
+    assert graph.get_node("artifact:syn-art-second") is None
+    assert first.json()["already_ingested"] is False
+    assert second.json() == {
+        "status": "ok",
+        "trace_id": "syn-dup-rest",
+        "evidence_id": None,
+        "already_ingested": True,
+    }
+
+
+def test_ingest_trace_fresh_id_reading_already_ingested_is_extracted(
+    client, monkeypatch
+):
+    """A fresh trace is extracted even when its id says "already ingested".
+
+    The handler's message embeds the caller's trace_id, so a duplicate
+    signal read from that message would be steered by the id.
+    """
+    monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+    trace_id = "syn trace already ingested"
+
+    resp = client.post("/api/v1/traces", json=synthetic_trace(trace_id, "fresh"))
+
+    graph = app_module._registry.knowledge.graph_store
+    assert resp.status_code == 200
+    assert resp.json()["already_ingested"] is False
+    assert graph.get_node(f"trace:{trace_id}") is not None
+    assert graph.get_node("agent:syn-agent-fresh") is not None
+
+
+def test_ingest_trace_unreadable_trace_store_keeps_409(
+    client, monkeypatch, extraction_calls
+):
+    """A trace store that cannot be read still answers 409, not 500.
+
+    The duplicate check reads the store before the write. Its failure must
+    not escape the route ahead of the handler's own read, which fails the
+    same way and is answered 409.
+    """
+    traces = app_module._registry.operational.trace_store
+
+    def _fail(_trace_id):
+        msg = "synthetic read failure"
+        raise StoreError(msg)
+
+    monkeypatch.setattr(traces, "get", _fail)
+
+    resp = client.post("/api/v1/traces", json=_rich_trace())
+
+    assert resp.status_code == 409
+    assert "synthetic read failure" in resp.json()["detail"]
+    assert extraction_calls == []
 
 
 # ── embed-on-ingest (TRELLIS_ENABLE_EMBED_ON_INGEST) ────────────────────
@@ -496,6 +671,102 @@ def test_get_trace_by_id(client):
     assert data["trace"]["intent"] == "get by id"
 
 
+def test_get_trace_names_what_can_show_each_evidence_ref(client, monkeypatch):
+    """The evidence document first, else the ``evidence:<id>`` graph node.
+
+    Only trace extraction writes the node, and it is off by default, so a ref
+    can have neither. That ref gets no entry, and the UI shows it as text.
+    """
+    doc_id = "syn-ev-doc-01"
+    resp = client.post(
+        "/api/v1/evidence",
+        json={
+            "evidence_id": doc_id,
+            "evidence_type": "snippet",
+            "content": "synthetic evidence",
+            "source_origin": "test",
+        },
+    )
+    assert resp.status_code == 200
+
+    def ingest(*evidence_ids: str) -> str:
+        trace = _make_trace(intent="cite evidence")
+        trace["evidence_used"] = [{"evidence_id": e} for e in evidence_ids]
+        resp = client.post("/api/v1/traces", json=trace)
+        assert resp.status_code == 200
+        return resp.json()["trace_id"]
+
+    def links(trace_id: str) -> dict:
+        resp = client.get(f"/api/v1/traces/{trace_id}")
+        assert resp.status_code == 200
+        return resp.json()["evidence_links"]
+
+    monkeypatch.delenv("TRELLIS_ENABLE_TRACE_EXTRACTION", raising=False)
+    plain = ingest(doc_id, "syn-ev-none-01")
+    monkeypatch.setenv("TRELLIS_ENABLE_TRACE_EXTRACTION", "1")
+    extracted = ingest(doc_id, "syn-ev-node-01")
+
+    assert links(plain) == {doc_id: {"document_id": doc_id}}
+    # Extraction wrote a node for both refs; the document still wins.
+    graph = app_module._registry.knowledge.graph_store
+    assert graph.get_node(f"evidence:{doc_id}") is not None
+    assert links(extracted) == {
+        doc_id: {"document_id": doc_id},
+        "syn-ev-node-01": {"entity_id": "evidence:syn-ev-node-01"},
+    }
+
+
+def test_get_trace_links_no_evidence_ref_with_an_empty_id(client):
+    """An empty ref names no record, so it has no entry.
+
+    That holds where a graph has the node ``evidence:``.
+    """
+    graph = app_module._registry.knowledge.graph_store
+    graph.upsert_node("evidence:", "Dataset", {})
+    trace = _make_trace(intent="cite an empty ref")
+    trace["evidence_used"] = [{"evidence_id": ""}]
+    resp = client.post("/api/v1/traces", json=trace)
+    assert resp.status_code == 200
+    trace_id = resp.json()["trace_id"]
+
+    resp = client.get(f"/api/v1/traces/{trace_id}")
+    assert resp.status_code == 200
+    assert resp.json()["evidence_links"] == {}
+
+
+def test_get_trace_serves_the_trace_when_its_evidence_links_cannot_be_read(
+    client, monkeypatch
+):
+    """A knowledge store that cannot answer costs the links, not the trace."""
+    trace = _make_trace(intent="cite evidence")
+    trace["evidence_used"] = [{"evidence_id": "syn-ev-doc-01"}]
+    resp = client.post("/api/v1/traces", json=trace)
+    assert resp.status_code == 200
+    trace_id = resp.json()["trace_id"]
+
+    message = "disk I/O error"
+
+    def unreadable(doc_id: str) -> None:
+        raise sqlite3.OperationalError(message)
+
+    documents = app_module._registry.knowledge.document_store
+    monkeypatch.setattr(documents, "get", unreadable)
+    with capture_logs() as logs:
+        resp = client.get(f"/api/v1/traces/{trace_id}")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["trace"]["trace_id"] == trace_id
+    # null, not {}: the links are unknown, not absent.
+    assert body["evidence_links"] is None
+    entry = next(
+        (e for e in logs if e.get("event") == "trace_evidence_links_failed"), None
+    )
+    assert entry is not None, logs
+    assert entry["log_level"] == "warning", entry
+    assert entry["trace_id"] == trace_id
+
+
 def test_create_entity(client):
     resp = client.post(
         "/api/v1/entities",
@@ -652,6 +923,157 @@ def test_assemble_pack_returns_typed_withholding(client) -> None:
     assert withholding["by_reason"] == {"archived": 1, "noise": 1}
     assert sorted(withholding["withheld_item_ids"]) == ["archived", "noise"]
     assert withholding["served_count"] == 1
+
+
+# -- axes: which retrieval axes a pack ran, and which failed --
+
+_AXIS_FAILURE_SENTINEL = "SENTINEL_AXIS_FAILURE_f91e7c"
+
+
+def _axis_item(item_id: str) -> PackItem:
+    return PackItem(
+        item_id=item_id, item_type="document", excerpt="x", relevance_score=0.5
+    )
+
+
+def _make_axis_strategy(name: str, items: list[PackItem]) -> SearchStrategy:
+    strategy = MagicMock(spec=SearchStrategy)
+    strategy.name = name
+    strategy.search.return_value = items
+    return strategy
+
+
+def _make_failing_axis_strategy(name: str, message: str) -> SearchStrategy:
+    strategy = MagicMock(spec=SearchStrategy)
+    strategy.name = name
+    strategy.search.side_effect = RuntimeError(message)
+    return strategy
+
+
+def _builder_with_one_failing_strategy(
+    *_args: object, **_kwargs: object
+) -> PackBuilder:
+    """Three strategies, the middle one raising — same shape as
+    tests/unit/retrieve/test_pack_builder_failures.py's partial-failure case."""
+    good_a = _make_axis_strategy("keyword", [_axis_item("d1")])
+    bad = _make_failing_axis_strategy("semantic", _AXIS_FAILURE_SENTINEL)
+    good_b = _make_axis_strategy("graph", [_axis_item("e1")])
+    return PackBuilder(strategies=[good_a, bad, good_b])
+
+
+def _semantic_init_fails(*_args: object, **_kwargs: object) -> object:
+    msg = "vector backend unavailable"
+    raise RuntimeError(msg)
+
+
+@pytest.mark.parametrize(
+    ("embedding_fn", "semantic"),
+    [(None, "not_configured"), (_EMBED_FN_PATH, "misconfigured")],
+)
+def test_assemble_pack_reports_no_failed_axes_when_none_raise(
+    client, monkeypatch, embedding_fn: str | None, semantic: str
+) -> None:
+    """Only the route's ``embedder_configured`` argument separates a missing
+    embedder from a resolved one whose vector search failed to initialise."""
+    if embedding_fn is None:
+        monkeypatch.delenv("TRELLIS_EMBEDDING_FN", raising=False)
+    else:
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", embedding_fn)
+        monkeypatch.setattr(
+            "trellis.retrieve.strategies.SemanticSearch", _semantic_init_fails
+        )
+
+    response = client.post("/api/v1/packs", json={"intent": "quiet pack"})
+
+    assert response.status_code == 200
+    axes = response.json()["axes"]
+    assert axes["failed"] == []
+    assert axes["ran"] == response.json()["retrieval_report"]["strategies_used"]
+    assert axes["ran"]  # at least the keyword axis ran — not a vacuous empty list
+    assert axes["semantic"] == semantic
+
+
+def test_assemble_pack_reports_failed_axis_when_a_strategy_raises(
+    client, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        retrieve, "build_pack_builder", _builder_with_one_failing_strategy
+    )
+
+    response = client.post("/api/v1/packs", json={"intent": "degraded pack"})
+
+    assert response.status_code == 200
+    axes = response.json()["axes"]
+    assert axes["failed"] == ["semantic"]
+    assert sorted(axes["ran"]) == ["graph", "keyword"]
+    assert sorted(axes["available"]) == ["graph", "keyword", "semantic"]
+    # Names and states only, never the exception text.
+    assert _AXIS_FAILURE_SENTINEL not in response.text
+
+
+@pytest.mark.parametrize(
+    ("embedding_fn", "semantic"),
+    [(None, "not_configured"), (_EMBED_FN_PATH, "misconfigured")],
+)
+def test_assemble_sectioned_pack_reports_no_failed_axes_when_none_raise(
+    client, monkeypatch, embedding_fn: str | None, semantic: str
+) -> None:
+    """A clean sectioned pack's axes block matches the flat route's shape."""
+    if embedding_fn is None:
+        monkeypatch.delenv("TRELLIS_EMBEDDING_FN", raising=False)
+    else:
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", embedding_fn)
+        monkeypatch.setattr(
+            "trellis.retrieve.strategies.SemanticSearch", _semantic_init_fails
+        )
+
+    response = client.post(
+        "/api/v1/packs/sectioned",
+        json={"intent": "quiet sectioned pack", "sections": [{"name": "all"}]},
+    )
+
+    assert response.status_code == 200
+    axes = response.json()["axes"]
+    assert axes["failed"] == []
+    assert axes["ran"]  # at least one axis ran -- not vacuously empty
+    assert axes["semantic"] == semantic
+
+
+def test_assemble_sectioned_pack_reports_failed_axis_when_a_strategy_raises(
+    client, monkeypatch
+) -> None:
+    """F2 (#775 gate): the sectioned route must not absorb a failed axis."""
+    monkeypatch.setattr(
+        retrieve, "build_pack_builder", _builder_with_one_failing_strategy
+    )
+
+    response = client.post(
+        "/api/v1/packs/sectioned",
+        json={"intent": "degraded sectioned pack", "sections": [{"name": "all"}]},
+    )
+
+    assert response.status_code == 200
+    axes = response.json()["axes"]
+    assert axes["failed"] == ["semantic"]
+    assert sorted(axes["ran"]) == ["graph", "keyword"]
+    assert sorted(axes["available"]) == ["graph", "keyword", "semantic"]
+    # Names and states only, never the exception text.
+    assert _AXIS_FAILURE_SENTINEL not in response.text
+
+
+def test_assemble_sectioned_pack_with_no_sections_is_refused(client) -> None:
+    """``sections=[]`` has no section to read ``axes`` from, so it is refused
+    before any build, with the reason MCP gives for the same input."""
+    response = client.post(
+        "/api/v1/packs/sectioned", json={"intent": "no sections", "sections": []}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "sections must not be empty"
+    # Refused before the build, so no PACK_ASSEMBLED is recorded for it.
+    assert not app_module._registry.operational.event_log.get_events(
+        event_type=EventType.PACK_ASSEMBLED
+    )
 
 
 def test_assemble_sectioned_pack_returns_routed_ids_and_served_count(client) -> None:
@@ -866,7 +1288,7 @@ def test_batch_creates_entities(client):
 
 
 def test_batch_stop_on_error(client):
-    """Batch with stop_on_error halts after first failure."""
+    """Batch with stop_on_error halts after the first refusal."""
     resp = client.post(
         "/api/v1/commands/batch",
         json={
@@ -877,7 +1299,7 @@ def test_batch_stop_on_error(client):
                 },
                 {
                     "operation": "entity.create",
-                    "args": {},  # missing required fields → validation fail
+                    "args": {},  # missing required fields → refused
                 },
                 {
                     "operation": "entity.create",
@@ -889,9 +1311,9 @@ def test_batch_stop_on_error(client):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["executed"] == 2  # stopped after failure
+    assert data["executed"] == 2  # stopped after the refusal
     assert data["succeeded"] == 1
-    assert data["failed"] == 1
+    assert (data["failed"], data["rejected"]) == (0, 1)
 
 
 def test_batch_continue_on_error(client):
@@ -906,11 +1328,15 @@ def test_batch_continue_on_error(client):
                 },
                 {
                     "operation": "entity.create",
-                    "args": {},  # fails
+                    "args": {},  # refused
                 },
                 {
                     "operation": "entity.create",
                     "args": {"entity_type": "service", "name": "third"},
+                },
+                {
+                    "operation": "link.remove",
+                    "args": {"edge_id": "syn-edge"},  # no handler: failed
                 },
             ],
             "strategy": "continue_on_error",
@@ -918,9 +1344,62 @@ def test_batch_continue_on_error(client):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["executed"] == 3
+    assert data["executed"] == 4
     assert data["succeeded"] == 2
-    assert data["failed"] == 1
+    assert (data["failed"], data["rejected"]) == (1, 1)
+
+
+def test_batch_refuses_an_unattended_writer(client):
+    """The batch hands its requested_by to the executor, so the roster refuses."""
+    resp = client.post(
+        "/api/v1/commands/batch",
+        json={
+            "commands": [
+                {
+                    "operation": "entity.create",
+                    "args": {"entity_type": "service", "name": "syn-svc"},
+                }
+            ],
+            "strategy": "continue_on_error",
+            "requested_by": "worker:embed-traces",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert (data["rejected"], data["failed"]) == (1, 0)
+    assert [r["status"] for r in data["results"]] == ["rejected"]
+
+
+def test_batch_feedback_record_refuses_an_out_of_range_rating(client):
+    """A batch rating of 5.0 is rejected (HTTP 200) and nothing is recorded.
+
+    ``BatchCommandItem.args`` is a plain dict, so no DTO bounds the rating here.
+    """
+    resp = client.post(
+        "/api/v1/commands/batch",
+        json={
+            "commands": [
+                {
+                    "operation": "feedback.record",
+                    "args": {"target_id": "t1", "rating": 5.0},
+                }
+            ],
+            "strategy": "continue_on_error",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert (data["rejected"], data["failed"], data["succeeded"]) == (1, 0, 0)
+    assert data["results"][0]["status"] == "rejected"
+    assert "rating" in data["results"][0]["message"].lower()
+
+    registry = app_module._registry
+    assert (
+        registry.operational.event_log.get_events(
+            event_type=EventType.FEEDBACK_RECORDED, limit=5
+        )
+        == []
+    )
 
 
 def test_batch_idempotency(client):

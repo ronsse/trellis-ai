@@ -228,3 +228,19 @@ class TestInstallSkillsCommand:
             plain(result.stdout).strip()
             == "Error: scope must be 'user' or 'project', got '[user]'"
         )
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    def test_failed_copy_error_keeps_its_brackets(self, monkeypatch, output_format):
+        error = OSError(13, "Permission denied", "/srv/demo/[work]/skills")
+
+        def raiser(_src, _dest):
+            raise error
+
+        monkeypatch.setattr("trellis_cli.claude_integration.shutil.copytree", raiser)
+
+        result = runner.invoke(
+            app, ["admin", "install-skills", "user", "--format", output_format]
+        )
+
+        assert result.exit_code == 1, result.stdout
+        assert str(error) in plain(result.stdout)

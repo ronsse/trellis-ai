@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
+from tests.unit.stores.sqlite_write_lock import committed_rows, write_at_once
 from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.sqlite.parameter import SQLiteParameterStore
 
@@ -133,3 +135,36 @@ def test_list_versions_filtered_by_scope(store: SQLiteParameterStore):
 
     component_only = store.list_versions(ParameterScope(component_id="c"))
     assert len(component_only) == 2
+
+
+def test_a_put_commits_at_once(store: SQLiteParameterStore, tmp_path: Path):
+    store.put(_set(params_version="syn-params-1", values={"v": 1}))
+
+    rows = committed_rows(
+        tmp_path / "parameters.db", "SELECT params_version FROM parameter_snapshots"
+    )
+    assert rows == [("syn-params-1",)]
+
+
+def test_a_failed_put_holds_no_write_lock(store: SQLiteParameterStore, tmp_path: Path):
+    """A duplicate put is rolled back, not left holding the write lock."""
+    store.put(_set(params_version="syn-params-1", values={"v": 1}))
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match=r"^UNIQUE constraint failed: parameter_snapshots\.params_version$",
+    ):
+        store.put(_set(params_version="syn-params-1", values={"v": 2}))
+
+    assert store._conn.in_transaction is False
+    write_at_once(
+        tmp_path / "parameters.db",
+        "INSERT INTO parameter_snapshots"
+        " (params_version, component_id, source, created_at) VALUES (?, ?, ?, ?)",
+        ("syn-params-2", "c", "operator", "2026-01-01T00:00:00+00:00"),
+    )
+    rows = committed_rows(
+        tmp_path / "parameters.db",
+        "SELECT params_version FROM parameter_snapshots ORDER BY params_version",
+    )
+    assert rows == [("syn-params-1",), ("syn-params-2",)]

@@ -444,6 +444,12 @@ class TestRetrievePack:
         # The wrong advice for this state, and the one a merged
         # "is semantic missing?" boolean would have printed.
         assert "no embeddings provider" not in out
+        # The sentence must say only what's true in every misconfigured
+        # case, not "keyword + graph only" -- false whenever keyword or
+        # graph also failed in the same build (#805 gate, finding 9).
+        assert "has no semantic results" in out
+        assert "keyword + graph only" not in out
+        assert "keyword and graph only" not in out
 
     def test_pack_item_ids_are_printed_verbatim_not_emojified(self) -> None:
         r"""``emoji=False`` is load-bearing, and nothing else pins it.
@@ -1051,6 +1057,12 @@ class TestRetrieveChunkVisibility:
         assert "--include-chunks" in _plain(rendered)
 
 
+#: One token, no whitespace, longer than a 60-column console -- Rich must
+#: hard-wrap *inside* it unless soft_wrap=True leaves the line to the
+#: terminal. Shared by the trace and entity "not found" lines below.
+_LONG_NOT_FOUND_ID = "synthetic-handle-" + "0123456789abcdef" * 4
+
+
 class TestRetrieveTrace:
     def test_trace_not_found(self) -> None:
         result = runner.invoke(app, ["retrieve", "trace", "nonexistent"])
@@ -1070,11 +1082,29 @@ class TestRetrieveTrace:
         data = json.loads(result.stdout.strip())
         assert data["status"] == "not_found"
 
+    def test_trace_not_found_long_id_prints_as_one_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "60")
+        result = runner.invoke(app, ["retrieve", "trace", _LONG_NOT_FOUND_ID])
+        assert result.exit_code == 1, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(_LONG_NOT_FOUND_ID in line for line in lines), result.stdout
+
 
 class TestRetrieveEntity:
     def test_entity_not_found(self) -> None:
         result = runner.invoke(app, ["retrieve", "entity", "ent_456"])
         assert result.exit_code == 1
+
+    def test_entity_not_found_long_id_prints_as_one_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "60")
+        result = runner.invoke(app, ["retrieve", "entity", _LONG_NOT_FOUND_ID])
+        assert result.exit_code == 1, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(_LONG_NOT_FOUND_ID in line for line in lines), result.stdout
 
     def test_entity_resolves_via_local_alias(self) -> None:
         from trellis_cli.stores import LOCAL_SOURCE_SYSTEM, get_graph_store

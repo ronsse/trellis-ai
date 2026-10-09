@@ -73,7 +73,7 @@ Three more env toggles control what an unauthenticated caller can reach. All thr
 ## `trellis worker curate` — the curation cycle (Tier 0 + Tier 2)
 
 ```bash
-trellis worker curate --output-dir DIR [--days 30] [--interval SECONDS] \
+trellis worker curate [--output-dir DIR] [--days 30] [--interval SECONDS] \
   [--dry-run] [--reconcile-first] \
   [--skip-noise-tags] [--skip-advisories] [--skip-learning] \
   [--no-meta-trace] [--format text|json]
@@ -83,7 +83,7 @@ One full curation cycle. It calls the curation library functions directly — no
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--output-dir` / `-o` | required | Directory the stage-4 review artifacts land in. |
+| `--output-dir` / `-o` | `$TRELLIS_LEARNING_ARTIFACTS_DIR`, else `<data_dir>/learning` | Directory the stage-4 review artifacts land in. The default is the directory the API's Review queue reads; pass this only to write somewhere the API does not look. |
 | `--days` | `30` | Days of EventLog history to scan. |
 | `--interval` | off | Loop mode: re-run every N seconds until SIGINT/SIGTERM. Plain sleep — **no scheduler dependency**. |
 | `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts. Each stage that runs still records its meta-Activity; add `--no-meta-trace` to skip that (see below). |
@@ -230,11 +230,10 @@ TRELLIS_AUTH_MODE=required TRELLIS_API_KEY=$(op read 'op://...') \
 **Process 2 — the curation loop** (a second tmux pane or systemd service). Once a day, reconcile the feedback log first, then curate:
 
 ```bash
-trellis worker curate --output-dir /var/lib/trellis/review \
-  --reconcile-first --interval 86400 --format json
+trellis worker curate --reconcile-first --interval 86400 --format json
 ```
 
-`--interval 86400` re-runs the cycle every 24h with a plain sleep — no scheduler. `--reconcile-first` backfills any file-only `pack_feedback.jsonl` rows into the EventLog before each cycle so the curate pass never misses feedback. For a real scheduler (cron / systemd timer / GHA / K8s CronJob) instead of `--interval`, use the recipes in [`../deployment/scheduled-curation.md`](../deployment/scheduled-curation.md).
+With no `--output-dir`, the learning-candidate artifacts land in `<data_dir>/learning`, the directory Process 1's Review queue reads, so run both processes against the same data directory. If you set `TRELLIS_LEARNING_ARTIFACTS_DIR` to move it, set it on both. `--interval 86400` re-runs the cycle every 24h with a plain sleep — no scheduler. `--reconcile-first` backfills any file-only `pack_feedback.jsonl` rows into the EventLog before each cycle so the curate pass never misses feedback. For a real scheduler (cron / systemd timer / GHA / K8s CronJob) instead of `--interval`, use the recipes in [`../deployment/scheduled-curation.md`](../deployment/scheduled-curation.md).
 
 ### Verification checklist
 

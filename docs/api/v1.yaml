@@ -1,5 +1,39 @@
 components:
   schemas:
+    AxisReportResponse:
+      additionalProperties: false
+      description: 'Which retrieval axes this pack has, ran, and did not.
+
+
+        Mirrors :class:`trellis.retrieve.builder_factory.AxisReport`: axis names
+
+        and states only, never an exception message.'
+      properties:
+        available:
+          items:
+            type: string
+          title: Available
+          type: array
+        failed:
+          items:
+            type: string
+          title: Failed
+          type: array
+        ran:
+          items:
+            type: string
+          title: Ran
+          type: array
+        semantic:
+          title: Semantic
+          type: string
+      required:
+      - available
+      - ran
+      - failed
+      - semantic
+      title: AxisReportResponse
+      type: object
     BatchCommandItem:
       additionalProperties: false
       description: A single command within a batch request.
@@ -783,6 +817,8 @@ components:
           - type: 'null'
           title: Pack Id
         rating:
+          maximum: 1.0
+          minimum: 0.0
           title: Rating
           type: number
         target_id:
@@ -821,6 +857,11 @@ components:
       additionalProperties: false
       description: Response after ingesting a trace or evidence.
       properties:
+        already_ingested:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Already Ingested
         evidence_id:
           anyOf:
           - type: string
@@ -839,8 +880,28 @@ components:
       type: object
     LearningCandidateListResponse:
       additionalProperties: false
-      description: Most-recent learning-candidate artifact, or an empty hint.
+      description: 'Most-recent learning-candidate artifact, or why none could be served.
+
+
+        ``status`` is ``"ok"`` when the artifact was read (``candidates`` may
+
+        still be empty) and ``"error"`` when there was none to read; then
+
+        ``code`` says why (``learning_artifacts_dir_missing``,
+
+        ``learning_candidates_missing``, ``learning_candidates_unreadable`` or
+
+        ``stores_dir_unconfigured``) and ``hint`` names the path and how to
+
+        produce the artifact. ``artifacts_dir`` names the directory looked in,
+
+        ``None`` only when none could be resolved.'
       properties:
+        artifacts_dir:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Artifacts Dir
         candidate_count:
           default: 0
           title: Candidate Count
@@ -851,6 +912,11 @@ components:
             type: object
           title: Candidates
           type: array
+        code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Code
         generated_at_utc:
           anyOf:
           - type: string
@@ -1236,6 +1302,10 @@ components:
           - type: string
           - type: 'null'
           title: Agent Id
+        axes:
+          anyOf:
+          - $ref: '#/components/schemas/AxisReportResponse'
+          - type: 'null'
         count:
           title: Count
           type: integer
@@ -1574,6 +1644,10 @@ components:
           - type: string
           - type: 'null'
           title: Agent Id
+        axes:
+          anyOf:
+          - $ref: '#/components/schemas/AxisReportResponse'
+          - type: 'null'
         domain:
           anyOf:
           - type: string
@@ -2449,7 +2523,11 @@ paths:
 
         ``EventLog.get_events`` has no offset — page older history by
 
-        passing the oldest ``occurred_at`` you have as ``until``.'
+        passing the oldest ``occurred_at`` you have as ``until``. On a
+
+        withheld pack''s row, the ``holdout_*`` keys but ``holdout_rate`` (the
+
+        would-be pack) reach ``admin`` callers only.'
       operationId: list_events_api_v1_events_get
       parameters:
       - description: Filter by event type value
@@ -2702,7 +2780,7 @@ paths:
       description: Search graph nodes by name or type.
       operationId: search_entities_api_v1_graph_search_get
       parameters:
-      - description: Name substring search (case-insensitive)
+      - description: A case-insensitive substring of the name, node_id or node_type
         in: query
         name: q
         required: false
@@ -2710,7 +2788,7 @@ paths:
           anyOf:
           - type: string
           - type: 'null'
-          description: Name substring search (case-insensitive)
+          description: A case-insensitive substring of the name, node_id or node_type
           title: Q
       - description: Filter by node type
         in: query
@@ -2781,6 +2859,50 @@ paths:
       summary: Search graph entities
       tags:
       - retrieve
+  /api/v1/graph/search/facets:
+    get:
+      description: 'Count current graph nodes per stored ``node_type`` under ``q``.
+
+
+        The graph page''s type chips. Every type is counted server-side, in its
+
+        stored case, by count descending then type, and the counts sum to
+
+        ``/graph/search``''s ``total`` for the same ``q``. ``node_type`` is not a
+
+        parameter because it is the dimension being counted.'
+      operationId: search_entity_facets_api_v1_graph_search_facets_get
+      parameters:
+      - description: 'The /graph/search q filter: a case-insensitive substring of the name, node_id or node_type'
+        in: query
+        name: q
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: 'The /graph/search q filter: a case-insensitive substring of the name, node_id or node_type'
+          title: Q
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Search Entity Facets Api V1 Graph Search Facets Get
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Count graph search matches per node type
+      tags:
+      - retrieve
   /api/v1/health:
     get:
       description: Check API and store health.
@@ -2836,15 +2958,21 @@ paths:
       description: 'Serve the most-recent ``intent_learning_candidates.json`` artifact.
 
 
-        The CLI writes this file via ``trellis analyze learning-candidates
+        ``trellis worker curate`` and ``trellis analyze learning-candidates``
 
-        --output-dir <dir>``. We resolve ``<dir>`` from
+        write it, by default to ``TRELLIS_LEARNING_ARTIFACTS_DIR`` when set and
 
-        ``TRELLIS_LEARNING_ARTIFACTS_DIR`` (or ``<data_dir>/learning``). When
+        otherwise to ``<data_dir>/learning``, the directory this route reads;
 
-        no artifact is found we return an empty list plus a ``hint`` telling
+        ``artifacts_dir`` names it. When there is nothing to serve (the
 
-        the operator how to generate one — never a 5xx.'
+        directory or the file is missing, the file is unreadable, or no
+
+        directory can be resolved), the answer is still 200 but carries
+
+        ``status="error"``, a ``code`` saying which, and a ``hint`` naming the
+
+        path, so an unwritten artifact never reads as an empty review queue.'
       operationId: list_learning_candidates_api_v1_learning_candidates_get
       responses:
         '200':
@@ -2865,7 +2993,9 @@ paths:
 
         Builds the decisions payload from the request body, joins it against
 
-        the most-recent candidate artifact via
+        the most-recent candidate artifact (read from the directory
+
+        ``GET /learning/candidates`` serves) via
 
         :func:`trellis.learning.prepare_learning_promotions`, then submits
 
@@ -2890,6 +3020,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/LearningPromotionResponse'
           description: Successful Response
+        '409':
+          description: 'Nothing was promoted: there is no learning-candidate artifact to join the decisions against. `detail.code`
+            says why (`learning_artifacts_dir_missing`, `learning_candidates_missing`, `learning_candidates_unreadable` or
+            `stores_dir_unconfigured`), `detail.path` names the directory or file at fault and `detail.message` how to produce
+            it.'
         '422':
           content:
             application/json:
@@ -3293,7 +3428,11 @@ paths:
 
         ``FEEDBACK_RECORDED.payload["pack_id"]`` (see
 
-        ``trellis.learning.pack_observations.join_pack_feedback``).'
+        ``trellis.learning.pack_observations.join_pack_feedback``). On a
+
+        withheld pack''s row, the ``holdout_*`` keys but ``holdout_rate`` (the
+
+        would-be pack) reach ``admin`` callers only.'
       operationId: get_pack_api_v1_packs__pack_id__get
       parameters:
       - in: path
@@ -3978,7 +4117,18 @@ paths:
       - ingest
   /api/v1/traces/{trace_id}:
     get:
-      description: Get a specific trace by ID.
+      description: 'Get a trace and what can show each of its evidence refs.
+
+
+        ``evidence_links`` maps an ``evidence_id`` to ``{"document_id": ...}``
+
+        when a document holds that evidence record, else to
+
+        ``{"entity_id": "evidence:<id>"}`` when that graph node exists. A ref with
+
+        neither, or with an empty ``evidence_id``, has no entry.
+
+        ``evidence_links`` is ``null`` when the knowledge stores cannot be read.'
       operationId: get_trace_api_v1_traces__trace_id__get
       parameters:
       - in: path

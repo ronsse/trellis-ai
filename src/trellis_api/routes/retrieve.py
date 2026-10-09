@@ -4,20 +4,26 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import ValidationError
 
-from trellis.retrieve.builder_factory import build_pack_builder
+from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.schemas.pack import PackBudget, SectionRequest
+from trellis.schemas.trace import Trace
+from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
+    AxisReportResponse,
     PackRequest,
     PackResponse,
     SectionedPackRequest,
     SectionedPackResponse,
 )
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -124,6 +130,14 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         tag_filters=req.tag_filters,
     )
 
+    # The axis report `trellis retrieve pack --format json` prints, so a
+    # caller can tell a pack missing a failed axis from a full one.
+    axes = describe_axes(
+        builder,
+        pack.retrieval_report.strategies_used,
+        embedder_configured=registry.embedding_fn is not None,
+    )
+
     return PackResponse(
         pack_id=pack.pack_id,
         intent=pack.intent,
@@ -134,6 +148,7 @@ def assemble_pack(req: PackRequest) -> PackResponse:
         advisories=[a.model_dump(mode="json") for a in pack.advisories],
         retrieval_report=pack.retrieval_report.model_dump(),
         withholding=pack.metadata.get("withholding"),
+        axes=AxisReportResponse(**axes),
     )
 
 
@@ -145,6 +160,11 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
     dicts are validated into ``SectionRequest`` models here (the wire
     DTO keeps them untyped so trellis_wire stays core-free).
     """
+    # An empty list has no section to read, so it is refused before any
+    # build, with the reason MCP's get_context and get_sectioned_context give.
+    if not req.sections:
+        raise HTTPException(status_code=422, detail="sections must not be empty")
+
     registry = get_registry()
     try:
         sections = [SectionRequest(**s) for s in req.sections]
@@ -166,6 +186,23 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         intent_family=req.intent_family,
         filters=filters,
     )
+
+    # Same axis report as POST /api/v1/packs (#775). build_sectioned()
+    # does not attach strategy_failures to the returned SectionedPack (only
+    # to the PACK_ASSEMBLED event payload), but describe_axes only ever
+    # needs the "ran" list, and every section's retrieval_report carries
+    # the identical list computed once before section-filling — so the
+    # first section's is as good as any. build_sectioned returns one section
+    # per requested section and the guard above refuses an empty list, so
+    # sections[0] exists.
+    axes = AxisReportResponse(
+        **describe_axes(
+            builder,
+            pack.sections[0].retrieval_report.strategies_used,
+            embedder_configured=registry.embedding_fn is not None,
+        )
+    )
+
     return SectionedPackResponse(
         pack_id=pack.pack_id,
         intent=pack.intent,
@@ -174,12 +211,16 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         sections=[s.model_dump(mode="json") for s in pack.sections],
         advisories=[a.model_dump(mode="json") for a in pack.advisories],
         withholding=pack.metadata.get("withholding"),
+        axes=axes,
     )
 
 
 @router.get("/graph/search", summary="Search graph entities")
 def search_entities(
-    q: str | None = Query(None, description="Name substring search (case-insensitive)"),
+    q: str | None = Query(
+        None,
+        description="A case-insensitive substring of the name, node_id or node_type",
+    ),
     node_type: str | None = Query(None, description="Filter by node type"),
     sort: str = Query(
         "created_at", description="Sort field: created_at, name, node_type"
@@ -189,159 +230,26 @@ def search_entities(
     offset: int = Query(0, ge=0, description="Offset for pagination"),
 ) -> dict[str, Any]:
     """Search graph nodes by name or type."""
-    registry = get_registry()
-    store = registry.knowledge.graph_store
-
-    # Detect backend by the shape of ``_conn``: SQLite stores hold a
-    # ``sqlite3.Connection`` object; the Postgres store's ``_conn`` is a
-    # *method* returning a pooled-connection context manager (used as
-    # ``with store._conn() as conn``), so callable means Postgres.
-    conn_attr = getattr(store, "_conn", None)
-    is_sqlite = conn_attr is not None and not callable(conn_attr)
-
-    if is_sqlite:
-        return _search_entities_sqlite(store, q, node_type, sort, order, limit, offset)
-    return _search_entities_postgres(store, q, node_type, sort, order, limit, offset)
-
-
-def _search_entities_sqlite(
-    store: Any,
-    q: str | None,
-    node_type: str | None,
-    sort: str,
-    order: str,
-    limit: int,
-    offset: int,
-) -> dict[str, Any]:
-    """Search graph nodes using SQLite-compatible SQL."""
-    import json  # noqa: PLC0415
-
-    conditions = ["valid_to IS NULL"]
-    params: list[Any] = []
-
-    if q:
-        conditions.append(
-            "(json_extract(properties_json, '$.name') LIKE ?"
-            " OR node_id LIKE ?"
-            " OR node_type LIKE ?)"
-        )
-        pattern = f"%{q}%"
-        params.extend([pattern, pattern, pattern])
-
-    if node_type:
-        conditions.append("node_type = ?")
-        params.append(node_type)
-
-    where = " AND ".join(conditions)
-
-    # Sort mapping
-    sort_col = {
-        "name": "json_extract(properties_json, '$.name')",
-        "node_type": "node_type",
-    }.get(sort, "created_at")
-    sort_dir = "ASC" if order.lower() == "asc" else "DESC"
-
-    # Count total matching rows
-    count_cursor = store._conn.execute(  # type: ignore[attr-defined]
-        f"SELECT COUNT(*) FROM nodes WHERE {where}",  # noqa: S608
-        params,
+    store = get_registry().knowledge.graph_store
+    # Lenient: an unknown sort is created_at, and any order but asc (in any
+    # case) descends.
+    rows, total = store.search_nodes(
+        search=q,
+        node_type=node_type,
+        sort=sort if sort in NODE_SEARCH_SORTS else "created_at",
+        descending=order.lower() != "asc",
+        limit=limit,
+        offset=offset,
     )
-    total = count_cursor.fetchone()[0]
-
-    # Fetch page
-    params.extend([limit, offset])
-    cursor = store._conn.execute(  # type: ignore[attr-defined]
-        f"SELECT node_id, node_type, properties_json, created_at"  # noqa: S608
-        f" FROM nodes WHERE {where}"
-        f" ORDER BY {sort_col} {sort_dir} LIMIT ? OFFSET ?",
-        params,
-    )
-    rows = cursor.fetchall()
-
-    results = []
-    for r in rows:
-        props = json.loads(r["properties_json"]) if r["properties_json"] else {}
-        results.append(
-            {
-                "entity_id": r["node_id"],
-                "node_type": r["node_type"],
-                "name": props.get("name", r["node_id"]),
-                "properties": props,
-                "created_at": r["created_at"],
-            }
-        )
-    return {
-        "status": "ok",
-        "total": total,
-        "count": len(results),
-        "offset": offset,
-        "results": results,
-    }
-
-
-def _search_entities_postgres(
-    store: Any,
-    q: str | None,
-    node_type: str | None,
-    sort: str,
-    order: str,
-    limit: int,
-    offset: int,
-) -> dict[str, Any]:
-    """Search graph nodes using PostgreSQL-compatible SQL."""
-    conditions = ["valid_to IS NULL"]
-    params: list[Any] = []
-
-    if q:
-        conditions.append(
-            "(properties->>'name' ILIKE %s OR node_id ILIKE %s OR node_type ILIKE %s)"
-        )
-        pattern = f"%{q}%"
-        params.extend([pattern, pattern, pattern])
-
-    if node_type:
-        conditions.append("node_type = %s")
-        params.append(node_type)
-
-    where = " AND ".join(conditions)
-
-    sort_col = {
-        "name": "properties->>'name'",
-        "node_type": "node_type",
-    }.get(sort, "created_at")
-    sort_dir = "ASC" if order.lower() == "asc" else "DESC"
-
-    # Hold one pooled connection across the count + page reads so the
-    # paginated UI sees a consistent snapshot — without this, a node
-    # written between the two queries shifts every subsequent page.
-    count_params = list(params)
-    params.extend([limit, offset])
-    with store._conn() as conn:  # type: ignore[attr-defined]
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT COUNT(*) FROM nodes WHERE {where}",  # noqa: S608
-                count_params,
-            )
-            total = cur.fetchone()[0]
-
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT node_id, node_type, properties, created_at"  # noqa: S608
-                f" FROM nodes WHERE {where}"
-                f" ORDER BY {sort_col} {sort_dir} LIMIT %s OFFSET %s",
-                params,
-            )
-            rows = cur.fetchall()
-
     results = [
         {
-            "entity_id": r[0],
-            "node_type": r[1],
-            "name": (r[2] or {}).get("name", r[0]),
-            "properties": r[2] or {},
-            "created_at": r[3].isoformat() if r[3] else None,
+            "entity_id": row["node_id"],
+            "node_type": row["node_type"],
+            "name": row["properties"].get("name", row["node_id"]),
+            "properties": row["properties"],
+            "created_at": row["created_at"],
         }
-        for r in rows
+        for row in rows
     ]
     return {
         "status": "ok",
@@ -350,6 +258,32 @@ def _search_entities_postgres(
         "offset": offset,
         "results": results,
     }
+
+
+@router.get("/graph/search/facets", summary="Count graph search matches per node type")
+def search_entity_facets(
+    q: str | None = Query(
+        None,
+        description=(
+            "The /graph/search q filter: a case-insensitive substring of the"
+            " name, node_id or node_type"
+        ),
+    ),
+) -> dict[str, Any]:
+    """Count current graph nodes per stored ``node_type`` under ``q``.
+
+    The graph page's type chips. Every type is counted server-side, in its
+    stored case, by count descending then type, and the counts sum to
+    ``/graph/search``'s ``total`` for the same ``q``. ``node_type`` is not a
+    parameter because it is the dimension being counted.
+    """
+    store = get_registry().knowledge.graph_store
+    counts = store.count_nodes_by_type(search=q or None)
+    node_types = [
+        {"node_type": node_type, "count": count}
+        for node_type, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    return {"status": "ok", "total": sum(counts.values()), "node_types": node_types}
 
 
 @router.get("/entities/{entity_id:path}")
@@ -388,12 +322,56 @@ def list_traces(
 
 @router.get("/traces/{trace_id}")
 def get_trace(trace_id: str) -> dict[str, Any]:
-    """Get a specific trace by ID."""
+    """Get a trace and what can show each of its evidence refs.
+
+    ``evidence_links`` maps an ``evidence_id`` to ``{"document_id": ...}``
+    when a document holds that evidence record, else to
+    ``{"entity_id": "evidence:<id>"}`` when that graph node exists. A ref with
+    neither, or with an empty ``evidence_id``, has no entry.
+    ``evidence_links`` is ``null`` when the knowledge stores cannot be read.
+    """
     registry = get_registry()
     trace = registry.operational.trace_store.get(trace_id)
     if trace is None:
         raise HTTPException(status_code=404, detail=f"Trace not found: {trace_id}")
-    return {"status": "ok", "trace": trace.model_dump(mode="json")}
+    links: dict[str, dict[str, str]] | None
+    try:
+        links = _evidence_links(registry, trace)
+    # GRACEFUL-DEGRADATION: the links only point at views of the evidence. A
+    # knowledge store that cannot answer costs the links, never the trace,
+    # which lives in the operational plane.
+    except Exception:
+        logger.warning("trace_evidence_links_failed", trace_id=trace_id, exc_info=True)
+        links = None
+    return {
+        "status": "ok",
+        "trace": trace.model_dump(mode="json"),
+        "evidence_links": links,
+    }
+
+
+def _evidence_links(registry: Any, trace: Trace) -> dict[str, dict[str, str]]:
+    """Where each evidence ref can be viewed, keyed by its ``evidence_id``.
+
+    The evidence writers (``POST /evidence``, ``trellis ingest evidence``, the
+    demo) store each record as a document under its ``evidence_id``. Failing
+    a document, trace extraction, when it ran, wrote an ``evidence:<id>``
+    graph node. A ref with neither has no entry, nor does one with an empty
+    ``evidence_id``: it names no record, even where a graph holds a node
+    ``evidence:``.
+    """
+    documents = registry.knowledge.document_store
+    graph = registry.knowledge.graph_store
+    links: dict[str, dict[str, str]] = {}
+    for ref in trace.evidence_used:
+        if not ref.evidence_id:
+            continue
+        node_id = f"evidence:{ref.evidence_id}"
+        if documents.get(ref.evidence_id) is not None:
+            links[ref.evidence_id] = {"document_id": ref.evidence_id}
+        elif graph.get_node(node_id) is not None:
+            links[ref.evidence_id] = {"entity_id": node_id}
+    return links
 
 
 @router.get("/precedents")

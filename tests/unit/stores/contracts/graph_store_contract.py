@@ -34,9 +34,9 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Barrier
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -49,6 +49,56 @@ if TYPE_CHECKING:
 def _sleep_for_ordering() -> None:
     """Sleep long enough that two SCD-2 operations get distinct timestamps."""
     time.sleep(0.005)
+
+
+# Two nodes whose every payload field is distinguishable, so a read that
+# returns one column in another's place fails on a named field.
+_PAYLOAD_NODES: dict[str, dict[str, Any]] = {
+    "pa": {
+        "node_type": "service",
+        "properties": {"name": "Alpha", "tier": 1},
+        "document_ids": ["doc-pa"],
+    },
+    "pb": {
+        "node_type": "person",
+        "properties": {"name": "Beta"},
+        "document_ids": ["doc-pb1", "doc-pb2"],
+    },
+}
+
+
+def _upsert_payload_nodes(store: GraphStore) -> None:
+    for node_id, spec in _PAYLOAD_NODES.items():
+        store.upsert_node(
+            node_id,
+            spec["node_type"],
+            spec["properties"],
+            document_ids=spec["document_ids"],
+        )
+    store.upsert_edge("pa", "pb", "depends_on")
+
+
+def _assert_current_payload(node: dict[str, Any] | None, node_id: str) -> None:
+    """Assert a current node's whole payload against ``_PAYLOAD_NODES``.
+
+    One comparison with both sides in the message, so a failure shows
+    every field that came back wrong.
+    """
+    spec = _PAYLOAD_NODES[node_id]
+    assert node is not None, f"{node_id} was not returned"
+    expected = {
+        "node_id": node_id,
+        "node_type": spec["node_type"],
+        "node_role": "semantic",
+        "generation_spec": None,
+        "properties": spec["properties"],
+        "document_ids": spec["document_ids"],
+        "valid_to": None,
+    }
+    actual = {key: node[key] for key in expected}
+    assert actual == expected, f"{node_id}: got {actual!r}, want {expected!r}"
+    for key in ("created_at", "updated_at", "valid_from"):
+        assert node[key] is not None, f"{node_id}: {key} is None"
 
 
 class GraphStoreContractTests:
@@ -185,6 +235,27 @@ class GraphStoreContractTests:
         results = store.query(node_type="service", properties={"team": "platform"})
         assert len(results) == 1
         assert results[0]["node_id"] == "a"
+
+    @pytest.mark.parametrize(
+        "key",
+        ["two words", "a.b", "clé", "it's"],
+        ids=["space", "dot", "unicode", "quote"],
+    )
+    def test_query_property_key_is_one_flat_key_as_written(
+        self, store: GraphStore, key: str
+    ) -> None:
+        """A property filter key names one top-level property, spelled as given.
+
+        The control carries the key with another value. The decoy carries
+        the value where a backend reading ``a.b`` as a path would look.
+        """
+        store.upsert_node("kp-target", "service", {key: "kp-match"})
+        store.upsert_node("kp-control", "service", {key: "kp-other"})
+        store.upsert_node("kp-decoy", "service", {"a": {"b": "kp-match"}})
+
+        results = store.query(properties={key: "kp-match"})
+
+        assert [r["node_id"] for r in results] == ["kp-target"]
 
     def test_query_respects_limit(self, store: GraphStore) -> None:
         for i in range(5):
@@ -344,6 +415,70 @@ class GraphStoreContractTests:
         assert store.count_nodes() == before
         assert store.get_node("fresh-row-0") is None
 
+    @pytest.mark.parametrize(
+        "repeat",
+        [
+            {"node_type": "service", "properties": {"v": "first"}},
+            {"node_type": "team", "properties": {"v": "second"}},
+            {"node_type": "service", "properties": {"v": "old"}},
+        ],
+        ids=["same_spec", "other_spec", "stored_spec"],
+    )
+    @pytest.mark.parametrize("existing", [False, True], ids=["new_id", "existing_id"])
+    def test_upsert_nodes_bulk_rejects_a_repeated_node_id(
+        self, store: GraphStore, existing: bool, repeat: dict[str, Any]
+    ) -> None:
+        """A ``node_id`` given twice in one call is refused before any write,
+        whether the second occurrence repeats the first, carries another
+        type and properties, or restates the stored node.
+
+        On an existing id the stored_spec repeat is one a version-preserving
+        no-op skip drops, so a refusal that looked only at the rows left to
+        write would let the first occurrence through.
+
+        One call writes one version per node. The refusal names the second
+        occurrence, as ``test_upsert_edges_bulk_rejects_duplicate_triplets``
+        does for a repeated edge, and leaves the node, new or existing, and
+        the rest of the batch unwritten.
+        """
+        if existing:
+            store.upsert_node("rep-a", "service", {"v": "old"})
+            _sleep_for_ordering()
+        history_before = store.get_node_history("rep-a")
+        before = store.count_nodes()
+        with pytest.raises(ValueError, match=r"upsert_nodes_bulk\[2\].*duplicate"):
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": "rep-a",
+                        "node_type": "service",
+                        "properties": {"v": "first"},
+                    },
+                    {"node_id": "rep-b", "node_type": "service", "properties": {}},
+                    {"node_id": "rep-a", **repeat},
+                ]
+            )
+        assert store.count_nodes() == before
+        assert store.get_node("rep-b") is None
+        assert store.get_node_history("rep-a") == history_before
+
+    def test_upsert_nodes_bulk_assigns_each_empty_node_id(
+        self, store: GraphStore
+    ) -> None:
+        """A ``None`` or ``""`` ``node_id`` is auto-assigned, so two of each
+        in one call are four new nodes, not a repeated id."""
+        ids = store.upsert_nodes_bulk(
+            [
+                {"node_id": None, "node_type": "service", "properties": {}},
+                {"node_id": None, "node_type": "service", "properties": {}},
+                {"node_id": "", "node_type": "service", "properties": {}},
+                {"node_id": "", "node_type": "service", "properties": {}},
+            ]
+        )
+        assert len(set(ids)) == 4
+        assert all(ids)
+        assert all(store.get_node(node_id) is not None for node_id in ids)
+
     # ------------------------------------------------------------------
     # edges
     # ------------------------------------------------------------------
@@ -481,6 +616,215 @@ class GraphStoreContractTests:
             )
         assert store.count_edges() == before
 
+    def test_upsert_edges_bulk_closes_only_named_triplets(
+        self, store: GraphStore
+    ) -> None:
+        """A bulk write closes only the priors of the triplets it names:
+        edges that share its source but differ in target or type stay
+        current and untouched."""
+        store.upsert_nodes_bulk(
+            [
+                {"node_id": "syn-a", "node_type": "service", "properties": {}},
+                {"node_id": "syn-b", "node_type": "service", "properties": {}},
+                {"node_id": "syn-c", "node_type": "service", "properties": {}},
+            ]
+        )
+        store.upsert_edge("syn-a", "syn-b", "syn_rel", {"v": 1})
+        store.upsert_edge("syn-a", "syn-c", "syn_rel", {"v": 1})
+        store.upsert_edge("syn-a", "syn-b", "syn_other", {"v": 1})
+        _sleep_for_ordering()
+
+        store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "syn-a",
+                    "target_id": "syn-b",
+                    "edge_type": "syn_rel",
+                    "properties": {"v": 2},
+                }
+            ]
+        )
+
+        out = store.get_edges("syn-a", direction="outgoing")
+        assert len(out) == 3
+        by_key = {(e["target_id"], e["edge_type"]): e for e in out}
+        assert by_key[("syn-b", "syn_rel")]["properties"]["v"] == 2
+        assert by_key[("syn-c", "syn_rel")]["properties"]["v"] == 1
+        assert by_key[("syn-b", "syn_other")]["properties"]["v"] == 1
+
+    def test_upsert_edges_bulk_closes_two_triplets_same_source(
+        self, store: GraphStore
+    ) -> None:
+        """A batch naming two triplets for the same source closes exactly
+        their two priors, leaving an unrelated third edge untouched."""
+        store.upsert_nodes_bulk(
+            [
+                {"node_id": "syn-a", "node_type": "service", "properties": {}},
+                {"node_id": "syn-b", "node_type": "service", "properties": {}},
+                {"node_id": "syn-c", "node_type": "service", "properties": {}},
+            ]
+        )
+        store.upsert_edge("syn-a", "syn-b", "syn_rel", {"v": 1})
+        store.upsert_edge("syn-a", "syn-c", "syn_rel", {"v": 1})
+        store.upsert_edge("syn-a", "syn-b", "syn_other", {"v": 1})
+        _sleep_for_ordering()
+
+        store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "syn-a",
+                    "target_id": "syn-b",
+                    "edge_type": "syn_rel",
+                    "properties": {"v": 2},
+                },
+                {
+                    "source_id": "syn-a",
+                    "target_id": "syn-c",
+                    "edge_type": "syn_rel",
+                    "properties": {"v": 2},
+                },
+            ]
+        )
+
+        out = store.get_edges("syn-a", direction="outgoing")
+        assert len(out) == 3
+        by_key = {(e["target_id"], e["edge_type"]): e for e in out}
+        assert by_key[("syn-b", "syn_rel")]["properties"]["v"] == 2
+        assert by_key[("syn-c", "syn_rel")]["properties"]["v"] == 2
+        assert by_key[("syn-b", "syn_other")]["properties"]["v"] == 1
+
+    def test_upsert_edges_bulk_leaves_closed_version_alone(
+        self, store: GraphStore
+    ) -> None:
+        """A bulk re-upsert closes only the current version of the triplet
+        it names. An already-closed (historical) version of that same
+        edge keeps its ``valid_from`` and ``valid_to`` untouched, and
+        exactly one version stays current.
+
+        Dropping the ``valid_to IS NULL`` guard from the bulk close
+        statement would re-close every version sharing the edge's
+        ``edge_id`` — including this historical one — and rewrite its
+        ``valid_to``, which would silently corrupt ``as_of`` time travel.
+        """
+        store.upsert_nodes_bulk(
+            [
+                {"node_id": "syn-closed-x", "node_type": "service", "properties": {}},
+                {"node_id": "syn-closed-y", "node_type": "service", "properties": {}},
+            ]
+        )
+        store.upsert_edge("syn-closed-x", "syn-closed-y", "syn_rel", {"v": 1})
+        _sleep_for_ordering()
+        # A timestamp strictly between the first and second single-row
+        # versions reads back the first version by its (now-closed)
+        # valid_to, once the second upsert_edge below closes it.
+        between = _now()
+        _sleep_for_ordering()
+        store.upsert_edge("syn-closed-x", "syn-closed-y", "syn_rel", {"v": 2})
+
+        # v2's created_at, read while it is still current. The bulk
+        # re-upsert below must carry it forward onto v3 rather than
+        # stamping a fresh one (follow-up 2 from the #759 gate).
+        v2_current = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel"
+        )
+        assert len(v2_current) == 1
+        v2_created_at = datetime.fromisoformat(v2_current[0]["created_at"])
+
+        historical_before = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel", as_of=between
+        )
+        assert len(historical_before) == 1
+        closed_valid_from = historical_before[0]["valid_from"]
+        closed_valid_to = historical_before[0]["valid_to"]
+        assert closed_valid_to is not None
+
+        _sleep_for_ordering()
+        store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "syn-closed-x",
+                    "target_id": "syn-closed-y",
+                    "edge_type": "syn_rel",
+                    "properties": {"v": 3},
+                }
+            ]
+        )
+
+        historical_after = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel", as_of=between
+        )
+        assert len(historical_after) == 1
+        assert historical_after[0]["valid_from"] == closed_valid_from
+        assert historical_after[0]["valid_to"] == closed_valid_to
+
+        current = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel"
+        )
+        assert len(current) == 1
+        assert current[0]["properties"]["v"] == 3
+        # Instants, not strings: a carried-forward value can come back
+        # through a different wire rendering of the same timestamp
+        # (e.g. ArcadeDB renders one as ``+00:00`` and another as ``Z``)
+        # without the carry having failed.
+        assert datetime.fromisoformat(current[0]["created_at"]) == v2_created_at
+
+    def test_upsert_edge_leaves_closed_version_alone(self, store: GraphStore) -> None:
+        """Twin of ``test_upsert_edges_bulk_leaves_closed_version_alone``
+        for the single-row path: closing the current version through
+        :meth:`~trellis.stores.base.graph.GraphStore.upsert_edge` must
+        not touch an already-closed (historical) version of the same
+        edge.
+
+        Dropping the ``valid_to IS NULL`` guard from the single-row
+        close statement (SQLite, Postgres, or the Bolt
+        ``OPTIONAL MATCH``) would re-close every version sharing the
+        edge's ``edge_id`` — including this historical one — and
+        rewrite its ``valid_to``. Follow-up 1 from the #759 gate: the
+        bulk path already pins this guard; the single-row path shares
+        the same close statement shape but had no case of its own.
+        """
+        store.upsert_nodes_bulk(
+            [
+                {"node_id": "syn-closed-x", "node_type": "service", "properties": {}},
+                {"node_id": "syn-closed-y", "node_type": "service", "properties": {}},
+            ]
+        )
+        store.upsert_edge("syn-closed-x", "syn-closed-y", "syn_rel", {"v": 1})
+        _sleep_for_ordering()
+        # A timestamp strictly between the first and second versions
+        # reads back the first version by its (now-closed) valid_to,
+        # once the second upsert_edge below closes it.
+        between = _now()
+        _sleep_for_ordering()
+        store.upsert_edge("syn-closed-x", "syn-closed-y", "syn_rel", {"v": 2})
+
+        historical_before = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel", as_of=between
+        )
+        assert len(historical_before) == 1
+        closed_valid_from = historical_before[0]["valid_from"]
+        closed_valid_to = historical_before[0]["valid_to"]
+        assert closed_valid_to is not None
+
+        _sleep_for_ordering()
+        # The third write goes through upsert_edge (single-row), not
+        # upsert_edges_bulk — that's the only difference from the bulk
+        # case above.
+        store.upsert_edge("syn-closed-x", "syn-closed-y", "syn_rel", {"v": 3})
+
+        historical_after = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel", as_of=between
+        )
+        assert len(historical_after) == 1
+        assert historical_after[0]["valid_from"] == closed_valid_from
+        assert historical_after[0]["valid_to"] == closed_valid_to
+
+        current = store.get_edges(
+            "syn-closed-x", direction="outgoing", edge_type="syn_rel"
+        )
+        assert len(current) == 1
+        assert current[0]["properties"]["v"] == 3
+
     def test_upsert_edge_same_triplet_is_idempotent(self, store: GraphStore) -> None:
         """Re-upserting the same edge (single-row) keeps one current version.
 
@@ -498,6 +842,44 @@ class GraphStoreContractTests:
         assert store.count_edges() == before
         edges = store.get_edges("a", direction="outgoing", edge_type="depends_on")
         assert len(edges) == 1
+        assert edges[0]["properties"]["v"] == 2
+
+    @pytest.mark.parametrize("bulk", [False, True], ids=["single", "bulk"])
+    @pytest.mark.parametrize("reversioned", ["a", "b"], ids=["source", "target"])
+    def test_upsert_edge_survives_endpoint_reversion(
+        self, store: GraphStore, reversioned: str, bulk: bool
+    ) -> None:
+        """Re-versioning an endpoint after the edge exists still finds it.
+
+        ``upsert_node`` closes a node's current row and opens a new one
+        without moving its relationships (the Bolt module docstring). The
+        next write of the triplet must find the edge on the closed row,
+        close it there and carry its ``edge_id`` forward: one current edge.
+        """
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        first_edge_id = store.upsert_edge("a", "b", "depends_on", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_node(reversioned, "service", {"reversioned": True})
+        _sleep_for_ordering()
+        if bulk:
+            (second_edge_id,) = store.upsert_edges_bulk(
+                [
+                    {
+                        "source_id": "a",
+                        "target_id": "b",
+                        "edge_type": "depends_on",
+                        "properties": {"v": 2},
+                    }
+                ]
+            )
+        else:
+            second_edge_id = store.upsert_edge("a", "b", "depends_on", {"v": 2})
+
+        assert second_edge_id == first_edge_id
+        edges = store.get_edges("a", direction="outgoing", edge_type="depends_on")
+        assert len(edges) == 1
+        assert edges[0]["edge_id"] == first_edge_id
         assert edges[0]["properties"]["v"] == 2
 
     def test_reingest_same_graph_is_idempotent(self, store: GraphStore) -> None:
@@ -600,6 +982,45 @@ class GraphStoreContractTests:
         store.upsert_node("x", "service", {})
         with pytest.raises(ValueError, match="depth"):
             store.get_subgraph(["x"], depth=-1)
+
+    @pytest.mark.parametrize("depth", [0, 1])
+    def test_subgraph_returns_the_full_node_payload(
+        self, store: GraphStore, depth: int
+    ) -> None:
+        """Subgraph nodes carry the payload ``upsert_node`` wrote.
+
+        The tests above compare ids only. Depth 0 is the batch existence
+        read ``NamespaceSeedExtractor`` confirms seeds with, and it checks
+        an alias-derived seed against ``properties["name"]``, so a payload
+        that loses its properties loses every alias seed.
+        """
+        _upsert_payload_nodes(store)
+        returned = store.get_subgraph(["pa"], depth=depth)["nodes"]
+        expected = ["pa"] if depth == 0 else ["pa", "pb"]
+        assert sorted(n["node_id"] for n in returned) == expected
+        for node in returned:
+            _assert_current_payload(node, node["node_id"])
+
+    def test_every_node_read_returns_the_full_payload(self, store: GraphStore) -> None:
+        """The point reads and queries return the same payload as the subgraph."""
+        from trellis.stores.base.graph_query import FilterClause, NodeQuery
+
+        _upsert_payload_nodes(store)
+        for node_id, spec in _PAYLOAD_NODES.items():
+            _assert_current_payload(store.get_node(node_id), node_id)
+            history = store.get_node_history(node_id)
+            assert len(history) == 1
+            _assert_current_payload(history[0], node_id)
+            (by_type,) = store.query(node_type=spec["node_type"])
+            _assert_current_payload(by_type, node_id)
+            (by_dsl,) = store.execute_node_query(
+                NodeQuery(filters=(FilterClause("node_id", "eq", node_id),))
+            )
+            _assert_current_payload(by_dsl, node_id)
+        bulk = store.get_nodes_bulk(list(_PAYLOAD_NODES))
+        assert sorted(n["node_id"] for n in bulk) == sorted(_PAYLOAD_NODES)
+        for node in bulk:
+            _assert_current_payload(node, node["node_id"])
 
     # ------------------------------------------------------------------
     # aliases
@@ -905,6 +1326,242 @@ class GraphStoreContractTests:
         assert store.get_edges("b", direction="both", as_of=before_delete) == []
 
     # ------------------------------------------------------------------
+    # update_node_if_current — compare-and-set on the version token
+    #
+    # The token is the current version's ``valid_from`` exactly as
+    # ``get_node`` returns it. Every case but the malformed-token one reads
+    # it through ``get_node``, so C1 also pins that each backend's
+    # comparison accepts its own rendering of the timestamp.
+    # ------------------------------------------------------------------
+
+    def test_update_node_if_current_writes_a_version_on_a_fresh_token(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1}, document_ids=["doc-1"])
+        before = _current(store, "n1")
+        _sleep_for_ordering()
+
+        written = store.update_node_if_current(
+            "n1",
+            before["valid_from"],
+            "person",
+            {"v": 2},
+            node_role="semantic",
+            document_ids=["doc-2"],
+        )
+
+        assert written is True
+        after = _current(store, "n1")
+        assert after["node_type"] == "person"
+        assert after["properties"] == {"v": 2}
+        assert after["document_ids"] == ["doc-2"]
+        assert after["valid_from"] != before["valid_from"]
+        # Compared as instants: ArcadeDB renders a carried-forward
+        # ``created_at`` with ``Z`` where the first version had
+        # ``+00:00``, as it does for ``upsert_node``.
+        assert datetime.fromisoformat(after["created_at"]) == datetime.fromisoformat(
+            before["created_at"]
+        )
+        history = store.get_node_history("n1")
+        assert [h["properties"] for h in history] == [{"v": 2}, {"v": 1}]
+        assert history[1]["valid_to"] is not None
+
+    def test_update_node_if_current_leaves_closed_versions_unchanged(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_node("n1", "service", {"v": 2})
+        closed = store.get_node_history("n1")[1]
+        _sleep_for_ordering()
+
+        written = store.update_node_if_current(
+            "n1",
+            _current(store, "n1")["valid_from"],
+            "service",
+            {"v": 3},
+            node_role="semantic",
+        )
+
+        assert written is True
+        history = store.get_node_history("n1")
+        assert [h["properties"] for h in history] == [{"v": 3}, {"v": 2}, {"v": 1}]
+        assert history[2] == closed
+
+    def test_update_node_if_current_never_creates_a_node(
+        self, store: GraphStore
+    ) -> None:
+        # A real token (another node's), so the refusal cannot come from
+        # a timestamp the backend fails to parse.
+        store.upsert_node("other", "service", {})
+        token = _current(store, "other")["valid_from"]
+
+        written = store.update_node_if_current(
+            "ghost", token, "service", {"v": 1}, node_role="semantic"
+        )
+
+        assert written is False
+        assert store.get_node("ghost") is None
+        assert store.get_node_history("ghost") == []
+        assert store.count_nodes() == 1
+
+    def test_update_node_if_current_refuses_a_deleted_node(
+        self, store: GraphStore
+    ) -> None:
+        # The redaction race: a writer read the node, a purge committed,
+        # then the write arrived. It must not re-create the purged id.
+        store.upsert_node("n1", "service", {"v": 1})
+        token = _current(store, "n1")["valid_from"]
+        assert store.delete_node("n1") is True
+
+        written = store.update_node_if_current(
+            "n1", token, "service", {"v": 2}, node_role="semantic"
+        )
+
+        assert written is False
+        assert store.get_node("n1") is None
+        assert store.get_node_history("n1") == []
+
+    def test_update_node_if_current_refuses_a_stale_token(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1})
+        stale = _current(store, "n1")["valid_from"]
+        _sleep_for_ordering()
+        store.upsert_node("n1", "service", {"v": 2})
+        current = _current(store, "n1")
+        assert current["valid_from"] != stale
+
+        written = store.update_node_if_current(
+            "n1", stale, "service", {"v": 3}, node_role="semantic"
+        )
+
+        assert written is False
+        assert store.get_node("n1") == current
+        assert len(store.get_node_history("n1")) == 2
+
+    def test_update_node_if_current_refuses_a_token_one_microsecond_off(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1})
+        current = _current(store, "n1")
+        token = datetime.fromisoformat(current["valid_from"])
+        off_by_one = (token + timedelta(microseconds=1)).isoformat()
+
+        written = store.update_node_if_current(
+            "n1", off_by_one, "service", {"v": 2}, node_role="semantic"
+        )
+
+        assert written is False
+        assert store.get_node("n1") == current
+        assert len(store.get_node_history("n1")) == 1
+
+    def test_update_node_if_current_refuses_a_token_from_before_a_recreation(
+        self, store: GraphStore
+    ) -> None:
+        # ABA: the id was purged and created again. A token read before
+        # the purge names a version that no longer exists.
+        store.upsert_node("n1", "service", {"v": 1})
+        purged = _current(store, "n1")["valid_from"]
+        assert store.delete_node("n1") is True
+        _sleep_for_ordering()
+        store.upsert_node("n1", "service", {"v": "recreated"})
+        current = _current(store, "n1")
+        assert current["valid_from"] != purged
+
+        written = store.update_node_if_current(
+            "n1", purged, "service", {"v": 2}, node_role="semantic"
+        )
+
+        assert written is False
+        assert store.get_node("n1") == current
+        assert len(store.get_node_history("n1")) == 1
+
+    def test_update_node_if_current_refuses_a_role_change(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("col", "uc_column", {"v": 1}, node_role="structural")
+        current = _current(store, "col")
+
+        with pytest.raises(ValueError, match="node_role"):
+            store.update_node_if_current(
+                "col",
+                current["valid_from"],
+                "uc_column",
+                {"v": 2},
+                node_role="semantic",
+            )
+
+        assert store.get_node("col") == current
+        assert len(store.get_node_history("col")) == 1
+
+    def test_update_node_if_current_requires_a_spec_for_a_curated_node(
+        self, store: GraphStore
+    ) -> None:
+        spec = {"generator_name": "louvain", "generator_version": "1.0.0"}
+        store.upsert_node(
+            "cluster_x", "concept", {"v": 1}, node_role="curated", generation_spec=spec
+        )
+        current = _current(store, "cluster_x")
+
+        with pytest.raises(ValueError, match="generation_spec"):
+            store.update_node_if_current(
+                "cluster_x",
+                current["valid_from"],
+                "concept",
+                {"v": 2},
+                node_role="curated",
+            )
+
+        assert store.get_node("cluster_x") == current
+        assert len(store.get_node_history("cluster_x")) == 1
+
+    def test_update_node_if_current_rejects_a_token_that_is_not_a_timestamp(
+        self, store: GraphStore
+    ) -> None:
+        # Raised before the query, so the backends agree. Past that point
+        # SQL compares the token as text and refuses, the Bolt engines
+        # raise their own errors, and Neo4j writes over a datetime object.
+        store.upsert_node("n1", "service", {"v": 1})
+        current = _current(store, "n1")
+
+        for token in ("", "not-a-timestamp"):
+            with pytest.raises(ValueError, match="expected_valid_from"):
+                store.update_node_if_current(
+                    "n1", token, "service", {"v": 2}, node_role="semantic"
+                )
+        with pytest.raises(TypeError, match="expected_valid_from"):
+            store.update_node_if_current(
+                "n1",
+                datetime.fromisoformat(current["valid_from"]),  # type: ignore[arg-type]
+                "service",
+                {"v": 2},
+                node_role="semantic",
+            )
+
+        assert store.get_node("n1") == current
+        assert len(store.get_node_history("n1")) == 1
+
+    def test_update_node_if_current_is_atomic_for_concurrent_writers(
+        self, store: GraphStore
+    ) -> None:
+        # Twenty races, not one: with the Bolt lock idiom removed, one race
+        # caught the mutant in 5 of 50 runs on Neo4j and twenty races in 50
+        # of 50 (measured 2026-10-03). ArcadeDB's commit check almost always
+        # fails the loser of a simultaneous start, so this misses that mutant
+        # there (0 of 50); over 0-20 ms start offsets both wrote in 4 of 532 races.
+        for round_number in range(20):
+            node_id = f"n{round_number}"
+            results = _race_update_node_if_current(store, node_id)
+
+            assert sorted(results) == [False, True], (node_id, results)
+            winner = "a" if results[0] else "b"
+            history = store.get_node_history(node_id)
+            assert len(history) == 2
+            assert [h["valid_to"] for h in history].count(None) == 1
+            assert _current(store, node_id)["properties"] == {"by": winner}
+
+    # ------------------------------------------------------------------
     # counts
     # ------------------------------------------------------------------
 
@@ -920,6 +1577,268 @@ class GraphStoreContractTests:
         store.upsert_node("b", "service", {})
         store.upsert_edge("a", "b", "depends_on")
         assert store.count_edges() == 1
+
+    def test_count_nodes_by_type_counts_current_versions_per_stored_type(
+        self, store: GraphStore
+    ) -> None:
+        assert store.count_nodes_by_type() == {}
+        for i in range(3):
+            store.upsert_node(f"act-{i}", "Activity", {"name": f"step {i}"})
+        store.upsert_node("lower-1", "concept", {"name": "lower one"})
+        store.upsert_node("lower-2", "concept", {"name": "lower two"})
+        store.upsert_node("upper-1", "Concept", {"name": "upper one"})
+        # Two closed versions: a same-type update must not count twice, and
+        # a type that survives only on a closed version must not appear.
+        store.upsert_node("svc", "service", {"v": 1})
+        store.upsert_node("moved", "legacy_kind", {"v": 1})
+        _sleep_for_ordering()
+        store.upsert_node("svc", "service", {"v": 2})
+        store.upsert_node("moved", "Activity", {"v": 2})
+
+        counts = store.count_nodes_by_type()
+
+        assert counts == {"Activity": 4, "concept": 2, "Concept": 1, "service": 1}
+        assert sum(counts.values()) == store.count_nodes()
+
+    def test_count_nodes_by_type_search_matches_name_id_or_type(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n-name", "Activity", {"name": "Deploy the Widget"})
+        store.upsert_node("widget-id", "concept", {"name": "unrelated"})
+        store.upsert_node("n-type", "WidgetKind", {"name": "also unrelated"})
+        store.upsert_node("n-miss-1", "Activity", {"name": "gadget"})
+        store.upsert_node("n-miss-2", "concept", {})
+        # A closed version whose name matched stops counting once renamed.
+        store.upsert_node("n-renamed", "Activity", {"name": "old widget"})
+        _sleep_for_ordering()
+        store.upsert_node("n-renamed", "Activity", {"name": "new gadget"})
+
+        assert store.count_nodes_by_type(search="WIDGET") == {
+            "Activity": 1,
+            "concept": 1,
+            "WidgetKind": 1,
+        }
+        assert store.count_nodes_by_type(search="no-node-has-this") == {}
+        assert store.count_nodes_by_type(search="") == {
+            "Activity": 3,
+            "concept": 2,
+            "WidgetKind": 1,
+        }
+
+    # ------------------------------------------------------------------
+    # Node search (the GET /graph/search list)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _seed_search_nodes(store: GraphStore) -> list[str]:
+        """Seed eight current nodes; return their ids oldest first.
+
+        Distinct first letters and lowercase types sort the same under any
+        collation. Two nodes also keep a closed version that the search
+        must not see: ``n-golf`` matched ``widget`` before a rename, and
+        ``n-hotel`` moved from ``legacykind`` to ``concept``.
+        """
+        seed: list[tuple[str, str, dict[str, Any]]] = [
+            ("n-alpha", "activity", {"name": "Alpha widget"}),
+            ("n-bravo", "activity", {"name": "Bravo"}),
+            ("widget-c", "concept", {"name": "Charlie"}),
+            ("n-delta", "widgetkind", {"name": "Delta"}),
+            ("n-echo", "service", {"name": "Echo widget", "tier": 2}),
+            ("n-foxtrot", "service", {}),
+            ("n-golf", "activity", {"name": "Golf widget"}),
+            ("n-hotel", "legacykind", {"name": "Hotel widget"}),
+        ]
+        for node_id, node_type, props in seed:
+            store.upsert_node(node_id, node_type, props)
+            _sleep_for_ordering()
+        store.upsert_node("n-golf", "activity", {"name": "Golf"})
+        store.upsert_node("n-hotel", "concept", {"name": "Hotel widget"})
+        return [node_id for node_id, _, _ in seed]
+
+    def test_search_nodes_total_matches_count_nodes_by_type(
+        self, store: GraphStore
+    ) -> None:
+        oldest_first = self._seed_search_nodes(store)
+
+        rows, total = store.search_nodes(search="WIDGET")
+
+        # Name, node_id and node_type match in any case; closed versions
+        # neither match nor count.
+        assert {r["node_id"] for r in rows} == {
+            "n-alpha",
+            "widget-c",
+            "n-delta",
+            "n-echo",
+            "n-hotel",
+        }
+        assert total == 5
+        # Each row is the node as get_node returns it.
+        for row in rows:
+            assert row == store.get_node(row["node_id"]), row["node_id"]
+        # A haystack's case does not matter either: only the name "Charlie" matches.
+        rows, total = store.search_nodes(search="charlie")
+        assert ([r["node_id"] for r in rows], total) == (["widget-c"], 1)
+        # Defaults: every current node, newest first.
+        rows, total = store.search_nodes()
+        assert [r["node_id"] for r in rows] == oldest_first[::-1]
+        assert total == 8 == store.count_nodes()
+        # The total equals count_nodes_by_type for the same search, whole and
+        # per type, so the graph page's chips sum to the list's total.
+        for search in ("WIDGET", "", "hotel", "no-node-has-this"):
+            counts = store.count_nodes_by_type(search=search)
+            assert store.search_nodes(search=search, limit=1)[1] == sum(
+                counts.values()
+            ), search
+            for node_type, count in counts.items():
+                typed, typed_total = store.search_nodes(
+                    search=search, node_type=node_type
+                )
+                assert typed_total == count == len(typed), (search, node_type)
+                assert {r["node_type"] for r in typed} == {node_type}
+        # A type that survives only on a closed version finds nothing.
+        assert store.search_nodes(node_type="legacykind") == ([], 0)
+
+    def test_search_nodes_pages_in_the_requested_order(self, store: GraphStore) -> None:
+        self._seed_search_nodes(store)
+
+        pages = [
+            store.search_nodes(
+                search="widget", sort="name", descending=False, limit=2, offset=o
+            )
+            for o in (0, 2, 4, 6)
+        ]
+
+        assert [[r["node_id"] for r in rows] for rows, _ in pages] == [
+            ["n-alpha", "widget-c"],
+            ["n-delta", "n-echo"],
+            ["n-hotel"],
+            [],
+        ]
+        assert [total for _, total in pages] == [5, 5, 5, 5]
+        rows, _ = store.search_nodes(search="widget", sort="name", descending=True)
+        assert [r["node_id"] for r in rows] == [
+            "n-hotel",
+            "n-echo",
+            "n-delta",
+            "widget-c",
+            "n-alpha",
+        ]
+        types = ["activity"] * 3 + ["concept"] * 2 + ["service"] * 2 + ["widgetkind"]
+        rows, _ = store.search_nodes(sort="node_type", descending=False)
+        assert [r["node_type"] for r in rows] == types
+        rows, _ = store.search_nodes(sort="node_type", descending=True)
+        assert [r["node_type"] for r in rows] == types[::-1]
+        rows, total = store.search_nodes(node_type="activity", limit=2, offset=1)
+        assert [r["node_id"] for r in rows] == ["n-bravo", "n-alpha"]
+        assert total == 3
+
+    def test_search_nodes_breaks_ties_by_node_id_on_every_page(
+        self, store: GraphStore
+    ) -> None:
+        # 120 nodes in two bulk writes: a write stamps one created_at on all
+        # of its nodes, and two names and two types make the rest of the
+        # rows tie too. The older write holds the higher ids and each write
+        # goes in shuffled, so neither write order nor insertion order is
+        # the node_id order that breaks the ties.
+        def name(i: int) -> str:
+            return "bravo" if i % 2 else "alpha"
+
+        def node_type(i: int) -> str:
+            return "concept" if i % 3 else "activity"
+
+        ids = [f"tie-{i:03d}" for i in range(120)]
+        for batch in (range(60, 120), range(60)):
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": ids[i],
+                        "node_type": node_type(i),
+                        "properties": {"name": name(i)},
+                    }
+                    for i in (batch[37 * k % 60] for k in range(60))
+                ]
+            )
+            _sleep_for_ordering()
+        # The created_at leg tests ties only while each write has one stamp.
+        rows, _ = store.search_nodes(limit=120)
+        assert len({r["created_at"] for r in rows}) == 2
+        sort_keys: dict[str, Any] = {
+            "name": name,
+            "node_type": node_type,
+            "created_at": lambda i: i < 60,  # the newer write
+        }
+
+        for sort, key in sort_keys.items():
+            ascending = [ids[i] for i in sorted(range(120), key=lambda i: (key(i), i))]
+            for descending, expected in ((False, ascending), (True, ascending[::-1])):
+                walked: list[str] = []
+                for offset in range(0, 120, 7):
+                    rows, total = store.search_nodes(
+                        sort=sort, descending=descending, limit=7, offset=offset
+                    )
+                    assert total == 120
+                    walked += [r["node_id"] for r in rows]
+                # Every page together shows each node once, in the stated order.
+                assert sorted(walked) == ids, (sort, descending)
+                assert walked == expected, (sort, descending)
+
+    def test_search_nodes_refuses_an_unknown_sort_or_a_negative_page(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n-1", "activity", {"name": "one"})
+        with pytest.raises(ValueError, match="sort must be one of"):
+            store.search_nodes(sort="bogus")
+        for page in ({"limit": -1}, {"offset": -1}):
+            with pytest.raises(ValueError, match="must be >= 0"):
+                store.search_nodes(**page)
+
+    def test_node_search_reads_percent_underscore_and_backslash_literally(
+        self, store: GraphStore
+    ) -> None:
+        # Each searched name has a decoy that the search would match as a
+        # SQL LIKE pattern: "_" is any one character, "%" any run, and "\s"
+        # an escaped "s". Each node has its own type, so a count names the
+        # node it counted, and no id or type holds any searched text.
+        nodes = {
+            "lit-1": ("alpha", "a_b"),
+            "lit-2": ("bravo", "axb"),
+            "lit-3": ("charlie", "100%"),
+            "lit-4": ("delta", "1000"),
+            "lit-5": ("echo", "back\\slash"),
+            "lit-6": ("foxtrot", "backslash"),
+        }
+        for node_id, (node_type, name) in nodes.items():
+            store.upsert_node(node_id, node_type, {"name": name})
+
+        # pytest does not rewrite asserts in this module, so each message
+        # carries what the store answered.
+        for node_id in ("lit-1", "lit-3", "lit-5"):
+            node_type, name = nodes[node_id]
+            rows, total = store.search_nodes(search=name)
+            listed = ([r["node_id"] for r in rows], total)
+            assert listed == ([node_id], 1), (name, listed)
+            counts = store.count_nodes_by_type(search=name)
+            assert counts == {node_type: 1}, (name, counts)
+        # The text a pair shares still matches both, anywhere in the name.
+        for stem, pair in (("100", {"lit-3", "lit-4"}), ("slash", {"lit-5", "lit-6"})):
+            rows, total = store.search_nodes(search=stem)
+            matched = ({r["node_id"] for r in rows}, total)
+            assert matched == (pair, 2), (stem, matched)
+
+    def test_node_search_reads_an_id_and_a_type_literally(
+        self, store: GraphStore
+    ) -> None:
+        # The node_id and node_type match like the name: each decoy holds
+        # "x" where its target holds "_", and no name holds searched text.
+        store.upsert_node("id_a", "golf", {"name": "g-1"})
+        store.upsert_node("idxa", "golf", {"name": "g-2"})
+        store.upsert_node("t-1", "type_b", {"name": "g-3"})
+        store.upsert_node("t-2", "typexb", {"name": "g-4"})
+
+        for search, node_id in (("id_a", "id_a"), ("type_b", "t-1")):
+            rows, total = store.search_nodes(search=search)
+            listed = ([r["node_id"] for r in rows], total)
+            assert listed == ([node_id], 1), (search, listed)
 
     # ------------------------------------------------------------------
     # node_role + generation_spec
@@ -1522,3 +2441,29 @@ def _now() -> datetime:
     from trellis.core.base import utc_now
 
     return utc_now()
+
+
+def _current(store: GraphStore, node_id: str) -> dict[str, Any]:
+    """Return the current version of ``node_id``, failing when there is none."""
+    node = store.get_node(node_id)
+    assert node is not None, f"{node_id} has no current version"
+    return node
+
+
+def _race_update_node_if_current(store: GraphStore, node_id: str) -> list[bool]:
+    """Create ``node_id``, then race two compare-and-sets on its one token.
+
+    Returns writer ``a``'s result, then writer ``b``'s.
+    """
+    store.upsert_node(node_id, "service", {"v": 0})
+    token = _current(store, node_id)["valid_from"]
+    barrier = Barrier(2)
+
+    def _contend(writer: str) -> bool:
+        barrier.wait()
+        return store.update_node_if_current(
+            node_id, token, "service", {"by": writer}, node_role="semantic"
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        return list(pool.map(_contend, ("a", "b")))

@@ -605,6 +605,12 @@
         }
         .legend-item:hover { color: var(--text); }
         .legend-item.dimmed { opacity: 0.3; }
+        .legend-item .legend-count {
+            background: var(--surface-2);
+            border-radius: 8px;
+            padding: 0 0.3rem;
+            font-size: 0.7rem;
+        }
         .legend-dot {
             width: 10px;
             height: 10px;
@@ -757,8 +763,10 @@
             text-align: center;
         }
         .type-chip.active .chip-count { background: rgba(99, 102, 241, 0.3); }
+        .type-chips .chip-note { font-size: 0.7rem; color: var(--text-dim); align-self: center; }
 
-        /* Group header */
+        /* Group header: the type in its stored case, so `concept` and
+           `Concept`, which are different types, read differently. */
         .srp-group-header {
             display: flex;
             align-items: center;
@@ -766,7 +774,6 @@
             padding: 0.5rem 0.75rem 0.3rem;
             font-size: 0.7rem;
             font-weight: 700;
-            text-transform: uppercase;
             letter-spacing: 0.05em;
             color: var(--text-dim);
             border-top: 1px solid var(--border);
@@ -863,6 +870,9 @@
         .node-detail .props { font-size: 0.85rem; color: var(--text-dim); }
         .node-detail .props dt { color: var(--text); font-weight: 600; margin-top: 0.5rem; }
         .node-detail .props dd { margin-left: 0; }
+        .node-detail .detail-evidence { font-size: 0.85rem; margin-top: 0.75rem; }
+        .node-detail .detail-evidence-title { color: var(--text); font-weight: 600; margin-bottom: 0.25rem; }
+        .node-detail .detail-evidence-links { display: flex; gap: 0.35rem 0.75rem; flex-wrap: wrap; font-size: 0.8rem; }
         .node-detail .detail-actions { display: flex; gap: 0.5rem; margin-top: 1rem; flex-wrap: wrap; }
 
         /* Tables */
@@ -1785,7 +1795,15 @@
             await throwIfAuthRefused(res, key);
             if (!res.ok) {
                 let detail = `${res.status} ${res.statusText}`;
-                try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
+                try {
+                    // `detail` is a string, an object carrying `message`
+                    // (a 409 refusal), or a list (a 422 validation error).
+                    const j = await res.json();
+                    const d = j && j.detail;
+                    if (typeof d === 'string') detail = d;
+                    else if (d && typeof d.message === 'string') detail = d.message;
+                    else if (d) detail = JSON.stringify(d);
+                } catch { /* non-JSON */ }
                 throw new Error(detail);
             }
             return res.json();
@@ -1807,12 +1825,34 @@
             return new Date(iso).toLocaleString();
         }
 
+        // Encodes & < > and both quotes: between tags the text stays text, and
+        // inside a quoted attribute a quote cannot end the attribute. An onclick
+        // decodes it first, so ids go through data-id (below). Cut a value
+        // before escaping it; a cut after can split an entity.
         function escHtml(s) {
             if (s == null) return '';
             const d = document.createElement('div');
             d.textContent = String(s);
-            return d.innerHTML;
+            return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
+
+        // An id can be agent-written (entity, document and trace ids are), so
+        // none reaches a handler through inline JavaScript: the browser decodes
+        // escHtml's entities before it runs an onclick, and a quote in the id
+        // would end the JS string. A template names the function in
+        // data-action and carries the id in data-id; this listener calls it.
+        const ID_ACTIONS = {
+            confirmPromoteProposal, rejectProposal, promoteProposal,
+            draftAdr, copyAdr, downloadAdr,
+            loadTraceDetail, navigateToEntity, navigateToDocument,
+            loadMemoryDetail, loadEventDetail, navigateToPack, loadPackDetail,
+        };
+        document.addEventListener('click', e => {
+            const el = e.target instanceof Element && e.target.closest('[data-action]');
+            if (el && ID_ACTIONS.hasOwnProperty(el.dataset.action)) {
+                ID_ACTIONS[el.dataset.action](el.dataset.id);
+            }
+        });
 
         function outcomeBadge(status) {
             if (!status) return '<span class="badge badge-info">unknown</span>';
@@ -2207,8 +2247,8 @@
                         <div class="review-kv">baseline: ${escHtml(JSON.stringify(p.baseline_values))}</div>
                         <div class="review-predict" id="predict-${escHtml(p.proposal_id)}" style="display:none"></div>
                         <div class="review-actions">
-                            <button class="btn btn-sm" onclick="confirmPromoteProposal('${escHtml(p.proposal_id)}')">Approve</button>
-                            <button class="btn btn-sm btn-danger" onclick="rejectProposal('${escHtml(p.proposal_id)}')">Reject</button>
+                            <button class="btn btn-sm" data-action="confirmPromoteProposal" data-id="${escHtml(p.proposal_id)}">Approve</button>
+                            <button class="btn btn-sm btn-danger" data-action="rejectProposal" data-id="${escHtml(p.proposal_id)}">Reject</button>
                         </div>
                     </div>`).join('');
             } catch (err) {
@@ -2232,7 +2272,7 @@
                     (pv.effect_size == null ? '' : ` (effect_size ${escHtml(Number(pv.effect_size).toFixed(4))})`);
                 const actions = card.querySelector('.review-actions');
                 actions.innerHTML =
-                    `<button class="btn btn-sm" onclick="promoteProposal('${escHtml(id)}')">Confirm approve</button>` +
+                    `<button class="btn btn-sm" data-action="promoteProposal" data-id="${escHtml(id)}">Confirm approve</button>` +
                     `<button class="btn btn-ghost btn-sm" onclick="loadReviewProposals()">Cancel</button>`;
             } catch (err) {
                 predict.style.display = 'block';
@@ -2346,7 +2386,7 @@
                             ${c.suggested_canonical_name ? `<span>canonical: ${escHtml(c.suggested_canonical_name)}</span>` : ''}
                         </div>
                         <div class="review-actions">
-                            <button class="btn btn-sm" onclick="draftAdr('${escHtml(c.candidate_id)}')">Draft ADR</button>
+                            <button class="btn btn-sm" data-action="draftAdr" data-id="${escHtml(c.candidate_id)}">Draft ADR</button>
                             <span class="review-tooltip" title="Promotion is a one-way ADR commitment: edit well_known.py by hand after the ADR is reviewed. There is deliberately no approve button here.">Why no approve?</span>
                         </div>
                         <div class="adr-panel" id="adr-${escHtml(c.candidate_id)}" style="display:none"></div>
@@ -2369,8 +2409,8 @@
                 controls.className = 'review-actions';
                 controls.style.marginBottom = '0.5rem';
                 controls.innerHTML =
-                    `<button class="btn btn-ghost btn-sm" onclick="copyAdr('${escHtml(id)}')">Copy</button>` +
-                    `<button class="btn btn-ghost btn-sm" onclick="downloadAdr('${escHtml(id)}')">Download</button>`;
+                    `<button class="btn btn-ghost btn-sm" data-action="copyAdr" data-id="${escHtml(id)}">Copy</button>` +
+                    `<button class="btn btn-ghost btn-sm" data-action="downloadAdr" data-id="${escHtml(id)}">Download</button>`;
                 panel.parentNode.insertBefore(controls, panel);
             } catch (err) {
                 panel.textContent = 'Draft ADR failed: ' + err.message;
@@ -2474,12 +2514,67 @@
         // ============================================================
         //  GRAPH EXPLORER
         // ============================================================
-        const NODE_COLORS = {
-            person: '#f472b6', system: '#60a5fa', service: '#34d399', team: '#fbbf24',
-            document: '#a78bfa', concept: '#fb923c', domain: '#2dd4bf',
-            file: '#94a3b8', project: '#e879f9', tool: '#f87171',
-            default: '#6366f1'
-        };
+        // One rule for a node's type everywhere on this page (colour, legend,
+        // hiding, chips, group headers): the type is its stored string, case
+        // included, so `concept` and `Concept` are two types.
+        function nodeTypeOf(x) {
+            return (x && (x.node_type || x.entity_type)) || 'unknown';
+        }
+
+        // The canonical types in trellis/schemas/well_known.py get fixed
+        // colours. The six that make up a trace's neighbourhood (Activity,
+        // SoftwareApplication, CreativeWork, File, Agent, Concept) sit apart
+        // from each other and from the hashed hues of `concept`, `gotcha` and
+        // `system` (179, 61 and 194), the most common open-vocabulary types.
+        const WELL_KNOWN_TYPE_COLORS = new Map([
+            ['Activity', '#60a5fa'],
+            ['SoftwareApplication', '#94a3b8'],
+            ['CreativeWork', '#c084fc'],
+            ['File', '#4ade80'],
+            ['Agent', '#f87171'],
+            ['Concept', '#fb923c'],
+            ['Person', '#f472b6'],
+            ['Organization', '#fbbf24'],
+            ['Team', '#a3e635'],
+            ['Dataset', '#e879f9'],
+            ['Project', '#38bdf8'],
+            ['Product', '#fda4af'],
+            ['Event', '#facc15'],
+            ['Place', '#34d399'],
+            ['Observation', '#22d3ee'],
+            ['Measurement', '#a8a29e'],
+        ]);
+
+        // Any other type gets a hue hashed (FNV-1a) from its stored string, so
+        // it keeps its colour across loads. Hues 228-257 are skipped: that band
+        // is the indigo of the page accent and the edge highlight.
+        function nodeColor(type) {
+            const fixed = WELL_KNOWN_TYPE_COLORS.get(type);
+            if (fixed) return fixed;
+            let h = 0x811c9dc5;
+            for (let i = 0; i < type.length; i++) {
+                h ^= type.charCodeAt(i);
+                h = Math.imul(h, 0x01000193);
+            }
+            let hue = (h >>> 0) % 330;
+            if (hue >= 228) hue += 30;
+            return `hsl(${hue}, 55%, 62%)`;
+        }
+
+        // Activity names are task intents, often over 100 characters. The
+        // canvas and the breadcrumbs show them cut at a word boundary; the
+        // tooltip, the breadcrumb's title and the detail panel keep the full text.
+        const ACTIVITY_LABEL_MAX = 40;
+        function shortLabel(text, max) {
+            const s = String(text);
+            if (s.length <= max) return s;
+            const cut = s.slice(0, max);
+            const space = cut.lastIndexOf(' ');
+            return (space > max / 2 ? cut.slice(0, space) : cut).replace(/[\s,.;:]+$/, '') + '…';
+        }
+        function displayName(type, name) {
+            return type === 'Activity' ? shortLabel(name, ACTIVITY_LABEL_MAX) : String(name);
+        }
 
         let cy = null;
         let graphInitialized = false;
@@ -2491,18 +2586,6 @@
         function initGraph() {
             if (graphInitialized) return;
             graphInitialized = true;
-
-            // Render legend with filter toggles
-            const legend = document.getElementById('graph-legend');
-            for (const [type, color] of Object.entries(NODE_COLORS)) {
-                if (type === 'default') continue;
-                const span = document.createElement('span');
-                span.className = 'legend-item';
-                span.dataset.type = type;
-                span.innerHTML = `<span class="legend-dot" style="background:${color}"></span>${type}`;
-                span.addEventListener('click', () => toggleNodeTypeVisibility(type, span));
-                legend.appendChild(span);
-            }
 
             // Layout selector
             document.querySelectorAll('#layout-selector button').forEach(btn => {
@@ -2541,6 +2624,12 @@
                         }
                     },
                     {
+                        // Activity labels arrive pre-shortened (displayName); wrap them
+                        // onto two lines instead of cutting them at 100px.
+                        selector: 'node.activity',
+                        style: { 'text-wrap': 'wrap', 'text-max-width': 140 }
+                    },
+                    {
                         selector: 'node:selected',
                         style: {
                             'border-color': '#ffffff',
@@ -2574,8 +2663,9 @@
                             'curve-style': 'bezier',
                             'arrow-scale': 0.7,
                             'label': 'data(label)',
-                            'font-size': 8,
-                            'color': '#555870',
+                            'font-size': 9,
+                            // --text-dim: 5.25:1 on the #1a1d27 canvas (#555870 was 2.41:1)
+                            'color': '#8b8fa3',
                             'text-rotation': 'autorotate',
                             'text-outline-width': 1.5,
                             'text-outline-color': '#1a1d27',
@@ -2711,6 +2801,7 @@
             cy.elements().remove();
             graphHistory.length = 0;
             renderBreadcrumbs();
+            renderGraphLegend();
             document.getElementById('node-detail').style.display = 'none';
             document.getElementById('graph-info').innerHTML = '';
         }
@@ -2730,33 +2821,56 @@
             cy.layout(opts).run();
         }
 
-        // Node type filtering
+        // Node type filtering. The legend lists the types on the canvas, with
+        // counts; clicking an entry hides or shows that exact stored type. A
+        // hidden type stays hidden across loads until its entry is clicked again.
         const hiddenTypes = new Set();
-        function toggleNodeTypeVisibility(type, legendEl) {
+
+        function applyTypeVisibility() {
             if (!cy) return;
-            if (hiddenTypes.has(type)) {
-                hiddenTypes.delete(type);
-                legendEl.classList.remove('dimmed');
-            } else {
-                hiddenTypes.add(type);
-                legendEl.classList.add('dimmed');
-            }
-            cy.nodes().forEach(n => {
-                const nt = (n.data('node_type') || '').toLowerCase();
-                if (hiddenTypes.has(nt)) {
-                    n.addClass('hidden');
-                    n.connectedEdges().addClass('hidden');
-                } else {
-                    n.removeClass('hidden');
-                    n.connectedEdges().forEach(e => {
-                        const src = e.source().data('node_type') || '';
-                        const tgt = e.target().data('node_type') || '';
-                        if (!hiddenTypes.has(src.toLowerCase()) && !hiddenTypes.has(tgt.toLowerCase())) {
-                            e.removeClass('hidden');
-                        }
-                    });
-                }
+            cy.batch(() => {
+                cy.nodes().forEach(n => {
+                    n.toggleClass('hidden', hiddenTypes.has(nodeTypeOf(n.data())));
+                });
+                cy.edges().forEach(e => {
+                    e.toggleClass('hidden', e.source().hasClass('hidden') || e.target().hasClass('hidden'));
+                });
             });
+        }
+
+        function renderGraphLegend() {
+            const legend = document.getElementById('graph-legend');
+            legend.replaceChildren();
+            if (!cy) return;
+            const counts = new Map();
+            cy.nodes().forEach(n => {
+                const type = nodeTypeOf(n.data());
+                counts.set(type, (counts.get(type) || 0) + 1);
+            });
+            const entries = [...counts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+            for (const [type, count] of entries) {
+                const hidden = hiddenTypes.has(type);
+                const item = document.createElement('span');
+                item.className = hidden ? 'legend-item dimmed' : 'legend-item';
+                item.dataset.type = type;
+                item.title = `${hidden ? 'Show' : 'Hide'} ${type} nodes`;
+                const dot = document.createElement('span');
+                dot.className = 'legend-dot';
+                dot.style.background = nodeColor(type);
+                const countEl = document.createElement('span');
+                countEl.className = 'legend-count';
+                countEl.textContent = String(count);
+                item.append(dot, document.createTextNode(type), countEl);
+                item.addEventListener('click', () => toggleNodeType(type));
+                legend.appendChild(item);
+            }
+        }
+
+        function toggleNodeType(type) {
+            if (hiddenTypes.has(type)) hiddenTypes.delete(type);
+            else hiddenTypes.add(type);
+            applyTypeVisibility();
+            renderGraphLegend();
         }
 
         function computeNodeSize(degree) {
@@ -2766,15 +2880,24 @@
 
         function renderBreadcrumbs() {
             const el = document.getElementById('graph-breadcrumbs');
-            if (graphHistory.length === 0) {
-                el.innerHTML = '';
-                return;
-            }
-            el.innerHTML = graphHistory.map((h, i) => {
-                const color = NODE_COLORS[h.type] || NODE_COLORS.default;
-                const sep = i < graphHistory.length - 1 ? ' <span class="breadcrumb-sep">&#x203A;</span> ' : '';
-                return `<span class="breadcrumb-item" onclick="loadEntity('${escHtml(h.id)}')"><span class="bc-dot" style="background:${color}"></span>${escHtml(h.name)}</span>${sep}`;
-            }).join('');
+            el.replaceChildren();
+            graphHistory.forEach((h, i) => {
+                if (i > 0) {
+                    const sep = document.createElement('span');
+                    sep.className = 'breadcrumb-sep';
+                    sep.textContent = '›';
+                    el.append(' ', sep, ' ');
+                }
+                const item = document.createElement('span');
+                item.className = 'breadcrumb-item';
+                item.title = String(h.name);
+                const dot = document.createElement('span');
+                dot.className = 'bc-dot';
+                dot.style.background = nodeColor(h.type);
+                item.append(dot, document.createTextNode(displayName(h.type, h.name)));
+                item.addEventListener('click', () => loadEntity(h.id));
+                el.appendChild(item);
+            });
         }
 
         function addToBreadcrumbs(entityId, name, type) {
@@ -2811,7 +2934,6 @@
         let searchCurrentOffset = 0;
         let searchTotal = 0;
         const SEARCH_PAGE_SIZE = 50;
-        let searchTypeCounts = {}; // { type: count }
 
         function closeSearchPanel() {
             document.getElementById('graph-search-results').style.display = 'none';
@@ -2861,31 +2983,15 @@
                 if (q) url += `&q=${encodeURIComponent(q)}`;
                 if (searchActiveTypeFilter) url += `&node_type=${encodeURIComponent(searchActiveTypeFilter)}`;
 
-                const data = await fetchJSON(url);
+                // A failed type count leaves the list usable; the chip row says so.
+                const facetUrl = '/graph/search/facets' + (q ? `?q=${encodeURIComponent(q)}` : '');
+                const [data, facets] = await Promise.all([
+                    fetchJSON(url),
+                    fetchJSON(facetUrl).catch(() => null),
+                ]);
                 lastSearchResults = data.results || [];
                 searchTotal = data.total || 0;
-
-                // Build type counts from full result set (when no type filter, fetch counts)
-                if (!searchActiveTypeFilter && searchCurrentOffset === 0) {
-                    searchTypeCounts = {};
-                    for (const r of lastSearchResults) {
-                        const t = r.node_type || 'unknown';
-                        searchTypeCounts[t] = (searchTypeCounts[t] || 0) + 1;
-                    }
-                    // If total > page size, we only have partial counts — do a supplementary count query
-                    if (searchTotal > SEARCH_PAGE_SIZE) {
-                        try {
-                            const allUrl = `/graph/search?limit=${Math.min(searchTotal, 500)}&offset=0&sort=node_type&order=asc` + (q ? `&q=${encodeURIComponent(q)}` : '');
-                            const allData = await fetchJSON(allUrl);
-                            searchTypeCounts = {};
-                            for (const r of (allData.results || [])) {
-                                const t = r.node_type || 'unknown';
-                                searchTypeCounts[t] = (searchTypeCounts[t] || 0) + 1;
-                            }
-                        } catch (e) { /* use partial counts */ }
-                    }
-                    renderTypeChips();
-                }
+                renderTypeChips(facets);
 
                 if (lastSearchResults.length === 0) {
                     countEl.textContent = 'No results';
@@ -2904,19 +3010,45 @@
             }
         }
 
-        function renderTypeChips() {
+        // One chip per type matching the search box, counted server-side by
+        // /graph/search/facets, so the counts cover every match rather than a
+        // page of them. Re-rendered on every search, so the active chip follows
+        // the filter. The counts ignore the type filter: the chips are that filter.
+        function renderTypeChips(facets) {
             const container = document.getElementById('srp-type-chips');
-            const types = Object.entries(searchTypeCounts).sort((a, b) => b[1] - a[1]);
-            const totalCount = Object.values(searchTypeCounts).reduce((a, b) => a + b, 0);
-
-            let html = `<span class="type-chip ${searchActiveTypeFilter === null ? 'active' : ''}" onclick="filterByType(null)">All <span class="chip-count">${totalCount}</span></span>`;
-
-            for (const [type, count] of types) {
-                const color = NODE_COLORS[type] || NODE_COLORS.default;
-                const isActive = searchActiveTypeFilter === type;
-                html += `<span class="type-chip ${isActive ? 'active' : ''}" onclick="filterByType('${escHtml(type)}')"><span class="chip-dot" style="background:${color}"></span>${escHtml(type)} <span class="chip-count">${count}</span></span>`;
+            container.replaceChildren();
+            const types = facets ? facets.node_types.map(f => [f.node_type, f.count]) : [];
+            if (searchActiveTypeFilter !== null && !types.some(([t]) => t === searchActiveTypeFilter)) {
+                types.push([searchActiveTypeFilter, facets ? 0 : null]);
             }
-            container.innerHTML = html;
+            container.appendChild(typeChip('All', null, facets ? facets.total : null));
+            for (const [type, count] of types) container.appendChild(typeChip(type, type, count));
+            if (!facets) {
+                const note = document.createElement('span');
+                note.className = 'chip-note';
+                note.textContent = 'Type counts unavailable';
+                container.appendChild(note);
+            }
+        }
+
+        function typeChip(label, type, count) {
+            const chip = document.createElement('span');
+            chip.className = searchActiveTypeFilter === type ? 'type-chip active' : 'type-chip';
+            if (type !== null) {
+                const dot = document.createElement('span');
+                dot.className = 'chip-dot';
+                dot.style.background = nodeColor(type);
+                chip.appendChild(dot);
+            }
+            chip.appendChild(document.createTextNode(label));
+            if (count !== null) {
+                const countEl = document.createElement('span');
+                countEl.className = 'chip-count';
+                countEl.textContent = String(count);
+                chip.appendChild(countEl);
+            }
+            chip.addEventListener('click', () => filterByType(type));
+            return chip;
         }
 
         function filterByType(type) {
@@ -2937,23 +3069,28 @@
             } else {
                 renderFlatResults(itemsEl);
             }
+            // Node ids are agent-written: they reach the handler through the
+            // DOM, never through inline JavaScript.
+            itemsEl.querySelectorAll('.srp-item').forEach(el =>
+                el.addEventListener('click', () => selectSearchResult(el.dataset.entityId)));
         }
 
         function renderGroupedResults(container) {
-            // Group by node_type
-            const groups = {};
+            // Group by stored node_type (a Map, so a type named like an
+            // Object.prototype key is still a group)
+            const groups = new Map();
             for (const r of lastSearchResults) {
-                const type = r.node_type || 'unknown';
-                if (!groups[type]) groups[type] = [];
-                groups[type].push(r);
+                const type = nodeTypeOf(r);
+                if (!groups.has(type)) groups.set(type, []);
+                groups.get(type).push(r);
             }
 
             // Sort groups by count descending
-            const sortedGroups = Object.entries(groups).sort((a, b) => b[1].length - a[1].length);
+            const sortedGroups = [...groups].sort((a, b) => b[1].length - a[1].length);
 
             let html = '';
             for (const [type, items] of sortedGroups) {
-                const color = NODE_COLORS[type] || NODE_COLORS.default;
+                const color = nodeColor(type);
                 html += `<div class="srp-group-header"><span class="gh-dot" style="background:${color}"></span>${escHtml(type)} <span class="gh-count">${items.length}</span></div>`;
                 for (const r of items) {
                     html += renderSearchItem(r);
@@ -2969,14 +3106,14 @@
         function renderSearchItem(r) {
             const id = r.entity_id || '';
             const name = r.name || id;
-            const type = r.node_type || '';
-            const color = NODE_COLORS[type] || NODE_COLORS.default;
+            const type = nodeTypeOf(r);
+            const color = nodeColor(type);
             const created = r.created_at ? timeAgo(r.created_at) : '';
-            return `<div class="srp-item" onclick="selectSearchResult('${escHtml(id)}')">
+            return `<div class="srp-item" data-entity-id="${escHtml(id)}">
                 <span style="display:flex; align-items:center; gap:0.4rem; min-width:0">
                     <span class="legend-dot" style="background:${color}; flex-shrink:0"></span>
                     <strong style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis">${escHtml(name)}</strong>
-                    <span class="mono" style="color:var(--text-dim); font-size:0.7rem; flex-shrink:0">${escHtml(id).substring(0, 24)}</span>
+                    <span class="mono" style="color:var(--text-dim); font-size:0.7rem; flex-shrink:0">${escHtml(String(id).substring(0, 24))}</span>
                 </span>
                 <span style="display:flex; align-items:center; gap:0.5rem; flex-shrink:0">
                     <span style="font-size:0.7rem; color:var(--text-dim)">${created}</span>
@@ -3009,6 +3146,26 @@
             loadEntity(entityId);
         }
 
+        // One Cytoscape node per stored node: colour and label from its type.
+        function toCyNode(n, isSeed) {
+            const type = nodeTypeOf(n);
+            const name = (n.properties && n.properties.name) || n.node_type || n.node_id.slice(-8);
+            const classes = [];
+            if (isSeed) classes.push('seed');
+            if (type === 'Activity') classes.push('activity');
+            return {
+                group: 'nodes',
+                data: {
+                    id: n.node_id,
+                    label: displayName(type, name),
+                    color: nodeColor(type),
+                    size: 28, // re-sized by degree once added
+                    ...n
+                },
+                classes: classes.join(' ')
+            };
+        }
+
         async function loadEntity(entityId, expand = false) {
             if (!entityId) return;
             const depth = document.getElementById('graph-depth').value;
@@ -3024,7 +3181,7 @@
                 // Determine entity name for breadcrumb
                 const entityNode = nodes.find(n => n.node_id === entityId) || data.entity || {};
                 const entityName = entityNode.properties?.name || entityNode.node_type || entityId.slice(-12);
-                const entityType = entityNode.node_type || entityNode.entity_type || '';
+                const entityType = nodeTypeOf(entityNode);
                 addToBreadcrumbs(entityId, entityName, entityType);
 
                 if (expand && cy) {
@@ -3033,16 +3190,7 @@
                     const newEles = [];
                     for (const n of nodes) {
                         if (!existingIds.has(n.node_id)) {
-                            newEles.push({
-                                group: 'nodes',
-                                data: {
-                                    id: n.node_id,
-                                    label: (n.properties && n.properties.name) || n.node_type || n.node_id.slice(-8),
-                                    color: NODE_COLORS[n.node_type] || NODE_COLORS.default,
-                                    size: 28, // will be updated after add
-                                    ...n
-                                }
-                            });
+                            newEles.push(toCyNode(n, false));
                         }
                     }
                     const existingEdgeIds = new Set(cy.edges().map(e => e.id()));
@@ -3068,6 +3216,8 @@
                         cy.nodes().forEach(n => {
                             n.data('size', computeNodeSize(n.degree()));
                         });
+                        applyTypeVisibility();
+                        renderGraphLegend();
                         runLayout(true);
                     }
                 } else if (cy) {
@@ -3075,17 +3225,7 @@
                     cy.elements().remove();
                     const eles = [];
                     for (const n of nodes) {
-                        eles.push({
-                            group: 'nodes',
-                            data: {
-                                id: n.node_id,
-                                label: (n.properties && n.properties.name) || n.node_type || n.node_id.slice(-8),
-                                color: NODE_COLORS[n.node_type] || NODE_COLORS.default,
-                                size: 28,
-                                ...n
-                            },
-                            classes: n.node_id === entityId ? 'seed' : ''
-                        });
+                        eles.push(toCyNode(n, n.node_id === entityId));
                     }
                     for (const e of edges) {
                         const eid = e.edge_id || `${e.source_id}-${e.target_id}-${e.edge_type}`;
@@ -3105,6 +3245,8 @@
                     cy.nodes().forEach(n => {
                         n.data('size', computeNodeSize(n.degree()));
                     });
+                    applyTypeVisibility();
+                    renderGraphLegend();
                     runLayout(false);
                     cy.fit(undefined, 40);
                 }
@@ -3134,7 +3276,7 @@
             const nodeType = data.node_type || data.entity_type || '';
             const name = (data.properties && data.properties.name) || nodeType;
             const props = data.properties || {};
-            const color = NODE_COLORS[nodeType] || NODE_COLORS.default;
+            const color = nodeColor(nodeTypeOf(data));
 
             let propsHtml = '';
             for (const [k, v] of Object.entries(props)) {
@@ -3150,13 +3292,48 @@
                 <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:0.75rem" class="mono">${escHtml(nodeId)}</div>
                 ${propsHtml ? `<dl class="props">${propsHtml}</dl>` : '<p style="color:var(--text-dim); font-size:0.85rem">No properties</p>'}
                 <div class="detail-actions">
-                    <button class="btn btn-ghost btn-sm" onclick="loadEntity('${escHtml(nodeId)}')">Center on node</button>
-                    <button class="btn btn-ghost btn-sm" onclick="loadEntity('${escHtml(nodeId)}', true)">Expand neighbors</button>
-                    <button class="btn btn-ghost btn-sm" onclick="loadNodeHistory('${escHtml(nodeId)}')">History</button>
-                    <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escHtml(nodeId)}')">Copy ID</button>
+                    <button class="btn btn-ghost btn-sm" data-act="center">Center on node</button>
+                    <button class="btn btn-ghost btn-sm" data-act="expand">Expand neighbors</button>
+                    <button class="btn btn-ghost btn-sm" data-act="history">History</button>
+                    <button class="btn btn-ghost btn-sm" data-act="copy">Copy ID</button>
                 </div>
                 <div id="node-history"></div>
             `;
+            const acts = {
+                center: () => loadEntity(nodeId),
+                expand: () => loadEntity(nodeId, true),
+                history: () => loadNodeHistory(nodeId),
+                copy: () => copyToClipboard(nodeId),
+            };
+            el.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', acts[b.dataset.act]));
+            const docIds = Array.isArray(data.document_ids)
+                ? data.document_ids.filter(d => typeof d === 'string' && d)
+                : [];
+            if (docIds.length) {
+                el.querySelector('.detail-actions').before(evidenceSection(docIds));
+            }
+        }
+
+        // The documents a node cites, each opening in the Memories view.
+        function evidenceSection(docIds) {
+            const wrap = document.createElement('div');
+            wrap.className = 'detail-evidence';
+            const title = document.createElement('div');
+            title.className = 'detail-evidence-title';
+            title.textContent = `Evidence (${docIds.length})`;
+            const links = document.createElement('div');
+            links.className = 'detail-evidence-links';
+            for (const id of docIds) {
+                const link = document.createElement('span');
+                link.className = 'entity-link mono';
+                link.dataset.docId = id;
+                link.title = 'Open document';
+                link.textContent = id;
+                link.addEventListener('click', () => navigateToDocument(id));
+                links.appendChild(link);
+            }
+            wrap.append(title, links);
+            return wrap;
         }
 
         function copyToClipboard(text) {
@@ -3167,6 +3344,12 @@
         function navigateToEntity(entityId) {
             switchView('graph');
             setTimeout(() => loadEntity(entityId), 100);
+        }
+
+        // Cross-view navigation: open a cited document in the Memories view
+        function navigateToDocument(docId) {
+            switchView('memories');
+            setTimeout(() => loadMemoryDetail(docId), 100);
         }
 
         // ============================================================
@@ -3201,7 +3384,7 @@
                 }
 
                 body.innerHTML = traces.map(t => `
-                    <tr class="clickable" onclick="loadTraceDetail('${escHtml(t.trace_id)}')">
+                    <tr class="clickable" data-action="loadTraceDetail" data-id="${escHtml(t.trace_id)}">
                         <td title="${escHtml(fmtDate(t.created_at))}">${escHtml(timeAgo(t.created_at))}</td>
                         <td class="truncate" style="max-width:350px" title="${escHtml(t.intent)}">${escHtml(t.intent)}</td>
                         <td>${sourceBadge(t.source)}</td>
@@ -3276,15 +3459,22 @@
                 metaHtml += `<div class="card"><h3>Artifacts</h3><div class="value">${artifacts.length}</div></div>`;
                 metaHtml += '</div>';
 
-                // Evidence links (cross-navigation to graph)
+                // Evidence: the API names what can show each ref, its document
+                // or else its graph node. A ref with neither is text, not a
+                // link that would 404.
                 let evidenceHtml = '';
                 if (evidence.length > 0) {
+                    const links = data.evidence_links || {};
                     evidenceHtml = '<div style="margin-top:1rem"><h4 style="font-size:0.9rem; margin-bottom:0.5rem">Evidence Used</h4>';
                     for (const e of evidence) {
-                        const eid = typeof e === 'string' ? e : (e.item_id || e.entity_id || JSON.stringify(e));
-                        evidenceHtml += `<div class="status-row">
-                            <span class="mono truncate entity-link" onclick="navigateToEntity('${escHtml(eid)}')" title="View in graph">${escHtml(eid)}</span>
-                        </div>`;
+                        const link = links[e.evidence_id] || {};
+                        let entry = `<span class="mono truncate">${escHtml(e.evidence_id)}</span>`;
+                        if (link.document_id) {
+                            entry = `<span class="mono truncate entity-link" data-action="navigateToDocument" data-id="${escHtml(link.document_id)}" title="View the evidence document">${escHtml(e.evidence_id)}</span>`;
+                        } else if (link.entity_id) {
+                            entry = `<span class="mono truncate entity-link" data-action="navigateToEntity" data-id="${escHtml(link.entity_id)}" title="View in graph">${escHtml(e.evidence_id)}</span>`;
+                        }
+                        evidenceHtml += `<div class="status-row">${entry}</div>`;
                     }
                     evidenceHtml += '</div>';
                 }
@@ -3359,7 +3549,7 @@
                         <div class="precedent-meta">
                             ${p.domain ? `<span class="badge badge-accent">${escHtml(p.domain)}</span>` : ''}
                             <span title="${escHtml(fmtDate(p.occurred_at))}">${timeAgo(p.occurred_at)}</span>
-                            ${p.entity_id ? `<span class="mono entity-link" style="font-size:0.7rem" onclick="navigateToEntity('${escHtml(p.entity_id)}')">${escHtml(p.entity_id)}</span>` : ''}
+                            ${p.entity_id ? `<span class="mono entity-link" style="font-size:0.7rem" data-action="navigateToEntity" data-id="${escHtml(p.entity_id)}">${escHtml(p.entity_id)}</span>` : ''}
                         </div>
                     </div>
                 `).join('')}</div>`;
@@ -3405,7 +3595,7 @@
                 }
 
                 body.innerHTML = docs.map(d => `
-                    <tr class="clickable" onclick="loadMemoryDetail('${escHtml(d.doc_id)}')">
+                    <tr class="clickable" data-action="loadMemoryDetail" data-id="${escHtml(d.doc_id)}">
                         <td title="${escHtml(fmtDate(d.created_at))}" style="white-space:nowrap">${escHtml(timeAgo(d.created_at))}</td>
                         <td class="mono truncate" style="max-width:220px; font-size:0.78rem" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
                         <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
@@ -3537,7 +3727,7 @@
                         ? `<span class="mono truncate" style="max-width:200px; display:inline-block; font-size:0.75rem" title="${escHtml(e.entity_id)}">${escHtml(e.entity_id)}</span>`
                         : '<span style="color:var(--text-dim)">-</span>';
                     return `
-                    <tr class="clickable" onclick="loadEventDetail('${escHtml(e.event_id)}')">
+                    <tr class="clickable" data-action="loadEventDetail" data-id="${escHtml(e.event_id)}">
                         <td title="${escHtml(fmtDate(e.occurred_at))}" style="white-space:nowrap">${escHtml(timeAgo(e.occurred_at))}</td>
                         <td><span class="badge ${badge}">${escHtml(e.event_type)}</span></td>
                         <td style="font-size:0.8rem">${escHtml(e.source)}</td>
@@ -3568,7 +3758,7 @@
                 if (!e) { container.innerHTML = ''; return; }
 
                 const packLink = e.event_type === 'pack.assembled' && e.entity_id
-                    ? `<button class="btn btn-ghost btn-sm" onclick="navigateToPack('${escHtml(e.entity_id)}')">Inspect pack</button>`
+                    ? `<button class="btn btn-ghost btn-sm" data-action="navigateToPack" data-id="${escHtml(e.entity_id)}">Inspect pack</button>`
                     : '';
 
                 container.innerHTML = `
@@ -3615,7 +3805,7 @@
                 }
 
                 body.innerHTML = packs.map(p => `
-                    <tr class="clickable" onclick="loadPackDetail('${escHtml(p.pack_id)}')">
+                    <tr class="clickable" data-action="loadPackDetail" data-id="${escHtml(p.pack_id)}">
                         <td title="${escHtml(fmtDate(p.created_at))}" style="white-space:nowrap">${escHtml(timeAgo(p.created_at))}</td>
                         <td class="truncate" style="max-width:320px" title="${escHtml(p.intent)}">${escHtml(p.intent)}</td>
                         <td>${p.domain ? escHtml(p.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>

@@ -92,6 +92,77 @@ class TestCuratePromote:
         rendered = " ".join(assert_coloured(result.stdout).split())
         assert "Message: Precedent promoted: [bold]t[/x]" in rendered
 
+    def test_message_long_text_prints_as_one_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_execute_command``'s ``Message:`` line (``markup=False``) echoes
+        ``result.message`` verbatim before raising on a refusal, in the
+        same function as that raise; a long one must not split at the
+        console width."""
+        monkeypatch.setenv("COLUMNS", "60")
+        long_message = "synthetic-rejection-message-" + "0123456789abcdef" * 4
+        executor = MagicMock(spec=MutationExecutor)
+        executor.execute.return_value = CommandResult(
+            command_id="cmd-msg-1",
+            status=CommandStatus.FAILED,
+            operation=Operation.PRECEDENT_PROMOTE,
+            message=long_message,
+        )
+        monkeypatch.setattr(
+            curate_cli, "build_curate_executor", lambda *_a, **_k: executor
+        )
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "promote",
+                "trace_123",
+                "--title",
+                "t",
+                "--description",
+                "d",
+            ],
+        )
+        assert result.exit_code != 0, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(long_message in line for line in lines), result.stdout
+
+    def test_warning_long_detail_prints_as_one_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_print_warnings`` prints a policy id and condition, or an audit
+        error, of any length; its callers (here ``_execute_command``) exit
+        non-zero after it on a refusal, and it must not split one at the
+        console width."""
+        monkeypatch.setenv("COLUMNS", "60")
+        long_detail = "synthetic-policy-detail-" + "0123456789abcdef" * 4
+        executor = MagicMock(spec=MutationExecutor)
+        executor.execute.return_value = CommandResult(
+            command_id="cmd-warn-1",
+            status=CommandStatus.REJECTED,
+            operation=Operation.PRECEDENT_PROMOTE,
+            message="rejected",
+            warnings=[long_detail],
+        )
+        monkeypatch.setattr(
+            curate_cli, "build_curate_executor", lambda *_a, **_k: executor
+        )
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "promote",
+                "trace_123",
+                "--title",
+                "t",
+                "--description",
+                "d",
+            ],
+        )
+        assert result.exit_code != 0, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(long_detail in line for line in lines), result.stdout
+
 
 class TestCurateEntity:
     def test_text_echoes_type_name_and_properties_verbatim(
@@ -298,18 +369,28 @@ class TestCurateRedact:
         )
         assert confirmed.exit_code == 0
 
-    def test_redact_missing_target_exits_store_code(self) -> None:
-        # NotFoundError is a StoreError -> FAILED -> EXIT_STORE (5), per
-        # the exit_codes map; the JSON keeps command_id so the failed
-        # attempt joins its MUTATION_REJECTED/EXECUTED audit event.
+    def test_redact_missing_target_json(self) -> None:
+        """A target id that names no node is input to fix: REJECTED, exit 2.
+
+        The JSON keeps ``command_id`` so the refused attempt joins its
+        MUTATION_REJECTED audit event.
+        """
         result = runner.invoke(
             app,
             ["curate", "redact", "ghost", "--yes", "--reason", "r", "--format", "json"],
         )
-        assert result.exit_code == 5
+        assert result.exit_code == 2, result.output
         data = json.loads(result.stdout.strip())
-        assert data["status"] == "failed"
+        assert data["status"] == "rejected"
+        assert data["message"] == "Node not found: ghost"
         assert data["command_id"]
+
+    def test_redact_missing_target_text(self) -> None:
+        result = runner.invoke(
+            app, ["curate", "redact", "ghost", "--yes", "--reason", "r"]
+        )
+        assert result.exit_code == 2, result.output
+        assert "Node not found: ghost" in plain(result.output)
 
     def test_redact_blank_reason_exits_validation_code(self) -> None:
         node_id = self._create_node()
@@ -349,7 +430,7 @@ class TestCurateRedact:
             app,
             ["curate", "redact", "ghost[/x]", "--yes", "--reason", "r"],
         )
-        assert result.exit_code == 5
+        assert result.exit_code == 2
         # 1. Colour really happened.
         rendered = assert_coloured(result.stdout)
         # 2. The markup token survived rendering byte-for-byte.
@@ -359,7 +440,7 @@ class TestCurateRedact:
         )
         # 3. And the error was printed rather than lost to a MarkupError
         #    somewhere upstream of it.
-        assert "Execution failed" in rendered
+        assert "Node not found" in rendered
 
 
 class TestCurateFeedback:

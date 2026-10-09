@@ -16,7 +16,7 @@ except ImportError:
     HAS_NUMPY = False
 
 from trellis.stores.base.vector import VectorStore
-from trellis.stores.sqlite.base import SQLiteStoreBase
+from trellis.stores.sqlite.base import SQLiteStoreBase, json_key_path
 
 logger = structlog.get_logger(__name__)
 
@@ -96,13 +96,14 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
         dimensions = len(vector)
         meta_json = json.dumps(metadata or {})
 
-        self._conn.execute(
-            "INSERT OR REPLACE INTO vectors "
-            "(item_id, vector_blob, dimensions, metadata_json) "
-            "VALUES (?, ?, ?, ?)",
-            (item_id, blob, dimensions, meta_json),
-        )
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            conn.execute(
+                "INSERT OR REPLACE INTO vectors "
+                "(item_id, vector_blob, dimensions, metadata_json) "
+                "VALUES (?, ?, ?, ?)",
+                (item_id, blob, dimensions, meta_json),
+            )
 
     def upsert_bulk(self, items: list[dict[str, Any]]) -> None:
         # In-process backend: a simple loop is the correct
@@ -139,12 +140,11 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
 
         if filters:
             for key, value in filters.items():
+                # A bool is an int, so it takes this branch too, and sqlite3
+                # binds it as 1 or 0: what json_extract returns for true/false.
                 if isinstance(value, str | int | float):
-                    where_parts.append(f"json_extract(metadata_json, '$.{key}') = ?")
-                    params.append(value)
-                elif isinstance(value, bool):
-                    where_parts.append(f"json_extract(metadata_json, '$.{key}') = ?")
-                    params.append(1 if value else 0)
+                    where_parts.append("json_extract(metadata_json, ?) = ?")
+                    params.extend([json_key_path(key), value])
                 else:
                     complex_filters[key] = value
 
@@ -198,11 +198,12 @@ class SQLiteVectorStore(SQLiteStoreBase, VectorStore):
         }
 
     def delete(self, item_id: str) -> bool:
-        cursor = self._conn.execute(
-            "DELETE FROM vectors WHERE item_id = ?",
-            (item_id,),
-        )
-        self._conn.commit()
+        conn = self._conn
+        with conn:  # commits on success, rolls back on an exception
+            cursor = conn.execute(
+                "DELETE FROM vectors WHERE item_id = ?",
+                (item_id,),
+            )
         return cursor.rowcount > 0
 
     def count(self) -> int:

@@ -22,12 +22,14 @@ from trellis.core.vector_metadata import resolve_vector_store
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
-from trellis.extract.trace_ingest_hook import run_trace_extraction
+from trellis.extract.trace_ingest_hook import (
+    run_trace_extraction,
+    trace_already_ingested,
+)
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
     Command,
     CommandBatch,
-    CommandResult,
     CommandStatus,
     Operation,
 )
@@ -36,7 +38,13 @@ from trellis.schemas.evidence import Evidence
 from trellis.schemas.extraction import ExtractionResult
 from trellis.schemas.trace import Trace
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.exit_codes import EXIT_VALIDATION, exit_code_for, refusal_exit_code
+from trellis_cli.exit_codes import (
+    EXIT_VALIDATION,
+    BatchOutcome,
+    batch_outcome,
+    exit_code_for,
+    refusal_exit_code,
+)
 from trellis_cli.ingest_conversations import ingest_conversations
 from trellis_cli.ingest_corpus import ingest_corpus
 from trellis_cli.output import build_console, emit_json
@@ -79,7 +87,7 @@ def _fail(
             }
         )
     else:
-        console.print(f"[red]{escape(message)}[/red]")
+        console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
     raise typer.Exit(code=EXIT_VALIDATION)
 
 
@@ -108,12 +116,17 @@ def ingest_trace(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Invalid trace: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Invalid trace: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     # Persist via the governed mutation pipeline
     registry = _get_registry()
     executor = build_curate_executor(registry)
+    # Read before the write: the handler answers a stored trace_id as a
+    # success that stores nothing, and only its message says which.
+    already_ingested = trace_already_ingested(registry, trace.trace_id)
     result = executor.execute(
         Command(
             operation=Operation.TRACE_INGEST,
@@ -132,15 +145,22 @@ def ingest_trace(
             emit_json(error_payload)
         else:
             console.print(
-                f"[red]Failed to ingest trace: {escape(result.message)}[/red]"
+                f"[red]Failed to ingest trace: {escape(result.message)}[/red]",
+                soft_wrap=True,
             )
         raise typer.Exit(code=refusal_exit_code(result))
 
     # Feature-flagged post-ingest trace->graph extraction
     # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs the deterministic
-    # TraceExtractor through the governed MutationExecutor. Never blocks
-    # ingest success -- failures are logged and swallowed inside the hook.
-    extraction = run_trace_extraction(registry, trace, requested_by="cli:ingest-trace")
+    # TraceExtractor through the governed MutationExecutor, and not when the
+    # read above found the trace_id stored: a duplicate's agent and artifacts
+    # would land on the stored trace's node. Never blocks ingest success --
+    # failures are logged and swallowed inside the hook.
+    extraction = (
+        None
+        if already_ingested
+        else run_trace_extraction(registry, trace, requested_by="cli:ingest-trace")
+    )
 
     if output_format == "json":
         payload: dict[str, object] = {
@@ -148,10 +168,16 @@ def ingest_trace(
             "trace_id": trace.trace_id,
             "source": trace.source,
             "intent": trace.intent,
+            "already_ingested": already_ingested,
         }
         if extraction is not None:
             payload["extraction"] = extraction
         emit_json(payload)
+    elif already_ingested:
+        console.print(
+            f"[yellow]Trace already ingested[/yellow]: {escape(trace.trace_id)}"
+        )
+        console.print("  Traces are immutable: nothing was stored or extracted.")
     else:
         console.print(f"[green]Trace ingested[/green]: {escape(trace.trace_id)}")
         console.print(f"  Source: {trace.source}")
@@ -182,7 +208,9 @@ def ingest_evidence(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Invalid evidence: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Invalid evidence: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     # Persist to document store
@@ -240,11 +268,11 @@ def _run_extraction(
 def _execute_batch(
     registry: StoreRegistry,
     batch: CommandBatch,
-) -> tuple[int, int, CommandResult | None]:
-    """Submit the batch and return ``(nodes_created, edges_created, refusal)``.
+) -> tuple[int, int, BatchOutcome]:
+    """Submit the batch and return ``(nodes_created, edges_created, outcome)``.
 
-    ``refusal`` is the first result when every command was refused or failed,
-    and ``None`` otherwise, so a partial refusal or an empty batch exits 0.
+    ``outcome`` reads the results by :func:`batch_outcome`, so a partial
+    refusal or an empty batch exits 0.
     """
     results = build_curate_executor(registry).execute_batch(batch)
     nodes = sum(
@@ -257,19 +285,7 @@ def _execute_batch(
         for r in results
         if r.operation == Operation.LINK_CREATE and r.status == CommandStatus.SUCCESS
     )
-    refused = [
-        r for r in results if r.status in (CommandStatus.REJECTED, CommandStatus.FAILED)
-    ]
-    if results and len(refused) == len(results):
-        return nodes, edges, refused[0]
-    return nodes, edges, None
-
-
-def _batch_status(refusal: CommandResult | None) -> dict[str, str]:
-    """The JSON status for a batch ingest, from the flag that sets its exit."""
-    if refusal is None:
-        return {"status": "ingested"}
-    return {"status": "error", "message": sanitize_error_message(refusal.message)}
+    return nodes, edges, batch_outcome(results, done="ingested")
 
 
 def _index_dbt_descriptions(
@@ -384,7 +400,10 @@ def ingest_dbt_manifest(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Could not read manifest: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Could not read manifest: {escape(str(exc))}[/red]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     from trellis_workers.extract import DbtManifestExtractor  # noqa: PLC0415
@@ -397,7 +416,7 @@ def ingest_dbt_manifest(
             raw_input=manifest,
             source_hint="dbt-manifest",
         )
-        nodes, edges, refusal = _execute_batch(
+        nodes, edges, outcome = _execute_batch(
             registry,
             result_to_batch(result, requested_by="cli:dbt-manifest"),
         )
@@ -405,8 +424,11 @@ def ingest_dbt_manifest(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]dbt ingest failed: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]dbt ingest failed: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=exit_code_for(exc)) from None
+    refusal = outcome.refusal
 
     doc_count, embedded = _index_dbt_descriptions(registry, result)
 
@@ -421,12 +443,13 @@ def ingest_dbt_manifest(
         "embedded": embedded,
     }
     if output_format == "json":
-        emit_json({**_batch_status(refusal), **counts})
+        emit_json({**outcome.status, **counts})
     else:
         console.print(
             "[green]dbt manifest ingested[/green]"
             if refusal is None
-            else f"[red]dbt ingest failed: {escape(refusal.message)}[/red]"
+            else f"[red]dbt ingest failed: {escape(refusal.message)}[/red]",
+            soft_wrap=True,
         )
         console.print(f"  Nodes: {counts['nodes']}")
         console.print(f"  Edges: {counts['edges']}")
@@ -463,7 +486,10 @@ def ingest_openlineage(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]Could not read events file: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Could not read events file: {escape(str(exc))}[/red]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     from trellis_workers.extract import OpenLineageExtractor  # noqa: PLC0415
@@ -476,7 +502,7 @@ def ingest_openlineage(
             raw_input=events,
             source_hint="openlineage",
         )
-        nodes, edges, refusal = _execute_batch(
+        nodes, edges, outcome = _execute_batch(
             registry,
             result_to_batch(result, requested_by="cli:openlineage"),
         )
@@ -484,17 +510,22 @@ def ingest_openlineage(
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
         else:
-            console.print(f"[red]OpenLineage ingest failed: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]OpenLineage ingest failed: {escape(str(exc))}[/red]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=exit_code_for(exc)) from None
+    refusal = outcome.refusal
 
     counts = {"nodes": nodes, "edges": edges}
     if output_format == "json":
-        emit_json({**_batch_status(refusal), **counts})
+        emit_json({**outcome.status, **counts})
     else:
         console.print(
             "[green]OpenLineage events ingested[/green]"
             if refusal is None
-            else f"[red]OpenLineage ingest failed: {escape(refusal.message)}[/red]"
+            else f"[red]OpenLineage ingest failed: {escape(refusal.message)}[/red]",
+            soft_wrap=True,
         )
         console.print(f"  Nodes: {counts['nodes']}")
         console.print(f"  Edges: {counts['edges']}")

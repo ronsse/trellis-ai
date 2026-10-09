@@ -16,6 +16,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from pydantic import ValidationError
 
 from tests.unit.mcp.conftest import unwrap_tool
+from trellis.errors import ConfigError
 from trellis.mcp.server import execute_mutation as _execute_mutation
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.trace import Trace
@@ -258,7 +259,8 @@ class TestExecuteMutationErrors:
     ) -> None:
         """Unexpected executor exceptions surface as INTERNAL_ERROR with
         the original cause chained via ``from`` and the command_id in
-        ``data`` for correlation."""
+        ``data`` for correlation. The message names the exception by its
+        type alone, because its text can be a driver's."""
         import trellis.mcp.server as server_mod
 
         class _ExplodingExecutor:
@@ -277,8 +279,8 @@ class TestExecuteMutationErrors:
             )
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
-        assert "execution failed" in err.error.message.lower()
-        assert "fake executor outage" in err.error.message
+        assert err.error.message == "execution failed: RuntimeError"
+        assert "fake executor outage" not in str(err.error.data)
         # ``from exc`` preserves the original cause.
         assert isinstance(excinfo.value.__cause__, RuntimeError)
         assert str(excinfo.value.__cause__) == "fake executor outage"
@@ -286,6 +288,24 @@ class TestExecuteMutationErrors:
         assert err.error.data["operation"] == "link.create"
         assert "command_id" in err.error.data
         assert err.error.data["error_class"] == "RuntimeError"
+
+    def test_a_trellis_error_keeps_its_text(self, temp_registry: StoreRegistry) -> None:
+        """A damaged policy file fails ``build_curate_executor`` with a
+        ``ConfigError``, whose text names the file and the fix."""
+        (temp_registry.stores_dir / "policies.json").write_text(
+            '{"polices": []}', encoding="utf-8"
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            execute_mutation(
+                operation="link.create",
+                args={"source_id": "a", "target_id": "b", "edge_kind": "k"},
+            )
+        err = excinfo.value
+        assert err.error.code == INTERNAL_ERROR
+        assert isinstance(err.__cause__, ConfigError)
+        assert err.error.message == f"execution failed: {err.__cause__}"
+        assert "policies.json" in err.error.message
 
     def test_missing_required_arg_returns_validation_error(
         self, temp_registry: StoreRegistry
@@ -296,13 +316,51 @@ class TestExecuteMutationErrors:
             args={"source_id": "a", "target_id": "b"},  # missing edge_kind
         )
         payload = json.loads(raw)
-        # The executor surfaces this as a FAILED CommandResult, which the
-        # tool relays verbatim — status is the executor's "failed", not
-        # the tool's pre-flight "error".
-        assert payload["status"] == "failed"
+        # The executor refuses this at Stage 1 with a REJECTED CommandResult,
+        # which the tool relays verbatim — status is the executor's
+        # "rejected", not the tool's pre-flight "error".
+        assert payload["status"] == "rejected"
         assert "validation failed" in payload["message"].lower()
         assert "edge_kind" in payload["message"]
         assert payload["operation"] == "link.create"
+
+    def test_a_missing_arg_is_reported_as_the_roster_refusal_is(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Both Stage 1 refusals answer ``rejected`` with the same fields."""
+        missing_arg = json.loads(
+            execute_mutation(operation="link.create", args={"source_id": "syn-node-a"})
+        )
+        roster = json.loads(
+            execute_mutation(
+                operation="entity.create",
+                args={"entity_type": "service", "name": "syn-svc"},
+                actor="worker:embed-traces",
+            )
+        )
+        assert missing_arg["status"] == roster["status"] == "rejected"
+        assert sorted(missing_arg) == sorted(roster)
+        assert missing_arg["message"] == (
+            "Validation failed: Missing required args: edge_kind, target_id"
+        )
+
+    def test_feedback_record_refuses_an_out_of_range_rating(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """A ``feedback.record`` rating of 5.0 is rejected and nothing is recorded.
+
+        ``execute_mutation`` passes caller ``args`` straight into the ``Command``.
+        """
+        raw = execute_mutation(
+            operation="feedback.record",
+            args={"target_id": "t1", "rating": 5.0},
+        )
+        payload = json.loads(raw)
+        assert payload["status"] == "rejected"
+        assert "rating" in payload["message"].lower()
+        assert not temp_registry.operational.event_log.get_events(
+            event_type=EventType.FEEDBACK_RECORDED, limit=5
+        )
 
     def test_handler_failure_surfaces_rejected_status(
         self, temp_registry: StoreRegistry
@@ -459,17 +517,17 @@ class TestTraceIngestTarget:
         """A trace that does not validate goes on untargeted.
 
         A policy scoped to traces does not match it, and the handler refuses
-        it with the trace's own validation error.
+        it, naming the trace's validation error by its type.
         """
         _deny_traces(temp_registry, "trace.ingest")
-        with pytest.raises(ValidationError) as refused:
+        with pytest.raises(ValidationError):
             Trace.model_validate(trace)
 
         payload = _ingest(trace)
 
         assert (payload["status"], payload["message"]) == (
             "failed",
-            f"Execution failed: {refused.value}",
+            "Execution failed: ValidationError",
         )
         assert temp_registry.operational.trace_store.count() == 0
         event = _audit_event(temp_registry, payload["command_id"])

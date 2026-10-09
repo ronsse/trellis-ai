@@ -205,6 +205,22 @@ class EventType(StrEnum):
     #: nothing still says so.
     CAPTURE_SWEEP_COMPLETED = "capture.sweep_completed"
 
+    #: Emitted by the session-capture sweep for each transcript it parses
+    #: that holds a turn or a tool call: the context packs that session was
+    #: served, read from its Trellis retrieval results. ``entity_id`` is the
+    #: transcript's session id (its file stem, the ``session_id`` captured
+    #: memories carry). ``pack_ids`` is empty for a session that never
+    #: retrieved; no event means the sweep has not parsed that session.
+    #: Nothing else joins a pack to the session that used it, because a
+    #: pack's own ``session_id`` is a label the agent chooses. ``outcome``
+    #: is what the session did, read from the transcript and from no pack:
+    #: counts, a duration and flags
+    #: (:class:`~trellis_workers.session_capture.outcome.SessionOutcome`); a
+    #: join written before it existed has none. Written again only when the
+    #: join changes, outcome included, so a session's latest event is its
+    #: join.
+    CAPTURE_SESSION_PACKS = "capture.session_packs"
+
     # Judged memory operation (north star — the memory system generates its
     # own training curriculum; plan-memory-lifecycle.md §0.1).
     #: Emitted once per **judged** memory-lifecycle operation — an

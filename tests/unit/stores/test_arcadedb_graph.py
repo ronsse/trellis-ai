@@ -23,10 +23,16 @@ Python boundary via :func:`validate_edge_provenance`.
 from __future__ import annotations
 
 import os
+import threading
+from typing import Any
 
 import pytest
 
 pytest.importorskip("neo4j")
+
+from neo4j import ManagedTransaction
+
+from tests.unit.stores import bolt_duplicate_current, bolt_edge_create_race
 
 URI = os.environ.get("TRELLIS_TEST_ARCADEDB_URI", "")
 USER = os.environ.get("TRELLIS_TEST_ARCADEDB_USER", "root")
@@ -44,11 +50,11 @@ pytestmark = [
 def graph_store():
     """Fresh ArcadeDBGraphStore with a cleaned database per test.
 
-    Mirrors the Neo4j fixture pattern — wipe :Node / :Alias rows
-    between tests so each test sees a deterministic state. The typed-
-    property schema is created once per database and survives the
-    wipe (DELETE doesn't touch the schema), so we don't need to
-    re-run migrations between tests.
+    Mirrors the Neo4j fixture pattern — wipe every label the store
+    writes (:Node, :Alias, :AliasClaim) between tests so each test
+    sees a deterministic state. The typed-property schema is created
+    once per database and survives the wipe (DELETE doesn't touch the
+    schema), so we don't need to re-run migrations between tests.
     """
     from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
 
@@ -61,9 +67,346 @@ def graph_store():
         ensure_database_exists=True,
     )
     with store._driver.session(database=store._database) as session:
-        session.run("MATCH (n) WHERE n:Node OR n:Alias DETACH DELETE n")
+        session.run("MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim DETACH DELETE n")
     yield store
     store.close()
+
+
+def _rows_left(store, node_id: str) -> dict[str, int]:
+    """Count the rows, any version, each label still holds for a node."""
+    with store._driver.session(database=store._database) as session:
+        return {
+            label: session.run(
+                f"MATCH (x:{label}) WHERE x.{key} = $nid RETURN count(x) AS c",
+                nid=node_id,
+            ).single()["c"]
+            for label, key in (
+                ("Node", "node_id"),
+                ("Alias", "entity_id"),
+                ("AliasClaim", "entity_id"),
+            )
+        }
+
+
+def test_a_purge_whose_commit_lost_to_a_concurrent_purge_reports_no_removal(
+    graph_store, monkeypatch
+):
+    # ArcadeDB never blocks a purge. The second purge's first attempt runs
+    # its statements while the first purge's transaction is open, the first
+    # commits, the second's commit conflicts, and the driver re-runs its
+    # transaction function, which finds nothing left to remove.
+    import neo4j
+
+    store = graph_store
+    store.upsert_node("n1", "person", {"phase": "1"})
+    store.upsert_node("n1", "person", {"phase": "2"})
+    store.upsert_node("n1-peer", "person", {})
+    store.upsert_edge("n1", "n1-peer", "knows")
+    store.upsert_alias("n1", "race-sys", "raw-n1", raw_name="One")
+    first = threading.get_ident()
+    original = neo4j.Session.execute_write
+    second_ran, first_done = threading.Event(), threading.Event()
+    state: dict[str, Any] = {"second_attempts": 0}
+
+    def second() -> None:
+        state["second"] = store.delete_node("n1")
+
+    def gated(session: Any, transaction_function: Any, *args: Any, **kwargs: Any):
+        if "delete_node" not in getattr(transaction_function, "__qualname__", ""):
+            return original(session, transaction_function, *args, **kwargs)
+
+        def held(tx: Any, *a: Any, **k: Any) -> Any:
+            result = transaction_function(tx, *a, **k)
+            if "purge" not in state:
+                state["purge"] = threading.Thread(target=second)
+                state["purge"].start()
+                state["overlapped"] = second_ran.wait(15)
+            return result
+
+        def overlapping(tx: Any, *a: Any, **k: Any) -> Any:
+            result = transaction_function(tx, *a, **k)
+            state["second_attempts"] += 1
+            if state["second_attempts"] == 1:
+                second_ran.set()
+                state["first_committed"] = first_done.wait(15)
+            return result
+
+        wrapper = held if threading.get_ident() == first else overlapping
+        return original(session, wrapper, *args, **kwargs)
+
+    monkeypatch.setattr(neo4j.Session, "execute_write", gated)
+    state["first"] = store.delete_node("n1")
+    first_done.set()
+    assert "purge" in state, "the first purge never ran a delete_node transaction"
+    state["purge"].join(timeout=60)
+
+    assert state["overlapped"], "the second purge never ran inside the first's"
+    assert state["first_committed"]
+    assert state["second_attempts"] >= 2, "the second purge's commit never conflicted"
+    assert not state["purge"].is_alive()
+    assert (state["first"], state["second"]) == (True, False)
+    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+
+
+def test_a_purge_the_server_refuses_is_a_store_error(graph_store):
+    """The server's refusal ends the purge as ``StoreError``, without its text.
+
+    ArcadeDB refuses a transaction against a database it does not have, and
+    its message names the database.
+    """
+    from neo4j.exceptions import Neo4jError
+
+    from trellis.errors import StoreError
+    from trellis.stores.bolt_opencypher.graph import BoltOpenCypherGraphStore
+
+    absent = "absentdb"
+    store = BoltOpenCypherGraphStore(
+        driver=graph_store._driver,
+        database=absent,
+        owns_driver=False,
+        init_schema=False,
+    )
+
+    with pytest.raises(StoreError) as caught:
+        store.delete_node("n1")
+
+    refusal = caught.value.__cause__
+    assert isinstance(refusal, Neo4jError)
+    assert absent in str(refusal)
+    assert f"Purge of node n1 failed: {type(refusal).__name__}" in caught.value.message
+    assert absent not in caught.value.message
+
+
+def _lose_the_purge_commit(monkeypatch, *, committed: bool) -> list[Exception]:
+    """Raise ``IncompleteCommit`` after each ``delete_node`` transaction.
+
+    The driver raises it when the connection drops with the commit
+    outstanding. With ``committed`` the purge commits first; otherwise its
+    statements run and are rolled back. Returns the errors raised so far.
+    """
+    import neo4j
+    from neo4j.exceptions import IncompleteCommit
+
+    original = neo4j.Session.execute_write
+    raised: list[Exception] = []
+
+    def lost(session: Any, transaction_function: Any, *args: Any, **kwargs: Any):
+        if "delete_node" not in getattr(transaction_function, "__qualname__", ""):
+            return original(session, transaction_function, *args, **kwargs)
+        if committed:
+            original(session, transaction_function, *args, **kwargs)
+        else:
+            with session.begin_transaction() as tx:
+                transaction_function(tx, *args, **kwargs)
+                tx.rollback()
+        msg = "synthetic lost commit"
+        raised.append(IncompleteCommit(msg))
+        raise raised[-1]
+
+    monkeypatch.setattr(neo4j.Session, "execute_write", lost)
+    return raised
+
+
+def _seed_purge_target(store, node_id: str) -> None:
+    """Two versions, an edge and an alias: rows of every kind a purge removes."""
+    store.upsert_node(node_id, "person", {"phase": "1"})
+    store.upsert_node(node_id, "person", {"phase": "2"})
+    store.upsert_node(f"{node_id}-peer", "person", {})
+    store.upsert_edge(node_id, f"{node_id}-peer", "knows")
+    store.upsert_alias(node_id, "race-sys", f"raw-{node_id}", raw_name="One")
+
+
+def test_a_lost_commit_the_purge_made_is_the_purge(graph_store, monkeypatch):
+    store = graph_store
+    _seed_purge_target(store, "n1")
+    lost = _lose_the_purge_commit(monkeypatch, committed=True)
+
+    assert store.delete_node("n1") is True
+    assert len(lost) == 1
+    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+
+
+def test_a_lost_commit_the_purge_did_not_make_is_a_failed_purge(
+    graph_store, monkeypatch
+):
+    from trellis.errors import StoreError
+
+    store = graph_store
+    _seed_purge_target(store, "n1")
+    seeded = _rows_left(store, "n1")
+    lost = _lose_the_purge_commit(monkeypatch, committed=False)
+
+    with pytest.raises(StoreError) as caught:
+        store.delete_node("n1")
+
+    assert lost == [caught.value.__cause__]
+    assert caught.value.message == "Purge of node n1 failed: IncompleteCommit"
+    assert seeded["Node"] == 2
+    assert _rows_left(store, "n1") == seeded
+
+
+@pytest.mark.parametrize(
+    ("source_id", "target_id"),
+    [("ghost_a", "ghost_b"), ("ghost_a", "a"), ("a", "ghost_b")],
+)
+def test_upsert_edge_missing_endpoints_raises(graph_store, source_id, target_id):
+    graph_store.upsert_node("a", "s", {})
+    with pytest.raises(ValueError, match="no current version"):
+        graph_store.upsert_edge(source_id, target_id, "links_to")
+    assert graph_store.count_edges() == 0
+
+
+def _second_arcadedb_store():
+    """A second, independent ArcadeDBGraphStore against the fixture's database."""
+    from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
+
+    return ArcadeDBGraphStore(
+        URI,
+        user=USER,
+        password=PASSWORD,
+        database=DATABASE,
+        http_url=HTTP_URL,
+        ensure_database_exists=True,
+    )
+
+
+def test_concurrent_edge_create_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_concurrent_edge_create_leaves_one_current_row(
+        graph_store, _second_arcadedb_store
+    )
+
+
+def test_concurrent_edge_update_leaves_one_current_row(graph_store):
+    bolt_edge_create_race.check_concurrent_edge_update_leaves_one_current_row(
+        graph_store, _second_arcadedb_store
+    )
+
+
+def test_edge_write_racing_node_upsert_keeps_one_current_node(graph_store):
+    bolt_edge_create_race.check_edge_write_racing_node_upsert_keeps_one_current_node(
+        graph_store, _second_arcadedb_store
+    )
+
+
+def _purge_after_endpoint_check(store, monkeypatch, gone: str) -> None:
+    """Purge ``gone`` once ``upsert_edges_bulk``'s endpoint check has found
+    it current, so the write runs without it.
+
+    ``_fetch_current_node_id_set`` also backs the post-rollback re-read that
+    runs after the dropped-row write, so this fires on the first call only —
+    a second call finds ``gone`` already purged and just passes through.
+    """
+    check = store._fetch_current_node_id_set
+    purged = False
+
+    def check_then_purge(session, node_ids):
+        nonlocal purged
+        found = check(session, node_ids)
+        if not purged:
+            assert store.delete_node(gone)
+            purged = True
+        return found
+
+    monkeypatch.setattr(store, "_fetch_current_node_id_set", check_then_purge)
+
+
+def _raw_counts(store) -> tuple[int, int]:
+    """Count every vertex and relationship, whatever its label."""
+    with store._driver.session(database=store._database) as session:
+        nodes = session.run("MATCH (n) RETURN count(n) AS c").single()["c"]
+        rels = session.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
+    return nodes, rels
+
+
+@pytest.mark.parametrize("vanished", ["source", "target"])
+def test_upsert_edges_bulk_refuses_a_row_whose_endpoint_vanished(
+    graph_store, monkeypatch, vanished
+):
+    """An endpoint purged between ``upsert_edges_bulk``'s endpoint check and
+    its write fails the call with ValueError naming the row and the
+    endpoint, and adds no edge or vertex."""
+    graph_store.upsert_node("a", "s", {})
+    graph_store.upsert_node("b", "s", {})
+    gone = "a" if vanished == "source" else "b"
+    _purge_after_endpoint_check(graph_store, monkeypatch, gone)
+    nodes, rels = _raw_counts(graph_store)
+    edge = {"source_id": "a", "target_id": "b", "edge_type": "links_to"}
+    with pytest.raises(
+        ValueError,
+        match=rf"upsert_edges_bulk\[0\]: {vanished} '{gone}' has no current version",
+    ):
+        graph_store.upsert_edges_bulk([edge])
+    assert _raw_counts(graph_store) == (nodes - 1, rels)
+
+
+def test_upsert_edges_bulk_refuses_a_dropped_row_beside_a_duplicated_edge(
+    graph_store, monkeypatch
+):
+    """Row 0's edge has two current versions, so the write returns a record
+    for each: as many records as rows, though row 1, whose target was purged
+    after the endpoint check, wrote nothing. The call names row 1, and its
+    transaction rolls back, so row 0's edge gains no version."""
+    for node_id in ("a", "b", "c", "d"):
+        graph_store.upsert_node(node_id, "s", {})
+    graph_store.upsert_edge("a", "b", "links_to")
+    with graph_store._driver.session(database=graph_store._database) as session:
+        session.run(
+            "MATCH (s:Node {node_id: 'a'})-[r:EDGE]->(t:Node {node_id: 'b'}) "
+            "CREATE (s)-[copy:EDGE]->(t) SET copy = properties(r)"
+        ).consume()
+    _purge_after_endpoint_check(graph_store, monkeypatch, "d")
+    nodes, rels = _raw_counts(graph_store)
+    assert rels == 2
+    edges = [
+        {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
+        {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
+    ]
+    with pytest.raises(
+        ValueError, match=r"upsert_edges_bulk\[1\]: target 'd' has no current version"
+    ):
+        graph_store.upsert_edges_bulk(edges)
+    assert _raw_counts(graph_store) == (nodes - 1, rels)
+
+
+def test_upsert_edges_bulk_raises_valueerror_when_endpoint_recreated_mid_write(
+    graph_store, monkeypatch
+):
+    """Row 1's target is purged after the endpoint check, so the write
+    drops row 1, and another writer re-creates it right after the UNWIND,
+    while the transaction that wrote row 0 is still open. The call raises
+    the documented ``ValueError``, not a raw driver error, and writes no
+    edge."""
+    for node_id in ("a", "b", "c", "d"):
+        graph_store.upsert_node(node_id, "s", {})
+    _purge_after_endpoint_check(graph_store, monkeypatch, "d")
+
+    orig_run = ManagedTransaction.run
+
+    def recreate_after_unwind(self, query, parameters=None, **kw):
+        result = orig_run(self, query, parameters, **kw)
+        text = str(query)
+        if "UNWIND $rows" in text and "CREATE (s)-[new:EDGE]->(t)" in text:
+            records = list(result)
+            # Another writer recreates "d" while this transaction is
+            # still open, beside row 0's edge, which this UNWIND wrote.
+            graph_store.upsert_node("d", "s", {})
+            return records
+        return result
+
+    monkeypatch.setattr(ManagedTransaction, "run", recreate_after_unwind)
+
+    nodes, rels = _raw_counts(graph_store)
+    edges = [
+        {"source_id": "a", "target_id": "b", "edge_type": "links_to"},
+        {"source_id": "c", "target_id": "d", "edge_type": "links_to"},
+    ]
+    with pytest.raises(
+        ValueError,
+        match=r"upsert_edges_bulk\[1\]: source 'c' or target 'd' was not current",
+    ):
+        graph_store.upsert_edges_bulk(edges)
+    assert _raw_counts(graph_store) == (nodes, rels)
+    assert rels == 0
 
 
 class TestArcadeDBEdgeProvenance:
@@ -187,6 +530,7 @@ class TestArcadeDBEdgeProvenance:
         would still reject the value. We exercise this by issuing the
         write via ArcadeDB SQL, bypassing the Cypher path.
         """
+        from trellis.errors import StoreError
         from trellis.stores.arcadedb.base import execute_sql
 
         graph_store.upsert_node("a", "service", {})
@@ -195,7 +539,7 @@ class TestArcadeDBEdgeProvenance:
         graph_store.upsert_edge("a", "b", "depends_on", confidence=0.5)
         # Try to UPDATE the confidence to an out-of-range value via
         # raw SQL. ArcadeDB's MIN/MAX constraint should reject this.
-        with pytest.raises(RuntimeError):
+        with pytest.raises(StoreError):
             execute_sql(
                 HTTP_URL,
                 USER,
@@ -218,6 +562,7 @@ class TestArcadeDBEdgeProvenance:
         ``confidence`` write at the server boundary even when the
         Python validator is bypassed.
         """
+        from trellis.errors import StoreError
         from trellis.stores.arcadedb.base import execute_sql
         from trellis.stores.registry import StoreRegistry
 
@@ -236,7 +581,9 @@ class TestArcadeDBEdgeProvenance:
             graph_store = registry.knowledge.graph_store
             # Clean rows from prior tests in this class.
             with graph_store._driver.session(database=graph_store._database) as session:
-                session.run("MATCH (n) WHERE n:Node OR n:Alias DETACH DELETE n")
+                session.run(
+                    "MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim DETACH DELETE n"
+                )
             graph_store.upsert_node("a", "service", {})
             graph_store.upsert_node("b", "service", {})
             graph_store.upsert_edge("a", "b", "depends_on", confidence=0.5)
@@ -245,7 +592,7 @@ class TestArcadeDBEdgeProvenance:
             # installed via the registry path. Pre-fix, this UPDATE
             # would succeed because the property was auto-created
             # untyped on first write.
-            with pytest.raises(RuntimeError):
+            with pytest.raises(StoreError):
                 execute_sql(
                     HTTP_URL,
                     USER,
@@ -393,3 +740,66 @@ class TestAliasContentionClassification:
             graph_store, "MATCH (n {x: $nope}) RETURN n", in_transaction=False
         )
         assert not graph_store._is_alias_write_contention(exc)
+
+
+class TestDuplicateCurrentRow:
+    """One node_id with two current rows, as concurrent upserts can leave."""
+
+    def test_every_read_shows_the_newest_version(self, graph_store):
+        bolt_duplicate_current.check_every_read_shows_the_newest_version(graph_store)
+
+    def test_type_counts_follow_the_shown_version(self, graph_store):
+        bolt_duplicate_current.check_type_counts_follow_the_shown_version(graph_store)
+
+    def test_equal_stamps_pick_the_greater_version_id(self, graph_store):
+        bolt_duplicate_current.check_equal_stamps_pick_the_greater_version_id(
+            graph_store
+        )
+
+    def test_upsert_node_heals_a_duplicate(self, graph_store):
+        bolt_duplicate_current.check_upsert_node_heals_a_duplicate(graph_store)
+
+    def test_upsert_nodes_bulk_heals_a_duplicate(self, graph_store):
+        bolt_duplicate_current.check_upsert_nodes_bulk_heals_a_duplicate(graph_store)
+
+    def test_update_node_if_current_heals_a_duplicate(self, graph_store):
+        bolt_duplicate_current.check_update_node_if_current_heals_a_duplicate(
+            graph_store
+        )
+
+    @pytest.mark.parametrize("duplicated_end", ["source", "target"])
+    def test_upsert_edge_writes_one_version(self, graph_store, duplicated_end):
+        bolt_duplicate_current.check_upsert_edge_writes_one_version(
+            graph_store, duplicated_end
+        )
+
+    @pytest.mark.parametrize("duplicated_end", ["source", "target"])
+    def test_upsert_edges_bulk_writes_one_version(self, graph_store, duplicated_end):
+        bolt_duplicate_current.check_upsert_edges_bulk_writes_one_version(
+            graph_store, duplicated_end
+        )
+
+    def test_upsert_edge_heals_a_duplicate_edge(self, graph_store):
+        bolt_duplicate_current.check_upsert_edge_heals_a_duplicate_edge(graph_store)
+
+    def test_upsert_edges_bulk_heals_a_duplicate_edge(self, graph_store):
+        bolt_duplicate_current.check_upsert_edges_bulk_heals_a_duplicate_edge(
+            graph_store
+        )
+
+    def test_get_nodes_bulk_shows_one_version(self, graph_store):
+        bolt_duplicate_current.check_get_nodes_bulk_shows_one_version(graph_store)
+
+    def test_get_subgraph_shows_one_version(self, graph_store):
+        bolt_duplicate_current.check_get_subgraph_shows_one_version(graph_store)
+
+    def test_query_shows_one_version(self, graph_store):
+        bolt_duplicate_current.check_query_shows_one_version(graph_store)
+
+    def test_execute_node_query_shows_one_version(self, graph_store):
+        bolt_duplicate_current.check_execute_node_query_shows_one_version(graph_store)
+
+    def test_filtered_listing_as_of_shows_the_version_then(self, graph_store):
+        bolt_duplicate_current.check_filtered_listing_as_of_shows_the_version_then(
+            graph_store
+        )

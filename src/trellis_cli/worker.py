@@ -90,6 +90,7 @@ from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.analyze import (
     _build_learning_registry_or_exit,
     _render_advisory_degradation,
+    _resolve_learning_output_dir,
 )
 from trellis_cli.config import get_config_dir, get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
@@ -259,13 +260,14 @@ def _build_auto_promote_policy_or_exit() -> AutoPromotePolicy:
     try:
         return _build_auto_promote_policy()
     except typer.BadParameter as exc:
-        console.print(f"[red]{escape(str(exc))}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     except ValueError as exc:
         # AutoPromotePolicy.__post_init__ rejects thresholds looser than the
         # manual gate or a disarmed rollback.
         console.print(
-            f"[red]invalid learning.auto_promote config: {escape(str(exc))}[/red]"
+            f"[red]invalid learning.auto_promote config: {escape(str(exc))}[/red]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
@@ -1120,11 +1122,15 @@ def _exit_if_advisory_write_refused(result: CurateCycleResult | None) -> None:
 
 @worker_app.command("curate")
 def curate_cmd(
-    output_dir: Path = typer.Option(  # noqa: B008 - typer option default
-        ...,
+    output_dir: Path | None = typer.Option(  # noqa: B008 - typer option default
+        None,
         "--output-dir",
         "-o",
-        help="Directory for learning-candidate review artifacts.",
+        help=(
+            "Directory for learning-candidate review artifacts. Defaults to "
+            "TRELLIS_LEARNING_ARTIFACTS_DIR when set, else <data_dir>/learning: "
+            "the directory the API's Review queue reads."
+        ),
     ),
     days: int = typer.Option(30, "--days", help="Days of EventLog history to scan."),
     interval: int | None = typer.Option(
@@ -1184,8 +1190,6 @@ def curate_cmd(
     SIGINT/SIGTERM, logging one structured line per cycle. No scheduler
     dependency is introduced — the interval is a plain-sleep convenience.
     """
-    output_dir = output_dir.expanduser()
-
     # Above the reconcile call and the --interval branch: reconcile emits a
     # FEEDBACK_RECORDED event per file-only row, which a dry run must not.
     if dry_run and reconcile_first:
@@ -1195,6 +1199,8 @@ def curate_cmd(
             "--dry-run'"
         )
         raise typer.BadParameter(msg)
+
+    output_dir = _resolve_learning_output_dir(output_dir)
 
     if reconcile_first:
         _reconcile_before_cycle()
@@ -1430,7 +1436,8 @@ def _require_llm_client_or_exit(consumer: LLMConsumer, *, command: str) -> Any:
             f"[red]{command} requires an LLM SDK that is not installed: "
             f"{escape(str(exc))}[/red]\n"
             "[dim]Install it, e.g. 'uv pip install trellis-ai\\[llm-openai]', "
-            "and configure an 'llm:' block in config.yaml.[/dim]"
+            "and configure an 'llm:' block in config.yaml.[/dim]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     if llm is None:
@@ -1440,7 +1447,8 @@ def _require_llm_client_or_exit(consumer: LLMConsumer, *, command: str) -> Any:
             "configured.[/red]\n"
             f"[dim]Add an 'llm:' block to {escape(config_path)} (provider, "
             "api_key_env, model) and install the matching extra "
-            "(\\[llm-openai] / \\[llm-anthropic]).[/dim]"
+            "(\\[llm-openai] / \\[llm-anthropic]).[/dim]",
+            soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_INTERNAL)
     return llm
@@ -1899,7 +1907,10 @@ def capture_sessions_cmd(
         else:
             # escape(): the remediation names the `[llm-openai]` /
             # `[llm-anthropic]` extras, which Rich would eat as markup tags.
-            console.print(f"[red]worker capture-sessions: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]worker capture-sessions: {escape(str(exc))}[/red]",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     payload = report.to_payload()
@@ -2065,7 +2076,9 @@ def embed_traces_cmd(
         if output_format == "json":
             emit_json({"status": "error", "message": str(exc)})
         else:
-            console.print(f"[red]worker embed-traces: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]worker embed-traces: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from exc
 
     payload = report.to_dict()
@@ -2100,5 +2113,6 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
     for failure in payload["failures"]:
         console.print(
             f"[red]  {escape(failure['trace_id'])}: "
-            f"{escape(str(failure['error']))}[/red]"
+            f"{escape(str(failure['error']))}[/red]",
+            soft_wrap=True,
         )

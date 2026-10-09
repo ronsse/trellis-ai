@@ -150,7 +150,14 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         with typed strings built by its own callers: an evaluation fault
         there is a code bug that surfaces identically after three
         attempts, not a data-dependent condition, so the cost is 3x
-        latency on a path that is already broken.
+        latency on a path that is already broken. One caller passes data
+        through: :meth:`update_node_if_current` (whose lost race also
+        arrives here) hands its ``expected_valid_from`` to ``datetime()``.
+        It refuses a token Python cannot parse before the query runs, but
+        ``datetime()`` is stricter than Python (it rejects a space for the
+        ``T`` and a comma before the fraction, measured), and such a token
+        fails on this code. It raises after three attempts instead of
+        one; it never reads as a refusal.
 
         ``gql_status`` is deliberately **not** part of the check. Every
         shape above reports 50N42, the syntax errors included, so it
@@ -529,12 +536,12 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
 
         Each statement is ``IF NOT EXISTS`` so calling this against an
         already-migrated database is a no-op. Failures bubble up as
-        ``RuntimeError`` from :func:`execute_sql` — the registry will
+        ``StoreError`` from :func:`execute_sql` — the registry will
         surface them at boot rather than as opaque errors on first
         write.
         """
         for stmt in _ARCADEDB_EDGE_PROVENANCE_SCHEMA:
-            execute_sql(http_url, user, password, database, stmt)
+            execute_sql(http_url, user, password, database, stmt, store="graph")
         logger.info(
             "arcadedb_edge_provenance_schema_migrated",
             database=database,

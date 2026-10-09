@@ -308,8 +308,9 @@ class TestSQLiteContainsCompiler:
         assert "ELSE '[]'" in sql
         assert "json_each" in sql
         assert "EXISTS" in sql
-        assert "json_extract(properties_json, '$.column_names')" in sql
-        assert params == ["user_id"]
+        assert "json_extract(properties_json, ?)" in sql
+        # The key's path is bound for ``json_type`` and ``json_extract``.
+        assert params == ['$."column_names"', '$."column_names"', "user_id"]
 
     def test_contains_rejects_top_level_field(self) -> None:
         """SQLite top-level columns are TEXT — ``contains`` is nonsense there."""
@@ -324,7 +325,7 @@ class TestSQLiteContainsCompiler:
 
         clause = FilterClause("properties.ids", "contains", 42)
         sql, params = SQLiteGraphStore._render_contains_sqlite(clause.field, clause)
-        assert params == [42]
+        assert params == ['$."ids"', '$."ids"', 42]
         # The scalar value lands as a parameter binding on
         # ``json_each.value = ?`` inside the EXISTS subquery.
         assert "json_each.value = ?" in sql
@@ -353,11 +354,15 @@ class TestPostgresContainsCompiler:
         sql, params = PostgresGraphStore._compile_properties_clause(clause)
         # The typeof guard rules out scalar-valued properties; the @>
         # containment carries the array-special-case.
-        assert "jsonb_typeof(properties->'column_names') = 'array'" in sql
+        assert "jsonb_typeof(properties->%s) = 'array'" in sql
         assert "properties @> %s::jsonb" in sql
-        # Nested-level @> requires the scalar wrapped in an array —
+        # The guard's key is a bound parameter, not SQL text. Nested-level
+        # @> requires the scalar wrapped in an array —
         # '{"a": ["x"]}' @> '{"a": "x"}' is FALSE in PostgreSQL.
-        assert params == [_json.dumps({"column_names": ["user_id"]})]
+        assert params == [
+            "column_names",
+            _json.dumps({"column_names": ["user_id"]}),
+        ]
 
     def test_contains_top_level_field_rejected(self) -> None:
         pytest.importorskip(

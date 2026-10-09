@@ -35,6 +35,7 @@ from rich.markup import escape
 
 from trellis.core.base import utc_now
 from trellis.core.error_sanitize import sanitized_error_payload
+from trellis.errors import TrellisError
 from trellis.extract.commands import (
     batch_draft_counts,
     reconcile_node_roles,
@@ -45,10 +46,16 @@ from trellis.extract.registry import ExtractorRegistry
 from trellis.extract.sources import SourceEntry, load_sources
 from trellis.extract.trace_ingest_hook import extract_trace_batch
 from trellis.mutate import build_curate_executor
+from trellis.mutate.commands import CommandResult, CommandStatus
 from trellis.schemas.extraction import ExtractionResult
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.exit_codes import EXIT_INTERNAL
+from trellis_cli.exit_codes import (
+    EXIT_INTERNAL,
+    BatchOutcome,
+    batch_outcome,
+    refusal_exit_code,
+)
 from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
 
@@ -244,6 +251,34 @@ def _emit_refresh_event(
         )
 
 
+def _command_counts(results: list[CommandResult]) -> dict[str, int]:
+    """Count a run's command results by status, under the REST extract route's names."""
+    return {
+        "succeeded": sum(1 for r in results if r.status == CommandStatus.SUCCESS),
+        "failed": sum(1 for r in results if r.status == CommandStatus.FAILED),
+        "rejected": sum(1 for r in results if r.status == CommandStatus.REJECTED),
+        "duplicates": sum(1 for r in results if r.status == CommandStatus.DUPLICATE),
+    }
+
+
+def _print_results(
+    results: list[CommandResult], first: CommandResult | None, *, width: int
+) -> None:
+    """Print a run's command counts, then *first*, its first failure, if any."""
+    counts = _command_counts(results)
+    console.print(
+        f"  {'Commands:':<{width}}{counts['succeeded']} succeeded, "
+        f"{counts['failed']} failed, {counts['rejected']} rejected, "
+        f"{counts['duplicates']} duplicates"
+    )
+    if first is not None:
+        console.print(
+            f"  [yellow]{counts['failed'] + counts['rejected']} failed or "
+            f"rejected; first: {escape(first.message)}[/yellow]",
+            soft_wrap=True,
+        )
+
+
 def _run_refresh(
     registry: StoreRegistry,
     *,
@@ -251,10 +286,11 @@ def _run_refresh(
     raw_input: Any,
     source_hint: str,
     source_name: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[CommandResult]]:
     """Core refresh logic: extract, snapshot, execute, diff, emit.
 
-    Returns a summary dict suitable for direct JSON serialization.
+    Returns a summary dict suitable for direct JSON serialization, and the
+    batch's command results.
     """
     ext_registry = ExtractorRegistry()
     ext_registry.register(extractor)  # type: ignore[arg-type]
@@ -271,7 +307,7 @@ def _run_refresh(
     before_snapshot = _snapshot_entities(registry, entity_ids)
     batch = result_to_batch(result, requested_by=f"cli:extract-refresh:{source_name}")
     executor = build_curate_executor(registry)
-    executor.execute_batch(batch)
+    results = executor.execute_batch(batch)
     after_snapshot = _snapshot_entities(registry, entity_ids)
 
     new_entities = 0
@@ -306,7 +342,7 @@ def _run_refresh(
             extractor_used=result.extractor_used,
         )
 
-    return {
+    summary: dict[str, Any] = {
         "source": source_name,
         "extractor_used": result.extractor_used,
         "tier": result.tier,
@@ -315,15 +351,17 @@ def _run_refresh(
         "changed_entities": changed_entities,
         "unchanged_entities": unchanged_entities,
         "edges_emitted": len(result.edges),
+        **_command_counts(results),
         "diffs": diffs,
     }
+    return summary, results
 
 
 def _refresh_entry(
     entry: SourceEntry,
     *,
     sources_root: Path,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[CommandResult]]:
     """Run refresh for a single SourceEntry."""
     if entry.endpoint is not None:
         # Endpoint-form sources are pushed at the REST API, not pulled by
@@ -400,40 +438,48 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         raise typer.Exit(code=EXIT_INTERNAL)
 
     summary: dict[str, Any]
+    results: list[CommandResult]
     if source is not None:
         sources_path = Path(sources_file)
         if not sources_path.exists():
             console.print(
-                f"[red]sources.yaml not found: {escape(str(sources_path))}[/red]"
+                f"[red]sources.yaml not found: {escape(str(sources_path))}[/red]",
+                soft_wrap=True,
             )
             raise typer.Exit(code=EXIT_INTERNAL)
         config = load_sources(sources_path)
         entry = config.find(source)
         if entry is None:
             console.print(
-                f"[red]Source {source!r} not declared in "
-                f"{escape(str(sources_path))}[/red]"
+                f"[red]Source {escape(repr(source))} not declared in "
+                f"{escape(str(sources_path))}[/red]",
+                soft_wrap=True,
             )
             raise typer.Exit(code=EXIT_INTERNAL)
         if not entry.enabled:
             console.print(
-                f"[yellow]Source {source!r} is disabled in "
+                f"[yellow]Source {escape(repr(source))} is disabled in "
                 f"{escape(str(sources_path))} — "
-                f"refusing to refresh. Remove enabled: false to proceed.[/yellow]"
+                f"refusing to refresh. Remove enabled: false to proceed.[/yellow]",
+                soft_wrap=True,
             )
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
-            summary = _refresh_entry(entry, sources_root=sources_path.parent.resolve())
+            summary, results = _refresh_entry(
+                entry, sources_root=sources_path.parent.resolve()
+            )
         except typer.Exit:
             raise
         except typer.BadParameter as exc:
-            console.print(f"[red]{escape(str(exc))}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
             raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":
                 print(json.dumps(sanitized_error_payload(exc)))
             else:
-                console.print(f"[red]Refresh failed: {escape(str(exc))}[/red]")
+                console.print(
+                    f"[red]Refresh failed: {escape(str(exc))}[/red]", soft_wrap=True
+                )
             raise typer.Exit(code=EXIT_INTERNAL) from None
     else:
         # --type path
@@ -460,7 +506,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             extractor = _resolve_extractor(extractor_type)
             raw_input = _read_raw_input(type_path, extractor_type)
             registry = _get_registry()
-            summary = _run_refresh(
+            summary, results = _run_refresh(
                 registry,
                 extractor=extractor,
                 raw_input=raw_input,
@@ -470,46 +516,96 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         except typer.Exit:
             raise
         except typer.BadParameter as exc:
-            console.print(f"[red]{escape(str(exc))}[/red]")
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
             raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":
                 print(json.dumps(sanitized_error_payload(exc)))
             else:
-                console.print(f"[red]Refresh failed: {escape(str(exc))}[/red]")
+                console.print(
+                    f"[red]Refresh failed: {escape(str(exc))}[/red]", soft_wrap=True
+                )
             raise typer.Exit(code=EXIT_INTERNAL) from None
 
+    # A batch whose every command was refused or failed is a failed refresh,
+    # not an "unchanged" one. A partial one names its first failure.
+    outcome = batch_outcome(results, done="refreshed", name_partial=True)
+    refusal = outcome.refusal
     if output_format == "json":
         # Use plain print to avoid Rich's word-wrapping on long JSON, which
         # injects newlines mid-value and breaks downstream parsers.
-        print(json.dumps({"status": "refreshed", **summary}))
-        return
+        print(json.dumps({**outcome.status, **summary}))
+    else:
+        source_name = escape(summary["source"])
+        console.print(
+            f"[green]Refreshed {source_name}[/green]"
+            if refusal is None
+            else f"[red]Refresh of {source_name} failed[/red]",
+            soft_wrap=True,
+        )
+        console.print(f"  Extractor: {summary['extractor_used']} ({summary['tier']})")
+        console.print(f"  Entities scanned:  {summary['entities_scanned']}")
+        console.print(f"  New:               {summary['new_entities']}")
+        console.print(f"  Changed:           {summary['changed_entities']}")
+        console.print(f"  Unchanged:         {summary['unchanged_entities']}")
+        console.print(f"  Edges emitted:     {summary['edges_emitted']}")
+        _print_results(results, outcome.first_failure, width=19)
+        if summary["diffs"]:
+            console.print()
+            console.print("  Per-entity diffs:")
+            for d in summary["diffs"]:
+                console.print(
+                    f"    - {escape(d['entity_id'])} ({escape(d['entity_type'])})"
+                )
+                diff = d["diff"]
+                if diff.get("new_entity"):
+                    console.print("      [cyan]new entity[/cyan]")
+                for key in diff.get("added", {}):
+                    console.print(f"      [green]+[/green] {escape(key)}")
+                for key in diff.get("removed", {}):
+                    console.print(f"      [red]-[/red] {escape(key)}", soft_wrap=True)
+                for key, (b, a) in (diff.get("changed") or {}).items():
+                    console.print(
+                        f"      [yellow]~[/yellow] {escape(key)}: "
+                        f"{escape(repr(b))} -> {escape(repr(a))}",
+                        soft_wrap=True,
+                    )
+    if refusal is not None:
+        raise typer.Exit(code=refusal_exit_code(refusal))
 
-    console.print(f"[green]Refreshed {summary['source']}[/green]")
-    console.print(f"  Extractor: {summary['extractor_used']} ({summary['tier']})")
-    console.print(f"  Entities scanned:  {summary['entities_scanned']}")
-    console.print(f"  New:               {summary['new_entities']}")
-    console.print(f"  Changed:           {summary['changed_entities']}")
-    console.print(f"  Unchanged:         {summary['unchanged_entities']}")
-    console.print(f"  Edges emitted:     {summary['edges_emitted']}")
-    if summary["diffs"]:
-        console.print()
-        console.print("  Per-entity diffs:")
-        for d in summary["diffs"]:
-            console.print(f"    - {escape(d['entity_id'])} ({d['entity_type']})")
-            diff = d["diff"]
-            if diff.get("new_entity"):
-                console.print("      [cyan]new entity[/cyan]")
-            for key in diff.get("added", {}):
-                console.print(f"      [green]+[/green] {key}")
-            for key in diff.get("removed", {}):
-                console.print(f"      [red]-[/red] {key}")
-            for key, (b, a) in (diff.get("changed") or {}).items():
-                console.print(f"      [yellow]~[/yellow] {key}: {b!r} -> {a!r}")
+
+def _print_backfill(
+    summary: dict[str, Any],
+    results: list[CommandResult],
+    outcome: BatchOutcome,
+    *,
+    since: int,
+) -> None:
+    """Print ``extract traces`` text output: drafts, then what the writes answered."""
+    console.print(
+        f"[red]Trace backfill failed ({since} days)[/red]"
+        if outcome.refusal is not None
+        else f"[green]Trace backfill ({since} days)[/green]",
+        soft_wrap=True,
+    )
+    console.print(f"  Traces scanned:  {summary['traces_scanned']}")
+    drafts = f"{summary['total_entities']} entities, {summary['total_edges']} edges"
+    if summary["dry_run"]:
+        console.print(f"  Would extract:        {drafts}")
+        console.print("  [yellow]dry-run -- no mutations executed[/yellow]")
+    else:
+        console.print(f"  Drafts:          {drafts}")
+        _print_results(results, outcome.first_failure, width=17)
+    for row in summary["per_trace"]:
+        if row["entities"] or row["edges"]:
+            console.print(
+                f"    - {escape(row['trace_id'])} ({escape(row['domain'] or '-')}): "
+                f"{row['entities']} entities, {row['edges']} edges"
+            )
 
 
 @extract_app.command("traces")
-def traces(
+def traces(  # noqa: PLR0912 - per-format failure report, as in refresh
     since: int = typer.Option(
         7,
         "--since",
@@ -540,7 +636,9 @@ def traces(
     optional ``--domain``) and runs each through
     :func:`trellis.extract.trace_ingest_hook.extract_trace_batch` — the
     same extraction core the live ingest hook uses — then executes the
-    governed batch. Reports per-trace draft counts.
+    governed batch. Reports per-trace draft counts and the batches' command
+    results by status. A run whose every command was refused or failed exits
+    by the first such result, as ``trellis ingest dbt-manifest`` does.
 
     With ``--dry-run`` the drafts are tallied and printed but no batch is
     executed -- useful to preview the graph a backfill would create.
@@ -558,60 +656,77 @@ def traces(
         if output_format == "json":
             print(json.dumps(sanitized_error_payload(exc)))
         else:
-            console.print(f"[red]Trace query failed: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Trace query failed: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     executor = build_curate_executor(registry)
 
     per_trace: list[dict[str, Any]] = []
+    results: list[CommandResult] = []
     total_entities = 0
     total_edges = 0
 
-    for trace in stored_traces:
-        _result, batch = extract_trace_batch(trace, requested_by="cli:extract-traces")
-        if batch is not None and not dry_run:
-            reconcile_node_roles(batch, registry.knowledge.graph_store)
-        # Count the batch, not the raw result: a confidence gate can drop
-        # drafts between the two, and the number reported has to be what
-        # would actually be written.
-        n_entities, n_edges = batch_draft_counts(batch)
-        total_entities += n_entities
-        total_edges += n_edges
-        per_trace.append(
-            {
-                "trace_id": trace.trace_id,
-                "domain": trace.context.domain,
-                "entities": n_entities,
-                "edges": n_edges,
-            }
-        )
-        if not dry_run and batch is not None:
-            executor.execute_batch(batch)
+    # An exception from the loop is reported as ``refresh`` reports its run,
+    # so a ``--format json`` caller still gets JSON. A ``TrellisError``
+    # passes on to the root boundary, which exits it by ``exit_code_for``;
+    # this catch is for the rest, such as a driver error outside the
+    # executor's handler tuple. Batches executed for earlier traces stay
+    # written.
+    try:
+        for trace in stored_traces:
+            _result, batch = extract_trace_batch(
+                trace, requested_by="cli:extract-traces"
+            )
+            if batch is not None and not dry_run:
+                reconcile_node_roles(batch, registry.knowledge.graph_store)
+            # Count the batch, not the raw result: a confidence gate can drop
+            # drafts between the two, and the number reported has to be what
+            # would actually be written.
+            n_entities, n_edges = batch_draft_counts(batch)
+            total_entities += n_entities
+            total_edges += n_edges
+            per_trace.append(
+                {
+                    "trace_id": trace.trace_id,
+                    "domain": trace.context.domain,
+                    "entities": n_entities,
+                    "edges": n_edges,
+                }
+            )
+            if not dry_run and batch is not None:
+                results.extend(executor.execute_batch(batch))
+    except (typer.Exit, TrellisError):
+        raise
+    except Exception as exc:
+        if output_format == "json":
+            print(json.dumps(sanitized_error_payload(exc)))
+        else:
+            console.print(
+                f"[red]Trace backfill failed: {escape(str(exc))}[/red]", soft_wrap=True
+            )
+        raise typer.Exit(code=EXIT_INTERNAL) from None
 
+    # The draft totals say what extraction proposed; the command counts say
+    # what the writes answered. A dry run executes nothing and counts none.
     summary: dict[str, Any] = {
         "traces_scanned": len(stored_traces),
         "total_entities": total_entities,
         "total_edges": total_edges,
+        **({} if dry_run else _command_counts(results)),
         "dry_run": dry_run,
         "per_trace": per_trace,
     }
 
+    outcome = batch_outcome(results, done="backfilled", name_partial=True)
+    refusal = outcome.refusal
     if output_format == "json":
-        print(json.dumps({"status": "backfilled", **summary}))
-        return
-
-    verb = "Would extract" if dry_run else "Extracted"
-    console.print(f"[green]Trace backfill ({since} days)[/green]")
-    console.print(f"  Traces scanned:  {summary['traces_scanned']}")
-    console.print(f"  {verb}:        {total_entities} entities, {total_edges} edges")
-    if dry_run:
-        console.print("  [yellow]dry-run -- no mutations executed[/yellow]")
-    for row in per_trace:
-        if row["entities"] or row["edges"]:
-            console.print(
-                f"    - {escape(row['trace_id'])} ({row['domain'] or '-'}): "
-                f"{row['entities']} entities, {row['edges']} edges"
-            )
+        print(json.dumps({**outcome.status, **summary}))
+    else:
+        _print_backfill(summary, results, outcome, since=since)
+    if refusal is not None:
+        raise typer.Exit(code=refusal_exit_code(refusal))
 
 
 if __name__ == "__main__":  # pragma: no cover

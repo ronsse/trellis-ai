@@ -201,7 +201,7 @@ class TestExecuteMutation:
     def test_an_invalid_trace_is_refused_by_the_handler(
         self, temp_registry: StoreRegistry, trace: Any
     ) -> None:
-        with pytest.raises(ValidationError) as refused:
+        with pytest.raises(ValidationError):
             Trace.model_validate(trace)
 
         payload = json.loads(
@@ -210,7 +210,7 @@ class TestExecuteMutation:
 
         assert (payload["status"], payload["message"]) == (
             "failed",
-            f"Execution failed: {refused.value}",
+            "Execution failed: ValidationError",
         )
         assert temp_registry.operational.trace_store.count() == 0
 
@@ -220,7 +220,7 @@ class TestExecuteMutation:
         payload = json.loads(execute_mutation(operation="trace.ingest", args={}))
 
         assert (payload["status"], payload["message"]) == (
-            "failed",
+            "rejected",
             "Validation failed: Missing required args: trace",
         )
         assert temp_registry.operational.trace_store.count() == 0

@@ -58,7 +58,7 @@ trellis ingest trace /tmp/trace.json --format json
 **Expected output:**
 
 ```json
-{"status": "ingested", "trace_id": "01JRK5N7QF8GHTM2XVZP3CWD9E", "source": "agent", "intent": "Migrated user table to add email_verified column"}
+{"status": "ingested", "trace_id": "01JRK5N7QF8GHTM2XVZP3CWD9E", "source": "agent", "intent": "Migrated user table to add email_verified column", "already_ingested": false}
 ```
 
 4. (Optional) Record feedback if quality is known.
@@ -206,7 +206,7 @@ trellis curate feedback 01JRK5N7QF8GHTM2XVZP3CWD9E 0.4 \
 
 ### If It Fails
 
-- **Validation error:** Ensure `rating` is a valid float.
+- **Validation error:** `rating` must be a number from 0.0 to 1.0 inclusive. Anything else, NaN included, exits 2 and records nothing.
 - **No handler:** The feedback handler may not be registered. This is a system configuration issue.
 
 ---
@@ -442,8 +442,8 @@ client.close()
 
 ### If It Fails
 
-- **ConnectionError (remote mode):** Ensure the API server is running (`trellis admin serve`).
-- **Store not initialized (local mode):** Run `trellis admin init`.
+- **`TrellisTransportError`:** nothing answered at `base_url`; start the API server (`trellis admin serve`) and read its log, since a store misconfiguration stops it before it listens.
+- **`TrellisClientError` with a 401 status:** the client sent no credential to a server running `TRELLIS_AUTH_MODE=required`, or sent one the server does not accept; pass a valid key as `api_key=` to `TrellisClient`/`AsyncTrellisClient` rather than injecting `http=httpx.Client(headers=...)` by hand.
 
 ---
 

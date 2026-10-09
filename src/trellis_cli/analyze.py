@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +27,7 @@ from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import StoreWriteRefusedError
 from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.learning import (
+    LEARNING_ARTIFACTS_DIR_ENV,
     LEARNING_NOISE_RETRY_KEY,
     LEARNING_NOISE_SUCCESS_KEY,
     LEARNING_PROMOTE_RETRY_KEY,
@@ -36,6 +38,7 @@ from trellis.learning import (
     analyze_learning_observations,
     analyze_well_known_candidates,
     build_learning_observations_from_event_log,
+    resolve_learning_artifacts_dir,
     write_learning_review_artifacts,
 )
 from trellis.learning import (
@@ -71,7 +74,7 @@ from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT
 from trellis.stores.base.parameter import ParameterStore
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import (
     _get_registry,
@@ -83,7 +86,15 @@ from trellis_cli.stores import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from rich.console import Console
+
+    from trellis.analyze.holdout import (
+        HoldoutGuardrailArm,
+        HoldoutHorizon,
+        HoldoutReport,
+    )
 
 logger = structlog.get_logger(__name__)
 
@@ -260,8 +271,29 @@ def _build_learning_registry_or_exit() -> ParameterRegistry:
     try:
         return _build_learning_registry()
     except typer.BadParameter as exc:
-        console.print(f"[red]{escape(str(exc))}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_INTERNAL) from exc
+
+
+def _resolve_learning_output_dir(output_dir: Path | None) -> Path:
+    """Return ``--output-dir`` when given, else the directory the API reads.
+
+    The default is :func:`resolve_learning_artifacts_dir` over the
+    registry's ``stores_dir``, the same resolver ``GET
+    /api/v1/learning/candidates`` reads through, so a writer run with no
+    flag and an API sharing its data directory meet in one place.
+    """
+    if output_dir is not None:
+        return output_dir.expanduser()
+    resolved = resolve_learning_artifacts_dir(_get_registry().stores_dir)
+    if resolved is None:
+        msg = (
+            "no learning-artifacts directory: the store registry has no "
+            f"stores_dir and {LEARNING_ARTIFACTS_DIR_ENV} is unset; pass "
+            "--output-dir"
+        )
+        raise typer.BadParameter(msg, param_hint="'--output-dir'")
+    return resolved
 
 
 def _print_demotion_outcome(report: Any) -> None:
@@ -727,7 +759,7 @@ def health(
 
     _print_capture_coverage(report.capture)
     for reason in report.reasons:
-        console.print(f"  [yellow]warn[/yellow] {reason}")
+        console.print(f"  [yellow]warn[/yellow] {escape(reason)}")
     if report.status == "ok" and write.attempts == 0 and serve.packs == 0:
         console.print("[dim]  No write or serve activity in window.[/dim]")
 
@@ -878,7 +910,7 @@ def replay(
             refill=not no_refill,
         )
     except ValueError as exc:
-        console.print(f"[red]{escape(str(exc))}[/red]")
+        console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=2) from exc
 
     event_log = get_event_log()
@@ -1208,6 +1240,385 @@ def judged_outcomes(
 
     for note in report.notes:
         console.print(f"  [dim]note: {escape(note)}[/dim]")
+
+
+def _parse_window_end(value: str | None) -> datetime | None:
+    """``--until`` as an aware UTC datetime; a naive value is read as UTC."""
+    from trellis.analyze.holdout import HoldoutAnalysisError  # noqa: PLC0415
+
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        message = f"--until must be an ISO-8601 date or time, got {value!r}."
+        raise HoldoutAnalysisError(message) from exc
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _num(value: float | None, spec: str = ".3g") -> str:
+    return "n/a" if value is None else format(value, spec)
+
+
+def _fig(value: float | None, reason: str | None, spec: str = ".3g") -> str:
+    """A figure, or why the evidence cannot give it."""
+    if value is not None:
+        return format(value, spec)
+    return "n/a" if reason is None else f"not measurable: {escape(reason)}"
+
+
+def _per_30_days(value: float | None, reason: str | None) -> str:
+    if value is not None:
+        return f"{_num(value)} per 30 days"
+    return f"per 30 days {_fig(None, reason)}"
+
+
+def _render_horizons(horizons: Sequence[HoldoutHorizon], mean_label: str) -> None:
+    for h in horizons:
+        if h.n is None:
+            console.print(f"      {h.days} days: {_fig(None, h.not_measurable)}")
+            continue
+        line = (
+            f"      {h.days} days: N {_num(h.n, '.4g')}, MDE "
+            f"{_fig(h.mde, h.not_measurable)}"
+        )
+        if h.ratio is not None:
+            line += f" (x{h.ratio:.3g})"
+        elif h.share_of_mean is not None:
+            line += f" ({h.share_of_mean:.0%} of {mean_label})"
+        console.print(line)
+
+
+def _render_holdout_sessions(report: HoldoutReport) -> None:
+    s = report.descriptive.sessions
+    why = s.not_measurable.get
+    reaching = _per_30_days(
+        s.reaching_retrieval_per_30d, why("reaching_retrieval_per_30d")
+    )
+    eligible = _per_30_days(s.eligible_per_30d, why("eligible_per_30d"))
+    analysed = _per_30_days(s.analysed_per_30d, why("analysed_per_30d"))
+    console.print(
+        f"    main sessions {s.rolled_up} rolled up ({s.not_finished} not finished "
+        f"and {s.without_main_join} without a main join left out): reaching a "
+        f"retrieval {s.reaching_retrieval} ({reaching}), with a non-empty pack "
+        f"{s.eligible} ({eligible}), analysed {s.analysed} ({analysed})"
+    )
+    console.print(
+        f"    main-session outcome SD {_fig(s.outcome_sd, why('outcome_sd'))} "
+        "(cut-offs included)"
+    )
+    console.print(
+        "    main-session MDE (same formula, plain SD, N = analysed main sessions "
+        "per 30 days x days / 30):"
+    )
+    _render_horizons(s.mde_by_horizon, "the session mean")
+    console.print(f"    [dim]{escape(s.note)}[/dim]")
+
+
+def _render_holdout_descriptive(report: HoldoutReport) -> None:
+    d = report.descriptive
+    why = d.not_measurable.get
+    console.print()
+    console.print(f"  [bold]{escape('Descriptive (the [R] re-measure)')}[/bold]")
+    console.print(
+        f"    eligible tasks {d.eligible_tasks} "
+        f"({_per_30_days(d.eligible_per_30d, why('eligible_per_30d'))}); analysed "
+        f"{d.analysed_tasks} "
+        f"({_per_30_days(d.analysed_per_30d, why('analysed_per_30d'))})"
+    )
+    across = (
+        f" across {d.parents} parent sessions"
+        if d.between_parent_share is not None
+        else ""
+    )
+    console.print(
+        "    outcome SD within parent "
+        f"{_fig(d.outcome_sd_within_parent, why('outcome_sd_within_parent'))} "
+        f"(overall {_fig(d.outcome_sd_total, why('outcome_sd_total'))}); "
+        "between-parent share of variance (bias-adjusted: epsilon-squared, "
+        f"floored at 0) {_fig(d.between_parent_share, why('between_parent_share'))}"
+        f"{across}"
+    )
+    console.print(
+        "    top parent's share of eligible tasks "
+        f"{_fig(d.top_parent_share, why('top_parent_share'))} (both arms, cut-offs "
+        "included)"
+    )
+    console.print(
+        f"    packs per task {_fig(d.packs_per_task, why('packs_per_task'))}; "
+        f"{d.tasks_with_several_packs} tasks with several packs; "
+        f"{d.tasks_with_both_arms} with calls in both arms"
+    )
+    shares = d.cut_off_share_by_arm
+    console.print(
+        f"    cut-off share {_fig(d.cut_off_share, why('cut_off_share'))} (served "
+        f"{_fig(shares.served, why('cut_off_share_by_arm.served'))}, withheld "
+        f"{_fig(shares.withheld, why('cut_off_share_by_arm.withheld'))}); PR base "
+        f"rate (served arm) {_fig(d.pr_base_rate_served, why('pr_base_rate_served'))}"
+        f", mean PRs created (both arms) "
+        f"{_fig(d.prs_created_mean, why('prs_created_mean'))}"
+    )
+    console.print(
+        f"    served / withheld: eligible {d.eligible_by_arm.served} / "
+        f"{d.eligible_by_arm.withheld}, cut-offs {d.cut_offs_by_arm.served} / "
+        f"{d.cut_offs_by_arm.withheld}, analysed {d.analysed_by_arm.served} / "
+        f"{d.analysed_by_arm.withheld}"
+    )
+    console.print(f"    post-hoc share {_fig(d.post_hoc_share, why('post_hoc_share'))}")
+    for check in d.arm_ratio:
+        console.print(
+            f"    arm ratio, {escape(check.population)}: {check.withheld} of "
+            f"{check.n} withheld against {check.expected_share:g}, binomial p "
+            f"{_num(check.p_value, '.4g')}"
+        )
+    console.print(
+        f"    task MDE ({report.power.target_power:.0%} power, alpha "
+        f"{report.inference.alpha:g} two-sided, 50/50 split, within-parent SD, "
+        "N = analysed tasks per 30 days x days / 30):"
+    )
+    _render_horizons(d.mde_by_horizon, "the served mean")
+    console.print(
+        "    N for a 10% effect (x0.9 on a log1p outcome, 10% of the served mean "
+        f"otherwise): {_fig(d.n_for_10pct_effect, why('n_for_10pct_effect'), ',')}"
+    )
+    _render_holdout_sessions(report)
+
+
+def _render_holdout_inference(report: HoldoutReport) -> None:
+    inference = report.inference
+    console.print()
+    console.print(f"  [bold]Inference: {escape(inference.verdict)}[/bold]")
+    console.print(
+        f"    mean served {_num(inference.mean_served)}, withheld "
+        f"{_num(inference.mean_withheld)}"
+    )
+    if inference.p_value is not None:
+        console.print(
+            f"    served minus withheld {_num(inference.difference)}, 95% CI "
+            f"{_num(inference.ci_low)} to {_num(inference.ci_high)} from "
+            f"{inference.bootstraps:,} stratified bootstraps"
+        )
+        console.print(
+            f"    two-sided p {_num(inference.p_value, '.4g')} from "
+            f"{inference.permutations:,} within-stratum permutations"
+        )
+    console.print(
+        f"    strata (parent session x ISO week) {inference.strata}: "
+        f"{inference.strata_both_arms} with both arms, {inference.strata_one_arm} "
+        f"with one arm, whose {inference.tasks_in_one_arm_strata} tasks carry "
+        "zero weight"
+    )
+    power = report.power
+    console.print()
+    console.print(f"  [bold]Power[/bold] ({escape(power.status)})")
+    console.print(
+        f"    planned: MDE {power.planned_mde:g} at N {power.planned_n} for "
+        f"{power.target_power:.0%} power"
+    )
+    console.print(
+        f"    achieved: N {power.realised_n}, SD within parent "
+        f"{_num(power.realised_sd)}; power at the planned MDE "
+        f"{_num(power.power_at_planned_mde)}; MDE at {power.target_power:.0%} "
+        f"power {_num(power.mde_at_target_power)} ({power.sims} simulated "
+        f"experiments of {power.sim_permutations} permutations, withheld share "
+        f"{power.withheld_share:g})"
+    )
+
+
+def _guardrail_arm(arm: HoldoutGuardrailArm, reads: str) -> str:
+    """One arm's guardrail value with its n and any tasks lacking the field."""
+    detail = f"n {arm.n}"
+    if arm.value is not None and arm.missing:
+        detail += f", {arm.missing} without {escape(reads)}"
+    return f"{_fig(arm.value, arm.not_measurable)} ({detail})"
+
+
+def _render_holdout_guardrails(report: HoldoutReport) -> None:
+    block = report.guardrails
+    status = "" if block.status == "ok" else f": {escape(block.status)}"
+    console.print()
+    console.print(
+        "  [bold]Guardrails[/bold] (reported, never decisive: no p-value, no "
+        f"verdict){status}"
+    )
+    for guardrail in block.measures:
+        line = (
+            f"    {escape(guardrail.label)} ({escape(guardrail.task_set)}): served "
+            f"{_guardrail_arm(guardrail.served, guardrail.reads)}"
+        )
+        if guardrail.withheld is not None:
+            line += f", withheld {_guardrail_arm(guardrail.withheld, guardrail.reads)}"
+        console.print(line)
+    console.print(f"    [dim]{escape(block.note)}[/dim]")
+
+
+def _render_holdout(report: HoldoutReport) -> None:
+    rate = "none" if report.rate is None else f"{report.rate:g}"
+    cut_offs = "kept (ITT)" if report.itt else "excluded"
+    console.print(
+        f"[bold]Pack Holdout[/bold] (rate {rate}, outcome "
+        f"{escape(report.outcome)}, cut-offs {cut_offs})"
+    )
+    console.print(
+        f"  window {escape(report.since)} to {escape(report.until)} "
+        f"({report.window_days} days)"
+    )
+    console.print(
+        f"  task window {escape(report.task_window_since)} to "
+        f"{escape(report.until)} ({report.task_window_days:g} days)"
+    )
+    if report.scan.truncated:
+        console.print(
+            f"  [yellow]window[/yellow] evidence covers "
+            f"{report.effective_window_days:g} of {report.window_days} days"
+        )
+    rows = report.rows
+    console.print(
+        f"  PACK_ASSEMBLED rows {rows.scanned}: {rows.without_holdout_key} without "
+        f"a holdout key, {rows.at_rate} at the analysed rate "
+        f"({rows.withheld_at_rate} withheld)"
+    )
+    f = report.funnel
+    console.print()
+    console.print("  [bold]Funnel[/bold]")
+    console.print(
+        f"    {f.joins_scanned} capture joins, {f.sessions} sessions: "
+        f"{f.main_sessions} main sessions, {f.no_outcome} without an outcome, "
+        f"{f.no_retrieval} without a pack, {f.first_pack_not_found} first pack "
+        f"not found, {f.outside_window} outside the window, "
+        f"{f.first_pack_old_build} from a build without the holdout, "
+        f"{f.other_rate} at another rate, {f.empty_first_pack} with an empty "
+        f"first pack, {f.unfinished} unfinished"
+    )
+    console.print(
+        f"    eligible {f.eligible} "
+        f"({escape(str(f.eligible_with_unparsed_pack_ids))} with an unparsed "
+        f"pack id), cut-offs excluded {f.cut_offs_excluded}, outcome "
+        f"missing {f.outcome_missing}, analysed {f.analysed}"
+    )
+    _render_holdout_descriptive(report)
+    console.print()
+    console.print("  [bold]Exclusions[/bold]")
+    for exclusion in report.exclusions:
+        if not exclusion.applied:
+            state = "not applied"
+        elif exclusion.excluded is None:
+            state = "applied"
+        else:
+            state = f"applied, {exclusion.excluded} excluded"
+        console.print(
+            f"    {escape(exclusion.timing)} ({escape(exclusion.name)}): {state}. "
+            f"{escape(exclusion.note)}"
+        )
+    _render_holdout_inference(report)
+    _render_holdout_guardrails(report)
+    for note in report.notes:
+        console.print(f"  [dim]note: {escape(note)}[/dim]")
+
+
+@analyze_app.command("holdout")
+def holdout(
+    days: int = typer.Option(
+        60, help="Days of history; a task belongs to the window by its first pack."
+    ),
+    until: str | None = typer.Option(
+        None, "--until", help="Window end, ISO-8601 (default: now; naive is UTC)."
+    ),
+    rate: float | None = typer.Option(
+        None,
+        "--rate",
+        help="The holdout_rate to analyse (default: the single rate present).",
+    ),
+    outcome: str = typer.Option(
+        "log1p_turns",
+        "--outcome",
+        help=(
+            "log1p_turns, prs_created, log1p_tokens or commits; log1p_commits "
+            "and any_commit are the prereg's commit guardrails."
+        ),
+    ),
+    itt: bool = typer.Option(
+        False, "--itt", help="Keep usage-limit cut-offs (first sensitivity analysis)."
+    ),
+    permutations: int = typer.Option(
+        10_000, "--permutations", help="Within-stratum permutations for the p-value."
+    ),
+    bootstraps: int = typer.Option(
+        4_000, "--bootstraps", help="Stratified bootstrap replicates for the 95% CI."
+    ),
+    power_sims: int = typer.Option(
+        600, "--power-sims", help="Simulated experiments per power estimate."
+    ),
+    planned_mde: float = typer.Option(
+        0.33, "--planned-mde", help="Planned MDE in outcome units (prereg: 0.33)."
+    ),
+    planned_n: int = typer.Option(
+        114, "--planned-n", help="Planned analysed tasks (prereg: about 114)."
+    ),
+    settle_hours: float = typer.Option(
+        3.0,
+        "--settle-hours",
+        help=(
+            "Hours a completed capture sweep must follow a task's latest join "
+            "before the task counts as finished."
+        ),
+    ),
+    seed: int = typer.Option(20261004, "--seed", help="Seed for every random draw."),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help=(
+            "Max events to scan per event type. Raise it when the report says "
+            "the evidence covers less than the window."
+        ),
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """The pack holdout experiment's pre-registered analysis. Read-only.
+
+    One unit per finished sub-agent task whose first pack was non-empty in
+    its own arm's terms; the arm is that first pack's holdout (ITT). Reports
+    the descriptive [R] re-measure in every flag state, then the
+    stratum-weighted difference served minus withheld (strata: parent
+    session x ISO week) with a within-stratum permutation p-value, a
+    stratified bootstrap CI and power at the realised N, and the
+    guardrails per arm, which decide nothing. Counts and statistics only;
+    writes nothing, not even a meta-trace.
+    """
+    from trellis.analyze.holdout import (  # noqa: PLC0415
+        HoldoutAnalysisError,
+        analyze_holdout,
+    )
+
+    try:
+        report = analyze_holdout(
+            get_event_log(),
+            days=days,
+            until=_parse_window_end(until),
+            rate=rate,
+            outcome=outcome,
+            itt=itt,
+            permutations=permutations,
+            bootstraps=bootstraps,
+            power_sims=power_sims,
+            planned_mde=planned_mde,
+            planned_n=planned_n,
+            settle_hours=settle_hours,
+            seed=seed,
+            limit=limit,
+        )
+    except HoldoutAnalysisError as exc:
+        message = str(exc)
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
+        raise typer.Exit(code=EXIT_VALIDATION) from exc
+
+    if output_format == "json":
+        emit_json(report.model_dump())
+        return
+    _render_holdout(report)
 
 
 @analyze_app.command("cost")
@@ -2716,7 +3127,7 @@ def graph_shape(
         roles = ", ".join(f"{name}={n}" for name, n in report.node_roles.items())
         console.print(f"  roles: {escape(roles)}")
         if report.scan.truncated:
-            console.print(f"  [red]truncated[/red] {report.scan.note}")
+            console.print(f"  [red]truncated[/red] {report.scan.note}", soft_wrap=True)
         console.print()
         _print_graph_types(report)
         console.print()
@@ -2751,13 +3162,15 @@ def graph_shape(
 
 @analyze_app.command("learning-candidates")
 def learning_candidates(
-    output_dir: Path = typer.Option(  # noqa: B008 - typer option default
-        ...,
+    output_dir: Path | None = typer.Option(  # noqa: B008 - typer option default
+        None,
         "--output-dir",
         "-o",
         help=(
             "Directory for the candidates JSON + decisions template. "
-            "Created if it doesn't exist."
+            "Created if it doesn't exist. Defaults to "
+            "TRELLIS_LEARNING_ARTIFACTS_DIR when set, else <data_dir>/learning: "
+            "the directory the API's Review queue reads."
         ),
     ),
     days: int = typer.Option(30, help="Days of EventLog history to scan"),
@@ -2791,6 +3204,7 @@ def learning_candidates(
     Read-only. Does not mutate the graph; the promote step does that
     after a human review pass.
     """
+    output_dir = _resolve_learning_output_dir(output_dir)
     event_log = get_event_log()
     registry = _build_learning_registry_or_exit()
     with wrap_cli_meta_analysis(

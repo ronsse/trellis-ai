@@ -9,20 +9,29 @@ test asserts the command registers and exit codes route correctly.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+from tests.cli_output import assert_coloured, force_colour, plain
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.graph import SQLiteGraphStore
+from trellis_cli import admin_migrate_provenance as migrate_provenance_module
 from trellis_cli.admin import admin_app
 from trellis_cli.admin_migrate_provenance import (
+    MigrateProvenanceReport,
     MigrationDriftError,
+    _print_text_report,
+    migrate_provenance_command,
     run_migrate_provenance,
 )
+from trellis_cli.exit_codes import EXIT_STORE
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -252,6 +261,317 @@ class TestRunMigrateProvenance:
 
 
 runner = CliRunner()
+
+
+# ---------------------------------------------------------------------------
+# ``_print_text_report``'s per-edge error line, verbatim and unwrapped.
+# Each ``report.errors`` entry carries a store exception's text, so Rich
+# must neither drop a ``[...]`` nor turn a ``:name:`` into an emoji, nor
+# hard-wrap a long token at the console width. ``migrate_provenance_command``
+# raises a non-zero exit right after this line when ``report.errors`` is
+# non-empty, so it is listed as a cross-function entry in
+# ``tests/unit/test_cli_failure_soft_wrap_rule.py``.
+# ---------------------------------------------------------------------------
+
+
+#: Long enough to wrap at 80 columns without ``soft_wrap``.
+_LONG_EDGE_ID = "edge-" + "a" * 90
+_UPSERT_ERROR = (
+    f"edge:{_LONG_EDGE_ID}: upsert failed: ValueError: [bold]x[/bold] [tag] :smile:"
+)
+
+
+class TestPrintTextReportErrorVerbatim:
+    @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
+    def test_error_line_prints_verbatim_and_unwrapped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        colour: bool,
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "80")
+        if colour:
+            force_colour(monkeypatch, migrate_provenance_module)
+
+        report = MigrateProvenanceReport(dry_run=False, errors=[_UPSERT_ERROR])
+        _print_text_report(report)
+
+        out = capsys.readouterr().out
+        text = assert_coloured(out) if colour else plain(out)
+        lines = [ln for ln in text.splitlines() if _LONG_EDGE_ID in ln]
+        assert lines == [f"  {_UPSERT_ERROR}"], text
+
+
+# ---------------------------------------------------------------------------
+# A per-edge upsert failure (``report.errors`` non-empty) exits
+# ``EXIT_STORE``, with the JSON payload's ``status`` distinguishing a
+# partial run from a total one, and the failing exception's text passed
+# through ``sanitize_error_message`` so a secret-shaped fragment never
+# reaches stdout. At main this exits ``0`` with no ``status`` key.
+# ---------------------------------------------------------------------------
+
+
+#: Secret-shaped per the ``password=`` leak heuristic in
+#: ``trellis.core.error_sanitize`` — must never appear in captured output.
+_SYNTHETIC_SECRET = "password=sk-canary-do-not-leak-0042"  # noqa: S105
+
+
+class _OneEdgeUpsertFailsStore:
+    """Wraps a real :class:`SQLiteGraphStore`; ``upsert_edge`` raises for
+    every edge type named in *fail_edge_types*, carrying *message* (by
+    default a synthetic secret-shaped one). Everything else delegates
+    straight through — this is a write-time failure validation cannot
+    catch, since validation runs on the legacy values before the store is
+    ever called.
+    """
+
+    def __init__(
+        self,
+        inner: SQLiteGraphStore,
+        fail_edge_types: frozenset[str],
+        *,
+        message: str = f"write rejected: {_SYNTHETIC_SECRET}",
+    ) -> None:
+        self._inner = inner
+        self._fail_edge_types = fail_edge_types
+        self._message = message
+
+    def query(self, **kwargs: Any) -> Any:
+        return self._inner.query(**kwargs)
+
+    def get_edges(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.get_edges(*args, **kwargs)
+
+    def upsert_edge(
+        self, source_id: str, target_id: str, edge_type: str, **kwargs: Any
+    ) -> str:
+        if edge_type in self._fail_edge_types:
+            raise RuntimeError(self._message)
+        return self._inner.upsert_edge(source_id, target_id, edge_type, **kwargs)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def _seed_two_legacy_edges(tmp_path: Path) -> SQLiteGraphStore:
+    """One ``fail_edge`` (a->b) and one ``ok_edge`` (a->c), both carrying
+    valid legacy provenance so both reach the upsert call."""
+    store = _make_store(tmp_path)
+    store.upsert_node("c", "service", {})
+    _seed_legacy_edge(
+        store, "fail_edge", {"confidence": 0.5, "extractor_tier": "DETERMINISTIC"}
+    )
+    store.upsert_edge(
+        "a",
+        "c",
+        "ok_edge",
+        properties={"confidence": 0.4, "extractor_tier": "DETERMINISTIC"},
+    )
+    return store
+
+
+def _edge_id(store: SQLiteGraphStore, edge_type: str) -> str:
+    (edge_id,) = [
+        edge["edge_id"]
+        for edge in store.get_edges("a", direction="outgoing")
+        if edge["edge_type"] == edge_type
+    ]
+    return str(edge_id)
+
+
+class TestExitCodeOnPerEdgeFailures:
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    def test_one_failing_edge_exits_store_with_status_partial(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        output_format: str,
+    ) -> None:
+        inner = _seed_two_legacy_edges(tmp_path)
+        fail_edge_id = _edge_id(inner, "fail_edge")
+        store = _OneEdgeUpsertFailsStore(inner, frozenset({"fail_edge"}))
+        monkeypatch.setattr(migrate_provenance_module, "get_graph_store", lambda: store)
+        monkeypatch.setattr(migrate_provenance_module, "get_event_log", lambda: None)
+
+        try:
+            with pytest.raises(typer.Exit) as exc:
+                migrate_provenance_command(
+                    dry_run=False,
+                    batch_size=10,
+                    output_format=output_format,
+                    no_meta_trace=True,
+                )
+            assert exc.value.exit_code == EXIT_STORE
+        finally:
+            store.close()
+
+        out = capsys.readouterr().out
+        assert _SYNTHETIC_SECRET not in plain(out)
+        # Only the exception's text is withheld: the edge and the
+        # exception type still say which row failed and how.
+        entry = f"edge:{fail_edge_id}: upsert failed: RuntimeError: {SUPPRESSED_MARKER}"
+
+        if output_format == "json":
+            payload = json.loads(out)
+            assert payload["status"] == "partial"
+            assert payload["edges_migrated"] == 1
+            assert payload["errors"] == [entry]
+        else:
+            assert "errors (1)" in plain(out)
+            assert entry in plain(out)
+
+    def test_a_clean_store_message_reaches_the_report_verbatim(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The sanitizer withholds only leak-shaped text, so an ordinary
+        driver message survives: the report carries the error, not just
+        its type."""
+        clean = "could not serialize access due to concurrent update"
+        inner = _seed_two_legacy_edges(tmp_path)
+        fail_edge_id = _edge_id(inner, "fail_edge")
+        store = _OneEdgeUpsertFailsStore(inner, frozenset({"fail_edge"}), message=clean)
+        monkeypatch.setattr(migrate_provenance_module, "get_graph_store", lambda: store)
+        monkeypatch.setattr(migrate_provenance_module, "get_event_log", lambda: None)
+
+        try:
+            with pytest.raises(typer.Exit) as exc:
+                migrate_provenance_command(
+                    dry_run=False,
+                    batch_size=10,
+                    output_format="json",
+                    no_meta_trace=True,
+                )
+            assert exc.value.exit_code == EXIT_STORE
+        finally:
+            store.close()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["errors"] == [
+            f"edge:{fail_edge_id}: upsert failed: RuntimeError: {clean}"
+        ]
+
+    def test_every_edge_failing_reports_status_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        inner = _seed_two_legacy_edges(tmp_path)
+        store = _OneEdgeUpsertFailsStore(inner, frozenset({"fail_edge", "ok_edge"}))
+        monkeypatch.setattr(migrate_provenance_module, "get_graph_store", lambda: store)
+        monkeypatch.setattr(migrate_provenance_module, "get_event_log", lambda: None)
+
+        try:
+            with pytest.raises(typer.Exit) as exc:
+                migrate_provenance_command(
+                    dry_run=False,
+                    batch_size=10,
+                    output_format="json",
+                    no_meta_trace=True,
+                )
+            assert exc.value.exit_code == EXIT_STORE
+        finally:
+            store.close()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert _SYNTHETIC_SECRET not in json.dumps(payload)
+        assert payload["status"] == "error"
+        assert payload["edges_migrated"] == 0
+        assert len(payload["errors"]) == 2
+
+    def test_no_errors_still_exits_ok_with_status_ok(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Negative control: a clean run keeps exiting 0, now with status."""
+        inner = _seed_two_legacy_edges(tmp_path)
+        store = _OneEdgeUpsertFailsStore(inner, frozenset())
+        monkeypatch.setattr(migrate_provenance_module, "get_graph_store", lambda: store)
+        monkeypatch.setattr(migrate_provenance_module, "get_event_log", lambda: None)
+
+        try:
+            with pytest.raises(typer.Exit) as exc:
+                migrate_provenance_command(
+                    dry_run=False,
+                    batch_size=10,
+                    output_format="json",
+                    no_meta_trace=True,
+                )
+            assert exc.value.exit_code == 0
+        finally:
+            store.close()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["errors"] == []
+
+
+class _QueryFailsStore:
+    """Wraps a real store; ``query`` raises with a synthetic secret.
+
+    Exercises the *other* store-error output named in the plan: the
+    generic ``except Exception`` handler in ``migrate_provenance_command``
+    (reached when the scan itself fails, before any report exists), as
+    opposed to ``_OneEdgeUpsertFailsStore`` above which exercises the
+    per-edge upsert failure path inside an already-building report.
+    """
+
+    def __init__(self, inner: SQLiteGraphStore) -> None:
+        self._inner = inner
+
+    def query(self, **kwargs: Any) -> Any:
+        msg = f"connection failed: {_SYNTHETIC_SECRET}"
+        raise RuntimeError(msg)
+
+    def get_edges(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.get_edges(*args, **kwargs)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class TestStoreErrorHandlerSanitizesSecret:
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    def test_scan_failure_exits_store_without_leaking_secret(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        output_format: str,
+    ) -> None:
+        inner = _make_store(tmp_path)
+        store = _QueryFailsStore(inner)
+        monkeypatch.setattr(migrate_provenance_module, "get_graph_store", lambda: store)
+        monkeypatch.setattr(migrate_provenance_module, "get_event_log", lambda: None)
+
+        try:
+            with pytest.raises(typer.Exit) as exc:
+                migrate_provenance_command(
+                    dry_run=False,
+                    batch_size=10,
+                    output_format=output_format,
+                    no_meta_trace=True,
+                )
+            assert exc.value.exit_code == EXIT_STORE
+        finally:
+            store.close()
+
+        out = capsys.readouterr().out
+        assert _SYNTHETIC_SECRET not in plain(out)
+
+        if output_format == "json":
+            payload = json.loads(out)
+            assert payload["error"] == "store_error"
+            assert "RuntimeError" in payload["message"]
+        else:
+            assert "store error" in plain(out)
+            assert "RuntimeError" in plain(out)
 
 
 class TestMigrateProvenanceCLI:

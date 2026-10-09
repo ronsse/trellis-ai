@@ -63,6 +63,8 @@ def format_pack_as_markdown(
     *,
     pack_id: str | None = None,
     withholding: WithholdingSummary | None = None,
+    empty_text: str | None = None,
+    axis_note: str = "",
 ) -> str:
     """Format pack items as concise markdown for LLM consumption.
 
@@ -93,6 +95,20 @@ def format_pack_as_markdown(
         pack_id: Optional pack identifier to surface for citation.
         withholding: What the builder removed and did not serve. Counts and
             reasons only — see :mod:`trellis.retrieve.withholding`.
+        empty_text: Line rendered in place of the item blocks when
+            ``items`` is empty, so an empty pack keeps its ``pack_id``
+            header and citation footer.
+        axis_note: Pre-rendered line(s) naming a retrieval axis problem —
+            a failed axis and/or a misconfigured semantic axis (built by
+            the caller from
+            :func:`~trellis.retrieve.builder_factory.format_failed_axes_note`
+            and
+            :func:`~trellis.retrieve.builder_factory.format_misconfigured_semantic_note`,
+            respectively) — or ``""`` when none applies. Same header
+            placement and not-charged-to-budget rule as ``withholding``,
+            and for the same reason: this is the markdown surface, so a
+            caller who never reads ``PACK_ASSEMBLED.strategy_failures`` or
+            ``axes.semantic`` still sees the gap.
 
     Returns:
         Markdown-formatted string within token budget.
@@ -100,10 +116,14 @@ def format_pack_as_markdown(
     lines = [f"# Context for: {intent}"]
     if pack_id:
         lines.append(f"**pack_id:** `{pack_id}`")
+    if axis_note:
+        lines.append(axis_note)
     note = format_withholding_note(withholding)
     if note:
         lines.append(note)
     lines.append("")
+    if not items and empty_text:
+        lines.append(empty_text)
     token_budget = max_tokens - _estimate_tokens(lines[0]) - 10  # reserve overhead
     used = 0
     included = 0
@@ -235,6 +255,8 @@ def format_pack_as_index_markdown(
     *,
     pack_id: str | None = None,
     withholding: WithholdingSummary | None = None,
+    empty_text: str | None = None,
+    axis_note: str = "",
 ) -> str:
     """Format pack items as an id index — one line per item, no bodies.
 
@@ -258,6 +280,8 @@ def format_pack_as_index_markdown(
         withholding: What the builder removed and did not serve. An index
             pack is all pointers, so the distinction it draws — served but
             demoted vs. withheld entirely — matters here most.
+        empty_text: As in :func:`format_pack_as_markdown`.
+        axis_note: As in :func:`format_pack_as_markdown`.
 
     Returns:
         Markdown-formatted index within token budget.
@@ -265,10 +289,14 @@ def format_pack_as_index_markdown(
     lines = [f"# Context index for: {intent}"]
     if pack_id:
         lines.append(f"**pack_id:** `{pack_id}`")
+    if axis_note:
+        lines.append(axis_note)
     note = format_withholding_note(withholding)
     if note:
         lines.append(note)
     lines.append("")
+    if not items and empty_text:
+        lines.append(empty_text)
     token_budget = max_tokens - index_render_overhead_tokens(intent)
     used = 0
     rendered: list[str] = []
@@ -700,6 +728,7 @@ def format_sectioned_pack_as_markdown(
     *,
     pack_id: str | None = None,
     withholding: WithholdingSummary | None = None,
+    axis_note: str = "",
 ) -> str:
     """Format a sectioned pack as markdown with section headings.
 
@@ -721,6 +750,7 @@ def format_sectioned_pack_as_markdown(
             whole candidate pool — rendered in the header, above the first
             section, for the reason given in
             :func:`format_pack_as_markdown`.
+        axis_note: As in :func:`format_pack_as_markdown`.
 
     Returns:
         Markdown-formatted string within token budget.
@@ -728,6 +758,8 @@ def format_sectioned_pack_as_markdown(
     lines = [f"# Context for: {intent}"]
     if pack_id:
         lines.append(f"**pack_id:** `{pack_id}`")
+    if axis_note:
+        lines.append(axis_note)
     note = format_withholding_note(withholding)
     if note:
         lines.append(note)

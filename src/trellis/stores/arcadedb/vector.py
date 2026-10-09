@@ -202,6 +202,7 @@ class ArcadeDBVectorStore(VectorStore):
             self._database,
             command,
             params=params,
+            store="vector",
         )
 
     def _init_schema(self, *, ddl_user: str, ddl_password: str) -> None:
@@ -211,7 +212,14 @@ class ArcadeDBVectorStore(VectorStore):
         # Deliberately bypasses ``self._sql`` — DDL uses the migration
         # credential pair, never the runtime one (issue #193).
         def ddl(command: str) -> None:
-            execute_sql(self._http_url, ddl_user, ddl_password, self._database, command)
+            execute_sql(
+                self._http_url,
+                ddl_user,
+                ddl_password,
+                self._database,
+                command,
+                store="vector",
+            )
 
         ddl("CREATE VERTEX TYPE Node IF NOT EXISTS")
         ddl("CREATE PROPERTY Node.embedding IF NOT EXISTS LIST OF FLOAT")
@@ -396,9 +404,9 @@ class ArcadeDBVectorStore(VectorStore):
     def delete(self, item_id: str) -> bool:
         # Like the Neo4j vector store: clear the embedding (and metadata)
         # on the current version; the node itself stays. Historical
-        # versions retain their embeddings (queryable via
-        # ``GraphStore.get_node_history`` but excluded from vector search
-        # by the ``valid_to IS NULL`` filter).
+        # versions retain their embeddings on their rows (no GraphStore
+        # read returns them, and the ``valid_to IS NULL`` filter
+        # excludes them from vector search).
         #
         # ArcadeDB's UPDATE only counts rows whose values actually
         # changed, so requiring ``embedding IS NOT NULL`` in the WHERE

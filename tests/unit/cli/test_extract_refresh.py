@@ -462,3 +462,60 @@ class TestRefreshEndToEnd:
         assert result.exit_code == 1
         assert "endpoint" in result.stdout.lower()
         assert "post" in result.stdout.lower()
+
+
+class TestRefreshLongValuesDoNotWrap:
+    """A long extracted value or refusal message stays on one line."""
+
+    def test_changed_diff_long_value_prints_as_one_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ``~ key: before -> after`` line, printed for a changed entity
+        on a run that exits 0."""
+        monkeypatch.setenv("COLUMNS", "60")
+        long_value = "synthetic-diff-value-" + "0123456789abcdef" * 4
+        runner.invoke(app, ["admin", "init"])
+        manifest = tmp_path / "manifest.json"
+        args = ["extract", "refresh", "--type", "dbt-manifest", "--path", str(manifest)]
+        manifest.write_text(json.dumps(_SAMPLE_MANIFEST_V1))
+        assert runner.invoke(app, args).exit_code == 0
+        manifest.write_text(
+            json.dumps(_SAMPLE_MANIFEST_V1).replace("V1 description", long_value)
+        )
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, result.stdout
+        lines = plain(result.stdout).splitlines()
+        assert any(long_value in line for line in lines), result.stdout
+
+    def test_first_failure_long_message_prints_as_one_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_print_results``' ``first:`` line, printed before ``refresh``
+        exits non-zero on a refused batch, echoes the deny policy's
+        condition."""
+        monkeypatch.setenv("COLUMNS", "60")
+        condition = "synthetic-deny-condition-" + "0123456789abcdef" * 4
+        runner.invoke(app, ["admin", "init"])
+        added = runner.invoke(
+            app,
+            [
+                "policy",
+                "add",
+                "--operation",
+                "*",
+                "--action",
+                "deny",
+                "--condition",
+                condition,
+            ],
+        )
+        assert added.exit_code == 0, added.stdout
+        manifest = tmp_path / "manifest.json"
+        manifest.write_text(json.dumps(_SAMPLE_MANIFEST_V1))
+        result = runner.invoke(
+            app,
+            ["extract", "refresh", "--type", "dbt-manifest", "--path", str(manifest)],
+        )
+        assert result.exit_code != 0, result.stdout
+        lines = plain(result.stdout).splitlines()
+        assert any(condition in line for line in lines), result.stdout

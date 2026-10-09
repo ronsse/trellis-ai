@@ -506,24 +506,43 @@ def _try_llm_embedder_plugin(
     )
 
 
-def _import_callable(dotted_path: str) -> Callable[[str], list[float]]:
+def _import_callable(
+    dotted_path: str, *, setting: str = "embeddings.provider"
+) -> Callable[[str], list[float]]:
     """Import a callable from a dotted module path (e.g. ``pkg.mod.func``).
 
-    Raises :class:`ConfigError` when the path is malformed, the module
-    cannot be imported, or the named attribute is not callable. Returning
-    ``None`` silently here would let a misconfigured ``TRELLIS_EMBEDDING_FN``
-    propagate as ``embedding_fn is None`` downstream, which masks the typo
-    behind a "no embeddings configured" branch.
+    Raises :class:`ConfigError` naming *setting* when the path is
+    malformed — not a string, with no dot, or with any dot-separated
+    segment empty (a leading, trailing, or doubled dot, e.g. ``.pkg.fn``,
+    ``pkg.``, ``pkg..fn``) — when importing its module raises
+    :class:`ImportError` (including a module that exists but cannot import
+    its own dependency), or when the named attribute is missing or not
+    callable. *setting* should name whichever of ``TRELLIS_EMBEDDING_FN``
+    (the env var) or ``embeddings.provider`` (the YAML key) supplied
+    *dotted_path*, so the operator edits the right one. Any other exception
+    raised by the target module's own top-level code while it imports is
+    that module's bug, not a bad path, and propagates unchanged rather than
+    being caught here (#794). Returning ``None`` silently here would let a
+    misconfigured ``TRELLIS_EMBEDDING_FN`` propagate as
+    ``embedding_fn is None`` downstream, which masks the typo behind a "no
+    embeddings configured" branch.
     """
     import importlib  # noqa: PLC0415
 
-    module_path, _, attr_name = dotted_path.rpartition(".")
-    if not module_path or not attr_name:
+    # Checked whole, before any import: a leading dot would reach
+    # `import_module` as a relative import (`TypeError`, not `ImportError`),
+    # and a non-string has no `.rpartition`. A non-string is named by its
+    # type, never echoed: a YAML mapping can hold a credential, and this
+    # message reaches the REST body and the error log.
+    is_str = isinstance(dotted_path, str)
+    if not (is_str and "." in dotted_path and all(dotted_path.split("."))):
+        shown = repr(dotted_path) if is_str else f"of type {type(dotted_path).__name__}"
         msg = (
-            f"Invalid embedding callable path {dotted_path!r} —"
+            f"Invalid embedding callable path {shown} —"
             " expected a dotted path like 'pkg.module.func'."
         )
-        raise ConfigError(msg, setting="embeddings.provider")
+        raise ConfigError(msg, setting=setting)
+    module_path, _, attr_name = dotted_path.rpartition(".")
     try:
         module = importlib.import_module(module_path)
     except ImportError as exc:
@@ -531,20 +550,20 @@ def _import_callable(dotted_path: str) -> Callable[[str], list[float]]:
             f"Could not import embedding callable {dotted_path!r}:"
             f" module {module_path!r} is not importable ({exc})."
         )
-        raise ConfigError(msg, setting="embeddings.provider") from exc
+        raise ConfigError(msg, setting=setting) from exc
     fn = getattr(module, attr_name, None)
     if fn is None:
         msg = (
             f"Embedding callable path {dotted_path!r} resolved, but"
             f" attribute {attr_name!r} is missing from {module_path!r}."
         )
-        raise ConfigError(msg, setting="embeddings.provider")
+        raise ConfigError(msg, setting=setting)
     if not callable(fn):
         msg = (
             f"Embedding callable path {dotted_path!r} resolved, but"
             f" {attr_name!r} is not callable."
         )
-        raise ConfigError(msg, setting="embeddings.provider")
+        raise ConfigError(msg, setting=setting)
     return fn  # type: ignore[no-any-return]
 
 
@@ -602,6 +621,11 @@ def _build_openai_embedding_fn(
     is not installed — returning ``None`` here silently demoted
     ``embeddings: provider: openai`` configs to no-embedding mode
     instead of telling the operator the extra is missing.
+
+    Raises :class:`ConfigError` when the SDK is installed but no API key
+    resolves from ``embeddings.api_key_env``, ``embeddings.api_key`` or
+    ``OPENAI_API_KEY``. The constructor's untyped ``openai.OpenAIError``
+    is chained as the cause; its text stays out of the message.
     """
     try:
         import openai  # noqa: PLC0415
@@ -621,7 +645,16 @@ def _build_openai_embedding_fn(
     if config.get("base_url"):
         kwargs["base_url"] = config["base_url"]
 
-    client = openai.OpenAI(**kwargs)
+    try:
+        client = openai.OpenAI(**kwargs)
+    except openai.OpenAIError as exc:
+        msg = (
+            "OpenAI embeddings are configured but no API key was found."
+            " Set embeddings.api_key_env to the name of an environment"
+            " variable holding the key, embeddings.api_key to a literal"
+            " value, or export OPENAI_API_KEY."
+        )
+        raise ConfigError(msg, setting="embeddings.api_key_env") from exc
 
     def _embed(text: str) -> list[float]:
         resp = client.embeddings.create(input=[text], model=model)
@@ -1642,45 +1675,54 @@ class StoreRegistry:
         dotted import path (e.g. ``mypackage.embeddings.embed``) for fully
         custom providers.
 
+        A non-empty ``TRELLIS_EMBEDDING_FN`` outranks ``embeddings.provider``:
+        the config block is never consulted, so a path that fails to resolve
+        raises rather than falling back to it.
+
         Returns ``None`` only when no embedding is configured at all
         (no env var, no ``embeddings.provider``). Raises
         :class:`BackendNotInstalledError` when ``provider: openai`` is
         configured but the ``llm-openai`` extra is missing, and
-        :class:`ConfigError` when the dotted-path provider can't be
-        imported or doesn't resolve to a callable.
+        :class:`ConfigError` when ``provider: openai`` finds no API key, or
+        a dotted path is malformed, raises :class:`ImportError` on import,
+        or names a missing or non-callable attribute — naming
+        ``TRELLIS_EMBEDDING_FN`` when the path came from the env var,
+        ``embeddings.provider`` when it came from config. Any other
+        exception the target module raises while it imports propagates
+        unchanged. A raise caches nothing, so the next access resolves
+        again; a callable or ``None`` is cached.
         """
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]
 
-        self._embedding_fn_cache = None  # default: not configured
+        resolved: Callable[[str], list[float]] | None = None
 
         # 1. Check env var for custom dotted-path callable
         import os  # noqa: PLC0415
 
         custom_path = os.environ.get("TRELLIS_EMBEDDING_FN")
         if custom_path:
-            self._embedding_fn_cache = _import_callable(custom_path)
-            if self._embedding_fn_cache is not None:
+            resolved = _import_callable(custom_path, setting="TRELLIS_EMBEDDING_FN")
+            if resolved is not None:
                 logger.info("embedding_fn_loaded", source="env", path=custom_path)
-                return self._embedding_fn_cache
-
-        # 2. Check config
-        provider = self._embedding_config.get("provider")
-        if not provider:
-            return None
-
-        if provider == "openai":
-            self._embedding_fn_cache = _build_openai_embedding_fn(
-                self._embedding_config
-            )
         else:
-            # Treat provider as a dotted import path
-            self._embedding_fn_cache = _import_callable(provider)
+            # 2. Check config
+            provider = self._embedding_config.get("provider")
+            if provider:
+                if provider == "openai":
+                    resolved = _build_openai_embedding_fn(self._embedding_config)
+                else:
+                    # Treat provider as a dotted import path
+                    resolved = _import_callable(provider)
 
-        if self._embedding_fn_cache is not None:
-            logger.info("embedding_fn_loaded", source="config", provider=provider)
+                if resolved is not None:
+                    logger.info(
+                        "embedding_fn_loaded", source="config", provider=provider
+                    )
 
-        return self._embedding_fn_cache
+        # Assigned only after resolution returns, so a raise leaves _UNSET.
+        self._embedding_fn_cache = resolved
+        return resolved
 
     @property
     def budget_config(self) -> Any:
