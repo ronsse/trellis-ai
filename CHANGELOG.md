@@ -388,6 +388,42 @@ All notable changes to Trellis will be documented in this file.
   `Infinity`; the field docstring no longer calls Infinity an open
   question.
   ([#827](https://github.com/ronsse/trellis-ai/pull/827))
+
+- **`TrellisError` raise sites describe the caught exception instead of
+  quoting it.** Nine sites built their message as `f"...: {exc}"` inside an
+  `except ... as exc:` handler — a pydantic `ValidationError`'s own text
+  embeds `input_value=<the caller's field value>` (Measurement and
+  Observation recording; a policy file's own entry), and an `OSError` /
+  `json.JSONDecodeError` / `ImportError`'s text can carry more of a path,
+  document or module than the raiser intended (`policy_source.py`,
+  `registry.py`). The sharpest case: a rejected Measurement's message
+  becomes the immutable `mutation.rejected` audit event verbatim, so the
+  leak was permanent once written. `trellis.core.error_sanitize` gains four
+  helpers — `describe_os_error`, `describe_json_error`,
+  `describe_validation_error` (pydantic's `errors(include_input=False)`,
+  never `str(exc)`), `describe_import_error` — each naming only the
+  exception's own structured fields (errno/strerror/filename; msg/line/col;
+  loc/type pairs; the missing module), and the nine sites now build their
+  message from one of these instead of the caught exception's `str()`. The
+  eight REST routes that construct an `HTTPException` detail or response
+  field directly from a `CommandResult.message` or a caught exception's
+  `.message` — bypassing the `trellis_error_handler` middleware that
+  already sanitizes an uncaught `TrellisError` — now wrap that value in
+  `sanitize_error_message` too, so a handler that has not yet adopted a
+  describe helper still cannot leak through those eight. The secret-pattern
+  deny-list in `sanitize_error_message` now also matches a credential key
+  wrapped in quotes (`"api_key": "..."`), the shape a JSON body or a
+  repr'd mapping takes, which the unquoted `key\s*[=:]` pattern missed
+  entirely. A new AST rule (`tests/unit/test_error_describe_not_quote_rule.py`,
+  built on `tests/ast_rules.py`) flags any `TrellisError`-family raise
+  inside an `except ... as name:` handler that interpolates `name` into its
+  message by f-string, `str()`/`repr()`, `.format()` or `%`-formatting, and
+  resolves the `TrellisError` family dynamically across modules rather than
+  from a hardcoded list — `LLMRoutingError` subclasses `ConfigError` from
+  `trellis.llm.routing`, outside `trellis/errors.py`, and a fixed list would
+  have missed it silently.
+  ([#829](https://github.com/ronsse/trellis-ai/pull/829))
+
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still

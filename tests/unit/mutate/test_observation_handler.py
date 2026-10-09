@@ -26,6 +26,13 @@ from trellis.schemas.well_known import MEASUREMENT
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
+#: A value that survives into pydantic's own ``str(exc)`` as
+#: ``input_value=<this>`` — planted where a numeric field belongs so the
+#: raw-interpolation defect (Q8, gate #808) would surface it in both the
+#: audit ``mutation.rejected`` payload and (via the REST 400 boundary,
+#: which wraps the identical ``result.message``) a caller-facing response.
+_SENTINEL = "XQ1BR6asQyYAJ6tcK6JnaWKZ"
+
 
 @pytest.fixture
 def registry(tmp_path: Path) -> StoreRegistry:
@@ -209,6 +216,45 @@ class TestMeasurementRecordHandler:
 
         assert result.status == CommandStatus.REJECTED
         assert registry.knowledge.graph_store.query(node_type=MEASUREMENT) == []
+
+    def test_bad_field_value_rejection_omits_sentinel_from_message_and_audit(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A synthetic sentinel in a bad field never reaches the caller.
+
+        Pinning test for Q8 (gate #808): pre-fix, ``handlers.py`` built the
+        ``ValidationError`` message as ``f"...: {exc}"``, and pydantic's own
+        ``str(exc)`` embeds ``input_value=<the bad value>`` — this sentinel
+        would appear verbatim both in the ``CommandResult.message`` the
+        REST routes answer with (through the now-sanitized ``result.message``
+        wrapper at ``observations.py``) and in the immutable
+        ``mutation.rejected`` audit event. Routing through
+        :func:`build_curate_executor` (not calling the handler directly)
+        reaches the exact code path that writes that audit event.
+        """
+        body = {
+            "subject_entity_id": "ds-1",
+            "subject_entity_type": "Dataset",
+            "metric_name": "null_rate",
+            "metric_value": _SENTINEL,  # str where a float is required
+            "observer_agent_id": "agent-1",
+        }
+        executor = build_curate_executor(registry)
+        cmd = Command(
+            operation=Operation.MEASUREMENT_RECORD, args={"measurement": body}
+        )
+
+        result = executor.execute(cmd)
+
+        assert result.status == CommandStatus.REJECTED
+        assert _SENTINEL not in result.message
+
+        rejected_events = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED
+        )
+        assert rejected_events, "expected a mutation.rejected audit event"
+        for event in rejected_events:
+            assert _SENTINEL not in str(event.payload)
 
     def test_writes_has_measurement_edge_not_has_observation(
         self, registry: StoreRegistry

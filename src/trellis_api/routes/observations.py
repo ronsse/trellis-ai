@@ -22,6 +22,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_MUTATE
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -89,7 +90,9 @@ def record_observation(body: dict[str, Any]) -> dict[str, Any]:
         )
     )
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        raise HTTPException(status_code=400, detail=result.message)
+        raise HTTPException(
+            status_code=400, detail=sanitize_error_message(result.message)
+        )
 
     return {
         "status": "ok",
@@ -148,7 +151,9 @@ def record_measurement(body: dict[str, Any]) -> dict[str, Any]:
         )
     )
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        raise HTTPException(status_code=400, detail=result.message)
+        raise HTTPException(
+            status_code=400, detail=sanitize_error_message(result.message)
+        )
 
     return {
         "status": "ok",

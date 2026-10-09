@@ -1030,7 +1030,7 @@ def list_learning_candidates() -> LearningCandidateListResponse:
             status="error",
             code=exc.code,
             artifacts_dir=None if exc.artifacts_dir is None else str(exc.artifacts_dir),
-            hint=exc.message,
+            hint=sanitize_error_message(exc.message),
         )
     candidates = [
         {
@@ -1090,7 +1090,7 @@ def promote_learning_candidates(
             status_code=409,
             detail={
                 "code": exc.code,
-                "message": exc.message,
+                "message": sanitize_error_message(exc.message),
                 "path": None if exc.path is None else str(exc.path),
             },
         ) from exc
