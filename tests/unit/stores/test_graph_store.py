@@ -167,6 +167,100 @@ def test_delete_nonexistent(graph_store):
 
 
 # ---------------------------------------------------------------------------
+# Non-finite floats in properties/generation_spec/document_ids are refused.
+#
+# ``json.dumps(..., allow_nan=False)`` at every write site raises
+# ``ValueError`` before the INSERT runs, instead of silently storing JSON
+# text containing the non-standard ``NaN``/``Infinity``/``-Infinity``
+# tokens (SQLite's own JSON functions parse them, so the row would read
+# back fine here and break only a stricter downstream consumer, such as
+# the REST API or a non-Python backend). Covers all five write methods
+# that serialize a caller-supplied dict: upsert_node, upsert_nodes_bulk,
+# update_node_if_current, upsert_edge, upsert_edges_bulk.
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_node_refuses_a_non_finite_property(graph_store):
+    with pytest.raises(ValueError):
+        graph_store.upsert_node(None, "service", {"score": float("nan")})
+    assert graph_store.count_nodes() == 0
+
+
+def test_upsert_node_refuses_a_non_finite_generation_spec_value(graph_store):
+    with pytest.raises(ValueError):
+        graph_store.upsert_node(
+            None,
+            "service",
+            {},
+            node_role="curated",
+            generation_spec={"confidence": float("inf")},
+        )
+    assert graph_store.count_nodes() == 0
+
+
+def test_upsert_nodes_bulk_refuses_a_non_finite_property(graph_store):
+    with pytest.raises(ValueError):
+        graph_store.upsert_nodes_bulk(
+            [
+                {
+                    "node_id": "n1",
+                    "node_type": "service",
+                    "properties": {"v": float("nan")},
+                }
+            ]
+        )
+    assert graph_store.count_nodes() == 0
+
+
+def test_update_node_if_current_refuses_a_non_finite_property(graph_store):
+    graph_store.upsert_node("n1", "service", {"v": 1})
+    before = graph_store.get_node("n1")
+    assert before is not None
+
+    with pytest.raises(ValueError):
+        graph_store.update_node_if_current(
+            "n1",
+            before["valid_from"],
+            "service",
+            {"v": float("-inf")},
+            node_role="semantic",
+        )
+
+    after = graph_store.get_node("n1")
+    assert after is not None
+    assert after["properties"] == {"v": 1}
+
+
+def test_upsert_edge_refuses_a_non_finite_property(graph_store):
+    graph_store.upsert_node("a", "service", {})
+    graph_store.upsert_node("b", "service", {})
+
+    with pytest.raises(ValueError):
+        graph_store.upsert_edge("a", "b", "depends_on", {"weight": float("nan")})
+
+    assert graph_store.count_edges() == 0
+
+
+def test_upsert_edges_bulk_refuses_a_non_finite_property(graph_store):
+    graph_store.upsert_node("a", "service", {})
+    graph_store.upsert_node("b", "service", {})
+
+    with pytest.raises(ValueError):
+        graph_store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "a",
+                    "target_id": "b",
+                    "edge_type": "depends_on",
+                    "properties": {"weight": float("inf")},
+                }
+            ]
+        )
+
+    assert graph_store.count_edges() == 0
+
+
+# ---------------------------------------------------------------------------
 # node_role / generation_spec (v3 additive schema)
 # ---------------------------------------------------------------------------
 

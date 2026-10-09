@@ -409,12 +409,16 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
 
         now = utc_now()
         now_iso = now.isoformat()
-        properties_json = json.dumps(properties)
+        properties_json = json.dumps(properties, allow_nan=False)
         generation_spec_json = (
-            json.dumps(generation_spec) if generation_spec is not None else None
+            json.dumps(generation_spec, allow_nan=False)
+            if generation_spec is not None
+            else None
         )
         document_ids_json = (
-            json.dumps(document_ids) if document_ids is not None else None
+            json.dumps(document_ids, allow_nan=False)
+            if document_ids is not None
+            else None
         )
 
         existing = self.get_node(node_id)
@@ -536,11 +540,13 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                     node_id,
                     node_type,
                     node_role,
-                    json.dumps(generation_spec)
+                    json.dumps(generation_spec, allow_nan=False)
                     if generation_spec is not None
                     else None,
-                    json.dumps(document_ids) if document_ids is not None else None,
-                    json.dumps(properties),
+                    json.dumps(document_ids, allow_nan=False)
+                    if document_ids is not None
+                    else None,
+                    json.dumps(properties, allow_nan=False),
                     closed["created_at"],
                     now_iso,
                     now_iso,
@@ -593,12 +599,14 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                     spec["node_type"],
                     spec.get("node_role", "semantic"),
                     (
-                        json.dumps(generation_spec)
+                        json.dumps(generation_spec, allow_nan=False)
                         if generation_spec is not None
                         else None
                     ),
-                    json.dumps(document_ids) if document_ids is not None else None,
-                    json.dumps(spec.get("properties") or {}),
+                    json.dumps(document_ids, allow_nan=False)
+                    if document_ids is not None
+                    else None,
+                    json.dumps(spec.get("properties") or {}, allow_nan=False),
                     created_at,
                     now_iso,
                     now_iso,
@@ -926,7 +934,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
 
         now = utc_now()
         now_iso = now.isoformat()
-        properties_json = json.dumps(properties or {})
+        properties_json = json.dumps(properties or {}, allow_nan=False)
 
         conn = self._conn
         # Take the write lock before reading the current row, so a second
@@ -1118,7 +1126,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
                         spec["source_id"],
                         spec["target_id"],
                         spec["edge_type"],
-                        json.dumps(spec.get("properties") or {}),
+                        json.dumps(spec.get("properties") or {}, allow_nan=False),
                         created_at,
                         now_iso,
                         prov["source_trace_id"],

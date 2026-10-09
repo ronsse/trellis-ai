@@ -376,6 +376,31 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The SQLite event log and both the SQLite and Postgres graph stores
+  refuse a NaN/Infinity float at write time, instead of silently storing
+  JSON text a stricter reader can't parse.** Python's `json.dumps` writes
+  the non-standard `NaN` / `Infinity` / `-Infinity` tokens by default, and
+  SQLite's own JSON functions parse them back, so a non-finite float in an
+  event payload, event metadata, or a graph node/edge `properties` (or a
+  curated node's `generation_spec`) round-tripped silently on SQLite while
+  Postgres's `jsonb` column already rejected it — an inconsistency between
+  backends, and invalid JSON by spec either way (the REST API's `json.dumps`
+  on the way out, or any non-Python consumer, breaks on it). Every
+  `json.dumps` call on a write path in `sqlite/event_log.py`,
+  `postgres/event_log.py`, `sqlite/graph.py` and `postgres/graph.py` now
+  passes `allow_nan=False`, matching the idiom already used in
+  `tests/unit/learning/tuners/test_promotion_effect_size.py` to pin the
+  Postgres behavior without a live server. The error is a `ValueError`
+  raised while the write's parameter tuple is built, before any statement
+  executes, so nothing is written — for Postgres this surfaces unwrapped
+  (not a `StoreError`) via the same contract already pinned by
+  `test_an_error_that_is_not_the_driver_s_keeps_its_type`, because a
+  non-serializable value is the caller's bug, not the store's. No producer
+  on `main` currently emits a non-finite float into either path: feedback
+  `rating` (#741/#751) and the tuner's `effect_size` (#620) were already
+  closed, and `Measurement.metric_value` — the one still-open vector, fixed
+  separately at the schema layer — has zero rows in production.
+
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
