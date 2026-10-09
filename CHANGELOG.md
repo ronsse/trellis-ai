@@ -1654,6 +1654,15 @@ All notable changes to Trellis will be documented in this file.
   red-only soft-wrap scan. It now passes `soft_wrap=True` and is listed by
   hand beside that scan (`CROSS_FUNCTION_FAILURE_LINES`, 18 -> 19).
   (follow-up from the [#811](https://github.com/ronsse/trellis-ai/pull/811) gate)
+- **Single-row `upsert_edge` carries `created_at` forward on SQLite and
+  Postgres.** Re-upserting the same `(source_id, target_id, edge_type)`
+  triplet through the single-row path stamped a fresh `created_at` on the
+  new version instead of keeping the logical edge's original mint time —
+  `upsert_edges_bulk` and the Bolt store (Neo4j, ArcadeDB) already carried it
+  forward, so the single-row path disagreed with every other path to the
+  same table. Both stores now read `created_at` alongside `edge_id` under
+  the same lock that reads the current row and write it back on the new
+  version; `valid_from` still advances on every write.
 
 ## [0.9.0] - 2026-05-13
 
