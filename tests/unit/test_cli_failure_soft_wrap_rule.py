@@ -192,7 +192,7 @@ def test_every_cli_failure_line_passes_soft_wrap() -> None:
 #: ``HAND_READ_FAILURE_LINE_COUNT`` above, so a roster entry quietly
 #: dropped (or renamed past what it matches) shrinks the *measured*
 #: population below this floor instead of moving the floor with it.
-HAND_READ_CROSS_FUNCTION_COUNT = 18
+HAND_READ_CROSS_FUNCTION_COUNT = 19
 
 #: (file, function, message fragment) for each cross-function failure line:
 #: a helper prints it in red or yellow, and a caller in the same file
@@ -205,7 +205,11 @@ HAND_READ_CROSS_FUNCTION_COUNT = 18
 #: which ``failure_line_sites`` does not scan. curate.py's
 #: ``_execute_command`` entry is same-function too, and uncoloured.
 #: extract_refresh.py's yellow ``~`` diff line is left off: a refused batch
-#: commits nothing, so there is no diff to print before the exit. The
+#: commits nothing, so there is no diff to print before the exit. Its
+#: ``_print_backfill`` per-trace row is uncoloured, and prints before
+#: ``traces()``'s refusal exit anyway -- its entity/edge counts come from
+#: extraction, computed before the batch is executed, so a row with a long
+#: domain still prints when every write in the batch is denied. The
 #: fragment tells apart entries that share a function: admin.py's
 #: ``_render_smoke_text`` (two reds), ingest_conversations.py's
 #: ``_render_report`` (its ``warning``/``withheld`` pair), and
@@ -222,6 +226,7 @@ CROSS_FUNCTION_FAILURE_LINES = (
     ("admin_migrate_provenance.py", "_print_text_report", "escape(err)"),
     ("curate.py", "_execute_command", "Message:"),
     ("curate.py", "_print_warnings", "Warning:"),
+    ("extract_refresh.py", "_print_backfill", "row['trace_id']"),
     ("extract_refresh.py", "_print_results", "first:"),
     ("ingest_conversations.py", "_render_report", "warning['kind']"),
     ("ingest_conversations.py", "_render_report", "withheld_name"),
