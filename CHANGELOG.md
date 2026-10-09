@@ -376,6 +376,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A pack build's latency is now recorded, not hard-coded to zero.**
+  `PackBuilder.build()` and `build_sectioned()` both constructed their
+  `RetrievalReport` with `duration_ms=0` — one path as a literal, the other
+  by never passing the field at all — so `PACK_ASSEMBLED` carried no timing
+  key and health reporting had no latency signal: every row read zero,
+  whatever the build actually cost. Both now time the build with
+  `time.perf_counter()` and report the real elapsed milliseconds; a
+  sectioned build times once for the whole build (every section reports
+  the same build, not its own loop iteration) rather than once per section.
+  `_withhold_sectioned`, the pack-effect holdout's (#701) sectioned
+  reconstruction path, had the same asymmetry `_withhold_flat` already
+  avoided — a withheld sectioned pack's timing silently read back as `0`
+  even though a real build happened — and now carries the real value
+  through too. `duration_ms` is an additive key on both `PACK_ASSEMBLED`
+  payloads; no schema or contract pins the payload key set other than
+  `test_pack_holdout_seam.py`'s hand-read base snapshot, which is updated
+  to expect it alongside the two holdout keys.
+
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still

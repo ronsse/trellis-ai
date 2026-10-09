@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from trellis.core.hashing import content_hash
+from trellis.retrieve import pack_builder as pack_builder_module
 from trellis.retrieve.excerpts import ContentFloorConfig
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import SearchStrategy
@@ -3144,3 +3145,109 @@ class TestIndexMode:
         assert first.items
         second = builder.build("q", session_id="s1", index_mode=True)
         assert second.items == []
+
+
+class TestLatencyTelemetry:
+    """``RetrievalReport.duration_ms`` is real elapsed time, not a stub.
+
+    Before this, every build hard-coded ``duration_ms=0`` (both the flat
+    ``report`` and each sectioned ``section_report``), so health reporting
+    had no latency signal at all — a p50/p95 could not be computed because
+    every row read zero. ``time.perf_counter`` is monkeypatched for a
+    deterministic elapsed value rather than sleeping the test.
+    """
+
+    @staticmethod
+    def _fake_clock(monkeypatch: pytest.MonkeyPatch, *ticks: float) -> None:
+        """Make ``time.perf_counter()`` return ``ticks`` in order.
+
+        A call past the last tick raises ``StopIteration`` rather than
+        repeating the last value, so a future change that adds another
+        ``perf_counter()`` call fails loudly instead of silently reading a
+        stale duration.
+        """
+        values = iter(ticks)
+        monkeypatch.setattr(
+            pack_builder_module.time, "perf_counter", lambda: next(values)
+        )
+
+    def test_build_reports_real_elapsed_duration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._fake_clock(monkeypatch, 100.0, 100.25)
+        s = _make_strategy("kw", [_item("d1", 0.9)])
+        pack = PackBuilder(strategies=[s]).build("q")
+        assert pack.retrieval_report.duration_ms == 250
+
+    def test_build_payload_carries_duration_ms(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fake_clock(monkeypatch, 200.0, 200.1)
+        log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy("kw", [_item("d1", 0.9)])
+            PackBuilder(strategies=[s], event_log=log).build("q")
+            payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)[
+                0
+            ].payload
+            assert payload["duration_ms"] == 100
+        finally:
+            log.close()
+
+    def test_build_sectioned_reports_real_elapsed_duration_per_section(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._fake_clock(monkeypatch, 50.0, 50.5)
+        s = _make_strategy("kw", [_item("d1", 0.9)])
+        pack = PackBuilder(strategies=[s]).build_sectioned(
+            "q", sections=[SectionRequest(name="a"), SectionRequest(name="b")]
+        )
+        assert [sec.retrieval_report.duration_ms for sec in pack.sections] == [
+            500,
+            500,
+        ]
+
+    def test_build_sectioned_payload_carries_duration_ms(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fake_clock(monkeypatch, 10.0, 10.3)
+        log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy("kw", [_item("d1", 0.9)])
+            PackBuilder(strategies=[s], event_log=log).build_sectioned(
+                "q", sections=[SectionRequest(name="all")]
+            )
+            payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)[
+                0
+            ].payload
+            assert payload["duration_ms"] == 300
+        finally:
+            log.close()
+
+    def test_zero_strategies_still_reports_a_nonnegative_duration(self) -> None:
+        """No monkeypatch: the real clock still produces a sane value.
+
+        Catches a sign or unit error (e.g. seconds mistaken for ms, or a
+        start/end swap) that a fixed-tick fixture alone could paper over.
+        """
+        pack = PackBuilder().build("q")
+        assert pack.retrieval_report.duration_ms >= 0
+
+    def test_withheld_sectioned_pack_still_carries_the_real_duration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_withhold_sectioned`` must carry ``duration_ms`` through too.
+
+        ``_withhold_flat`` already preserved ``report.duration_ms`` when
+        rebuilding the empty ``RetrievalReport`` a withheld caller gets;
+        ``_withhold_sectioned`` must do the same per section, or a withheld
+        sectioned pack's timing silently reads back as ``0`` even though a
+        real build happened. ``rate=1.0`` withholds every pack
+        deterministically (:func:`trellis.core.pack_holdout.is_held_out`).
+        """
+        self._fake_clock(monkeypatch, 1000.0, 1000.4)
+        s = _make_strategy("kw", [_item("d1", 0.9)])
+        pack = PackBuilder(strategies=[s], holdout_rate=1.0).build_sectioned(
+            "q", sections=[SectionRequest(name="a")]
+        )
+        assert pack.sections[0].retrieval_report.duration_ms == 400
