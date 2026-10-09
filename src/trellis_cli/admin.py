@@ -1933,23 +1933,50 @@ def _check_healthz(client: httpx.Client) -> dict[str, Any]:
     return _record_check("healthz", "pass", started)
 
 
-def _check_readyz(client: httpx.Client) -> dict[str, Any]:
+def _check_readyz(client: httpx.Client, api_key: str | None = None) -> dict[str, Any]:
     started = time.monotonic_ns()
+    headers = {"X-API-Key": api_key} if api_key else None
     try:
-        response = client.get("/readyz")
+        response = client.get("/readyz", headers=headers)
     except httpx.HTTPError as exc:
         return _record_check("readyz", "fail", started, error=str(exc))
+
+    notes: list[str] = []
+    if api_key and response.status_code == HTTPStatus.UNAUTHORIZED:
+        # auth_accepts_valid owns the verdict on key validity — a key
+        # rejected here must not read as the deployment being unready.
+        # Re-probe without it so readiness is still answered.
+        notes.append(
+            "API key rejected by /readyz (401); re-probed without it — "
+            "see auth_accepts_valid for key validity"
+        )
+        try:
+            response = client.get("/readyz")
+        except httpx.HTTPError as exc:
+            return _record_check(
+                "readyz", "fail", started, error=str(exc), note="; ".join(notes)
+            )
+
     body = _safe_json(response)
     backends = body.get("backends") if isinstance(body, dict) else None
+    if isinstance(body, dict) and backends is None:
+        # /readyz withholds the per-backend breakdown from a caller with
+        # no credential (trellis_api.routes.health.readyz); say so instead
+        # of silently reporting a bare pass/fail with no detail.
+        notes.append("per-backend breakdown withheld (no API key)")
+    extra: dict[str, Any] = {"backends": backends}
+    if notes:
+        extra["note"] = "; ".join(notes)
+
     if response.status_code != HTTPStatus.OK:
         return _record_check(
             "readyz",
             "fail",
             started,
             error=f"expected 200, got {response.status_code}",
-            backends=backends,
+            **extra,
         )
-    return _record_check("readyz", "pass", started, backends=backends)
+    return _record_check("readyz", "pass", started, **extra)
 
 
 def _check_auth_rejects_missing(client: httpx.Client) -> dict[str, Any]:
@@ -1984,10 +2011,11 @@ def _check_auth_accepts_valid(client: httpx.Client, api_key: str) -> dict[str, A
     return _record_check("auth_accepts_valid", "pass", started)
 
 
-def _check_metrics(client: httpx.Client) -> dict[str, Any]:
+def _check_metrics(client: httpx.Client, api_key: str | None = None) -> dict[str, Any]:
     started = time.monotonic_ns()
+    headers = {"X-API-Key": api_key} if api_key else None
     try:
-        response = client.get("/metrics")
+        response = client.get("/metrics", headers=headers)
     except httpx.HTTPError as exc:
         return _record_check("metrics", "fail", started, error=str(exc))
     # 404 means the [observability] extra isn't installed — that's a
@@ -2153,7 +2181,7 @@ def smoke_test(
     checks: list[dict[str, Any]] = []
     with httpx.Client(base_url=base_url, timeout=timeout) as client:
         checks.append(_check_healthz(client))
-        checks.append(_check_readyz(client))
+        checks.append(_check_readyz(client, key))
         if key:
             checks.append(_check_auth_rejects_missing(client))
             checks.append(_check_auth_accepts_valid(client, key))
@@ -2172,7 +2200,7 @@ def smoke_test(
                     "reason": "no API key configured (TRELLIS_API_KEY unset)",
                 }
             )
-        checks.append(_check_metrics(client))
+        checks.append(_check_metrics(client, key))
 
     summary = _summarize(checks)
     ok = summary["fail"] == 0

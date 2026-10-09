@@ -376,6 +376,23 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis admin smoke-test` sends its resolved API key to `/readyz` and
+  `/metrics`, not just `/api/v1/advisories`.** On an auth-required
+  deployment, the readyz check previously went out with no credential, so
+  `trellis_api.routes.health.readyz` withheld its per-backend breakdown
+  (`backends` came back `None` even though the deployment was healthy), and
+  a gated `/metrics` (`TRELLIS_METRICS_PUBLIC` unset) 401'd and read as a
+  smoke-test bug rather than the deploy choice it was. Both checks now take
+  the key resolved for `_check_auth_accepts_valid` and send `X-API-Key` when
+  one resolves. If `/readyz` itself rejects that key (401) — a verdict
+  `_check_auth_accepts_valid` already owns — `_check_readyz` re-probes once
+  without the header so readiness is still answered, and notes that the key
+  was rejected rather than reporting the deployment as unready. Whenever the
+  response body still carries no `backends` (no key at all, or the
+  retried unauthenticated probe), both the text and JSON output note
+  "per-backend breakdown withheld (no API key)" instead of a bare pass with
+  no detail.
+
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
