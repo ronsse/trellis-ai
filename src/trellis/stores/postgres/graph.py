@@ -1031,7 +1031,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT edge_id FROM edges
+                    SELECT edge_id, created_at FROM edges
                     WHERE source_id = %s AND target_id = %s AND edge_type = %s
                       AND valid_to IS NULL
                     FOR UPDATE
@@ -1042,6 +1042,12 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
 
             if row:
                 edge_id: str = row[0]
+                # Carry created_at forward from the version being closed,
+                # matching upsert_edges_bulk and the Bolt store's coalesce
+                # (contract: test_upsert_edge_carries_created_at_forward): a
+                # re-upsert is a new version of the same logical edge, not a
+                # new edge.
+                created_at = row[1]
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE edges SET valid_to = %s"
@@ -1066,7 +1072,7 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                             target_id,
                             edge_type,
                             properties_json,
-                            now,
+                            created_at,
                             now,
                             source_trace_id,
                             agent_id,

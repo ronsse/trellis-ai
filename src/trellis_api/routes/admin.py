@@ -36,6 +36,7 @@ from trellis.learning.scoring import (
     submit_learning_promotion,
 )
 from trellis.learning.tuners import (
+    PromotionPolicy,
     preview_promotion,
     promote_proposal,
     reject_proposal,
@@ -876,19 +877,34 @@ def list_pending_proposals(
     return TunerProposalListResponse(count=len(rows), proposals=rows)
 
 
+#: The Review queue exposes no ``force`` or policy override (unlike the
+#: CLI's ``--force``/``--min-sample-size``/``--min-effect-size`` flags), so
+#: its one implicit policy must be the stricter of the two reasonable
+#: defaults. A proposal with no baseline promoted through this route with
+#: the library's own permissive default is the exact shape of the
+#: unbaselined promotion this module's reachability check (above) was
+#: added to stop a repeat of; mirrors AutoPromotePolicy's
+#: ``require_baseline=True`` default on the other unattended path.
+_REVIEW_QUEUE_POLICY = PromotionPolicy(allow_no_baseline=False)
+
+
 @router.get("/proposals/{proposal_id}/preview", response_model=ProposalPreviewResponse)
 def preview_proposal(proposal_id: str) -> ProposalPreviewResponse:
     """Dry-run a proposal promotion — predict the decision, mutate nothing.
 
     Backs the UI confirm step: the operator sees the predicted
     promote / reject outcome (and why) before committing. Wraps the same
-    :func:`trellis.learning.tuners.preview_promotion` the CLI dry-run uses.
+    :func:`trellis.learning.tuners.preview_promotion` the CLI dry-run uses,
+    with the Review queue's stricter default policy (see
+    ``_REVIEW_QUEUE_POLICY``) so a preview never predicts a promotion the
+    commit route below would refuse.
     """
     registry = get_registry()
     preview = preview_promotion(
         proposal_id,
         tuner_state=registry.operational.tuner_state_store,
         parameter_store=registry.operational.parameter_store,
+        policy=_REVIEW_QUEUE_POLICY,
     )
     return ProposalPreviewResponse(
         proposal_id=preview.proposal_id,
@@ -915,6 +931,8 @@ def promote_proposal_route(
     write the new ``ParameterSet``, and emit ``PARAMS_UPDATED`` (or
     ``TUNER_PROPOSAL_REJECTED`` on a policy rejection). A second
     ``REVIEW_DECISION_RECORDED`` event records the reviewer identity.
+    Unlike the CLI, this route has no ``--force``/threshold flags, so it
+    always applies the stricter ``_REVIEW_QUEUE_POLICY``.
     """
     registry = get_registry()
     result = promote_proposal(
@@ -922,6 +940,7 @@ def promote_proposal_route(
         tuner_state=registry.operational.tuner_state_store,
         parameter_store=registry.operational.parameter_store,
         event_log=registry.operational.event_log,
+        policy=_REVIEW_QUEUE_POLICY,
         source="trellis_api.review.promote",
     )
     _emit_review_decision(

@@ -426,12 +426,9 @@ class GraphStore(ABC):
 
         Same SCD-2 semantics as :meth:`upsert_edge`: an existing
         current edge between ``(source_id, target_id, edge_type)`` is
-        closed before the new version is inserted. This method carries
-        ``created_at`` forward from the closed version on every
-        backend, but :meth:`upsert_edge` does not share that behaviour
-        everywhere: on Neo4j and ArcadeDB it also carries ``created_at``
-        forward, while on SQLite and Postgres its single-row path
-        stamps a fresh ``created_at`` on each new version instead.
+        closed before the new version is inserted, and ``created_at``
+        is carried forward from the closed version — on every backend,
+        and identically for the single-row :meth:`upsert_edge` path.
 
         Round-trip-cost guidance is the same as
         :meth:`upsert_nodes_bulk`. Endpoints must already be current
