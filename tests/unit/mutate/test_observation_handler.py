@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 
 from trellis.errors import ValidationError
-from trellis.mutate.commands import Command, Operation
+from trellis.mutate import build_curate_executor
+from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.handlers import (
     MeasurementRecordHandler,
     ObservationRecordHandler,
@@ -21,6 +22,7 @@ from trellis.mutate.handlers import (
 )
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
+from trellis.schemas.well_known import MEASUREMENT
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -176,6 +178,37 @@ class TestMeasurementRecordHandler:
         )
         with pytest.raises(ValidationError):
             handler.handle(cmd)
+
+    def test_non_finite_metric_value_is_rejected_by_the_executor(
+        self, registry: StoreRegistry
+    ) -> None:
+        """An inf ``metric_value`` is a structured rejection, not a node.
+
+        Routed through :func:`build_curate_executor` rather than calling
+        ``handler.handle`` directly, so the ``REJECTED`` status and the
+        empty graph store are both the executor's contract — the
+        ``Measurement.model_validate`` failure the handler raises becomes
+        a ``ValidationError`` the executor turns into a rejection
+        *before* ``store.upsert_node`` runs, matching the 422 + empty
+        store pinned at the API layer in ``test_non_finite_body.py``.
+        """
+        subject_id = _seed_subject(registry)
+        body = {
+            "subject_entity_id": subject_id,
+            "subject_entity_type": "Dataset",
+            "metric_name": "null_rate",
+            "metric_value": float("inf"),
+            "observer_agent_id": "agent-2",
+        }
+        cmd = Command(
+            operation=Operation.MEASUREMENT_RECORD, args={"measurement": body}
+        )
+        executor = build_curate_executor(registry)
+
+        result = executor.execute(cmd)
+
+        assert result.status == CommandStatus.REJECTED
+        assert registry.knowledge.graph_store.query(node_type=MEASUREMENT) == []
 
     def test_writes_has_measurement_edge_not_has_observation(
         self, registry: StoreRegistry
