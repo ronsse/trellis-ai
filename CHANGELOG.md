@@ -391,7 +391,7 @@ All notable changes to Trellis will be documented in this file.
   response body still carries no `backends` (no key at all, or the
   retried unauthenticated probe), both the text and JSON output note
   "per-backend breakdown withheld (no API key)" instead of a bare pass with
-  no detail.
+  no detail. ([#826](https://github.com/ronsse/trellis-ai/pull/826))
 
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
