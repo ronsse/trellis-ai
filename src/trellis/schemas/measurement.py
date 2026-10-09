@@ -66,8 +66,10 @@ class Measurement(TrellisModel):
     :class:`Observation` instead. Must be finite: NaN compares false
     against everything, so no analysis can use it, and ``Infinity`` /
     ``-Infinity`` are refused too — Postgres' JSONB has no token for
-    either, SQLite stores them as invalid JSON, and a sum or max over
-    several measurements turns into NaN the moment one is infinite.
+    either, SQLite stores them as invalid JSON, and arithmetic over
+    them misleads: ``max()`` always picks an infinite value, and
+    ``inf - inf`` or ``0 * inf`` is NaN, which every threshold
+    comparison reads as False.
     An undefined result (division by zero, an empty baseline) is not a
     measurement; record nothing, or a ``None`` plus a reason field at
     the call site, the pattern ``EffectSize`` already uses."""

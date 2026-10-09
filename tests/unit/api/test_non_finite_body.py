@@ -218,7 +218,7 @@ class TestMeasurementValue:
     consumer reads it as "infinite" — Postgres' JSONB refuses it
     outright, SQLite stores it as invalid JSON, REST shows it as
     ``null``, and the CLI prints a bare ``Infinity`` token that is not
-    valid JSON (see ``docs/design/claude-md-rationale.md`` Q1).
+    valid JSON (see the ``Measurement.metric_value`` field docstring).
     """
 
     @pytest.mark.parametrize(

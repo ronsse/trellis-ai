@@ -378,17 +378,15 @@ All notable changes to Trellis will be documented in this file.
 
 - **`Measurement.metric_value` refuses `Infinity` and `-Infinity`, not only
   `NaN`.** The field accepted any float that passed `math.isnan`, so a
-  caller could record `Infinity`; every consumer then mishandled it
-  differently — Postgres' JSONB has no token for it and the write failed,
-  SQLite stored it as the invalid-JSON text `Infinity`, REST serialized it
-  as `null`, the CLI printed a bare `Infinity` that is not valid JSON, and
-  any aggregate that summed or maxed several measurements turned into NaN
-  the moment one was infinite, silently failing every subsequent threshold
-  comparison. The validator now checks `math.isfinite`, refusing `NaN`,
+  caller could record `Infinity`. `metric_value` now refuses `NaN`,
   `Infinity` and `-Infinity` alike with "metric_value must be a finite
   number" (422 at the REST boundary, `REJECTED` through
-  `MutationExecutor`, before any node is written); the field docstring no
-  longer calls Infinity an open question.
+  `MutationExecutor`, before any node is written), because a non-finite
+  value poisons downstream arithmetic — `inf - inf` or `0 * inf` is NaN,
+  and `max()` over a series containing one always picks it — and cannot
+  be stored by the Postgres event log, whose JSONB has no token for
+  `Infinity`; the field docstring no longer calls Infinity an open
+  question.
   ([#827](https://github.com/ronsse/trellis-ai/pull/827))
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge

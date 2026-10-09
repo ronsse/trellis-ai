@@ -69,16 +69,11 @@ class TestMeasurementValueTypes:
 
     @pytest.mark.parametrize("value", [float("inf"), float("-inf")])
     def test_metric_value_refuses_infinity(self, value: float) -> None:
-        """Infinity breaks Postgres JSONB storage and every aggregate; see
-        the field docstring. This flips the pin that used to accept it."""
+        """Infinity breaks Postgres JSONB storage and poisons downstream
+        arithmetic (``inf - inf`` is NaN); see the field docstring. This
+        flips the pin that used to accept it."""
         with pytest.raises(ValidationError, match="finite number"):
             Measurement(**{**_valid_kwargs(), "metric_value": value})  # type: ignore[arg-type]
-
-    def test_metric_value_refuses_overflowing_literal(self) -> None:
-        """``1e400`` has no finite float representation; Python parses it
-        as ``inf`` rather than raising, so it must hit the same refusal."""
-        with pytest.raises(ValidationError, match="finite number"):
-            Measurement(**{**_valid_kwargs(), "metric_value": 1e400})  # type: ignore[arg-type]
 
     def test_unit_optional(self) -> None:
         m = Measurement(**{**_valid_kwargs(), "unit": "percent"})  # type: ignore[arg-type]
