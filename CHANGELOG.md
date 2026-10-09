@@ -376,38 +376,32 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`Measurement.metric_value` refuses `Infinity` and `-Infinity`, not only
+  `NaN`.** The field accepted any float that passed `math.isnan`, so a
+  caller could record `Infinity`. `metric_value` now refuses `NaN`,
+  `Infinity` and `-Infinity` alike with "metric_value must be a finite
+  number" (422 at the REST boundary, `REJECTED` through
+  `MutationExecutor`, before any node is written), because a non-finite
+  value poisons downstream arithmetic — `inf - inf` or `0 * inf` is NaN,
+  and `max()` over a series containing one always picks it — and cannot
+  be stored by the Postgres event log, whose JSONB has no token for
+  `Infinity`; the field docstring no longer calls Infinity an open
+  question.
+  ([#827](https://github.com/ronsse/trellis-ai/pull/827))
 - **A proposal with no comparable baseline is refused by default, and the
   refusal is recoverable.** `PromotionPolicy.allow_no_baseline` now
   defaults to `False`, so a bare `trellis metrics promote --commit` no
-  longer promotes a scope's first proposal vacuously — the gap #823 left
-  open on the CLI after closing it on the Review queue. A new
-  `--allow-no-baseline` flag is the surgical opt-in: unlike `--force`, it
-  skips only the baseline rule, not `--min-sample-size`,
-  `--min-effect-size`, reachability, or the immutable-core check.
-  `--force` still skips the whole policy gate, baseline rule included —
-  that is unchanged, and deliberately so: pulling the baseline check out
-  of `--force`'s reach would restructure a function two test files
-  assert on directly, for a surface that is already non-default and
-  logged. A no-baseline refusal no longer marks the proposal terminally
-  `"rejected"` — every other refusal from the pipeline's three gates
-  still does — so a later `--allow-no-baseline` call on the *same*
-  proposal can still promote it; before this, confirming a reachable
-  no-baseline proposal in the Review queue rejected it with no way back,
-  since `promote_proposal(force=True)` answers
-  `skipped proposal_already_rejected` for an already-rejected proposal
-  from every surface. The Review queue's "Confirm approve" button is now
-  disabled when the preview predicts a rejection, and shows the CLI
-  bootstrap path when the reason is the bootstrap-shaped one. Also:
-  `auto_promote`'s dry-run `_evaluate` now runs the same reachability
-  check `promote_proposal` does, so its reported reason cannot disagree
-  with what a live promotion of the same proposal would do (today this
-  changes nothing `run_auto_promotion` reaches, since `RuleTuner.run`
-  already screens for reachability before a proposal gets here — it
-  closes the gap for a proposal written before that screen existed, or
-  by a tuner that skips it); the admin API's promote-route docstring and
-  the CLI dry-run's "WOULD REJECTED" text are corrected to match.
+  longer promotes a scope's first, unbaselined proposal — the gap #823
+  left open on the CLI after closing it on the Review queue. Pass the new
+  `--allow-no-baseline` flag to opt in per call; `--force` keeps its
+  existing, broader meaning and still skips the whole policy gate,
+  baseline rule included. A no-baseline refusal no longer marks the
+  proposal terminally `"rejected"`, so a later `--allow-no-baseline` call
+  on the same proposal can still promote it, and `TUNER_PROPOSAL_REJECTED`
+  now carries a `terminal` key reflecting that. The Review queue's
+  "Confirm approve" button is disabled when the preview predicts a
+  rejection and names the CLI bootstrap command.
   ([#823](https://github.com/ronsse/trellis-ai/pull/823) follow-up)
-
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
@@ -1686,6 +1680,15 @@ All notable changes to Trellis will be documented in this file.
   red-only soft-wrap scan. It now passes `soft_wrap=True` and is listed by
   hand beside that scan (`CROSS_FUNCTION_FAILURE_LINES`, 18 -> 19).
   (follow-up from the [#811](https://github.com/ronsse/trellis-ai/pull/811) gate)
+- **Single-row `upsert_edge` carries `created_at` forward on SQLite and
+  Postgres.** Re-upserting the same `(source_id, target_id, edge_type)`
+  triplet through the single-row path stamped a fresh `created_at` on the
+  new version instead of keeping the logical edge's original mint time —
+  `upsert_edges_bulk` and the Bolt store (Neo4j, ArcadeDB) already carried it
+  forward, so the single-row path disagreed with every other path to the
+  same table. Both stores now read `created_at` alongside `edge_id` under
+  the same lock that reads the current row and write it back on the new
+  version; `valid_from` still advances on every write.
 
 ## [0.9.0] - 2026-05-13
 
