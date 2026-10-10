@@ -1005,3 +1005,73 @@ back; nothing is lost on the host side. See
 [examples/hooks_generic_workflow.py](../../examples/hooks_generic_workflow.py)
 for a runnable end-to-end demo.
 
+## Playbook 15: Recovering from a broken embedder config
+
+**When to use:** `embed_on_ingest_embedder_resolve_failed` (ingest-time, from
+`run_embed_on_ingest`) or `mcp_prewarm_optional_unavailable` with
+`component=embedding_fn` (http startup) shows up in the logs. Both mean
+`registry.embedding_fn` is raising — a config error (bad
+`TRELLIS_EMBEDDING_FN` / `embeddings.provider` path, missing provider extra,
+missing API key), not a transient outage. The cause fails every ingest and
+every semantic-axis read identically until the setting is fixed, so the hook
+logs the resolve failure **once per distinct `(error_type, setting)` per
+process** rather than once per document — see each event's `error_type` and
+`setting` fields for what to fix; `reason` in a `run_embed_on_ingest` summary
+carries the same two fields and never the exception's own message text.
+
+### Steps
+
+1. **Read the fields, not a traceback.** `setting` names what to fix, and
+   it is not always an editable key:
+   - `TRELLIS_EMBEDDING_FN` or `embeddings.provider` — a bad dotted import
+     path.
+   - `embeddings.api_key_env` — an OpenAI provider configured but no API
+     key resolved (set that key to the name of an env var holding it, set
+     `embeddings.api_key` to a literal, or export `OPENAI_API_KEY`).
+   - `backend.openai-embeddings` — the `llm-openai` extra is not
+     installed. This one names the backend, not a config key: there is
+     nothing to edit, only `uv pip install -e ".[llm-openai]"` to run.
+
+   `error_type` narrows the cause further: `BackendNotInstalledError` →
+   missing extra (see above), `ConfigError` → bad path or missing key,
+   anything else → the target module's own import-time bug.
+2. **Fix the setting** (install the extra, set the API key, correct the
+   dotted path) and **restart**. This is not because the resolve is
+   memoized — a raise caches nothing, so every later access re-resolves
+   and fails the same way — but because the `embeddings:` block is read
+   once, when the `StoreRegistry` is constructed; a running process
+   cannot see an edited `config.yaml` or environment afterward. Under MCP
+   **http** or the REST API, "restart" means restarting that server
+   process. Under MCP **stdio** there is one process per client session,
+   so it means relaunching the client (the session that owns the config),
+   not a server-side command. The CLI resolves a fresh `StoreRegistry` on
+   every invocation, so it needs no restart at all.
+   - **To see the full cause before fixing anything** — the dotted-path
+     sub-reason (module missing, attribute missing, not callable), or
+     `BackendNotInstalledError`'s install hint — `error_type`/`setting`
+     don't carry it, but the CLI boundary's rendered message does. Run
+     `trellis admin reindex-vectors --dry-run --format json`: it resolves
+     `registry.embedding_fn` before its dry-run branch, so the same
+     failure surfaces there with the original message, at exit code `5`.
+3. **Backfill what arrived while it was broken.** With
+   `TRELLIS_ENABLE_EMBED_ON_INGEST` on, documents written during the outage
+   were stored (ingest never fails on this) but never embedded. Run:
+
+   ```bash
+   trellis admin reindex-vectors --format json
+   ```
+
+   It walks every document missing a vector and embeds it through the now-fixed
+   `embedding_fn`, via the same `build_vector_row` core the live hook uses. See
+   [operations.md → `trellis admin reindex-vectors`](operations.md#trellis-admin-reindex-vectors-backfill)
+   for flags (`--batch-size`, `--limit`, `--force`, `--dry-run`).
+
+### If It Fails
+
+A fix that doesn't stick (the warning keeps recurring with the same
+`(error_type, setting)` after a restart) means the edited setting isn't the
+one actually read in this environment — check for an env var shadowing
+`config.yaml`, or a `TRELLIS_CONFIG_DIR` pointed somewhere other than
+expected. `trellis admin reindex-vectors` itself exits loudly (not silently
+indexing nothing) when the embedder or vector store is still unconfigured.
+

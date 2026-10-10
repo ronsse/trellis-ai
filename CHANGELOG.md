@@ -406,6 +406,25 @@ All notable changes to Trellis will be documented in this file.
   `Infinity`; the field docstring no longer calls Infinity an open
   question.
   ([#827](https://github.com/ronsse/trellis-ai/pull/827))
+- **`trellis admin smoke-test` sends its resolved API key to `/readyz` and
+  `/metrics`, not just `/api/v1/advisories`.** On an auth-required
+  deployment, the readyz check previously went out with no credential, so
+  `trellis_api.routes.health.readyz` withheld its per-backend breakdown
+  (`backends` came back `None` even though the deployment was healthy), and
+  a gated `/metrics` (`TRELLIS_METRICS_PUBLIC=false`) 401'd and read as a
+  smoke-test bug rather than the deploy choice it was. Both checks now take
+  the key resolved for `_check_auth_accepts_valid` and send `X-API-Key` when
+  one resolves. If either `/readyz` or `/metrics` rejects that key (401) — a
+  verdict `_check_auth_accepts_valid` already owns — the check re-probes
+  once without the header so it's still answered (readiness, or a public
+  `/metrics` under the default `TRELLIS_METRICS_PUBLIC` posture), and notes
+  that the key was rejected rather than failing on a deploy choice that
+  isn't actually broken. Whenever `/readyz`'s response body still carries no
+  `backends` (no key sent, or the key was rejected), both the text and JSON
+  output note "per-backend breakdown withheld (no API key)"; if a valid key
+  was sent and `backends` is still absent, the note reads "per-backend
+  breakdown absent" instead, since no API key isn't the cause.
+  ([#826](https://github.com/ronsse/trellis-ai/pull/826))
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
@@ -428,6 +447,31 @@ All notable changes to Trellis will be documented in this file.
   row this command could not write is a state an operator needs to see,
   not one that nets out as a quiet partial success.
   ([#824](https://github.com/ronsse/trellis-ai/pull/824))
+- **A broken embedder config is now loud once per cause, not once per
+  document.** `run_embed_on_ingest` caught a failed `registry.embedding_fn`
+  resolve (a bad `TRELLIS_EMBEDDING_FN`/`embeddings.provider` path, a
+  missing provider extra, a missing API key — all config errors that fail
+  every subsequent ingest identically) with `logger.exception`, so a
+  misconfiguration logged a full traceback per ingested document. It now
+  logs `embed_on_ingest_embedder_resolve_failed` at WARNING once per
+  distinct `(error_type, setting)` per process, and the hook's returned
+  `reason` carries only the exception's type name and, when the exception
+  names one, the broken setting (e.g. `"ConfigError: embeddings.provider"`)
+  — never the exception's message text, which can echo a credential (this
+  resolve path never sees document content). The MCP http prewarm's
+  `mcp_prewarm_optional_unavailable` warning now names `error_type` too,
+  and its comment states each prewarmed component's own runtime posture
+  instead of one blanket claim: an unresolvable `embedding_fn` raises at
+  every retrieval call site until the setting is fixed; a broken
+  `vector_store` degrades retrieval to keyword and graph (`semantic:
+  misconfigured`); embed-on-ingest is fail-soft for an embedder resolve
+  failure only. Added a recovery runbook,
+  [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config):
+  fix the setting, restart (the `embeddings:` block is read once, at
+  `StoreRegistry` construction, so a running process can't see an edited
+  config or environment), then run `trellis admin reindex-vectors` for
+  documents that arrived while it was broken.
+  ([#830](https://github.com/ronsse/trellis-ai/pull/830))
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited

@@ -23,7 +23,7 @@ from tests.structlog_isolation import clear_cached_logger_proxies
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.hashing import content_hash
 from trellis.core.write_config import MINHASH_SEED_MAX_DOCS_ENV
-from trellis.errors import StoreError
+from trellis.errors import ConfigError, StoreError
 from trellis.llm.routing import LLMConsumer
 from trellis.mcp.server import MUTATION_FAILED, RESOURCE_NOT_FOUND
 from trellis.mcp.server import (
@@ -2367,6 +2367,64 @@ class TestNearDuplicateSuppression:
         result = get_context("deployment and backup operations notes", max_tokens=4000)
         assert "d-pipeline" in result
         assert "d-backups" in result
+
+
+# ---------------------------------------------------------------------------
+# Prewarm (http transport only)
+# ---------------------------------------------------------------------------
+
+
+class TestPrewarmRegistry:
+    """``_prewarm_registry``'s per-component degradation warning.
+
+    #830 gate verdict mutant M2 dropped ``error_type`` from the warning
+    and survived tests/unit/mcp plus the hook's own tests (676 passed) —
+    nothing asserted the field exists or names the failing component's
+    own cause, rather than some other component's.
+    """
+
+    def test_embedding_fn_failure_warns_with_its_own_error_type(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``vector_store`` succeeds here (so it logs nothing); only
+        ``embedding_fn`` fails, and the warning must name that failure's
+        own ``error_type`` — not drop the field, and not some other
+        component's."""
+        from unittest.mock import PropertyMock
+
+        monkeypatch.setattr(server_mod, "_get_minhash_index", lambda registry: None)
+        monkeypatch.setattr(server_mod, "_memory_extractor", None)
+        monkeypatch.setattr(server_mod, "_memory_extractor_attempted", False)
+        monkeypatch.delenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", raising=False)
+
+        registry = MagicMock()
+        type(registry).embedding_fn = PropertyMock(
+            side_effect=ConfigError("no key", setting="embeddings.provider")
+        )
+
+        # The package's autouse `_suppress_structlog` filters below
+        # CRITICAL at the `wrapper_class` level, which `capture_logs`
+        # cannot see past (it only replaces processors) — lift it, and
+        # evict the module logger's memoised bind so the lift actually
+        # reaches `server_mod.logger` (see TestBuildLlmClientRouting.logs).
+        prior = structlog.get_config()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.NOTSET)
+        )
+        try:
+            with capture_logs() as logs:
+                clear_cached_logger_proxies()
+                server_mod._prewarm_registry(registry)
+        finally:
+            structlog.configure(**prior)
+            clear_cached_logger_proxies()
+
+        unavailable = [
+            (entry["component"], entry["error_type"])
+            for entry in logs
+            if entry["event"] == "mcp_prewarm_optional_unavailable"
+        ]
+        assert unavailable == [("embedding_fn", "ConfigError")]
 
 
 # ---------------------------------------------------------------------------
