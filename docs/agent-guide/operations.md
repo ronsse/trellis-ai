@@ -2550,7 +2550,7 @@ The check is advisory telemetry and fails soft: if it raises, the pack is served
 
 ### Citing Pack Elements in Feedback
 
-The three sectioned-context tools render each response with a `pack_id` header and full item/advisory IDs in backticks so agents can cite specific elements when calling `record_feedback`:
+Every pack-assembling tool — the three sectioned-context tools and the flat `get_context` / `search` paths alike (#392, decision-ledger D-4) — renders each response with a `pack_id` header and full item/advisory IDs in backticks so agents can cite specific elements when calling `record_feedback`. One exception: an empty flat pack at the default holdout rate of 0 renders a one-line answer with no `pack_id` header, so any advisories shown under it cannot be cited:
 
 ```markdown
 # Context for: deploy checklist
@@ -2559,11 +2559,11 @@ The three sectioned-context tools render each response with a `pack_id` header a
 ## Domain Knowledge
 - `doc_ownership_rules` (document, 0.82): Ownership rules for platform...
 
-## Advisories
-1. `adv_01HXYZ` **[pattern]** Always run dry-run first (n=12, effect=+18%)
-
 ---
 *Cite feedback via `record_feedback(pack_id="01HABCDEF...", success=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*
+
+## Advisories
+1. `adv_01HXYZ` **[pattern]** Always run dry-run first (n=12, effect=+18%)
 ```
 
 When an agent finishes the task, it calls `record_feedback` with the copied IDs:

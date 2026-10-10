@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, TypeVar
 
 import structlog
 
@@ -98,6 +98,10 @@ from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventLog, EventType
 
 logger = structlog.get_logger()
+
+#: Bound for :meth:`PackBuilder._blind_advisories_for_empty_pack`, which
+#: must hand back the exact pack type it was given.
+_PackT = TypeVar("_PackT", Pack, SectionedPack)
 
 #: Default window for session-aware dedup. When a ``session_id`` is
 #: supplied, items served in prior packs within this window are excluded.
@@ -1055,6 +1059,13 @@ class PackBuilder:
             withheld_from, pack = pack, self._withhold_flat(pack)
             telemetry = self._withheld_flat_telemetry(index_mode=index_mode)
 
+        # R1 (#844): applied to the *served* pack only, after the holdout
+        # draw above — ``withheld_from`` already captured the true would-be
+        # advisories, so this cannot touch the audit trail. A pack that is
+        # naturally empty (never drawn into the holdout) must still look
+        # like a withheld one, which ``_withhold_flat`` already empties.
+        pack = self._blind_advisories_for_empty_pack(pack, has_items=bool(pack.items))
+
         # Optional assembly-time quality evaluation (fail-soft).
         self._attach_quality_report(pack)
 
@@ -1403,6 +1414,14 @@ class PackBuilder:
             withheld_from = sectioned_pack
             sectioned_pack = self._withhold_sectioned(sectioned_pack)
             telemetry = self._withheld_sectioned_telemetry()
+
+        # R1 (#844): see the matching comment in :meth:`build` — applied
+        # after the holdout draw, so ``withheld_from`` keeps the true
+        # would-be advisories and only the served pack is blinded.
+        sectioned_pack = self._blind_advisories_for_empty_pack(
+            sectioned_pack,
+            has_items=any(section.items for section in sectioned_pack.sections),
+        )
 
         # 5. Emit telemetry
         if self._event_log is not None:
@@ -2377,6 +2396,35 @@ class PackBuilder:
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=UTC)
         return bool((now - stamp).days > cls._ADVISORY_EXPLORE_STALE_DAYS)
+
+    def _blind_advisories_for_empty_pack(
+        self, pack: _PackT, *, has_items: bool
+    ) -> _PackT:
+        """Drop advisories from a served, item-less pack while the holdout
+        is live.
+
+        R1 (#844): ``_withhold_flat``/``_withhold_sectioned`` always empty
+        ``advisories`` on a withheld pack, so once a pack with no items can
+        carry an advisory block, "no items, no advisories" becomes the one
+        tell that separates a withheld empty pack from a merely empty one
+        — exactly the asymmetry the holdout exists to hide. Applying the
+        rule here, at assembly, keeps both ``PackBuilder.build`` and
+        ``build_sectioned`` blind the same way and keeps
+        ``PACK_ASSEMBLED.advisory_ids`` truthful: the ids reported are
+        always the ones actually served.
+
+        Call this only on the pack about to be returned, *after* the
+        holdout draw has already copied a would-be-held-out pack apart
+        (``withheld_from``) — that copy must keep the true matched
+        advisories for the audit trail, never this blinded view.
+
+        Inert at the default ``holdout_rate`` of 0, and inert whenever the
+        pack has items — advisory selection does not depend on item count
+        (:meth:`_select_advisories`), and that stays true here too.
+        """
+        if self._holdout_rate > 0 and not has_items and pack.advisories:
+            return pack.model_copy(update={"advisories": []})
+        return pack
 
     @staticmethod
     def _attach_advisory_provenance(

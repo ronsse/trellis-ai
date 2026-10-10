@@ -592,6 +592,104 @@ class TestSessionDedup:
         ]
 
 
+class TestNaturallyEmptyPackBlindsAdvisoriesToo:
+    """R1 (#844): advisory selection does not depend on item count, so a
+    pack that genuinely found nothing can still carry advisories (#404's
+    rule) — except while the holdout is live, where that would be the one
+    tell separating a naturally empty pack from a withheld one (both have
+    no items; only the naturally empty one kept its advisories). The
+    builder rule closes that: a served, item-less pack carries no
+    advisories whenever ``holdout_rate > 0``, matching a withheld pack's
+    ``_withhold_flat`` / ``_withhold_sectioned`` zeroing.
+    """
+
+    def test_flat_build_drops_advisories_when_naturally_empty_and_rate_is_live(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        natural_empty = _builder(event_log, advisory_store, 1e-12, items=[]).build(
+            "rotate keys", budget=_BUDGET
+        )
+        row = _payload(event_log, natural_empty.pack_id)
+
+        assert natural_empty.items == []
+        assert row["holdout"] is False  # a 1e-12 draw is never held out
+        assert natural_empty.advisories == []
+        assert row["advisory_ids"] == []
+        # The telemetry count is untouched: this blinds what the caller is
+        # served, not what the store matched.
+        assert row["advisories_matched"] == 3
+
+    def test_flat_build_keeps_advisories_when_naturally_empty_at_rate_zero(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        """Inert at the default rate: #404's rule is unchanged when the
+        holdout is off."""
+        natural_empty = _builder(event_log, advisory_store, 0.0, items=[]).build(
+            "rotate keys", budget=_BUDGET
+        )
+        assert natural_empty.items == []
+        assert len(natural_empty.advisories) == 3
+
+    def test_flat_audit_trail_keeps_the_true_would_be_advisories(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        """A pack that is both naturally item-less and drawn into the
+        holdout must still record the true matched advisories under
+        ``holdout_advisory_ids`` — the blind applies to the served copy
+        only, never to the apart-kept would-be pack."""
+        held = _builder(event_log, advisory_store, 1.0, items=[]).build(
+            "rotate keys", budget=_BUDGET
+        )
+        row = _payload(event_log, held.pack_id)
+
+        assert row["holdout"] is True
+        assert held.advisories == []
+        assert row["holdout_advisory_ids"] == [
+            "adv-entity",
+            "adv-approach",
+            "adv-scope",
+        ]
+
+    def test_sectioned_build_drops_advisories_when_naturally_empty_and_rate_is_live(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        natural_empty = _builder(
+            event_log, advisory_store, 1e-12, items=[]
+        ).build_sectioned("rotate keys", sections=_SECTIONS)
+        row = _payload(event_log, natural_empty.pack_id)
+
+        assert natural_empty.total_items == 0
+        assert row["holdout"] is False
+        assert natural_empty.advisories == []
+        assert row["advisory_ids"] == []
+        assert row["advisories_matched"] == 3
+
+    def test_sectioned_build_keeps_advisories_when_naturally_empty_at_rate_zero(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        natural_empty = _builder(
+            event_log, advisory_store, 0.0, items=[]
+        ).build_sectioned("rotate keys", sections=_SECTIONS)
+        assert natural_empty.total_items == 0
+        assert len(natural_empty.advisories) == 3
+
+    def test_sectioned_audit_trail_keeps_the_true_would_be_advisories(
+        self, event_log: SQLiteEventLog, advisory_store: AdvisoryStore
+    ) -> None:
+        held = _builder(event_log, advisory_store, 1.0, items=[]).build_sectioned(
+            "rotate keys", sections=_SECTIONS
+        )
+        row = _payload(event_log, held.pack_id)
+
+        assert row["holdout"] is True
+        assert held.advisories == []
+        assert row["holdout_advisory_ids"] == [
+            "adv-entity",
+            "adv-approach",
+            "adv-scope",
+        ]
+
+
 class TestFactoryWiring:
     """``build_pack_builder`` reads the knob per construction, as every surface does."""
 

@@ -1092,12 +1092,29 @@ def _flat_context(
         # single most misleading pack this server can return. The note
         # goes here first, before it goes anywhere else.
         empty = empty_message or f"No context found for: {intent}"
+        # Advisory selection (PackBuilder._select_advisories) does not
+        # depend on whether any items were selected, so an empty pack can
+        # still carry advisories — except while the pack holdout is on
+        # (``holdout_rate > 0``), where ``PackBuilder`` blinds an
+        # item-less pack's advisories too
+        # (``_blind_advisories_for_empty_pack``, R1/#844), so a withheld
+        # pack (zeroed via ``_withhold_flat``) and a genuinely empty one
+        # carry the same nothing and stay look-alike. Render whatever
+        # ``pack.advisories`` holds here too — matching
+        # ``_sectioned_context``, which never special-cases empty sections
+        # before appending advisories — rather than silently dropping the
+        # only content an empty-item response would otherwise carry.
+        adv_md = format_advisories_as_markdown(pack.advisories)
         if builder.holdout_rate > 0:
             # With the pack holdout on, an empty pack may be a withheld one.
             # It must still carry the ``pack_id`` header the capture join
-            # reads, and it must read like every other empty pack, so all
-            # empty packs render through the formatter while the rate is
-            # above zero. At rate 0 the one-liner below is unchanged.
+            # reads, so all empty packs render through the formatter while
+            # the rate is above zero. ``adv_md`` is always empty here too
+            # — this branch's pack has no items and the rate is above
+            # zero, so the builder rule above has already blinded
+            # ``pack.advisories`` — but the append stays in case a future
+            # caller reaches this branch some other way. At rate 0 the
+            # one-liner below is unchanged.
             formatter = (
                 format_pack_as_index_markdown if index else format_pack_as_markdown
             )
@@ -1110,12 +1127,16 @@ def _flat_context(
                 empty_text=empty,
                 axis_note=axis_note,
             )
+            if adv_md:
+                result = f"{result}\n\n{adv_md}"
             return f"{banner}\n\n{result}" if banner else result
         if axis_note:
             empty = f"{empty}\n\n{axis_note}"
         note = format_withholding_note(withholding)
         if note:
             empty = f"{empty}\n\n{note}"
+        if adv_md:
+            empty = f"{empty}\n\n{adv_md}"
         return f"{banner}\n\n{empty}" if banner else empty
 
     item_dicts = [
@@ -1140,6 +1161,14 @@ def _flat_context(
         withholding=withholding,
         axis_note=axis_note,
     )
+    # Advisories ride outside the item budget on both pack shapes — see
+    # ``_sectioned_context``, which appends them after
+    # ``format_sectioned_pack_as_markdown`` and before the capture banner.
+    # Mirrored here (same helper, same position) so the flat path, which
+    # agents actually call, stops building advisories it never shows.
+    adv_md = format_advisories_as_markdown(pack.advisories)
+    if adv_md:
+        result = f"{result}\n\n{adv_md}"
     if banner:
         result = f"{banner}\n\n{result}"
     _track_tokens(
