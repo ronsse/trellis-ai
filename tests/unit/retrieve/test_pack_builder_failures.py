@@ -13,6 +13,7 @@ empty packs:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -130,13 +131,14 @@ class TestAllStrategiesFailRaises:
                 error_type="ConfigError", setting="embeddings.provider"
             ),
         )
+        calls: dict[str, Callable[[], object]] = {
+            "flat": lambda: builder.build("q"),
+            "sectioned": lambda: builder.build_sectioned(
+                "q", sections=[SectionRequest(name="default")]
+            ),
+        }
         with pytest.raises(PackAssemblyError) as excinfo:
-            if build_kind == "flat":
-                builder.build("q")
-            else:
-                builder.build_sectioned(
-                    "q", sections=[SectionRequest(name="default")]
-                )
+            calls[build_kind]()
         assert "All 2 configured strategies failed" in str(excinfo.value)
         # Exactly the two real strategies -- the embedder-resolve-failure
         # entry is never part of what tripped this raise.
