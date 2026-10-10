@@ -8,6 +8,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import ValidationError
 
+from trellis.core.error_sanitize import describe_validation_error
 from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import list_precedents as _list_precedents
@@ -170,7 +171,8 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         sections = [SectionRequest(**s) for s in req.sections]
     except (ValidationError, TypeError) as exc:
         raise HTTPException(
-            status_code=422, detail=f"Invalid section request: {exc}"
+            status_code=422,
+            detail=f"Invalid section request: {describe_validation_error(exc)}",
         ) from exc
 
     builder = _build_pack_builder(registry)
