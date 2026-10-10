@@ -376,6 +376,37 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`Measurement.metric_value` refuses `Infinity` and `-Infinity`, not only
+  `NaN`.** The field accepted any float that passed `math.isnan`, so a
+  caller could record `Infinity`. `metric_value` now refuses `NaN`,
+  `Infinity` and `-Infinity` alike with "metric_value must be a finite
+  number" (422 at the REST boundary, `REJECTED` through
+  `MutationExecutor`, before any node is written), because a non-finite
+  value poisons downstream arithmetic — `inf - inf` or `0 * inf` is NaN,
+  and `max()` over a series containing one always picks it — and cannot
+  be stored by the Postgres event log, whose JSONB has no token for
+  `Infinity`; the field docstring no longer calls Infinity an open
+  question.
+  ([#827](https://github.com/ronsse/trellis-ai/pull/827))
+- **`trellis admin smoke-test` sends its resolved API key to `/readyz` and
+  `/metrics`, not just `/api/v1/advisories`.** On an auth-required
+  deployment, the readyz check previously went out with no credential, so
+  `trellis_api.routes.health.readyz` withheld its per-backend breakdown
+  (`backends` came back `None` even though the deployment was healthy), and
+  a gated `/metrics` (`TRELLIS_METRICS_PUBLIC=false`) 401'd and read as a
+  smoke-test bug rather than the deploy choice it was. Both checks now take
+  the key resolved for `_check_auth_accepts_valid` and send `X-API-Key` when
+  one resolves. If either `/readyz` or `/metrics` rejects that key (401) — a
+  verdict `_check_auth_accepts_valid` already owns — the check re-probes
+  once without the header so it's still answered (readiness, or a public
+  `/metrics` under the default `TRELLIS_METRICS_PUBLIC` posture), and notes
+  that the key was rejected rather than failing on a deploy choice that
+  isn't actually broken. Whenever `/readyz`'s response body still carries no
+  `backends` (no key sent, or the key was rejected), both the text and JSON
+  output note "per-backend breakdown withheld (no API key)"; if a valid key
+  was sent and `backends` is still absent, the note reads "per-backend
+  breakdown absent" instead, since no API key isn't the cause.
+  ([#826](https://github.com/ronsse/trellis-ai/pull/826))
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
