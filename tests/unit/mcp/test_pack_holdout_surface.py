@@ -107,8 +107,8 @@ def _body(subject: str, mentions: int) -> str:
     return mention * mentions + filler * (8 - mentions)
 
 
-def _seed(registry: StoreRegistry) -> None:
-    """Four documents every tool can retrieve, and two global advisories."""
+def _seed_documents(registry: StoreRegistry) -> None:
+    """Four documents every tool can retrieve."""
     store = registry.knowledge.document_store
     for i, subject in enumerate(_SUBJECTS):
         content_type = "pattern" if i % 2 == 0 else "configuration"
@@ -117,6 +117,12 @@ def _seed(registry: StoreRegistry) -> None:
             _body(subject, mentions=i + 2),
             {"title": f"Runbook {i}", "content_tags": {"content_type": content_type}},
         )
+
+
+def _seed_advisories(registry: StoreRegistry) -> None:
+    """Two global advisories, matching every undomained pack regardless of
+    whether it has items — this is what makes an item-less pack a tell
+    (R1/#844) unless the builder blinds advisories on it too."""
     advisories = AdvisoryStore(registry.stores_dir / "advisories.json")
     for advisory_id, confidence, category in [
         ("adv-entity", 0.82, AdvisoryCategory.ENTITY),
@@ -137,6 +143,12 @@ def _seed(registry: StoreRegistry) -> None:
                 scope="global",
             )
         )
+
+
+def _seed(registry: StoreRegistry) -> None:
+    """Four documents every tool can retrieve, and two global advisories."""
+    _seed_documents(registry)
+    _seed_advisories(registry)
 
 
 def _pack_id(response: str) -> str:
@@ -173,11 +185,18 @@ class TestAWithheldPackReadsAsAnEmptyPack:
         self, name: str, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         call = _CALLS[name]
-        # A genuinely empty corpus, the flag on but this pack served.
+        # Advisories already exist (global scope, so they match any
+        # undomained pack) but no document does yet: a naturally empty
+        # pack, served (not drawn into the holdout — the rate is positive
+        # but vanishing), while the holdout is live. This is the R1
+        # scenario (#844): without the builder blinding an item-less
+        # pack's advisories too, this response would carry an advisory
+        # block a withheld response never does, telling the two apart.
+        _seed_advisories(temp_registry)
         monkeypatch.setenv(RATE_ENV, "1e-12")
         greenfield = call()
 
-        _seed(temp_registry)
+        _seed_documents(temp_registry)
         monkeypatch.setenv(RATE_ENV, "0")
         control = call()
         monkeypatch.setenv(RATE_ENV, "1")

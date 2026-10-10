@@ -391,8 +391,13 @@ All notable changes to Trellis will be documented in this file.
   advisories; only the pack-effect holdout zeroes both together), and in
   both full and `index=True` rendering. An empty advisory list renders
   nothing, so output is unchanged for every pack that has none. Decided and
-  approved as decision-ledger D-4, 2026-10-10.
-  ([#392](https://github.com/ronsse/trellis-ai/issues/392))
+  approved as decision-ledger D-4, 2026-10-10. While the pack holdout is on,
+  an item-less pack now carries no advisories on either shape too
+  (`PackBuilder._blind_advisories_for_empty_pack`), so a naturally empty
+  pack and a withheld one still look alike instead of the advisory block
+  becoming the one tell that gave a holdout draw away.
+  ([#392](https://github.com/ronsse/trellis-ai/issues/392),
+  [#844](https://github.com/ronsse/trellis-ai/pull/844))
 
 - **Noise demotion counts what was written, not what the evidence gate
   admitted.** `apply_noise_tags` writes `signal_quality="noise"` only to

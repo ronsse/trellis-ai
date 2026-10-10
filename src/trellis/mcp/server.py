@@ -1094,19 +1094,27 @@ def _flat_context(
         empty = empty_message or f"No context found for: {intent}"
         # Advisory selection (PackBuilder._select_advisories) does not
         # depend on whether any items were selected, so an empty pack can
-        # still carry advisories (e.g. the pack-effect holdout zeroes both
-        # together via ``_withhold_flat``, but a genuinely empty pack does
-        # not). Render them here too — matching ``_sectioned_context``,
-        # which never special-cases empty sections before appending
-        # advisories — rather than silently dropping the only content an
-        # empty-item response would otherwise carry.
+        # still carry advisories — except while the pack holdout is on
+        # (``holdout_rate > 0``), where ``PackBuilder`` blinds an
+        # item-less pack's advisories too
+        # (``_blind_advisories_for_empty_pack``, R1/#844), so a withheld
+        # pack (zeroed via ``_withhold_flat``) and a genuinely empty one
+        # carry the same nothing and stay look-alike. Render whatever
+        # ``pack.advisories`` holds here too — matching
+        # ``_sectioned_context``, which never special-cases empty sections
+        # before appending advisories — rather than silently dropping the
+        # only content an empty-item response would otherwise carry.
         adv_md = format_advisories_as_markdown(pack.advisories)
         if builder.holdout_rate > 0:
             # With the pack holdout on, an empty pack may be a withheld one.
             # It must still carry the ``pack_id`` header the capture join
-            # reads, and it must read like every other empty pack, so all
-            # empty packs render through the formatter while the rate is
-            # above zero. At rate 0 the one-liner below is unchanged.
+            # reads, so all empty packs render through the formatter while
+            # the rate is above zero. ``adv_md`` is always empty here too
+            # — this branch's pack has no items and the rate is above
+            # zero, so the builder rule above has already blinded
+            # ``pack.advisories`` — but the append stays in case a future
+            # caller reaches this branch some other way. At rate 0 the
+            # one-liner below is unchanged.
             formatter = (
                 format_pack_as_index_markdown if index else format_pack_as_markdown
             )
