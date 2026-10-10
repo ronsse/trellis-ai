@@ -2078,6 +2078,26 @@ All notable changes to Trellis will be documented in this file.
   one-line message — exiting `EXIT_INTERNAL` in both `--format text` and
   `json`. The replay appends in 500-row transactions, so chunks before
   the refused one may already be committed.
+- **A non-string `embeddings.provider` silently meant "not configured."**
+  `registry.embedding_fn` tested the config value with a bare
+  `if provider:`, so any falsy non-string — notably YAML `provider: off`,
+  which parses to the bool `False` — fell through to the "no embedder"
+  branch with no error, turning semantic search off with nothing to read
+  (`axes.semantic` just read `not_configured`, indistinguishable from an
+  operator who never set the key). `None` and `""` still mean "not
+  configured"; every other non-string (bool, int, list, mapping) now
+  raises `ConfigError(setting="embeddings.provider")`, naming only the
+  value's type, never the value itself — a misplaced mapping can hold a
+  credential. A bool gets an extra hint ("delete the key or set it to
+  null") since `off`/`on`/`yes`/`no` are the likely source. Retrieval
+  still degrades rather than crashing, as for every other
+  embedder-resolve failure (#838): the pack falls back to keyword + graph
+  and reports `axes.semantic == "embedder_failed"` with
+  `embedder_setting == "embeddings.provider"`, so a `provider: off`
+  deployment now reads `embedder_failed` where it used to read
+  `not_configured`. Embed-on-ingest stays fail-soft, and
+  `trellis admin reindex-vectors` now refuses with the `ConfigError`
+  (exit 5) instead of its generic missing-embedder message (exit 1).
 - **Three more "describe, don't quote" (#206) surfaces follow up #829/#836/#837 — MCP, admin-proposals CLI and the SDK.**
   MCP `server.py`'s three pydantic-validation sites (`save_experience`,
   `record_observation`, `execute_mutation`) quoted `str(exc)` — including a

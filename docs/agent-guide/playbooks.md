@@ -1049,7 +1049,9 @@ was failing were never embedded, so step 3's backfill applies unchanged.
 1. **Read the fields, not a traceback.** `setting` names what to fix, and
    it is not always an editable key:
    - `TRELLIS_EMBEDDING_FN` or `embeddings.provider` — a bad dotted import
-     path.
+     path, or (config only) a non-string value such as a YAML boolean
+     (`provider: off` parses to `False`); delete the key or set it to
+     `null` to mean "not configured" instead.
    - `embeddings.api_key_env` — an OpenAI provider configured but no API
      key resolved (set that key to the name of an env var holding it, set
      `embeddings.api_key` to a literal, or export `OPENAI_API_KEY`).
