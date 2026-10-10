@@ -466,10 +466,15 @@ All notable changes to Trellis will be documented in this file.
   `RetrievalReport` with `duration_ms=0` — one path as a literal, the other
   by never passing the field at all — so `PACK_ASSEMBLED` carried no timing
   key and health reporting had no latency signal: every row read zero,
-  whatever the build actually cost. Both now time the build with
-  `time.perf_counter()` and report the real elapsed milliseconds; a
-  sectioned build times once for the whole build (every section reports
-  the same build, not its own loop iteration) rather than once per section.
+  whatever the build actually cost. Both now time with
+  `time.perf_counter()` from entry through strategy collection and
+  budgeting (per-section budgets included on the sectioned path), snapshotted
+  once just before section assembly — the cross-section dedup, annotation
+  and per-`PackSection` report construction that follows — so every section
+  reports the same window rather than its own loop iteration. Neither
+  window covers advisory selection, the optional quality evaluator, or the
+  event write, on either path; nothing in `src` reads the new key yet, so a
+  p50/p95 health-report reader stays a follow-up, not shipped here.
   `_withhold_sectioned`, the pack-effect holdout's (#701) sectioned
   reconstruction path, had the same asymmetry `_withhold_flat` already
   avoided — a withheld sectioned pack's timing silently read back as `0`

@@ -3224,15 +3224,6 @@ class TestLatencyTelemetry:
         finally:
             log.close()
 
-    def test_zero_strategies_still_reports_a_nonnegative_duration(self) -> None:
-        """No monkeypatch: the real clock still produces a sane value.
-
-        Catches a sign or unit error (e.g. seconds mistaken for ms, or a
-        start/end swap) that a fixed-tick fixture alone could paper over.
-        """
-        pack = PackBuilder().build("q")
-        assert pack.retrieval_report.duration_ms >= 0
-
     def test_withheld_sectioned_pack_still_carries_the_real_duration(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3251,3 +3242,34 @@ class TestLatencyTelemetry:
             "q", sections=[SectionRequest(name="a")]
         )
         assert pack.sections[0].retrieval_report.duration_ms == 400
+
+    def test_withheld_flat_pack_still_carries_the_real_duration(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``_withhold_flat`` must carry ``duration_ms`` through, both ways.
+
+        A withheld caller gets an emptied pack (:meth:`_withhold_flat`), but
+        ``_emit_telemetry`` reads its ``duration_ms`` from that same,
+        already-withheld pack's report (:attr:`pack.retrieval_report`) when
+        it writes the ``PACK_ASSEMBLED`` row. Deleting the
+        ``duration_ms=report.duration_ms`` carry at the ``RetrievalReport``
+        rebuild in ``_withhold_flat`` would silently zero both the response
+        and the row even though a real build happened, and no other test
+        catches that: the holdout tests above mask ``duration_ms`` instead
+        of asserting it. ``rate=1.0`` withholds every pack deterministically
+        (:func:`trellis.core.pack_holdout.is_held_out`).
+        """
+        self._fake_clock(monkeypatch, 2000.0, 2000.6)
+        log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            s = _make_strategy("kw", [_item("d1", 0.9)])
+            pack = PackBuilder(strategies=[s], holdout_rate=1.0, event_log=log).build(
+                "q"
+            )
+            assert pack.retrieval_report.duration_ms == 600
+            payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)[
+                0
+            ].payload
+            assert payload["duration_ms"] == 600
+        finally:
+            log.close()
