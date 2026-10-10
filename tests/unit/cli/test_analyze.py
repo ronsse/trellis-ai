@@ -1075,6 +1075,32 @@ class TestLearningCandidates:
         assert "1 candidate promotion-ready" in rendered
         assert "1 candidates" not in rendered
 
+    def test_text_surface_renders_unmeasured_retry_rate_as_na(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """An unmeasured ``retry_rate`` must not crash the text-mode table.
+
+        ``_seed_promote_signal`` emits ``FEEDBACK_RECORDED`` payloads with
+        no ``had_retry`` key at all, so scoring.py's ``retry_observed_count``
+        stays 0 and ``retry_rate`` is ``None`` (a sparse-signal fact, never
+        a measured zero — see the ``metrics_coverage`` comments in
+        ``src/trellis/learning/scoring.py``). Formatting ``None`` with
+        ``:.1%`` raises ``TypeError``; the Rich table must show a
+        placeholder instead.
+        """
+        self._seed_promote_signal(temp_stores)
+        out_dir = tmp_path / "review"
+
+        result = runner.invoke(
+            app,
+            ["analyze", "learning-candidates", "--output-dir", str(out_dir)],
+        )
+
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.output)
+        assert "n/a" in rendered
+        assert "Candidates by Recommendation" in rendered
+
     def test_title_less_candidate_named_from_its_document(
         self, tmp_path: Path, temp_stores: StoreRegistry
     ) -> None:

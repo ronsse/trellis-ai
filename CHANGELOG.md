@@ -397,6 +397,21 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis analyze learning-candidates` text output no longer crashes on
+  an unmeasured retry rate.** The "Candidates by Recommendation" table
+  formatted `metrics["retry_rate"]` with `:.1%` unconditionally;
+  `scoring.py` legitimately returns `retry_rate=None` whenever no feedback
+  event in the window reported `had_retry` at all (a sparse-signal fact,
+  not a measured zero — see the `metrics_coverage` comments in
+  `src/trellis/learning/scoring.py`), so any non-empty, text-mode run
+  without `had_retry` coverage raised `TypeError: unsupported format
+  string passed to NoneType.__format__`. The cell now renders `"n/a"`
+  instead. A swept check of every other `{x:.Nf}`-style format call in
+  `analyze.py` found no other unguarded nullable metric; `injection_rate`
+  and `avg_selection_efficiency` (also nullable in `scoring.py`) are not
+  currently rendered by any text surface, so there was nothing else to fix
+  there.
+
 - **The flat `get_context` / `search` paths render advisories.**
   `_flat_context` built `pack.advisories` via `PackBuilder._select_advisories`
   on every call but never rendered them — only `_sectioned_context` called
