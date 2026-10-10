@@ -714,6 +714,24 @@ def _report_with_candidates(*candidates: dict) -> dict:
     }
 
 
+def _write_capturing_fallback_failures(
+    report: dict, output_dir: Path, document_store: object | None = None
+) -> list[dict]:
+    """Write the artifacts; return any ``learning_readable_name_fallback_failed`` lines.
+
+    The fallback is wrapped whole, so a deleted guard that raises inside it
+    yields the same bare-id names as the guard itself; only this warning
+    tells the two apart.
+    """
+    with capture_logs() as logs:
+        clear_cached_logger_proxies()
+        write_learning_review_artifacts(
+            report=report, output_dir=output_dir, document_store=document_store
+        )
+    clear_cached_logger_proxies()
+    return [e for e in logs if e["event"] == "learning_readable_name_fallback_failed"]
+
+
 class TestReadableNameFallback:
     def test_fallback_name_used_when_title_missing(self, tmp_path: Path) -> None:
         candidate = _make_promotable_candidate(item_id="item-no-title", title=None)
@@ -761,21 +779,21 @@ class TestReadableNameFallback:
         candidate["precedent_name"] = "Learning: asset_generation :: missing-item-id"
         store = _FakeDocumentStore({})  # empty: nothing resolves
         report = _report_with_candidates(candidate)
-        write_learning_review_artifacts(
-            report=report, output_dir=tmp_path, document_store=store
-        )
+        failures = _write_capturing_fallback_failures(report, tmp_path, store)
         updated = report["candidates"][0]
         expected = "Learning: asset_generation :: missing-item-id"
         assert updated["precedent_name"] == expected
+        assert failures == []  # a miss is not a store failure
 
     def test_no_document_store_keeps_bare_id(self, tmp_path: Path) -> None:
         candidate = _make_promotable_candidate(item_id="item-no-store", title=None)
         candidate["precedent_name"] = "Learning: asset_generation :: item-no-store"
         report = _report_with_candidates(candidate)
-        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        failures = _write_capturing_fallback_failures(report, tmp_path)
         updated = report["candidates"][0]
         expected = "Learning: asset_generation :: item-no-store"
         assert updated["precedent_name"] == expected
+        assert failures == []  # no store is not a store failure
 
     def test_frontmatter_and_heading_marker_both_stripped(self, tmp_path: Path) -> None:
         candidate = _make_promotable_candidate(item_id="item-fm", title=None)
@@ -835,29 +853,22 @@ class TestReadableNameFallback:
             citation_evidence=evidence,
         )
         report = _report_with_candidates(first, second)
-        with capture_logs() as logs:
-            clear_cached_logger_proxies()
-            paths = write_learning_review_artifacts(
-                report=report,
-                output_dir=tmp_path,
-                document_store=_FailingDocumentStore(),
-            )
-        clear_cached_logger_proxies()
+        failures = _write_capturing_fallback_failures(
+            report, tmp_path, _FailingDocumentStore()
+        )
 
         names = [c["precedent_name"] for c in report["candidates"]]
         assert names == [
             "Learning: asset_generation :: item-f1",
             "Learning: asset_generation :: item-f2",
         ]
-        written = json.loads(Path(paths["candidates_path"]).read_text("utf-8"))
-        assert written["promotable"]["count"] == 2
-        decisions = json.loads(
-            Path(paths["decisions_template_path"]).read_text("utf-8")
+        written = json.loads(
+            (tmp_path / "intent_learning_candidates.json").read_text("utf-8")
         )
+        assert written["promotable"]["count"] == 2
+        decisions_path = tmp_path / "promotion_decisions.template.json"
+        decisions = json.loads(decisions_path.read_text("utf-8"))
         assert [d["promotion_name"] for d in decisions["decisions"]] == names
-        failures = [
-            e for e in logs if e["event"] == "learning_readable_name_fallback_failed"
-        ]
         assert len(failures) == 1
         assert failures[0]["log_level"] == "warning"
         assert failures[0]["error_type"] == "OperationalError"
