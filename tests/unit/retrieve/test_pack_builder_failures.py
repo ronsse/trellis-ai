@@ -19,6 +19,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
+from trellis.errors import TrellisError
 from trellis.retrieve.pack_builder import (
     PackAssemblyError,
     PackBuilder,
@@ -230,7 +232,7 @@ class TestRerankerFailureRaises:
 
 
 class TestStrategyFailureSerialization:
-    """``StrategyFailure.to_event_payload`` produces JSON-serializable dicts."""
+    """``StrategyFailure``'s two serializers produce JSON-serializable dicts."""
 
     def test_to_event_payload_shape(self) -> None:
         f = StrategyFailure(strategy="kw", error_class="RuntimeError", message="boom")
@@ -239,3 +241,269 @@ class TestStrategyFailureSerialization:
             "error_class": "RuntimeError",
             "message": "boom",
         }
+
+    def test_to_audit_event_payload_defaults_to_sanitized_message(self) -> None:
+        """R4 (#843 gate): no explicit ``audit_message`` must fail
+        *closed*, not open. Before this fix the default echoed ``message``
+        verbatim, so any caller that skipped ``audit_message`` — not just
+        today's in-tree callers — stored a raw, unsanitized ``str(exc)``
+        with no test catching it. The default is now
+        ``sanitize_error_message(message)``, pinned here with a hostile
+        (credential-bearing) message rather than plain prose."""
+        hostile = "connection failed: postgresql://svc:correcthorsebattery@10.0.0.5:5432/trellis"
+        f = StrategyFailure(strategy="kw", error_class="RuntimeError", message=hostile)
+        payload = f.to_audit_event_payload()
+        assert "correcthorsebattery" not in payload["message"]
+        assert payload == {
+            "strategy": "kw",
+            "error_class": "RuntimeError",
+            "message": SUPPRESSED_MARKER,
+        }
+
+    def test_embedder_resolve_rows_default_message_is_unchanged_by_sanitizing(
+        self,
+    ) -> None:
+        """The one in-tree caller that relies on the default
+        (:class:`EmbedderResolveFailure`) stores ``<ErrorType>[: <setting>]``
+        — plain text with no leak heuristic — so sanitizing it by default
+        must be a no-op, not a behaviour change for the row that matters
+        in production today."""
+        failure = EmbedderResolveFailure(
+            error_type="ConfigError", setting="database.dsn"
+        ).to_strategy_failure()
+        assert (
+            failure.to_audit_event_payload()["message"] == "ConfigError: database.dsn"
+        )
+
+    def test_explicit_audit_message_diverges_from_message(self) -> None:
+        """The two serializers read different fields: ``to_event_payload``
+        always reads ``message`` (raw), ``to_audit_event_payload`` always
+        reads ``audit_message`` (sanitized), and an explicit
+        ``audit_message`` is never echoed back by the other."""
+        f = StrategyFailure(
+            strategy="kw",
+            error_class="RuntimeError",
+            message="boom with a secret",
+            audit_message="boom",
+        )
+        assert f.to_event_payload()["message"] == "boom with a secret"
+        assert f.to_audit_event_payload()["message"] == "boom"
+
+
+class TestStrategyFailureMessageIsSanitized:
+    """#837 follow-up: the ``PACK_ASSEMBLED`` event's stored
+    ``strategy_failures[].message`` is built from
+    ``summarize_exception(exc)["message"]`` (via ``StrategyFailure.audit_message``
+    and :meth:`StrategyFailure.to_audit_event_payload`) rather than a raw
+    ``str(exc)``, so a credential or secret embedded in a strategy's own
+    exception text cannot reach stored telemetry. ``StrategyFailure.message``
+    itself stays the raw ``str(exc)`` — the CLI's plain-text render arm and
+    ``_raise_if_blocking_strategy_failures``'s own exception text both
+    depend on seeing it unsanitized (#493,
+    ``tests/unit/cli/test_pack_assembly_boundary.py::test_the_machine_arm_suppresses_a_leaky_axis_message``).
+    Both ``build`` and ``build_sectioned`` construct ``StrategyFailure``
+    independently (two call sites), so both are covered here rather than
+    pinning only one.
+    """
+
+    _HOSTILE = (
+        "connection failed: postgresql://svc:correcthorsebattery@10.0.0.5:5432/trellis"
+    )
+    _SECRET_FRAGMENT = "correcthorsebattery"  # noqa: S105 — test placeholder, not a real credential
+
+    def test_event_payload_message_is_sanitized_not_raw(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
+        good = _make_strategy("kw", [_item("d1", 0.9)])
+        bad = _failing_strategy("sem", RuntimeError(self._HOSTILE))
+        builder = PackBuilder(strategies=[good, bad], event_log=event_log)
+        builder.build("q")
+
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        payload = events[0].payload or {}
+        failures = payload.get("strategy_failures")
+        assert isinstance(failures, list)
+        assert failures[0]["message"] == SUPPRESSED_MARKER
+        assert self._SECRET_FRAGMENT not in failures[0]["message"]
+
+    def test_stored_message_uses_summarize_exception_not_plain_sanitizing(
+        self, tmp_path: Path
+    ) -> None:
+        """R5 (#843 gate, mutant G1): pins ``summarize_exception`` over a
+        plain ``sanitize_error_message(str(exc))`` fallback. A multi-line
+        driver-style error ('relation "acct_7731" does not exist\\nwhile
+        planning query 2') is exactly the shape ``_foreign_exception_summary``
+        exists for — first line only (the second line is dropped outright,
+        not merely masked), then the quoted identifier masked to ``"..."`` —
+        while the plain sanitizer (mutant G1) keeps both the quoted
+        identifier and the second line verbatim, since neither looks like a
+        credential to it. A ``not in``-only check on the identifier would
+        not discriminate this from a mutant that always stores the
+        suppression marker, so this asserts positive equality on the exact
+        stored text."""
+        event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
+        good = _make_strategy("kw", [_item("d1", 0.9)])
+        bad = _failing_strategy(
+            "sem",
+            RuntimeError('relation "acct_7731" does not exist\nwhile planning query 2'),
+        )
+        builder = PackBuilder(strategies=[good, bad], event_log=event_log)
+        builder.build("q")
+
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        payload = events[0].payload or {}
+        failures = payload.get("strategy_failures", [])
+        assert failures[0]["message"] == 'relation "..." does not exist'
+
+    def test_required_strategy_failure_keeps_raw_message_but_sanitizes_audit_message(
+        self,
+    ) -> None:
+        """The in-memory ``StrategyFailure`` attached to a raised
+        ``PackAssemblyError`` keeps a raw ``.message`` — the CLI's
+        plain-text arm and the exception's own interpolated text both
+        depend on it — but its ``.audit_message`` (what would be written
+        to stored telemetry had the build not raised) is sanitized."""
+        bad = _failing_strategy("kw", RuntimeError(self._HOSTILE))
+        builder = PackBuilder(strategies=[bad])
+        with pytest.raises(PackAssemblyError) as excinfo:
+            builder.build("q")
+        failure = excinfo.value.strategy_failures[0]
+        assert failure.message == self._HOSTILE
+        assert failure.audit_message == SUPPRESSED_MARKER
+
+    def test_sectioned_build_event_message_is_sanitized(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
+        good = _make_strategy("kw", [_item("d1", 0.9)])
+        bad = _failing_strategy("sem", RuntimeError(self._HOSTILE))
+        builder = PackBuilder(strategies=[good, bad], event_log=event_log)
+        builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        payload = events[0].payload or {}
+        failures = payload.get("strategy_failures", [])
+        assert failures[0]["message"] == SUPPRESSED_MARKER
+        assert self._SECRET_FRAGMENT not in failures[0]["message"]
+
+    def test_plain_prose_message_still_reads_naturally(self, tmp_path: Path) -> None:
+        """Sanitization only fires on a leak heuristic — ordinary prose
+        (no credentials, no long opaque token) still reads as itself,
+        same as the pre-existing ``"bad query vector"``/``"index
+        missing"`` assertions elsewhere in this file."""
+        event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
+        good = _make_strategy("kw", [_item("d1", 0.9)])
+        bad = _failing_strategy("sem", RuntimeError("index out of range"))
+        builder = PackBuilder(strategies=[good, bad], event_log=event_log)
+        builder.build("q")
+
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        payload = events[0].payload or {}
+        failures = payload.get("strategy_failures", [])
+        assert failures[0]["message"] == "index out of range"
+
+
+class _NoSuperTrellisError(TrellisError):
+    """A ``TrellisError`` subclass whose ``__init__`` forgets
+    ``super().__init__()`` — so ``self.message`` is never set.
+    ``summarize_exception`` reads ``exc.message`` unconditionally for any
+    ``TrellisError``, so this raises ``AttributeError`` partway through
+    building the audit summary (scratchpad probe ``g843_exotic.py``,
+    gate R2)."""
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+
+
+class _RaisingCodeError(RuntimeError):
+    """A plain (non-Trellis) exception whose ``.code`` property raises.
+    ``_driver_error_code`` does ``getattr(exc, "code", None)`` to pick up
+    neo4j/``TrellisError``-style ``code`` attributes; ``getattr``'s
+    default only swallows ``AttributeError``, so this property's own
+    ``KeyError`` escapes instead (gate R2)."""
+
+    @property
+    def code(self) -> str:
+        msg = "no code"
+        raise KeyError(msg)
+
+
+class TestExoticExceptionSummarizationNeverBlocksADegrade:
+    """R2 (#843 gate): ``summarize_exception`` itself raising must not
+    stop the build from degrading. Before the fix, both ``build`` and
+    ``build_sectioned`` computed ``audit_message=summarize_exception(exc)["message"]``
+    inline at the call site, so a strategy exception that is well-behaved
+    enough to search (raises cleanly) but whose *summary* blows up
+    (``AttributeError``/``KeyError``, both untyped and uncaught) took down
+    the whole pack build instead of just that one axis. ``_audit_message``
+    now wraps the summarize call whole — per CLAUDE.md's
+    ``resolve_stamp_staleness`` model, not a list of expected exception
+    types — and falls back to ``SUPPRESSED_MARKER``.
+    """
+
+    def test_build_degrades_when_a_trellis_error_forgot_super_init(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
+        good = _make_strategy("kw", [_item("d1", 0.9)])
+        bad = _failing_strategy("sem", _NoSuperTrellisError("d"))
+        builder = PackBuilder(strategies=[good, bad], event_log=event_log)
+
+        pack = builder.build("q")
+
+        assert [item.item_id for item in pack.items] == ["d1"]
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        failures = (events[0].payload or {}).get("strategy_failures", [])
+        assert failures[0]["error_class"] == "_NoSuperTrellisError"
+        assert failures[0]["message"] == SUPPRESSED_MARKER
+
+    def test_build_degrades_when_a_code_property_raises_key_error(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
+        good = _make_strategy("kw", [_item("d1", 0.9)])
+        bad = _failing_strategy("sem", _RaisingCodeError("boom"))
+        builder = PackBuilder(strategies=[good, bad], event_log=event_log)
+
+        pack = builder.build("q")
+
+        assert [item.item_id for item in pack.items] == ["d1"]
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        failures = (events[0].payload or {}).get("strategy_failures", [])
+        assert failures[0]["error_class"] == "_RaisingCodeError"
+        assert failures[0]["message"] == SUPPRESSED_MARKER
+
+    def test_build_sectioned_degrades_when_a_trellis_error_forgot_super_init(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
+        good = _make_strategy("kw", [_item("d1", 0.9)])
+        bad = _failing_strategy("sem", _NoSuperTrellisError("d"))
+        builder = PackBuilder(strategies=[good, bad], event_log=event_log)
+
+        pack = builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+
+        served_ids = {
+            item.item_id for section in pack.sections for item in section.items
+        }
+        assert served_ids == {"d1"}
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        failures = (events[0].payload or {}).get("strategy_failures", [])
+        assert failures[0]["error_class"] == "_NoSuperTrellisError"
+        assert failures[0]["message"] == SUPPRESSED_MARKER
+
+    def test_build_sectioned_degrades_when_a_code_property_raises_key_error(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
+        good = _make_strategy("kw", [_item("d1", 0.9)])
+        bad = _failing_strategy("sem", _RaisingCodeError("boom"))
+        builder = PackBuilder(strategies=[good, bad], event_log=event_log)
+
+        pack = builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+
+        served_ids = {
+            item.item_id for section in pack.sections for item in section.items
+        }
+        assert served_ids == {"d1"}
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        failures = (events[0].payload or {}).get("strategy_failures", [])
+        assert failures[0]["error_class"] == "_RaisingCodeError"
+        assert failures[0]["message"] == SUPPRESSED_MARKER

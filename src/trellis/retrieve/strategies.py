@@ -1947,6 +1947,35 @@ class EmbedderResolveFailure:
 SEMANTIC_AXIS_STRATEGY_NAME = "semantic"
 
 
+def _describe_init_failure(exc: Exception) -> tuple[str, str | None]:
+    """Describe, don't quote: the (type name, setting) of an init failure.
+
+    Shared by the embedder-resolve branch (above, #838) and the
+    vector-backend init branch (below, #843) in :func:`build_strategies`.
+    Mirrors :func:`trellis.core.vector_metadata._describe_resolve_failure`
+    and :func:`trellis.retrieve.embed_ingest_hook._describe_resolve_failure`
+    — duplicated rather than imported for the same reason those two
+    duplicate each other: each caller's module has its own reason not to
+    import the others. ``setting`` is read from the exception's own
+    ``.setting`` attribute only when the exception IS a
+    :class:`~trellis.errors.ConfigError`, whose ``setting`` is typed
+    ``str | None``. A plain ``getattr(exc, "setting", None)`` would let an
+    unrelated exception's same-named, possibly-unhashable or untrusted
+    attribute reach a ``functools.cache``-keyed dedup call below.
+
+    The type hint is not enforced at runtime, so ``setting`` is also
+    checked with ``isinstance(..., str)`` before it is kept: a
+    ``ConfigError`` constructed with a non-``str`` ``setting`` — a list,
+    say — would otherwise reach the ``functools.cache``-keyed dedup call
+    and raise ``TypeError: unhashable type`` there, breaking
+    :func:`build_strategies`'s fail-soft degrade contract on the very
+    first failure (#839's guard, applied here). A non-``str`` setting
+    degrades to ``None`` like a missing one.
+    """
+    setting = exc.setting if isinstance(exc, ConfigError) else None
+    return type(exc).__name__, setting if isinstance(setting, str) else None
+
+
 @functools.cache
 def _warn_embedder_resolve_failed_once(error_type: str, setting: str | None) -> None:
     """Emit ``semantic_search_embedder_resolve_failed`` once per cause.
@@ -1965,6 +1994,41 @@ def _warn_embedder_resolve_failed_once(error_type: str, setting: str | None) -> 
     """
     logger.warning(
         "semantic_search_embedder_resolve_failed",
+        error_type=error_type,
+        setting=setting,
+    )
+
+
+@functools.cache
+def _warn_semantic_search_init_failed_once(
+    error_type: str, setting: str | None
+) -> None:
+    """Emit ``semantic_search_init_failed`` once per cause.
+
+    ``StoreRegistry._get`` caches only success (#830): a vector backend
+    that fails to initialise is re-instantiated — and re-raises
+    identically — on *every* pack build, not just the first. Logging a
+    full traceback (``exc_info=True``, which carries the exception's own
+    message) on each one turned one persistent misconfiguration into a
+    traceback per retrieval call. ``functools.cache`` makes a repeat call
+    with the same ``(error_type, setting)`` a no-op: the body (and its
+    ``logger.warning``) runs once per distinct cause per process. Same
+    log-once pattern #830 (:mod:`trellis.retrieve.embed_ingest_hook`)
+    started, also applied to this module's own
+    ``_warn_embedder_resolve_failed_once`` above (#838) and, with the
+    non-str-setting guard #839 added, to
+    ``_warn_vector_store_unavailable_once``
+    (:mod:`trellis.core.vector_metadata`) and both
+    :mod:`trellis.retrieve.embed_ingest_hook` helpers. WARNING, not
+    ``.exception`` — the type and setting are what an operator acts on;
+    the traceback is noise after the first one.
+
+    ``_warn_semantic_search_init_failed_once.cache_clear()`` is
+    test-facing only, to isolate cases within one process — a production
+    process does not reset it mid-flight.
+    """
+    logger.warning(
+        "semantic_search_init_failed",
         error_type=error_type,
         setting=setting,
     )
@@ -2088,13 +2152,10 @@ def build_strategies(
             fn = getattr(registry, "embedding_fn", None)
         except Exception as exc:
             fn = None
-            # Describe, don't quote: ``setting`` is read from the
-            # exception's own ``.setting`` attribute only when the
-            # exception IS a ConfigError — see embed_ingest_hook.py's
-            # identical guard against an unrelated exception shape having
-            # its own untrusted ``.setting``.
-            error_type = type(exc).__name__
-            setting = exc.setting if isinstance(exc, ConfigError) else None
+            # Describe, don't quote; see _describe_init_failure's docstring
+            # for why setting is narrowed to str | None before the
+            # functools.cache-keyed dedup call below.
+            error_type, setting = _describe_init_failure(exc)
             _warn_embedder_resolve_failed_once(error_type, setting)
             embedder_resolve_failure = EmbedderResolveFailure(
                 error_type=error_type, setting=setting
@@ -2112,9 +2173,12 @@ def build_strategies(
             logger.info("semantic_search_enabled")
         # GRACEFUL-DEGRADATION: semantic search is optional; a vector
         # backend that fails init must not block keyword + graph search
-        # — log and continue without it.
-        except Exception:
-            logger.warning("semantic_search_init_failed", exc_info=True)
+        # — log and continue without it. Describe, don't quote, via the
+        # same _describe_init_failure helper the embedder-resolve branch
+        # above uses.
+        except Exception as exc:
+            error_type, setting = _describe_init_failure(exc)
+            _warn_semantic_search_init_failed_once(error_type, setting)
 
     return BuildStrategiesResult(
         strategies=strategies,

@@ -2143,6 +2143,49 @@ All notable changes to Trellis will be documented in this file.
   `_LearningCandidatesUnavailableError` path was checked and found already
   routing every exception through
   `describe_os_error`/`describe_json_error`/`sanitize_error_message`.
+- **`build_strategies()`'s vector-backend init failure is now loud once per
+  cause, not once per pack build.** Degrading to keyword + graph search when
+  `SemanticSearch(registry.knowledge.vector_store, ...)` raised logged
+  `semantic_search_init_failed` with `exc_info=True` on every single build —
+  `StoreRegistry._get` caches only success (#830), so a persistent
+  misconfiguration (a bad `vector_store.provider`, a missing extra, a down
+  backend) re-raised identically on every retrieval call, turning one broken
+  setting into a full traceback per pack. A new
+  `_warn_semantic_search_init_failed_once` (`functools.cache`-backed,
+  mirroring the embedder-resolve helper #838 added to this same module)
+  now logs at WARNING once per distinct `(error_type, setting)` per
+  process, describing the cause — the exception's type name and, for a
+  `ConfigError`, its `setting` — never the exception's message or a
+  traceback, which can echo a DSN or credential. A non-string `setting`
+  (only reachable from a plugin or future caller today) is narrowed to
+  `None` before it reaches the cache key, the same guard #839 added for
+  `embed_ingest_hook.py` and `vector_metadata.py`, so an unhashable
+  `ConfigError.setting` still degrades retrieval instead of raising; the
+  sibling embedder-resolve call site (#838) gets the same guard.
+  ([#843](https://github.com/ronsse/trellis-ai/pull/843))
+- **The stored `PACK_ASSEMBLED.strategy_failures[].message` is now a
+  sanitized summary, not a raw `str(exc)`.** A strategy's own exception text
+  (a DSN fragment, a credential, a row value) reached this durable audit
+  event verbatim. `StrategyFailure` keeps a raw `.message` — `PackAssemblyError`'s
+  own interpolated text and `trellis_cli.main`'s plain-text render arm both
+  depend on seeing it unsanitized, by design (#493,
+  `test_the_machine_arm_suppresses_a_leaky_axis_message`) — alongside a new
+  `.audit_message`, computed by a module-level helper that calls
+  `summarize_exception(exc)["message"]` and falls back to the suppression
+  marker if summarizing itself raises, so an exotic exception from the open
+  `SearchStrategy` protocol can't turn a degraded build into a crash. When a
+  constructor passes no `audit_message`, the default is now
+  `sanitize_error_message(message)` rather than the raw message, so the
+  stored form is sanitized by construction rather than by caller discipline
+  alone. `build()` and `build_sectioned()` write the event's
+  `strategy_failures[]` through a new `to_audit_event_payload()` serializer
+  that reads `.audit_message`, instead of the raw-message `to_event_payload()`
+  CLI rendering already uses. The axes block an agent-facing pack response
+  carries (`format_failed_axes_note`) never reads either field.
+  `PACK_ASSEMBLED` rows written before this fix keep their raw text — events
+  are immutable — and remain servable verbatim by
+  `GET /api/v1/packs/{pack_id}`.
+  ([#843](https://github.com/ronsse/trellis-ai/pull/843))
 
 ## [0.9.0] - 2026-05-13
 
