@@ -3306,13 +3306,18 @@ def learning_candidates(
             if candidate["recommendation_type"].startswith("promote_")
             else "yellow"
         )
+        # ``retry_rate`` is ``None`` whenever no feedback event in the
+        # window reported ``had_retry`` at all (scoring.py's
+        # ``metrics_coverage``) — a sparse-signal fact, not a zero. Render
+        # "n/a" rather than formatting ``None`` as a percentage.
+        retry_rate = metrics["retry_rate"]
         table.add_row(
             escape(candidate["candidate_id"]),
             f"[{rec_style}]{candidate['recommendation_type']}[/{rec_style}]",
             candidate.get("item_type") or "-",
             str(metrics["times_served"]),
             f"{metrics['success_rate']:.1%}",
-            f"{metrics['retry_rate']:.1%}",
+            "n/a" if retry_rate is None else f"{retry_rate:.1%}",
         )
     console.print(table)
     console.print()
