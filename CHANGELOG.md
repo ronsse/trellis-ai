@@ -386,7 +386,7 @@ All notable changes to Trellis will be documented in this file.
   (`analyze_advisory_effectiveness`) still read `PACK_ASSEMBLED.advisory_ids`
   off those same flat packs as "presented". `_flat_context` now calls
   `format_advisories_as_markdown` in the same position `_sectioned_context`
-  does — after the items, before the capture-health banner — on both the
+  does — after the items and the cite footer — on both the
   non-empty and empty-pack branches (an empty-item pack can still carry
   advisories; only the pack-effect holdout zeroes both together), and in
   both full and `index=True` rendering. An empty advisory list renders

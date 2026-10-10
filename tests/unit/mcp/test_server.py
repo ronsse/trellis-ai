@@ -1886,12 +1886,16 @@ class TestFlatContextRendersAdvisories:
         assert "`adv-flat-anti-pattern`" in result
         assert "**[entity]**" in result
         assert "**[anti_pattern]**" in result
+        # The position ``_sectioned_context`` uses: after the items and the
+        # cite footer.
+        assert result.index("## Advisories") > result.index("`doc1`")
+        assert result.index("## Advisories") > result.index("*Cite feedback")
 
     def test_omits_the_section_when_there_are_no_advisories(
         self, temp_registry: StoreRegistry
     ) -> None:
-        """Output is byte-identical to before this fix when the pack has no
-        advisories — the common case today, since nothing seeds the store."""
+        """Output is unchanged from before this fix when the pack has no
+        advisories: nothing at all is appended after the cite footer."""
         temp_registry.knowledge.document_store.put(
             "doc1", "How to deploy the platform safely"
         )
@@ -1899,6 +1903,7 @@ class TestFlatContextRendersAdvisories:
         result = get_context("deploy platform")
 
         assert "## Advisories" not in result
+        assert result.splitlines()[-1].startswith("*Cite feedback")
 
     def test_empty_item_pack_still_renders_advisories(
         self, temp_registry: StoreRegistry
