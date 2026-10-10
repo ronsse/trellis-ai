@@ -1164,9 +1164,9 @@ class TestSaveMemoryEmbedOnIngest:
     def test_flag_on_broken_vector_store_still_succeeds(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Gate 830 follow-up 3 / probe P3: a ``vector_store`` that raises
-        at resolve time must not fail ``save_memory`` for a memory that
-        was already durably stored. Before the fix, ``run_embed_on_ingest``
+        """#830 follow-up 3: a ``vector_store`` that raises at resolve
+        time must not fail ``save_memory`` for a memory that was already
+        durably stored. Before the fix, ``run_embed_on_ingest``
         let that ``ConfigError`` propagate straight out of the hook, past
         the "fail-soft" comment at its own call site, into an McpError for
         a write that had already landed — inviting a client retry of an

@@ -1021,10 +1021,19 @@ setting)` per process** rather than once per document — see each event's
 exception's own message text.
 
 A broken `vector_store` resolve logs the same `embed_on_ingest_resolve_failed`
-(or `mcp_prewarm_optional_unavailable`) event with `component=vector_store`
-instead, and no-ops the same way — steps 1-2 below apply unchanged (read
-`setting`/`error_type`, fix the config, restart); only step 3's backfill
-command is embedder-specific.
+(or `mcp_prewarm_optional_unavailable`) event with `component=vector_store`,
+and no-ops the same way. Its `setting` names a `stores.vector.*` key, or
+`backend.NAME` for a missing extra, rather than one of the embedder keys in
+step 1. A `ConfigError` can also mean the backend was unreachable when the
+store was first opened (pgvector reports a failed connection as
+`stores.vector.dsn`), so check reachability before editing anything. A
+failed store instantiation is not cached: once the backend is reachable,
+the next write resolves it again without a restart. An edited config still
+needs the restart step 2 describes. Step 2's "see the full cause" trick
+works unchanged here too — `reindex-vectors` resolves `vector_store` before
+its dry-run branch, so a `ConfigError` surfaces with its message at exit
+`5`. Either way, documents stored while the vector store was failing were
+never embedded, so step 3's backfill applies unchanged.
 
 ### Steps
 

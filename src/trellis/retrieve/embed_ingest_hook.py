@@ -255,16 +255,17 @@ def run_embed_on_ingest(
         return {"embedded": False, "reason": reason}
 
     try:
-        # ``getattr`` (not a bare attribute access) so a registry whose
-        # ``.knowledge`` genuinely lacks a ``vector_store`` attribute still
-        # falls through to the "unconfigured" branch below via its own
-        # ``AttributeError`` instead of being caught here — the shape the
-        # tests' plain registry doubles rely on. Any OTHER exception raised
-        # while *resolving* the property (a real registry's backend
-        # instantiation: ``ConfigError``, ``BackendNotInstalledError``, a
-        # connection error) is the same class of failure as a broken
-        # embedder above, and must be just as fail-soft: #830 wrapped the
-        # embedder resolve; this is its vector_store twin.
+        # ``getattr`` (not a bare attribute access): its default absorbs
+        # only an ``AttributeError`` raised by the lookup itself, so a
+        # registry whose ``.knowledge`` genuinely lacks a ``vector_store``
+        # attribute falls through to the "unconfigured" branch below via
+        # that ``AttributeError`` rather than being caught here. Any OTHER
+        # exception raised while *resolving* the property (a real
+        # registry's backend instantiation: ``ConfigError``,
+        # ``BackendNotInstalledError``, a connection error) is the same
+        # class of failure as a broken embedder above, and must be just as
+        # fail-soft: #830 wrapped the embedder resolve; this is its
+        # vector_store twin.
         vector_store = getattr(registry.knowledge, "vector_store", None)
     except Exception as exc:
         error_type, setting = _describe_resolve_failure(exc)

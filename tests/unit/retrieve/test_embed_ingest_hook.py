@@ -36,7 +36,7 @@ from trellis.retrieve.embed_ingest_hook import (
 )
 from trellis.retrieve.excerpts import EXCERPT_ELLIPSIS
 
-# The once-per-cause dedup cache in ``_warn_embedder_resolve_failed_once``
+# The once-per-cause dedup cache in ``_warn_resolve_failed_once``
 # is reset by the central autouse fixture in tests/conftest.py
 # (``_reset_embedder_resolve_failure_log_cache``), which isolates it across
 # every test file, not just this one.
@@ -433,7 +433,7 @@ class TestHook:
 class TestVectorStoreResolve:
     """``registry.knowledge.vector_store`` raising at resolve time (not
     merely being ``None``) must be exactly as fail-soft as a broken
-    ``embedding_fn`` resolve (follow-up 3 from #830 / gate 830 probe P3).
+    ``embedding_fn`` resolve (follow-up 3 from #830).
 
     Before this fix, ``run_embed_on_ingest`` read the vector store with
     ``getattr(registry.knowledge, "vector_store", None)``: the ``getattr``
