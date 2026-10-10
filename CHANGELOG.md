@@ -397,6 +397,33 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`GET /api/v1/health` reports real store status; the Memories table
+  reads the tags a tagging pipeline actually writes.** Two defects found
+  in a UI quality review (P0):
+  - `health()` returned a literal `{"api": True, "stores": True}`
+    regardless of backend state — the dashboard's Store Health card read
+    green even while `/readyz` (which really probes) read 503. The probe
+    logic in `readyz` is now factored into `probe_backends` /
+    `overall_backend_status` (`src/trellis_api/routes/health.py`), and
+    `health()` calls the same functions, so the two surfaces can no
+    longer disagree. `HealthResponse` gains an additive, optional
+    `backends` field (per-backend status/latency/error) alongside the
+    existing `checks` bool map, which keeps the response shape backward
+    compatible for its two prior readers
+    (`tests/unit/api/test_routes.py`,
+    `tests/integration/api/test_live_smoke.py`). The dashboard's store
+    health rows now render each backend's latency or error string.
+  - The Memories table's `tagChips(metadata)` read `metadata.tags`, a key
+    no writer sets; the tagging pipeline writes the 4 retrieval-shaping
+    facets to `metadata["content_tags"]` (`ContentTags` in
+    `trellis.schemas.classification`), so the column was empty on every
+    row regardless of whether tagging ran. `tagChips` now reads
+    `content_tags` and renders only the facets a row actually has;
+    `content_tags_shadow` (LLM shadow-mode proposals never applied — see
+    `trellis.retrieve.servable`) is never rendered as if it were an
+    applied tag. The column header is renamed "Content tags" per
+    [`adr-terminology.md`](docs/design/adr-terminology.md).
+
 - **`trellis analyze learning-candidates` text output no longer crashes on
   an unmeasured retry rate.** The "Candidates by Recommendation" table
   formatted `metrics["retry_rate"]` with `:.1%` unconditionally;
