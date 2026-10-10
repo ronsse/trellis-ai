@@ -21,7 +21,11 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from trellis.core.error_sanitize import sanitize_error_message
+from trellis.core.error_sanitize import (
+    describe_json_error,
+    describe_os_error,
+    sanitize_error_message,
+)
 from trellis.core.path_presence import path_is_present
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import StaleStoreWriteError
@@ -164,17 +168,23 @@ def apply_noise_tags(
         # axis keeps serving the pre-demotion snapshot.
         vector_store=resolve_vector_store(registry),
     )
-    # What the evidence gate admitted, not what the usage-rate rule
-    # proposed (#336) — the key says "tagged", so it has to count writes.
+    # What apply_noise_tags actually wrote, not what the evidence gate
+    # admitted (#336) and not the usage-rate rule's proposal — the key
+    # says "tagged", so it has to count writes. A gate admission that
+    # resolves to no document (a trace id or other non-document id)
+    # writes nothing; ``noise_candidates_refused_not_document`` below
+    # names that remainder (#833).
     # ``demotion_screen`` in the dumped report carries the full accounting.
-    screen = report.demotion_screen
     tagged = (
-        len(screen.admitted) if screen is not None else len(report.noise_candidates)
+        report.noise_tags_written
+        if report.noise_tags_written is not None
+        else len(report.noise_candidates)
     )
     return {
         "status": "ok",
         "noise_candidates_tagged": tagged,
         "noise_candidates_proposed": len(report.noise_candidates),
+        "noise_candidates_refused_not_document": len(report.noise_refused_not_document),
         **report.model_dump(),
     }
 
@@ -806,7 +816,18 @@ def _load_learning_candidates() -> tuple[Path, dict[str, Any]]:
         logger.warning(
             "learning_candidates_read_failed", path=str(candidates_path), error=str(exc)
         )
-        msg = f"Could not read learning candidates from {candidates_path}: {exc}"
+        # Describe, don't quote: str(exc) can be the whole message for an
+        # OSError/ValueError built from a single text argument (#829
+        # follow-up), so this never falls back to it.
+        if isinstance(exc, OSError):
+            description = describe_os_error(exc)
+        elif isinstance(exc, json.JSONDecodeError):
+            description = describe_json_error(exc)
+        else:
+            description = type(exc).__name__
+        msg = (
+            f"Could not read learning candidates from {candidates_path}: {description}"
+        )
         raise _LearningCandidatesUnavailableError(
             msg,
             code="learning_candidates_unreadable",

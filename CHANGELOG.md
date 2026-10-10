@@ -376,6 +376,57 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Noise demotion counts what was written, not what the evidence gate
+  admitted.** `apply_noise_tags` writes `signal_quality="noise"` only to
+  ids that resolve in the document store; the demotion gate admits
+  candidates on citation evidence alone, with no notion of which store an
+  id belongs to, so an admitted trace id (or other non-document id)
+  reached the writer and nothing was written for it, silently (one
+  `logger.debug` per id). Curate's nightly `noise_tagged`, REST
+  `POST /effectiveness/apply-noise-tags`'s `noise_candidates_tagged`, and
+  CLI `trellis analyze apply-noise-tags`'s text output each independently
+  reported the admission count as the demotion count, overstating it by
+  the non-document remainder. `apply_noise_tags` now returns a
+  `NoiseTagResult` (`updated`, `refused_not_document`) instead of a bare
+  `int`; `EffectivenessReport` carries `noise_tags_written` /
+  `noise_refused_not_document`. REST and the CLI report the real write
+  count beside the refused ids by name (`noise_refused_not_document` /
+  `noise_candidates_refused_not_document`); curate reports the write
+  count beside only a refused *count* (`noise_refused_non_document`), not
+  names. A curate dry run, which writes nothing either way, previews the
+  same split with a read-only `document_store.get` check per admitted
+  id, and curate's `NoiseTagsApplied` finding now fires on the write
+  count rather than the admission count.
+  ([#833](https://github.com/ronsse/trellis-ai/pull/833))
+- **Every remaining `json.dumps` write path in the graph, document,
+  vector, outcome, tuner-state, parameter and blob stores now refuses
+  NaN/Infinity too, closing the gap #831 (above) left open.** The
+  advisory and policy JSON files (`DegradableJsonStore`) are unchanged
+  and still write a bare `NaN`/`Infinity` token. That PR fixed
+  the event logs and the SQLite/Postgres graph stores; the ArcadeDB/Neo4j
+  graph store (`bolt_opencypher/graph.py`, 11 call sites across
+  `upsert_node`, `update_node_if_current`, `upsert_nodes_bulk`,
+  `upsert_edge` and `upsert_edges_bulk`), the SQLite and Postgres document
+  stores, every vector store's metadata write (SQLite, pgvector, Neo4j —
+  `upsert` and the separately-implemented `upsert_bulk` are two distinct
+  call sites there — and ArcadeDB), the outcome/tuner-state/parameter
+  stores, and the local blob store's metadata sidecar all still wrote a
+  non-finite float as a silent `NaN`/`Infinity` JSON token. The fix is the
+  same `allow_nan=False` on each `json.dumps` call, and the same
+  `ValueError` raised before the write lands. Two gaps this also closes:
+  (1) MCP `save_memory` previously committed a document row with NaN
+  metadata durably *before* the later `MEMORY_STORED` event emit failed,
+  leaving an orphan a caller's error made look recoverable — fixing
+  `sqlite/document.py`'s `put()` means the write itself refuses first, so
+  nothing durable lands; (2) the SQLite graph store's
+  `upsert_nodes_bulk`/`upsert_edges_bulk` already rolled back a
+  non-finite row atomically before this PR (both build every `json.dumps`
+  call before any write statement runs), but had no test pinning a
+  two-row batch where an earlier row has a prior version and a later row
+  is non-finite — added, and confirmed non-vacuous by mutating the store
+  to commit each row as it's built (which the test catches: the prior
+  row's value leaks through).
+  ([#835](https://github.com/ronsse/trellis-ai/pull/835))
 - **The SQLite event log and both the SQLite and Postgres graph stores
   refuse a NaN/Infinity float at write time, instead of silently storing
   JSON text a stricter reader can't parse.** Python's `json.dumps` writes
@@ -596,6 +647,41 @@ All notable changes to Trellis will be documented in this file.
   suppressing the other. Playbook 15 and the MCP prewarm comment updated to
   match.
   ([#834](https://github.com/ronsse/trellis-ai/pull/834))
+- **#829 follow-up: the REST pre-validation 422s, `admin.py`'s learning-candidates
+  read failure, and `CommandResult.message` on two more routes still quoted
+  raw exception/message text.** Five sites built a 422 `detail` as
+  `f"...: {exc}"` directly from a `model_validate`/`SectionRequest` failure,
+  before the governed-mutation pipeline and its sanitized rejection path ever
+  ran: `ingest.py`'s `ingest_trace` / `ingest_evidence`, `observations.py`'s
+  `record_observation` / `record_measurement`, and `retrieve.py`'s
+  `assemble_sectioned_pack`. All five now build the detail with
+  `describe_validation_error`, same as the nine sites above.
+  `admin.py`'s `_load_learning_candidates` built
+  `_LearningCandidatesUnavailableError`'s message as `f"...: {exc}"` for an
+  unreadable or malformed candidates file; it now uses `describe_os_error` /
+  `describe_json_error`, falling back to the exception's type name.
+  Separately, `CommandResult.message` reached a REST caller unsanitized
+  through two paths #829 did not cover: `/commands/batch` (every result,
+  including `FAILED`/`REJECTED`, via `_results.py`'s `command_response` —
+  the one projection the `curate`, `extract` and `mutations` routers share)
+  and `/ingest/bulk`'s three per-item `BulkItemResult` constructions (entity,
+  edge, alias), neither of which went through `command_response`. Both now
+  sanitize `message` through `sanitize_error_message`, but only when
+  `status` is `FAILED` or `REJECTED`: a `SUCCESS`/`DUPLICATE` message only
+  restates the caller's own request (a name, id, title or idempotency key),
+  and wrapping it unconditionally would replace an ordinary long name, an
+  email-named entity, or a digest idempotency key with the suppression
+  marker, for no protective value. Fixing the shared
+  `command_response` projection closes `/commands/batch` and, incidentally,
+  `extract.py`'s identical unfiltered construction, in one change. The two
+  `trellis_sdk` sites with the same `f"...: {exc}"` shape
+  (`client.py`/`async_client.py`'s `record_feedback`) are left as-is:
+  `trellis_sdk` has no dependency edge to `trellis` core to reach
+  `error_sanitize` from (by the dual-mode local/remote design), and the
+  exception there describes the SDK's own parse failure on a response its
+  own trusted server just returned, not caller-supplied or server-internal
+  text.
+  ([#829](https://github.com/ronsse/trellis-ai/pull/829) follow-up)
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited

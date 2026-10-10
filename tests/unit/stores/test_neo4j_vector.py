@@ -113,6 +113,13 @@ class TestUpsert:
         with pytest.raises(ValueError, match="no current version"):
             vector.upsert("ghost", _vec(1, 0, 0))
 
+    def test_refuses_a_non_finite_metadata_value(self, stores):
+        graph, vector = stores
+        _make_node(graph, "a")
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            vector.upsert("a", _vec(1, 0, 0), metadata={"score": float("nan")})
+        assert vector.get("a") is None
+
 
 class TestUpsertBulk:
     def test_attaches_embeddings_to_existing_nodes(self, stores):
@@ -172,6 +179,24 @@ class TestUpsertBulk:
                     {"item_id": "ghost", "vector": _vec(0, 1, 0)},
                 ]
             )
+
+    def test_refuses_a_non_finite_metadata_value(self, stores):
+        """``upsert_bulk`` has its own UNWIND Cypher (not a loop over
+        ``upsert``), so this is a separate fix site and needs its own test.
+        """
+        graph, vector = stores
+        _make_node(graph, "a")
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            vector.upsert_bulk(
+                [
+                    {
+                        "item_id": "a",
+                        "vector": _vec(1, 0, 0),
+                        "metadata": {"v": float("inf")},
+                    }
+                ]
+            )
+        assert vector.get("a") is None
 
 
 # ---------------------------------------------------------------------------

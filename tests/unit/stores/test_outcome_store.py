@@ -218,3 +218,28 @@ def test_a_duplicate_mid_batch_writes_none_of_the_batch(
         ("syn-outcome-0",),
         ("syn-outcome-9",),
     ]
+
+
+def test_append_refuses_a_non_finite_metrics_value(store: SQLiteOutcomeStore):
+    """json.dumps(o.outcome.model_dump(...), allow_nan=False) refuses a
+    non-finite value inside ``ComponentOutcome.metrics`` (a freeform
+    ``dict[str, float]`` with no pydantic range constraint, unlike
+    ``latency_ms``) before the INSERT runs.
+    """
+    event = _make(
+        outcome=ComponentOutcome(
+            success=True, latency_ms=5.0, metrics={"confidence": float("nan")}
+        )
+    )
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        store.append(event)
+    assert store.query() == []
+    assert store.count() == 0
+
+
+def test_append_refuses_a_non_finite_metadata_value(store: SQLiteOutcomeStore):
+    event = _make(metadata={"score": float("inf")})
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        store.append(event)
+    assert store.query() == []
+    assert store.count() == 0
