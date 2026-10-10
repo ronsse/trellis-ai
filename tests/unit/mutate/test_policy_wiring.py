@@ -377,8 +377,8 @@ class TestLoadPolicies:
     ) -> None:
         """A synthetic sentinel in a bad policy field never reaches a caller.
 
-        Pinning test for Q8 (gate #808): pre-fix, ``policy_source.py`` built
-        the ``ConfigError`` message as ``f"...: {exc}"``, and pydantic's own
+        Pre-fix, ``policy_source.py`` built the ``ConfigError`` message as
+        ``f"...: {exc}"``, and pydantic's own
         ``str(exc)`` embeds ``input_value=<the policy's own field value>``.
         A deployment's policy file can carry an operator-authored value
         Trellis never chose, so this is the same class of leak as the

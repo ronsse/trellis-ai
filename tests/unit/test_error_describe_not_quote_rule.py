@@ -1,4 +1,4 @@
-"""Guard: a TrellisError describes a caught exception, never quotes it (Q8).
+"""Guard: a TrellisError describes a caught exception, never quotes it.
 
 Nine raise sites in ``src/trellis/mutate`` and ``src/trellis/stores`` used to
 paste a caught ``OSError``/``JSONDecodeError``/pydantic ``ValidationError``/
@@ -22,12 +22,12 @@ handler, anywhere in ``src/trellis``, must not interpolate ``name`` into its
 message by f-string, ``str()``/``repr()``, ``.format()``, or
 ``%``-formatting.
 
-**Scope note, a deliberate deviation from the plan's literal numbers.** The
-plan (``q8-describe-dont-quote.md``) says "set its floor with
+**Scope note, a deliberate deviation from the original plan's literal
+numbers.** The plan that scoped this fix said "set its floor with
 ``assert_hand_read_floor``: 9, or 11 with the SDK sites" -- but that count is
-how many sites were *violating* at measurement time (the nine in the Q8
-table, scoped to three files), not the population this scan's predicate
-reaches. The rule as the plan states it ("a TrellisError subclass raised
+how many sites were *violating* at measurement time (nine sites, scoped to
+three files), not the population this scan's predicate reaches. The rule as
+the plan states it ("a TrellisError subclass raised
 inside except ... as name must not interpolate name") is general over all of
 ``src/trellis``, and a guard confined to those three files would never see a
 violation introduced anywhere else -- the exact failure mode
@@ -43,6 +43,7 @@ quantity the scan below computes for itself.
 from __future__ import annotations
 
 import ast
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,7 +58,7 @@ _SRC = Path(__file__).resolve().parents[2] / "src" / "trellis"
 #: ``stores/bolt_opencypher/base.py`` x1, ``stores/bolt_opencypher/graph.py``
 #: x3, ``stores/pgvector/store.py`` x1, ``stores/postgres/api_key.py`` x1,
 #: ``stores/postgres/event_log.py`` x1, ``stores/postgres/graph.py`` x3,
-#: ``stores/postgres/trace.py`` x1, ``stores/registry.py`` x16,
+#: ``stores/postgres/trace.py`` x1, ``stores/registry.py`` x14,
 #: ``stores/sqlite/api_key.py`` x1, ``stores/sqlite/trace.py`` x1). All 35
 #: are, at HEAD, either a ``describe_*`` call, a static sentence, an
 #: interpolation of the *caller's own* data (a record/trace id, never the
@@ -154,27 +155,52 @@ class _RaiseSite:
         )
 
 
-def _resolve_one_hop(expr: ast.expr, handler: ast.ExceptHandler) -> ast.expr:
-    """If *expr* is a bare ``Name`` bound by a top-level ``x = ...`` in the
-    handler's own body, return that assignment's value instead.
+def _resolve_transitively(expr: ast.expr, handler: ast.ExceptHandler) -> ast.expr:
+    """Inline every name bound by a top-level ``x = ...`` in the handler's
+    own body, transitively, anywhere in *expr*'s subtree.
 
-    One hop, not a fixed point: every real site in this tree builds its
-    message as ``msg = f"..."; raise X(msg) from exc``, and a resolver that
-    chases further is reaching past what a handler's own body actually
-    contains.
+    Not every real site builds its message in one hop. Two do it in two:
+    ``detail = (... if ... else ...); msg = f"...{detail}..."; raise
+    X(msg) from exc``. A resolver that only follows the raise argument's
+    own top-level name (``msg``) reaches the f-string, but the ``detail``
+    name embedded *inside* that f-string is a second, nested binding it
+    never follows -- so an unsafe branch hiding behind ``detail`` (for
+    example ``else str(exc)``) stays invisible to
+    ``_bare_name_interpolation``, which only ever sees the first hop's
+    result. This substitutes every locally bound ``Name`` node it finds,
+    walking the full subtree (not just the top level), and recurses into
+    each substituted value in turn. A per-call ``visiting`` set guards
+    against a cycle (a name that resolves back to itself is left alone
+    rather than looping), and each substitution is a deep copy so inlining
+    the same binding at two different spots never lets one site's
+    resolution mutate the handler's original AST out from under the other.
+    Names the handler's body never binds -- the exception name itself,
+    built-ins, module/function names -- are left as bare ``Name`` nodes,
+    which is exactly what ``_bare_name_interpolation`` needs to see.
     """
-    if not isinstance(expr, ast.Name):
-        return expr
-    found: ast.expr | None = None
+    bindings: dict[str, ast.expr] = {}
     for stmt in handler.body:
         if (
             isinstance(stmt, ast.Assign)
             and len(stmt.targets) == 1
             and isinstance(stmt.targets[0], ast.Name)
-            and stmt.targets[0].id == expr.id
         ):
-            found = stmt.value
-    return found if found is not None else expr
+            bindings[stmt.targets[0].id] = stmt.value
+
+    class _Inliner(ast.NodeTransformer):
+        def __init__(self) -> None:
+            self.visiting: set[str] = set()
+
+        def visit_Name(self, node: ast.Name) -> ast.expr:
+            if node.id in self.visiting or node.id not in bindings:
+                return node
+            self.visiting.add(node.id)
+            try:
+                return self.visit(copy.deepcopy(bindings[node.id]))
+            finally:
+                self.visiting.discard(node.id)
+
+    return _Inliner().visit(expr)
 
 
 def _scan(tree: ast.Module, path: Path, family: frozenset[str]) -> list[_RaiseSite]:
@@ -209,7 +235,7 @@ def _scan(tree: ast.Module, path: Path, family: frozenset[str]) -> list[_RaiseSi
             continue
         assert handler.name is not None
         exprs = [
-            _resolve_one_hop(arg, handler)
+            _resolve_transitively(arg, handler)
             for arg in (*node.exc.args, *(kw.value for kw in node.exc.keywords))
         ]
         violates = any(_bare_name_interpolation(e, handler.name) for e in exprs)
@@ -398,12 +424,67 @@ def f():
     assert sites[0].violates
 
 
+def test_two_hop_interpolation_is_caught_on_a_defective_subject() -> None:
+    """Prove the guard on a two-hop shape: a name bound from a name.
+
+    This mirrors the real shape at ``policy_source.py`` and
+    ``registry.py``: an intermediate ``detail`` is bound by a ternary, and
+    only then interpolated into the ``msg`` the raise actually resolves.
+    The unsafe branch here (``else str(exc)``) is two hops from the raise
+    argument, so a one-hop resolver that only expands ``msg`` would see the
+    f-string's ``{detail}`` placeholder and stop, never noticing that
+    ``detail`` itself can be a bare ``str(exc)``.
+    """
+    tree = ast.parse(
+        """
+def f():
+    try:
+        pass
+    except OSError as exc:
+        detail = describe_os_error(exc) if isinstance(exc, OSError) else str(exc)
+        msg = f"operation failed: {detail}"
+        raise StoreError(msg) from exc
+"""
+    )
+    sites = _scan(tree, Path("<synthetic>"), frozenset({"StoreError"}))
+    assert len(sites) == 1
+    assert sites[0].violates
+
+
+def test_two_hop_safe_pattern_is_not_flagged() -> None:
+    """Negative control for the two-hop resolver: both branches stay safe.
+
+    Same shape as the test above, but neither branch of the intermediate
+    ``detail`` binding stringifies ``exc`` directly -- matching the real
+    sites at HEAD. The transitive resolver must not over-collect once it
+    starts following nested names.
+    """
+    tree = ast.parse(
+        """
+def f():
+    try:
+        pass
+    except OSError as exc:
+        detail = (
+            describe_os_error(exc)
+            if isinstance(exc, OSError)
+            else type(exc).__name__
+        )
+        msg = f"operation failed: {detail}"
+        raise StoreError(msg) from exc
+"""
+    )
+    sites = _scan(tree, Path("<synthetic>"), frozenset({"StoreError"}))
+    assert len(sites) == 1
+    assert not sites[0].violates
+
+
 def test_reverting_a_real_site_is_caught() -> None:
     """Reverting one real site to its pre-fix shape makes the scan flag it.
 
     This is the exact text ``src/trellis/mutate/handlers.py`` raised before
-    this fix (Q8 table, ``q-review.md``): pydantic's rendered
-    ``ValidationError`` text, which can carry ``input_value=`` -- the
+    this fix: pydantic's rendered ``ValidationError`` text, which can carry
+    ``input_value=`` -- the
     caller's own field value -- pasted straight into the message. The real
     file now builds this message with ``describe_validation_error(exc)``
     instead (confirmed clean by

@@ -556,8 +556,7 @@ def _import_callable(
         # error text can carry whatever a third-party package put in it.
         msg = (
             f"Could not import embedding callable {dotted_path!r}:"
-            f" module {module_path!r} is not importable"
-            f" ({describe_import_error(exc)})."
+            f" {describe_import_error(exc)}."
         )
         raise ConfigError(msg, setting=setting) from exc
     fn = getattr(module, attr_name, None)

@@ -94,8 +94,8 @@ class TestSuppression:
         # The shape a JSON body or a repr'd mapping takes: a closing quote
         # sits between the key name and the ':'/'=' separator, which the
         # pattern's un-quoted form (`key\s*[=:]`) does not match at all —
-        # this synthetic provider-error shape passes through unsuppressed
-        # on main (Q8, gate #808 F2).
+        # this synthetic provider-error shape passed through unsuppressed
+        # before the pattern gained the optional quote.
         msg = 'provider rejected request: {"api_key": "sk-synthetic-ABCDEF123456"}'
         assert sanitize_error_message(msg) == SUPPRESSED_MARKER
 
@@ -538,11 +538,25 @@ class TestDescribeValidationError:
 class TestDescribeImportError:
     """``describe_import_error`` names the module, never str(exc)."""
 
-    def test_names_the_failing_module(self) -> None:
-        with pytest.raises(ImportError) as exc:
+    def test_module_not_found_says_the_module_was_not_found(self) -> None:
+        """A missing module: ``ModuleNotFoundError``, the module itself
+        does not exist."""
+        with pytest.raises(ModuleNotFoundError) as exc:
             import_module(f"trellis_test_missing_{_SENTINEL}")
         described = describe_import_error(exc.value)
-        assert described == f"module {exc.value.name!r} is not importable"
+        assert described == f"module {exc.value.name!r} was not found"
+
+    def test_missing_attribute_says_the_import_failed(self) -> None:
+        """``from <module> import <missing name>``: the module exists
+        and imports fine, but the name inside it does not — a plain
+        ``ImportError``, not a ``ModuleNotFoundError``."""
+        with pytest.raises(ImportError) as exc:
+            from os import (  # type: ignore[attr-defined]  # noqa: F401
+                this_name_does_not_exist_in_os,
+            )
+        assert not isinstance(exc.value, ModuleNotFoundError)
+        described = describe_import_error(exc.value)
+        assert described == f"an import from module {exc.value.name!r} failed"
 
     def test_no_name_falls_back_to_type_name(self) -> None:
         exc = ImportError("generic failure")

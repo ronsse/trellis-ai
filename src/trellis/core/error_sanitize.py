@@ -207,16 +207,27 @@ def describe_json_error(exc: json.JSONDecodeError) -> str:
 
 def describe_validation_error(exc: BaseException) -> str:
     """Describe a pydantic ``ValidationError`` by each failed field's
-    location and error type, never by its rendered message.
+    location, error type and pydantic's own ``msg``, never by the
+    exception's rendered ``str()``.
 
     pydantic's own ``str(exc)`` composes ``input_value=<the caller's
     value>`` into every line, by design (it is meant for a human
     debugging their own call) — exactly the content the storage and
     display rule forbids in an audit event or a caller-facing reply.
-    ``errors(include_input=False)`` gives the same failures without it;
-    this keeps only ``loc`` (dotted) and ``type``, dropping pydantic's
-    ``msg``/``url``, which a custom validator can still shape around a
-    value.
+    ``errors(include_input=False)`` gives the same failures without that
+    clause; this keeps ``loc`` (dotted), ``type`` and ``msg``. ``msg`` is
+    a separate field from ``input_value``: for every error type pydantic
+    raises itself (a missing field, a type mismatch, an enum/literal
+    miss), ``msg`` names only the *expectation*, never the caller's
+    actual value, so a field's own schema-authored sentence — "metric_value
+    must be a finite number" — survives without reintroducing what the
+    caller sent. For ``value_error``/``assertion_error``, ``msg`` is a
+    custom ``@field_validator``'s own exception text, which *could* embed
+    a value if that validator chooses to interpolate one in (none of this
+    module's current callers' validators do); since this function cannot
+    inspect a validator's source to know whether it did, ``msg`` is passed
+    through :func:`sanitize_error_message` as a defense-in-depth measure
+    before it is used.
 
     Falls back to the exception's type name when *exc* has no
     ``errors(include_input=...)`` method — not every exception a broad
@@ -230,27 +241,40 @@ def describe_validation_error(exc: BaseException) -> str:
         raw_errors = errors_method(include_input=False)
     except TypeError:
         return type(exc).__name__
-    pairs = [
-        f"{'.'.join(str(part) for part in err.get('loc', ())) or '<root>'}: "
-        f"{err.get('type', '?')}"
-        for err in raw_errors
-    ]
+    pairs = []
+    for err in raw_errors:
+        loc = ".".join(str(part) for part in err.get("loc", ())) or "<root>"
+        err_type = err.get("type", "?")
+        msg = err.get("msg")
+        if msg:
+            pairs.append(f"{loc}: {err_type}: {sanitize_error_message(str(msg))}")
+        else:
+            pairs.append(f"{loc}: {err_type}")
     return "; ".join(pairs) if pairs else type(exc).__name__
 
 
 def describe_import_error(exc: ImportError) -> str:
-    """Describe an ``ImportError`` by the module name that failed to
-    import, never by ``str(exc)``.
+    """Describe an ``ImportError`` by its own ``name`` field, never by
+    ``str(exc)``.
 
     A dotted import path can fail on a *transitive* import inside the
     target module rather than on the target itself; ``exc.name`` names
     whichever module actually raised, which ``str(exc)`` folds into one
     sentence that can also carry an unrelated third-party package's own
-    error text.
+    error text. The two ``ImportError`` shapes say different things and
+    must not share a sentence: ``ModuleNotFoundError`` (a subclass of
+    ``ImportError``) means the named module itself does not exist, while
+    a plain ``ImportError`` with a ``name`` means that module *was*
+    found and imported, but ``from <name> import <missing attr>`` failed
+    inside it — the earlier "module is not importable" wording claimed
+    the former for both, sending an operator to reinstall a package that
+    already works.
     """
-    if exc.name:
-        return f"module {exc.name!r} is not importable"
-    return type(exc).__name__
+    if not exc.name:
+        return type(exc).__name__
+    if isinstance(exc, ModuleNotFoundError):
+        return f"module {exc.name!r} was not found"
+    return f"an import from module {exc.name!r} failed"
 
 
 def describe_yaml_error(exc: BaseException) -> str:

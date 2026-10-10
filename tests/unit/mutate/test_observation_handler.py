@@ -27,10 +27,12 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 #: A value that survives into pydantic's own ``str(exc)`` as
-#: ``input_value=<this>`` — planted where a numeric field belongs so the
-#: raw-interpolation defect (Q8, gate #808) would surface it in both the
-#: audit ``mutation.rejected`` payload and (via the REST 400 boundary,
-#: which wraps the identical ``result.message``) a caller-facing response.
+#: ``input_value=<this>`` — planted where a numeric field belongs so a
+#: raw-interpolation defect would surface it in the immutable audit
+#: ``mutation.rejected`` payload, the path this file's test exercises
+#: (``build_curate_executor`` / ``MeasurementRecordHandler``, not the REST
+#: route -- a REST caller sending this body hits ``observations.py``'s own
+#: pre-validation 422 first, which is a separate, disclosed gap).
 _SENTINEL = "XQ1BR6asQyYAJ6tcK6JnaWKZ"
 
 
@@ -222,15 +224,21 @@ class TestMeasurementRecordHandler:
     ) -> None:
         """A synthetic sentinel in a bad field never reaches the caller.
 
-        Pinning test for Q8 (gate #808): pre-fix, ``handlers.py`` built the
-        ``ValidationError`` message as ``f"...: {exc}"``, and pydantic's own
-        ``str(exc)`` embeds ``input_value=<the bad value>`` — this sentinel
-        would appear verbatim both in the ``CommandResult.message`` the
-        REST routes answer with (through the now-sanitized ``result.message``
-        wrapper at ``observations.py``) and in the immutable
-        ``mutation.rejected`` audit event. Routing through
+        Pre-fix, ``handlers.py`` built the ``ValidationError`` message as
+        ``f"...: {exc}"``, and pydantic's own ``str(exc)`` embeds
+        ``input_value=<the bad value>`` — this sentinel would appear
+        verbatim in the immutable ``mutation.rejected`` audit event, which
+        is permanent once written. Routing through
         :func:`build_curate_executor` (not calling the handler directly)
         reaches the exact code path that writes that audit event.
+
+        This exercises the governed-pipeline path directly, not the REST
+        route: a caller who actually ``POST``s this body to
+        ``/measurements`` hits ``observations.py``'s own pre-validation
+        ``Measurement.model_validate`` call first, whose 422 still quotes
+        pydantic's raw text (a separate, disclosed gap this fix does not
+        close) — this test's ``result.message`` assertion below is about
+        the executor's rejection, not that REST response.
         """
         body = {
             "subject_entity_id": "ds-1",
@@ -248,6 +256,11 @@ class TestMeasurementRecordHandler:
 
         assert result.status == CommandStatus.REJECTED
         assert _SENTINEL not in result.message
+        # Not just "the sentinel is gone" -- the field it was planted in
+        # must still be *named*, so a describe-helper collapsed to
+        # ``type(exc).__name__`` (which drops every field name) fails
+        # this, not just the sentinel check above.
+        assert "metric_value" in result.message
 
         rejected_events = registry.operational.event_log.get_events(
             event_type=EventType.MUTATION_REJECTED
