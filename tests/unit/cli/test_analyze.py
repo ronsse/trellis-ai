@@ -194,9 +194,7 @@ class TestApplyNoiseTags:
         assert result.exit_code == 0, result.output
         rendered = plain(result.stdout)
         assert "Noise tags applied to 0 of 1 proposed item(s)" in rendered
-        assert (
-            "1 admitted item(s) refused: not found in the document store" in rendered
-        )
+        assert "1 admitted item(s) refused: not found in the document store" in rendered
         assert "ac:trace:phantom" in rendered
 
 
