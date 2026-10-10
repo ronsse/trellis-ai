@@ -244,22 +244,33 @@ def _reset_write_provenance() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _reset_embedder_resolve_failure_log_cache() -> Iterator[None]:
-    """Drop the once-per-cause embed/vector-store resolve-failure log cache.
+    """Drop the once-per-cause embed/vector-store failure log caches.
 
     :func:`trellis.retrieve.embed_ingest_hook._warn_resolve_failed_once`
-    is a ``functools.cache`` keyed on ``(component, error_type, setting)``
-    so a persistently broken embedder or vector store warns once per
-    process, not once per ingest. Without this reset, two tests across
-    *any* file that hit a resolve failure with the same cause would see
-    the second test's warning silently swallowed by the first's cache
-    entry — the same order-dependent flake ``_reset_write_provenance``
-    above guards against for the write-provenance stamp.
+    (keyed on ``(component, error_type, setting)``),
+    :func:`trellis.retrieve.embed_ingest_hook._warn_upsert_failed_once`
+    and :func:`trellis.core.vector_metadata._warn_vector_store_unavailable_once`
+    (both keyed on ``(error_type, setting)``) are each a ``functools.cache``
+    so a persistently broken embedder, vector store or upsert warns once
+    per process, not once per call. Without this reset, two tests across
+    *any* file that hit a failure with the same cause would see the
+    second test's warning silently swallowed by the first's cache entry —
+    the same order-dependent flake ``_reset_write_provenance`` above
+    guards against for the write-provenance stamp.
     """
-    from trellis.retrieve.embed_ingest_hook import _warn_resolve_failed_once
+    from trellis.core.vector_metadata import _warn_vector_store_unavailable_once
+    from trellis.retrieve.embed_ingest_hook import (
+        _warn_resolve_failed_once,
+        _warn_upsert_failed_once,
+    )
 
     _warn_resolve_failed_once.cache_clear()
+    _warn_upsert_failed_once.cache_clear()
+    _warn_vector_store_unavailable_once.cache_clear()
     yield
     _warn_resolve_failed_once.cache_clear()
+    _warn_upsert_failed_once.cache_clear()
+    _warn_vector_store_unavailable_once.cache_clear()
 
 
 @pytest.fixture(autouse=True)

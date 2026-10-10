@@ -32,10 +32,12 @@ no other reason to import.
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from trellis.errors import ConfigError
 from trellis.schemas.classification import LIFECYCLE_KEY
 
 if TYPE_CHECKING:
@@ -197,6 +199,64 @@ def sync_vector_metadata(
     )
 
 
+def _describe_resolve_failure(exc: Exception) -> tuple[str, str | None]:
+    """Describe, don't quote: the (type name, setting) of a resolve failure.
+
+    Mirrors :func:`trellis.retrieve.embed_ingest_hook._describe_resolve_failure`
+    — duplicated rather than imported, because this module deliberately
+    does not import :mod:`trellis.retrieve` (see the module docstring: it
+    is a heavy package the classify write path has no other reason to
+    pull in). ``setting`` is read from the exception's own ``.setting``
+    attribute only when the exception IS a
+    :class:`~trellis.errors.ConfigError`, whose ``setting`` is typed
+    ``str | None``. A plain ``getattr(exc, "setting", None)`` would let an
+    unrelated exception's same-named, possibly-unhashable or untrusted
+    attribute reach the ``functools.cache``-keyed dedup call below.
+
+    The type hint is not enforced at runtime, so ``setting`` is also
+    checked with ``isinstance(..., str)`` before it is kept: a
+    ``ConfigError`` constructed with a non-``str`` ``setting`` — a list,
+    say — would otherwise reach the ``functools.cache``-keyed dedup call
+    and raise ``TypeError: unhashable type`` there, breaking
+    :func:`resolve_vector_store`'s fail-soft degrade-to-``None`` contract
+    on the very first failure (#839). A non-``str`` setting degrades to
+    ``None`` like a missing one.
+    """
+    setting = exc.setting if isinstance(exc, ConfigError) else None
+    return type(exc).__name__, setting if isinstance(setting, str) else None
+
+
+@functools.cache
+def _warn_vector_store_unavailable_once(error_type: str, setting: str | None) -> None:
+    """Emit ``vector_store_unavailable_for_metadata_sync`` once per cause.
+
+    ``resolve_vector_store`` runs on every tag write across the feedback
+    loop, the REST/CLI demotion surfaces and session capture — a
+    persistently broken or misconfigured vector store fails the same way
+    on every one of them, so logging a full traceback (``exc_info=True``,
+    which carries the exception's message) on each call turned one
+    misconfiguration into a traceback per write. ``functools.cache`` makes
+    a repeat call with the same ``(error_type, setting)`` a no-op: the
+    body (and its ``logger.warning``) runs once per distinct cause per
+    process. Same dedup #834 applied to the embed-on-ingest hook's
+    resolve path. WARNING, not ``.exception`` — the type and setting are
+    what an operator acts on; the traceback is noise after the first one.
+
+    ``_warn_vector_store_unavailable_once.cache_clear()`` is test-facing
+    only, to isolate cases within one process — a production process does
+    not reset it mid-flight.
+    """
+    logger.warning(
+        "vector_store_unavailable_for_metadata_sync",
+        error_type=error_type,
+        setting=setting,
+        consequence=(
+            "tag writes will not reach vector rows; the semantic axis "
+            "will keep serving pre-write metadata"
+        ),
+    )
+
+
 def resolve_vector_store(registry: StoreRegistry) -> VectorStore | None:
     """The registry's vector store, or ``None`` on a deployment without one.
 
@@ -205,19 +265,17 @@ def resolve_vector_store(registry: StoreRegistry) -> VectorStore | None:
     deployment with no usable vector store must still be able to demote a
     document — the document store is the authority — but it must not do so
     quietly, because the consequence is precisely the divergence #338 is
-    about. So the failure degrades to ``None`` and says what that costs.
+    about. So the failure degrades to ``None`` and says what that costs —
+    describing the cause (exception type, and the broken setting for a
+    :class:`~trellis.errors.ConfigError`) rather than quoting its message,
+    and logging it once per distinct cause per process rather than once
+    per call; see :func:`_warn_vector_store_unavailable_once`.
     """
     try:
         return registry.knowledge.vector_store
-    except Exception:
-        logger.warning(
-            "vector_store_unavailable_for_metadata_sync",
-            consequence=(
-                "tag writes will not reach vector rows; the semantic axis "
-                "will keep serving pre-write metadata"
-            ),
-            exc_info=True,
-        )
+    except Exception as exc:
+        error_type, setting = _describe_resolve_failure(exc)
+        _warn_vector_store_unavailable_once(error_type, setting)
         return None
 
 

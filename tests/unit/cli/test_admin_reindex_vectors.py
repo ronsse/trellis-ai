@@ -14,7 +14,10 @@ import json
 import pytest
 from typer.testing import CliRunner
 
+from trellis.errors import ConfigError
+from trellis.stores.registry import _KnowledgePlane
 from trellis_cli.admin import admin_app
+from trellis_cli.main import app
 from trellis_cli.stores import _get_registry, _reset_registry
 
 runner = CliRunner()
@@ -107,3 +110,104 @@ class TestReindexVectorsCLI:
         _seed_documents()
         summary = _run_json("--limit", "1")
         assert summary["scanned"] == 1
+
+
+class TestReindexVectorsStoreResolveFailure:
+    """A raising ``vector_store`` property must not escape as a traceback.
+
+    ``getattr(registry.knowledge, "vector_store", None)`` only ever
+    absorbed an ``AttributeError`` the real property never raises — any
+    OTHER exception from resolving it (a broken backend config) escaped
+    uncaught. It is now routed through the root CLI boundary
+    (``trellis_cli.main._BoundaryGroup``), which is why these three tests
+    invoke ``trellis_cli.main.app`` rather than ``admin_app`` directly: a
+    local ``except StoreError`` here once pre-empted that boundary and
+    printed the raw, unsanitized exception text — the regression #839's
+    fix round closed (see the module docstring at ``_resolve_vector_store``).
+    A ``ConfigError`` (already a ``TrellisError``) is re-raised unchanged
+    and keeps its own ``error_code``/``setting``; only an untyped
+    exception is wrapped into a ``StoreError``. Both reach the boundary
+    and exit ``EXIT_STORE`` (5), distinct from the already-existing
+    ``EXIT_INTERNAL`` (1) "unconfigured" branch covered by
+    ``test_missing_embedder_exits_loudly`` above.
+    """
+
+    #: A DSN-shaped credential, embedded in the raised exception's own
+    #: message. ``sanitize_error_message`` (src/trellis/core/error_sanitize.py)
+    #: suppresses a URL with inline credentials wholesale; asserting on
+    #: this exact substring is what makes the "no message text leaks"
+    #: checks below non-vacuous rather than merely checking the type name
+    #: is present.
+    _LEAK = "postgres://trellis:hunter2@dbhost.internal:5432/trellis"
+
+    def test_json_format_exits_store(self, cli_env, monkeypatch) -> None:
+        monkeypatch.setattr(
+            _KnowledgePlane,
+            "vector_store",
+            property(
+                lambda _self: (_ for _ in ()).throw(
+                    ConfigError(f"boom ({self._LEAK})", setting="vectors.backend")
+                )
+            ),
+        )
+        result = runner.invoke(app, ["admin", "reindex-vectors", "--format", "json"])
+        assert result.exit_code == 5
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert payload["error_type"] == "ConfigError"
+        assert payload["error_code"] == "CONFIG_ERROR"
+        assert payload["setting"] == "vectors.backend"
+        assert self._LEAK not in payload["message"]
+        assert "hunter2" not in payload["message"]
+
+    def test_text_format_exits_store_too(self, cli_env, monkeypatch) -> None:
+        """Same exit code regardless of ``--format`` (parity rule).
+
+        Text is the terminal surface, not the machine envelope: per
+        ``_render_boundary_failure``'s own docstring it prints
+        ``exc.message`` unsanitized "as every other error render in this
+        CLI does" — a pre-existing, documented convention this PR does not
+        change. Only ``--format json`` is the leak-checked surface
+        (asserted in :meth:`test_json_format_exits_store`); this test
+        pins the exit code and that the error's own code/type still
+        appears on text.
+        """
+        monkeypatch.setattr(
+            _KnowledgePlane,
+            "vector_store",
+            property(
+                lambda _self: (_ for _ in ()).throw(
+                    ConfigError(f"boom ({self._LEAK})", setting="vectors.backend")
+                )
+            ),
+        )
+        result = runner.invoke(app, ["admin", "reindex-vectors"])
+        assert result.exit_code == 5
+        assert "CONFIG_ERROR" in result.output
+
+    def test_describes_a_non_config_error_by_type_alone(
+        self, cli_env, monkeypatch
+    ) -> None:
+        """An untyped cause is wrapped into a ``StoreError`` naming only
+        its type — never its message — and still exits 5 through the
+        same boundary, with its own envelope keys (``error_type``,
+        ``error_code``, ``store``)."""
+        monkeypatch.setattr(
+            _KnowledgePlane,
+            "vector_store",
+            property(
+                lambda _self: (_ for _ in ()).throw(
+                    RuntimeError(f"db down ({self._LEAK})")
+                )
+            ),
+        )
+        result = runner.invoke(app, ["admin", "reindex-vectors", "--format", "json"])
+        assert result.exit_code == 5
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert payload["error_type"] == "StoreError"
+        assert payload["error_code"] == "STORE_ERROR"
+        assert payload["store"] == "vector"
+        assert "RuntimeError" in payload["message"]
+        assert self._LEAK not in payload["message"]
+        assert "db down" not in payload["message"]

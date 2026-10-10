@@ -160,8 +160,18 @@ def _describe_resolve_failure(exc: Exception) -> tuple[str, str | None]:
     ``getattr(exc, "setting", None)`` would let an unrelated exception's
     same-named, possibly-unhashable or untrusted attribute reach the
     ``functools.cache``-keyed dedup call and the returned ``reason``.
+
+    The type hint is not enforced at runtime, so ``setting`` is also
+    checked with ``isinstance(..., str)`` before it is kept: a
+    ``ConfigError`` constructed (by code outside this tree, or future
+    code in it) with a non-``str`` ``setting`` — a list, say — would
+    otherwise reach the ``functools.cache``-keyed dedup call below and
+    raise ``TypeError: unhashable type`` there, breaking every caller's
+    fail-soft degrade-to-``None`` contract on the very first failure
+    (#839). A non-``str`` setting degrades to ``None`` like a missing one.
     """
-    return type(exc).__name__, exc.setting if isinstance(exc, ConfigError) else None
+    setting = exc.setting if isinstance(exc, ConfigError) else None
+    return type(exc).__name__, setting if isinstance(setting, str) else None
 
 
 @functools.cache
@@ -200,6 +210,39 @@ def _warn_resolve_failed_once(
     )
 
 
+@functools.cache
+def _warn_upsert_failed_once(step: str, error_type: str, setting: str | None) -> None:
+    """Emit ``embed_on_ingest_upsert_failed`` once per ``(step, error_type, setting)``.
+
+    Covers both halves of the embed/upsert step (not a resolve —
+    ``embedding_fn`` and ``vector_store`` both resolved fine):
+    ``step="embed"`` for :func:`build_vector_row` calling the embedder,
+    ``step="upsert"`` for ``vector_store.upsert``. Either fails
+    identically for every later document while its cause persists
+    (backend down, dimension mismatch), so logging a full traceback per
+    document — the prior behaviour — turned one cause into a traceback
+    per write, same as the resolve path above. ``functools.cache`` makes
+    a repeat call with the same arguments a no-op. ``step`` is part of
+    the cache key (not just the log payload) so a same-shaped cause on
+    one step — e.g. both raising a bare ``RuntimeError`` with no
+    ``setting`` — cannot silently suppress the other step's warning
+    (#839, the same reasoning :func:`_warn_resolve_failed_once` gives for
+    ``component``). WARNING, not ``.exception``: the step, type and
+    setting are what an operator acts on; the traceback is noise after
+    the first one.
+
+    ``_warn_upsert_failed_once.cache_clear()`` is test-facing only, to
+    isolate cases within one process — a production process does not
+    reset it mid-flight.
+    """
+    logger.warning(
+        "embed_on_ingest_upsert_failed",
+        step=step,
+        error_type=error_type,
+        setting=setting,
+    )
+
+
 def run_embed_on_ingest(
     registry: StoreRegistry,
     doc_id: str,
@@ -223,17 +266,21 @@ def run_embed_on_ingest(
         ``{"embedded": True, "dimensions": int}`` on success, or
         ``{"embedded": False, "reason": "..."}`` when skipped (empty
         content, embedder/vector store unconfigured) or failed. Any
-        failure is caught and logged — it never propagates. When
+        failure is caught and logged — it never propagates. Whether
         ``registry.embedding_fn`` or ``registry.knowledge.vector_store``
-        itself fails to resolve (raises instead of returning), ``reason``
-        carries only the exception's type name and, when the exception
-        names one (see :class:`~trellis.errors.ConfigError`'s
+        itself fails to resolve (raises instead of returning), or the
+        embed/upsert call itself fails (backend down, dimension
+        mismatch), ``reason`` carries only the exception's type name and,
+        when the exception names one (see :class:`~trellis.errors.ConfigError`'s
         ``setting``), the broken setting — e.g. ``"ConfigError:
         embeddings.provider"`` — never the exception's message text,
-        which can echo a credential (this resolve path never sees document
-        content — it fails before any document is read). The matching
-        warning is logged once per distinct ``(component, cause)`` per
-        process, not once per call; see :func:`_warn_resolve_failed_once`.
+        which can echo document content or a credential. The matching
+        warning is logged once per distinct cause per process, not once
+        per call; see :func:`_warn_resolve_failed_once` (resolve
+        failures, keyed by ``component``) and
+        :func:`_warn_upsert_failed_once` (the embed and upsert calls,
+        keyed by ``step`` — the two are tracked separately so a failure
+        in one cannot silence a same-shaped failure in the other).
     """
     if not embed_on_ingest_enabled():
         return None
@@ -285,19 +332,39 @@ def run_embed_on_ingest(
 
     try:
         row = build_vector_row(doc_id, content, metadata, embedding_fn)
+    except Exception as exc:
+        # GRACEFUL-DEGRADATION: document ingest's success contract is
+        # "the document is durably stored". Embedding is a feature-
+        # flagged bonus pass; its failure (bad input, provider timeout)
+        # must never roll back a successful document write. Describe,
+        # don't quote — same reason as the resolve path above: the
+        # exception's message can echo document content or a credential,
+        # and ``logger.exception`` on every document turned one
+        # persistently broken embedder into a traceback per write.
+        # ``step="embed"`` keeps this cause's dedup-cache key distinct
+        # from the upsert call's below, so an embedder failure and a
+        # vector-store failure of the *same* exception type cannot
+        # silence each other (#839) — a separate ``try`` per step, not a
+        # shared one, is what makes that distinction possible.
+        error_type, setting = _describe_resolve_failure(exc)
+        _warn_upsert_failed_once("embed", error_type, setting)
+        reason = f"{error_type}: {setting}" if setting else error_type
+        return {"embedded": False, "reason": reason}
+
+    try:
         vector_store.upsert(
             item_id=row["item_id"],
             vector=row["vector"],
             metadata=row["metadata"],
         )
     except Exception as exc:
-        # GRACEFUL-DEGRADATION: document ingest's success contract is
-        # "the document is durably stored". Embedding is a feature-
-        # flagged bonus pass; its failure (embedder down, dimension
-        # mismatch) must never roll back a successful document write.
-        # Logged at exception level so persistent breakage is visible.
-        logger.exception("embed_on_ingest_failed", doc_id=doc_id, source=source)
-        return {"embedded": False, "reason": str(exc)}
+        # Same fail-soft contract as the embed step above (backend down,
+        # dimension mismatch); ``step="upsert"`` is this call's half of
+        # the same distinction.
+        error_type, setting = _describe_resolve_failure(exc)
+        _warn_upsert_failed_once("upsert", error_type, setting)
+        reason = f"{error_type}: {setting}" if setting else error_type
+        return {"embedded": False, "reason": reason}
 
     logger.info(
         "embed_on_ingest_completed",

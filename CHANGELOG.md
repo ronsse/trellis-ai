@@ -1947,6 +1947,36 @@ All notable changes to Trellis will be documented in this file.
   same table. Both stores now read `created_at` alongside `edge_id` under
   the same lock that reads the current row and write it back on the new
   version; `valid_from` still advances on every write.
+- **Three follow-ups to #834's embed-on-ingest fix apply its "describe,
+  don't quote; log once" discipline to the paths it didn't cover.**
+  `trellis admin reindex-vectors` read the vector store with an unwrapped
+  `getattr(..., None)`, which only ever absorbed an `AttributeError` the
+  real property never raises, so an untyped backend-construction error
+  escaped as a bare traceback with exit 1; a `ConfigError` already exited
+  5 through the root CLI boundary (`_BoundaryGroup`) on its own, before
+  this change. A new `_resolve_vector_store` helper re-raises a
+  `TrellisError` (a `ConfigError` included) unchanged, keeping its own
+  `error_code` and `setting`, and wraps only an untyped cause in a
+  `StoreError` naming its type alone; both now reach the boundary and
+  exit `EXIT_STORE` (5), regardless of `--format`, with the standard
+  sanitized JSON envelope. `resolve_vector_store` (`trellis.core.vector_metadata`)
+  already logged at `WARNING` with `exc_info=True` on every call while a
+  vector-store backend stayed broken — a full traceback carrying the
+  exception's message on every tag write, demotion and session capture;
+  it now describes the cause (type name, plus the setting for a
+  `ConfigError`) and logs once per distinct cause per process instead.
+  The embed-on-ingest hook had a single `except` block shared by its
+  embed and upsert calls, logged the `embed_on_ingest_failed` event at
+  `ERROR` (`logger.exception`) on every document, and returned the
+  exception's message as the hook's own `reason`; it now splits into two
+  `except` blocks keyed by step (`embed`, `upsert`), describes rather
+  than quotes, and logs the renamed `embed_on_ingest_upsert_failed` event
+  at `WARNING` once per distinct `(step, cause)` per process — so an
+  embedder failure and a vector-store failure of the same error type can
+  no longer hide each other — dropping `doc_id`/`source` from the log
+  line. In both helpers, a `setting` that is not a string degrades to
+  `None` instead of breaking the dedup cache, so every path still
+  degrades rather than raising.
 
 ## [0.9.0] - 2026-05-13
 
