@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import time
+from importlib import import_module
 
 import pytest
 import yaml
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from trellis.core.error_sanitize import (
     DEFAULT_MAX_LEN,
     SUPPRESSED_MARKER,
+    describe_import_error,
+    describe_json_error,
+    describe_os_error,
+    describe_validation_error,
     describe_yaml_error,
     sanitize_error_message,
     sanitized_error_payload,
@@ -81,6 +89,19 @@ class TestSuppression:
         assert sanitize_error_message("header Authorization: Bearer xyz") == (
             SUPPRESSED_MARKER
         )
+
+    def test_quoted_key_secret_assignment_suppressed(self) -> None:
+        # The shape a JSON body or a repr'd mapping takes: a closing quote
+        # sits between the key name and the ':'/'=' separator, which the
+        # pattern's un-quoted form (`key\s*[=:]`) does not match at all —
+        # this synthetic provider-error shape passed through unsuppressed
+        # before the pattern gained the optional quote.
+        msg = 'provider rejected request: {"api_key": "sk-synthetic-ABCDEF123456"}'
+        assert sanitize_error_message(msg) == SUPPRESSED_MARKER
+
+    def test_quoted_key_secret_assignment_single_quoted_suppressed(self) -> None:
+        msg = "provider error: {'authorization': 'Bearer synthetic-token-xyz'}"
+        assert sanitize_error_message(msg) == SUPPRESSED_MARKER
 
     def test_long_token_run_suppressed(self) -> None:
         token = "A" * 20 + "b1" * 12  # 44-char unbroken run
@@ -434,3 +455,110 @@ class TestDescribeYamlError:
         described = describe_yaml_error(exc.value)
         assert described.startswith("a value could not be constructed (")
         assert _SENTINEL.lower() not in described.lower()
+
+
+class TestDescribeOsError:
+    """``describe_os_error`` names strerror/errno/filename, never str(exc)."""
+
+    def test_missing_file_names_strerror_errno_and_path(self, tmp_path) -> None:
+        missing = tmp_path / "does-not-exist" / f"{_SENTINEL}.json"
+        with pytest.raises(OSError) as exc:
+            missing.open()
+        described = describe_os_error(exc.value)
+        assert "errno" in described
+        assert str(missing) in described
+        # The strerror/errno text itself never carries the sentinel; the
+        # path does, and a path Trellis resolved itself is allowed under
+        # the storage and display rule's single-tenant row.
+        assert described == (
+            f"{exc.value.strerror}, errno {exc.value.errno}, path {missing!s}"
+        )
+
+    def test_no_filename_falls_back_to_available_fields(self) -> None:
+        exc = OSError(5, "Input/output error")
+        assert describe_os_error(exc) == "Input/output error, errno 5"
+
+    def test_no_fields_at_all_falls_back_to_type_name(self) -> None:
+        exc = OSError()
+        assert describe_os_error(exc) == "OSError"
+
+
+class TestDescribeJsonError:
+    """``describe_json_error`` names msg/lineno/colno, never the document."""
+
+    def test_malformed_document_is_never_quoted(self) -> None:
+        document = f'{{"key": {_SENTINEL}}}'
+        with pytest.raises(json.JSONDecodeError) as exc:
+            json.loads(document)
+        described = describe_json_error(exc.value)
+        assert _SENTINEL not in described
+        assert described == (
+            f"{exc.value.msg} (line {exc.value.lineno}, column {exc.value.colno})"
+        )
+
+    def test_truncated_document_reports_its_position(self) -> None:
+        with pytest.raises(json.JSONDecodeError) as exc:
+            json.loads('{"a": 1,')
+        described = describe_json_error(exc.value)
+        assert "line" in described
+        assert "column" in described
+
+
+class _SyntheticModel(BaseModel):
+    name: str
+    count: int
+
+
+class TestDescribeValidationError:
+    """``describe_validation_error`` gives loc/type, never pydantic's input_value."""
+
+    def test_input_value_is_never_present(self) -> None:
+        with pytest.raises(PydanticValidationError) as exc:
+            _SyntheticModel.model_validate({"name": _SENTINEL, "count": "not-an-int"})
+        described = describe_validation_error(exc.value)
+        assert _SENTINEL not in described
+        assert "input_value" not in described
+
+    def test_loc_and_type_pairs_are_present(self) -> None:
+        with pytest.raises(PydanticValidationError) as exc:
+            _SyntheticModel.model_validate({"name": "ok", "count": "not-an-int"})
+        described = describe_validation_error(exc.value)
+        assert "count: " in described
+
+    def test_missing_field_reports_its_loc(self) -> None:
+        with pytest.raises(PydanticValidationError) as exc:
+            _SyntheticModel.model_validate({"count": 1})
+        described = describe_validation_error(exc.value)
+        assert "name: missing" in described
+
+    def test_non_pydantic_exception_falls_back_to_type_name(self) -> None:
+        assert describe_validation_error(ValueError("plain")) == "ValueError"
+
+
+class TestDescribeImportError:
+    """``describe_import_error`` names the module, never str(exc)."""
+
+    def test_module_not_found_says_the_module_was_not_found(self) -> None:
+        """A missing module: ``ModuleNotFoundError``, the module itself
+        does not exist."""
+        with pytest.raises(ModuleNotFoundError) as exc:
+            import_module(f"trellis_test_missing_{_SENTINEL}")
+        described = describe_import_error(exc.value)
+        assert described == f"module {exc.value.name!r} was not found"
+
+    def test_missing_attribute_says_the_import_failed(self) -> None:
+        """``from <module> import <missing name>``: the module exists
+        and imports fine, but the name inside it does not — a plain
+        ``ImportError``, not a ``ModuleNotFoundError``."""
+        with pytest.raises(ImportError) as exc:
+            from os import (  # type: ignore[attr-defined]  # noqa: F401
+                this_name_does_not_exist_in_os,
+            )
+        assert not isinstance(exc.value, ModuleNotFoundError)
+        described = describe_import_error(exc.value)
+        assert described == f"an import from module {exc.value.name!r} failed"
+
+    def test_no_name_falls_back_to_type_name(self) -> None:
+        exc = ImportError("generic failure")
+        exc.name = None
+        assert describe_import_error(exc) == "ImportError"

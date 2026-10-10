@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import feedback_log_dir
 from trellis.feedback.recording import record_feedback as record_pack_feedback
@@ -38,7 +39,9 @@ def _execute_command(cmd: Command) -> CommandResponse:
     # ValidationError, post-Variant A') are 400-class outcomes from the
     # API caller's perspective. See adr-extraction-validation.md §5.5.
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        raise HTTPException(status_code=400, detail=result.message)
+        raise HTTPException(
+            status_code=400, detail=sanitize_error_message(result.message)
+        )
     return command_response(result)
 
 

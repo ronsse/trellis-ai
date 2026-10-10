@@ -372,6 +372,40 @@ class TestLoadPolicies:
         with pytest.raises(ConfigError, match="index 1"):
             load_policies(stores_dir)
 
+    def test_invalid_policy_entry_omits_sentinel_from_message_and_mcp_reply(
+        self, tmp_path: Path
+    ) -> None:
+        """A synthetic sentinel in a bad policy field never reaches a caller.
+
+        Pre-fix, ``policy_source.py`` built the ``ConfigError`` message as
+        ``f"...: {exc}"``, and pydantic's own
+        ``str(exc)`` embeds ``input_value=<the policy's own field value>``.
+        A deployment's policy file can carry an operator-authored value
+        Trellis never chose, so this is the same class of leak as the
+        Measurement/Observation sites. The MCP server's ``_exception_detail``
+        (``trellis.mcp.server``) is the generic reply-text builder every
+        tool uses for a caught ``TrellisError`` — it passes a
+        ``TrellisError``'s own message through verbatim (see
+        ``render_exception_detail``'s docstring), so the describe-not-quote
+        discipline at the raise site is the only thing standing between a
+        policy file's own values and an agent-facing MCP reply.
+        """
+        from trellis.mcp.server import _exception_detail
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True)
+        sentinel = "XQ1BR6asQyYAJ6tcK6JnaWKZ"
+        (stores_dir / POLICY_FILENAME).write_text(
+            json.dumps({"policies": [{"policy_type": sentinel}]}),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_policies(stores_dir)
+
+        assert sentinel not in str(exc_info.value)
+        assert sentinel not in _exception_detail(exc_info.value)
+
     def test_empty_policies_list_is_not_an_error(self, tmp_path: Path) -> None:
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir(parents=True)
