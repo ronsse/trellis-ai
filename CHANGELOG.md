@@ -2065,7 +2065,7 @@ All notable changes to Trellis will be documented in this file.
   `(error_type, setting)` per process, describing the cause — the exception's
   type name and, for a `ConfigError`, its `setting` — never the exception's
   message or a traceback, which can echo a DSN or credential.
-  ([#848](https://github.com/ronsse/trellis-ai/pull/848))
+  ([#843](https://github.com/ronsse/trellis-ai/pull/843))
 - **The stored `PACK_ASSEMBLED.strategy_failures[].message` is now a
   sanitized summary, not a raw `str(exc)`.** A strategy's own exception text
   (a DSN fragment, a credential, a row value) reached this durable audit
@@ -2080,7 +2080,7 @@ All notable changes to Trellis will be documented in this file.
   instead of the raw-message `to_event_payload()` CLI rendering already uses.
   The axes block an agent-facing pack response carries
   (`format_failed_axes_note`) never reads either field.
-  ([#848](https://github.com/ronsse/trellis-ai/pull/848))
+  ([#843](https://github.com/ronsse/trellis-ai/pull/843))
 
 ## [0.9.0] - 2026-05-13
 
