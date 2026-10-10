@@ -21,7 +21,9 @@ from trellis.core.error_sanitize import (
     describe_yaml_error,
     sanitize_error_message,
     sanitized_error_payload,
+    summarize_exception,
 )
+from trellis.errors import StoreError, TrellisError, ValidationError
 
 #: A fake credential planted where PyYAML's ``str(exc)`` would quote it.
 _SENTINEL = "XQ1BR6asQyYAJ6tcK6JnaWKZ"
@@ -391,6 +393,86 @@ class TestPayload:
         # the message does not.
         assert payload["error_type"] == "RuntimeError"
         assert payload["message"] == SUPPRESSED_MARKER
+
+
+class TestSummarizeException:
+    """``summarize_exception`` — the structured shape audit/telemetry
+    events store for a caught error. Distinct from ``sanitized_error_payload``
+    above (a CLI/API envelope): an immutable audit event also gets
+    ``error_code``/``constraint`` as separate, filterable fields, and a
+    ``TrellisError``'s own ``.message`` is kept whole rather than cut to
+    one line, since Trellis composes that text itself.
+    """
+
+    def test_trellis_error_keeps_its_own_message_whole(self) -> None:
+        exc = TrellisError("line one\nline two", code="my_code")
+        assert summarize_exception(exc) == {
+            "error_type": "TrellisError",
+            "error_code": "my_code",
+            "message": "line one\nline two",
+        }
+
+    def test_generic_exception_keeps_only_the_first_line(self) -> None:
+        summary = summarize_exception(RuntimeError("line one\nline two"))
+        assert summary["message"] == "line one"
+        assert "line two" not in summary["message"]
+
+    def test_generic_exception_masks_a_quoted_value_on_its_first_line(self) -> None:
+        exc = RuntimeError('column "secret_value" rejected')
+        assert summarize_exception(exc)["message"] == 'column "..." rejected'
+
+    def test_error_code_prefers_sqlstate_over_sqlite_errorname_and_code(self) -> None:
+        class _FakeError(RuntimeError):
+            sqlstate = "23505"
+            sqlite_errorname = "SQLITE_READONLY"
+            code = "some_code"
+
+        assert summarize_exception(_FakeError("x"))["error_code"] == "23505"
+
+    def test_error_code_prefers_sqlite_errorname_over_code(self) -> None:
+        class _FakeError(RuntimeError):
+            sqlite_errorname = "SQLITE_READONLY"
+            code = "some_code"
+
+        assert summarize_exception(_FakeError("x"))["error_code"] == "SQLITE_READONLY"
+
+    def test_error_code_prefers_code_over_errno(self) -> None:
+        class _FakeError(RuntimeError):
+            code = "some_code"
+            errno = 5
+
+        assert summarize_exception(_FakeError("x"))["error_code"] == "some_code"
+
+    def test_error_code_falls_back_to_errno_last(self) -> None:
+        assert (
+            summarize_exception(OSError(2, "No such file or directory"))["error_code"]
+            == "2"
+        )
+
+    def test_error_code_none_when_nothing_applies(self) -> None:
+        assert summarize_exception(RuntimeError("plain"))["error_code"] is None
+
+    def test_constraint_key_absent_when_no_diag(self) -> None:
+        assert "constraint" not in summarize_exception(RuntimeError("plain"))
+
+    def test_constraint_key_present_when_diag_names_one(self) -> None:
+        class _Diag:
+            constraint_name = "users_email_key"
+
+        class _FakeError(RuntimeError):
+            diag = _Diag()
+
+        assert summarize_exception(_FakeError("x"))["constraint"] == "users_email_key"
+
+    def test_store_error_is_treated_as_a_trellis_error(self) -> None:
+        exc = StoreError("backend down", store="pg")
+        summary = summarize_exception(exc)
+        assert summary["error_type"] == "StoreError"
+        assert summary["message"] == "backend down"
+
+    def test_validation_error_s_default_code_survives(self) -> None:
+        summary = summarize_exception(ValidationError("bad field"))
+        assert summary["error_code"] == "VALIDATION_ERROR"
 
 
 class TestDescribeYamlError:

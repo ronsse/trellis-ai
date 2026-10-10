@@ -345,3 +345,81 @@ def sanitized_error_payload(exc: BaseException, **context: Any) -> dict[str, Any
         "message": sanitize_error_message(str(exc)),
         **context,
     }
+
+
+def _driver_error_code(exc: BaseException) -> str | None:
+    """Pick a structured error code off a caught exception, if one exists.
+
+    Checked in order, first match wins: a psycopg ``sqlstate`` (the
+    five-character Postgres SQLSTATE), a sqlite3 ``sqlite_errorname``
+    (e.g. ``"SQLITE_READONLY"``, Python 3.11+), a ``code`` attribute —
+    set independently by neo4j's driver exceptions (a dotted status such
+    as ``"Neo.ClientError.Schema.ConstraintValidationFailed"``) and by
+    Trellis's own :class:`~trellis.errors.TrellisError` family, so one
+    check covers both — and finally an ``OSError``'s numeric ``errno``.
+    Each of these is a stable, caller-defined identifier rather than
+    free text, so none needs :func:`sanitize_error_message`. Returns
+    ``None`` when the exception carries none of them.
+    """
+    sqlstate = getattr(exc, "sqlstate", None)
+    if isinstance(sqlstate, str) and sqlstate:
+        return sqlstate
+    sqlite_errorname = getattr(exc, "sqlite_errorname", None)
+    if isinstance(sqlite_errorname, str) and sqlite_errorname:
+        return sqlite_errorname
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code:
+        return code
+    errno = getattr(exc, "errno", None)
+    if isinstance(errno, int):
+        return str(errno)
+    return None
+
+
+def summarize_exception(exc: BaseException) -> dict[str, Any]:
+    """Build the audit-safe structured summary of a caught exception.
+
+    This is the shape Trellis's audit and telemetry events store for a
+    caught error — distinct from :func:`render_exception_detail` (a
+    caller-facing message) and :func:`sanitized_error_payload` (a CLI/API
+    error envelope): an immutable event is read back by a reader who
+    cannot ask a follow-up question, so it gets a structured summary
+    rather than one opaque sentence.
+
+    Returns a dict with:
+
+    * ``error_type`` — the exception's class name. Always safe: a type
+      name never contains payload data.
+    * ``error_code`` — see :func:`_driver_error_code`; ``None`` when the
+      exception carries none.
+    * ``message`` — for a :class:`~trellis.errors.TrellisError`,
+      :func:`sanitize_error_message` run on the error's own ``.message``
+      (Trellis composes that text itself without driver internals by
+      convention; the sanitizer still runs as defense-in-depth in case a
+      handler interpolated caller input into it). For any other
+      exception, the *first line* of ``str(exc)`` — a multi-line driver
+      error's ``DETAIL:``/``CONTEXT:`` continuation lines are the most
+      likely place for a quoted row value, and are dropped outright
+      rather than merely masked — then :func:`_mask_quoted` (so a
+      same-line quoted value, such as a Postgres ``Key
+      (email)=('a@b.com')`` row, does not survive as scannable text),
+      then :func:`sanitize_error_message` as a second layer over
+      anything the mask regex does not recognize as quoted.
+    * ``constraint`` — psycopg's ``diag.constraint_name``, only when the
+      driver names one; the key is omitted (not ``None``) otherwise, so
+      a reader can test for its presence rather than its value.
+    """
+    summary: dict[str, Any] = {
+        "error_type": type(exc).__name__,
+        "error_code": _driver_error_code(exc),
+    }
+    if isinstance(exc, TrellisError):
+        summary["message"] = sanitize_error_message(exc.message)
+    else:
+        text = str(exc)
+        first_line = text.splitlines()[0] if text else ""
+        summary["message"] = sanitize_error_message(_mask_quoted(first_line))
+    constraint = getattr(getattr(exc, "diag", None), "constraint_name", None)
+    if constraint:
+        summary["constraint"] = constraint
+    return summary

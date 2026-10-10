@@ -209,11 +209,16 @@ class TestMutationExecutor:
         returns ``CommandStatus.REJECTED`` (not FAILED)."""
         event_log = MagicMock()
         handler = MagicMock()
-        handler.handle.side_effect = ValidationError(
+        exc = ValidationError(
             "FK check failed",
             errors=["source missing", "target missing"],
             code="orphan_edge",
         )
+        # Duck-typed diag, same shape summarize_exception reads off a
+        # driver error — proves the constraint field is read generically,
+        # not only on the untyped-panic path's fake psycopg error below.
+        exc.diag = type("Diag", (), {"constraint_name": "edges_fk"})()  # type: ignore[attr-defined]
+        handler.handle.side_effect = exc
         executor = MutationExecutor(
             event_log=event_log,
             handlers={Operation.ENTITY_CREATE: handler},
@@ -231,6 +236,11 @@ class TestMutationExecutor:
         assert payload["reason"] == "orphan_edge"
         assert payload["status"] == CommandStatus.REJECTED
         assert "FK check failed" in payload["message"]
+        # The audit event also carries the error's type and the
+        # handler's own code as separate, filterable fields.
+        assert payload["error_type"] == "ValidationError"
+        assert payload["error_code"] == "orphan_edge"
+        assert payload["constraint"] == "edges_fk"
 
     def test_handler_validation_error_without_explicit_code_uses_default(
         self,
@@ -251,6 +261,35 @@ class TestMutationExecutor:
         assert result.status == CommandStatus.REJECTED
         payload = event_log.emit.call_args.kwargs["payload"]
         assert payload["reason"] == "handler_validate"
+
+    def test_handler_raised_store_error_audits_its_type_and_code(self) -> None:
+        """A handler-raised ``StoreError`` is the typed ``(StoreError,
+        TrellisError)`` catch, distinct from both the rejection catches
+        above and the untyped-panic catch below: FAILED, not REJECTED,
+        and the audit event carries the error's type and its (fixed)
+        ``STORE_ERROR`` code."""
+        event_log = MagicMock()
+        handler = MagicMock()
+        exc = StoreError("backend down", store="pg")
+        # Duck-typed diag, same shape summarize_exception reads off a
+        # driver error — proves the constraint field is read generically
+        # on the typed (StoreError, TrellisError) catch too, not only on
+        # the untyped-panic path's fake psycopg error below.
+        exc.diag = type("Diag", (), {"constraint_name": "pg_conn_pool"})()  # type: ignore[attr-defined]
+        handler.handle.side_effect = exc
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+        result = executor.execute(_cmd())
+
+        assert result.status == CommandStatus.FAILED
+        assert result.message == "Execution failed: backend down"
+        payload = event_log.emit.call_args.kwargs["payload"]
+        assert payload["message"] == "backend down"
+        assert payload["error_type"] == "StoreError"
+        assert payload["error_code"] == "STORE_ERROR"
+        assert payload["constraint"] == "pg_conn_pool"
 
 
 class TestIdempotencyCacheEviction:
@@ -776,3 +815,108 @@ class TestSQLiteDriverError:
         driver_text = "attempt to write a readonly database"
         assert result.message == "Execution failed: OperationalError"
         assert rejected[0].payload["message"] == driver_text
+        # The audit event also carries the error's type and the driver's
+        # own structured code as separate fields, so a reader can filter
+        # or group on them without parsing ``message``.
+        assert rejected[0].payload["error_type"] == "OperationalError"
+        assert rejected[0].payload["error_code"] == "SQLITE_READONLY"
+
+    def test_a_multiline_driver_error_s_audit_message_keeps_only_the_first_line(
+        self, tmp_path: Path
+    ) -> None:
+        """A driver error's continuation line can quote a row value; the
+        audit ``message`` must not carry it past the first line.
+
+        Synthesizes the shape a Postgres unique-violation renders as: a
+        clean first line, then a ``DETAIL:`` line quoting the offending
+        row value, then a ``CONTEXT:`` line. This fails on base/main,
+        where the panic-path catch audits ``str(exc)`` whole — the
+        quoted value and both continuation lines reach the event.
+        """
+        log = SQLiteEventLog(tmp_path / "events.db")
+        driver_text = (
+            "value too long for type character varying(50)\n"
+            "DETAIL:  Key (email)=('syn-secret@example.com') already exists.\n"
+            "CONTEXT:  COPY entities, line 3"
+        )
+        handler = MagicMock()
+        handler.handle.side_effect = ValueError(driver_text)
+        executor = MutationExecutor(
+            event_log=log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        result = executor.execute(_cmd())
+
+        assert result.status == CommandStatus.FAILED
+        rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert len(rejected) == 1
+        audit_message = rejected[0].payload["message"]
+        assert audit_message == "value too long for type character varying(50)"
+        assert "syn-secret@example.com" not in audit_message
+        assert "DETAIL" not in audit_message
+        assert "CONTEXT" not in audit_message
+        assert rejected[0].payload["error_type"] == "ValueError"
+        # No code applies to a plain ValueError, so the key stays absent
+        # from the payload entirely — the same convention ``reason`` and
+        # ``policy_warnings`` already follow.
+        assert "error_code" not in rejected[0].payload
+        # The caller-facing CommandResult.message is unchanged by this —
+        # it already named only the type, never the driver's text.
+        assert result.message == "Execution failed: ValueError"
+
+    def test_a_psycopg_shaped_error_s_sqlstate_and_constraint_reach_the_audit(
+        self, tmp_path: Path
+    ) -> None:
+        """A psycopg-style driver exception's ``sqlstate`` and
+        ``diag.constraint_name`` land on the audit event as ``error_code``
+        and ``constraint``.
+
+        psycopg is not installed in this environment (an optional extra),
+        so the real exception class is unavailable; this fakes its shape
+        — a plain ``Exception`` subclass carrying the same attributes
+        psycopg's own ``Error`` exposes — which is all
+        ``summarize_exception`` reads (duck-typed, not an isinstance
+        check).
+        """
+
+        class _Diag:
+            constraint_name = "entities_name_key"
+
+        class _FakePsycopgError(RuntimeError):
+            """Carries psycopg.Error's ``sqlstate``/``diag`` shape.
+
+            Subclasses ``RuntimeError`` (not bare ``Exception``) so it is
+            one of the executor's enumerated panic-catch types even
+            without the real ``psycopg`` package installed — production
+            code recognizes the real ``psycopg.Error`` the same way
+            (``_optional_driver_panics``), by reading it out of
+            ``sys.modules`` rather than importing it.
+            """
+
+            sqlstate = "23505"
+            diag = _Diag()
+
+        log = SQLiteEventLog(tmp_path / "events.db")
+        handler = MagicMock()
+        handler.handle.side_effect = _FakePsycopgError(
+            'duplicate key value violates unique constraint "entities_name_key"'
+        )
+        executor = MutationExecutor(
+            event_log=log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        result = executor.execute(_cmd())
+
+        assert result.status == CommandStatus.FAILED
+        rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert len(rejected) == 1
+        assert rejected[0].payload["error_type"] == "_FakePsycopgError"
+        assert rejected[0].payload["error_code"] == "23505"
+        assert rejected[0].payload["constraint"] == "entities_name_key"
+        # The constraint name is also quoted in the error's own text; the
+        # message field masks it rather than leaving it readable twice.
+        assert rejected[0].payload["message"] == (
+            'duplicate key value violates unique constraint "..."'
+        )

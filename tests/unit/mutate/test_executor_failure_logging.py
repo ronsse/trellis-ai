@@ -204,28 +204,41 @@ def test_a_failed_idempotency_read_logs_its_type_and_not_its_cause(
 
 
 @pytest.mark.parametrize(
-    ("handler", "message", "result_message"),
+    ("handler", "message", "result_message", "error_type", "error_code"),
     [
         pytest.param(
             _MappedDriverFailure(),
             _TYPED_MESSAGE,
             f"Execution failed: {_TYPED_MESSAGE}",
+            "StoreError",
+            "STORE_ERROR",
             id="typed",
         ),
         pytest.param(
-            _Panic(), _PANIC_MESSAGE, "Execution failed: RuntimeError", id="unexpected"
+            _Panic(),
+            _PANIC_MESSAGE,
+            "Execution failed: RuntimeError",
+            "RuntimeError",
+            None,
+            id="unexpected",
         ),
     ],
 )
 def test_a_handler_failure_returns_failed_and_audits_one_rejection(
-    handler: CommandHandler, message: str, result_message: str
+    handler: CommandHandler,
+    message: str,
+    result_message: str,
+    error_type: str,
+    error_code: str | None,
 ) -> None:
     """The FAILED result and the MUTATION_REJECTED event a failure produces.
 
     Every field is pinned, and the command's optional fields are set to distinct
     values, so a change to how the failure is logged cannot move what the caller
     and the audit see. ``executed_at`` is a clock and ``schema_version`` the
-    model's own.
+    model's own. ``error_type`` is always present; ``error_code`` only when
+    ``summarize_exception`` found one (``StoreError``'s fixed code; a bare
+    ``RuntimeError`` has none, so the key is absent rather than ``None``).
     """
     event_log = MagicMock()
     event_log.has_idempotency_key.return_value = False
@@ -254,20 +267,24 @@ def test_a_handler_failure_returns_failed_and_audits_one_rejection(
         "warnings": [],
         "metadata": {},
     }
+    expected_payload = {
+        "command_id": _COMMAND_ID,
+        "operation": Operation.ENTITY_CREATE,
+        "status": CommandStatus.FAILED,
+        "message": message,
+        "requested_by": "test:synthetic",
+        "idempotency_key": "idem-synthetic-1",
+        "error_type": error_type,
+    }
+    if error_code is not None:
+        expected_payload["error_code"] = error_code
     assert event_log.emit.call_args_list == [
         call(
             EventType.MUTATION_REJECTED,
             "mutation_executor",
             entity_id="node-synthetic-1",
             entity_type="entity",
-            payload={
-                "command_id": _COMMAND_ID,
-                "operation": Operation.ENTITY_CREATE,
-                "status": CommandStatus.FAILED,
-                "message": message,
-                "requested_by": "test:synthetic",
-                "idempotency_key": "idem-synthetic-1",
-            },
+            payload=expected_payload,
         )
     ]
 

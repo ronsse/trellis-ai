@@ -376,6 +376,41 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`MutationExecutor`'s audit events carry a structured error summary,
+  not just the exception's type name.** A store refusal reaching the
+  untyped panic catch logged `error_type=ValueError` on the operator's
+  structlog line but the `mutation.rejected` / `mutation.executed`
+  `Event.payload` itself carried none of that — an operator reading the
+  EventLog (not stderr) saw only a bare `message` and had to go dig up
+  the log line to learn even the exception's type, let alone a driver
+  code or a violated constraint. `error_sanitize.py` gains
+  `summarize_exception(exc) -> dict`, built on #829's describe helpers:
+  `error_type` (`type(exc).__name__`, always present), `error_code`
+  (`_driver_error_code` — `sqlstate`, then `sqlite_errorname`, then
+  `code`, then `errno`, first one present, duck-typed so it reads a
+  `psycopg`/`sqlite3` exception's own attributes without importing
+  either), `message` (a `TrellisError`'s own `.message` kept whole, since
+  it is already a raiser-authored summary; a generic exception's `str()`
+  truncated to its first line and run through the existing
+  `_mask_quoted`, since a multi-line driver error's later lines are
+  where query text and values live), and `constraint`
+  (`exc.diag.constraint_name` when present, psycopg's shape). All three
+  in-scope catches in `MutationExecutor.execute` — the `ValidationError`
+  rejection, the typed `(StoreError, TrellisError)` failure, and the
+  untyped panic — now thread `error_type` / `error_code` / `constraint`
+  through `_emit_rejection` / `_emit` into the audit payload, added only
+  when not `None` (the same convention `reason` and `policy_warnings`
+  already use, so a payload with no code or no constraint stays
+  byte-identical to before this change). `CommandResult.message` — what
+  callers see — is untouched at all three sites. This does not change
+  what #831's "Execution failed: ValueError" scenario *says*: that
+  message was already a clean one-line `str(exc)` with nothing to
+  sanitize, so it reads the same; what changes is that the audit event
+  now also carries `error_type: "ValueError"` as a separate, queryable
+  field instead of only existing in the structlog line. #831's deeper
+  complaint — that the bare-ValueError case names neither the offending
+  field nor the row — is not addressed by this change.
+  ([#PENDING](https://github.com/ronsse/trellis-ai/pull/PENDING))
 - **The SQLite event log and both the SQLite and Postgres graph stores
   refuse a NaN/Infinity float at write time, instead of silently storing
   JSON text a stricter reader can't parse.** Python's `json.dumps` writes
