@@ -6,7 +6,7 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
-- **Advisories and Policies tabs in the web UI (#PR_NUMBER).** Both surfaces
+- **Advisories and Policies tabs in the web UI (#850).** Both surfaces
   existed only as CLI/REST before this: `GET /advisories` (+
   `POST /advisories/generate`, an admin action gated behind an inline
   two-step confirm, never `window.confirm`) and `/policies*` (list is
