@@ -3950,10 +3950,11 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
     singletons below build best-effort: winning the init race is worth
     it, but a build failure must NOT sink the server — the tool paths
     handle it at call time (semantic search → keyword/graph, an embedder
-    that failed to resolve is resolved again by each later call and
-    errors while it still fails, embed-on-ingest is fail-soft, memory
-    extraction is feature-flagged). Forcing them to succeed would make
-    each one a hard http boot dependency the stdio path never had.
+    that failed to resolve degrades to keyword + graph with
+    `semantic: embedder_failed` in the axes block, embed-on-ingest is
+    fail-soft, memory extraction is feature-flagged). Forcing them to
+    succeed would make each one a hard http boot dependency the stdio
+    path never had.
     """
     for name in _REQUIRED_KNOWLEDGE_STORES:
         getattr(registry.knowledge, name)
@@ -3979,9 +3980,10 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
             # not a traceback. This is a startup signal to act on, not
             # evidence every component degrades quietly once the server is
             # serving traffic — the three fail differently at call time:
-            #   - embedding_fn: resolved again by every later call (a raise
-            #     caches nothing), and raises at every retrieval call site
-            #     until the setting is fixed.
+            #   - embedding_fn: build_strategies (retrieve/strategies.py)
+            #     catches the resolve failure too, and degrades to
+            #     keyword + graph with `semantic: embedder_failed` in the
+            #     pack's axes block — it does not raise either.
             #   - vector_store: build_strategies (retrieve/strategies.py)
             #     catches the init failure and degrades retrieval to
             #     keyword + graph, with `semantic: misconfigured` in the

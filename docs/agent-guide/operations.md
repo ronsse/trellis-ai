@@ -1460,13 +1460,14 @@ trellis retrieve pack --intent <text> [--domain DOMAIN] [--agent AGENT_ID] [--ma
 
 **`--quiet` means a different population on `retrieve search`.** Same flag, same one-id-per-line shape, and `search` excludes `<parent>#chunk-N` rows by pushing the exclusion into the store — so its line count refills with whole documents rather than shrinking. Pipelines that consume both surfaces cannot assume one id vocabulary.
 
-**The semantic axis is reported, not assumed.** `build_strategies` adds it only when an embedder resolves, and drops it with an `info` log line the CLI's `WARNING` default never prints. The `axes` block says which of four things happened:
+**The semantic axis is reported, not assumed.** `build_strategies` adds it only when an embedder resolves, and drops it with an `info` log line the CLI's `WARNING` default never prints — except when resolving the embedder itself raises (Q5-A, #838), which logs `semantic_search_embedder_resolve_failed` at `WARNING`, once per distinct cause per process, so it prints at the default level. The `axes` block says which of five things happened:
 
 | `axes.semantic` | Meaning |
 |---|---|
 | `ran` | The axis exists and ran |
 | `not_configured` | No `embeddings:` provider and no `TRELLIS_EMBEDDING_FN` — this pack is keyword + graph only |
 | `misconfigured` | An embedder resolved but the vector backend failed to initialise |
+| `embedder_failed` | `registry.embedding_fn` raised instead of resolving — keyword and graph still run; `axes.embedder_error_type` names the exception type and, for a `ConfigError`, `axes.embedder_setting` names the setting, never the message |
 | `failed` | The axis exists and raised during *this* build; see `PACK_ASSEMBLED.strategy_failures` |
 
 Text output prints a sentence for every state but `ran`.
@@ -1505,13 +1506,13 @@ trellis retrieve pack --intent "deploy checklist for staging" --domain platform 
   "retrieval_report": {"strategies_used": ["keyword", "graph"], "candidates_found": 55, "items_selected": 5, "rejected_items": [], "budget_trace": []},
   "budget": {"max_items": 10, "max_tokens": 8000},
   "withholding": {"total": 5, "by_reason": {"max_items": 5}, "withheld_item_ids": ["01JRKA…"], "non_absence_reasons": [], "section_filtered": 0, "served_count": 5},
-  "axes": {"available": ["keyword", "graph"], "ran": ["keyword", "graph"], "failed": [], "semantic": "not_configured"}
+  "axes": {"available": ["keyword", "graph"], "ran": ["keyword", "graph"], "failed": [], "semantic": "not_configured", "embedder_error_type": null, "embedder_setting": null}
 }
 ```
 
 `withholding` is the builder's stamped summary verbatim, so it carries `withheld_item_ids` as well as the counts — #404's counts-and-reasons-only rule scopes the *rendered note* an agent reads, not this payload, whose reader already holds the stores. `retrieval_report` is abbreviated above; it also carries `queries_run`, `duration_ms` and `schema_version`, and its `rejected_items` / `budget_trace` are populated on any pack that hit a budget.
 
-**`POST /api/v1/packs/sectioned` carries the same `axes` block** (#783). `SectionedPackResponse.axes` is the identical `{available, ran, failed, semantic}` shape, read off the first section's `strategies_used` — `build_sectioned` runs every strategy once and gives every section that one list, so the first stands for all. `sections=[]` is refused before any build with `422` and `detail: "sections must not be empty"`, the reason MCP's `get_context` / `get_sectioned_context` give for the same input, so every `200` has a section to read `axes` off.
+**`POST /api/v1/packs/sectioned` carries the same `axes` block** (#783). `SectionedPackResponse.axes` is the identical `{available, ran, failed, semantic, embedder_error_type, embedder_setting}` shape, read off the first section's `strategies_used` — `build_sectioned` runs every strategy once and gives every section that one list, so the first stands for all. `sections=[]` is refused before any build with `422` and `detail: "sections must not be empty"`, the reason MCP's `get_context` / `get_sectioned_context` give for the same input, so every `200` has a section to read `axes` off.
 
 **MCP renders a markdown line, not a JSON block.** `get_context`, `search`, and — since #789 — `get_context(sections=...)`, `get_objective_context`, `get_task_context` and `get_sectioned_context` all add one line naming any axis in `axes.failed`, to both a populated and an empty reply:
 
@@ -1529,7 +1530,15 @@ A `misconfigured` semantic axis (an embedder resolved but the vector backend nev
 
 Same facts as the CLI's `misconfigured` sentence (`SEMANTIC_AXIS_NOTES`), never the exception text. A failed axis and a misconfigured semantic axis are independent states a single build can hit together, so both lines render when both apply; a reply with neither has no such line.
 
-**The Python SDK renders the same two lines from the response's `axes` block.** `TrellisClient.get_objective_context` / `get_task_context`, sync and async, pass it to `trellis_wire.axes.axis_note_from_payload`, which renders MCP's wording through the same two formatters (defined in `trellis_wire.axes`, re-exported from `trellis.retrieve.builder_factory`). A response without `axes`, or with `axes: null`, renders no line.
+An `embedder_failed` semantic axis (Q5-A, #838 — `registry.embedding_fn` itself raised, before any strategy was built) adds a third, independent line:
+
+```
+**Semantic retrieval unavailable:** the embedder failed to resolve (<error_type>[: <setting>]), so this pack has no semantic results. Fix the setting, then run `trellis admin reindex-vectors`.
+```
+
+`<error_type>` and, for a `ConfigError`, `<setting>` name the cause, never the exception message. All three lines are independent and render together when more than one applies.
+
+**The Python SDK renders the same three lines from the response's `axes` block.** `TrellisClient.get_objective_context` / `get_task_context`, sync and async, pass it to `trellis_wire.axes.axis_note_from_payload`, which renders MCP's wording through the same three formatters (`format_failed_axes_note`, `format_misconfigured_semantic_note`, `format_embedder_failed_note` — defined in `trellis_wire.axes`, the first two re-exported from `trellis.retrieve.builder_factory`). A response without `axes`, or with `axes: null`, renders no line.
 
 > **This is a CLI contract change.** Before #410 the payload was
 > `{"status", "intent", "domain", "agent_id", "count", "include_chunks", "items"}`

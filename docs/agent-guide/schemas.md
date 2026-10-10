@@ -523,7 +523,7 @@ A scalar / numeric / boolean measurement attached to an entity. Machine-comparab
 from trellis.retrieve import ObservationSearch, PackBuilder
 from trellis.retrieve.strategies import build_strategies
 
-strategies = build_strategies(registry)
+strategies = build_strategies(registry).strategies
 strategies.append(ObservationSearch(registry.knowledge.graph_store))
 pack = PackBuilder(strategies=strategies).build(
     intent="why is this column flagged?",

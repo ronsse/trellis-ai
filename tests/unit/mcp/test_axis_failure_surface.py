@@ -471,10 +471,25 @@ def test_get_sectioned_context_clean_pack_has_no_axis_note(
 # through a ``temp_registry`` whose ``embedding_fn`` property raises --
 # the exact scenario that answered 409/INTERNAL_ERROR/exit 5 across REST,
 # MCP and the CLI before this fix (q-review.md #9's acceptance test).
+#
+# Both are parametrized over the flat and sectioned tools (mirrors the
+# ``_SECTIONED_CALLS`` flat/sectioned split above, :395) -- ``get_context``
+# and ``get_sectioned_context`` each resolve the builder's outcome through
+# their own code path (``_flat_context`` vs. ``_sectioned_context``), and
+# #838 gate R1 found the sectioned half of both untested: a dropped
+# ``embedder_resolve_failure`` kwarg at the sectioned ``describe_axes``
+# call, or a sectioned build that never records the failure into
+# ``PACK_ASSEMBLED``, both passed the flat-only suite.
+
+_Q5A_CALLS: dict[str, Callable[[], str]] = {
+    "get_context": lambda: get_context(INTENT),
+    "get_sectioned_context": lambda: get_sectioned_context(INTENT, _CUSTOM_SECTIONS),
+}
 
 
+@pytest.mark.parametrize("tool_name", sorted(_Q5A_CALLS))
 def test_get_context_degrades_instead_of_raising(
-    temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch, tool_name: str
 ) -> None:
     def _boom(_self: object) -> None:
         exc = ConfigError(
@@ -487,7 +502,7 @@ def test_get_context_degrades_instead_of_raising(
         "doc-a", "alpha bravo runbook drain queue"
     )
 
-    result = get_context(INTENT)
+    result = _Q5A_CALLS[tool_name]()
 
     assert not result.startswith("Error")
     assert "**Semantic retrieval unavailable:**" in result
@@ -502,8 +517,9 @@ def test_get_context_degrades_instead_of_raising(
     assert failures[0]["error_class"] == "ConfigError"
 
 
+@pytest.mark.parametrize("tool_name", sorted(_Q5A_CALLS))
 def test_get_context_degrades_for_an_uninstalled_backend_too(
-    temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch, tool_name: str
 ) -> None:
     """Not just the base ConfigError -- a subclass raised the same way."""
 
@@ -512,7 +528,7 @@ def test_get_context_degrades_for_an_uninstalled_backend_too(
 
     monkeypatch.setattr(StoreRegistry, "embedding_fn", property(_boom))
 
-    result = get_context(INTENT)
+    result = _Q5A_CALLS[tool_name]()
 
     assert not result.startswith("Error")
     assert "(BackendNotInstalledError: backend.openai)" in result

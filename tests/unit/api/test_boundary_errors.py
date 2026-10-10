@@ -218,14 +218,29 @@ class TestTheOtherConfigErrorTheSweepFound:
     ``tests/unit/wire/test_axes.py``.
     """
 
+    @pytest.mark.parametrize(
+        ("endpoint", "request_body"),
+        [
+            ("/api/v1/packs", {"intent": "anything"}),
+            (
+                "/api/v1/packs/sectioned",
+                {"intent": "anything", "sections": [{"name": "all"}]},
+            ),
+        ],
+        ids=["flat", "sectioned"],
+    )
     def test_an_uninstalled_backend_degrades_the_pack_instead_of_raising(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        endpoint: str,
+        request_body: dict[str, object],
     ) -> None:
         def _boom(_self: object) -> None:
             raise BackendNotInstalledError(backend_name="openai", extra="llm-openai")
 
         monkeypatch.setattr(StoreRegistry, "embedding_fn", property(_boom))
-        resp = client.post("/api/v1/packs", json={"intent": "anything"})
+        resp = client.post(endpoint, json=request_body)
         body = resp.json()
 
         assert resp.status_code == 200

@@ -1022,9 +1022,10 @@ fix; `reason` in a `run_embed_on_ingest` summary carries the same two fields
 and never the exception's own message text — and retrieval degrades instead
 of failing: keyword and graph still run, the pack carries `axes.semantic ==
 "embedder_failed"` plus `axes.embedder_error_type` / `axes.embedder_setting`
-(the same two fields, never the message), and `PACK_ASSEMBLED.strategy_
-failures` records one semantic entry per build without counting toward, or
-blocking, a required-strategy or all-axes-failed refusal.
+(the same two fields, never the message), and
+`PACK_ASSEMBLED.strategy_failures` records one semantic entry per build
+without counting toward, or blocking, a required-strategy or
+all-axes-failed refusal.
 
 A broken `vector_store` resolve logs the same `embed_on_ingest_resolve_failed`
 (or `mcp_prewarm_optional_unavailable`) event with `component=vector_store`,

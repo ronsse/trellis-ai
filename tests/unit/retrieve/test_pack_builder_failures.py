@@ -97,11 +97,12 @@ class TestAllStrategiesFailRaises:
         names = {f.strategy for f in excinfo.value.strategy_failures}
         assert names == {"kw", "sem", "graph"}
 
+    @pytest.mark.parametrize("build_kind", ["flat", "sectioned"])
     def test_an_embedder_resolve_failure_never_masks_the_all_failed_raise(
-        self,
+        self, build_kind: str
     ) -> None:
         """Q5-A: a failed-to-resolve embedder must not count toward,
-        or block, the all-failed check below it.
+        or block, the all-failed check below it -- on either build path.
 
         The semantic axis here never reached ``self._strategies`` at all
         — ``build_strategies`` drops it before construction when the
@@ -115,7 +116,10 @@ class TestAllStrategiesFailRaises:
         ``False`` and the all-failed raise would silently stop firing —
         a pack with zero working axes reported as successfully
         assembled, the exact silent-empty-pack shape C2 Phase 4 exists
-        to prevent, reopened one layer up by this feature.
+        to prevent, reopened one layer up by this feature. ``build`` and
+        ``build_sectioned`` each run this ordering independently (#838
+        gate R1), so both are parametrized here rather than pinning only
+        the flat path.
         """
         s1 = _failing_strategy("kw", RuntimeError("a"))
         s2 = _failing_strategy("graph", RuntimeError("c"))
@@ -127,7 +131,12 @@ class TestAllStrategiesFailRaises:
             ),
         )
         with pytest.raises(PackAssemblyError) as excinfo:
-            builder.build("q")
+            if build_kind == "flat":
+                builder.build("q")
+            else:
+                builder.build_sectioned(
+                    "q", sections=[SectionRequest(name="default")]
+                )
         assert "All 2 configured strategies failed" in str(excinfo.value)
         # Exactly the two real strategies -- the embedder-resolve-failure
         # entry is never part of what tripped this raise.

@@ -659,7 +659,10 @@ All notable changes to Trellis will be documented in this file.
   inside `build_strategies`'s own `try`, and the outcome
   (`BuildStrategiesResult.embedder_resolve_failure`) flows into
   `describe_axes` once, so none of the five surfaces re-read
-  `registry.embedding_fn` to render it. A new axes state,
+  `registry.embedding_fn` to render it. **`build_strategies` now returns
+  `BuildStrategiesResult`, a `NamedTuple`, instead of a bare
+  `list[SearchStrategy]`** — existing callers take `.strategies` for the
+  list they used to get back directly. A new axes state,
   `semantic: "embedder_failed"`, carries `embedder_error_type` and
   `embedder_setting` (the exception's type name and, when it names one,
   the broken setting — never its message) and a note pointing at
