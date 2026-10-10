@@ -65,7 +65,7 @@ REQUIRED_LEARNING_PARAMETER_KEYS: tuple[str, ...] = (
     LEARNING_NOISE_RETRY_KEY,
 )
 
-# --- Readable fallback names (#e159) ---------------------------------------
+# --- Readable fallback names (#845) ---------------------------------------
 #
 # A candidate whose source item is a plain ``save_memory`` document has no
 # ``title``/``capture_title``/``name`` (see ``_item_attribution`` in
@@ -83,7 +83,7 @@ _FALLBACK_NAME_FRONTMATTER_RE = re.compile(
 _FALLBACK_NAME_HEADING_RE = re.compile(r"\A#{1,6}[ \t]+")
 _FALLBACK_NAME_MAX_CHARS = 96
 
-# --- Promotable digest (#e159) ----------------------------------------------
+# --- Promotable digest (#845) ----------------------------------------------
 #
 # A ``promote_guidance`` candidate is "promotable" for the digest only once
 # at least one grader has cited it helpful and none has cited it unhelpful —
@@ -235,7 +235,7 @@ def _build_promotable_digest(
 ) -> dict[str, Any]:
     """Summarize ``promote_guidance`` candidates with net-positive citations.
 
-    Surfacing only (#e159): this counts and ranks waiting candidates so a
+    Surfacing only (#845): this counts and ranks waiting candidates so a
     reviewer knows to look — it never promotes anything itself. Eligibility
     is ``recommendation_type == "promote_guidance"`` (the narrower literal,
     not :data:`PROMOTE_RECOMMENDATIONS`, which also admits
@@ -475,7 +475,7 @@ def analyze_learning_observations(
         "candidates": candidates,
         # ``promotable`` is deliberately NOT computed here: its
         # ``precedent_name`` entries must reflect the readable-name
-        # fallback (#e159), which only runs once a ``DocumentStore`` is
+        # fallback (#845), which only runs once a ``DocumentStore`` is
         # reachable — at artifact-write time, never in this pure,
         # store-free aggregator. See ``write_learning_review_artifacts``,
         # which computes and attaches it after applying that fallback.
@@ -577,7 +577,7 @@ def write_learning_review_artifacts(
     (both CLI surfaces do, for ``--format json``) sees exactly what landed
     on disk rather than a stale pre-write copy:
 
-    * **Readable names (#e159).** Any candidate with no ``title`` keeps a
+    * **Readable names (#845).** Any candidate with no ``title`` keeps a
       bare-``item_id`` ``precedent_name`` from :func:`analyze_learning_observations`
       (which is store-free by design). When ``document_store`` is given,
       each such candidate's item is looked up and, if resolved, its
@@ -587,7 +587,7 @@ def write_learning_review_artifacts(
       promoted-name override (``promotion_name``, built below and in
       :func:`build_learning_promotion_payloads`) still wins over whatever
       ``precedent_name`` ends up being.
-    * **Promotable digest (#e159).** ``report["promotable"]`` is (re)computed
+    * **Promotable digest (#845).** ``report["promotable"]`` is (re)computed
       from the candidates *after* the fallback above, so its ``top`` entries
       carry the same readable names — a digest built from the pure
       aggregator's output would otherwise echo the bare ids this fallback

@@ -6,7 +6,7 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
-- **Promotable-candidate digest and readable fallback names (#e159).** Prod
+- **Promotable-candidate digest and readable fallback names (#845).** Prod
   had scored 796 learning candidates with 0 ever promoted, and 13 of the top
   15 `promote_guidance` candidates carried an ugly bare-item-id
   `precedent_name` because `title` was missing at scoring time. Two fixes,

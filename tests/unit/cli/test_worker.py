@@ -480,7 +480,7 @@ class TestWorkerCurate:
         # Promote-half artifacts are written for human review.
         assert data["candidates_path"] is not None
         assert Path(data["candidates_path"]).exists()
-        # Promotable digest (#e159): this seed's one candidate has 3
+        # Promotable digest (#845): this seed's one candidate has 3
         # helpful citations and 0 unhelpful, so it is promotable end to
         # end through the real JSON CLI payload, not just the unit tests
         # on the pure digest builder.

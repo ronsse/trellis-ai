@@ -429,7 +429,7 @@ class CurateCycleResult:
     learning_candidates: int = 0
     candidates_path: str | None = None
     decisions_path: str | None = None
-    #: Surfacing-only digest (#e159) of ``promote_guidance`` candidates with
+    #: Surfacing-only digest (#845) of ``promote_guidance`` candidates with
     #: net-positive grader evidence — ``{"count": int, "top": [...]}``, from
     #: ``write_learning_review_artifacts``'s ``report["promotable"]``.
     #: ``{"count": 0, "top": []}`` on a dry run or a skipped stage, same as
@@ -914,7 +914,7 @@ def _curate_stage_learning(
     Observations are always scored; artifacts are written to disk only
     outside dry-run. Promotion itself stays human-gated.
 
-    ``learning_promotable`` (#e159) — the count/top-5 digest of
+    ``learning_promotable`` (#845) — the count/top-5 digest of
     ``promote_guidance`` candidates with net-positive grader evidence — is
     computed by ``write_learning_review_artifacts`` (it needs
     ``document_store`` for the readable-name fallback feeding its ``top``
@@ -998,7 +998,7 @@ def _render_cycle_text(result: CurateCycleResult) -> None:
     )
     promotable_count = int(result.learning_promotable.get("count", 0) or 0)
     if promotable_count:
-        # Surfacing only (#e159) — nothing here promotes anything; it just
+        # Surfacing only (#845) — nothing here promotes anything; it just
         # tells an operator reading the nightly log that candidates are
         # waiting, which until now nothing did.
         console.print(
