@@ -243,6 +243,26 @@ def _reset_write_provenance() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_embedder_resolve_failure_log_cache() -> Iterator[None]:
+    """Drop the once-per-cause embedder-resolve-failure log cache.
+
+    :func:`trellis.retrieve.embed_ingest_hook._warn_embedder_resolve_failed_once`
+    is a ``functools.cache`` keyed on ``(error_type, setting)`` so a
+    persistently broken embedder warns once per process, not once per
+    ingest. Without this reset, two tests across *any* file that hit a
+    resolve failure with the same cause would see the second test's
+    warning silently swallowed by the first's cache entry — the same
+    order-dependent flake ``_reset_write_provenance`` above guards
+    against for the write-provenance stamp.
+    """
+    from trellis.retrieve.embed_ingest_hook import _warn_embedder_resolve_failed_once
+
+    _warn_embedder_resolve_failed_once.cache_clear()
+    yield
+    _warn_embedder_resolve_failed_once.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_project_stamp(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Unset ``TRELLIS_PROJECT`` and drop the memoized project around every test.
 
