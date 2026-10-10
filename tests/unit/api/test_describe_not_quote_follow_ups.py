@@ -35,6 +35,7 @@ sites this file does not re-cover.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,25 @@ _OS_ERROR_MARKER = "osmarker-glint-93af"
 #: Shaped like `sanitize_error_message`'s unquoted `key=value` deny-list
 #: entry, matching the convention in test_sanitize_error_message_wraps.py.
 _SECRET = "api_key=s3cr3t-leak-9f8e7d6c5b4a"  # noqa: S105 — test placeholder, not a real credential
+
+#: A clean REJECTED message -- no deny-list shape at all. A fix that
+#: wraps `command_response`/`BulkItemResult` in a constant suppression
+#: marker regardless of status would still make `_SECRET` disappear, so
+#: asserting only its absence cannot tell "sanitized" from "replaced
+#: outright"; this value pins the real text must still arrive.
+_CLEAN_REJECTED_MESSAGE = "Node not found: d1"
+
+#: 48 characters -- long enough to trip `sanitize_error_message`'s
+#: 40-char long-opaque-token rule, same as the gate's probe. A real
+#: entity name, not secret-shaped, so gating the wrap by status is what
+#: keeps it readable on a SUCCESS result.
+_LONG_NAME = "int_customer_orders_aggregated_by_month_v2_daily"
+
+#: A sha256 hex digest -- 64 characters, also past the long-token floor.
+#: `evidence.ingest:<sha256>` is the in-tree idempotency-key convention
+#: (src/trellis/mutate/evidence_ingest.py); a DUPLICATE message built
+#: from one must survive, not be replaced by the suppression marker.
+_DIGEST_KEY = hashlib.sha256(b"evidence.ingest:probe-idempotency-key").hexdigest()
 
 
 @pytest.fixture(autouse=True)
@@ -129,23 +149,40 @@ def client(registry: StoreRegistry) -> TestClient:
             },
             "subject_entity_id",
         ),
+        (
+            "/api/v1/packs/sectioned",
+            {"intent": "probe", "sections": [{"name": "s1"}]},
+            "schema_version",
+        ),
     ],
     ids=[
         "ingest.py:trace",
         "ingest.py:evidence",
         "observations.py:observation",
         "observations.py:measurement",
+        "retrieve.py:sectioned_pack",
     ],
 )
 def test_validation_422_never_quotes_the_rejected_value(
     client: TestClient, path: str, body: dict[str, Any], corrupt_field: str
 ) -> None:
     corrupted = dict(body)
-    # A dict where a str was required: pydantic's own str(exc) embeds
-    # `input_value={'leak': 'nightshade-4471'}` for this failure; the
-    # error TYPE ("string_type") never varies with the value, only the
-    # dropped input_value clause does.
-    corrupted[corrupt_field] = {"leak": _VALIDATION_MARKER}
+    if path == "/api/v1/packs/sectioned":
+        # The bad field lives on a per-section dict, not the request's
+        # own top level -- `req.sections` stays a valid `list[dict]` so
+        # FastAPI's own request validation passes and only
+        # `SectionRequest(**s)` inside the route catches the corruption.
+        section = {
+            **corrupted["sections"][0],
+            corrupt_field: {"leak": _VALIDATION_MARKER},
+        }
+        corrupted["sections"] = [section]
+    else:
+        # A dict where a str was required: pydantic's own str(exc) embeds
+        # `input_value={'leak': 'nightshade-4471'}` for this failure; the
+        # error TYPE ("string_type") never varies with the value, only the
+        # dropped input_value clause does.
+        corrupted[corrupt_field] = {"leak": _VALIDATION_MARKER}
 
     resp = client.post(path, json=corrupted)
 
@@ -204,44 +241,144 @@ def test_unreadable_candidates_file_never_quotes_the_os_error_text(
 
 class _StubBatchExecutor:
     """A ``build_curate_executor(...)`` replacement for ``/commands/batch``:
-    ``execute_batch`` ignores the batch and returns one fixed REJECTED
-    result per command."""
+    ``execute_batch`` ignores the batch's command content and returns
+    *results* in order, one per command. A single ``CommandResult``
+    (not a list) repeats for every command, matching the original
+    one-result-fits-all stub."""
 
-    def __init__(self, result: CommandResult) -> None:
-        self._result = result
+    def __init__(self, results: CommandResult | list[CommandResult]) -> None:
+        self._results = results if isinstance(results, list) else [results]
 
     def execute_batch(self, batch: object) -> list[CommandResult]:
         commands = getattr(batch, "commands", [])
-        return [self._result for _ in commands] or [self._result]
+        n = len(commands) or 1
+        return [self._results[i % len(self._results)] for i in range(n)]
 
 
 class _StubBulkExecutor:
     """A ``build_curate_executor(...)`` replacement for ``/ingest/bulk``:
-    every ``execute`` call (entity, edge, alias) returns the same fixed
-    REJECTED result, regardless of the command passed in."""
+    each ``execute`` call (entity, then edge, then alias) returns the
+    next *results* entry in order, cycling if called more times than
+    *results* has entries -- regardless of the command passed in."""
 
-    def __init__(self, result: CommandResult) -> None:
-        self._result = result
+    def __init__(self, results: CommandResult | list[CommandResult]) -> None:
+        self._results = results if isinstance(results, list) else [results]
+        self._calls = 0
 
     def execute(self, _cmd: Command) -> CommandResult:
-        return self._result
+        result = self._results[self._calls % len(self._results)]
+        self._calls += 1
+        return result
 
 
-def _rejected(operation: Operation) -> CommandResult:
+def _rejected(operation: Operation, message: str = _SECRET) -> CommandResult:
     return CommandResult(
         command_id="cmd-stub",
         status=CommandStatus.REJECTED,
         operation=operation,
-        message=_SECRET,
+        message=message,
+    )
+
+
+def _success(operation: Operation, message: str) -> CommandResult:
+    return CommandResult(
+        command_id="cmd-stub-success",
+        status=CommandStatus.SUCCESS,
+        operation=operation,
+        created_id="node-stub",
+        message=message,
+    )
+
+
+def _duplicate(operation: Operation, message: str) -> CommandResult:
+    return CommandResult(
+        command_id="cmd-stub-duplicate",
+        status=CommandStatus.DUPLICATE,
+        operation=operation,
+        message=message,
     )
 
 
 def test_commands_batch_sanitizes_per_item_message(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Two REJECTED commands: the first carries the deny-list secret (must
+    # be sanitized), the second a clean message with no deny-list shape
+    # at all (must arrive verbatim). A fix that replaces every message
+    # with a constant marker regardless of content passes the first
+    # assertion but fails the second.
     monkeypatch.setattr(
         "trellis_api.routes.mutations.build_curate_executor",
-        lambda _registry: _StubBatchExecutor(_rejected(Operation.ENTITY_CREATE)),
+        lambda _registry: _StubBatchExecutor(
+            [
+                _rejected(Operation.ENTITY_CREATE),
+                _rejected(Operation.ENTITY_CREATE, message=_CLEAN_REJECTED_MESSAGE),
+            ]
+        ),
+    )
+
+    resp = client.post(
+        "/api/v1/commands/batch",
+        json={
+            "commands": [
+                {
+                    "operation": "entity.create",
+                    "args": {"entity_type": "Dataset", "name": "d1"},
+                },
+                {
+                    "operation": "entity.create",
+                    "args": {"entity_type": "Dataset", "name": "d2"},
+                },
+            ]
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert _SECRET not in resp.text
+    results = resp.json()["results"]
+    assert len(results) == 2
+    assert _SECRET not in results[0]["message"]
+    assert results[1]["message"] == _CLEAN_REJECTED_MESSAGE
+
+
+def test_commands_batch_success_message_with_a_long_name_is_verbatim(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = f"Entity created: {_LONG_NAME}"
+    monkeypatch.setattr(
+        "trellis_api.routes.mutations.build_curate_executor",
+        lambda _registry: _StubBatchExecutor(
+            _success(Operation.ENTITY_CREATE, message)
+        ),
+    )
+
+    resp = client.post(
+        "/api/v1/commands/batch",
+        json={
+            "commands": [
+                {
+                    "operation": "entity.create",
+                    "args": {"entity_type": "Dataset", "name": _LONG_NAME},
+                }
+            ]
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    results = resp.json()["results"]
+    assert len(results) == 1
+    assert results[0]["message"] == message
+
+
+def test_commands_batch_duplicate_message_with_a_digest_key_is_verbatim(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = f"Duplicate command (persisted): {_DIGEST_KEY}"
+    monkeypatch.setattr(
+        "trellis_api.routes.mutations.build_curate_executor",
+        lambda _registry: _StubBatchExecutor(
+            _duplicate(Operation.ENTITY_CREATE, message)
+        ),
     )
 
     resp = client.post(
@@ -257,18 +394,27 @@ def test_commands_batch_sanitizes_per_item_message(
     )
 
     assert resp.status_code == 200, resp.text
-    assert _SECRET not in resp.text
     results = resp.json()["results"]
     assert len(results) == 1
-    assert _SECRET not in results[0]["message"]
+    assert results[0]["message"] == message
 
 
 def test_ingest_bulk_sanitizes_every_item_result_message(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Entity keeps the deny-list secret (must be sanitized); edge and
+    # alias get the clean message (must arrive verbatim). A fix that
+    # replaces every message with a constant marker passes the secret
+    # check but fails the clean-message checks.
     monkeypatch.setattr(
         "trellis_api.routes.ingest.build_curate_executor",
-        lambda _registry: _StubBulkExecutor(_rejected(Operation.ENTITY_CREATE)),
+        lambda _registry: _StubBulkExecutor(
+            [
+                _rejected(Operation.ENTITY_CREATE),
+                _rejected(Operation.LINK_CREATE, message=_CLEAN_REJECTED_MESSAGE),
+                _rejected(Operation.ALIAS_UPSERT, message=_CLEAN_REJECTED_MESSAGE),
+            ]
+        ),
     )
 
     resp = client.post(
@@ -293,8 +439,26 @@ def test_ingest_bulk_sanitizes_every_item_result_message(
     edge_messages = [r["message"] for r in body["edges"]["results"]]
     alias_messages = [r["message"] for r in body["aliases"]["results"]]
     assert entity_messages == [r for r in entity_messages if _SECRET not in r]
-    assert edge_messages == [r for r in edge_messages if _SECRET not in r]
-    assert alias_messages == [r for r in alias_messages if _SECRET not in r]
+    assert edge_messages == [_CLEAN_REJECTED_MESSAGE]
+    assert alias_messages == [_CLEAN_REJECTED_MESSAGE]
     assert len(entity_messages) == 1
-    assert len(edge_messages) == 1
-    assert len(alias_messages) == 1
+
+
+def test_ingest_bulk_success_message_with_a_long_name_is_verbatim(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = f"Entity created: {_LONG_NAME}"
+    monkeypatch.setattr(
+        "trellis_api.routes.ingest.build_curate_executor",
+        lambda _registry: _StubBulkExecutor(_success(Operation.ENTITY_CREATE, message)),
+    )
+
+    resp = client.post(
+        "/api/v1/ingest/bulk",
+        json={"entities": [{"entity_type": "Dataset", "name": _LONG_NAME}]},
+    )
+
+    assert resp.status_code == 200, resp.text
+    results = resp.json()["entities"]["results"]
+    assert len(results) == 1
+    assert results[0]["message"] == message

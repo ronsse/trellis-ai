@@ -9,31 +9,41 @@ one, and the rule in
 ``tests/unit/api/test_command_response_rule.py`` keeps it there.
 
 ``message`` is sanitized here rather than at each call site (#829
-follow-up). ``curate.py``'s own caller pre-filters FAILED/REJECTED into a
-sanitized ``HTTPException`` before this projection ever sees them, but
-``extract.py`` and ``mutations.py`` hand every result -- FAILED and
-REJECTED included -- straight to this projection, same as the bulk-ingest
-per-item results in ``ingest.py`` sanitize their own ``BulkItemResult``.
-``sanitize_error_message`` passes clean text through unchanged, so a
-SUCCESS/DUPLICATE message is unaffected.
+follow-up), but only when ``status`` is FAILED or REJECTED. ``curate.py``'s
+own caller pre-filters FAILED/REJECTED into a sanitized ``HTTPException``
+before this projection ever sees them, but ``extract.py`` and
+``mutations.py`` hand every result -- FAILED and REJECTED included --
+straight to this projection, same as the bulk-ingest per-item results in
+``ingest.py`` sanitize their own ``BulkItemResult``. A SUCCESS or
+DUPLICATE message only restates the caller's own request -- a name, id,
+title or idempotency key -- so it is returned verbatim; wrapping it in
+``sanitize_error_message`` unconditionally would replace an ordinary long
+name, an email-named entity, or a digest idempotency key with the
+suppression marker, for no protective value.
 """
 
 from __future__ import annotations
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.mutate import CommandResult
+from trellis.mutate.commands import CommandStatus
 from trellis_wire.dtos import CommandResponse
 
 __all__ = ["command_response"]
 
+_SANITIZED_STATUSES = frozenset({CommandStatus.FAILED, CommandStatus.REJECTED})
+
 
 def command_response(result: CommandResult) -> CommandResponse:
     """Project a :class:`CommandResult` onto its wire DTO."""
+    message = result.message
+    if result.status in _SANITIZED_STATUSES:
+        message = sanitize_error_message(message)
     return CommandResponse(
         status=result.status.value,
         command_id=result.command_id,
         operation=result.operation,
-        message=sanitize_error_message(result.message),
+        message=message,
         created_id=result.created_id,
         warnings=list(result.warnings),
     )

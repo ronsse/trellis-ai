@@ -577,35 +577,6 @@ All notable changes to Trellis will be documented in this file.
   comparing, since it is now real elapsed time and two builds are not
   expected to cost the same.
   ([#832](https://github.com/ronsse/trellis-ai/pull/832))
-- **#829 follow-up: the REST pre-validation 422s, `admin.py`'s learning-candidates
-  read failure, and `CommandResult.message` on two more routes still quoted
-  raw exception/message text.** Four sites built a 422 `detail` as
-  `f"...: {exc}"` directly from a `model_validate` failure, before the
-  governed-mutation pipeline and its sanitized rejection path ever ran:
-  `ingest.py`'s `ingest_trace` / `ingest_evidence` and `observations.py`'s
-  `record_observation` / `record_measurement`. All four now build the detail
-  with `describe_validation_error`, same as the nine sites above.
-  `admin.py`'s `_load_learning_candidates` built
-  `_LearningCandidatesUnavailableError`'s message as `f"...: {exc}"` for an
-  unreadable or malformed candidates file; it now uses `describe_os_error` /
-  `describe_json_error`, falling back to the exception's type name.
-  Separately, `CommandResult.message` reached a REST caller unsanitized
-  through two paths #829 did not cover: `/commands/batch` (every result,
-  including `FAILED`/`REJECTED`, via `_results.py`'s `command_response` —
-  the one projection the `curate`, `extract` and `mutations` routers share)
-  and `/ingest/bulk`'s three per-item `BulkItemResult` constructions (entity,
-  edge, alias), neither of which went through `command_response`. Both now
-  wrap `message` in `sanitize_error_message`; fixing the shared
-  `command_response` projection closes `/commands/batch` and, incidentally,
-  `extract.py`'s identical unfiltered construction, in one change. The two
-  `trellis_sdk` sites with the same `f"...: {exc}"` shape
-  (`client.py`/`async_client.py`'s `record_feedback`) are left as-is:
-  `trellis_sdk` has no dependency edge to `trellis` core to reach
-  `error_sanitize` from (by the dual-mode local/remote design), and the
-  exception there describes the SDK's own parse failure on a response its
-  own trusted server just returned, not caller-supplied or server-internal
-  text.
-  ([#829](https://github.com/ronsse/trellis-ai/pull/829) follow-up)
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
@@ -676,6 +647,41 @@ All notable changes to Trellis will be documented in this file.
   suppressing the other. Playbook 15 and the MCP prewarm comment updated to
   match.
   ([#834](https://github.com/ronsse/trellis-ai/pull/834))
+- **#829 follow-up: the REST pre-validation 422s, `admin.py`'s learning-candidates
+  read failure, and `CommandResult.message` on two more routes still quoted
+  raw exception/message text.** Five sites built a 422 `detail` as
+  `f"...: {exc}"` directly from a `model_validate`/`SectionRequest` failure,
+  before the governed-mutation pipeline and its sanitized rejection path ever
+  ran: `ingest.py`'s `ingest_trace` / `ingest_evidence`, `observations.py`'s
+  `record_observation` / `record_measurement`, and `retrieve.py`'s
+  `assemble_sectioned_pack`. All five now build the detail with
+  `describe_validation_error`, same as the nine sites above.
+  `admin.py`'s `_load_learning_candidates` built
+  `_LearningCandidatesUnavailableError`'s message as `f"...: {exc}"` for an
+  unreadable or malformed candidates file; it now uses `describe_os_error` /
+  `describe_json_error`, falling back to the exception's type name.
+  Separately, `CommandResult.message` reached a REST caller unsanitized
+  through two paths #829 did not cover: `/commands/batch` (every result,
+  including `FAILED`/`REJECTED`, via `_results.py`'s `command_response` —
+  the one projection the `curate`, `extract` and `mutations` routers share)
+  and `/ingest/bulk`'s three per-item `BulkItemResult` constructions (entity,
+  edge, alias), neither of which went through `command_response`. Both now
+  sanitize `message` through `sanitize_error_message`, but only when
+  `status` is `FAILED` or `REJECTED`: a `SUCCESS`/`DUPLICATE` message only
+  restates the caller's own request (a name, id, title or idempotency key),
+  and wrapping it unconditionally would replace an ordinary long name, an
+  email-named entity, or a digest idempotency key with the suppression
+  marker, for no protective value. Fixing the shared
+  `command_response` projection closes `/commands/batch` and, incidentally,
+  `extract.py`'s identical unfiltered construction, in one change. The two
+  `trellis_sdk` sites with the same `f"...: {exc}"` shape
+  (`client.py`/`async_client.py`'s `record_feedback`) are left as-is:
+  `trellis_sdk` has no dependency edge to `trellis` core to reach
+  `error_sanitize` from (by the dual-mode local/remote design), and the
+  exception there describes the SDK's own parse failure on a response its
+  own trusted server just returned, not caller-supplied or server-internal
+  text.
+  ([#829](https://github.com/ronsse/trellis-ai/pull/829) follow-up)
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
