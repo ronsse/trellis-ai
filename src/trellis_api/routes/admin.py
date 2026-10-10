@@ -61,7 +61,9 @@ from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.vector import VectorStore
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
+from trellis_api.routes.health import probe_backends
 from trellis_wire.dtos import (
+    BackendHealth,
     CodeProposalListResponse,
     CodeProposalSummary,
     DraftAdrResponse,
@@ -90,8 +92,27 @@ router = APIRouter()
 
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    """Check API and store health."""
-    return HealthResponse(status="ok", checks={"api": True, "stores": True})
+    """Check API and store health.
+
+    Reuses the ``/readyz`` probe set (``probe_backends``) so this
+    versioned-API view can never read healthy while ``/readyz`` reads
+    degraded — before this, ``checks`` was a hard-coded literal that
+    never touched a store.
+    """
+    registry = get_registry()
+    backend_results = probe_backends(registry)
+    checks: dict[str, bool] = {"api": True}
+    checks.update(
+        {name: result["status"] == "ok" for name, result in backend_results.items()}
+    )
+    overall_status = "ok" if all(checks.values()) else "degraded"
+    return HealthResponse(
+        status=overall_status,
+        checks=checks,
+        backends={
+            name: BackendHealth(**result) for name, result in backend_results.items()
+        },
+    )
 
 
 # Two document counts, not one, and not the other one (#412).
