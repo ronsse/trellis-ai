@@ -145,6 +145,7 @@ def _seed(registry: StoreRegistry) -> None:
                     success_rate_with=0.7,
                     success_rate_without=0.4,
                     effect_size=0.3,
+                    evidence_confidence=1.0,
                 ),
                 scope="global",
             )

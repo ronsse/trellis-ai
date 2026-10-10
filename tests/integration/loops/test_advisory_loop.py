@@ -247,6 +247,9 @@ async def test_advisory_suppress(loop_env: LoopEnvironment) -> None:
         success_rate_with=0.9,
         success_rate_without=0.4,
         effect_size=0.5,
+        # Post-#394 generator output: a row without evidence_confidence is
+        # withheld as legacy at serve time (decision-ledger D-4, option B).
+        evidence_confidence=1.0,
     )
     high = Advisory(
         category=AdvisoryCategory.ENTITY,

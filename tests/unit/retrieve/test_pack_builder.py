@@ -710,7 +710,12 @@ def _make_advisory(
     advisory_id: str | None = None,
     sample_size: int = 10,
     fitness_scored_at: datetime | None = None,
+    evidence_confidence: float | None = 1.0,
 ) -> Advisory:
+    # ``evidence_confidence`` defaults non-None: every advisory the #394
+    # generator writes populates it, so the default fixture shape is a
+    # post-repair row. Pass ``evidence_confidence=None`` explicitly to build
+    # a pre-#394 row (decision-ledger D-4) for the legacy-filter tests.
     kwargs: dict[str, object] = {
         "fitness_scored_at": fitness_scored_at,
         "category": category,
@@ -721,6 +726,7 @@ def _make_advisory(
             success_rate_with=0.8,
             success_rate_without=0.4,
             effect_size=0.4,
+            evidence_confidence=evidence_confidence,
         ),
         "scope": scope,
         "entity_id": entity_id,
@@ -3273,3 +3279,251 @@ class TestLatencyTelemetry:
             assert payload["duration_ms"] == 600
         finally:
             log.close()
+
+
+# ---------------------------------------------------------------------------
+# Legacy advisory filter (decision-ledger D-4, option B)
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyAdvisoryFilter:
+    """Advisories minted before the #394 generator repair are not served.
+
+    ``_make_advisory`` defaults to a post-repair shape
+    (``evidence_confidence`` set), so every fixture here that wants a
+    legacy row passes ``evidence_confidence=None`` explicitly — the same
+    shape a pre-#394 row loads as, since the field did not exist then.
+    """
+
+    @staticmethod
+    def _mixed_store(tmp_path: Path) -> AdvisoryStore:
+        """Two legacy rows, two post-repair rows, no two fields alike.
+
+        Varied on category, confidence, sample size and entity id so a
+        mutant that keys on the wrong field, or that only works for a
+        population of one, has something to disagree with.
+        """
+        store = AdvisoryStore(tmp_path / "adv.json")
+        store.put(
+            _make_advisory(
+                advisory_id="legacy-1",
+                category=AdvisoryCategory.ENTITY,
+                confidence=0.8,
+                sample_size=12,
+                entity_id="e1",
+                evidence_confidence=None,
+            )
+        )
+        store.put(
+            _make_advisory(
+                advisory_id="legacy-2",
+                category=AdvisoryCategory.ANTI_PATTERN,
+                confidence=0.5,
+                sample_size=30,
+                entity_id="e2",
+                evidence_confidence=None,
+            )
+        )
+        store.put(
+            _make_advisory(
+                advisory_id="adv-post-1",
+                category=AdvisoryCategory.QUERY,
+                confidence=0.6,
+                sample_size=8,
+                entity_id="e3",
+                evidence_confidence=1.0,
+            )
+        )
+        store.put(
+            _make_advisory(
+                advisory_id="adv-post-2",
+                category=AdvisoryCategory.SCOPE,
+                confidence=0.3,
+                sample_size=50,
+                entity_id="e4",
+                evidence_confidence=0.42,
+            )
+        )
+        return store
+
+    def test_legacy_rows_are_withheld_from_the_flat_pack_by_default(
+        self, tmp_path: Path
+    ) -> None:
+        store = self._mixed_store(tmp_path)
+        builder = PackBuilder(advisory_store=store)
+        pack = builder.build("q")
+        served_ids = {a.advisory_id for a in pack.advisories}
+        assert served_ids == {"adv-post-1", "adv-post-2"}
+
+    def test_legacy_rows_are_withheld_from_the_sectioned_pack_by_default(
+        self, tmp_path: Path
+    ) -> None:
+        store = self._mixed_store(tmp_path)
+        builder = PackBuilder(advisory_store=store)
+        pack = builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+        served_ids = {a.advisory_id for a in pack.advisories}
+        assert served_ids == {"adv-post-1", "adv-post-2"}
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", "OFF", " false "])
+    def test_the_knob_off_restores_legacy_serving(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv(pack_builder_module.FILTER_LEGACY_ADVISORIES_ENV, value)
+        store = self._mixed_store(tmp_path)
+        builder = PackBuilder(advisory_store=store)
+        pack = builder.build("q")
+        served_ids = {a.advisory_id for a in pack.advisories}
+        assert served_ids == {"legacy-1", "legacy-2", "adv-post-1", "adv-post-2"}
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", ""])
+    def test_recognised_on_values_and_an_empty_value_leave_it_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv(pack_builder_module.FILTER_LEGACY_ADVISORIES_ENV, value)
+        store = self._mixed_store(tmp_path)
+        builder = PackBuilder(advisory_store=store)
+        pack = builder.build("q")
+        served_ids = {a.advisory_id for a in pack.advisories}
+        assert served_ids == {"adv-post-1", "adv-post-2"}
+
+    def test_an_unrecognised_value_keeps_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A typo'd kill switch must not read as a disable (mirrors #371's
+        ``GRAPH_SEEDING_ENV`` test): the filter stays on and a warning is
+        logged, never a silent fall-through to serving legacy rows.
+        """
+        monkeypatch.setenv(pack_builder_module.FILTER_LEGACY_ADVISORIES_ENV, "disabled")
+        store = self._mixed_store(tmp_path)
+        builder = PackBuilder(advisory_store=store)
+        pack = builder.build("q")
+        served_ids = {a.advisory_id for a in pack.advisories}
+        assert served_ids == {"adv-post-1", "adv-post-2"}
+
+    def test_post_repair_rows_are_served_regardless_of_the_knob(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The filter only ever removes rows; it never also screens the
+        rows it is supposed to leave alone, in either knob position.
+        """
+        store = self._mixed_store(tmp_path)
+        builder = PackBuilder(advisory_store=store)
+        on = {a.advisory_id for a in builder.build("q").advisories}
+        monkeypatch.setenv(pack_builder_module.FILTER_LEGACY_ADVISORIES_ENV, "off")
+        off = {a.advisory_id for a in builder.build("q").advisories}
+        assert {"adv-post-1", "adv-post-2"} <= on
+        assert {"adv-post-1", "adv-post-2"} <= off
+
+    def test_flat_telemetry_counts_the_withheld_legacy_rows(
+        self, tmp_path: Path
+    ) -> None:
+        log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            store = self._mixed_store(tmp_path)
+            builder = PackBuilder(advisory_store=store, event_log=log)
+            builder.build("q")
+            payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)[
+                0
+            ].payload
+            assert payload["advisories_filtered_legacy"] == 2
+            assert payload["advisories_matched"] == 2
+            # Exposure safety: a filtered row never reaches the ids the
+            # fitness loop (``analyze_advisory_effectiveness``) reads to
+            # count presentations, so it can never be graded as served.
+            assert "legacy-1" not in payload["advisory_ids"]
+            assert "legacy-2" not in payload["advisory_ids"]
+        finally:
+            log.close()
+
+    def test_sectioned_telemetry_counts_the_withheld_legacy_rows(
+        self, tmp_path: Path
+    ) -> None:
+        log = SQLiteEventLog(tmp_path / "events.db")
+        try:
+            store = self._mixed_store(tmp_path)
+            builder = PackBuilder(advisory_store=store, event_log=log)
+            builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+            payload = log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=10)[
+                0
+            ].payload
+            assert payload["advisories_filtered_legacy"] == 2
+            assert payload["advisories_matched"] == 2
+            assert "legacy-1" not in payload["advisory_ids"]
+            assert "legacy-2" not in payload["advisory_ids"]
+        finally:
+            log.close()
+
+    def test_withheld_empty_pack_reports_zero_filtered(self) -> None:
+        """A build with no advisory store filters nothing — ``0``, not an
+        absent key, so a consumer can ``payload["advisories_filtered_legacy"]``
+        unconditionally.
+        """
+        builder = PackBuilder()
+        pack = builder.build("q")
+        assert pack.advisories == []
+
+    def test_is_legacy_advisory_keys_on_evidence_confidence_alone(
+        self, tmp_path: Path
+    ) -> None:
+        """Direct unit check on the predicate, independent of selection,
+        ranking or the cap — scope, category and confidence must not
+        matter.
+        """
+        legacy = _make_advisory(evidence_confidence=None)
+        post_repair = _make_advisory(evidence_confidence=0.0)
+        assert PackBuilder._is_legacy_advisory(legacy) is True
+        assert PackBuilder._is_legacy_advisory(post_repair) is False
+
+    def test_a_legacy_row_never_occupies_a_cap_slot_a_post_repair_row_would_win(
+        self, tmp_path: Path
+    ) -> None:
+        """Filtering runs *before* ranking and the cap (#392/#502), not
+        after. Two legacy rows are given the highest confidence in the
+        store — if the filter ran after the cap instead, they would win
+        exploit slots and nothing would backfill in their place, serving
+        fewer than the cap. Every row is stamped ``fitness_scored_at=now``
+        so none is explorable, isolating the cap/filter ordering from the
+        explore-slot mechanism (#502, tested elsewhere).
+        """
+        now = datetime.now(UTC)
+        store = AdvisoryStore(tmp_path / "adv.json")
+        store.put(
+            _make_advisory(
+                advisory_id="legacy-high-1",
+                confidence=0.99,
+                sample_size=40,
+                fitness_scored_at=now,
+                evidence_confidence=None,
+            )
+        )
+        store.put(
+            _make_advisory(
+                advisory_id="legacy-high-2",
+                confidence=0.95,
+                sample_size=35,
+                fitness_scored_at=now,
+                evidence_confidence=None,
+            )
+        )
+        for i, confidence in enumerate([0.9, 0.85, 0.8, 0.75, 0.7, 0.65]):
+            store.put(
+                _make_advisory(
+                    advisory_id=f"post-{i}",
+                    confidence=confidence,
+                    sample_size=20 - i,
+                    fitness_scored_at=now,
+                    evidence_confidence=1.0,
+                )
+            )
+
+        builder = PackBuilder(advisory_store=store)
+        pack = builder.build("q")
+        served_ids = {a.advisory_id for a in pack.advisories}
+
+        assert len(served_ids) == PackBuilder._ADVISORY_MAX_COUNT
+        assert "legacy-high-1" not in served_ids
+        assert "legacy-high-2" not in served_ids
+        # The cap still reaches five rows from the post-repair population
+        # alone: the two legacy rows never consumed a slot, so the fifth-
+        # ranked post-repair row (confidence 0.7) is not displaced.
+        assert served_ids == {"post-0", "post-1", "post-2", "post-3", "post-4"}
