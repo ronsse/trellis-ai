@@ -397,6 +397,40 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The Review tab and its empty states stop hiding why.** Five defects in
+  `src/trellis_api/static/index.html` where the admin console read a failure
+  or an absence as "nothing pending," per the UI-quality review's P1 section:
+  - A tuner proposal card now shows `status`, `tool_name` and the
+    reachability verdict `/proposals` already computes; an unreachable
+    proposal's Approve control is disabled with the reason in its `title`
+    instead of inviting a click `promote_proposal()` would refuse. Reject —
+    terminal, unlike a recoverable bootstrap refusal — now routes through an
+    in-page two-step confirm instead of calling it directly.
+  - A fetch failure on any of the four Review-queue count badges
+    (proposals, learning, schema, code) used to write a literal `0` via
+    `setCount`, reading identically to an honest empty result. A new
+    `setCountError` renders a distinct "!" marker with the failure in
+    `title`, and `setCount` clears that state on a subsequent clean load.
+  - `GET /learning/candidates` answering 200 with `status: "error"` (the
+    artifact is missing or unreadable) never reached the page's `catch`
+    block and rendered as "no candidates found." It now renders as an error
+    with the server's own `hint`. The artifact's `generated_at_utc` is shown
+    through a new `fmtUtc()`, labelled UTC, instead of `fmtDate()`'s silent
+    `toLocaleString()` conversion to the browser's zone.
+  - The precedents empty state said "Promote traces to create precedents,"
+    implying any trace promotion sufficed. It now names the actual path (a
+    learning candidate approved via Review → Learning, or `trellis curate
+    promote-learning`) and says plainly that nothing schedules that
+    promotion automatically today.
+  - `/effectiveness` with zero feedback rendered a "0.0%" success rate,
+    reading as "every pack failed" rather than "nothing was measured"; it
+    now renders "not measured". `noise_candidates` is the usage-rule's
+    *proposal* (see `EffectivenessReport`'s docstring), not a demotion, so
+    the section is relabelled "Usage-Rule Proposals" and reports how many of
+    those proposals `demotion_screen.admitted` — the evidence gate's
+    verdict — actually cleared, without claiming any of them were tagged
+    (this view never calls the write path).
+
 - **`trellis analyze learning-candidates` text output no longer crashes on
   an unmeasured retry rate.** The "Candidates by Recommendation" table
   formatted `metrics["retry_rate"]` with `:.1%` unconditionally;
