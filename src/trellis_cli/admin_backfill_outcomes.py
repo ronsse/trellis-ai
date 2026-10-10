@@ -8,10 +8,12 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import typer
+from rich.markup import escape
 
+from trellis.core.error_sanitize import sanitized_error_payload
 from trellis.feedback.backfill import DEFAULT_EVENT_LIMIT, backfill_outcomes
 from trellis.learning.tuners.rule_tuner import DEFAULT_WINDOW_DAYS
-from trellis_cli.exit_codes import EXIT_STORE, EXIT_VALIDATION
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.output import build_console
 from trellis_cli.stores import get_event_log, get_outcome_store
 
@@ -72,13 +74,27 @@ def register(app: Typer) -> None:
             )
             raise typer.Exit(code=EXIT_VALIDATION)
 
-        report = backfill_outcomes(
-            event_log=get_event_log(),
-            outcome_store=get_outcome_store(),
-            window_days=window_days,
-            apply=apply_changes,
-            event_limit=event_limit,
-        )
+        try:
+            report = backfill_outcomes(
+                event_log=get_event_log(),
+                outcome_store=get_outcome_store(),
+                window_days=window_days,
+                apply=apply_changes,
+                event_limit=event_limit,
+            )
+        except ValueError as exc:
+            # A legacy event row written before #831 closed the EventLog's
+            # own write-time guard can hold a non-finite relevance score.
+            # Replaying it writes through the real OutcomeStore, whose
+            # ``append_many`` refuses with a bare ``ValueError`` — not a
+            # ``TrellisError``, so the global CLI boundary
+            # (``trellis_cli.main``) does not catch it. Describe it here
+            # instead of letting it surface as a traceback.
+            if output_format == "json":
+                typer.echo(json.dumps(sanitized_error_payload(exc)))
+            else:
+                build_console().print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+            raise typer.Exit(code=EXIT_INTERNAL) from exc
 
         payload: dict[str, Any] = {
             "status": (

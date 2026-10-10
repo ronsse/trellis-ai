@@ -2051,6 +2051,53 @@ All notable changes to Trellis will be documented in this file.
   line. In both helpers, a `setting` that is not a string degrades to
   `None` instead of breaking the dedup cache, so every path still
   degrades rather than raising.
+- **The last two NaN/Infinity gaps #831 and #835 left open are closed.**
+  `DegradableJsonStore._save` — the shared base of `PolicyStore` and
+  `AdvisoryStore`, called out by #835 as unchanged — dumped with a lenient
+  `json.dumps` and still wrote a bare `NaN`/`Infinity` token; it now
+  refuses with the same `allow_nan=False`, before the file is touched, so
+  an existing file survives byte-identical on a refused write. A legacy
+  file some already-shipped build wrote with the non-standard token still
+  reads back clean (the read path, `json.loads`, stays lenient on
+  purpose). In practice only `AdvisoryStore` can drive this refusal
+  through a real write today: `Policy`'s float-capable fields, `metadata`
+  and `PolicyRule.params`, are both `dict[str, Any]`, and Pydantic's own
+  `model_dump(mode="json")` nulls a non-finite float nested under an
+  `Any`-typed value before
+  `_save` ever runs, so a live NaN cannot reach the guard through
+  `Policy`'s public schema — the guard is still wired on the shared base
+  regardless, and a new test pins that directly. Separately,
+  `trellis admin backfill-outcomes --apply` replaying a legacy
+  feedback event with a non-finite relevance score (predating the
+  EventLog's own #831 write guard, so a raw row written before that
+  fix can still hold one) wrote through `OutcomeStore.append_many`,
+  which raises exactly that bare `ValueError` — not a `TrellisError`,
+  so the CLI's global boundary did not catch it, and it surfaced as an
+  untyped traceback. The command now catches it at its own boundary and
+  reports a described failure — a sanitized JSON envelope or an escaped
+  one-line message — exiting `EXIT_INTERNAL` in both `--format text` and
+  `json`. The replay appends in 500-row transactions, so chunks before
+  the refused one may already be committed.
+- **A non-string `embeddings.provider` silently meant "not configured."**
+  `registry.embedding_fn` tested the config value with a bare
+  `if provider:`, so any falsy non-string — notably YAML `provider: off`,
+  which parses to the bool `False` — fell through to the "no embedder"
+  branch with no error, turning semantic search off with nothing to read
+  (`axes.semantic` just read `not_configured`, indistinguishable from an
+  operator who never set the key). `None` and `""` still mean "not
+  configured"; every other non-string (bool, int, list, mapping) now
+  raises `ConfigError(setting="embeddings.provider")`, naming only the
+  value's type, never the value itself — a misplaced mapping can hold a
+  credential. A bool gets an extra hint ("delete the key or set it to
+  null") since `off`/`on`/`yes`/`no` are the likely source. Retrieval
+  still degrades rather than crashing, as for every other
+  embedder-resolve failure (#838): the pack falls back to keyword + graph
+  and reports `axes.semantic == "embedder_failed"` with
+  `embedder_setting == "embeddings.provider"`, so a `provider: off`
+  deployment now reads `embedder_failed` where it used to read
+  `not_configured`. Embed-on-ingest stays fail-soft, and
+  `trellis admin reindex-vectors` now refuses with the `ConfigError`
+  (exit 5) instead of its generic missing-embedder message (exit 1).
 - **`build_strategies()`'s vector-backend init failure is now loud once per
   cause, not once per pack build.** Degrading to keyword + graph search when
   `SemanticSearch(registry.knowledge.vector_store, ...)` raised logged
@@ -2059,12 +2106,16 @@ All notable changes to Trellis will be documented in this file.
   misconfiguration (a bad `vector_store.provider`, a missing extra, a down
   backend) re-raised identically on every retrieval call, turning one broken
   setting into a full traceback per pack. A new
-  `_warn_semantic_search_init_failed_once` (`functools.cache`-backed, mirroring
-  `_warn_embedder_resolve_failed_once` / `_warn_vector_store_unavailable_once` /
-  the `embed_ingest_hook` helpers) now logs at WARNING once per distinct
-  `(error_type, setting)` per process, describing the cause — the exception's
-  type name and, for a `ConfigError`, its `setting` — never the exception's
-  message or a traceback, which can echo a DSN or credential.
+  `_warn_semantic_search_init_failed_once` (`functools.cache`-backed, added
+  by #838) now logs at WARNING once per distinct `(error_type, setting)` per
+  process, describing the cause — the exception's type name and, for a
+  `ConfigError`, its `setting` — never the exception's message or a
+  traceback, which can echo a DSN or credential. A non-string `setting`
+  (only reachable from a plugin or future caller today) is narrowed to
+  `None` before it reaches the cache key, the same guard #839 added for
+  `embed_ingest_hook.py` and `vector_metadata.py`, so an unhashable
+  `ConfigError.setting` still degrades retrieval instead of raising; the
+  sibling embedder-resolve call site (#838) gets the same guard.
   ([#843](https://github.com/ronsse/trellis-ai/pull/843))
 - **The stored `PACK_ASSEMBLED.strategy_failures[].message` is now a
   sanitized summary, not a raw `str(exc)`.** A strategy's own exception text
@@ -2073,13 +2124,21 @@ All notable changes to Trellis will be documented in this file.
   own interpolated text and `trellis_cli.main`'s plain-text render arm both
   depend on seeing it unsanitized, by design (#493,
   `test_the_machine_arm_suppresses_a_leaky_axis_message`) — alongside a new
-  `.audit_message`, computed once at construction from
-  `summarize_exception(exc)["message"]` (sanitized, bounded). `build()` and
-  `build_sectioned()` now write the event's `strategy_failures[]` through a
-  new `to_audit_event_payload()` serializer that reads `.audit_message`,
-  instead of the raw-message `to_event_payload()` CLI rendering already uses.
-  The axes block an agent-facing pack response carries
-  (`format_failed_axes_note`) never reads either field.
+  `.audit_message`, computed by a module-level helper that calls
+  `summarize_exception(exc)["message"]` and falls back to the suppression
+  marker if summarizing itself raises, so an exotic exception from the open
+  `SearchStrategy` protocol can't turn a degraded build into a crash. When a
+  constructor passes no `audit_message`, the default is now
+  `sanitize_error_message(message)` rather than the raw message, so the
+  stored form is sanitized by construction rather than by caller discipline
+  alone. `build()` and `build_sectioned()` write the event's
+  `strategy_failures[]` through a new `to_audit_event_payload()` serializer
+  that reads `.audit_message`, instead of the raw-message `to_event_payload()`
+  CLI rendering already uses. The axes block an agent-facing pack response
+  carries (`format_failed_axes_note`) never reads either field.
+  `PACK_ASSEMBLED` rows written before this fix keep their raw text — events
+  are immutable — and remain servable verbatim by
+  `GET /api/v1/packs/{pack_id}`.
   ([#843](https://github.com/ronsse/trellis-ai/pull/843))
 
 ## [0.9.0] - 2026-05-13
