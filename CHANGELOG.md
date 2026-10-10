@@ -498,6 +498,34 @@ All notable changes to Trellis will be documented in this file.
   `trellis.llm.routing`, outside `trellis/errors.py`, and a fixed list
   would have missed it silently.
   ([#829](https://github.com/ronsse/trellis-ai/pull/829))
+- **A pack build's latency is now recorded, not hard-coded to zero.**
+  `PackBuilder.build()` and `build_sectioned()` both constructed their
+  `RetrievalReport` with `duration_ms=0` — one path as a literal, the other
+  by never passing the field at all — so `PACK_ASSEMBLED` carried no timing
+  key and health reporting had no latency signal: every row read zero,
+  whatever the build actually cost. Both now time with
+  `time.perf_counter()` from entry through strategy collection and
+  budgeting (per-section budgets included on the sectioned path), snapshotted
+  once just before section assembly — the cross-section dedup, annotation
+  and per-`PackSection` report construction that follows — so every section
+  reports the same window rather than its own loop iteration. Neither
+  window covers advisory selection, the optional quality evaluator, or the
+  event write, on either path; nothing in `src` reads the new key yet, so a
+  p50/p95 health-report reader stays a follow-up, not shipped here.
+  `_withhold_sectioned`, the pack-effect holdout's (#701) sectioned
+  reconstruction path, had the same asymmetry `_withhold_flat` already
+  avoided — a withheld sectioned pack's timing silently read back as `0`
+  even though a real build happened — and now carries the real value
+  through too. `duration_ms` is an additive key on both `PACK_ASSEMBLED`
+  payloads; no schema or contract pins the payload key set other than
+  `test_pack_holdout_seam.py`'s hand-read base snapshot, which is updated
+  to expect it alongside the two holdout keys. Three CLI, API and retrieve
+  tests that compared two separately-built packs' full payloads for
+  equality (`test_pack_holdout_cli.py`, `test_pack_holdout_routes.py`,
+  `test_pack_holdout_seam.py` itself) masked `duration_ms` before
+  comparing, since it is now real elapsed time and two builds are not
+  expected to cost the same.
+  ([#832](https://github.com/ronsse/trellis-ai/pull/832))
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
