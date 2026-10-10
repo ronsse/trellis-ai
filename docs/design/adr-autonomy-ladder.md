@@ -134,7 +134,7 @@ acts alone.
 |---|---|---|---|
 | `min_sample_size` | 5 | **30** | 30 matches `DEFAULT_RULES`' own `min_sample_size`, i.e. the auto floor never trusts a cell the tuner itself would not have fired on. 6× the manual floor. |
 | `min_effect_size` | 0.15 | **0.25** | Only changes whose measured relative delta against the live baseline is large enough that noise is an unlikely explanation auto-apply. |
-| baseline required | no (bootstrap allowed) | **yes** (`require_baseline=True`) | Invariant (a): no baseline ⇒ nothing to roll back to ⇒ not auto-applied. |
+| baseline required | **yes** (`allow_no_baseline=False`; the CLI's `--allow-no-baseline` opts out per call) | **yes** (`require_baseline=True`) | Same rule since [#828](https://github.com/ronsse/trellis-ai/pull/828); auto has no opt-out. |
 | `post_min_samples` (monitor) | 20 | 20 | Inherited from `PostPromotionPolicy`; the rollback side already demands 20 post-promotion samples before any demotion verdict, guarding against `n=2` thrash. |
 
 `AutoPromotePolicy.__post_init__` *asserts* that the auto thresholds dominate
@@ -143,18 +143,25 @@ below the human-reviewed one without raising at construction. Operators may
 tighten further per scope but never loosen below the manual floor.
 
 "Manual default" in the table above is the library's own `PromotionPolicy()`
-default, which the CLI (`trellis metrics promote`) still uses unmodified
-(bootstrap promotion allowed; `--force` skips the whole policy gate). The
-Review queue's REST routes are a second manual path: a reviewer confirms
-each decision, but the routes have no `--force` or threshold flags of
-their own, so they apply an explicit
-stricter policy (`_REVIEW_QUEUE_POLICY` in `trellis_api.routes.admin`,
-`allow_no_baseline=False`) rather than inheriting the library default —
-closing the exact bootstrap-with-no-baseline shape a 2026-10-03 Review-queue
-promotion took. This is a per-route override, not a change to
-`PromotionPolicy`'s class default, and is unrelated to the
+default. Since [#828](https://github.com/ronsse/trellis-ai/pull/828) that
+class default itself refuses a scope's first, unbaselined proposal. The CLI
+(`trellis metrics promote`) bootstraps one only via an explicit opt-in: the
+narrow `--allow-no-baseline` flag, which lifts only the baseline rule, or
+the coarser, pre-existing `--force`, which skips the whole policy gate
+(baseline rule included, but never reachability or the immutable-core
+check). The Review queue's REST routes are a second manual path: a
+reviewer confirms each decision, but the routes have no `--force` or
+threshold flags of their own, so they apply an explicit stricter policy
+(`_REVIEW_QUEUE_POLICY` in `trellis_api.routes.admin`,
+`allow_no_baseline=False`) — closing the exact bootstrap-with-no-baseline
+shape a 2026-10-03 Review-queue promotion took. That explicit `False` now
+equals the class default, so it pins the route against a future default
+change rather than overriding today's default, and is unrelated to the
 `AutoPromotePolicy` asserted-dominance invariant above, which governs only
-the fully unattended path.
+the fully unattended path. On both manual surfaces a no-baseline refusal is
+not terminal: the proposal stays `pending`, so a later
+`--allow-no-baseline` CLI call (the Review queue exposes no equivalent) can
+still promote it.
 
 Non-qualifying proposals are left `pending`, not rejected — exactly the state
 the manual `trellis metrics promote` path expects. The autonomous pass and the

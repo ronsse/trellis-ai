@@ -375,7 +375,9 @@ def _render_text(report: Any, *, tuner_name: str) -> None:
     if report.pending_manual:
         console.print(
             "[dim]A run without --dry-run leaves pending proposals queued for "
-            "manual review: 'trellis metrics promote <proposal_id> --commit'.[/dim]"
+            "manual review: 'trellis metrics promote <proposal_id> --commit' "
+            "(add --allow-no-baseline for a scope with no comparable baseline "
+            "yet).[/dim]"
         )
 
 
