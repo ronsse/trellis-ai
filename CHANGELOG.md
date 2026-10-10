@@ -376,6 +376,45 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The SQLite event log and both the SQLite and Postgres graph stores
+  refuse a NaN/Infinity float at write time, instead of silently storing
+  JSON text a stricter reader can't parse.** Python's `json.dumps` writes
+  the non-standard `NaN` / `Infinity` / `-Infinity` tokens by default, and
+  Python's own `json.loads` parses them back into the same float when a
+  row is read back out, so a non-finite float in an event payload, event
+  metadata, or a graph node/edge `properties` (or a curated node's
+  `generation_spec`) round-tripped silently through SQLite's own read
+  path — though not through SQLite's `json_extract`/`json_each`, used for
+  filtering, which read a stored `NaN` back as `NULL` and `Infinity` as
+  `9e999` — while Postgres's `jsonb` column already rejected it outright
+  at write time: an inconsistency between backends, and invalid JSON by
+  spec either way (the REST API's `json.dumps` on the way out, or any
+  non-Python consumer, breaks on it). Every `json.dumps` call on a write
+  path in `sqlite/event_log.py`, `postgres/event_log.py`,
+  `sqlite/graph.py` and `postgres/graph.py` now passes `allow_nan=False`,
+  matching the idiom already used in
+  `tests/unit/learning/tuners/test_promotion_effect_size.py` to pin the
+  Postgres behavior without a live server. The error is a `ValueError`
+  raised before the INSERT executes; a version close already run in the
+  same transaction — SQLite's and Postgres's `update_node_if_current`,
+  and SQLite's `upsert_edges_bulk` — is rolled back along with it, so
+  nothing is written either way. For Postgres this surfaces unwrapped
+  (not a `StoreError`) via the same contract already pinned by
+  `test_an_error_that_is_not_the_driver_s_keeps_its_type`, because a
+  non-serializable value is the caller's bug, not the store's. One live
+  producer did reach this path: `PrecedentMiner`
+  (`trellis_workers/learning/miner.py`) read an LLM reply's `confidence`
+  with a bare `float()`, which accepts both a JSON `NaN` token and the
+  string `"nan"`, and the clamp that followed preserved it rather than
+  rejecting it — unlike `compute_importance`'s clamp, which does. It now
+  reads with `coerce_finite_float` and falls back to `0.5`, the same
+  pattern `session_capture/distill.py` already uses for the same kind of
+  field. Feedback `rating` (#741/#751), the tuner's `effect_size` (#620)
+  and `Measurement.metric_value` (#827, below) were already closed at
+  their producers before this PR; the miner was the one still open, and
+  is now closed here too.
+  ([#831](https://github.com/ronsse/trellis-ai/pull/831))
+
 - **`Measurement.metric_value` refuses `Infinity` and `-Infinity`, not only
   `NaN`.** The field accepted any float that passed `math.isnan`, so a
   caller could record `Infinity`. `metric_value` now refuses `NaN`,
@@ -421,6 +460,72 @@ All notable changes to Trellis will be documented in this file.
   "Confirm approve" button is disabled when the preview predicts a
   rejection and names the CLI bootstrap command.
   ([#823](https://github.com/ronsse/trellis-ai/pull/823) follow-up)
+- **`TrellisError` raise sites describe the caught exception instead of
+  quoting it.** Nine sites built their message as `f"...: {exc}"` inside an
+  `except ... as exc:` handler — a pydantic `ValidationError`'s own text
+  embeds `input_value=<the caller's field value>` (Measurement and
+  Observation recording; a policy file's own entry), and an `OSError` /
+  `json.JSONDecodeError` / `ImportError`'s text can carry more of a path,
+  document or module than the raiser intended (`policy_source.py`,
+  `registry.py`). The sharpest case: a rejected Measurement's message
+  becomes the immutable `mutation.rejected` audit event verbatim, so the
+  leak was permanent once written. `trellis.core.error_sanitize` gains four
+  helpers — `describe_os_error`, `describe_json_error`,
+  `describe_validation_error` (pydantic's `errors(include_input=False)`,
+  never `str(exc)`), `describe_import_error` (a `ModuleNotFoundError` names
+  the module that was not found; any other `ImportError` says the import
+  from that module failed, since the module itself exists) — each naming
+  only the exception's own structured fields, and the nine sites now build
+  their message from one of these instead of the caught exception's
+  `str()`. The eight REST routes that construct an `HTTPException` detail
+  or response field directly from a `CommandResult.message` or a caught
+  exception's `.message` — bypassing the `trellis_error_handler` middleware
+  that already sanitizes an uncaught `TrellisError` — now wrap that value in
+  `sanitize_error_message` too, which masks secret-shaped, SQL-shaped and
+  long-token text; it is a deny-list, not a guarantee, so a handler that
+  has not yet adopted a describe helper can still leak text that matches
+  none of those shapes. The secret-pattern deny-list in
+  `sanitize_error_message` now also matches a credential key wrapped in
+  quotes (`"api_key": "..."`), the shape a JSON body or a repr'd mapping
+  takes, which the unquoted `key\s*[=:]` pattern missed entirely. A new AST
+  rule (`tests/unit/test_error_describe_not_quote_rule.py`, built on
+  `tests/ast_rules.py`) flags any `TrellisError`-family raise inside an
+  `except ... as name:` handler that interpolates `name` — or a local
+  variable transitively bound from it — into its message by f-string,
+  `str()`/`repr()`, `.format()` or `%`-formatting, and resolves the
+  `TrellisError` family dynamically across modules rather than from a
+  hardcoded list — `LLMRoutingError` subclasses `ConfigError` from
+  `trellis.llm.routing`, outside `trellis/errors.py`, and a fixed list
+  would have missed it silently.
+  ([#829](https://github.com/ronsse/trellis-ai/pull/829))
+- **A pack build's latency is now recorded, not hard-coded to zero.**
+  `PackBuilder.build()` and `build_sectioned()` both constructed their
+  `RetrievalReport` with `duration_ms=0` — one path as a literal, the other
+  by never passing the field at all — so `PACK_ASSEMBLED` carried no timing
+  key and health reporting had no latency signal: every row read zero,
+  whatever the build actually cost. Both now time with
+  `time.perf_counter()` from entry through strategy collection and
+  budgeting (per-section budgets included on the sectioned path), snapshotted
+  once just before section assembly — the cross-section dedup, annotation
+  and per-`PackSection` report construction that follows — so every section
+  reports the same window rather than its own loop iteration. Neither
+  window covers advisory selection, the optional quality evaluator, or the
+  event write, on either path; nothing in `src` reads the new key yet, so a
+  p50/p95 health-report reader stays a follow-up, not shipped here.
+  `_withhold_sectioned`, the pack-effect holdout's (#701) sectioned
+  reconstruction path, had the same asymmetry `_withhold_flat` already
+  avoided — a withheld sectioned pack's timing silently read back as `0`
+  even though a real build happened — and now carries the real value
+  through too. `duration_ms` is an additive key on both `PACK_ASSEMBLED`
+  payloads; no schema or contract pins the payload key set other than
+  `test_pack_holdout_seam.py`'s hand-read base snapshot, which is updated
+  to expect it alongside the two holdout keys. Three CLI, API and retrieve
+  tests that compared two separately-built packs' full payloads for
+  equality (`test_pack_holdout_cli.py`, `test_pack_holdout_routes.py`,
+  `test_pack_holdout_seam.py` itself) masked `duration_ms` before
+  comparing, since it is now real elapsed time and two builds are not
+  expected to cost the same.
+  ([#832](https://github.com/ronsse/trellis-ai/pull/832))
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
@@ -461,13 +566,36 @@ All notable changes to Trellis will be documented in this file.
   every retrieval call site until the setting is fixed; a broken
   `vector_store` degrades retrieval to keyword and graph (`semantic:
   misconfigured`); embed-on-ingest is fail-soft for an embedder resolve
-  failure only. Added a recovery runbook,
+  failure. Added a recovery runbook,
   [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config):
   fix the setting, restart (the `embeddings:` block is read once, at
   `StoreRegistry` construction, so a running process can't see an edited
   config or environment), then run `trellis admin reindex-vectors` for
   documents that arrived while it was broken.
   ([#830](https://github.com/ronsse/trellis-ai/pull/830))
+- **A broken `vector_store` resolve is now fail-soft too, like the embedder
+  resolve #830 fixed above.** `run_embed_on_ingest` resolved
+  `registry.knowledge.vector_store` with a bare
+  `getattr(registry.knowledge, "vector_store", None)`: the default only
+  absorbs `AttributeError`, so a vector backend that raises while
+  instantiating (`ConfigError`, `BackendNotInstalledError`, a connection
+  error) propagated straight out of the hook — called, unwrapped, by every
+  caller (MCP `save_memory`, the mutate "soft" handler, corpus-sync ingest,
+  CLI dbt-manifest ingest) *after* the document was already durably stored,
+  so the write's own response failed for content that had, in fact, been
+  saved, inviting a client retry of an already-stored write. The resolve is
+  now wrapped the same way #830 wrapped the embedder's, returning
+  `{"embedded": False, "reason": ...}` instead of raising. The dedup helper
+  generalized to cover both: the WARNING event is renamed
+  `embed_on_ingest_resolve_failed` (from
+  `embed_on_ingest_embedder_resolve_failed`) and now carries a `component`
+  field (`embedding_fn` or `vector_store`); the once-per-cause cache key is
+  `(component, error_type, setting)`, not just `(error_type, setting)`, so
+  an embedder and a vector store failing with the same shape (e.g. both a
+  bare `RuntimeError` with no `setting`) log independently instead of one
+  suppressing the other. Playbook 15 and the MCP prewarm comment updated to
+  match.
+  ([#834](https://github.com/ronsse/trellis-ai/pull/834))
 - **Retrieval degrades, instead of failing, when the embedder fails to
   resolve.** `build_strategies` used to read `registry.embedding_fn` outside
   its own `try`, so the same raise #830 made quiet on ingest (a bad

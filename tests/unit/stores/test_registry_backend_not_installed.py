@@ -709,7 +709,7 @@ def test_import_callable_missing_module_raises_configerror() -> None:
     """Module that doesn't exist raises ``ConfigError`` with a hint."""
     with pytest.raises(ConfigError) as exc_info:
         _import_callable("no_such_module_xyz.embed")
-    assert "is not importable" in str(exc_info.value)
+    assert "was not found" in str(exc_info.value)
 
 
 def test_import_callable_missing_attribute_raises_configerror() -> None:

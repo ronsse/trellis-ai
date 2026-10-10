@@ -165,15 +165,22 @@ def _without_pack_id(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _steady(node: Any) -> Any:
-    """``node`` with every ``original_score`` masked.
+    """``node`` with every ``original_score`` and ``duration_ms`` masked.
 
-    That raw score carries recency decay against the current time, so it
+    ``original_score`` carries recency decay against the current time, so it
     moves between any two calls, flag or no flag. The ranking and the fused
     scores built from it hold still at these distinct keyword scores.
+    ``duration_ms`` is real wall-clock elapsed time for that call's build, so
+    two separately-executed builds (even of the same, empty, pack) are not
+    expected to report the same value.
     """
     if isinstance(node, dict):
         return {
-            key: "<decayed>" if key == "original_score" else _steady(value)
+            key: "<decayed>"
+            if key == "original_score"
+            else "<elapsed>"
+            if key == "duration_ms"
+            else _steady(value)
             for key, value in node.items()
         }
     if isinstance(node, list):
@@ -236,7 +243,9 @@ class TestAWithheldPackReadsAsAnEmptyPack:
             "adv-approach",
         ]
         # The withheld response is the greenfield one, pack id aside ...
-        assert _without_pack_id(withheld) == _without_pack_id(greenfield)
+        assert _steady(_without_pack_id(withheld)) == _steady(
+            _without_pack_id(greenfield)
+        )
         assert withheld["advisories"] == []
         assert withheld["withholding"]["total"] == 0
         # ... names its own pack ...
