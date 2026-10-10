@@ -46,6 +46,11 @@ def test_empty_analysis(event_log):
     assert report.success_rate == 0.0
     assert report.item_scores == []
     assert report.noise_candidates == []
+    # analyze_effectiveness alone never writes — None says "not
+    # attempted", distinct from the 0 run_effectiveness_feedback reports
+    # after a write pass that wrote nothing.
+    assert report.noise_tags_written is None
+    assert report.noise_refused_not_document == []
 
 
 def test_packs_without_feedback(event_log):
@@ -375,6 +380,38 @@ class TestRunEffectivenessFeedback:
         assert doc_id in report.noise_candidates
         assert report.demotion_screen is not None
         assert report.demotion_screen.admitted == [doc_id]
+        # The write outcome, not the gate's admission count
+        # (noise-refused-non-document) — identical here because the
+        # admitted id is a real document, but the two fields exist
+        # precisely because they can diverge.
+        assert report.noise_tags_written == 1
+        assert report.noise_refused_not_document == []
+
+    def test_reports_refused_not_document_for_a_non_document_admission(
+        self, event_log, doc_store
+    ):
+        """An id the gate admits on citations alone, but is not a document.
+
+        The evidence gate (``demotion_gate.py``) reasons purely over
+        citation counts in the event log — it has no notion of which
+        store an id belongs to. A trace id cited unhelpful just as often
+        as a real document is admitted right alongside it, but
+        ``apply_noise_tags`` cannot write a document that was never put,
+        so ``noise_tags_written`` must exclude it and
+        ``noise_refused_not_document`` must name it.
+        """
+        self._serve_and_grade(
+            event_log, "trace-not-a-document", packs=5, unhelpful=True
+        )
+
+        report = run_effectiveness_feedback(
+            event_log, doc_store, days=30, min_appearances=2
+        )
+
+        assert report.demotion_screen is not None
+        assert report.demotion_screen.admitted == ["trace-not-a-document"]
+        assert report.noise_tags_written == 0
+        assert report.noise_refused_not_document == ["trace-not-a-document"]
 
     def test_withholds_demotion_when_feedback_cites_nothing(self, event_log, doc_store):
         """#336: served, graded, but no item attribution — not demoted.
@@ -404,6 +441,10 @@ class TestRunEffectivenessFeedback:
         assert report.demotion_screen is not None
         assert report.demotion_screen.admitted == []
         assert report.demotion_screen.refused_count == 1
+        # Nothing admitted means no write pass ran, not "unknown" — the
+        # loop still attempted the step and found nothing to do.
+        assert report.noise_tags_written == 0
+        assert report.noise_refused_not_document == []
 
     def test_noop_when_no_noise(self, event_log, doc_store):
         """When there are no noise candidates, no docs are modified."""
@@ -438,11 +479,13 @@ class TestRunEffectivenessFeedback:
         assert doc is not None
         assert doc["metadata"]["content_tags"]["signal_quality"] == "high"
         assert report.noise_candidates == []
+        assert report.noise_tags_written == 0
 
     def test_empty_events_returns_clean_report(self, event_log, doc_store):
         """No events -> clean report, no errors."""
         report = run_effectiveness_feedback(event_log, doc_store, days=30)
         assert report.total_packs == 0
+        assert report.noise_tags_written == 0
         assert report.noise_candidates == []
 
 

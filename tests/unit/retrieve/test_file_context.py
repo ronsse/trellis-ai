@@ -457,7 +457,7 @@ class TestNewestItemAtIsAStalenessGate:
         )
 
         clock["now"] = now
-        assert apply_noise_tags(["stale"], docs) == 1
+        assert apply_noise_tags(["stale"], docs).updated == 1
 
         after = _build(registry, ["widget.py"])["paths"][0]["newest_item_at"]
         assert after == before

@@ -28,7 +28,9 @@ class TestEmptyInput:
 
     def test_empty_candidates_returns_zero(self) -> None:
         store = MagicMock(spec=DocumentStore)
-        assert apply_noise_tags([], store) == 0
+        result = apply_noise_tags([], store)
+        assert result.updated == 0
+        assert result.refused_not_document == []
         store.get.assert_not_called()
         store.put.assert_not_called()
 
@@ -50,9 +52,10 @@ class TestHappyPath:
         }
         store = _make_store(docs)
 
-        updated = apply_noise_tags(["doc1"], store)
+        result = apply_noise_tags(["doc1"], store)
 
-        assert updated == 1
+        assert result.updated == 1
+        assert result.refused_not_document == []
         store.put.assert_called_once()
         args = store.put.call_args
         item_id, content, metadata = args.args
@@ -100,8 +103,9 @@ class TestEdgeCaseMissingDocument:
 
     def test_missing_doc_does_not_increment_counter(self) -> None:
         store = _make_store(docs={})
-        updated = apply_noise_tags(["nonexistent"], store)
-        assert updated == 0
+        result = apply_noise_tags(["nonexistent"], store)
+        assert result.updated == 0
+        assert result.refused_not_document == ["nonexistent"]
         store.put.assert_not_called()
 
 
@@ -116,8 +120,9 @@ class TestPartialBatch:
             }
         }
         store = _make_store(docs)
-        updated = apply_noise_tags(["doc_present", "doc_missing"], store)
-        assert updated == 1
+        result = apply_noise_tags(["doc_present", "doc_missing"], store)
+        assert result.updated == 1
+        assert result.refused_not_document == ["doc_missing"]
         assert store.put.call_count == 1
 
 
@@ -194,12 +199,12 @@ class TestVectorWriteThrough:
         vector_store = MagicMock(spec=VectorStore)
         vector_store.get.side_effect = RuntimeError("vector backend down")
 
-        assert apply_noise_tags(["doc1"], store, vector_store) == 1
+        assert apply_noise_tags(["doc1"], store, vector_store).updated == 1
         store.put.assert_called_once()
 
     def test_omitting_the_vector_store_still_demotes(self) -> None:
         """A deployment with no vector store can still demote a document."""
         store = _make_store(self._docs())
 
-        assert apply_noise_tags(["doc1"], store) == 1
+        assert apply_noise_tags(["doc1"], store).updated == 1
         store.put.assert_called_once()

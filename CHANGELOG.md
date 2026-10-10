@@ -376,6 +376,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Noise demotion counts what was written, not what the evidence gate
+  admitted.** `apply_noise_tags` writes `signal_quality="noise"` only to
+  ids that resolve in the document store; the demotion gate admits
+  candidates on citation evidence alone, with no notion of which store an
+  id belongs to, so an admitted trace id (or other non-document id)
+  reached the writer and nothing was written for it, silently (one
+  `logger.debug` per id). Curate's nightly `noise_tagged`, REST
+  `POST /effectiveness/apply-noise-tags`'s `noise_candidates_tagged`, and
+  CLI `trellis analyze apply-noise-tags`'s text output each independently
+  reported the admission count as the demotion count, overstating it by
+  the non-document remainder. `apply_noise_tags` now returns a
+  `NoiseTagResult` (`updated`, `refused_not_document`);
+  `EffectivenessReport` carries `noise_tags_written` /
+  `noise_refused_not_document`; all three surfaces report the real write
+  count and name what was refused (`noise_refused_non_document` /
+  `noise_candidates_refused_not_document`). A curate dry run, which writes
+  nothing either way, previews the same split with a read-only
+  `document_store.get` check per admitted id.
 - **`Measurement.metric_value` refuses `Infinity` and `-Infinity`, not only
   `NaN`.** The field accepted any float that passed `math.isnan`, so a
   caller could record `Infinity`. `metric_value` now refuses `NaN`,

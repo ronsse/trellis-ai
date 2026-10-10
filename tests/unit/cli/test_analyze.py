@@ -117,6 +117,88 @@ class TestApplyNoiseTags:
         )
         assert result.exit_code == 0
 
+    @staticmethod
+    def _seed_phantom_admission(registry: StoreRegistry) -> None:
+        """Five packs citing a non-document id unhelpful — gate-admissible.
+
+        Mirrors ``test_live_run_separates_written_from_refused_not_document``
+        in ``tests/unit/cli/test_worker.py``: the demotion gate admits on
+        citation evidence alone, with no notion of which store an id
+        belongs to, so a trace id reaches ``apply_noise_tags`` here too.
+        """
+        event_log = registry.operational.event_log
+        phantom = "ac:trace:phantom"
+        for i in range(5):
+            pack_id = f"ac-phantom-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "ac-test",
+                    "domain": "ac-test",
+                    "injected_item_ids": [phantom],
+                    "injected_items": [
+                        {
+                            "item_id": phantom,
+                            "item_type": "trace",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"ac-run-{i}",
+                    "intent_family": "ac-test",
+                    "outcome": "failure",
+                    "success": False,
+                    "helpful_item_ids": [],
+                    "unhelpful_item_ids": [phantom],
+                },
+            )
+
+    def test_json_reports_refused_not_document_for_a_non_document_admission(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """A gate-admitted trace id writes nothing and is named refused.
+
+        Before this fix ``noise_candidates_tagged``-shaped counts (here,
+        the bare ``model_dump()`` echoed the gate's admission) had no way
+        to say that an admitted id was never a document; now the report
+        carries ``noise_tags_written`` (0, not 1) and
+        ``noise_refused_not_document`` (the id), the same fields
+        ``run_effectiveness_feedback`` populates for every caller.
+        """
+        self._seed_phantom_admission(temp_stores)
+        result = runner.invoke(app, ["analyze", "apply-noise-tags", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["demotion_screen"]["admitted"] == ["ac:trace:phantom"]
+        assert data["noise_tags_written"] == 0
+        assert data["noise_refused_not_document"] == ["ac:trace:phantom"]
+
+    def test_text_shows_the_refused_not_document_line(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_phantom_admission(temp_stores)
+        result = runner.invoke(app, ["analyze", "apply-noise-tags"])
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.stdout)
+        assert "Noise tags applied to 0 of 1 proposed item(s)" in rendered
+        assert (
+            "1 admitted item(s) refused: not found in the document store" in rendered
+        )
+        assert "ac:trace:phantom" in rendered
+
 
 class TestTokenUsage:
     def test_empty_events(self) -> None:
