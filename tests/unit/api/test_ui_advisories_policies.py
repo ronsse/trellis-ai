@@ -130,7 +130,10 @@ def test_run_generate_advisories_branches_on_all_three_refusal_shapes() -> None:
 
 def test_generate_advisories_uses_two_step_confirm_not_window_confirm() -> None:
     page = _page()
-    assert "window.confirm" not in page
+    # A call, not the bare substring: another surface's comment (#849)
+    # legitimately names "window.confirm" to explain why *it* avoids
+    # calling it, without ever invoking it either.
+    assert "window.confirm(" not in page
     show = _function_body(page, "showGenerateAdvisoriesForm")
     assert "confirmGenerateAdvisories()" in show
     confirm = _function_body(page, "confirmGenerateAdvisories")
