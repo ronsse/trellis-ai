@@ -26,6 +26,7 @@ from trellis.retrieve.strategies import (
     _apply_importance,
     _apply_recency_decay,
     _warn_embedder_resolve_failed_once,
+    _warn_semantic_search_init_failed_once,
     build_strategies,
 )
 from trellis.stores.sqlite.graph import SQLiteGraphStore
@@ -1126,3 +1127,111 @@ class TestBuildStrategiesEmbedderResolveFailure:
         assert result.embedder_configured is True
         assert result.embedder_resolve_failure is None
         assert any(isinstance(s, SemanticSearch) for s in result.strategies)
+
+
+class _KnowledgeVectorStoreRaises:
+    """``registry.knowledge`` stand-in whose ``vector_store`` property raises.
+
+    Mirrors ``_EmbeddingFnRaises`` above: a mock's attribute access never
+    raises on its own, so a real property is needed to reproduce #830's
+    construction-time failure. ``registry.knowledge.vector_store`` is
+    evaluated as a ``SemanticSearch(...)`` call argument, inside the
+    ``try`` that the embedder-resolve failure's ``try`` (above) does not
+    cover -- this is the *other* branch of ``build_strategies``.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self.document_store = object()
+        self.graph_store = object()
+        self._exc = exc
+
+    @property
+    def vector_store(self) -> Any:
+        raise self._exc
+
+
+class _VectorStoreRaises:
+    """Stand-in for StoreRegistry whose ``knowledge.vector_store`` raises."""
+
+    def __init__(self, exc: Exception) -> None:
+        self.knowledge = _KnowledgeVectorStoreRaises(exc)
+
+
+class TestBuildStrategiesSemanticSearchInitFailure:
+    """#830 fu4: ``semantic_search_init_failed`` must warn once per cause,
+    never per build, and never carry the exception's message or a
+    traceback.
+
+    ``StoreRegistry._get`` caches only success, so a broken vector
+    backend is re-instantiated -- and re-raises identically -- on every
+    pack build. Before this fix, ``build_strategies`` logged
+    ``semantic_search_init_failed`` with ``exc_info=True`` (a full
+    traceback, which carries the message) unconditionally on every call.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_warn_cache(self) -> Any:
+        _warn_semantic_search_init_failed_once.cache_clear()
+        yield
+        _warn_semantic_search_init_failed_once.cache_clear()
+
+    def test_it_degrades_to_keyword_and_graph_only(self) -> None:
+        registry = _VectorStoreRaises(RuntimeError("boom"))
+
+        result = build_strategies(
+            registry,  # type: ignore[arg-type]
+            embedding_fn=lambda _text: [0.1, 0.2],
+        )
+
+        assert not any(isinstance(s, SemanticSearch) for s in result.strategies)
+        assert {type(s).__name__ for s in result.strategies} == {
+            "KeywordSearch",
+            "GraphSearch",
+        }
+
+    def test_it_warns_once_per_distinct_cause(self) -> None:
+        registry = _VectorStoreRaises(ConfigError("x", setting="vector_store.provider"))
+
+        with capture_logs() as logs:
+            build_strategies(registry, embedding_fn=lambda _text: [0.1])  # type: ignore[arg-type]
+            build_strategies(registry, embedding_fn=lambda _text: [0.1])  # type: ignore[arg-type]
+
+        warned = [e for e in logs if e["event"] == "semantic_search_init_failed"]
+        assert len(warned) == 1
+        assert warned[0]["log_level"] == "warning"
+        assert warned[0]["error_type"] == "ConfigError"
+        assert warned[0]["setting"] == "vector_store.provider"
+
+    def test_log_never_carries_the_message_text_or_a_traceback(self) -> None:
+        """Describe, don't quote: the prior ``exc_info=True`` behaviour put
+        a full traceback -- including the message -- on every build."""
+        sentinel = "SENTINEL-leak-marker-semantic-init-7c2a"
+        registry = _VectorStoreRaises(RuntimeError(sentinel))
+
+        with capture_logs() as logs:
+            build_strategies(registry, embedding_fn=lambda _text: [0.1])  # type: ignore[arg-type]
+
+        warned = [e for e in logs if e["event"] == "semantic_search_init_failed"]
+        assert len(warned) == 1
+        assert warned[0]["error_type"] == "RuntimeError"
+        assert warned[0]["setting"] is None
+        # No exc_info -> no "exception" key carrying a rendered traceback.
+        assert "exc_info" not in warned[0]
+        for value in warned[0].values():
+            assert sentinel not in str(value)
+
+    def test_logs_again_for_a_different_cause(self) -> None:
+        """Dedup is per-cause, not a global silence switch."""
+        with capture_logs() as logs:
+            build_strategies(  # type: ignore[arg-type]
+                _VectorStoreRaises(RuntimeError("a")),
+                embedding_fn=lambda _text: [0.1],
+            )
+            build_strategies(  # type: ignore[arg-type]
+                _VectorStoreRaises(ConfigError("b", setting="vector_store.dsn")),
+                embedding_fn=lambda _text: [0.1],
+            )
+
+        warned = [e for e in logs if e["event"] == "semantic_search_init_failed"]
+        assert len(warned) == 2
+        assert {w["error_type"] for w in warned} == {"RuntimeError", "ConfigError"}

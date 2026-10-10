@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.retrieve.pack_builder import (
     PackAssemblyError,
     PackBuilder,
@@ -230,7 +231,7 @@ class TestRerankerFailureRaises:
 
 
 class TestStrategyFailureSerialization:
-    """``StrategyFailure.to_event_payload`` produces JSON-serializable dicts."""
+    """``StrategyFailure``'s two serializers produce JSON-serializable dicts."""
 
     def test_to_event_payload_shape(self) -> None:
         f = StrategyFailure(strategy="kw", error_class="RuntimeError", message="boom")
@@ -239,3 +240,109 @@ class TestStrategyFailureSerialization:
             "error_class": "RuntimeError",
             "message": "boom",
         }
+
+    def test_to_audit_event_payload_defaults_to_message(self) -> None:
+        """No explicit ``audit_message`` → it falls back to ``message``
+        (the shape every pre-existing hand-constructed ``StrategyFailure``,
+        such as :class:`EmbedderResolveFailure`'s, relies on)."""
+        f = StrategyFailure(strategy="kw", error_class="RuntimeError", message="boom")
+        assert f.to_audit_event_payload() == {
+            "strategy": "kw",
+            "error_class": "RuntimeError",
+            "message": "boom",
+        }
+
+    def test_explicit_audit_message_diverges_from_message(self) -> None:
+        """The two serializers read different fields: ``to_event_payload``
+        always reads ``message`` (raw), ``to_audit_event_payload`` always
+        reads ``audit_message`` (sanitized), and an explicit
+        ``audit_message`` is never echoed back by the other."""
+        f = StrategyFailure(
+            strategy="kw",
+            error_class="RuntimeError",
+            message="boom with a secret",
+            audit_message="boom",
+        )
+        assert f.to_event_payload()["message"] == "boom with a secret"
+        assert f.to_audit_event_payload()["message"] == "boom"
+
+
+class TestStrategyFailureMessageIsSanitized:
+    """#837 follow-up: the ``PACK_ASSEMBLED`` event's stored
+    ``strategy_failures[].message`` is built from
+    ``summarize_exception(exc)["message"]`` (via ``StrategyFailure.audit_message``
+    and :meth:`StrategyFailure.to_audit_event_payload`) rather than a raw
+    ``str(exc)``, so a credential or secret embedded in a strategy's own
+    exception text cannot reach stored telemetry. ``StrategyFailure.message``
+    itself stays the raw ``str(exc)`` — the CLI's plain-text render arm and
+    ``_raise_if_blocking_strategy_failures``'s own exception text both
+    depend on seeing it unsanitized (#493,
+    ``tests/unit/cli/test_pack_assembly_boundary.py::test_the_machine_arm_suppresses_a_leaky_axis_message``).
+    Both ``build`` and ``build_sectioned`` construct ``StrategyFailure``
+    independently (two call sites), so both are covered here rather than
+    pinning only one.
+    """
+
+    _HOSTILE = (
+        "connection failed: postgresql://svc:correcthorsebattery@10.0.0.5:5432/trellis"
+    )
+    _SECRET_FRAGMENT = "correcthorsebattery"  # noqa: S105 — test placeholder, not a real credential
+
+    def test_event_payload_message_is_sanitized_not_raw(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
+        good = _make_strategy("kw", [_item("d1", 0.9)])
+        bad = _failing_strategy("sem", RuntimeError(self._HOSTILE))
+        builder = PackBuilder(strategies=[good, bad], event_log=event_log)
+        builder.build("q")
+
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        payload = events[0].payload or {}
+        failures = payload.get("strategy_failures")
+        assert isinstance(failures, list)
+        assert failures[0]["message"] == SUPPRESSED_MARKER
+        assert self._SECRET_FRAGMENT not in failures[0]["message"]
+
+    def test_required_strategy_failure_keeps_raw_message_but_sanitizes_audit_message(
+        self,
+    ) -> None:
+        """The in-memory ``StrategyFailure`` attached to a raised
+        ``PackAssemblyError`` keeps a raw ``.message`` — the CLI's
+        plain-text arm and the exception's own interpolated text both
+        depend on it — but its ``.audit_message`` (what would be written
+        to stored telemetry had the build not raised) is sanitized."""
+        bad = _failing_strategy("kw", RuntimeError(self._HOSTILE))
+        builder = PackBuilder(strategies=[bad])
+        with pytest.raises(PackAssemblyError) as excinfo:
+            builder.build("q")
+        failure = excinfo.value.strategy_failures[0]
+        assert failure.message == self._HOSTILE
+        assert failure.audit_message == SUPPRESSED_MARKER
+
+    def test_sectioned_build_event_message_is_sanitized(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
+        good = _make_strategy("kw", [_item("d1", 0.9)])
+        bad = _failing_strategy("sem", RuntimeError(self._HOSTILE))
+        builder = PackBuilder(strategies=[good, bad], event_log=event_log)
+        builder.build_sectioned("q", sections=[SectionRequest(name="all")])
+
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        payload = events[0].payload or {}
+        failures = payload.get("strategy_failures", [])
+        assert failures[0]["message"] == SUPPRESSED_MARKER
+        assert self._SECRET_FRAGMENT not in failures[0]["message"]
+
+    def test_plain_prose_message_still_reads_naturally(self, tmp_path: Path) -> None:
+        """Sanitization only fires on a leak heuristic — ordinary prose
+        (no credentials, no long opaque token) still reads as itself,
+        same as the pre-existing ``"bad query vector"``/``"index
+        missing"`` assertions elsewhere in this file."""
+        event_log = SQLiteEventLog(db_path=tmp_path / "events.db")
+        good = _make_strategy("kw", [_item("d1", 0.9)])
+        bad = _failing_strategy("sem", RuntimeError("index out of range"))
+        builder = PackBuilder(strategies=[good, bad], event_log=event_log)
+        builder.build("q")
+
+        events = event_log.get_events(event_type=EventType.PACK_ASSEMBLED)
+        payload = events[0].payload or {}
+        failures = payload.get("strategy_failures", [])
+        assert failures[0]["message"] == "index out of range"

@@ -2051,6 +2051,36 @@ All notable changes to Trellis will be documented in this file.
   line. In both helpers, a `setting` that is not a string degrades to
   `None` instead of breaking the dedup cache, so every path still
   degrades rather than raising.
+- **`build_strategies()`'s vector-backend init failure is now loud once per
+  cause, not once per pack build.** Degrading to keyword + graph search when
+  `SemanticSearch(registry.knowledge.vector_store, ...)` raised logged
+  `semantic_search_init_failed` with `exc_info=True` on every single build —
+  `StoreRegistry._get` caches only success (#830), so a persistent
+  misconfiguration (a bad `vector_store.provider`, a missing extra, a down
+  backend) re-raised identically on every retrieval call, turning one broken
+  setting into a full traceback per pack. A new
+  `_warn_semantic_search_init_failed_once` (`functools.cache`-backed, mirroring
+  `_warn_embedder_resolve_failed_once` / `_warn_vector_store_unavailable_once` /
+  the `embed_ingest_hook` helpers) now logs at WARNING once per distinct
+  `(error_type, setting)` per process, describing the cause — the exception's
+  type name and, for a `ConfigError`, its `setting` — never the exception's
+  message or a traceback, which can echo a DSN or credential.
+  ([#848](https://github.com/ronsse/trellis-ai/pull/848))
+- **The stored `PACK_ASSEMBLED.strategy_failures[].message` is now a
+  sanitized summary, not a raw `str(exc)`.** A strategy's own exception text
+  (a DSN fragment, a credential, a row value) reached this durable audit
+  event verbatim. `StrategyFailure` keeps a raw `.message` — `PackAssemblyError`'s
+  own interpolated text and `trellis_cli.main`'s plain-text render arm both
+  depend on seeing it unsanitized, by design (#493,
+  `test_the_machine_arm_suppresses_a_leaky_axis_message`) — alongside a new
+  `.audit_message`, computed once at construction from
+  `summarize_exception(exc)["message"]` (sanitized, bounded). `build()` and
+  `build_sectioned()` now write the event's `strategy_failures[]` through a
+  new `to_audit_event_payload()` serializer that reads `.audit_message`,
+  instead of the raw-message `to_event_payload()` CLI rendering already uses.
+  The axes block an agent-facing pack response carries
+  (`format_failed_axes_note`) never reads either field.
+  ([#848](https://github.com/ronsse/trellis-ai/pull/848))
 
 ## [0.9.0] - 2026-05-13
 

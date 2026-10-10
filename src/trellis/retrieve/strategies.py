@@ -1970,6 +1970,38 @@ def _warn_embedder_resolve_failed_once(error_type: str, setting: str | None) -> 
     )
 
 
+@functools.cache
+def _warn_semantic_search_init_failed_once(
+    error_type: str, setting: str | None
+) -> None:
+    """Emit ``semantic_search_init_failed`` once per cause.
+
+    ``StoreRegistry._get`` caches only success (#830): a vector backend
+    that fails to initialise is re-instantiated — and re-raises
+    identically — on *every* pack build, not just the first. Logging a
+    full traceback (``exc_info=True``, which carries the exception's own
+    message) on each one turned one persistent misconfiguration into a
+    traceback per retrieval call. ``functools.cache`` makes a repeat call
+    with the same ``(error_type, setting)`` a no-op: the body (and its
+    ``logger.warning``) runs once per distinct cause per process. Same
+    dedup #834/#839 applied to ``_warn_embedder_resolve_failed_once``
+    above, ``_warn_vector_store_unavailable_once``
+    (:mod:`trellis.core.vector_metadata`) and both
+    :mod:`trellis.retrieve.embed_ingest_hook` helpers. WARNING, not
+    ``.exception`` — the type and setting are what an operator acts on;
+    the traceback is noise after the first one.
+
+    ``_warn_semantic_search_init_failed_once.cache_clear()`` is
+    test-facing only, to isolate cases within one process — a production
+    process does not reset it mid-flight.
+    """
+    logger.warning(
+        "semantic_search_init_failed",
+        error_type=error_type,
+        setting=setting,
+    )
+
+
 class BuildStrategiesResult(NamedTuple):
     """What :func:`build_strategies` returns.
 
@@ -2112,9 +2144,14 @@ def build_strategies(
             logger.info("semantic_search_enabled")
         # GRACEFUL-DEGRADATION: semantic search is optional; a vector
         # backend that fails init must not block keyword + graph search
-        # — log and continue without it.
-        except Exception:
-            logger.warning("semantic_search_init_failed", exc_info=True)
+        # — log and continue without it. Describe, don't quote (same
+        # reasoning as the embedder-resolve branch above): ``setting`` is
+        # read from the exception's own ``.setting`` attribute only when
+        # it IS a ConfigError.
+        except Exception as exc:
+            error_type = type(exc).__name__
+            setting = exc.setting if isinstance(exc, ConfigError) else None
+            _warn_semantic_search_init_failed_once(error_type, setting)
 
     return BuildStrategiesResult(
         strategies=strategies,

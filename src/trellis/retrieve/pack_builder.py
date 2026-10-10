@@ -29,6 +29,7 @@ import structlog
 
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.base import utc_now
+from trellis.core.error_sanitize import summarize_exception
 from trellis.core.hashing import content_hash
 from trellis.core.pack_holdout import (
     HOLDOUT_ADVISORY_IDS_KEY,
@@ -149,19 +150,64 @@ class StrategyFailure:
 
     Attached to :class:`PackAssemblyError` when raised, and included in
     the ``PACK_ASSEMBLED`` event payload under ``strategy_failures``
-    when the build continues with survivors.
+    when the build continues with survivors. These two consumers have
+    different, incompatible disclosure rules for the same failure, so
+    this carries two message fields rather than one:
+
+    * ``message`` — the raw ``str(exc)``. ``PackAssemblyError`` quotes
+      this verbatim into the exception text
+      (:func:`_raise_if_blocking_strategy_failures`), and
+      :mod:`trellis_cli.main`'s plain-text render arm prints it
+      unsanitized to a human's terminal by design (#493,
+      ``tests/unit/cli/test_pack_assembly_boundary.py::test_the_machine_arm_suppresses_a_leaky_axis_message``)
+      — "it is going to a terminal, not into an artifact." The CLI's
+      own ``--format json`` arm and the MCP boundary already sanitize
+      this independently at render time
+      (:func:`~trellis.core.error_sanitize.sanitized_error_payload`,
+      :func:`~trellis.core.error_sanitize.render_exception_detail`), so
+      leaving it raw here does not leak it to either of those surfaces.
+    * ``audit_message`` — :func:`~trellis.core.error_sanitize.summarize_exception`'s
+      sanitized one-line ``"message"``, computed once at construction
+      from the original exception. This is what the two ``build``/
+      ``build_sectioned`` call sites write into the *stored*
+      ``PACK_ASSEMBLED`` event (:meth:`to_audit_event_payload`) — a
+      durable audit row has no "it's just a terminal" excuse, so it
+      never gets the raw, unbounded ``str(exc)`` that could echo a DSN,
+      credential or row value. Defaults to ``message`` when not given
+      explicitly, for callers (tests, :class:`EmbedderResolveFailure`)
+      that construct a `StrategyFailure` directly from an already-safe
+      string rather than from a caught exception.
+
+    The axes block a pack response carries
+    (:func:`~trellis.retrieve.builder_factory.describe_axes`,
+    rendered by :func:`trellis_wire.axes.format_failed_axes_note`) never
+    reads either field — it names only which axes failed, never why —
+    so neither message can reach that agent-facing surface.
     """
 
     strategy: str
     error_class: str
     message: str
+    audit_message: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.audit_message is None:
+            object.__setattr__(self, "audit_message", self.message)
 
     def to_event_payload(self) -> dict[str, str]:
-        """Serialize for inclusion in the ``PACK_ASSEMBLED`` event."""
+        """Serialize for :mod:`trellis_cli.main`'s render helpers — raw ``message``."""
         return {
             "strategy": self.strategy,
             "error_class": self.error_class,
             "message": self.message,
+        }
+
+    def to_audit_event_payload(self) -> dict[str, str]:
+        """Serialize for the stored ``PACK_ASSEMBLED`` event — sanitized."""
+        return {
+            "strategy": self.strategy,
+            "error_class": self.error_class,
+            "message": self.audit_message or "",
         }
 
 
@@ -771,6 +817,7 @@ class PackBuilder:
                         strategy=strategy.name,
                         error_class=type(exc).__name__,
                         message=str(exc),
+                        audit_message=summarize_exception(exc)["message"],
                     )
                 )
                 continue
@@ -1072,6 +1119,7 @@ class PackBuilder:
                         strategy=strategy.name,
                         error_class=type(exc).__name__,
                         message=str(exc),
+                        audit_message=summarize_exception(exc)["message"],
                     )
                 )
                 continue
@@ -1527,7 +1575,7 @@ class PackBuilder:
                 "content_floor": content_floor or {},
                 "withholding": withholding or {},
                 "strategy_failures": [
-                    sf.to_event_payload() for sf in (strategy_failures or [])
+                    sf.to_audit_event_payload() for sf in (strategy_failures or [])
                 ],
                 "meta_filtered_count": meta_filtered_count,
                 **holdout,
@@ -1805,7 +1853,7 @@ class PackBuilder:
                     1 for r in report.rejected_items if r.reason == "semantic_dedup"
                 ),
                 "strategy_failures": [
-                    sf.to_event_payload() for sf in (strategy_failures or [])
+                    sf.to_audit_event_payload() for sf in (strategy_failures or [])
                 ],
                 "meta_filtered_count": meta_filtered_count,
                 "index_mode": index_mode,
