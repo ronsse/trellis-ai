@@ -152,10 +152,12 @@ _HOLDOUT_KEYS = {"holdout", "holdout_rate"}
 #: Keys added to both payloads since the ``_BASE_*_KEYS`` snapshot was taken,
 #: by any change, not just this one: the holdout keys (this file's own
 #: subject), plus ``duration_ms`` (real build latency, previously hard-coded
-#: to ``0`` and emitted nowhere). ``_BASE_*_KEYS`` stays an honest historical
-#: snapshot of 58be23d4 rather than being backfilled, so a *later* addition
-#: extends this set, not the base one.
-_KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {"duration_ms"}
+#: to ``0`` and emitted nowhere) and ``advisories_filtered_legacy``
+#: (decision-ledger D-4, option B — how many matching advisories were
+#: withheld for predating the #394 generator repair). ``_BASE_*_KEYS`` stays
+#: an honest historical snapshot of 58be23d4 rather than being backfilled,
+#: so a *later* addition extends this set, not the base one.
+_KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {"duration_ms", "advisories_filtered_legacy"}
 
 
 def _items() -> list[PackItem]:
@@ -191,6 +193,7 @@ def _advisory(
             success_rate_with=0.8,
             success_rate_without=0.45,
             effect_size=0.35,
+            evidence_confidence=1.0,
         ),
         scope="global",
     )

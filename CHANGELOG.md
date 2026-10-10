@@ -435,6 +435,26 @@ All notable changes to Trellis will be documented in this file.
   ([#392](https://github.com/ronsse/trellis-ai/issues/392),
   [#844](https://github.com/ronsse/trellis-ai/pull/844))
 
+- **Stop serving advisories minted before the #394 generator repair.**
+  #844 rendered advisories on the flat path but shipped decision-ledger D-4's
+  option A (render everything matching), not the option B the owner
+  approved: the code made no attempt to distinguish pre-/post-#394 rows, so
+  the 51 known-degenerate legacy rows measured live on 2026-10-10 (vs. 361
+  post-repair, zero mismatches against the alternative id-prefix
+  discriminator) were eligible to ride every pack. `_select_advisories` now
+  drops any advisory whose `evidence.evidence_confidence is None` — the
+  field only the repaired generator populates — before ranking and the
+  delivery cap run, on both pack shapes, so a legacy row can never occupy a
+  rank or cap slot a post-repair row would have won. Reversible via
+  `TRELLIS_FILTER_LEGACY_ADVISORIES` (default on, same accepted-value
+  vocabulary as `TRELLIS_GRAPH_SEEDING`). `PACK_ASSEMBLED` carries the
+  withheld count as `advisories_filtered_legacy` (`0` when the knob is
+  off), counted before `advisories_matched`, so the advisory-fitness loop
+  never counts a withheld row as a presentation. Clearing the 51 legacy
+  rows from the live store is a separate, operator-only live-store
+  mutation, unchanged by this fix.
+  ([decision-ledger D-4](docs/design/decision-ledger.md#d-4--should-the-flat-pack-path-render-advisories-at-all--panel-split))
+
 - **Noise demotion counts what was written, not what the evidence gate
   admitted.** `apply_noise_tags` writes `signal_quality="noise"` only to
   ids that resolve in the document store; the demotion gate admits

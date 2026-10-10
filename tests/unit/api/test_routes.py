@@ -1171,6 +1171,7 @@ def _seed_advisories(stores_dir, count):
                     success_rate_with=0.6,
                     success_rate_without=0.0,
                     effect_size=0.6,
+                    evidence_confidence=1.0,
                 ),
                 scope="global",
             )

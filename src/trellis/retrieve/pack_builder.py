@@ -18,6 +18,7 @@ Failure semantics (C2 Phase 4):
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from collections.abc import Callable, Iterable
@@ -127,6 +128,55 @@ DEFAULT_SESSION_DEDUP_EVENT_LIMIT = 200
 #: to skip. See :mod:`trellis.retrieve.evaluate` for scorer building blocks
 #: and ``docs/agent-guide/pack-quality-evaluation.md`` for usage.
 PackEvaluator = Callable[[Pack], "QualityReport | None"]
+
+#: Kill switch for withholding advisories minted before the #394 generator
+#: repair (decision-ledger D-4, option B). Unset means **on**.
+#:
+#: A **read-side** knob, deliberately outside :mod:`trellis.core.write_config`
+#: for the same reason :data:`trellis.retrieve.builder_factory.GRAPH_SEEDING_ENV`
+#: lives there instead of here: that module is the one home for *ingest-time*
+#: behaviour, and this is what gets *served*, not what gets written.
+#:
+#: Pre-#394, the generator minted a fresh ULID ``advisory_id`` every nightly
+#: pass and never wrote ``AdvisoryEvidence.evidence_confidence`` (the field
+#: did not exist). #394 keyed ids on the finding instead
+#: (``adv-<category>-<hash>``), so a legacy ULID row can never collide with
+#: a regenerated one and is never replaced — it is stuck, forever, exactly
+#: as the old generator left it. decision-ledger D-4 calls these "known-
+#: degenerate output" the fitness loop must not be the first to see. Default
+#: **on** because that is the owner's chosen posture; the one-knob reversal
+#: is what makes it safe to ship without a live-store purge in the same
+#: change (clearing the rows is a separate, operator-only step).
+FILTER_LEGACY_ADVISORIES_ENV = "TRELLIS_FILTER_LEGACY_ADVISORIES"
+
+#: Accepted spellings, matching :mod:`trellis.retrieve.builder_factory`. A
+#: value in neither set is a typo, and a typo'd kill switch that silently
+#: keeps the default is how an operator ends up believing they disabled
+#: something they did not — so it warns rather than going quiet.
+_LEGACY_ADVISORY_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_LEGACY_ADVISORY_FALSEY = frozenset({"0", "false", "no", "off"})
+
+
+def _filter_legacy_advisories_enabled() -> bool:
+    """Read :data:`FILTER_LEGACY_ADVISORIES_ENV`; unset or unrecognised means on.
+
+    Read per build rather than at import, so a long-lived process picks up
+    an operator's change between runs — the same posture
+    :func:`trellis.retrieve.builder_factory._graph_seeding_enabled` takes.
+    """
+    raw = os.environ.get(FILTER_LEGACY_ADVISORIES_ENV, "").strip().lower()
+    if not raw:
+        return True
+    if raw in _LEGACY_ADVISORY_FALSEY:
+        return False
+    if raw not in _LEGACY_ADVISORY_TRUTHY:
+        logger.warning(
+            "filter_legacy_advisories_env_unrecognised",
+            var=FILTER_LEGACY_ADVISORIES_ENV,
+            value=raw,
+            effective=True,
+        )
+    return True
 
 
 class PackAssemblyError(RuntimeError):
@@ -1010,9 +1060,12 @@ class PackBuilder:
         # Capped at :attr:`_ADVISORY_MAX_COUNT` (#392); provenance is
         # stamped from the *served* set, because an advisory the caller
         # never saw cannot have influenced anything it did.
-        advisories, advisories_matched, advisories_explored = self._select_advisories(
-            domain
-        )
+        (
+            advisories,
+            advisories_matched,
+            advisories_explored,
+            advisories_filtered_legacy,
+        ) = self._select_advisories(domain)
         selected = self._attach_advisory_provenance(selected, advisories)
 
         # What this build removed and did not serve (#404). Computed from
@@ -1048,6 +1101,7 @@ class PackBuilder:
             "withholding": withholding.as_telemetry(),
             "advisories_matched": advisories_matched,
             "advisories_explored": advisories_explored,
+            "advisories_filtered_legacy": advisories_filtered_legacy,
         }
         # The pack-effect holdout (:mod:`trellis.core.pack_holdout`), drawn
         # once the pack id exists and the would-be pack is known. A withheld
@@ -1369,9 +1423,12 @@ class PackBuilder:
                 )
             )
 
-        advisories, advisories_matched, advisories_explored = self._select_advisories(
-            domain
-        )
+        (
+            advisories,
+            advisories_matched,
+            advisories_explored,
+            advisories_filtered_legacy,
+        ) = self._select_advisories(domain)
 
         # Stamp per-item advisory provenance across all sections
         # (Unit C1, foundation for D1 axis C semantic tightening).
@@ -1406,6 +1463,7 @@ class PackBuilder:
             "withholding": withholding.as_telemetry(),
             "advisories_matched": advisories_matched,
             "advisories_explored": advisories_explored,
+            "advisories_filtered_legacy": advisories_filtered_legacy,
         }
         # The pack-effect holdout, drawn as in :meth:`build`: the whole
         # sectioned pack is withheld or none of it.
@@ -1507,6 +1565,7 @@ class PackBuilder:
             "withholding": summarize_withheld([], []).as_telemetry(),
             "advisories_matched": 0,
             "advisories_explored": [],
+            "advisories_filtered_legacy": 0,
         }
 
     def _withheld_sectioned_telemetry(self) -> dict[str, Any]:
@@ -1520,6 +1579,7 @@ class PackBuilder:
             "withholding": summarize_withheld([], []).as_telemetry(),
             "advisories_matched": 0,
             "advisories_explored": [],
+            "advisories_filtered_legacy": 0,
         }
 
     def _emit_sectioned_telemetry(
@@ -1533,6 +1593,7 @@ class PackBuilder:
         withholding: dict[str, Any] | None = None,
         advisories_matched: int | None = None,
         advisories_explored: list[str] | None = None,
+        advisories_filtered_legacy: int | None = None,
         withheld_from: SectionedPack | None = None,
     ) -> None:
         """Emit telemetry event for a sectioned pack.
@@ -1555,6 +1616,14 @@ class PackBuilder:
         operator can see that a cap bound without inferring it from which
         build was deployed. Equal to ``len(advisory_ids)`` whenever the
         cap did not bind.
+
+        ``advisories_filtered_legacy`` (decision-ledger D-4, option B) is how
+        many matching advisories were withheld for predating the #394
+        generator repair — rows ``_is_legacy_advisory`` identifies by a
+        missing ``evidence_confidence``, dropped before ranking/capping so
+        one can never occupy an explore or cap slot. ``0`` when the
+        ``TRELLIS_FILTER_LEGACY_ADVISORIES`` knob is off, since nothing is
+        withheld in that case.
         """
         per_item_estimates = [
             item.estimated_tokens or self._token_counter.count(item.excerpt)
@@ -1627,6 +1696,11 @@ class PackBuilder:
                 # running and found nothing to explore" is
                 # distinguishable from a build that has no slot at all.
                 "advisories_explored": list(advisories_explored or []),
+                "advisories_filtered_legacy": (
+                    0
+                    if advisories_filtered_legacy is None
+                    else advisories_filtered_legacy
+                ),
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
                 "semantic_dedup_rejected": semantic_dedup_rejected_count,
@@ -1731,6 +1805,7 @@ class PackBuilder:
         index_mode: bool = False,
         advisories_matched: int | None = None,
         advisories_explored: list[str] | None = None,
+        advisories_filtered_legacy: int | None = None,
         withheld_from: Pack | None = None,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
@@ -1809,6 +1884,14 @@ class PackBuilder:
         operator can see that a cap bound without inferring it from which
         build was deployed. Equal to ``len(advisory_ids)`` whenever the
         cap did not bind.
+
+        ``advisories_filtered_legacy`` (decision-ledger D-4, option B) is how
+        many matching advisories were withheld for predating the #394
+        generator repair — rows ``_is_legacy_advisory`` identifies by a
+        missing ``evidence_confidence``, dropped before ranking/capping so
+        one can never occupy an explore or cap slot. ``0`` when the
+        ``TRELLIS_FILTER_LEGACY_ADVISORIES`` knob is off, since nothing is
+        withheld in that case.
 
         ``duration_ms`` is wall-clock time for this build, from entry to
         the point the :class:`RetrievalReport` is constructed (strategy
@@ -1905,6 +1988,11 @@ class PackBuilder:
                 # running and found nothing to explore" is
                 # distinguishable from a build that has no slot at all.
                 "advisories_explored": list(advisories_explored or []),
+                "advisories_filtered_legacy": (
+                    0
+                    if advisories_filtered_legacy is None
+                    else advisories_filtered_legacy
+                ),
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
                 "semantic_dedup_rejected": sum(
@@ -2144,15 +2232,22 @@ class PackBuilder:
 
     def _select_advisories(
         self, domain: str | None
-    ) -> tuple[list[Any], int, list[str]]:
+    ) -> tuple[list[Any], int, list[str], int]:
         """Rank the matching advisories and cut them to the delivery cap.
 
-        Returns ``(served, matched, explored)`` — the advisories that ride
-        the pack, how many matched before the cap, and the ids among the
-        served that took the explore slot. The first two make the cap's
-        effect a property of the served record (``PACK_ASSEMBLED.payload
-        ["advisories_matched"]``) rather than an inference about which
-        build was deployed; the third does the same for the slot.
+        Returns ``(served, matched, explored, filtered_legacy)`` — the
+        advisories that ride the pack, how many matched before the cap, the
+        ids among the served that took the explore slot, and how many
+        pre-#394 rows (decision-ledger D-4, option B) were withheld by
+        :data:`FILTER_LEGACY_ADVISORIES_ENV` before ranking. The first two
+        make the cap's effect a property of the served record
+        (``PACK_ASSEMBLED.payload["advisories_matched"]``) rather than an
+        inference about which build was deployed; the third does the same
+        for the slot, and the fourth for the legacy filter — a withheld
+        legacy row has no ``RejectedItem`` to carry it (that schema is
+        ``PackItem``-only), so a counter in telemetry is the record.
+        Filtered *before* ranking and the cap, so a legacy row can never
+        occupy a slot a post-repair finding would have won.
 
         **The cap is self-reinforcing without a reserved slot** (#502).
         Selection reads ``confidence``; ``confidence`` is only ever moved
@@ -2322,10 +2417,15 @@ class PackBuilder:
         the ties are now larger, just lower down.
         """
         matching = self._get_matching_advisories(domain)
+        filtered_legacy = 0
+        if _filter_legacy_advisories_enabled():
+            before = len(matching)
+            matching = [a for a in matching if not self._is_legacy_advisory(a)]
+            filtered_legacy = before - len(matching)
         matching.sort(key=self._advisory_rank)
         cap = self._ADVISORY_MAX_COUNT
         if len(matching) <= cap:
-            return matching, len(matching), []
+            return matching, len(matching), [], filtered_legacy
 
         slots = self._ADVISORY_EXPLORE_SLOTS
         exploit = matching[: cap - slots]
@@ -2350,7 +2450,7 @@ class PackBuilder:
                     break
 
         served.sort(key=self._advisory_rank)
-        return served, len(matching), [a.advisory_id for a in explore]
+        return served, len(matching), [a.advisory_id for a in explore], filtered_legacy
 
     @staticmethod
     def _advisory_rank(advisory: Any) -> tuple[float, int, str]:
@@ -2360,6 +2460,27 @@ class PackBuilder:
             -advisory.evidence.sample_size,
             advisory.advisory_id,
         )
+
+    @staticmethod
+    def _is_legacy_advisory(advisory: Any) -> bool:
+        """True for a row minted before the #394 generator repair.
+
+        The repaired generator is the only writer that populates
+        ``AdvisoryEvidence.evidence_confidence`` — every one of its five
+        analysis methods sets it, four through the shared ``_evidence``
+        helper and ``_scope_analysis`` directly. The field did not exist
+        before #394, so a pre-repair row's stored JSON never carries it and
+        it loads as ``None``. It can never become populated afterwards
+        either: #394 also moved ``advisory_id`` from a fresh ULID per run to
+        a hash stable per finding, so a legacy ULID id never collides with
+        a regenerated one and ``AdvisoryStore.put_many`` can never replace
+        it in place (decision-ledger D-4). Measured against the live store
+        2026-10-10: exactly the 51 rows this predicate selects are also the
+        51 whose ``advisory_id`` does not start with ``"adv-"`` — either
+        discriminator alone is sufficient; this one is used because it is a
+        field the schema already carries, not a string convention on an id.
+        """
+        return advisory.evidence.evidence_confidence is None
 
     @classmethod
     def _advisory_is_explorable(cls, advisory: Any, *, now: datetime) -> bool:
