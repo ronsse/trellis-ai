@@ -942,6 +942,29 @@ class TestSaveMemory:
             limit=100,
         )
 
+    def test_non_finite_metadata_writes_no_document(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """A NaN/Infinity metadata value must not leave a durable orphan.
+
+        Before the document store refused non-finite JSON (allow_nan=False
+        on the write path), ``save_memory`` committed the document row
+        first and only the later ``MEMORY_STORED`` emit failed — an
+        unrecoverable write the caller's error made look recoverable.
+        Once the document store also refuses, nothing durable lands.
+        """
+        with pytest.raises(McpError):
+            save_memory(
+                "memory content with non-finite metadata",
+                metadata={"score": float("nan")},
+            )
+
+        assert temp_registry.knowledge.document_store.count() == 0
+        assert not temp_registry.operational.event_log.get_events(
+            event_type=EventType.MEMORY_STORED,
+            limit=100,
+        )
+
     def test_embedding_runs_once_outside_dedup_lock(
         self,
         temp_registry: StoreRegistry,

@@ -247,6 +247,113 @@ class TestBoltUpsertEdgesBulkShape:
 
 
 # ---------------------------------------------------------------------------
+# A non-finite property/generation_spec value is refused before any
+# round trip — json.dumps(..., allow_nan=False) on the shared Bolt base.
+# ---------------------------------------------------------------------------
+
+
+class TestBoltRefusesNonFiniteJson:
+    def test_upsert_node_refuses_a_non_finite_property(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_node("a", "service", {"score": float("nan")})
+        assert captured == []
+
+    def test_upsert_node_refuses_a_non_finite_generation_spec_value(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_node(
+                "a",
+                "memory",
+                {},
+                node_role="curated",
+                generation_spec={"confidence": float("inf")},
+            )
+        assert captured == []
+
+    def test_update_node_if_current_refuses_a_non_finite_property(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.update_node_if_current(
+                "a",
+                "2026-01-01T00:00:00+00:00",
+                "service",
+                {"score": float("-inf")},
+                node_role="semantic",
+            )
+        assert captured == []
+
+    def test_upsert_nodes_bulk_refuses_a_non_finite_property(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_nodes_bulk(
+                [
+                    {"node_id": "a", "node_type": "service", "properties": {"v": 1}},
+                    {
+                        "node_id": "b",
+                        "node_type": "service",
+                        "properties": {"v": float("nan")},
+                    },
+                ]
+            )
+        # The pre-fetch (read) may have run, but no write round trip did.
+        assert not any("UNWIND $rows" in str(c["cypher"]) for c in captured)
+
+    def test_upsert_nodes_bulk_refuses_a_non_finite_generation_spec_value(
+        self,
+    ) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_nodes_bulk(
+                [
+                    {
+                        "node_id": "a",
+                        "node_type": "memory",
+                        "node_role": "curated",
+                        "properties": {},
+                        "generation_spec": {"confidence": float("nan")},
+                    },
+                ]
+            )
+        assert not any("UNWIND $rows" in str(c["cypher"]) for c in captured)
+
+    def test_upsert_edge_refuses_a_non_finite_property(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_edge("a", "b", "depends_on", {"weight": float("nan")})
+        assert captured == []
+
+    def test_upsert_edges_bulk_refuses_a_non_finite_property(self) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.upsert_edges_bulk(
+                [
+                    {
+                        "source_id": "a",
+                        "target_id": "b",
+                        "edge_type": "depends_on",
+                        "properties": {"weight": 1.0},
+                    },
+                    {
+                        "source_id": "a",
+                        "target_id": "c",
+                        "edge_type": "depends_on",
+                        "properties": {"weight": float("inf")},
+                    },
+                ]
+            )
+        # The build loop raises before the endpoint pre-check round trip.
+        assert captured == []
+
+
+# ---------------------------------------------------------------------------
 # _edge_props_to_dict — read path surfaces provenance fields
 # ---------------------------------------------------------------------------
 

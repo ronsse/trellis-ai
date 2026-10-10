@@ -272,7 +272,7 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
 
         now = utc_now().isoformat()
         metadata = metadata or {}
-        metadata_json = json.dumps(metadata)
+        metadata_json = json.dumps(metadata, allow_nan=False)
         chash = _content_hash(content)
 
         conn = self._conn

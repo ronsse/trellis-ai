@@ -69,11 +69,11 @@ class SQLiteParameterStore(SQLiteStoreBase, ParameterStore):
                     params.scope.domain,
                     params.scope.intent_family,
                     params.scope.tool_name,
-                    json.dumps(params.values),
+                    json.dumps(params.values, allow_nan=False),
                     params.source,
                     params.created_at.isoformat(),
                     params.notes,
-                    json.dumps(params.metadata),
+                    json.dumps(params.metadata, allow_nan=False),
                     params.schema_version,
                 ),
             )
