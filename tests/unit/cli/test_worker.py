@@ -501,6 +501,32 @@ class TestWorkerCurate:
         assert Path(data["decisions_path"]).exists()
         assert data["skipped_stages"] == []
 
+    def test_full_cycle_names_title_less_candidate_from_its_document(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        # The nightly path must hand its document store to the artifact
+        # write (#845): a title-less candidate whose item resolves carries
+        # the readable name into the digest and the decisions template.
+        temp_stores.knowledge.document_store.put(
+            "wc:doc:named",
+            "---\nkind: note\n---\n# Readable Doc Heading\n\nBody line.",
+            {},
+        )
+        _seed_promote_signal(temp_stores, item_id="wc:doc:named")
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            ["worker", "curate", "--output-dir", str(out_dir), "--format", "json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        top_row = data["learning_promotable"]["top"][0]
+        name = top_row["precedent_name"]
+        assert name.endswith(":: Readable Doc Heading"), name
+        decisions = json.loads(Path(data["decisions_path"]).read_text("utf-8"))
+        by_id = {d["candidate_id"]: d["promotion_name"] for d in decisions["decisions"]}
+        assert by_id[top_row["candidate_id"]] == name
+
     def test_skip_noise_tags(self, tmp_path: Path, temp_stores: StoreRegistry) -> None:
         _seed_promote_signal(temp_stores)
         out_dir = tmp_path / "review"

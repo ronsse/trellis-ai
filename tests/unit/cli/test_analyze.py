@@ -1018,6 +1018,34 @@ class TestLearningCandidates:
         ids = {d["candidate_id"] for d in decisions["decisions"]}
         assert candidate["candidate_id"] in ids
 
+    def test_title_less_candidate_named_from_its_document(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        # The command hands its document store to the artifact write
+        # (#845), so a resolvable title-less item gets a readable name.
+        temp_stores.knowledge.document_store.put(
+            "lc:doc:named",
+            "---\nkind: note\n---\n# Readable Doc Heading\n\nBody line.",
+            {},
+        )
+        self._seed_promote_signal(temp_stores, item_id="lc:doc:named")
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "learning-candidates",
+                "--output-dir",
+                str(out_dir),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        name = data["candidates"][0]["precedent_name"]
+        assert name.endswith(":: Readable Doc Heading"), name
+
     def test_min_support_filters(
         self, tmp_path: Path, temp_stores: StoreRegistry
     ) -> None:

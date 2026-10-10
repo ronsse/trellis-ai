@@ -25,6 +25,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import structlog
+
 from trellis.learning.artifacts import LEARNING_CANDIDATES_FILENAME
 from trellis.learning.evidence_gate import (
     NOT_SCREENED,
@@ -37,6 +39,8 @@ if TYPE_CHECKING:
     from trellis.mutate import MutationExecutor
     from trellis.ops.registry import ParameterRegistry
     from trellis.stores.base.document import DocumentStore
+
+logger = structlog.get_logger(__name__)
 
 _LEARNING_ARTIFACT_VERSION = "1.0"
 _DEFAULT_MIN_SUPPORT = 2
@@ -524,8 +528,9 @@ def _resolve_fallback_candidate_name(
     ``None`` covers every case the caller treats identically: no store was
     given, the store has no document for ``item_id``, the document has no
     content, or the content has no derivable non-empty line.
-    ``DocumentStore.get`` returns ``None`` cleanly on no match (no
-    exception handling needed around it — see the sqlite backend).
+    ``DocumentStore.get`` returns ``None`` on no match, but an operational
+    failure (store unavailable, unreadable row) raises, and
+    :func:`_apply_readable_names` contains it.
     """
     if document_store is None:
         return None
@@ -564,6 +569,27 @@ def _apply_readable_name_fallback(
     )
 
 
+def _apply_readable_names(
+    candidates: Sequence[Any], document_store: DocumentStore | None
+) -> None:
+    """Apply :func:`_apply_readable_name_fallback` to each candidate; never raise.
+
+    The names are advisory, so the step is wrapped whole: a store failure
+    leaves the remaining candidates on their bare-id names and the artifact
+    is still written, instead of failing ``trellis worker curate`` after its
+    earlier stages have already run.
+    """
+    try:
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                _apply_readable_name_fallback(candidate, document_store)
+    except Exception as exc:  # advisory step; never fail the artifact write
+        logger.warning(
+            "learning_readable_name_fallback_failed",
+            error_type=type(exc).__name__,
+        )
+
+
 def write_learning_review_artifacts(
     *,
     report: dict[str, Any],
@@ -583,7 +609,8 @@ def write_learning_review_artifacts(
       each such candidate's item is looked up and, if resolved, its
       ``precedent_name`` is rebuilt from a readable fallback name — see
       :func:`_apply_readable_name_fallback`. A candidate that already has
-      a ``title``, or whose item can't be resolved, is untouched; the
+      a ``title``, or whose item can't be resolved, is untouched, and a
+      store failure degrades to bare ids rather than raising; the
       promoted-name override (``promotion_name``, built below and in
       :func:`build_learning_promotion_payloads`) still wins over whatever
       ``precedent_name`` ends up being.
@@ -598,9 +625,7 @@ def write_learning_review_artifacts(
 
     candidates = report.get("candidates", [])
     if isinstance(candidates, Sequence) and not isinstance(candidates, str | bytes):
-        for candidate in candidates:
-            if isinstance(candidate, dict):
-                _apply_readable_name_fallback(candidate, document_store)
+        _apply_readable_names(candidates, document_store)
     else:
         candidates = []
     report["promotable"] = _build_promotable_digest(candidates)

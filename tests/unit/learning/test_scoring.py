@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
+from tests.structlog_isolation import clear_cached_logger_proxies
 from tests.unit.learning._registry_fixture import build_seeded_registry
 from trellis.learning.evidence_gate import (
     MIN_ATTRIBUTED_OBSERVATIONS,
@@ -809,6 +812,56 @@ class TestReadableNameFallback:
         updated = report["candidates"][0]
         assert updated["precedent_name"] == "Learning: asset_generation :: item-blank"
 
+    def test_store_failure_degrades_to_bare_ids(self, tmp_path: Path) -> None:
+        # An operational failure is not a clean miss: it must leave every
+        # bare-id name in place, log once, and still write both artifacts,
+        # because this write is the last stage of ``trellis worker curate``.
+        class _FailingDocumentStore:
+            def get(self, doc_id: str) -> dict | None:
+                msg = "database is locked"
+                raise sqlite3.OperationalError(msg)
+
+        evidence = {"appearances": 5, "helpful_count": 1, "unhelpful_count": 0}
+        first = _make_promotable_candidate(
+            candidate_id="asset_generation:f1",
+            item_id="item-f1",
+            title=None,
+            citation_evidence=evidence,
+        )
+        second = _make_promotable_candidate(
+            candidate_id="asset_generation:f2",
+            item_id="item-f2",
+            title=None,
+            citation_evidence=evidence,
+        )
+        report = _report_with_candidates(first, second)
+        with capture_logs() as logs:
+            clear_cached_logger_proxies()
+            paths = write_learning_review_artifacts(
+                report=report,
+                output_dir=tmp_path,
+                document_store=_FailingDocumentStore(),
+            )
+        clear_cached_logger_proxies()
+
+        names = [c["precedent_name"] for c in report["candidates"]]
+        assert names == [
+            "Learning: asset_generation :: item-f1",
+            "Learning: asset_generation :: item-f2",
+        ]
+        written = json.loads(Path(paths["candidates_path"]).read_text("utf-8"))
+        assert written["promotable"]["count"] == 2
+        decisions = json.loads(
+            Path(paths["decisions_template_path"]).read_text("utf-8")
+        )
+        assert [d["promotion_name"] for d in decisions["decisions"]] == names
+        failures = [
+            e for e in logs if e["event"] == "learning_readable_name_fallback_failed"
+        ]
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+        assert failures[0]["error_type"] == "OperationalError"
+
 
 # ---------------------------------------------------------------------------
 # Promotable digest (#845)
@@ -897,8 +950,11 @@ class TestPromotableDigest:
         assert digest["top"] == []
 
     def test_ordering_by_helpful_count_desc(self, tmp_path: Path) -> None:
+        # ``high`` has the LOWER success_rate, so this pins helpful_count as
+        # the primary key rather than leaving it to a success_rate tie.
         low = _make_promotable_candidate(
             candidate_id="asset_generation:low",
+            success_rate=1.0,
             citation_evidence={
                 "appearances": 5,
                 "helpful_count": 1,
@@ -907,6 +963,7 @@ class TestPromotableDigest:
         )
         high = _make_promotable_candidate(
             candidate_id="asset_generation:high",
+            success_rate=0.2,
             citation_evidence={
                 "appearances": 5,
                 "helpful_count": 4,
