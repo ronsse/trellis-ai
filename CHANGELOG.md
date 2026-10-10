@@ -2106,8 +2106,9 @@ All notable changes to Trellis will be documented in this file.
   misconfiguration (a bad `vector_store.provider`, a missing extra, a down
   backend) re-raised identically on every retrieval call, turning one broken
   setting into a full traceback per pack. A new
-  `_warn_semantic_search_init_failed_once` (`functools.cache`-backed, added
-  by #838) now logs at WARNING once per distinct `(error_type, setting)` per
+  `_warn_semantic_search_init_failed_once` (`functools.cache`-backed,
+  mirroring the embedder-resolve helper #838 added to this same module)
+  now logs at WARNING once per distinct `(error_type, setting)` per
   process, describing the cause — the exception's type name and, for a
   `ConfigError`, its `setting` — never the exception's message or a
   traceback, which can echo a DSN or credential. A non-string `setting`

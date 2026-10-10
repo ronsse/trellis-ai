@@ -29,7 +29,11 @@ import structlog
 
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.base import utc_now
-from trellis.core.error_sanitize import summarize_exception
+from trellis.core.error_sanitize import (
+    SUPPRESSED_MARKER,
+    sanitize_error_message,
+    summarize_exception,
+)
 from trellis.core.hashing import content_hash
 from trellis.core.pack_holdout import (
     HOLDOUT_ADVISORY_IDS_KEY,
@@ -144,6 +148,32 @@ class PackAssemblyError(RuntimeError):
         self.strategy_failures = list(strategy_failures)
 
 
+def _audit_message(exc: Exception) -> str:
+    """Sanitized one-line summary of ``exc``, for the stored audit event.
+
+    Wrapped whole, not guarded by a list of exception types the way the
+    collect loop's own ``except Exception`` is — :func:`resolve_stamp_staleness`
+    (``trellis.core.version``) is the model CLAUDE.md names for this shape.
+    ``summarize_exception`` is not total: it reads ``exc.message`` on a
+    :class:`~trellis.errors.TrellisError`, which a subclass whose
+    ``__init__`` skips ``super().__init__()`` does not have, and it reads
+    driver-code attributes (``sqlstate``, ``code``, ``errno``) via
+    ``getattr`` with a default that only absorbs ``AttributeError`` — a
+    ``.code`` *property* that itself raises escapes that default. Both
+    call sites below run this inside the collect loop's own
+    GRACEFUL-DEGRADATION ``except Exception``, which exists precisely to
+    absorb arbitrary failures from the open ``SearchStrategy`` protocol;
+    an exotic exception shape must not turn that degrade into a crash.
+    Falling back to :data:`~trellis.core.error_sanitize.SUPPRESSED_MARKER`
+    means telemetry can never be the reason a strategy failure becomes
+    unrecoverable.
+    """
+    try:
+        return str(summarize_exception(exc)["message"])
+    except Exception:  # advisory; must never block a degrade
+        return SUPPRESSED_MARKER
+
+
 @dataclass(frozen=True)
 class StrategyFailure:
     """One entry per failed :class:`SearchStrategy.search` call.
@@ -166,17 +196,24 @@ class StrategyFailure:
       (:func:`~trellis.core.error_sanitize.sanitized_error_payload`,
       :func:`~trellis.core.error_sanitize.render_exception_detail`), so
       leaving it raw here does not leak it to either of those surfaces.
-    * ``audit_message`` — :func:`~trellis.core.error_sanitize.summarize_exception`'s
-      sanitized one-line ``"message"``, computed once at construction
-      from the original exception. This is what the two ``build``/
-      ``build_sectioned`` call sites write into the *stored*
-      ``PACK_ASSEMBLED`` event (:meth:`to_audit_event_payload`) — a
-      durable audit row has no "it's just a terminal" excuse, so it
-      never gets the raw, unbounded ``str(exc)`` that could echo a DSN,
-      credential or row value. Defaults to ``message`` when not given
-      explicitly, for callers (tests, :class:`EmbedderResolveFailure`)
-      that construct a `StrategyFailure` directly from an already-safe
-      string rather than from a caught exception.
+    * ``audit_message`` — a sanitized one-line summary, computed once at
+      construction via the module-level :func:`_audit_message` helper
+      (``summarize_exception(exc)["message"]``, falling back to
+      :data:`~trellis.core.error_sanitize.SUPPRESSED_MARKER` if
+      summarizing itself raises) when a caller passes the original
+      exception, or at this constructor's own ``__post_init__`` when it
+      does not. This is what the two ``build``/``build_sectioned`` call
+      sites write into the *stored* ``PACK_ASSEMBLED`` event
+      (:meth:`to_audit_event_payload`) — a durable audit row has no
+      "it's just a terminal" excuse, so it never gets the raw, unbounded
+      ``str(exc)`` that could echo a DSN, credential or row value. When
+      a caller omits ``audit_message`` — the embedder-resolve branch
+      (:class:`~trellis.retrieve.strategies.EmbedderResolveFailure`) and
+      most tests, both constructing from an already-safe string rather
+      than a caught exception — ``__post_init__`` defaults it to
+      ``sanitize_error_message(message)``, never the raw ``message``
+      itself, so the stored form is sanitized by construction rather
+      than by caller discipline alone.
 
     The axes block a pack response carries
     (:func:`~trellis.retrieve.builder_factory.describe_axes`,
@@ -192,7 +229,9 @@ class StrategyFailure:
 
     def __post_init__(self) -> None:
         if self.audit_message is None:
-            object.__setattr__(self, "audit_message", self.message)
+            object.__setattr__(
+                self, "audit_message", sanitize_error_message(self.message)
+            )
 
     def to_event_payload(self) -> dict[str, str]:
         """Serialize for :mod:`trellis_cli.main`'s render helpers — raw ``message``."""
@@ -817,7 +856,7 @@ class PackBuilder:
                         strategy=strategy.name,
                         error_class=type(exc).__name__,
                         message=str(exc),
-                        audit_message=summarize_exception(exc)["message"],
+                        audit_message=_audit_message(exc),
                     )
                 )
                 continue
@@ -1119,7 +1158,7 @@ class PackBuilder:
                         strategy=strategy.name,
                         error_class=type(exc).__name__,
                         message=str(exc),
-                        audit_message=summarize_exception(exc)["message"],
+                        audit_message=_audit_message(exc),
                     )
                 )
                 continue
