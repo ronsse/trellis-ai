@@ -29,6 +29,7 @@ from trellis_sdk._http import (
     SDK_API_MINOR,
     api_key_headers,
     check_handshake,
+    describe_body_parse_error,
     pack_attribution,
     raise_for_status,
     wrap_transport_error,
@@ -472,7 +473,17 @@ class AsyncTrellisClient:
         except Exception as exc:  # JSONDecodeError / pydantic.ValidationError
             # A malformed 2xx body must stay inside the TrellisError
             # hierarchy — hooks' degradation contract depends on it.
-            msg = f"unexpected response body for {path}: {exc}"
+            # Describe, don't quote (#206): the body here may be a
+            # proxy/interstitial's own page rather than anything the
+            # Trellis server wrote, so a pydantic ValidationError's
+            # str() — which composes ``input_value=<that body's own
+            # field value>`` into every line by design — must not be
+            # quoted back whole. ``describe_body_parse_error`` is a
+            # local, dependency-free port (see its docstring): the
+            # SDK's remote/httpx path must not import ``trellis.*``
+            # (tests/unit/sdk/test_isolation.py).
+            detail = describe_body_parse_error(exc)
+            msg = f"unexpected response body for {path}: {detail}"
             raise TrellisProtocolError(msg, request_path=path) from exc
 
     # -- Observations + Measurements (Item 1 Phase 1) --
