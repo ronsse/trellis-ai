@@ -460,7 +460,44 @@ All notable changes to Trellis will be documented in this file.
   "Confirm approve" button is disabled when the preview predicts a
   rejection and names the CLI bootstrap command.
   ([#823](https://github.com/ronsse/trellis-ai/pull/823) follow-up)
-
+- **`TrellisError` raise sites describe the caught exception instead of
+  quoting it.** Nine sites built their message as `f"...: {exc}"` inside an
+  `except ... as exc:` handler — a pydantic `ValidationError`'s own text
+  embeds `input_value=<the caller's field value>` (Measurement and
+  Observation recording; a policy file's own entry), and an `OSError` /
+  `json.JSONDecodeError` / `ImportError`'s text can carry more of a path,
+  document or module than the raiser intended (`policy_source.py`,
+  `registry.py`). The sharpest case: a rejected Measurement's message
+  becomes the immutable `mutation.rejected` audit event verbatim, so the
+  leak was permanent once written. `trellis.core.error_sanitize` gains four
+  helpers — `describe_os_error`, `describe_json_error`,
+  `describe_validation_error` (pydantic's `errors(include_input=False)`,
+  never `str(exc)`), `describe_import_error` (a `ModuleNotFoundError` names
+  the module that was not found; any other `ImportError` says the import
+  from that module failed, since the module itself exists) — each naming
+  only the exception's own structured fields, and the nine sites now build
+  their message from one of these instead of the caught exception's
+  `str()`. The eight REST routes that construct an `HTTPException` detail
+  or response field directly from a `CommandResult.message` or a caught
+  exception's `.message` — bypassing the `trellis_error_handler` middleware
+  that already sanitizes an uncaught `TrellisError` — now wrap that value in
+  `sanitize_error_message` too, which masks secret-shaped, SQL-shaped and
+  long-token text; it is a deny-list, not a guarantee, so a handler that
+  has not yet adopted a describe helper can still leak text that matches
+  none of those shapes. The secret-pattern deny-list in
+  `sanitize_error_message` now also matches a credential key wrapped in
+  quotes (`"api_key": "..."`), the shape a JSON body or a repr'd mapping
+  takes, which the unquoted `key\s*[=:]` pattern missed entirely. A new AST
+  rule (`tests/unit/test_error_describe_not_quote_rule.py`, built on
+  `tests/ast_rules.py`) flags any `TrellisError`-family raise inside an
+  `except ... as name:` handler that interpolates `name` — or a local
+  variable transitively bound from it — into its message by f-string,
+  `str()`/`repr()`, `.format()` or `%`-formatting, and resolves the
+  `TrellisError` family dynamically across modules rather than from a
+  hardcoded list — `LLMRoutingError` subclasses `ConfigError` from
+  `trellis.llm.routing`, outside `trellis/errors.py`, and a fixed list
+  would have missed it silently.
+  ([#829](https://github.com/ronsse/trellis-ai/pull/829))
 - **A pack build's latency is now recorded, not hard-coded to zero.**
   `PackBuilder.build()` and `build_sectioned()` both constructed their
   `RetrievalReport` with `duration_ms=0` — one path as a literal, the other

@@ -7,6 +7,7 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, HTTPException
 
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.ids import generate_ulid
 from trellis.extract.trace_ingest_hook import (
     run_trace_extraction,
@@ -63,11 +64,15 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
     if result.status == CommandStatus.REJECTED:
         # A refusal stored nothing, so it is neither extracted nor
         # answered "ok". 400, as on /evidence and the curate routes.
-        raise HTTPException(status_code=400, detail=result.message)
+        raise HTTPException(
+            status_code=400, detail=sanitize_error_message(result.message)
+        )
     if result.status == CommandStatus.FAILED:
         # The handler raised, e.g. StoreError from append. A duplicate
         # trace_id never lands here: the handler answers it as success.
-        raise HTTPException(status_code=409, detail=result.message)
+        raise HTTPException(
+            status_code=409, detail=sanitize_error_message(result.message)
+        )
 
     # Feature-flagged post-ingest trace->graph extraction
     # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs after the trace is durably
@@ -105,7 +110,9 @@ def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
     )
     result = build_curate_executor(registry).execute(command)
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        raise HTTPException(status_code=400, detail=result.message)
+        raise HTTPException(
+            status_code=400, detail=sanitize_error_message(result.message)
+        )
     if (
         result.status is CommandStatus.DUPLICATE
         and registry.knowledge.document_store.get(evidence.evidence_id) is None
