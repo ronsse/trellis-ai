@@ -1184,6 +1184,34 @@ class TestSaveMemoryEmbedOnIngest:
         assert row["metadata"]["content"] == "embedded memory content"
         assert row["metadata"]["domain"] == "ops"
 
+    def test_flag_on_broken_vector_store_still_succeeds(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#830 follow-up 3: a ``vector_store`` that raises at resolve
+        time must not fail ``save_memory`` for a memory that was already
+        durably stored. Before the fix, ``run_embed_on_ingest``
+        let that ``ConfigError`` propagate straight out of the hook, past
+        the "fail-soft" comment at its own call site, into an McpError for
+        a write that had already landed — inviting a client retry of an
+        already-stored memory."""
+        from unittest.mock import PropertyMock
+
+        from trellis.stores.registry import _KnowledgePlane
+
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+        monkeypatch.setattr(
+            _KnowledgePlane,
+            "vector_store",
+            PropertyMock(side_effect=ConfigError("down", setting="vector.backend")),
+        )
+
+        result = save_memory("stored despite a broken vector store")
+
+        assert result.startswith("Memory saved:")
+        doc_id = result.split(":", 1)[1].strip()
+        assert temp_registry.knowledge.document_store.get(doc_id) is not None
+
 
 # ---------------------------------------------------------------------------
 # save_memory — tiered extraction (feature-flagged)

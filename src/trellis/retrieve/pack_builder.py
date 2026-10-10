@@ -19,6 +19,7 @@ Failure semantics (C2 Phase 4):
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -664,6 +665,7 @@ class PackBuilder:
         would-be items are recorded under ``holdout_items`` instead of
         ``injected_items``; :meth:`build_sectioned` does the same per pack.
         """
+        start_time = time.perf_counter()
         budget = budget or PackBudget()
         all_items: list[PackItem] = []
         strategies_used: list[str] = []
@@ -851,7 +853,7 @@ class PackBuilder:
             queries_run=len(strategies_used),
             candidates_found=candidates_found,
             items_selected=len(selected),
-            duration_ms=0,
+            duration_ms=round((time.perf_counter() - start_time) * 1000),
             strategies_used=strategies_used,
             rejected_items=rejected,
             budget_trace=budget_trace,
@@ -962,6 +964,7 @@ class PackBuilder:
             5. Cross-section dedup: keep each item in its highest-scoring section.
             6. Emit telemetry and return SectionedPack.
         """
+        start_time = time.perf_counter()
         mapper = tier_mapper or TierMapper()
 
         # 1. Collect candidate pool (same as build())
@@ -1161,6 +1164,11 @@ class PackBuilder:
             )
         )
 
+        # Snapshotted once rather than per section: every section report
+        # describes the same build, and timing each separately would
+        # measure the loop body's own dict lookups, not retrieval.
+        section_duration_ms = round((time.perf_counter() - start_time) * 1000)
+
         # 4. Cross-section dedup — keep item only in its best section
         pack_sections: list[PackSection] = []
         for section_req in sections:
@@ -1185,6 +1193,7 @@ class PackBuilder:
                 queries_run=len(strategies_used),
                 candidates_found=len(raw_sections.get(section_req.name, [])),
                 items_selected=len(annotated),
+                duration_ms=section_duration_ms,
                 strategies_used=strategies_used,
                 rejected_items=[
                     floor_rejections[item.item_id]
@@ -1299,6 +1308,7 @@ class PackBuilder:
                         name=section.name,
                         retrieval_report=RetrievalReport(
                             queries_run=section.retrieval_report.queries_run,
+                            duration_ms=section.retrieval_report.duration_ms,
                             strategies_used=list(
                                 section.retrieval_report.strategies_used
                             ),
@@ -1426,6 +1436,14 @@ class PackBuilder:
                 "project": self._project,
                 "section_count": len(pack.sections),
                 "total_items": pack.total_items,
+                # All sections share one build, so one timing: see
+                # ``_emit_telemetry``'s ``duration_ms`` note for what it
+                # measures. ``0`` only when the request named no sections.
+                "duration_ms": (
+                    pack.sections[0].retrieval_report.duration_ms
+                    if pack.sections
+                    else 0
+                ),
                 # Per-item content hashes (issue #258), flattened across
                 # sections. Symmetric with the flat pack payload so the
                 # served-set reader consults one field for both pack kinds.
@@ -1628,6 +1646,11 @@ class PackBuilder:
         operator can see that a cap bound without inferring it from which
         build was deployed. Equal to ``len(advisory_ids)`` whenever the
         cap did not bind.
+
+        ``duration_ms`` is wall-clock time for this build, from entry to
+        the point the :class:`RetrievalReport` is constructed (strategy
+        search through budget application). Health reporting had no
+        latency signal before this: every build hard-coded ``0``.
         """
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(
@@ -1682,6 +1705,7 @@ class PackBuilder:
                 "injected_items": self._injected_item_rows(pack.items),
                 "strategies_used": report.strategies_used,
                 "candidates_found": report.candidates_found,
+                "duration_ms": report.duration_ms,
                 "budget_max_items": pack.budget.max_items,
                 "budget_max_tokens": pack.budget.max_tokens,
                 "rejected_items": [

@@ -528,6 +528,34 @@ All notable changes to Trellis will be documented in this file.
   `trellis.llm.routing`, outside `trellis/errors.py`, and a fixed list
   would have missed it silently.
   ([#829](https://github.com/ronsse/trellis-ai/pull/829))
+- **A pack build's latency is now recorded, not hard-coded to zero.**
+  `PackBuilder.build()` and `build_sectioned()` both constructed their
+  `RetrievalReport` with `duration_ms=0` — one path as a literal, the other
+  by never passing the field at all — so `PACK_ASSEMBLED` carried no timing
+  key and health reporting had no latency signal: every row read zero,
+  whatever the build actually cost. Both now time with
+  `time.perf_counter()` from entry through strategy collection and
+  budgeting (per-section budgets included on the sectioned path), snapshotted
+  once just before section assembly — the cross-section dedup, annotation
+  and per-`PackSection` report construction that follows — so every section
+  reports the same window rather than its own loop iteration. Neither
+  window covers advisory selection, the optional quality evaluator, or the
+  event write, on either path; nothing in `src` reads the new key yet, so a
+  p50/p95 health-report reader stays a follow-up, not shipped here.
+  `_withhold_sectioned`, the pack-effect holdout's (#701) sectioned
+  reconstruction path, had the same asymmetry `_withhold_flat` already
+  avoided — a withheld sectioned pack's timing silently read back as `0`
+  even though a real build happened — and now carries the real value
+  through too. `duration_ms` is an additive key on both `PACK_ASSEMBLED`
+  payloads; no schema or contract pins the payload key set other than
+  `test_pack_holdout_seam.py`'s hand-read base snapshot, which is updated
+  to expect it alongside the two holdout keys. Three CLI, API and retrieve
+  tests that compared two separately-built packs' full payloads for
+  equality (`test_pack_holdout_cli.py`, `test_pack_holdout_routes.py`,
+  `test_pack_holdout_seam.py` itself) masked `duration_ms` before
+  comparing, since it is now real elapsed time and two builds are not
+  expected to cost the same.
+  ([#832](https://github.com/ronsse/trellis-ai/pull/832))
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
@@ -568,13 +596,36 @@ All notable changes to Trellis will be documented in this file.
   every retrieval call site until the setting is fixed; a broken
   `vector_store` degrades retrieval to keyword and graph (`semantic:
   misconfigured`); embed-on-ingest is fail-soft for an embedder resolve
-  failure only. Added a recovery runbook,
+  failure. Added a recovery runbook,
   [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config):
   fix the setting, restart (the `embeddings:` block is read once, at
   `StoreRegistry` construction, so a running process can't see an edited
   config or environment), then run `trellis admin reindex-vectors` for
   documents that arrived while it was broken.
   ([#830](https://github.com/ronsse/trellis-ai/pull/830))
+- **A broken `vector_store` resolve is now fail-soft too, like the embedder
+  resolve #830 fixed above.** `run_embed_on_ingest` resolved
+  `registry.knowledge.vector_store` with a bare
+  `getattr(registry.knowledge, "vector_store", None)`: the default only
+  absorbs `AttributeError`, so a vector backend that raises while
+  instantiating (`ConfigError`, `BackendNotInstalledError`, a connection
+  error) propagated straight out of the hook — called, unwrapped, by every
+  caller (MCP `save_memory`, the mutate "soft" handler, corpus-sync ingest,
+  CLI dbt-manifest ingest) *after* the document was already durably stored,
+  so the write's own response failed for content that had, in fact, been
+  saved, inviting a client retry of an already-stored write. The resolve is
+  now wrapped the same way #830 wrapped the embedder's, returning
+  `{"embedded": False, "reason": ...}` instead of raising. The dedup helper
+  generalized to cover both: the WARNING event is renamed
+  `embed_on_ingest_resolve_failed` (from
+  `embed_on_ingest_embedder_resolve_failed`) and now carries a `component`
+  field (`embedding_fn` or `vector_store`); the once-per-cause cache key is
+  `(component, error_type, setting)`, not just `(error_type, setting)`, so
+  an embedder and a vector store failing with the same shape (e.g. both a
+  bare `RuntimeError` with no `setting`) log independently instead of one
+  suppressing the other. Playbook 15 and the MCP prewarm comment updated to
+  match.
+  ([#834](https://github.com/ronsse/trellis-ai/pull/834))
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
