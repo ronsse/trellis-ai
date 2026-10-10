@@ -51,22 +51,10 @@ _SAFE_CALL_NAMES = frozenset(
 #: top-level function does; keyed by name, not line number, so moving the
 #: def does not desync the roster.
 EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
-    "save_experience": (
-        "a pydantic ValidationError on the caller's own trace JSON; the "
-        "caller needs the detail to fix their payload."
-    ),
     "_resolve_evidence_pointer": (
         "MutationError.message is already rendered safe by "
         "MutationExecutor's own design, never raw driver text (two sites: "
         "the raised message and its data['message'] echo)."
-    ),
-    "record_observation": (
-        "a pydantic ValidationError on the caller's own Observation "
-        "fields; the caller needs the detail to fix their call."
-    ),
-    "execute_mutation": (
-        "a pydantic ValidationError on the caller's own Command op/args, "
-        "the same shape #748 itself left alone in this function."
     ),
     "_SanitizeUncaughtToolErrors.on_call_tool": (
         "str(exc) feeds a startswith(prefix) comparison that decides "
@@ -87,18 +75,24 @@ _MODULE_EXEMPTIONS: dict[str, dict[str, str]] = {
     "server.py": EXCEPTION_TEXT_EXEMPTIONS,
 }
 
-# Hand count (trellis-ai#748): 1 in save_experience, 2 in
-# _resolve_evidence_pointer, 1 in record_observation, 1 in
-# execute_mutation, 1 in _SanitizeUncaughtToolErrors.on_call_tool, all in
-# server.py. Re-grep '{exc}\|str(exc)' in src/trellis/mcp/server.py and
-# subtract the one log-only site (_build_llm_client, excluded structurally
-# above) to reconcile. The scan's other shapes, repr(), an
-# attribute chain inside str()/repr()/an f-string, a `%` right operand and
-# a `.format(...)` argument, have no site in server.py: re-grep
+# Hand count (trellis-ai#748, shrunk by the MCP/CLI describe-dont-quote
+# follow-up sweep): 2 in _resolve_evidence_pointer, 1 in
+# _SanitizeUncaughtToolErrors.on_call_tool, all in server.py.
+# save_experience, record_observation and execute_mutation each used to
+# carry one more (a raw pydantic ValidationError interpolated into the
+# caller-facing message) -- the follow-up sweep switched all three to
+# describe_validation_error(exc), which passes exc as a plain call
+# argument rather than stringifying it, so the scan no longer sees them
+# and their roster entries were removed rather than left stale. Re-grep
+# '{exc}\|str(exc)' in src/trellis/mcp/server.py and subtract the one
+# log-only site (_build_llm_client, excluded structurally above) to
+# reconcile. The scan's other shapes, repr(), an attribute chain inside
+# str()/repr()/an f-string, a `%` right operand and a `.format(...)`
+# argument, have no site in server.py: re-grep
 # 'repr(exc\|{exc\.\|str(exc\.\|% exc\|format(exc' finds none. Every other
 # module under src/trellis/mcp (__init__.py, auth.py, knowledge_links.py,
 # reconcile.py, supersession.py) hand-reads clean at this count.
-_HAND_READ_SITE_COUNT = 6
+_HAND_READ_SITE_COUNT = 3
 
 _SERVER_PATH = Path(inspect.getsourcefile(server_mod) or "")
 _MCP_PACKAGE_DIR = _SERVER_PATH.parent

@@ -40,13 +40,14 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
+from trellis.core.error_sanitize import sanitize_error_message
 from trellis.extract.referents import (
     ReferentResolution,
     ReferentStatus,
     resolve_referent,
     resolve_referents,
 )
-from trellis.mutate import Command, CommandStatus, Operation
+from trellis.mutate import Command, CommandResult, CommandStatus, Operation
 from trellis.schemas.well_known import APPLIES_TO, schema_alignment_for_edge_kind
 
 if TYPE_CHECKING:
@@ -56,6 +57,20 @@ if TYPE_CHECKING:
     from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
+
+#: A FAILED/REJECTED ``CommandResult.message`` can carry driver or caller
+#: text; SUCCESS and DUPLICATE only restate the caller's own request, so
+#: they pass through unsanitized, matching ``_results.py``'s
+#: ``_SANITIZED_STATUSES`` on the REST boundary (#836).
+_SANITIZED_STATUSES = frozenset({CommandStatus.FAILED, CommandStatus.REJECTED})
+
+
+def _describe_unsuccessful(result: CommandResult) -> str:
+    """Sanitize ``result.message`` for a non-SUCCESS link write, gated by
+    status (#836's convention) rather than wrapped unconditionally."""
+    if result.status in _SANITIZED_STATUSES:
+        return sanitize_error_message(result.message)
+    return result.message
 
 #: ``requested_by`` on every link this module creates.
 SAVE_KNOWLEDGE_REQUESTER: Final = "mcp:save_knowledge"
@@ -194,7 +209,7 @@ def _link_relates_to(
             f"Edge created: {result.created_id} --[{edge_kind}]--> {match.node_id}"
         )
     else:
-        lines.append(f"Warning: edge not created: {result.message}")
+        lines.append(f"Warning: edge not created: {_describe_unsuccessful(result)}")
     return lines
 
 
@@ -261,7 +276,8 @@ def _link_domains(
             )
         else:
             lines.append(
-                f"Warning: domain link to {match.node_id} not created: {result.message}"
+                "Warning: domain link to "
+                f"{match.node_id} not created: {_describe_unsuccessful(result)}"
             )
     return lines
 

@@ -43,6 +43,7 @@ import structlog
 import typer
 from rich.markup import escape
 
+from trellis.core.error_sanitize import render_exception_detail
 from trellis.stores.base.event_log import EventType
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
 from trellis_cli.output import build_console
@@ -276,7 +277,8 @@ def generate_proposals_command(
         raise
     except Exception as exc:
         logger.exception("generate_proposals_failed")
-        message = f"{type(exc).__name__}: {exc}"
+        # Describe, don't quote: str(exc) can carry raw driver text (#206).
+        message = f"{type(exc).__name__}: {render_exception_detail(exc)}"
         if output_format == "json":
             print(json.dumps({"error": "store_error", "message": message}))
         else:
@@ -338,7 +340,8 @@ def list_proposals_command(
         raise
     except Exception as exc:
         logger.exception("list_proposals_failed")
-        message = f"{type(exc).__name__}: {exc}"
+        # Describe, don't quote: str(exc) can carry raw driver text (#206).
+        message = f"{type(exc).__name__}: {render_exception_detail(exc)}"
         if output_format == "json":
             print(json.dumps({"error": "store_error", "message": message}))
         else:
@@ -402,7 +405,8 @@ def show_proposal_command(
         raise
     except Exception as exc:
         logger.exception("show_proposal_failed")
-        message = f"{type(exc).__name__}: {exc}"
+        # Describe, don't quote: str(exc) can carry raw driver text (#206).
+        message = f"{type(exc).__name__}: {render_exception_detail(exc)}"
         if output_format == "json":
             print(json.dumps({"error": "store_error", "message": message}))
         else:
