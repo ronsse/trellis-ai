@@ -19,7 +19,9 @@ Contract (mirrors the trace-extraction hook):
   the document content; the vector row is keyed by the document's
   ``doc_id`` so the two stores stay 1:1.
 * Fully best-effort: any failure is logged and swallowed. A broken or
-  unreachable embedder must NEVER fail the ingest.
+  unreachable embedder or vector store must NEVER fail the ingest — that
+  includes a resolve failure (either property raising instead of
+  returning), not only a failed embed or upsert call.
 
 The vector row's metadata carries a ``content`` excerpt because
 ``SemanticSearch`` renders ``PackItem.excerpt`` from vector metadata —
@@ -149,28 +151,50 @@ def build_vector_row(
     return {"item_id": doc_id, "vector": vector, "metadata": row_metadata}
 
 
+def _describe_resolve_failure(exc: Exception) -> tuple[str, str | None]:
+    """Describe, don't quote: the (type name, setting) of a resolve failure.
+
+    ``setting`` is read from the exception's own ``.setting`` attribute
+    only when the exception IS a :class:`~trellis.errors.ConfigError`,
+    whose ``setting`` is typed ``str | None`` (errors.py). A plain
+    ``getattr(exc, "setting", None)`` would let an unrelated exception's
+    same-named, possibly-unhashable or untrusted attribute reach the
+    ``functools.cache``-keyed dedup call and the returned ``reason``.
+    """
+    return type(exc).__name__, exc.setting if isinstance(exc, ConfigError) else None
+
+
 @functools.cache
-def _warn_embedder_resolve_failed_once(error_type: str, setting: str | None) -> None:
-    """Emit ``embed_on_ingest_embedder_resolve_failed`` once per cause.
+def _warn_resolve_failed_once(
+    component: str, error_type: str, setting: str | None
+) -> None:
+    """Emit ``embed_on_ingest_resolve_failed`` once per ``(component, cause)``.
 
-    A broken embedder config (missing provider extra, missing API key, a
-    malformed ``TRELLIS_EMBEDDING_FN``/``embeddings.provider`` path) fails
-    ``registry.embedding_fn`` identically on every ingest until an operator
-    fixes the setting, so logging a full traceback per document — the
-    prior behaviour — turned one misconfiguration into a traceback per
-    write. ``functools.cache`` makes a repeat call with the same arguments
-    a no-op: the body (and its ``logger.warning``) runs on the first call
-    for a given ``(error_type, setting)``, and every later failure with
-    the same cause returns the cached ``None`` without logging again.
-    WARNING, not ``.exception`` — the type and setting are what an
-    operator acts on; the traceback is noise after the first one.
+    Covers both of the hook's two optional dependencies:
+    ``registry.embedding_fn`` (``component="embedding_fn"``) and
+    ``registry.knowledge.vector_store`` (``component="vector_store"``). A
+    broken config for either (missing provider extra, missing API key, a
+    malformed dotted path, an unreachable backend) fails the same property
+    identically on every ingest until an operator fixes the setting, so
+    logging a full traceback per document — the prior behaviour — turned
+    one misconfiguration into a traceback per write. ``functools.cache``
+    makes a repeat call with the same arguments a no-op: the body (and its
+    ``logger.warning``) runs on the first call for a given ``(component,
+    error_type, setting)``, and every later failure with the same cause
+    returns the cached ``None`` without logging again. ``component`` is
+    part of the cache key (not just the log payload) so a same-shaped
+    cause on one component — e.g. both raising a bare ``RuntimeError``
+    with no ``setting`` — cannot silently suppress the other's warning.
+    WARNING, not ``.exception`` — the component, type and setting are what
+    an operator acts on; the traceback is noise after the first one.
 
-    ``_warn_embedder_resolve_failed_once.cache_clear()`` is test-facing
-    only, to isolate cases within one process — a production process
-    does not reset it mid-flight.
+    ``_warn_resolve_failed_once.cache_clear()`` is test-facing only, to
+    isolate cases within one process — a production process does not
+    reset it mid-flight.
     """
     logger.warning(
-        "embed_on_ingest_embedder_resolve_failed",
+        "embed_on_ingest_resolve_failed",
+        component=component,
         error_type=error_type,
         setting=setting,
     )
@@ -200,15 +224,16 @@ def run_embed_on_ingest(
         ``{"embedded": False, "reason": "..."}`` when skipped (empty
         content, embedder/vector store unconfigured) or failed. Any
         failure is caught and logged — it never propagates. When
-        ``registry.embedding_fn`` itself fails to resolve, ``reason``
+        ``registry.embedding_fn`` or ``registry.knowledge.vector_store``
+        itself fails to resolve (raises instead of returning), ``reason``
         carries only the exception's type name and, when the exception
         names one (see :class:`~trellis.errors.ConfigError`'s
         ``setting``), the broken setting — e.g. ``"ConfigError:
         embeddings.provider"`` — never the exception's message text,
         which can echo a credential (this resolve path never sees document
         content — it fails before any document is read). The matching
-        warning is logged once per distinct cause per process, not once
-        per call; see :func:`_warn_embedder_resolve_failed_once`.
+        warning is logged once per distinct ``(component, cause)`` per
+        process, not once per call; see :func:`_warn_resolve_failed_once`.
     """
     if not embed_on_ingest_enabled():
         return None
@@ -224,19 +249,29 @@ def run_embed_on_ingest(
         # every later ingest identically — same fail-soft contract as an
         # embed failure (never fail the ingest), but made loud once per
         # cause instead of once per document.
-        #
-        # Describe, don't quote: `setting` is read from the exception's
-        # own `.setting` attribute only when the exception IS a
-        # ConfigError, whose `setting` is typed `str | None` (errors.py).
-        # A plain `getattr(exc, "setting", None)` would let an unrelated
-        # exception's same-named, possibly-unhashable or untrusted
-        # attribute reach the cache key and the returned `reason`.
-        error_type = type(exc).__name__
-        setting = exc.setting if isinstance(exc, ConfigError) else None
-        _warn_embedder_resolve_failed_once(error_type, setting)
+        error_type, setting = _describe_resolve_failure(exc)
+        _warn_resolve_failed_once("embedding_fn", error_type, setting)
         reason = f"{error_type}: {setting}" if setting else error_type
         return {"embedded": False, "reason": reason}
-    vector_store = getattr(registry.knowledge, "vector_store", None)
+
+    try:
+        # ``getattr`` (not a bare attribute access) so a registry whose
+        # ``.knowledge`` genuinely lacks a ``vector_store`` attribute still
+        # falls through to the "unconfigured" branch below via its own
+        # ``AttributeError`` instead of being caught here — the shape the
+        # tests' plain registry doubles rely on. Any OTHER exception raised
+        # while *resolving* the property (a real registry's backend
+        # instantiation: ``ConfigError``, ``BackendNotInstalledError``, a
+        # connection error) is the same class of failure as a broken
+        # embedder above, and must be just as fail-soft: #830 wrapped the
+        # embedder resolve; this is its vector_store twin.
+        vector_store = getattr(registry.knowledge, "vector_store", None)
+    except Exception as exc:
+        error_type, setting = _describe_resolve_failure(exc)
+        _warn_resolve_failed_once("vector_store", error_type, setting)
+        reason = f"{error_type}: {setting}" if setting else error_type
+        return {"embedded": False, "reason": reason}
+
     if embedding_fn is None or vector_store is None:
         logger.warning(
             "embed_on_ingest_unavailable",

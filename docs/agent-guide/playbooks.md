@@ -1007,17 +1007,24 @@ for a runnable end-to-end demo.
 
 ## Playbook 15: Recovering from a broken embedder config
 
-**When to use:** `embed_on_ingest_embedder_resolve_failed` (ingest-time, from
-`run_embed_on_ingest`) or `mcp_prewarm_optional_unavailable` with
-`component=embedding_fn` (http startup) shows up in the logs. Both mean
+**When to use:** `embed_on_ingest_resolve_failed` with `component=embedding_fn`
+(ingest-time, from `run_embed_on_ingest`) or `mcp_prewarm_optional_unavailable`
+with `component=embedding_fn` (http startup) shows up in the logs. Both mean
 `registry.embedding_fn` is raising — a config error (bad
 `TRELLIS_EMBEDDING_FN` / `embeddings.provider` path, missing provider extra,
 missing API key), not a transient outage. The cause fails every ingest and
 every semantic-axis read identically until the setting is fixed, so the hook
-logs the resolve failure **once per distinct `(error_type, setting)` per
-process** rather than once per document — see each event's `error_type` and
-`setting` fields for what to fix; `reason` in a `run_embed_on_ingest` summary
-carries the same two fields and never the exception's own message text.
+logs the resolve failure **once per distinct `(component, error_type,
+setting)` per process** rather than once per document — see each event's
+`error_type` and `setting` fields for what to fix; `reason` in a
+`run_embed_on_ingest` summary carries the same two fields and never the
+exception's own message text.
+
+A broken `vector_store` resolve logs the same `embed_on_ingest_resolve_failed`
+(or `mcp_prewarm_optional_unavailable`) event with `component=vector_store`
+instead, and no-ops the same way — steps 1-2 below apply unchanged (read
+`setting`/`error_type`, fix the config, restart); only step 3's backfill
+command is embedder-specific.
 
 ### Steps
 
@@ -1069,7 +1076,7 @@ carries the same two fields and never the exception's own message text.
 ### If It Fails
 
 A fix that doesn't stick (the warning keeps recurring with the same
-`(error_type, setting)` after a restart) means the edited setting isn't the
+`(component, error_type, setting)` after a restart) means the edited setting isn't the
 one actually read in this environment — check for an env var shadowing
 `config.yaml`, or a `TRELLIS_CONFIG_DIR` pointed somewhere other than
 expected. `trellis admin reindex-vectors` itself exits loudly (not silently

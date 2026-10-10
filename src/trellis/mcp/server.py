@@ -3972,9 +3972,10 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
             #     keyword + graph, with `semantic: misconfigured` in the
             #     pack's axes block — it does not raise.
             #   - memory_extractor: feature-flagged; see the docstring above.
-            # Only run_embed_on_ingest is fail-soft for an embedder resolve
-            # failure specifically — a broken vector_store still propagates
-            # out of that hook (pre-existing; not this PR's scope).
+            # run_embed_on_ingest is fail-soft for either resolve failure:
+            # an embedder or a vector_store that raises here logs
+            # embed_on_ingest_resolve_failed once per (component, cause)
+            # per process and no-ops, rather than failing the ingest.
             logger.warning(
                 "mcp_prewarm_optional_unavailable",
                 component=label,
