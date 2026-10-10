@@ -376,6 +376,28 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Noise demotion counts what was written, not what the evidence gate
+  admitted.** `apply_noise_tags` writes `signal_quality="noise"` only to
+  ids that resolve in the document store; the demotion gate admits
+  candidates on citation evidence alone, with no notion of which store an
+  id belongs to, so an admitted trace id (or other non-document id)
+  reached the writer and nothing was written for it, silently (one
+  `logger.debug` per id). Curate's nightly `noise_tagged`, REST
+  `POST /effectiveness/apply-noise-tags`'s `noise_candidates_tagged`, and
+  CLI `trellis analyze apply-noise-tags`'s text output each independently
+  reported the admission count as the demotion count, overstating it by
+  the non-document remainder. `apply_noise_tags` now returns a
+  `NoiseTagResult` (`updated`, `refused_not_document`) instead of a bare
+  `int`; `EffectivenessReport` carries `noise_tags_written` /
+  `noise_refused_not_document`. REST and the CLI report the real write
+  count beside the refused ids by name (`noise_refused_not_document` /
+  `noise_candidates_refused_not_document`); curate reports the write
+  count beside only a refused *count* (`noise_refused_non_document`), not
+  names. A curate dry run, which writes nothing either way, previews the
+  same split with a read-only `document_store.get` check per admitted
+  id, and curate's `NoiseTagsApplied` finding now fires on the write
+  count rather than the admission count.
+  ([#833](https://github.com/ronsse/trellis-ai/pull/833))
 - **Every remaining `json.dumps` write path in the graph, document,
   vector, outcome, tuner-state, parameter and blob stores now refuses
   NaN/Infinity too, closing the gap #831 (above) left open.** The
@@ -405,7 +427,6 @@ All notable changes to Trellis will be documented in this file.
   to commit each row as it's built (which the test catches: the prior
   row's value leaks through).
   ([#835](https://github.com/ronsse/trellis-ai/pull/835))
-
 - **The SQLite event log and both the SQLite and Postgres graph stores
   refuse a NaN/Infinity float at write time, instead of silently storing
   JSON text a stricter reader can't parse.** Python's `json.dumps` writes
