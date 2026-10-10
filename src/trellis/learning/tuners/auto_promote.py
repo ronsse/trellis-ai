@@ -63,6 +63,7 @@ from trellis.learning.tuners.rollback import (
     PostPromotionReport,
     monitor_post_promotion,
 )
+from trellis.ops.parameter_reachability import reachability_reasons
 from trellis.stores.base.event_log import EventLog, EventType
 
 if TYPE_CHECKING:
@@ -397,12 +398,28 @@ def _evaluate(
     (:func:`_compute_effect_size` + :func:`_apply_policy`) so the gate the
     auto path applies is identical in shape to the manual one, only with
     stricter thresholds.
+
+    Also runs :func:`reachability_reasons`, the same check
+    :func:`promote_proposal` applies above its own policy gate. Today
+    every caller of this function (``run_auto_promotion``) only ever
+    reaches it with proposals ``RuleTuner.run`` already screened for
+    reachability, and the live promotion inside ``_promote_and_monitor``
+    re-checks it independently, so this did not change what got
+    promoted — but a dry run's reported ``reason`` disagreed with what a
+    live run of the same proposal would actually do, and a proposal
+    written before that screen existed (or by a tuner that skips it)
+    would reach this gate with no reachability opinion at all.
     """
     # Local import keeps the private gate primitives in one module.
     from trellis.learning.tuners.promotion import (  # noqa: PLC0415
         _apply_policy,
         _compute_effect_size,
     )
+
+    unreachable = reachability_reasons(proposal.scope, tuple(proposal.proposed_values))
+    if unreachable:
+        reason = "unreachable: " + "; ".join(r.detail for r in unreachable)
+        return False, reason, None
 
     baseline = parameter_store.resolve(proposal.scope)
     baseline_values = baseline.values if baseline else None

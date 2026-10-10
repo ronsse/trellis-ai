@@ -880,11 +880,14 @@ def list_pending_proposals(
 #: The Review queue exposes no ``force`` or policy override (unlike the
 #: CLI's ``--force``/``--min-sample-size``/``--min-effect-size`` flags), so
 #: its one implicit policy must be the stricter of the two reasonable
-#: defaults. A proposal with no baseline promoted through this route with
-#: the library's own permissive default is the exact shape of the
-#: unbaselined promotion this module's reachability check (above) was
-#: added to stop a repeat of; mirrors AutoPromotePolicy's
-#: ``require_baseline=True`` default on the other unattended path.
+#: defaults. ``allow_no_baseline=False`` now matches ``PromotionPolicy``'s
+#: own class default — this object stays explicit anyway, so the route's
+#: behaviour is pinned to this surface's own decision rather than silently
+#: following wherever the library default moves next; mirrors
+#: AutoPromotePolicy's ``require_baseline=True`` default on the other
+#: unattended path. The CLI's bootstrap opt-in (``--allow-no-baseline``)
+#: has no equivalent here: only a promotion writes a snapshot, so without
+#: the CLI a scope can never clear its own first refusal.
 _REVIEW_QUEUE_POLICY = PromotionPolicy(allow_no_baseline=False)
 
 
@@ -929,10 +932,11 @@ def promote_proposal_route(
     Wraps the same :func:`trellis.learning.tuners.promote_proposal` logic
     as ``trellis metrics promote --commit`` — validate, policy gate,
     write the new ``ParameterSet``, and emit ``PARAMS_UPDATED`` (or
-    ``TUNER_PROPOSAL_REJECTED`` on a policy rejection). A second
-    ``REVIEW_DECISION_RECORDED`` event records the reviewer identity.
-    Unlike the CLI, this route has no ``--force``/threshold flags, so it
-    always applies the stricter ``_REVIEW_QUEUE_POLICY``.
+    ``TUNER_PROPOSAL_REJECTED`` on a refusal from any of its three
+    gates: the immutable core, reachability, or the policy gate itself).
+    A second ``REVIEW_DECISION_RECORDED`` event records the reviewer
+    identity. Unlike the CLI, this route has no ``--force``/threshold
+    flags, so it always applies the stricter ``_REVIEW_QUEUE_POLICY``.
     """
     registry = get_registry()
     result = promote_proposal(

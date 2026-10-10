@@ -376,6 +376,45 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The SQLite event log and both the SQLite and Postgres graph stores
+  refuse a NaN/Infinity float at write time, instead of silently storing
+  JSON text a stricter reader can't parse.** Python's `json.dumps` writes
+  the non-standard `NaN` / `Infinity` / `-Infinity` tokens by default, and
+  Python's own `json.loads` parses them back into the same float when a
+  row is read back out, so a non-finite float in an event payload, event
+  metadata, or a graph node/edge `properties` (or a curated node's
+  `generation_spec`) round-tripped silently through SQLite's own read
+  path — though not through SQLite's `json_extract`/`json_each`, used for
+  filtering, which read a stored `NaN` back as `NULL` and `Infinity` as
+  `9e999` — while Postgres's `jsonb` column already rejected it outright
+  at write time: an inconsistency between backends, and invalid JSON by
+  spec either way (the REST API's `json.dumps` on the way out, or any
+  non-Python consumer, breaks on it). Every `json.dumps` call on a write
+  path in `sqlite/event_log.py`, `postgres/event_log.py`,
+  `sqlite/graph.py` and `postgres/graph.py` now passes `allow_nan=False`,
+  matching the idiom already used in
+  `tests/unit/learning/tuners/test_promotion_effect_size.py` to pin the
+  Postgres behavior without a live server. The error is a `ValueError`
+  raised before the INSERT executes; a version close already run in the
+  same transaction — SQLite's and Postgres's `update_node_if_current`,
+  and SQLite's `upsert_edges_bulk` — is rolled back along with it, so
+  nothing is written either way. For Postgres this surfaces unwrapped
+  (not a `StoreError`) via the same contract already pinned by
+  `test_an_error_that_is_not_the_driver_s_keeps_its_type`, because a
+  non-serializable value is the caller's bug, not the store's. One live
+  producer did reach this path: `PrecedentMiner`
+  (`trellis_workers/learning/miner.py`) read an LLM reply's `confidence`
+  with a bare `float()`, which accepts both a JSON `NaN` token and the
+  string `"nan"`, and the clamp that followed preserved it rather than
+  rejecting it — unlike `compute_importance`'s clamp, which does. It now
+  reads with `coerce_finite_float` and falls back to `0.5`, the same
+  pattern `session_capture/distill.py` already uses for the same kind of
+  field. Feedback `rating` (#741/#751), the tuner's `effect_size` (#620)
+  and `Measurement.metric_value` (#827, below) were already closed at
+  their producers before this PR; the miner was the one still open, and
+  is now closed here too.
+  ([#831](https://github.com/ronsse/trellis-ai/pull/831))
+
 - **`Measurement.metric_value` refuses `Infinity` and `-Infinity`, not only
   `NaN`.** The field accepted any float that passed `math.isnan`, so a
   caller could record `Infinity`. `metric_value` now refuses `NaN`,
@@ -407,6 +446,20 @@ All notable changes to Trellis will be documented in this file.
   was sent and `backends` is still absent, the note reads "per-backend
   breakdown absent" instead, since no API key isn't the cause.
   ([#826](https://github.com/ronsse/trellis-ai/pull/826))
+- **A proposal with no comparable baseline is refused by default, and the
+  refusal is recoverable.** `PromotionPolicy.allow_no_baseline` now
+  defaults to `False`, so a bare `trellis metrics promote --commit` no
+  longer promotes a scope's first, unbaselined proposal — the gap #823
+  left open on the CLI after closing it on the Review queue. Pass the new
+  `--allow-no-baseline` flag to opt in per call; `--force` keeps its
+  existing, broader meaning and still skips the whole policy gate,
+  baseline rule included. A no-baseline refusal no longer marks the
+  proposal terminally `"rejected"`, so a later `--allow-no-baseline` call
+  on the same proposal can still promote it, and `TUNER_PROPOSAL_REJECTED`
+  now carries a `terminal` key reflecting that. The Review queue's
+  "Confirm approve" button is disabled when the preview predicts a
+  rejection and names the CLI bootstrap command.
+  ([#823](https://github.com/ronsse/trellis-ai/pull/823) follow-up)
 - **`TrellisError` raise sites describe the caught exception instead of
   quoting it.** Nine sites built their message as `f"...: {exc}"` inside an
   `except ... as exc:` handler — a pydantic `ValidationError`'s own text
@@ -467,6 +520,31 @@ All notable changes to Trellis will be documented in this file.
   row this command could not write is a state an operator needs to see,
   not one that nets out as a quiet partial success.
   ([#824](https://github.com/ronsse/trellis-ai/pull/824))
+- **A broken embedder config is now loud once per cause, not once per
+  document.** `run_embed_on_ingest` caught a failed `registry.embedding_fn`
+  resolve (a bad `TRELLIS_EMBEDDING_FN`/`embeddings.provider` path, a
+  missing provider extra, a missing API key — all config errors that fail
+  every subsequent ingest identically) with `logger.exception`, so a
+  misconfiguration logged a full traceback per ingested document. It now
+  logs `embed_on_ingest_embedder_resolve_failed` at WARNING once per
+  distinct `(error_type, setting)` per process, and the hook's returned
+  `reason` carries only the exception's type name and, when the exception
+  names one, the broken setting (e.g. `"ConfigError: embeddings.provider"`)
+  — never the exception's message text, which can echo a credential (this
+  resolve path never sees document content). The MCP http prewarm's
+  `mcp_prewarm_optional_unavailable` warning now names `error_type` too,
+  and its comment states each prewarmed component's own runtime posture
+  instead of one blanket claim: an unresolvable `embedding_fn` raises at
+  every retrieval call site until the setting is fixed; a broken
+  `vector_store` degrades retrieval to keyword and graph (`semantic:
+  misconfigured`); embed-on-ingest is fail-soft for an embedder resolve
+  failure only. Added a recovery runbook,
+  [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config):
+  fix the setting, restart (the `embeddings:` block is read once, at
+  `StoreRegistry` construction, so a running process can't see an edited
+  config or environment), then run `trellis admin reindex-vectors` for
+  documents that arrived while it was broken.
+  ([#830](https://github.com/ronsse/trellis-ai/pull/830))
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
