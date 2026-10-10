@@ -72,6 +72,11 @@ class StoreCase:
     #: AST walk below, so a method added to a store without an entry here
     #: fails rather than going quietly uncovered.
     attempts: Callable[[DegradableJsonStore, str], dict[str, Callable[[], object]]]
+    #: Write one row carrying the given float in an unconstrained field
+    #: (``Policy.metadata`` / ``AdvisoryEvidence.effect_size``), so a
+    #: non-finite value — which passes Pydantic validation; ``allow_inf_nan``
+    #: defaults to ``True`` — is the thing that reaches ``_save``.
+    write_with_score: Callable[[DegradableJsonStore, float], object]
 
 
 def _policy() -> Policy:
@@ -110,6 +115,9 @@ CASES = [
             "add": lambda: store.add(_policy()),
             "remove": lambda: store.remove(seeded),
         },
+        write_with_score=lambda store, value: store.add(
+            _policy().model_copy(update={"metadata": {"score": value}})
+        ),
     ),
     StoreCase(
         label="advisory",
@@ -126,6 +134,15 @@ CASES = [
             "remove": lambda: store.remove(seeded),
             "clear": store.clear,
         },
+        write_with_score=lambda store, value: store.put(
+            _advisory().model_copy(
+                update={
+                    "evidence": _advisory().evidence.model_copy(
+                        update={"effect_size": value}
+                    )
+                }
+            )
+        ),
     ),
 ]
 CASE_IDS = [c.label for c in CASES]
@@ -136,6 +153,30 @@ SHAPE_PARAMS = [
     pytest.param(case, text, reason, id=f"{case.label}-{shape_id}")
     for case in CASES
     for shape_id, text, reason in degenerate_files(case.envelope_key)
+]
+
+#: ``(case, non-finite value)``, filtered to ``advisory`` only.
+#: ``AdvisoryEvidence.effect_size`` is plainly ``float``, so a non-finite
+#: value survives ``model_dump(mode="json")`` as a live float and reaches
+#: ``_save``'s ``json.dumps``. ``policy``'s float-capable fields,
+#: ``metadata`` and ``PolicyRule.params``, are both ``dict[str, Any]``,
+#: and Pydantic's own JSON-mode dump nulls a non-finite float nested
+#: under an ``Any``-typed value *before* ``_save`` ever calls
+#: ``json.dumps`` — measured directly, not assumed:
+#: ``Policy(...).model_copy(update={"metadata": {"score": float("nan")}})
+#: .model_dump(mode="json")["metadata"]`` is ``{"score": None}``. So no
+#: live NaN can reach the write guard through ``Policy``'s public schema
+#: today; ``test_save_dumps_with_allow_nan_false`` below pins that the
+#: guard is wired on the shared base regardless, for both stores.
+NON_FINITE_PARAMS = [
+    pytest.param(case, value, id=f"{case.label}-{value_id}")
+    for case in CASES
+    if case.label == "advisory"
+    for value, value_id in (
+        (float("nan"), "nan"),
+        (float("inf"), "inf"),
+        (float("-inf"), "-inf"),
+    )
 ]
 
 
@@ -308,6 +349,97 @@ class TestStaleWritesAreRefusedOnEveryStore:
         assert recovery is not None
         assert recovery.startswith("trellis ")
         assert not recovery.startswith("mv ")
+
+
+class TestNonFiniteFloatsAreRefusedOnEveryStore:
+    """A NaN/Infinity float must refuse at write, never reach disk (#840).
+
+    ``_save`` dumped with a lenient ``json.dumps`` (no ``allow_nan=False``),
+    the same gap #835 closed on every other store's write path, left open
+    here because this shared base was not one of the stores #835 touched.
+    The guard is on the shared base (asserted directly below, on both
+    stores), but only ``AdvisoryStore`` has a schema that can drive it
+    through a real write today — see ``NON_FINITE_PARAMS``'s comment.
+    """
+
+    @pytest.mark.parametrize(("case", "value"), NON_FINITE_PARAMS)
+    def test_a_non_finite_float_refuses_before_the_file_is_touched(
+        self, tmp_path: Path, case: StoreCase, value: float
+    ) -> None:
+        path = tmp_path / "store.json"
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            case.write_with_score(case.cls(path), value)
+        assert not path.exists()
+
+    @pytest.mark.parametrize(("case", "value"), NON_FINITE_PARAMS)
+    def test_a_non_finite_write_keeps_the_existing_file_byte_identical(
+        self, tmp_path: Path, case: StoreCase, value: float
+    ) -> None:
+        path = tmp_path / "store.json"
+        case.write(case.cls(path))
+        before = path.read_text(encoding="utf-8")
+        store = case.cls(path)
+
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            case.write_with_score(store, value)
+
+        assert path.read_text(encoding="utf-8") == before
+
+    @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+    def test_a_legacy_non_finite_file_still_loads_clean(
+        self, tmp_path: Path, case: StoreCase
+    ) -> None:
+        """A file written before this guard existed must stay readable.
+
+        ``_load_rows`` parses with the default, lenient ``json.loads``,
+        which accepts the non-standard ``NaN``/``Infinity`` tokens a
+        pre-fix write could have left on disk (see :meth:`_save`'s
+        docstring). The fix only closes the *write* side; degrading this
+        read would turn an old file some already-shipped build produced
+        into a newly-unreadable one, for no corresponding gain.
+        """
+        row = case.row()
+        if case.label == "policy":
+            row["metadata"] = {"score": float("nan")}
+        else:
+            row["evidence"]["effect_size"] = float("nan")
+        path = tmp_path / "store.json"
+        path.write_text(json.dumps({case.envelope_key: [row]}), encoding="utf-8")
+
+        store = case.cls(path)
+
+        assert store.is_degraded is False
+
+    @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
+    def test_save_dumps_with_allow_nan_false(
+        self, tmp_path: Path, case: StoreCase, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard is wired into ``_save``'s dump call, on both stores.
+
+        ``policy``'s ``Any``-typed fields (``metadata``, ``PolicyRule.params``)
+        cannot actually carry a live non-finite float as far as ``_save``:
+        Pydantic nulls it first (see ``NON_FINITE_PARAMS``'s comment), which
+        is why the behavioural write-refusal test above covers ``advisory``
+        only. This asserts the guard itself is present on the shared base
+        regardless of whether a given subclass's own schema can trigger it
+        today — an ordinary write must still pass ``allow_nan=False``.
+        """
+        path = tmp_path / "store.json"
+        store = case.cls(path)
+        real_dumps = degradable_json_store.json.dumps
+        calls: list[dict[str, object]] = []
+
+        def recording_dumps(*args: object, **kwargs: object) -> str:
+            if args and isinstance(args[0], dict) and case.envelope_key in args[0]:
+                calls.append(kwargs)
+            return real_dumps(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(degradable_json_store.json, "dumps", recording_dumps)
+
+        case.write(store)
+
+        assert calls, "no json.dumps call seen for this store's envelope"
+        assert calls[-1].get("allow_nan") is False
 
 
 class TestEveryWritePathIsGuarded:

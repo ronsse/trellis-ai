@@ -2051,6 +2051,33 @@ All notable changes to Trellis will be documented in this file.
   line. In both helpers, a `setting` that is not a string degrades to
   `None` instead of breaking the dedup cache, so every path still
   degrades rather than raising.
+- **The last two NaN/Infinity gaps #831 and #835 left open are closed.**
+  `DegradableJsonStore._save` — the shared base of `PolicyStore` and
+  `AdvisoryStore`, called out by #835 as unchanged — dumped with a lenient
+  `json.dumps` and still wrote a bare `NaN`/`Infinity` token; it now
+  refuses with the same `allow_nan=False`, before the file is touched, so
+  an existing file survives byte-identical on a refused write. A legacy
+  file some already-shipped build wrote with the non-standard token still
+  reads back clean (the read path, `json.loads`, stays lenient on
+  purpose). In practice only `AdvisoryStore` can drive this refusal
+  through a real write today: `Policy`'s float-capable fields, `metadata`
+  and `PolicyRule.params`, are both `dict[str, Any]`, and Pydantic's own
+  `model_dump(mode="json")` nulls a non-finite float nested under an
+  `Any`-typed value before
+  `_save` ever runs, so a live NaN cannot reach the guard through
+  `Policy`'s public schema — the guard is still wired on the shared base
+  regardless, and a new test pins that directly. Separately,
+  `trellis admin backfill-outcomes --apply` replaying a legacy
+  feedback event with a non-finite relevance score (predating the
+  EventLog's own #831 write guard, so a raw row written before that
+  fix can still hold one) wrote through `OutcomeStore.append_many`,
+  which raises exactly that bare `ValueError` — not a `TrellisError`,
+  so the CLI's global boundary did not catch it, and it surfaced as an
+  untyped traceback. The command now catches it at its own boundary and
+  reports a described failure — a sanitized JSON envelope or an escaped
+  one-line message — exiting `EXIT_INTERNAL` in both `--format text` and
+  `json`. The replay appends in 500-row transactions, so chunks before
+  the refused one may already be committed.
 
 ## [0.9.0] - 2026-05-13
 
