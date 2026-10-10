@@ -199,7 +199,7 @@ Three server-side decisions **wait for a human**. The workers prepare the artifa
 | Decision | Prepared by | Artifact / input | Human runs | Tier |
 |---|---|---|---|---|
 | **Promote a learning candidate** into a precedent node | `worker curate` stage 4 | `intent_learning_candidates.json` + `promotion_decisions.template.json` in `--output-dir` | Set `approved: true` on rows in the decisions file, then `trellis curate promote-learning --candidates intent_learning_candidates.json --decisions <filled-in>.json` | 2 |
-| **Promote a tuner parameter proposal** (when auto-promote is OFF, or for proposals below the auto gate) | `worker tune` / `trellis metrics tune` | a `pending` proposal | `trellis metrics promote <PROPOSAL_ID> --commit` (dry-run by default; `--commit` writes the snapshot) | 1→manual |
+| **Promote a tuner parameter proposal** (when auto-promote is OFF, or for proposals below the auto gate) | `worker tune` / `trellis metrics tune` | a `pending` proposal | `trellis metrics promote <PROPOSAL_ID> --commit` (dry-run by default; `--commit` writes the snapshot; add `--allow-no-baseline` for a scope with no comparable baseline yet) | 1→manual |
 | **Promote an open-string type** to the canonical ontology | `trellis analyze schema-evolution` | a `WELL_KNOWN_CANDIDATE` event / `candidate_id` | `trellis admin draft-promotion-adr <candidate_id>` to scaffold an ADR amendment, then a human authors + merges it | 3 |
 
 The pattern is identical each time: **the machine prepares, the human commits.** `worker curate` writes a decisions *template* and stops; `worker tune` (auto-off) leaves proposals `pending`; `analyze schema-evolution` only emits a candidate event. None of them crosses the irreversible line on its own.
