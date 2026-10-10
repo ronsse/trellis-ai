@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 
 from trellis.core.document_write import put_document
+from trellis.core.error_sanitize import describe_validation_error
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import NotFoundError, StoreError, ValidationError
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
@@ -844,7 +845,10 @@ class ObservationRecordHandler:
         except Exception as exc:
             # Loud-on-missing-required-field discipline. The executor
             # turns ValidationError into a structured rejection event.
-            msg = f"Observation validation failed: {exc}"
+            # describe_validation_error, not str(exc): pydantic's own text
+            # embeds input_value=<the caller's field value>, and this
+            # message becomes the immutable mutation.rejected audit event.
+            msg = f"Observation validation failed: {describe_validation_error(exc)}"
             raise ValidationError(msg, code="observation_validation") from exc
 
         store = self._registry.knowledge.graph_store
@@ -939,7 +943,9 @@ class MeasurementRecordHandler:
                 raw if isinstance(raw, Measurement) else Measurement.model_validate(raw)
             )
         except Exception as exc:
-            msg = f"Measurement validation failed: {exc}"
+            # describe_validation_error, not str(exc): see the matching
+            # comment in ObservationRecordHandler.handle above.
+            msg = f"Measurement validation failed: {describe_validation_error(exc)}"
             raise ValidationError(msg, code="measurement_validation") from exc
 
         store = self._registry.knowledge.graph_store
