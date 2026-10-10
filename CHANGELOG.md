@@ -528,7 +528,7 @@ All notable changes to Trellis will be documented in this file.
   an embedder and a vector store failing with the same shape (e.g. both a
   bare `RuntimeError` with no `setting`) log independently instead of one
   suppressing the other. Playbook 15 and the comment above updated to match.
-  ([#838](https://github.com/ronsse/trellis-ai/pull/838))
+  ([#834](https://github.com/ronsse/trellis-ai/pull/834))
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
