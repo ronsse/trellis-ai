@@ -1123,6 +1123,42 @@
         }
         .key-banner .key-status { color: var(--text-dim); font-size: 0.75rem; }
 
+        /* Degraded-store banner (advisories / policies): a store that could
+           only partly read its file must look at least as alarming as an
+           empty one, never the same as "nothing here". */
+        .degraded-banner {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+            padding: 0.75rem 1.25rem;
+            margin-bottom: 1rem;
+            background: #350a0a;
+            border: 1px solid var(--error);
+            border-radius: 8px;
+            font-size: 0.85rem;
+        }
+        .degraded-banner .degraded-title { color: var(--error); font-weight: 600; }
+        .degraded-banner .degraded-detail { color: var(--text-dim); }
+        .degraded-banner code {
+            background: var(--bg);
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-family: var(--font-mono);
+        }
+        .field-hint { color: var(--text-dim); font-size: 0.78rem; margin: 0.15rem 0 0.6rem; }
+        .form-row { margin-bottom: 0.9rem; }
+        .form-row label { display: block; font-size: 0.85rem; margin-bottom: 0.3rem; }
+        .form-row input, .form-row select {
+            width: 100%;
+            max-width: 420px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.45rem 0.7rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+        }
+
         /* Scrollbar */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: var(--bg); }
@@ -1358,6 +1394,8 @@
             <a href="#" data-view="memories" data-label="Memories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.2" rx="7.5" ry="2.9"/><path d="M4.5 5.2v6.4c0 1.6 3.4 2.9 7.5 2.9s7.5-1.3 7.5-2.9V5.2"/><path d="M4.5 11.6V18c0 1.6 3.4 2.9 7.5 2.9s7.5-1.3 7.5-2.9v-6.4"/></svg><span class="nav-label">Memories</span><span class="nav-key">8</span></a>
             <a href="#" data-view="events" data-label="Events"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h12M9 12h12M9 18h12"/><circle cx="4" cy="6" r="1.3"/><circle cx="4" cy="12" r="1.3"/><circle cx="4" cy="18" r="1.3"/></svg><span class="nav-label">Events</span><span class="nav-key">9</span></a>
             <a href="#" data-view="packs" data-label="Packs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 16V8a1.9 1.9 0 0 0-.95-1.64l-6.6-3.8a1.9 1.9 0 0 0-1.9 0l-6.6 3.8A1.9 1.9 0 0 0 3.5 8v8a1.9 1.9 0 0 0 .95 1.64l6.6 3.8a1.9 1.9 0 0 0 1.9 0l6.6-3.8A1.9 1.9 0 0 0 20.5 16z"/><path d="M3.8 7.1L12 11.8l8.2-4.7M12 21.3V11.8"/></svg><span class="nav-label">Packs</span><span class="nav-key">0</span></a>
+            <a href="#" data-view="advisories" data-label="Advisories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l8.5 4.9v9.2L12 21.5l-8.5-4.9V7.4z"/><path d="M12 8.2v5"/><circle cx="12" cy="16" r="0.9" fill="currentColor" stroke="none"/></svg><span class="nav-label">Advisories</span></a>
+            <a href="#" data-view="policies" data-label="Policies"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l7.5 3v6.2c0 4.3-3.1 7.4-7.5 9.3-4.4-1.9-7.5-5-7.5-9.3V5.5z"/><path d="M9 12l2.2 2.2L15.5 9.5"/></svg><span class="nav-label">Policies</span></a>
         </nav>
 
         <div class="sidebar-foot" id="sidebar-foot" title="Backend version">&mdash;</div>
@@ -1701,6 +1739,78 @@
             </div>
             <div id="pack-detail-container"></div>
         </div>
+
+        <div id="view-advisories" style="display:none">
+            <div id="advisories-banner"></div>
+            <div class="search-bar">
+                <input type="text" id="adv-scope" placeholder="Filter by scope (exact match)">
+                <input type="number" id="adv-min-confidence" placeholder="Min confidence" min="0" max="1" step="0.05" style="max-width:140px">
+                <button onclick="loadAdvisories()">Refresh</button>
+                <button onclick="showGenerateAdvisoriesForm()">Generate advisories&hellip;</button>
+            </div>
+            <p class="field-hint">
+                This is the full advisory store, not a record of what was served: this route does
+                not (yet) say which rows actually reached an agent in a pack. "Boosted" is not a
+                persisted state either &mdash; it is a one-run fitness-loop report, not a field on the
+                advisory &mdash; so status / confidence / fitness-scored-at below are the real,
+                queryable state.
+            </p>
+            <div id="adv-generate-form" style="display:none"></div>
+            <div id="adv-generate-result"></div>
+            <div class="status-section" style="padding:0; overflow:hidden">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Id</th>
+                            <th>Category</th>
+                            <th>Scope</th>
+                            <th>Confidence</th>
+                            <th>Evidence</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                            <th>Fitness-scored</th>
+                        </tr>
+                    </thead>
+                    <tbody id="advisories-body"></tbody>
+                </table>
+            </div>
+            <p class="field-hint" id="advisories-total"></p>
+        </div>
+
+        <div id="view-policies" style="display:none">
+            <div id="policies-banner"></div>
+            <p class="field-hint">
+                Deny wins: every policy whose scope and operation match a command is evaluated,
+                and the first matching <code>deny</code> or <code>require_approval</code> rule
+                stops it &mdash; a narrower <code>allow</code> elsewhere cannot override that.
+                <code>allow</code> rules are inert (they grant nothing a default-allow posture
+                did not already grant). Zero policies ships by default: an empty store allows
+                every command.
+            </p>
+            <div class="search-bar">
+                <button onclick="loadPolicies()">Refresh</button>
+                <button onclick="showCreatePolicyForm()">New policy&hellip;</button>
+            </div>
+            <div id="policy-create-form" style="display:none"></div>
+            <div id="policy-create-result"></div>
+            <div class="status-section" style="padding:0; overflow:hidden">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Id</th>
+                            <th>Type</th>
+                            <th>Scope</th>
+                            <th>Rules</th>
+                            <th>Enforcement</th>
+                            <th>Created</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="policies-body"></tbody>
+                </table>
+            </div>
+            <p class="field-hint" id="policies-total"></p>
+        </div>
     </div>
     </div>
     </div>
@@ -1809,6 +1919,26 @@
             return res.json();
         }
 
+        async function deleteJSON(path) {
+            const headers = {};
+            const key = getApiKey();
+            if (key) headers['X-API-Key'] = key;
+            const res = await fetch(API + path, { method: 'DELETE', headers });
+            await throwIfAuthRefused(res, key);
+            if (!res.ok) {
+                let detail = `${res.status} ${res.statusText}`;
+                try {
+                    const j = await res.json();
+                    const d = j && j.detail;
+                    if (typeof d === 'string') detail = d;
+                    else if (d && typeof d.message === 'string') detail = d.message;
+                    else if (d) detail = JSON.stringify(d);
+                } catch { /* non-JSON */ }
+                throw new Error(detail);
+            }
+            return res.json();
+        }
+
         function timeAgo(iso) {
             if (!iso) return '';
             const d = new Date(iso);
@@ -1823,6 +1953,16 @@
         function fmtDate(iso) {
             if (!iso) return '';
             return new Date(iso).toLocaleString();
+        }
+
+        // Stores write timestamps in UTC; label them as such rather than
+        // rendering a bare local-looking string a reader could misread as
+        // their own timezone.
+        function fmtDateUtc(iso) {
+            if (!iso) return 'not measured';
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return 'not measured';
+            return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
         }
 
         // Encodes & < > and both quotes: between tags the text stays text, and
@@ -1846,6 +1986,7 @@
             draftAdr, copyAdr, downloadAdr,
             loadTraceDetail, navigateToEntity, navigateToDocument,
             loadMemoryDetail, loadEventDetail, navigateToPack, loadPackDetail,
+            confirmDeletePolicy, deletePolicy,
         };
         document.addEventListener('click', e => {
             const el = e.target instanceof Element && e.target.closest('[data-action]');
@@ -1869,7 +2010,7 @@
         }
 
         // -- View switching --
-        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs'];
+        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs', 'advisories', 'policies'];
         const viewLoaded = {};
         // init() reveals the dashboard when its fetches resolve. Track where the
         // user actually is, so a click made while the API is still answering is
@@ -1904,6 +2045,8 @@
                 if (name === 'memories') loadMemories();
                 if (name === 'events') loadEvents();
                 if (name === 'packs') loadPacks();
+                if (name === 'advisories') loadAdvisories();
+                if (name === 'policies') loadPolicies();
             }
             // Focus search when switching to graph
             if (name === 'graph' && graphInitialized) {
@@ -4528,6 +4671,361 @@
 
             return { start, scan };
         })();
+
+        // -- Advisories (G6) & Policies (G7) tabs --
+        // A degraded JSON-file store (DegradableJsonStore: PolicyStore,
+        // AdvisoryStore) still answers 200 with whatever rows parsed, plus a
+        // `store_degradation` object describing what did not. Zero rows and
+        // a degraded read must never render the same way, or an operator
+        // reads "no policies" / "no advisories" when the truth is "can't
+        // tell, the file is damaged" -- so every list view renders this
+        // banner from that field before it renders its rows.
+        function renderDegradedBanner(targetId, degradation) {
+            const el = document.getElementById(targetId);
+            if (!el) return;
+            if (!degradation) { el.innerHTML = ''; return; }
+            el.innerHTML = `<div class="degraded-banner">
+                <span class="degraded-title">STORE DEGRADED &mdash; ${escHtml(degradation.reason || 'unknown')}</span>
+                <span class="degraded-detail">${escHtml(degradation.detail || '')}</span>
+                <span class="degraded-detail">${escHtml(String(degradation.rows_loaded ?? 0))} row(s) loaded, ${escHtml(String(degradation.rows_skipped_display ?? 'unknown'))} skipped from <code>${escHtml(degradation.path || '')}</code></span>
+                <span class="degraded-detail">Recovery (operator-run): <code>${escHtml(degradation.recovery || '')}</code></span>
+            </div>`;
+        }
+
+        // === Advisories ===
+
+        async function loadAdvisories() {
+            const tbody = document.getElementById('advisories-body');
+            const totalEl = document.getElementById('advisories-total');
+            tbody.innerHTML = `<tr><td colspan="8">${loadingHtml('Loading advisories...')}</td></tr>`;
+            renderDegradedBanner('advisories-banner', null);
+            totalEl.textContent = '';
+            const scope = document.getElementById('adv-scope').value.trim();
+            const minConf = document.getElementById('adv-min-confidence').value.trim();
+            const qs = [];
+            if (scope) qs.push('scope=' + encodeURIComponent(scope));
+            if (minConf) qs.push('min_confidence=' + encodeURIComponent(minConf));
+            const query = qs.length ? ('?' + qs.join('&')) : '';
+            try {
+                const data = await fetchJSON('/advisories' + query);
+                // This route answers a missing stores_dir at 200 with
+                // {status:"error"}, not an HTTP failure -- fetchJSON's
+                // !res.ok check cannot see it, so it is checked explicitly
+                // rather than falling through to "0 advisories".
+                if (data.status === 'error') {
+                    tbody.innerHTML = `<tr><td colspan="8" style="color:var(--error)">Advisories unavailable: ${escHtml(data.message || 'unknown error')}</td></tr>`;
+                    return;
+                }
+                renderDegradedBanner('advisories-banner', data.store_degradation);
+                const rows = data.advisories || [];
+                if (rows.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">${data.store_degradation ? 'No advisories parsed from a degraded store -- see the banner above.' : 'No advisories generated yet.'}</div></td></tr>`;
+                } else {
+                    tbody.innerHTML = rows.map(renderAdvisoryRow).join('');
+                }
+                totalEl.textContent = `${data.count ?? rows.length} advisor${(data.count ?? rows.length) === 1 ? 'y' : 'ies'} (route total)`;
+            } catch (err) {
+                tbody.innerHTML = `<tr><td colspan="8" style="color:var(--error)">Failed to load advisories: ${escHtml(err.message)}</td></tr>`;
+            }
+        }
+
+        function renderAdvisoryRow(a) {
+            const ev = a.evidence || {};
+            const statusBadge = a.status === 'suppressed'
+                ? `<span class="badge badge-warn" title="${escHtml(a.suppression_reason || 'suppressed')}">suppressed</span>`
+                : `<span class="badge badge-ok">active</span>`;
+            const evidenceConf = ev.evidence_confidence == null ? 'not measured' : ev.evidence_confidence.toFixed(2);
+            const scopeCell = a.scope + (a.entity_id ? ` (entity: ${a.entity_id})` : '');
+            return `<tr>
+                <td title="${escHtml(a.advisory_id)}"><code>${escHtml(String(a.advisory_id).substring(0, 12))}</code></td>
+                <td>${escHtml(a.category)}</td>
+                <td>${escHtml(scopeCell)}</td>
+                <td>${a.confidence == null ? 'not measured' : escHtml(a.confidence.toFixed(2))}</td>
+                <td title="sample_size=${escHtml(String(ev.sample_size ?? ''))}, success_with=${escHtml(String(ev.success_rate_with ?? ''))}, success_without=${escHtml(String(ev.success_rate_without ?? ''))}">evidence_confidence: ${escHtml(evidenceConf)}, effect: ${ev.effect_size == null ? 'not measured' : escHtml(ev.effect_size.toFixed(2))}</td>
+                <td>${statusBadge}</td>
+                <td>${fmtDateUtc(a.created_at)}</td>
+                <td>${a.fitness_scored_at ? fmtDateUtc(a.fitness_scored_at) : 'not yet scored'}</td>
+            </tr>`;
+        }
+
+        function showGenerateAdvisoriesForm() {
+            const el = document.getElementById('adv-generate-form');
+            document.getElementById('adv-generate-result').innerHTML = '';
+            el.style.display = 'block';
+            el.innerHTML = `<div class="status-section">
+                <div class="form-row">
+                    <label for="adv-gen-days">Days of history to scan</label>
+                    <input type="number" id="adv-gen-days" value="30" min="1">
+                    <p class="field-hint">How far back pack outcomes are scanned to build the with/without comparison.</p>
+                </div>
+                <div class="form-row">
+                    <label for="adv-gen-min-sample">Minimum sample size</label>
+                    <input type="number" id="adv-gen-min-sample" value="5" min="1">
+                    <p class="field-hint">A comparison arm smaller than this is refused rather than reported as a finding.</p>
+                </div>
+                <div class="form-row">
+                    <label for="adv-gen-min-effect">Minimum effect size</label>
+                    <input type="number" id="adv-gen-min-effect" value="0.15" min="0" max="1" step="0.01">
+                    <p class="field-hint">Minimum gap between the with/without success rates before advice is generated on it.</p>
+                </div>
+                <div id="adv-gen-actions">
+                    <button class="btn btn-sm" onclick="confirmGenerateAdvisories()">Generate&hellip;</button>
+                    <button class="btn btn-ghost btn-sm" onclick="cancelGenerateAdvisories()">Cancel</button>
+                </div>
+            </div>`;
+        }
+
+        function cancelGenerateAdvisories() {
+            const el = document.getElementById('adv-generate-form');
+            el.style.display = 'none';
+            el.innerHTML = '';
+        }
+
+        function confirmGenerateAdvisories() {
+            const actions = document.getElementById('adv-gen-actions');
+            if (!actions) return;
+            actions.innerHTML =
+                '<p style="color:var(--warn)">This scans history now and writes new advisories to the store. Confirm?</p>' +
+                '<button class="btn btn-sm btn-danger" onclick="runGenerateAdvisories()">Confirm generate</button> ' +
+                '<button class="btn btn-ghost btn-sm" onclick="cancelGenerateAdvisories()">Cancel</button>';
+        }
+
+        // POST /advisories/generate answers two of its three refusal shapes
+        // at HTTP 409 with its *own* rich body (status/code fields), not an
+        // HTTPException {detail} envelope -- postJSON's generic error path
+        // reads only `detail`, so reusing it here would collapse
+        // degraded_store and stores_dir_unconfigured to a bare "409
+        // Conflict" and throw away the one payload that explains the
+        // refusal. The third shape (stale_store_write) IS an HTTPException,
+        // so this reads the body on every status rather than only on
+        // res.ok, to catch all three.
+        async function generateAdvisoriesRequest(qs) {
+            const headers = {};
+            const key = getApiKey();
+            if (key) headers['X-API-Key'] = key;
+            const res = await fetch(API + '/advisories/generate' + qs, { method: 'POST', headers });
+            await throwIfAuthRefused(res, key);
+            let data = null;
+            try { data = await res.json(); } catch { /* non-JSON */ }
+            if (!data) throw new Error(`${res.status} ${res.statusText}`);
+            return data;
+        }
+
+        async function runGenerateAdvisories() {
+            const days = document.getElementById('adv-gen-days').value || '30';
+            const minSample = document.getElementById('adv-gen-min-sample').value || '5';
+            const minEffect = document.getElementById('adv-gen-min-effect').value || '0.15';
+            const resultEl = document.getElementById('adv-generate-result');
+            const actions = document.getElementById('adv-gen-actions');
+            if (actions) actions.innerHTML = loadingHtml('Generating...');
+            const qs = `?days=${encodeURIComponent(days)}&min_sample=${encodeURIComponent(minSample)}&min_effect=${encodeURIComponent(minEffect)}`;
+            try {
+                const data = await generateAdvisoriesRequest(qs);
+                cancelGenerateAdvisories();
+                if (data.detail && data.detail.code === 'stale_store_write') {
+                    resultEl.innerHTML = `<p style="color:var(--error)">Generate refused: ${escHtml(data.detail.message || 'stale_store_write')}</p>`;
+                } else if (data.status === 'error') {
+                    resultEl.innerHTML = `<p style="color:var(--error)">Generate refused (${escHtml(data.code || 'error')}): ${escHtml(data.message || '')}</p>`;
+                } else if (data.status === 'degraded') {
+                    resultEl.innerHTML = `<div class="degraded-banner">
+                        <span class="degraded-title">Generation ran against a degraded advisory store</span>
+                        <span class="degraded-detail">Stored ${escHtml(String(data.advisories_stored ?? 0))} of ${escHtml(String(data.advisories_generated ?? 0))} generated advisories; nothing else was written.</span>
+                    </div>`;
+                } else {
+                    resultEl.innerHTML = `<p style="color:var(--success)">Generated ${escHtml(String(data.advisories_generated ?? 0))} advisories (${escHtml(String(data.advisories_stored ?? 0))} stored) over ${escHtml(String(data.analysis_window_days ?? ''))} day(s); ${escHtml(String(data.findings_refused_no_comparison_arm ?? 0))} finding(s) refused for lack of a comparison arm.</p>`;
+                }
+                loadAdvisories();
+            } catch (err) {
+                if (actions) {
+                    actions.innerHTML =
+                        '<button class="btn btn-sm btn-danger" onclick="runGenerateAdvisories()">Confirm generate</button> ' +
+                        '<button class="btn btn-ghost btn-sm" onclick="cancelGenerateAdvisories()">Cancel</button>';
+                }
+                resultEl.innerHTML = `<p style="color:var(--error)">Generate failed: ${escHtml(err.message)}</p>`;
+            }
+        }
+
+        // === Policies ===
+
+        async function loadPolicies() {
+            const tbody = document.getElementById('policies-body');
+            const totalEl = document.getElementById('policies-total');
+            tbody.innerHTML = `<tr><td colspan="7">${loadingHtml('Loading policies...')}</td></tr>`;
+            renderDegradedBanner('policies-banner', null);
+            totalEl.textContent = '';
+            try {
+                const data = await fetchJSON('/policies');
+                renderDegradedBanner('policies-banner', data.store_degradation);
+                const rows = data.policies || [];
+                if (rows.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">${data.store_degradation ? 'No policies parsed from a degraded store -- more may exist in the unreadable rows; see the banner above.' : 'No policies declared. Trellis ships zero policies by default, which behaves exactly as if no gate existed.'}</div></td></tr>`;
+                } else {
+                    tbody.innerHTML = rows.map(renderPolicyRow).join('');
+                }
+                totalEl.textContent = `${data.count ?? rows.length} polic${(data.count ?? rows.length) === 1 ? 'y' : 'ies'} (route total)`;
+            } catch (err) {
+                tbody.innerHTML = `<tr><td colspan="7" style="color:var(--error)">Failed to load policies: ${escHtml(err.message)}</td></tr>`;
+            }
+        }
+
+        function renderPolicyRow(p) {
+            const rulesText = (p.rules || []).map(r =>
+                `${r.action} ${r.operation}` + (r.condition && r.condition !== 'always' ? ` (${r.condition})` : '')
+            ).join('; ') || '(no rules)';
+            const scopeText = p.scope ? (p.scope.value ? `${p.scope.level}:${p.scope.value}` : p.scope.level) : '';
+            return `<tr id="policy-row-${escHtml(p.policy_id)}">
+                <td title="${escHtml(p.policy_id)}"><code>${escHtml(String(p.policy_id).substring(0, 12))}</code></td>
+                <td>${escHtml(p.policy_type)}</td>
+                <td>${escHtml(scopeText)}</td>
+                <td>${escHtml(rulesText)}</td>
+                <td>${escHtml(p.enforcement)}</td>
+                <td>${fmtDateUtc(p.created_at)}</td>
+                <td id="policy-actions-${escHtml(p.policy_id)}"><button class="btn btn-sm btn-danger" data-action="confirmDeletePolicy" data-id="${escHtml(p.policy_id)}">Delete</button></td>
+            </tr>`;
+        }
+
+        function confirmDeletePolicy(id) {
+            const cell = document.getElementById('policy-actions-' + id);
+            if (!cell) return;
+            cell.innerHTML =
+                '<span style="color:var(--warn)">Delete this policy?</span> ' +
+                `<button class="btn btn-sm btn-danger" data-action="deletePolicy" data-id="${escHtml(id)}">Confirm delete</button> ` +
+                '<button class="btn btn-ghost btn-sm" onclick="loadPolicies()">Cancel</button>';
+        }
+
+        async function deletePolicy(id) {
+            const cell = document.getElementById('policy-actions-' + id);
+            if (cell) cell.innerHTML = loadingHtml('Deleting...');
+            try {
+                await deleteJSON(`/policies/${encodeURIComponent(id)}`);
+                loadPolicies();
+            } catch (err) {
+                if (cell) {
+                    cell.innerHTML =
+                        `<span style="color:var(--error)">Delete failed: ${escHtml(err.message)}</span> ` +
+                        `<button class="btn btn-sm btn-danger" data-action="confirmDeletePolicy" data-id="${escHtml(id)}">Retry</button>`;
+                }
+            }
+        }
+
+        function showCreatePolicyForm() {
+            const el = document.getElementById('policy-create-form');
+            document.getElementById('policy-create-result').innerHTML = '';
+            el.style.display = 'block';
+            el.innerHTML = `<div class="status-section">
+                <div class="form-row">
+                    <label for="pol-type">Policy type</label>
+                    <select id="pol-type">
+                        <option value="mutation">mutation</option>
+                        <option value="access">access</option>
+                        <option value="retention">retention</option>
+                        <option value="redaction">redaction</option>
+                    </select>
+                    <p class="field-hint">What kind of operation this governs.</p>
+                </div>
+                <div class="form-row">
+                    <label for="pol-scope-level">Scope level</label>
+                    <select id="pol-scope-level">
+                        <option value="global">global</option>
+                        <option value="domain">domain</option>
+                        <option value="team">team</option>
+                        <option value="entity_type">entity_type</option>
+                    </select>
+                    <p class="field-hint">Evaluation order only, most-specific first &mdash; a broader deny is never overridden by a narrower allow.</p>
+                </div>
+                <div class="form-row">
+                    <label for="pol-scope-value">Scope value</label>
+                    <input type="text" id="pol-scope-value" placeholder="required unless scope level is global">
+                    <p class="field-hint">The domain, team or entity-type name this policy is scoped to; leave blank for global.</p>
+                </div>
+                <div class="form-row">
+                    <label for="pol-operation">Operation pattern</label>
+                    <input type="text" id="pol-operation" placeholder="e.g. precedent.promote, entity.*, *">
+                    <p class="field-hint">The command this rule matches.</p>
+                </div>
+                <div class="form-row">
+                    <label for="pol-action">Rule action</label>
+                    <select id="pol-action">
+                        <option value="deny">deny</option>
+                        <option value="allow">allow</option>
+                        <option value="require_approval">require_approval</option>
+                        <option value="warn">warn</option>
+                    </select>
+                    <p class="field-hint">deny-wins: a matching deny or require_approval blocks the command under enforce; allow is inert (it grants nothing a default-allow posture does not already grant); warn always surfaces a warning regardless of enforcement.</p>
+                </div>
+                <div class="form-row">
+                    <label for="pol-condition">Condition label</label>
+                    <input type="text" id="pol-condition" value="always">
+                    <p class="field-hint">A human-readable label shown in the denial/warning message &mdash; not an evaluated expression.</p>
+                </div>
+                <div class="form-row">
+                    <label for="pol-enforcement">Enforcement</label>
+                    <select id="pol-enforcement">
+                        <option value="enforce">enforce</option>
+                        <option value="warn">warn</option>
+                        <option value="audit_only">audit_only</option>
+                    </select>
+                    <p class="field-hint">enforce blocks a matching deny/require_approval; warn and audit_only let the command through (audit_only logs silently, warn also returns a warning).</p>
+                </div>
+                <div id="pol-create-actions">
+                    <button class="btn btn-sm" onclick="confirmCreatePolicy()">Create&hellip;</button>
+                    <button class="btn btn-ghost btn-sm" onclick="cancelCreatePolicyForm()">Cancel</button>
+                </div>
+            </div>`;
+        }
+
+        function cancelCreatePolicyForm() {
+            const el = document.getElementById('policy-create-form');
+            el.style.display = 'none';
+            el.innerHTML = '';
+        }
+
+        function confirmCreatePolicy() {
+            const actions = document.getElementById('pol-create-actions');
+            if (!actions) return;
+            const op = document.getElementById('pol-operation').value.trim();
+            if (!op) {
+                document.getElementById('policy-create-result').innerHTML =
+                    '<p style="color:var(--error)">Operation pattern is required.</p>';
+                return;
+            }
+            actions.innerHTML =
+                '<p style="color:var(--warn)">This writes a new policy now; it applies to matching commands immediately. Confirm?</p>' +
+                '<button class="btn btn-sm btn-danger" onclick="runCreatePolicy()">Confirm create</button> ' +
+                '<button class="btn btn-ghost btn-sm" onclick="cancelCreatePolicyForm()">Cancel</button>';
+        }
+
+        async function runCreatePolicy() {
+            const body = {
+                policy_type: document.getElementById('pol-type').value,
+                scope: {
+                    level: document.getElementById('pol-scope-level').value,
+                    value: document.getElementById('pol-scope-value').value.trim() || null,
+                },
+                rules: [{
+                    operation: document.getElementById('pol-operation').value.trim(),
+                    condition: document.getElementById('pol-condition').value.trim() || 'always',
+                    action: document.getElementById('pol-action').value,
+                }],
+                enforcement: document.getElementById('pol-enforcement').value,
+            };
+            const resultEl = document.getElementById('policy-create-result');
+            const actions = document.getElementById('pol-create-actions');
+            if (actions) actions.innerHTML = loadingHtml('Creating...');
+            try {
+                const r = await postJSON('/policies', body);
+                cancelCreatePolicyForm();
+                resultEl.innerHTML = `<p style="color:var(--success)">${escHtml(r.message || 'Policy created')}.</p>`;
+                loadPolicies();
+            } catch (err) {
+                resultEl.innerHTML = `<p style="color:var(--error)">Create failed: ${escHtml(err.message)}</p>`;
+                if (actions) {
+                    actions.innerHTML =
+                        '<button class="btn btn-sm btn-danger" onclick="runCreatePolicy()">Confirm create</button> ' +
+                        '<button class="btn btn-ghost btn-sm" onclick="cancelCreatePolicyForm()">Cancel</button>';
+                }
+            }
+        }
 
         initSidebar();
         TableUX.start();
