@@ -3220,6 +3220,7 @@ def learning_candidates(
     """
     output_dir = _resolve_learning_output_dir(output_dir)
     event_log = get_event_log()
+    document_store = get_document_store()
     registry = _build_learning_registry_or_exit()
     with wrap_cli_meta_analysis(
         agent_suffix="analyze",
@@ -3233,7 +3234,12 @@ def learning_candidates(
             min_support=min_support,
             artifacts_root=output_dir,
         )
-        paths = write_learning_review_artifacts(report=report, output_dir=output_dir)
+        # ``document_store`` lets the write apply the readable-name
+        # fallback (#845) before it computes ``report["promotion_ready"]`` —
+        # see ``write_learning_review_artifacts``.
+        paths = write_learning_review_artifacts(
+            report=report, output_dir=output_dir, document_store=document_store
+        )
         if _meta_record.enabled and report.get("candidate_count", 0) > 0:
             _meta_record.produced_finding(
                 f"learning-candidates-d{days}-m{min_support}",
@@ -3265,6 +3271,16 @@ def learning_candidates(
     console.print(
         f"  Decisions template: [cyan]{escape(paths['decisions_template_path'])}[/cyan]"
     )
+    promotion_ready_count = int(
+        (report.get("promotion_ready") or {}).get("count", 0) or 0
+    )
+    if promotion_ready_count:
+        # Surfacing only (#845) — nothing here promotes anything.
+        noun = "candidate" if promotion_ready_count == 1 else "candidates"
+        console.print(
+            f"  {promotion_ready_count} {noun} promotion-ready — review with "
+            "[bold]trellis curate promote-learning[/bold] or the Review tab"
+        )
 
     if not report["candidates"]:
         console.print()

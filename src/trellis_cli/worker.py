@@ -429,6 +429,14 @@ class CurateCycleResult:
     learning_candidates: int = 0
     candidates_path: str | None = None
     decisions_path: str | None = None
+    #: Surfacing-only digest (#845) of ``promote_guidance`` candidates with
+    #: net-positive grader evidence — ``{"count": int, "top": [...]}``, from
+    #: ``write_learning_review_artifacts``'s ``report["promotion_ready"]``.
+    #: ``{"count": 0, "top": []}`` on a dry run or a skipped stage, same as
+    #: every other zeroed field here: a no-op reads as a no-op.
+    learning_promotion_ready: dict[str, Any] = field(
+        default_factory=lambda: {"count": 0, "top": []}
+    )
     skipped_stages: tuple[str, ...] = field(default_factory=tuple)
     dry_run: bool = False
     #: Set when the advisory file could not be read in full, in which case
@@ -501,6 +509,7 @@ class CurateCycleResult:
             "learning_candidates": self.learning_candidates,
             "candidates_path": self.candidates_path,
             "decisions_path": self.decisions_path,
+            "learning_promotion_ready": self.learning_promotion_ready,
             "skipped_stages": list(self.skipped_stages),
             "dry_run": self.dry_run,
         }
@@ -581,6 +590,7 @@ def run_curation_cycle(
     learning = _curate_stage_learning(
         event_log,
         learning_registry,
+        document_store=document_store,
         output_dir=output_dir,
         days=days,
         dry_run=dry_run,
@@ -602,6 +612,7 @@ def run_curation_cycle(
         learning_candidates=learning["learning_candidates"],
         candidates_path=learning["candidates_path"],
         decisions_path=learning["decisions_path"],
+        learning_promotion_ready=learning["learning_promotion_ready"],
         skipped_stages=tuple(skipped),
         dry_run=dry_run,
     )
@@ -890,6 +901,7 @@ def _curate_stage_learning(
     event_log: EventLog,
     learning_registry: ParameterRegistry,
     *,
+    document_store: DocumentStore,
     output_dir: Path,
     days: int,
     dry_run: bool,
@@ -901,6 +913,13 @@ def _curate_stage_learning(
 
     Observations are always scored; artifacts are written to disk only
     outside dry-run. Promotion itself stays human-gated.
+
+    ``learning_promotion_ready`` (#845) — the count/top-5 digest of
+    ``promote_guidance`` candidates with net-positive grader evidence — is
+    computed by ``write_learning_review_artifacts`` (it needs
+    ``document_store`` for the readable-name fallback feeding its ``top``
+    entries, and that only runs on a live write), so it is ``{"count": 0,
+    "top": []}`` on a dry run, same as ``candidates_path`` being ``None``.
     """
     if skip:
         skipped.append("learning")
@@ -909,10 +928,12 @@ def _curate_stage_learning(
             "learning_candidates": 0,
             "candidates_path": None,
             "decisions_path": None,
+            "learning_promotion_ready": {"count": 0, "top": []},
         }
 
     candidates_path: str | None = None
     decisions_path: str | None = None
+    learning_promotion_ready: dict[str, Any] = {"count": 0, "top": []}
     with wrap_cli_meta_analysis(
         agent_suffix="worker",
         analyzer_name="cli.worker.curate.learning",
@@ -926,10 +947,13 @@ def _curate_stage_learning(
         )
         if not dry_run:
             paths = write_learning_review_artifacts(
-                report=report, output_dir=output_dir
+                report=report, output_dir=output_dir, document_store=document_store
             )
             candidates_path = paths["candidates_path"]
             decisions_path = paths["decisions_template_path"]
+            learning_promotion_ready = (
+                report.get("promotion_ready") or learning_promotion_ready
+            )
         if record.enabled and report["candidate_count"] and not dry_run:
             record.produced_finding(
                 f"curate-learning-d{days}",
@@ -940,6 +964,7 @@ def _curate_stage_learning(
         "learning_candidates": report["candidate_count"],
         "candidates_path": candidates_path,
         "decisions_path": decisions_path,
+        "learning_promotion_ready": learning_promotion_ready,
     }
 
 
@@ -973,6 +998,16 @@ def _render_cycle_text(result: CurateCycleResult) -> None:
         f"  learning observations: {result.learning_observations}  "
         f"candidates: {result.learning_candidates}"
     )
+    promotion_ready_count = int(result.learning_promotion_ready.get("count", 0) or 0)
+    if promotion_ready_count:
+        # Surfacing only (#845) — nothing here promotes anything; it just
+        # tells an operator reading the nightly log that candidates are
+        # waiting, which until now nothing did.
+        noun = "candidate" if promotion_ready_count == 1 else "candidates"
+        console.print(
+            f"  {promotion_ready_count} {noun} promotion-ready — review with "
+            "[bold]trellis curate promote-learning[/bold] or the Review tab"
+        )
     if result.advisory_store_degraded:
         # Not dim, and above the skipped line: the zeros in the advisory
         # counts printed above are not a quiet night, and the operator has

@@ -25,6 +25,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import structlog
+
 from trellis.learning.artifacts import LEARNING_CANDIDATES_FILENAME
 from trellis.learning.evidence_gate import (
     NOT_SCREENED,
@@ -36,6 +38,9 @@ from trellis.schemas.parameters import ParameterScope
 if TYPE_CHECKING:
     from trellis.mutate import MutationExecutor
     from trellis.ops.registry import ParameterRegistry
+    from trellis.stores.base.document import DocumentStore
+
+logger = structlog.get_logger(__name__)
 
 _LEARNING_ARTIFACT_VERSION = "1.0"
 _DEFAULT_MIN_SUPPORT = 2
@@ -63,6 +68,35 @@ REQUIRED_LEARNING_PARAMETER_KEYS: tuple[str, ...] = (
     LEARNING_NOISE_SUCCESS_KEY,
     LEARNING_NOISE_RETRY_KEY,
 )
+
+# --- Readable fallback names (#845) ---------------------------------------
+#
+# A candidate whose source item is a plain ``save_memory`` document has no
+# ``title``/``capture_title``/``name`` (see ``_item_attribution`` in
+# ``trellis.retrieve.pack_builder`` for that resolution order), so
+# ``precedent_name`` fell back to the bare ULID ``item_id`` — unreadable in
+# a review queue. When the item can be resolved via a ``DocumentStore``,
+# its first non-empty line (frontmatter and a leading markdown heading
+# marker stripped) stands in for the title. Kept independent of the
+# dedup/ingest frontmatter regexes (same shape, different module) per this
+# repo's convention of not sharing that pattern across packages.
+_FALLBACK_NAME_FRONTMATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n.*?\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|\Z)",
+    re.DOTALL,
+)
+_FALLBACK_NAME_HEADING_RE = re.compile(r"\A#{1,6}[ \t]+")
+_FALLBACK_NAME_MAX_CHARS = 96
+
+# --- Promotion-ready digest (#845) ------------------------------------------
+#
+# A ``promote_guidance`` candidate is "promotion-ready" for the digest only
+# once at least one grader has cited it helpful and none has cited it
+# unhelpful — the single threshold named here, so a reviewer (or a future
+# tuning pass) finds it in one place rather than re-deriving it from the
+# filter.
+LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT = 1
+#: Cap on ``promotion_ready.top`` — a digest, not a second candidates listing.
+_PROMOTION_READY_DIGEST_TOP_N = 5
 
 _INTENT_FAMILY_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("analyze", "profile", "explore"), "source_analysis"),
@@ -199,6 +233,60 @@ def _accumulate_item(
         metrics["source_strategies"][source_strategy] = (
             metrics["source_strategies"].get(source_strategy, 0) + 1
         )
+
+
+def _build_promotion_ready_digest(
+    candidates: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Summarize ``promote_guidance`` candidates with net-positive citations.
+
+    Surfacing only (#845): this counts and ranks waiting candidates so a
+    reviewer knows to look — it never promotes anything itself. Eligibility
+    is ``recommendation_type == "promote_guidance"`` (the narrower literal,
+    not :data:`PROMOTE_RECOMMENDATIONS`, which also admits
+    ``"promote_precedent"``) plus the one named threshold,
+    :data:`LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT`, and zero unhelpful
+    citations. ``top`` is capped at :data:`_PROMOTION_READY_DIGEST_TOP_N`,
+    ordered by ``helpful_count`` desc, then ``success_rate`` desc, then
+    ``times_served`` desc.
+    """
+    eligible: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if candidate.get("recommendation_type") != "promote_guidance":
+            continue
+        citations = candidate.get("citation_evidence")
+        if not isinstance(citations, Mapping):
+            continue
+        helpful_count = int(citations.get("helpful_count", 0) or 0)
+        unhelpful_count = int(citations.get("unhelpful_count", 0) or 0)
+        if (
+            helpful_count < LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT
+            or unhelpful_count != 0
+        ):
+            continue
+        metrics = candidate.get("metrics")
+        metrics = metrics if isinstance(metrics, Mapping) else {}
+        eligible.append(
+            {
+                "candidate_id": candidate.get("candidate_id"),
+                "precedent_name": candidate.get("precedent_name"),
+                "helpful_count": helpful_count,
+                "times_served": int(metrics.get("times_served", 0) or 0),
+                "success_rate": float(metrics.get("success_rate", 0.0) or 0.0),
+            }
+        )
+
+    eligible.sort(
+        key=lambda row: (
+            -row["helpful_count"],
+            -row["success_rate"],
+            -row["times_served"],
+        )
+    )
+    return {
+        "count": len(eligible),
+        "top": eligible[:_PROMOTION_READY_DIGEST_TOP_N],
+    }
 
 
 def analyze_learning_observations(
@@ -390,16 +478,158 @@ def analyze_learning_observations(
             "suppressed_reason": screen.suppressed_reason,
         },
         "candidates": candidates,
+        # ``promotion_ready`` is deliberately NOT computed here: its
+        # ``precedent_name`` entries must reflect the readable-name
+        # fallback (#845), which only runs once a ``DocumentStore`` is
+        # reachable — at artifact-write time, never in this pure,
+        # store-free aggregator. See ``write_learning_review_artifacts``,
+        # which computes and attaches it after applying that fallback.
     }
+
+
+def _derive_readable_name(content: str) -> str | None:
+    """First non-empty line of ``content``, ready to stand in for a title.
+
+    Strips a leading YAML frontmatter block (the same shape as the
+    ingest/dedup frontmatter regexes elsewhere in this codebase, kept as
+    an independent copy per this repo's convention for that pattern), then
+    returns the first non-empty line with any leading markdown heading
+    marker (``#`` through ``######``) removed and the result truncated
+    with :func:`trellis.retrieve.excerpts.truncate_excerpt`.
+
+    Returns ``None`` when the content has no non-empty line at all (empty
+    or whitespace-only body) — the caller keeps the bare item id in that
+    case, the same as when the item can't be resolved at all.
+    """
+    # Deferred: ``trellis.retrieve`` imports ``pack_builder``, which imports
+    # ``normalize_intent_family`` back from this module at module level, so
+    # a top-level import here would be circular. By the time this function
+    # runs, this module has already finished importing.
+    from trellis.retrieve.excerpts import truncate_excerpt  # noqa: PLC0415
+
+    stripped = _FALLBACK_NAME_FRONTMATTER_RE.sub("", content, count=1)
+    for raw_line in stripped.splitlines():
+        candidate_line = raw_line.strip()
+        if not candidate_line:
+            continue
+        candidate_line = _FALLBACK_NAME_HEADING_RE.sub(
+            "", candidate_line, count=1
+        ).strip()
+        if not candidate_line:
+            continue
+        return truncate_excerpt(candidate_line, limit=_FALLBACK_NAME_MAX_CHARS)
+    return None
+
+
+def _resolve_fallback_candidate_name(
+    item_id: str, document_store: DocumentStore | None
+) -> str | None:
+    """Readable fallback name for ``item_id``, or ``None`` if unresolvable.
+
+    ``None`` covers every case the caller treats identically: no store was
+    given, the store has no document for ``item_id``, the document has no
+    content, or the content has no derivable non-empty line.
+    ``DocumentStore.get`` returns ``None`` on no match, but an operational
+    failure (store unavailable, unreadable row) raises, and
+    :func:`_apply_readable_names` contains it.
+    """
+    if document_store is None:
+        return None
+    document = document_store.get(item_id)
+    if not document:
+        return None
+    content = str(document.get("content") or "")
+    if not content:
+        return None
+    return _derive_readable_name(content)
+
+
+def _apply_readable_name_fallback(
+    candidate: dict[str, Any], document_store: DocumentStore | None
+) -> None:
+    """Rebuild a title-less candidate's ``precedent_name`` from its item, in place.
+
+    No-op when the candidate already has a non-empty ``title`` (it already
+    produced a readable ``precedent_name`` in
+    :func:`analyze_learning_observations`) or when no readable fallback name
+    could be resolved — the bare-id name survives untouched in both cases,
+    per the brief: "don't change names of candidates that already have a
+    title" and "keep the bare id only when the item can't be resolved."
+    """
+    if str(candidate.get("title") or "").strip():
+        return
+    item_id = str(candidate.get("item_id", "")).strip()
+    if not item_id:
+        return
+    fallback_name = _resolve_fallback_candidate_name(item_id, document_store)
+    if not fallback_name:
+        return
+    intent_family = str(candidate.get("intent_family", "")).strip()
+    candidate["precedent_name"] = (
+        f"Learning: {intent_family} :: {fallback_name}".strip()
+    )
+
+
+def _apply_readable_names(
+    candidates: Sequence[Any], document_store: DocumentStore | None
+) -> None:
+    """Apply :func:`_apply_readable_name_fallback` to each candidate; never raise.
+
+    The names are advisory, so the step is wrapped whole: a store failure
+    leaves the remaining candidates on their bare-id names and the artifact
+    is still written, instead of failing ``trellis worker curate`` after its
+    earlier stages have already run.
+    """
+    try:
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                _apply_readable_name_fallback(candidate, document_store)
+    except Exception as exc:  # advisory step; never fail the artifact write
+        logger.warning(
+            "learning_readable_name_fallback_failed",
+            error_type=type(exc).__name__,
+        )
 
 
 def write_learning_review_artifacts(
     *,
-    report: Mapping[str, Any],
+    report: dict[str, Any],
     output_dir: str | Path,
+    document_store: DocumentStore | None = None,
 ) -> dict[str, str]:
+    """Write the candidates report and a blank decisions template to disk.
+
+    Mutates ``report`` in place on two counts before serializing it, so a
+    caller that goes on to print or re-read the same ``report`` object
+    (both CLI surfaces do, for ``--format json``) sees exactly what landed
+    on disk rather than a stale pre-write copy:
+
+    * **Readable names (#845).** Any candidate with no ``title`` keeps a
+      bare-``item_id`` ``precedent_name`` from :func:`analyze_learning_observations`
+      (which is store-free by design). When ``document_store`` is given,
+      each such candidate's item is looked up and, if resolved, its
+      ``precedent_name`` is rebuilt from a readable fallback name — see
+      :func:`_apply_readable_name_fallback`. A candidate that already has
+      a ``title``, or whose item can't be resolved, is untouched, and a
+      store failure degrades to bare ids rather than raising; the
+      promoted-name override (``promotion_name``, built below and in
+      :func:`build_learning_promotion_payloads`) still wins over whatever
+      ``precedent_name`` ends up being.
+    * **Promotion-ready digest (#845).** ``report["promotion_ready"]`` is
+      (re)computed from the candidates *after* the fallback above, so its
+      ``top`` entries carry the same readable names — a digest built from
+      the pure aggregator's output would otherwise echo the bare ids this
+      fallback exists to fix. See :func:`_build_promotion_ready_digest`.
+    """
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
+
+    candidates = report.get("candidates", [])
+    if isinstance(candidates, Sequence) and not isinstance(candidates, str | bytes):
+        _apply_readable_names(candidates, document_store)
+    else:
+        candidates = []
+    report["promotion_ready"] = _build_promotion_ready_digest(candidates)
 
     candidates_path = target_dir / LEARNING_CANDIDATES_FILENAME
     candidates_path.write_text(
@@ -817,6 +1047,7 @@ __all__ = [
     "LEARNING_NOISE_SUCCESS_KEY",
     "LEARNING_PROMOTE_RETRY_KEY",
     "LEARNING_PROMOTE_SUCCESS_KEY",
+    "LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT",
     "LEARNING_SCORING_COMPONENT",
     "PROMOTE_RECOMMENDATIONS",
     "REQUIRED_LEARNING_PARAMETER_KEYS",
