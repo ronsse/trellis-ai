@@ -77,12 +77,16 @@ class PromotionPolicy:
             this floor nor exempt the keys beside them from it; they
             are reported as :attr:`EffectSize.unbaselined_keys` and
             governed by ``allow_no_baseline``.
-        allow_no_baseline: When ``True`` (default) a proposal the
-            baseline cannot be compared against can still promote —
-            the bootstrap case. This covers both shapes: no active
-            snapshot for the scope at all, and a snapshot that carries
-            none of the proposed keys. When ``False`` the cell must
-            have a prior snapshot carrying at least one proposed key.
+        allow_no_baseline: When ``True`` a proposal the baseline cannot
+            be compared against can still promote — the bootstrap case.
+            This covers both shapes: no active snapshot for the scope at
+            all, and a snapshot that carries none of the proposed keys.
+            When ``False`` (default) the cell must have a prior snapshot
+            carrying at least one proposed key. The CLI's bare
+            ``--commit`` and the Review queue both inherit this default;
+            ``trellis metrics promote`` exposes ``--allow-no-baseline``
+            as the explicit, surgical opt-in — distinct from ``--force``,
+            which skips this gate along with every other one below.
         allow_non_numeric: When ``True`` (default) a proposal setting
             a non-numeric value (``str`` / ``bool``) skips the
             ``min_effect_size`` check. Numeric baselines always
@@ -91,7 +95,7 @@ class PromotionPolicy:
 
     min_sample_size: int = DEFAULT_MIN_SAMPLE_SIZE
     min_effect_size: float = DEFAULT_MIN_EFFECT_SIZE
-    allow_no_baseline: bool = True
+    allow_no_baseline: bool = False
     allow_non_numeric: bool = True
 
 
@@ -225,6 +229,18 @@ def _compute_effect_size(
     )
 
 
+#: Reason prefix for the two bootstrap-shaped ``_apply_policy`` refusals
+#: (no snapshot for the scope at all; a snapshot that carries none of the
+#: proposed keys) — the only reasons :func:`_reject` treats as
+#: non-terminal. Both are governed by ``PromotionPolicy.allow_no_baseline``
+#: and share the property that clears every other reason this module
+#: emits: the proposal itself did nothing wrong, the store just has
+#: nothing yet to compare it against, so a later call with
+#: ``allow_no_baseline=True`` (``trellis metrics promote
+#: --allow-no-baseline``) should still be able to promote it.
+_NO_BASELINE_REASON_PREFIX = "no_baseline_"
+
+
 def _reject(
     *,
     proposal_id: str,
@@ -235,6 +251,7 @@ def _reject(
     tuner_state: TunerStateStore,
     event_log: EventLog,
     source: str,
+    terminal: bool = True,
 ) -> PromotionResult:
     """Mark a proposal rejected, emit the audit event, and shape the result.
 
@@ -247,12 +264,31 @@ def _reject(
     for it, which is the key the policy branch already wrote whenever
     the effect was incomputable.
 
+    ``terminal`` controls only whether the *stored proposal* moves to
+    ``"rejected"``. The immutable-core and reachability gates, and every
+    :class:`PromotionPolicy` reason except the bootstrap pair above, are
+    terminal: nothing about a later call changes the verdict, so leaving
+    the proposal retryable would just let an operator spam the same
+    refusal. The bootstrap pair is the one case where the store's own
+    state — "no comparable snapshot exists yet" — is what produced the
+    refusal, and a subsequent ``allow_no_baseline=True`` call is the
+    intended way to clear it; marking the proposal terminally
+    ``"rejected"`` first (the previous behaviour) made that call always
+    lose to the ``status in {"promoted", "rejected"}`` short-circuit
+    below, so the only way to promote a scope's first proposal was to
+    get the policy right on the very first attempt. The returned
+    ``PromotionResult.status`` is ``"rejected"`` either way — callers
+    (CLI, REST, UI) read the wire shape, not the store — but the
+    ``terminal`` flag rides along on the emitted event so the audit log
+    can tell the two apart too.
+
     :func:`reject_proposal` deliberately does **not** route through here.
     Its payload carries ``manual: True`` and no ``effect_size`` at all,
     and folding it in would silently add a key to an audit event that
     already ships.
     """
-    tuner_state.update_status(proposal_id, "rejected", notes=reason)
+    if terminal:
+        tuner_state.update_status(proposal_id, "rejected", notes=reason)
     event_log.emit(
         EventType.TUNER_PROPOSAL_REJECTED,
         source=source,
@@ -266,9 +302,15 @@ def _reject(
             "effect_size": effect.comparable_max if effect else None,
             "uncomparable_keys": list(effect.unbaselined_keys) if effect else [],
             "reason": reason,
+            "terminal": terminal,
         },
     )
-    logger.info("tuner.promotion.rejected", proposal_id=proposal_id, reason=reason)
+    logger.info(
+        "tuner.promotion.rejected",
+        proposal_id=proposal_id,
+        reason=reason,
+        terminal=terminal,
+    )
     return PromotionResult(
         proposal_id=proposal_id,
         status="rejected",
@@ -383,6 +425,13 @@ def promote_proposal(
             effect=effect,
         )
         if gate_result is not None:
+            # The bootstrap pair of reasons ("no snapshot for the scope at
+            # all" / "no snapshot carries the proposed keys") is the one
+            # case where a later call, not a different proposal, is the
+            # intended remedy (``--allow-no-baseline``) — see _reject's
+            # ``terminal`` docstring. Every other policy reason (sample
+            # size, effect size, non-numeric) is terminal: nothing about
+            # calling again with the same values would change the verdict.
             return _reject(
                 proposal_id=proposal_id,
                 proposal=proposal,
@@ -392,6 +441,7 @@ def promote_proposal(
                 tuner_state=tuner_state,
                 event_log=event_log,
                 source=source,
+                terminal=not gate_result.startswith(_NO_BASELINE_REASON_PREFIX),
             )
 
     # Execute: merge the proposed values onto the baseline so partial

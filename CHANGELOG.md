@@ -407,6 +407,20 @@ All notable changes to Trellis will be documented in this file.
   was sent and `backends` is still absent, the note reads "per-backend
   breakdown absent" instead, since no API key isn't the cause.
   ([#826](https://github.com/ronsse/trellis-ai/pull/826))
+- **A proposal with no comparable baseline is refused by default, and the
+  refusal is recoverable.** `PromotionPolicy.allow_no_baseline` now
+  defaults to `False`, so a bare `trellis metrics promote --commit` no
+  longer promotes a scope's first, unbaselined proposal — the gap #823
+  left open on the CLI after closing it on the Review queue. Pass the new
+  `--allow-no-baseline` flag to opt in per call; `--force` keeps its
+  existing, broader meaning and still skips the whole policy gate,
+  baseline rule included. A no-baseline refusal no longer marks the
+  proposal terminally `"rejected"`, so a later `--allow-no-baseline` call
+  on the same proposal can still promote it, and `TUNER_PROPOSAL_REJECTED`
+  now carries a `terminal` key reflecting that. The Review queue's
+  "Confirm approve" button is disabled when the preview predicts a
+  rejection and names the CLI bootstrap command.
+  ([#823](https://github.com/ronsse/trellis-ai/pull/823) follow-up)
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
