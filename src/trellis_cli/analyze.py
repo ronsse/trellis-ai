@@ -3235,7 +3235,7 @@ def learning_candidates(
             artifacts_root=output_dir,
         )
         # ``document_store`` lets the write apply the readable-name
-        # fallback (#845) before it computes ``report["promotable"]`` —
+        # fallback (#845) before it computes ``report["promotion_ready"]`` —
         # see ``write_learning_review_artifacts``.
         paths = write_learning_review_artifacts(
             report=report, output_dir=output_dir, document_store=document_store
@@ -3271,11 +3271,14 @@ def learning_candidates(
     console.print(
         f"  Decisions template: [cyan]{escape(paths['decisions_template_path'])}[/cyan]"
     )
-    promotable_count = int((report.get("promotable") or {}).get("count", 0) or 0)
-    if promotable_count:
+    promotion_ready_count = int(
+        (report.get("promotion_ready") or {}).get("count", 0) or 0
+    )
+    if promotion_ready_count:
         # Surfacing only (#845) — nothing here promotes anything.
+        noun = "candidate" if promotion_ready_count == 1 else "candidates"
         console.print(
-            f"  {promotable_count} candidates promotable — review with "
+            f"  {promotion_ready_count} {noun} promotion-ready — review with "
             "[bold]trellis curate promote-learning[/bold] or the Review tab"
         )
 

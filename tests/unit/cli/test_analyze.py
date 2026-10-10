@@ -1018,6 +1018,63 @@ class TestLearningCandidates:
         ids = {d["candidate_id"] for d in decisions["decisions"]}
         assert candidate["candidate_id"] in ids
 
+    def test_text_surface_singular_candidate_wording(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """One promotion-ready candidate reads as singular, not '1 candidates'."""
+        # Mirrors ``_seed_promote_signal`` but reports ``had_retry`` on every
+        # round, so ``retry_rate`` is measured (``0.0``) rather than ``None``
+        # — unrelated to this fix, but the candidates table the text surface
+        # renders below the promotion-ready line formats ``retry_rate`` as a
+        # percentage and has no None-guard, which an unmeasured rate trips.
+        item_id = "lc:doc:helpful"
+        event_log = temp_stores.operational.event_log
+        for i in range(3):
+            pack_id = f"lc-pack-retry-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "domain": "lc-test",
+                    "injected_items": [
+                        {
+                            "item_id": item_id,
+                            "item_type": "document",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                    "injected_item_ids": [item_id],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "outcome": "success",
+                    "success": True,
+                    "helpful_item_ids": [item_id],
+                    "had_retry": False,
+                },
+            )
+        out_dir = tmp_path / "review"
+
+        result = runner.invoke(
+            app,
+            ["analyze", "learning-candidates", "--output-dir", str(out_dir)],
+        )
+
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.output)
+        assert "1 candidate promotion-ready" in rendered
+        assert "1 candidates" not in rendered
+
     def test_title_less_candidate_named_from_its_document(
         self, tmp_path: Path, temp_stores: StoreRegistry
     ) -> None:

@@ -480,14 +480,14 @@ class TestWorkerCurate:
         # Promote-half artifacts are written for human review.
         assert data["candidates_path"] is not None
         assert Path(data["candidates_path"]).exists()
-        # Promotable digest (#845): this seed's one candidate has 3
-        # helpful citations and 0 unhelpful, so it is promotable end to
-        # end through the real JSON CLI payload, not just the unit tests
-        # on the pure digest builder.
-        promotable = data["learning_promotable"]
-        assert promotable["count"] == 1
-        assert len(promotable["top"]) == 1
-        top_row = promotable["top"][0]
+        # Promotion-ready digest (#845): this seed's one candidate has 3
+        # helpful citations and 0 unhelpful, so it is promotion-ready end
+        # to end through the real JSON CLI payload, not just the unit
+        # tests on the pure digest builder.
+        promotion_ready = data["learning_promotion_ready"]
+        assert promotion_ready["count"] == 1
+        assert len(promotion_ready["top"]) == 1
+        top_row = promotion_ready["top"][0]
         assert top_row["helpful_count"] == 3
         assert top_row["times_served"] == 3
         assert top_row["success_rate"] == 1.0
@@ -497,9 +497,24 @@ class TestWorkerCurate:
         # survives in the name.
         assert top_row["precedent_name"].endswith("wc:doc:helpful")
         candidates_payload = json.loads(Path(data["candidates_path"]).read_text())
-        assert candidates_payload["promotable"] == promotable
+        assert candidates_payload["promotion_ready"] == promotion_ready
         assert Path(data["decisions_path"]).exists()
         assert data["skipped_stages"] == []
+
+    def test_text_surface_singular_candidate_wording(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """One promotion-ready candidate reads as singular, not '1 candidates'."""
+        _seed_promote_signal(temp_stores)
+
+        result = runner.invoke(
+            app, ["worker", "curate", "--output-dir", str(tmp_path / "review")]
+        )
+
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.output)
+        assert "1 candidate promotion-ready" in rendered
+        assert "1 candidates" not in rendered
 
     def test_full_cycle_names_title_less_candidate_from_its_document(
         self, tmp_path: Path, temp_stores: StoreRegistry
@@ -520,7 +535,7 @@ class TestWorkerCurate:
         )
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout.strip())
-        top_row = data["learning_promotable"]["top"][0]
+        top_row = data["learning_promotion_ready"]["top"][0]
         name = top_row["precedent_name"]
         assert name.endswith(":: Readable Doc Heading"), name
         decisions = json.loads(Path(data["decisions_path"]).read_text("utf-8"))

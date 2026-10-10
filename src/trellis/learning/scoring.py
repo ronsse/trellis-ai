@@ -87,15 +87,16 @@ _FALLBACK_NAME_FRONTMATTER_RE = re.compile(
 _FALLBACK_NAME_HEADING_RE = re.compile(r"\A#{1,6}[ \t]+")
 _FALLBACK_NAME_MAX_CHARS = 96
 
-# --- Promotable digest (#845) ----------------------------------------------
+# --- Promotion-ready digest (#845) ------------------------------------------
 #
-# A ``promote_guidance`` candidate is "promotable" for the digest only once
-# at least one grader has cited it helpful and none has cited it unhelpful —
-# the single threshold named here, so a reviewer (or a future tuning pass)
-# finds it in one place rather than re-deriving it from the filter.
-LEARNING_PROMOTABLE_MIN_HELPFUL_COUNT = 1
-#: Cap on ``promotable.top`` — a digest, not a second candidates listing.
-_PROMOTABLE_DIGEST_TOP_N = 5
+# A ``promote_guidance`` candidate is "promotion-ready" for the digest only
+# once at least one grader has cited it helpful and none has cited it
+# unhelpful — the single threshold named here, so a reviewer (or a future
+# tuning pass) finds it in one place rather than re-deriving it from the
+# filter.
+LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT = 1
+#: Cap on ``promotion_ready.top`` — a digest, not a second candidates listing.
+_PROMOTION_READY_DIGEST_TOP_N = 5
 
 _INTENT_FAMILY_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("analyze", "profile", "explore"), "source_analysis"),
@@ -234,7 +235,7 @@ def _accumulate_item(
         )
 
 
-def _build_promotable_digest(
+def _build_promotion_ready_digest(
     candidates: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Summarize ``promote_guidance`` candidates with net-positive citations.
@@ -244,8 +245,8 @@ def _build_promotable_digest(
     is ``recommendation_type == "promote_guidance"`` (the narrower literal,
     not :data:`PROMOTE_RECOMMENDATIONS`, which also admits
     ``"promote_precedent"``) plus the one named threshold,
-    :data:`LEARNING_PROMOTABLE_MIN_HELPFUL_COUNT`, and zero unhelpful
-    citations. ``top`` is capped at :data:`_PROMOTABLE_DIGEST_TOP_N`,
+    :data:`LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT`, and zero unhelpful
+    citations. ``top`` is capped at :data:`_PROMOTION_READY_DIGEST_TOP_N`,
     ordered by ``helpful_count`` desc, then ``success_rate`` desc, then
     ``times_served`` desc.
     """
@@ -259,7 +260,7 @@ def _build_promotable_digest(
         helpful_count = int(citations.get("helpful_count", 0) or 0)
         unhelpful_count = int(citations.get("unhelpful_count", 0) or 0)
         if (
-            helpful_count < LEARNING_PROMOTABLE_MIN_HELPFUL_COUNT
+            helpful_count < LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT
             or unhelpful_count != 0
         ):
             continue
@@ -284,7 +285,7 @@ def _build_promotable_digest(
     )
     return {
         "count": len(eligible),
-        "top": eligible[:_PROMOTABLE_DIGEST_TOP_N],
+        "top": eligible[:_PROMOTION_READY_DIGEST_TOP_N],
     }
 
 
@@ -477,7 +478,7 @@ def analyze_learning_observations(
             "suppressed_reason": screen.suppressed_reason,
         },
         "candidates": candidates,
-        # ``promotable`` is deliberately NOT computed here: its
+        # ``promotion_ready`` is deliberately NOT computed here: its
         # ``precedent_name`` entries must reflect the readable-name
         # fallback (#845), which only runs once a ``DocumentStore`` is
         # reachable — at artifact-write time, never in this pure,
@@ -614,11 +615,11 @@ def write_learning_review_artifacts(
       promoted-name override (``promotion_name``, built below and in
       :func:`build_learning_promotion_payloads`) still wins over whatever
       ``precedent_name`` ends up being.
-    * **Promotable digest (#845).** ``report["promotable"]`` is (re)computed
-      from the candidates *after* the fallback above, so its ``top`` entries
-      carry the same readable names — a digest built from the pure
-      aggregator's output would otherwise echo the bare ids this fallback
-      exists to fix. See :func:`_build_promotable_digest`.
+    * **Promotion-ready digest (#845).** ``report["promotion_ready"]`` is
+      (re)computed from the candidates *after* the fallback above, so its
+      ``top`` entries carry the same readable names — a digest built from
+      the pure aggregator's output would otherwise echo the bare ids this
+      fallback exists to fix. See :func:`_build_promotion_ready_digest`.
     """
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -628,7 +629,7 @@ def write_learning_review_artifacts(
         _apply_readable_names(candidates, document_store)
     else:
         candidates = []
-    report["promotable"] = _build_promotable_digest(candidates)
+    report["promotion_ready"] = _build_promotion_ready_digest(candidates)
 
     candidates_path = target_dir / LEARNING_CANDIDATES_FILENAME
     candidates_path.write_text(
@@ -1044,9 +1045,9 @@ def _utc_now() -> str:
 __all__ = [
     "LEARNING_NOISE_RETRY_KEY",
     "LEARNING_NOISE_SUCCESS_KEY",
-    "LEARNING_PROMOTABLE_MIN_HELPFUL_COUNT",
     "LEARNING_PROMOTE_RETRY_KEY",
     "LEARNING_PROMOTE_SUCCESS_KEY",
+    "LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT",
     "LEARNING_SCORING_COMPONENT",
     "PROMOTE_RECOMMENDATIONS",
     "REQUIRED_LEARNING_PARAMETER_KEYS",

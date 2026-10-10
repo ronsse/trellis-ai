@@ -20,8 +20,8 @@ from trellis.learning.evidence_gate import (
 )
 from trellis.learning.scoring import (
     LEARNING_NOISE_SUCCESS_KEY,
-    LEARNING_PROMOTABLE_MIN_HELPFUL_COUNT,
     LEARNING_PROMOTE_SUCCESS_KEY,
+    LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT,
     analyze_learning_observations,
     build_learning_promotion_payloads,
     normalize_intent_family,
@@ -865,7 +865,7 @@ class TestReadableNameFallback:
         written = json.loads(
             (tmp_path / "intent_learning_candidates.json").read_text("utf-8")
         )
-        assert written["promotable"]["count"] == 2
+        assert written["promotion_ready"]["count"] == 2
         decisions_path = tmp_path / "promotion_decisions.template.json"
         decisions = json.loads(decisions_path.read_text("utf-8"))
         assert [d["promotion_name"] for d in decisions["decisions"]] == names
@@ -875,11 +875,11 @@ class TestReadableNameFallback:
 
 
 # ---------------------------------------------------------------------------
-# Promotable digest (#845)
+# Promotion-ready digest (#845)
 # ---------------------------------------------------------------------------
 
 
-class TestPromotableDigest:
+class TestPromotionReadyDigest:
     def test_count_and_top_include_eligible_candidate(self, tmp_path: Path) -> None:
         candidate = _make_promotable_candidate(
             candidate_id="asset_generation:c1",
@@ -893,7 +893,7 @@ class TestPromotableDigest:
         )
         report = _report_with_candidates(candidate)
         write_learning_review_artifacts(report=report, output_dir=tmp_path)
-        digest = report["promotable"]
+        digest = report["promotion_ready"]
         assert digest["count"] == 1
         assert len(digest["top"]) == 1
         row = digest["top"][0]
@@ -913,12 +913,12 @@ class TestPromotableDigest:
         )
         report = _report_with_candidates(candidate)
         write_learning_review_artifacts(report=report, output_dir=tmp_path)
-        digest = report["promotable"]
+        digest = report["promotion_ready"]
         assert digest["count"] == 0
         assert digest["top"] == []
 
     def test_below_threshold_helpful_count_excluded(self, tmp_path: Path) -> None:
-        assert LEARNING_PROMOTABLE_MIN_HELPFUL_COUNT == 1
+        assert LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT == 1
         candidate = _make_promotable_candidate(
             candidate_id="asset_generation:c3",
             citation_evidence={
@@ -929,7 +929,7 @@ class TestPromotableDigest:
         )
         report = _report_with_candidates(candidate)
         write_learning_review_artifacts(report=report, output_dir=tmp_path)
-        digest = report["promotable"]
+        digest = report["promotion_ready"]
         assert digest["count"] == 0
         assert digest["top"] == []
 
@@ -956,7 +956,7 @@ class TestPromotableDigest:
         )
         report = _report_with_candidates(promote_precedent, investigate_noise)
         write_learning_review_artifacts(report=report, output_dir=tmp_path)
-        digest = report["promotable"]
+        digest = report["promotion_ready"]
         assert digest["count"] == 0
         assert digest["top"] == []
 
@@ -983,7 +983,7 @@ class TestPromotableDigest:
         )
         report = _report_with_candidates(low, high)
         write_learning_review_artifacts(report=report, output_dir=tmp_path)
-        top = report["promotable"]["top"]
+        top = report["promotion_ready"]["top"]
         assert [row["candidate_id"] for row in top] == [
             "asset_generation:high",
             "asset_generation:low",
@@ -1026,7 +1026,7 @@ class TestPromotableDigest:
         )
         report = _report_with_candidates(a, b, c)
         write_learning_review_artifacts(report=report, output_dir=tmp_path)
-        top = report["promotable"]["top"]
+        top = report["promotion_ready"]["top"]
         assert [row["candidate_id"] for row in top] == [
             "asset_generation:c",
             "asset_generation:b",
@@ -1047,7 +1047,7 @@ class TestPromotableDigest:
         ]
         report = _report_with_candidates(*candidates)
         write_learning_review_artifacts(report=report, output_dir=tmp_path)
-        digest = report["promotable"]
+        digest = report["promotion_ready"]
         assert digest["count"] == 7
         assert len(digest["top"]) == 5
         assert [row["candidate_id"] for row in digest["top"]] == [
@@ -1081,14 +1081,14 @@ class TestPromotableDigest:
         write_learning_review_artifacts(
             report=report, output_dir=tmp_path, document_store=store
         )
-        row = report["promotable"]["top"][0]
+        row = report["promotion_ready"]["top"][0]
         expected = "Learning: asset_generation :: Readable Fallback Name"
         assert row["precedent_name"] == expected
 
     def test_empty_candidates_produces_empty_digest(self, tmp_path: Path) -> None:
         report = _report_with_candidates()
         write_learning_review_artifacts(report=report, output_dir=tmp_path)
-        assert report["promotable"] == {"count": 0, "top": []}
+        assert report["promotion_ready"] == {"count": 0, "top": []}
 
 
 # ---------------------------------------------------------------------------
