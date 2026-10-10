@@ -2259,20 +2259,35 @@
 
         async function confirmPromoteProposal(id) {
             // Show the dry-run prediction first, then swap the Approve button
-            // into a confirm action.
+            // into a confirm action — but leave that button disabled when the
+            // preview predicts a rejection. Confirming on a predicted
+            // rejection used to be possible and, for a reachable proposal
+            // with no comparable baseline, rejected it terminally with no
+            // way back (promote_proposal(force=True) then answers
+            // proposal_already_rejected from every surface); a bootstrap
+            // refusal is recoverable via the CLI below, every other
+            // rejection is not, so there is nothing a Confirm click here
+            // could do but waste the one proposal.
             const card = document.getElementById('proposal-' + id);
             const predict = document.getElementById('predict-' + id);
             try {
                 const pv = await fetchJSON(`/proposals/${encodeURIComponent(id)}/preview`);
                 const ok = pv.predicted_status === 'promoted';
+                const isNoBaseline = typeof pv.reason === 'string' && pv.reason.startsWith('no_baseline_');
                 predict.style.display = 'block';
                 predict.innerHTML =
                     `<strong style="color:${ok ? 'var(--success)' : 'var(--error)'}">` +
                     `Predicted: ${escHtml(pv.predicted_status)}</strong> — ${escHtml(pv.reason)}` +
-                    (pv.effect_size == null ? '' : ` (effect_size ${escHtml(Number(pv.effect_size).toFixed(4))})`);
+                    (pv.effect_size == null ? '' : ` (effect_size ${escHtml(Number(pv.effect_size).toFixed(4))})`) +
+                    (isNoBaseline
+                        ? '<br><span style="color:var(--text-dim)">First promotion for this scope: use ' +
+                          '<code style="font-family:var(--font-mono)">trellis metrics promote --allow-no-baseline</code>.</span>'
+                        : '');
                 const actions = card.querySelector('.review-actions');
                 actions.innerHTML =
-                    `<button class="btn btn-sm" data-action="promoteProposal" data-id="${escHtml(id)}">Confirm approve</button>` +
+                    `<button class="btn btn-sm" data-action="promoteProposal" data-id="${escHtml(id)}"` +
+                    (ok ? '' : ' disabled title="Preview predicts a rejection — see the reason above."') +
+                    `>Confirm approve</button>` +
                     `<button class="btn btn-ghost btn-sm" onclick="loadReviewProposals()">Cancel</button>`;
             } catch (err) {
                 predict.style.display = 'block';

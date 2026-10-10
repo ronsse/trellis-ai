@@ -3802,13 +3802,15 @@ paths:
 
         write the new ``ParameterSet``, and emit ``PARAMS_UPDATED`` (or
 
-        ``TUNER_PROPOSAL_REJECTED`` on a policy rejection). A second
+        ``TUNER_PROPOSAL_REJECTED`` on a refusal from any of its three
 
-        ``REVIEW_DECISION_RECORDED`` event records the reviewer identity.
+        gates: the immutable core, reachability, or the policy gate itself).
 
-        Unlike the CLI, this route has no ``--force``/threshold flags, so it
+        A second ``REVIEW_DECISION_RECORDED`` event records the reviewer
 
-        always applies the stricter ``_REVIEW_QUEUE_POLICY``.'
+        identity. Unlike the CLI, this route has no ``--force``/threshold
+
+        flags, so it always applies the stricter ``_REVIEW_QUEUE_POLICY``.'
       operationId: promote_proposal_route_api_v1_proposals__proposal_id__promote_post
       parameters:
       - in: path
