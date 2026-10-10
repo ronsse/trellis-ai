@@ -376,8 +376,11 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
-- **Every remaining store-layer `json.dumps` on a write path now refuses
-  NaN/Infinity too, closing the gap #831 (above) left open.** That PR fixed
+- **Every remaining `json.dumps` write path in the graph, document,
+  vector, outcome, tuner-state, parameter and blob stores now refuses
+  NaN/Infinity too, closing the gap #831 (above) left open.** The
+  advisory and policy JSON files (`DegradableJsonStore`) are unchanged
+  and still write a bare `NaN`/`Infinity` token. That PR fixed
   the event logs and the SQLite/Postgres graph stores; the ArcadeDB/Neo4j
   graph store (`bolt_opencypher/graph.py`, 11 call sites across
   `upsert_node`, `update_node_if_current`, `upsert_nodes_bulk`,

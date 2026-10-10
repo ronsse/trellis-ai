@@ -286,6 +286,22 @@ class TestBoltRefusesNonFiniteJson:
             )
         assert captured == []
 
+    def test_update_node_if_current_refuses_a_non_finite_generation_spec_value(
+        self,
+    ) -> None:
+        store = _make_store_with_mocked_driver()
+        captured = _capture_write_calls(store)
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.update_node_if_current(
+                "a",
+                "2026-01-01T00:00:00+00:00",
+                "memory",
+                {},
+                node_role="curated",
+                generation_spec={"confidence": float("nan")},
+            )
+        assert captured == []
+
     def test_upsert_nodes_bulk_refuses_a_non_finite_property(self) -> None:
         store = _make_store_with_mocked_driver()
         captured = _capture_write_calls(store)
