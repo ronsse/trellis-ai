@@ -515,6 +515,64 @@ def test_metrics_promote_commit_refuses_no_baseline_by_default(cli_env):
     assert cli_env["tuner_state"].get_proposal(proposal_id).status == "pending"
 
 
+def test_metrics_promote_no_baseline_refusal_text_hints_allow_no_baseline(cli_env):
+    """The text (non-JSON) refusal names the actual remedy.
+
+    Follow-up from the #828 gate: before this, the CLI's text output for
+    a ``no_baseline_...`` refusal said only the bare reason string, and
+    an operator reading it had no way to tell ``--allow-no-baseline``
+    (surgical) apart from ``--force`` (skips everything) without reading
+    the source. Both the dry-run preview and the ``--commit`` refusal
+    must show the hint; machine consumers reading ``--format json``
+    already see the ``no_baseline_...`` prefix in ``reason`` and need no
+    hint, so the JSON payload is unchanged (checked above).
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
+
+    dry_run = runner.invoke(
+        app,
+        ["metrics", "promote", proposal_id, "--min-sample-size", "5"],
+    )
+    assert dry_run.exit_code == 0, plain(dry_run.output)
+    assert "--allow-no-baseline" in plain(dry_run.output)
+
+    committed = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "5",
+        ],
+    )
+    assert committed.exit_code == 0, plain(committed.output)
+    assert "--allow-no-baseline" in plain(committed.output)
+
+    # A refusal that is NOT bootstrap-shaped gets no such hint — it would
+    # misdirect an operator toward a flag that cannot fix a sample-size or
+    # effect-size shortfall.
+    bootstrapped = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "5",
+            "--min-effect-size",
+            "0.01",
+            "--allow-no-baseline",
+        ],
+    )
+    assert bootstrapped.exit_code == 0, plain(bootstrapped.output)
+    assert "--allow-no-baseline" not in plain(bootstrapped.output)
+
+
 def test_metrics_promote_commit_with_allow_no_baseline_bootstraps_scope(cli_env):
     """A no-baseline refusal is recoverable: the *same* proposal promotes
     on a second call that adds ``--allow-no-baseline``, because the first
@@ -562,6 +620,46 @@ def test_metrics_promote_commit_with_allow_no_baseline_bootstraps_scope(cli_env)
     assert payload["status"] == "promoted"
     assert payload["params_version"] is not None
     assert cli_env["tuner_state"].get_proposal(proposal_id).status == "promoted"
+
+
+def test_metrics_promote_allow_no_baseline_still_enforces_sample_size_floor(cli_env):
+    """``--allow-no-baseline`` is surgical: it lifts only the baseline
+    rule, not ``--min-sample-size``.
+
+    With the floor raised above the seeded proposal's sample size,
+    ``--allow-no-baseline --commit`` still refuses on the sample-size
+    gate rather than promoting, and the stored status is terminally
+    ``"rejected"`` — a sample-size refusal, unlike a no-baseline one, has
+    no recovery path. A regression that routed ``--allow-no-baseline``
+    through ``force`` (skipping the whole policy gate, like ``--force``
+    does) would instead promote here.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
+
+    result = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "999",
+            "--allow-no-baseline",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "rejected"
+    assert payload["reason"].startswith("sample_size=")
+
+    # Terminal: unlike a no-baseline refusal, a sample-size refusal marks
+    # the stored proposal "rejected".
+    assert cli_env["tuner_state"].get_proposal(proposal_id).status == "rejected"
 
 
 def test_metrics_promote_force_alone_still_bypasses_baseline_rule(cli_env):

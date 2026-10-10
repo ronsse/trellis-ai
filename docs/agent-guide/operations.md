@@ -2351,7 +2351,7 @@ each with a live count:
    exposes no equivalent override, so a scope with no snapshot yet can
    never clear its own first refusal from the UI alone. The CLI's
    `--force` is the coarser, pre-existing escape hatch: it skips the
-   whole policy gate, including the baseline requirement, not only the
+   whole policy gate, including the baseline requirement, but never the
    reachability or immutable-core refusals (which no flag skips).
 2. **Learning promotion candidates** — candidate cards with metrics, an
    approve checkbox + rationale field, and a single submit that runs the

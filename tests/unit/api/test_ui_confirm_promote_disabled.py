@@ -52,10 +52,16 @@ def test_confirm_button_is_disabled_on_predicted_rejection() -> None:
         "Confirm approve button markup is not gated on `ok` with a "
         "disabled-attribute ternary"
     )
-    # The disabled arm must land on the actual button tag, not some other
-    # element, and the button's own markup must still be present either way.
-    assert 'data-action="promoteProposal"' in clause
-    assert ">Confirm approve</button>" in clause
+    # The disabled arm must land adjacent to the actual Confirm-approve
+    # button tag, not merely somewhere in the clause — a mutant that moves
+    # the ternary onto the Cancel button instead leaves every substring
+    # above present while always enabling Confirm.
+    assert re.search(
+        r'data-action="promoteProposal"[^`]*`\s*\+\s*'
+        r"\(ok \? '' : ' disabled[^)]*\)\s*\+\s*"
+        r"`>Confirm approve</button>",
+        clause,
+    ), "disabled ternary is not adjacent to the Confirm approve button tag"
 
 
 def test_no_baseline_rejection_shows_the_cli_bootstrap_hint() -> None:

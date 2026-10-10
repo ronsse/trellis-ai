@@ -121,6 +121,10 @@ def test_promote_rejected_on_low_sample_size(stores):
     rejections = events.get_events(event_type=EventType.TUNER_PROPOSAL_REJECTED)
     assert len(rejections) == 1
     assert rejections[0].payload["reason"].startswith("sample_size=3")
+    # Terminal: a sample-size refusal has no recovery path, unlike the two
+    # no_baseline_ reasons (see the bootstrap tests below, which assert
+    # the opposite, ``terminal is False``).
+    assert rejections[0].payload["terminal"] is True
 
 
 def test_promote_rejected_on_insufficient_effect(stores):
@@ -269,6 +273,143 @@ def test_promote_no_baseline_refusal_is_not_terminal_and_can_bootstrap_later(sto
     assert bootstrapped.status == "promoted"
     assert bootstrapped.params_version is not None
     assert state.get_proposal(p.proposal_id).status == "promoted"
+
+
+def test_promote_no_baseline_for_proposed_keys_refusal_is_recoverable(
+    stores,
+):
+    """The second bootstrap reason (a scope *has* a baseline, but it
+    doesn't carry the proposed key) is non-terminal too.
+
+    ``promote_proposal``'s ``terminal=`` classification matches on the
+    ``no_baseline_`` prefix, which both ``_apply_policy`` bootstrap
+    reasons share (``no_baseline_snapshot_for_scope`` — no snapshot at
+    all — and ``no_baseline_for_proposed_keys=...`` — a snapshot that
+    omits the proposed key). Only the first reason has a test exercising
+    it through ``promote_proposal``; this pins the second so a future
+    classification that special-cases one reason string, instead of the
+    shared prefix, cannot pass unnoticed.
+    """
+    params, state, events = stores
+    # A baseline exists for the scope, but it doesn't carry the key this
+    # proposal proposes — the per-key bootstrap case.
+    params.put(
+        ParameterSet(
+            scope=ParameterScope(
+                component_id="retrieve.strategies.KeywordSearch", domain="a"
+            ),
+            values={"unrelated_key": 1.0},
+            source="test",
+        )
+    )
+    p = _proposal()  # proposes "recency_half_life_days", absent from baseline
+    state.put_proposal(p)
+
+    refused = promote_proposal(
+        p.proposal_id,
+        tuner_state=state,
+        parameter_store=params,
+        event_log=events,
+        policy=PromotionPolicy(allow_no_baseline=False),
+    )
+    assert refused.status == "rejected"
+    assert refused.reason.startswith("no_baseline_for_proposed_keys=")
+
+    # Non-terminal: the stored proposal stays pending, not rejected.
+    stored = state.get_proposal(p.proposal_id)
+    assert stored.status not in {"promoted", "rejected"}
+
+    rejected_events = events.get_events(event_type=EventType.TUNER_PROPOSAL_REJECTED)
+    assert len(rejected_events) == 1
+    assert rejected_events[0].payload["terminal"] is False
+
+    bootstrapped = promote_proposal(
+        p.proposal_id,
+        tuner_state=state,
+        parameter_store=params,
+        event_log=events,
+        policy=PromotionPolicy(allow_no_baseline=True),
+    )
+    assert bootstrapped.status == "promoted"
+    assert bootstrapped.params_version is not None
+    assert state.get_proposal(p.proposal_id).status == "promoted"
+
+
+@pytest.mark.parametrize(
+    ("baseline_values", "proposed_values", "sample_size", "policy", "reason_prefix"),
+    [
+        pytest.param(
+            None,
+            {"recency_half_life_days": 15.0},
+            3,
+            PromotionPolicy(min_sample_size=10),
+            "sample_size=",
+            id="sample_size",
+        ),
+        pytest.param(
+            {"recency_half_life_days": 30.0},
+            {"recency_half_life_days": 29.0},
+            30,
+            PromotionPolicy(min_effect_size=0.15),
+            "effect_size=",
+            id="effect_size",
+        ),
+        pytest.param(
+            {"mode": "hybrid"},
+            {"mode": "hybrid"},
+            30,
+            PromotionPolicy(),
+            "zero_effect_proposed_equals_baseline",
+            id="zero_effect",
+        ),
+        pytest.param(
+            {"mode": "standard"},
+            {"mode": "aggressive"},
+            30,
+            PromotionPolicy(allow_non_numeric=False),
+            "non_numeric_change_disallowed",
+            id="non_numeric",
+        ),
+    ],
+)
+def test_terminal_refusals_mark_payload_terminal_true_and_store_rejected(
+    stores, baseline_values, proposed_values, sample_size, policy, reason_prefix
+):
+    """Every non-bootstrap refusal is terminal end to end.
+
+    Only the two ``no_baseline_`` reasons are non-terminal (see the
+    bootstrap tests above); every other reason ``_apply_policy`` returns
+    — low sample size, insufficient effect size, a proposal that is a
+    no-op against its baseline, and a disallowed non-numeric change —
+    must mark the emitted event's ``terminal`` payload key ``True`` and
+    the stored proposal status ``"rejected"``. Before this test, only
+    ``test_promote_rejected_on_low_sample_size`` (via its own assertions
+    on ``result.status``, not on ``terminal``) touched this arm, and
+    mutant G5 (``"terminal": False`` hard-coded) passed the whole suite.
+    """
+    params, state, events = stores
+    scope = ParameterScope(component_id="retrieve.strategies.KeywordSearch", domain="a")
+    if baseline_values is not None:
+        params.put(ParameterSet(scope=scope, values=baseline_values, source="test"))
+
+    p = _proposal(proposed_values=proposed_values, sample_size=sample_size)
+    state.put_proposal(p)
+
+    result = promote_proposal(
+        p.proposal_id,
+        tuner_state=state,
+        parameter_store=params,
+        event_log=events,
+        policy=policy,
+    )
+    assert result.status == "rejected"
+    assert result.reason.startswith(reason_prefix)
+
+    assert state.get_proposal(p.proposal_id).status == "rejected"
+
+    rejected_events = events.get_events(event_type=EventType.TUNER_PROPOSAL_REJECTED)
+    assert len(rejected_events) == 1
+    assert rejected_events[0].payload["terminal"] is True
 
 
 # ---------------------------------------------------------------------------

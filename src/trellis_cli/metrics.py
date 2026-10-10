@@ -49,6 +49,17 @@ from trellis_cli.stores import (
 metrics_app = typer.Typer(no_args_is_help=True)
 console = build_console()
 
+#: Shared prefix for the bootstrap-shaped rejection reasons
+#: (``trellis.learning.tuners.promotion._NO_BASELINE_REASON_PREFIX``,
+#: duplicated here as the Review-queue UI's own check does, rather than
+#: importing a private module constant across the CLI/library boundary).
+_NO_BASELINE_REASON_PREFIX = "no_baseline_"
+_NO_BASELINE_HINT = (
+    "  hint: this scope (or this key) has no baseline yet — pass "
+    "--allow-no-baseline to bootstrap it; --force skips the whole "
+    "policy gate instead."
+)
+
 
 # ---------------------------------------------------------------------------
 # outcomes
@@ -425,6 +436,10 @@ def promote_cmd(
         f"[{color}]{result.status.upper()}[/{color}] {escape(result.proposal_id)}: "
         f"{result.reason}"
     )
+    if result.status == "rejected" and result.reason.startswith(
+        _NO_BASELINE_REASON_PREFIX
+    ):
+        console.print(_NO_BASELINE_HINT)
     if result.params_version:
         console.print(f"  new params_version: {result.params_version}")
     if result.effect_size is not None:
@@ -549,6 +564,10 @@ def _dry_run_promote(
         f"[{color}]WOULD {verb}[/{color}] {escape(proposal_id)}: "
         f"{preview.reason if preview.reason != 'ok' else 'policy gate would pass'}"
     )
+    if preview.status == "rejected" and preview.reason.startswith(
+        _NO_BASELINE_REASON_PREFIX
+    ):
+        console.print(_NO_BASELINE_HINT)
     console.print(f"  proposed: {json.dumps(preview.proposed_values)}")
     console.print(f"  baseline: {json.dumps(preview.baseline_values)}")
     if preview.effect_size is not None:
