@@ -108,6 +108,24 @@ def _without_pack_id(body: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in body.items() if key != "pack_id"}
 
 
+def _mask_duration(node: Any) -> Any:
+    """``node`` with every ``duration_ms`` masked.
+
+    It is real wall-clock elapsed time for that call's build, so two
+    separately-invoked CLI builds (a withheld preview vs. a greenfield one,
+    run as two different process-in-process ``trellis retrieve pack``
+    invocations) are not expected to report the same value.
+    """
+    if isinstance(node, dict):
+        return {
+            key: "<elapsed>" if key == "duration_ms" else _mask_duration(value)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_mask_duration(value) for value in node]
+    return node
+
+
 class TestRetrievePack:
     def test_a_withheld_preview_is_an_empty_pack(
         self, monkeypatch: pytest.MonkeyPatch
@@ -127,7 +145,9 @@ class TestRetrievePack:
             "doc-3",
         ]
         assert control["advisories"]
-        assert _without_pack_id(withheld) == _without_pack_id(greenfield)
+        assert _mask_duration(_without_pack_id(withheld)) == _mask_duration(
+            _without_pack_id(greenfield)
+        )
         assert withheld["count"] == 0
         assert len(withheld["pack_id"]) == 26
 

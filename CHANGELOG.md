@@ -376,40 +376,102 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
-- **`MutationExecutor`'s audit events carry a structured error summary,
-  not just the exception's type name.** A store refusal reaching the
-  untyped panic catch logged `error_type=ValueError` on the operator's
-  structlog line but the `mutation.rejected` / `mutation.executed`
-  `Event.payload` itself carried none of that — an operator reading the
-  EventLog (not stderr) saw only a bare `message` and had to go dig up
-  the log line to learn even the exception's type, let alone a driver
-  code or a violated constraint. `error_sanitize.py` gains
-  `summarize_exception(exc) -> dict`, built on #829's describe helpers:
-  `error_type` (`type(exc).__name__`, always present), `error_code`
-  (`_driver_error_code` — `sqlstate`, then `sqlite_errorname`, then
-  `code`, then `errno`, first one present, duck-typed so it reads a
-  `psycopg`/`sqlite3` exception's own attributes without importing
-  either), `message` (a `TrellisError`'s own `.message` kept whole, since
-  it is already a raiser-authored summary; a generic exception's `str()`
-  truncated to its first line and run through the existing
-  `_mask_quoted`, since a multi-line driver error's later lines are
-  where query text and values live), and `constraint`
-  (`exc.diag.constraint_name` when present, psycopg's shape). All three
-  in-scope catches in `MutationExecutor.execute` — the `ValidationError`
-  rejection, the typed `(StoreError, TrellisError)` failure, and the
-  untyped panic — now thread `error_type` / `error_code` / `constraint`
-  through `_emit_rejection` / `_emit` into the audit payload, added only
-  when not `None` (the same convention `reason` and `policy_warnings`
-  already use, so a payload with no code or no constraint stays
-  byte-identical to before this change). `CommandResult.message` — what
-  callers see — is untouched at all three sites. This does not change
-  what #831's "Execution failed: ValueError" scenario *says*: that
-  message was already a clean one-line `str(exc)` with nothing to
-  sanitize, so it reads the same; what changes is that the audit event
-  now also carries `error_type: "ValueError"` as a separate, queryable
-  field instead of only existing in the structlog line. #831's deeper
-  complaint — that the bare-ValueError case names neither the offending
-  field nor the row — is not addressed by this change.
+- **Noise demotion counts what was written, not what the evidence gate
+  admitted.** `apply_noise_tags` writes `signal_quality="noise"` only to
+  ids that resolve in the document store; the demotion gate admits
+  candidates on citation evidence alone, with no notion of which store an
+  id belongs to, so an admitted trace id (or other non-document id)
+  reached the writer and nothing was written for it, silently (one
+  `logger.debug` per id). Curate's nightly `noise_tagged`, REST
+  `POST /effectiveness/apply-noise-tags`'s `noise_candidates_tagged`, and
+  CLI `trellis analyze apply-noise-tags`'s text output each independently
+  reported the admission count as the demotion count, overstating it by
+  the non-document remainder. `apply_noise_tags` now returns a
+  `NoiseTagResult` (`updated`, `refused_not_document`) instead of a bare
+  `int`; `EffectivenessReport` carries `noise_tags_written` /
+  `noise_refused_not_document`. REST and the CLI report the real write
+  count beside the refused ids by name (`noise_refused_not_document` /
+  `noise_candidates_refused_not_document`); curate reports the write
+  count beside only a refused *count* (`noise_refused_non_document`), not
+  names. A curate dry run, which writes nothing either way, previews the
+  same split with a read-only `document_store.get` check per admitted
+  id, and curate's `NoiseTagsApplied` finding now fires on the write
+  count rather than the admission count.
+  ([#833](https://github.com/ronsse/trellis-ai/pull/833))
+- **Every remaining `json.dumps` write path in the graph, document,
+  vector, outcome, tuner-state, parameter and blob stores now refuses
+  NaN/Infinity too, closing the gap #831 (above) left open.** The
+  advisory and policy JSON files (`DegradableJsonStore`) are unchanged
+  and still write a bare `NaN`/`Infinity` token. That PR fixed
+  the event logs and the SQLite/Postgres graph stores; the ArcadeDB/Neo4j
+  graph store (`bolt_opencypher/graph.py`, 11 call sites across
+  `upsert_node`, `update_node_if_current`, `upsert_nodes_bulk`,
+  `upsert_edge` and `upsert_edges_bulk`), the SQLite and Postgres document
+  stores, every vector store's metadata write (SQLite, pgvector, Neo4j —
+  `upsert` and the separately-implemented `upsert_bulk` are two distinct
+  call sites there — and ArcadeDB), the outcome/tuner-state/parameter
+  stores, and the local blob store's metadata sidecar all still wrote a
+  non-finite float as a silent `NaN`/`Infinity` JSON token. The fix is the
+  same `allow_nan=False` on each `json.dumps` call, and the same
+  `ValueError` raised before the write lands. Two gaps this also closes:
+  (1) MCP `save_memory` previously committed a document row with NaN
+  metadata durably *before* the later `MEMORY_STORED` event emit failed,
+  leaving an orphan a caller's error made look recoverable — fixing
+  `sqlite/document.py`'s `put()` means the write itself refuses first, so
+  nothing durable lands; (2) the SQLite graph store's
+  `upsert_nodes_bulk`/`upsert_edges_bulk` already rolled back a
+  non-finite row atomically before this PR (both build every `json.dumps`
+  call before any write statement runs), but had no test pinning a
+  two-row batch where an earlier row has a prior version and a later row
+  is non-finite — added, and confirmed non-vacuous by mutating the store
+  to commit each row as it's built (which the test catches: the prior
+  row's value leaks through).
+  ([#835](https://github.com/ronsse/trellis-ai/pull/835))
+- **A failed idempotency read, and a store failure a Postgres or Bolt
+  backend wraps as `StoreError ... from exc`, audited only the
+  exception's type name; both now audit the actual error, one level of
+  wrapping included.** Before this change, most failure paths already
+  stored the real error: the untyped panic catch stored a driver's raw
+  `str(exc)` (sometimes multi-line, with query text and row values on
+  later lines), and a Trellis-composed message (`StoreError("backend
+  down")`, an orphan-edge refusal) stored that text as-is. Only two
+  paths stored the type alone, which is what the owner's "not just the
+  error type" asked to fix: the failed idempotency read
+  (`"Idempotency check failed: OperationalError"`, naming neither
+  "database is locked" nor a Postgres wrapper's own type), and a
+  `StoreError`/`TrellisError` wrapping a driver error via `from exc`
+  (`"Purge of node n1 failed: DeadlockDetected"` plus a constant
+  `error_code="STORE_ERROR"`, discarding the driver's SQLSTATE,
+  message and constraint that sat on `__cause__`).
+  `error_sanitize.py` gains `summarize_exception(exc) -> dict`:
+  `error_type` (`type(exc).__name__`), `error_code`
+  (`_driver_error_code` — a psycopg `sqlstate`, then a sqlite3
+  `sqlite_errorname`, then a `.code` attribute, then `errno`, first one
+  present), `message` (a `TrellisError`'s own `.message`, run through
+  `sanitize_error_message`; a generic exception's `str()` first line,
+  masked with `_mask_quoted` and then also run through
+  `sanitize_error_message`), and `constraint`
+  (`exc.diag.constraint_name` when present). When `exc.__cause__` is
+  set, the summary also nests one level of the same four fields for
+  the cause, under `cause` — read from `__cause__` only, never the
+  implicit `__context__` a bare `raise` inside an `except` block also
+  sets. All four in-scope catches in `MutationExecutor.execute` — the
+  idempotency-read failure, the `ValidationError` rejection, the typed
+  `(StoreError, TrellisError)` failure, and the untyped panic — now
+  build the stored `message` and the `error_type` / `error_code` /
+  `constraint` / `cause` keys from this summary, added only when not
+  `None`. The panic path's stored `message` itself changes: it was the
+  driver's raw (possibly multi-line) text and is now the masked,
+  sanitized first line only — a behavior change for any reader of
+  existing `mutation.rejected` events, not an additive one.
+  `CommandResult.message` — what callers see — is unchanged on every
+  path; it stays type-only on the idempotency and panic paths.
+  Mutation testing against `error_sanitize.py` and `executor.py`
+  (36 hand-written mutants) now kills 31 of 36; the 5 remaining
+  survivors were assessed as near-equivalent or, in one case
+  (`CommandResult` built from the summary message), unpinnable without
+  leaking raw credential text into the caller-facing message, and are
+  left as a follow-up rather than pinned with a vacuous assertion.
   ([#837](https://github.com/ronsse/trellis-ai/pull/837))
 - **The SQLite event log and both the SQLite and Postgres graph stores
   refuse a NaN/Infinity float at write time, instead of silently storing
@@ -533,6 +595,34 @@ All notable changes to Trellis will be documented in this file.
   `trellis.llm.routing`, outside `trellis/errors.py`, and a fixed list
   would have missed it silently.
   ([#829](https://github.com/ronsse/trellis-ai/pull/829))
+- **A pack build's latency is now recorded, not hard-coded to zero.**
+  `PackBuilder.build()` and `build_sectioned()` both constructed their
+  `RetrievalReport` with `duration_ms=0` — one path as a literal, the other
+  by never passing the field at all — so `PACK_ASSEMBLED` carried no timing
+  key and health reporting had no latency signal: every row read zero,
+  whatever the build actually cost. Both now time with
+  `time.perf_counter()` from entry through strategy collection and
+  budgeting (per-section budgets included on the sectioned path), snapshotted
+  once just before section assembly — the cross-section dedup, annotation
+  and per-`PackSection` report construction that follows — so every section
+  reports the same window rather than its own loop iteration. Neither
+  window covers advisory selection, the optional quality evaluator, or the
+  event write, on either path; nothing in `src` reads the new key yet, so a
+  p50/p95 health-report reader stays a follow-up, not shipped here.
+  `_withhold_sectioned`, the pack-effect holdout's (#701) sectioned
+  reconstruction path, had the same asymmetry `_withhold_flat` already
+  avoided — a withheld sectioned pack's timing silently read back as `0`
+  even though a real build happened — and now carries the real value
+  through too. `duration_ms` is an additive key on both `PACK_ASSEMBLED`
+  payloads; no schema or contract pins the payload key set other than
+  `test_pack_holdout_seam.py`'s hand-read base snapshot, which is updated
+  to expect it alongside the two holdout keys. Three CLI, API and retrieve
+  tests that compared two separately-built packs' full payloads for
+  equality (`test_pack_holdout_cli.py`, `test_pack_holdout_routes.py`,
+  `test_pack_holdout_seam.py` itself) masked `duration_ms` before
+  comparing, since it is now real elapsed time and two builds are not
+  expected to cost the same.
+  ([#832](https://github.com/ronsse/trellis-ai/pull/832))
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
@@ -573,13 +663,71 @@ All notable changes to Trellis will be documented in this file.
   every retrieval call site until the setting is fixed; a broken
   `vector_store` degrades retrieval to keyword and graph (`semantic:
   misconfigured`); embed-on-ingest is fail-soft for an embedder resolve
-  failure only. Added a recovery runbook,
+  failure. Added a recovery runbook,
   [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config):
   fix the setting, restart (the `embeddings:` block is read once, at
   `StoreRegistry` construction, so a running process can't see an edited
   config or environment), then run `trellis admin reindex-vectors` for
   documents that arrived while it was broken.
   ([#830](https://github.com/ronsse/trellis-ai/pull/830))
+- **A broken `vector_store` resolve is now fail-soft too, like the embedder
+  resolve #830 fixed above.** `run_embed_on_ingest` resolved
+  `registry.knowledge.vector_store` with a bare
+  `getattr(registry.knowledge, "vector_store", None)`: the default only
+  absorbs `AttributeError`, so a vector backend that raises while
+  instantiating (`ConfigError`, `BackendNotInstalledError`, a connection
+  error) propagated straight out of the hook — called, unwrapped, by every
+  caller (MCP `save_memory`, the mutate "soft" handler, corpus-sync ingest,
+  CLI dbt-manifest ingest) *after* the document was already durably stored,
+  so the write's own response failed for content that had, in fact, been
+  saved, inviting a client retry of an already-stored write. The resolve is
+  now wrapped the same way #830 wrapped the embedder's, returning
+  `{"embedded": False, "reason": ...}` instead of raising. The dedup helper
+  generalized to cover both: the WARNING event is renamed
+  `embed_on_ingest_resolve_failed` (from
+  `embed_on_ingest_embedder_resolve_failed`) and now carries a `component`
+  field (`embedding_fn` or `vector_store`); the once-per-cause cache key is
+  `(component, error_type, setting)`, not just `(error_type, setting)`, so
+  an embedder and a vector store failing with the same shape (e.g. both a
+  bare `RuntimeError` with no `setting`) log independently instead of one
+  suppressing the other. Playbook 15 and the MCP prewarm comment updated to
+  match.
+  ([#834](https://github.com/ronsse/trellis-ai/pull/834))
+- **#829 follow-up: the REST pre-validation 422s, `admin.py`'s learning-candidates
+  read failure, and `CommandResult.message` on two more routes still quoted
+  raw exception/message text.** Five sites built a 422 `detail` as
+  `f"...: {exc}"` directly from a `model_validate`/`SectionRequest` failure,
+  before the governed-mutation pipeline and its sanitized rejection path ever
+  ran: `ingest.py`'s `ingest_trace` / `ingest_evidence`, `observations.py`'s
+  `record_observation` / `record_measurement`, and `retrieve.py`'s
+  `assemble_sectioned_pack`. All five now build the detail with
+  `describe_validation_error`, same as the nine sites above.
+  `admin.py`'s `_load_learning_candidates` built
+  `_LearningCandidatesUnavailableError`'s message as `f"...: {exc}"` for an
+  unreadable or malformed candidates file; it now uses `describe_os_error` /
+  `describe_json_error`, falling back to the exception's type name.
+  Separately, `CommandResult.message` reached a REST caller unsanitized
+  through two paths #829 did not cover: `/commands/batch` (every result,
+  including `FAILED`/`REJECTED`, via `_results.py`'s `command_response` —
+  the one projection the `curate`, `extract` and `mutations` routers share)
+  and `/ingest/bulk`'s three per-item `BulkItemResult` constructions (entity,
+  edge, alias), neither of which went through `command_response`. Both now
+  sanitize `message` through `sanitize_error_message`, but only when
+  `status` is `FAILED` or `REJECTED`: a `SUCCESS`/`DUPLICATE` message only
+  restates the caller's own request (a name, id, title or idempotency key),
+  and wrapping it unconditionally would replace an ordinary long name, an
+  email-named entity, or a digest idempotency key with the suppression
+  marker, for no protective value. Fixing the shared
+  `command_response` projection closes `/commands/batch` and, incidentally,
+  `extract.py`'s identical unfiltered construction, in one change. The two
+  `trellis_sdk` sites with the same `f"...: {exc}"` shape
+  (`client.py`/`async_client.py`'s `record_feedback`) are left as-is:
+  `trellis_sdk` has no dependency edge to `trellis` core to reach
+  `error_sanitize` from (by the dual-mode local/remote design), and the
+  exception there describes the SDK's own parse failure on a response its
+  own trusted server just returned, not caller-supplied or server-internal
+  text.
+  ([#829](https://github.com/ronsse/trellis-ai/pull/829) follow-up)
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited

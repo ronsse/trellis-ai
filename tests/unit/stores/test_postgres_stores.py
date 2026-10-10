@@ -181,6 +181,12 @@ class TestPostgresDocumentStore:
         store.put("doc-1", "content")
         assert store.count() == 1
 
+    def test_put_refuses_a_non_finite_metadata_value(self, store) -> None:
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.put("doc-1", "content", {"score": float("nan")})
+        assert store.get("doc-1") is None
+        assert store.count() == 0
+
     def test_get_by_hash(self, store) -> None:
         store.put("doc-1", "unique content")
         doc = store.get("doc-1")

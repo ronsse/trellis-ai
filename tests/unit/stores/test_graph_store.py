@@ -624,3 +624,71 @@ class TestCompactVersions:
         store = _StubStore()
         with pytest.raises(NotImplementedError, match="compact_versions"):
             store.compact_versions(datetime.now(UTC))
+
+
+# ---------------------------------------------------------------------------
+# Bulk atomicity (gate O3): the single-row cases above don't pin that a
+# later bad row in a *multi-row* batch leaves an earlier good row, or a
+# prior version of it, untouched. upsert_nodes_bulk builds every
+# json.dumps call in pure Python before ``with conn:`` opens, so a
+# mid-batch failure happens before any SQL executes. upsert_edges_bulk
+# opens ``BEGIN IMMEDIATE`` and runs a SELECT first, but the close-UPDATE
+# and the bulk INSERT both run only after the full row-build loop
+# completes, so a mid-batch failure means neither runs for any row.
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_nodes_bulk_atomic_when_a_later_row_is_non_finite(graph_store):
+    graph_store.upsert_node("n1", "service", {"v": 1})
+    before = graph_store.get_node("n1")
+    assert before is not None
+
+    with pytest.raises(ValueError):
+        graph_store.upsert_nodes_bulk(
+            [
+                {"node_id": "n1", "node_type": "service", "properties": {"v": 2}},
+                {
+                    "node_id": "n2",
+                    "node_type": "service",
+                    "properties": {"v": float("nan")},
+                },
+            ]
+        )
+
+    after = graph_store.get_node("n1")
+    assert after is not None
+    assert after["properties"] == {"v": 1}
+    assert after["valid_from"] == before["valid_from"]
+    assert graph_store.get_node("n2") is None
+    assert graph_store.count_nodes() == 1
+
+
+def test_upsert_edges_bulk_atomic_when_a_later_row_is_non_finite(graph_store):
+    graph_store.upsert_node("a", "service", {})
+    graph_store.upsert_node("b", "service", {})
+    graph_store.upsert_node("c", "service", {})
+    eid = graph_store.upsert_edge("a", "b", "depends_on", {"weight": 1.0})
+
+    with pytest.raises(ValueError):
+        graph_store.upsert_edges_bulk(
+            [
+                {
+                    "source_id": "a",
+                    "target_id": "b",
+                    "edge_type": "depends_on",
+                    "properties": {"weight": 2.0},
+                },
+                {
+                    "source_id": "a",
+                    "target_id": "c",
+                    "edge_type": "depends_on",
+                    "properties": {"weight": float("nan")},
+                },
+            ]
+        )
+
+    edges = graph_store.get_edges("a", direction="outgoing")
+    assert len(edges) == 1
+    assert edges[0]["edge_id"] == eid
+    assert edges[0]["properties"] == {"weight": 1.0}
+    assert graph_store.count_edges() == 1
