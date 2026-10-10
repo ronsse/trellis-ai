@@ -1627,7 +1627,7 @@
                             <th>Time</th>
                             <th>Doc ID</th>
                             <th>Preview</th>
-                            <th>Tags</th>
+                            <th>Content tags</th>
                             <th>Size</th>
                         </tr>
                     </thead>
@@ -1971,12 +1971,22 @@
             return div;
         }
 
-        function renderStatusRow(name, ok) {
+        function renderStatusRow(name, ok, detail) {
             const div = document.createElement('div');
             div.className = 'status-row';
             const cls = ok ? 'badge-ok' : 'badge-err';
             const label = ok ? 'OK' : 'DOWN';
-            div.innerHTML = `<span>${escHtml(name)}</span><span class="badge ${cls}">${label}</span>`;
+            // `detail` is the matching /api/v1/health `backends[name]` probe
+            // result (latency_ms always; error only on a failed probe) — a
+            // failed probe must show the reason, not just a red badge.
+            let extra = '';
+            if (detail && typeof detail.latency_ms === 'number') {
+                extra += ` <span style="color:var(--text-dim); font-size:0.8rem">${detail.latency_ms.toFixed(1)}ms</span>`;
+            }
+            if (detail && detail.error) {
+                extra += ` <span style="color:var(--error); font-size:0.8rem">${escHtml(detail.error)}</span>`;
+            }
+            div.innerHTML = `<span>${escHtml(name)}${extra}</span><span class="badge ${cls}">${label}</span>`;
             return div;
         }
 
@@ -3721,11 +3731,20 @@
         // ============================================================
         let memOffset = 0;
 
+        // The tagging pipeline writes the 4 retrieval-shaping facets to
+        // metadata.content_tags (adr-terminology.md); `tags` is not a key
+        // any writer sets. `content_tags_shadow` (LLM shadow-mode tags,
+        // never applied — see servable.py) is deliberately NOT read here:
+        // showing it beside applied tags would misrepresent what actually
+        // ran.
+        const CONTENT_TAG_FACETS = ['domain', 'content_type', 'scope', 'signal_quality'];
+
         function tagChips(metadata) {
-            const tags = (metadata && metadata.tags) || {};
+            const tags = (metadata && metadata.content_tags) || {};
             const chips = [];
-            for (const [facet, value] of Object.entries(tags)) {
-                const vals = Array.isArray(value) ? value : [value];
+            for (const facet of CONTENT_TAG_FACETS) {
+                const value = tags[facet];
+                const vals = Array.isArray(value) ? value : (value != null ? [value] : []);
                 for (const v of vals) {
                     if (v != null && v !== '') chips.push(`<span class="badge badge-info" title="${escHtml(facet)}">${escHtml(v)}</span>`);
                 }
@@ -4175,11 +4194,12 @@
 
                 const healthEl = document.getElementById('health-rows');
                 const checks = health.checks || {};
+                const healthBackends = health.backends || {};
                 if (Object.keys(checks).length === 0) {
                     healthEl.innerHTML = '<div style="color:var(--text-dim); padding:0.5rem 0; font-size:0.9rem">No health checks configured</div>';
                 } else {
                     for (const [name, ok] of Object.entries(checks)) {
-                        healthEl.appendChild(renderStatusRow(name, ok));
+                        healthEl.appendChild(renderStatusRow(name, ok, healthBackends[name]));
                     }
                 }
 
