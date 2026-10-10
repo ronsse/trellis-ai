@@ -427,6 +427,52 @@ All notable changes to Trellis will be documented in this file.
   to commit each row as it's built (which the test catches: the prior
   row's value leaks through).
   ([#835](https://github.com/ronsse/trellis-ai/pull/835))
+- **A failed idempotency read, and a store failure a Postgres or Bolt
+  backend wraps as `StoreError ... from exc`, audited only the
+  exception's type name; both now audit the actual error, one level of
+  wrapping included.** Before this change, most failure paths already
+  stored the real error: the untyped panic catch stored a driver's raw
+  `str(exc)` (sometimes multi-line, with query text and row values on
+  later lines), and a Trellis-composed message (`StoreError("backend
+  down")`, an orphan-edge refusal) stored that text as-is. Only two
+  paths stored the type alone, which is what the owner's "not just the
+  error type" asked to fix: the failed idempotency read
+  (`"Idempotency check failed: OperationalError"`, naming neither
+  "database is locked" nor a Postgres wrapper's own type), and a
+  `StoreError`/`TrellisError` wrapping a driver error via `from exc`
+  (`"Purge of node n1 failed: DeadlockDetected"` plus a constant
+  `error_code="STORE_ERROR"`, discarding the driver's SQLSTATE,
+  message and constraint that sat on `__cause__`).
+  `error_sanitize.py` gains `summarize_exception(exc) -> dict`:
+  `error_type` (`type(exc).__name__`), `error_code`
+  (`_driver_error_code` — a psycopg `sqlstate`, then a sqlite3
+  `sqlite_errorname`, then a `.code` attribute, then `errno`, first one
+  present), `message` (a `TrellisError`'s own `.message`, run through
+  `sanitize_error_message`; a generic exception's `str()` first line,
+  masked with `_mask_quoted` and then also run through
+  `sanitize_error_message`), and `constraint`
+  (`exc.diag.constraint_name` when present). When `exc.__cause__` is
+  set, the summary also nests one level of the same four fields for
+  the cause, under `cause` — read from `__cause__` only, never the
+  implicit `__context__` a bare `raise` inside an `except` block also
+  sets. All four in-scope catches in `MutationExecutor.execute` — the
+  idempotency-read failure, the `ValidationError` rejection, the typed
+  `(StoreError, TrellisError)` failure, and the untyped panic — now
+  build the stored `message` and the `error_type` / `error_code` /
+  `constraint` / `cause` keys from this summary, added only when not
+  `None`. The panic path's stored `message` itself changes: it was the
+  driver's raw (possibly multi-line) text and is now the masked,
+  sanitized first line only — a behavior change for any reader of
+  existing `mutation.rejected` events, not an additive one.
+  `CommandResult.message` — what callers see — is unchanged on every
+  path; it stays type-only on the idempotency and panic paths.
+  Mutation testing against `error_sanitize.py` and `executor.py`
+  (36 hand-written mutants) now kills 31 of 36; the 5 remaining
+  survivors were assessed as near-equivalent or, in one case
+  (`CommandResult` built from the summary message), unpinnable without
+  leaking raw credential text into the caller-facing message, and are
+  left as a follow-up rather than pinned with a vacuous assertion.
+  ([#837](https://github.com/ronsse/trellis-ai/pull/837))
 - **The SQLite event log and both the SQLite and Postgres graph stores
   refuse a NaN/Infinity float at write time, instead of silently storing
   JSON text a stricter reader can't parse.** Python's `json.dumps` writes

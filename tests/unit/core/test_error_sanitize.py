@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from importlib import import_module
+from typing import NoReturn
 
 import pytest
 import yaml
@@ -21,7 +22,9 @@ from trellis.core.error_sanitize import (
     describe_yaml_error,
     sanitize_error_message,
     sanitized_error_payload,
+    summarize_exception,
 )
+from trellis.errors import StoreError, TrellisError, ValidationError
 
 #: A fake credential planted where PyYAML's ``str(exc)`` would quote it.
 _SENTINEL = "XQ1BR6asQyYAJ6tcK6JnaWKZ"
@@ -32,6 +35,24 @@ def _filler(length: int) -> str:
     is 40+ chars and nothing resembles ``@``/``=``/``:`` — safe against
     every ``_LEAK_PATTERNS`` entry and the long-opaque-token check."""
     return ("lorem " * (length // 6 + 2))[:length]
+
+
+def _raise_inner_failure() -> NoReturn:
+    inner_message = "inner failure"
+    raise RuntimeError(inner_message)
+
+
+def _raise_store_error_chained_by_context_only() -> NoReturn:
+    """Raise a ``StoreError`` whose ``__context__`` (not ``__cause__``)
+    is set: a bare ``raise`` inside an ``except`` block. ``from None``
+    only silences the traceback printer's chaining note
+    (``__suppress_context__``) to satisfy B904 — it does not clear
+    ``__context__`` itself, which stays set to the inner exception."""
+    try:
+        _raise_inner_failure()
+    except RuntimeError:
+        outer_message = "outer failure"
+        raise StoreError(outer_message, store="pg") from None
 
 
 class TestCleanPassthrough:
@@ -391,6 +412,149 @@ class TestPayload:
         # the message does not.
         assert payload["error_type"] == "RuntimeError"
         assert payload["message"] == SUPPRESSED_MARKER
+
+
+class TestSummarizeException:
+    """``summarize_exception`` — the structured shape audit/telemetry
+    events store for a caught error. Distinct from ``sanitized_error_payload``
+    above (a CLI/API envelope): an immutable audit event also gets
+    ``error_code``/``constraint`` as separate, filterable fields, and a
+    ``TrellisError``'s own ``.message`` is kept whole rather than cut to
+    one line, since Trellis composes that text itself.
+    """
+
+    def test_trellis_error_keeps_its_own_message_whole(self) -> None:
+        exc = TrellisError("line one\nline two", code="my_code")
+        assert summarize_exception(exc) == {
+            "error_type": "TrellisError",
+            "error_code": "my_code",
+            "message": "line one\nline two",
+        }
+
+    def test_generic_exception_keeps_only_the_first_line(self) -> None:
+        summary = summarize_exception(RuntimeError("line one\nline two"))
+        assert summary["message"] == "line one"
+        assert "line two" not in summary["message"]
+
+    def test_generic_exception_masks_a_quoted_value_on_its_first_line(self) -> None:
+        exc = RuntimeError('column "secret_value" rejected')
+        assert summarize_exception(exc)["message"] == 'column "..." rejected'
+
+    def test_error_code_prefers_sqlstate_over_sqlite_errorname_and_code(self) -> None:
+        class _FakeError(RuntimeError):
+            sqlstate = "23505"
+            sqlite_errorname = "SQLITE_READONLY"
+            code = "some_code"
+
+        assert summarize_exception(_FakeError("x"))["error_code"] == "23505"
+
+    def test_error_code_prefers_sqlite_errorname_over_code(self) -> None:
+        class _FakeError(RuntimeError):
+            sqlite_errorname = "SQLITE_READONLY"
+            code = "some_code"
+
+        assert summarize_exception(_FakeError("x"))["error_code"] == "SQLITE_READONLY"
+
+    def test_error_code_prefers_code_over_errno(self) -> None:
+        class _FakeError(RuntimeError):
+            code = "some_code"
+            errno = 5
+
+        assert summarize_exception(_FakeError("x"))["error_code"] == "some_code"
+
+    def test_error_code_falls_back_to_errno_last(self) -> None:
+        assert (
+            summarize_exception(OSError(2, "No such file or directory"))["error_code"]
+            == "2"
+        )
+
+    def test_error_code_none_when_nothing_applies(self) -> None:
+        assert summarize_exception(RuntimeError("plain"))["error_code"] is None
+
+    def test_constraint_key_absent_when_no_diag(self) -> None:
+        assert "constraint" not in summarize_exception(RuntimeError("plain"))
+
+    def test_constraint_key_present_when_diag_names_one(self) -> None:
+        class _Diag:
+            constraint_name = "users_email_key"
+
+        class _FakeError(RuntimeError):
+            diag = _Diag()
+
+        assert summarize_exception(_FakeError("x"))["constraint"] == "users_email_key"
+
+    def test_store_error_is_treated_as_a_trellis_error(self) -> None:
+        exc = StoreError("backend down", store="pg")
+        summary = summarize_exception(exc)
+        assert summary["error_type"] == "StoreError"
+        assert summary["message"] == "backend down"
+
+    def test_validation_error_s_default_code_survives(self) -> None:
+        summary = summarize_exception(ValidationError("bad field"))
+        assert summary["error_code"] == "VALIDATION_ERROR"
+
+    def test_empty_text_yields_an_empty_message_not_a_crash(self) -> None:
+        """S8 (R3): ``text.splitlines()`` on an empty string is ``[]``,
+        so the ``if text else ""`` guard is load-bearing — a bare
+        ``RuntimeError()`` (``str(exc) == ""``) must not raise
+        ``IndexError`` out of ``summarize_exception``."""
+        assert summarize_exception(RuntimeError())["message"] == ""
+
+    def test_generic_branch_suppresses_an_unquoted_dsn(self) -> None:
+        """S11 (R3): the generic branch's ``sanitize_error_message`` call
+        is load-bearing on its own, separately from ``_mask_quoted`` — an
+        unquoted credential (a DSN with no surrounding quotes) in a
+        foreign exception's first line must still be suppressed."""
+        text = "connect postgresql://svc_user:s3cr3t@db.internal/trellis failed"
+        assert summarize_exception(RuntimeError(text))["message"] == SUPPRESSED_MARKER
+
+    def test_cause_key_absent_when_nothing_is_chained(self) -> None:
+        assert "cause" not in summarize_exception(RuntimeError("plain"))
+
+    def test_cause_key_absent_when_only_context_is_set(self) -> None:
+        """A bare ``raise`` inside an ``except`` block sets the implicit
+        ``__context__`` but leaves ``__cause__`` ``None`` (the helper's
+        ``from None`` only silences the traceback printer, per its own
+        docstring), and ``summarize_exception`` must not confuse the
+        two."""
+        captured: list[BaseException] = []
+        try:
+            _raise_store_error_chained_by_context_only()
+        except StoreError as caught:
+            captured.append(caught)
+        exc = captured[0]
+        assert exc.__cause__ is None
+        assert exc.__context__ is not None
+
+        assert "cause" not in summarize_exception(exc)
+
+    def test_cause_summarized_one_level_from_a_chained_driver_error(self) -> None:
+        """A ``StoreError`` wrapping a psycopg-shaped deadlock records the
+        cause's SQLSTATE, first-line message and constraint — one level
+        only, read from ``__cause__``, never recursing further."""
+
+        class _Diag:
+            constraint_name = "orders_pkey"
+
+        class _FakePsycopgError(RuntimeError):
+            sqlstate = "40P01"
+            diag = _Diag()
+
+        cause = _FakePsycopgError(
+            "deadlock detected\nDETAIL: Process 123 blocked by process 456."
+        )
+        exc = StoreError("Purge of node n1 failed: DeadlockDetected", store="graph")
+        exc.__cause__ = cause
+
+        summary = summarize_exception(exc)
+        assert summary["error_type"] == "StoreError"
+        assert summary["message"] == "Purge of node n1 failed: DeadlockDetected"
+        assert summary["cause"] == {
+            "error_type": "_FakePsycopgError",
+            "error_code": "40P01",
+            "message": "deadlock detected",
+            "constraint": "orders_pkey",
+        }
 
 
 class TestDescribeYamlError:
