@@ -682,6 +682,17 @@ class DegradableJsonStore(ABC, Generic[RowT]):
         return a wrong answer from the in-memory view before they would
         ever reach here, so this guard cannot cover them, and they cannot
         cover a direct call to this one.
+
+        ``allow_nan=False`` refuses a non-finite float here, before this
+        call, the same gap #835 closed on every other store's write path.
+        It is one-directional: :meth:`_load_rows` parses with the default,
+        lenient ``json.loads``, so a file holding the non-standard
+        ``NaN``/``Infinity``/``-Infinity`` tokens a pre-fix write already
+        left on disk still loads cleanly — degrading that read would turn
+        an old, already-written file into a newly-unreadable one for no
+        gain, since nothing downstream of a load re-serializes it with
+        ``allow_nan=False`` until the next write, which this guard now
+        refuses.
         """
         self.refuse_if_degraded()
         self.refuse_if_stale()
@@ -695,7 +706,9 @@ class DegradableJsonStore(ABC, Generic[RowT]):
                 for row in self._rows.values()
             ]
         }
-        atomic_write_text(self._path, json.dumps(data, indent=2, default=str))
+        atomic_write_text(
+            self._path, json.dumps(data, indent=2, default=str, allow_nan=False)
+        )
         # What we just wrote is now what we "loaded": a second write from the
         # same store instance must not trip its own guard.
         self._loaded_fingerprint = self._fingerprint()
