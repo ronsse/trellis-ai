@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from trellis.core.base import SCHEMA_VERSION
 from trellis.feedback.models import PackFeedback
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.exit_codes import EXIT_VALIDATION
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_VALIDATION
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
 
@@ -77,6 +80,56 @@ def _outcome_count(stores_dir: Path) -> int:
         return registry.operational.outcome_store.count()
     finally:
         registry.close()
+
+
+def _seed_legacy_nan_row(stores_dir: Path) -> None:
+    """Write a FEEDBACK_RECORDED row carrying a non-finite relevance score.
+
+    ``SQLiteEventLog.append`` dumps with ``allow_nan=False`` (#835), so no
+    call through the normal API can seed this. A raw INSERT simulates a row
+    a pre-#835 build already wrote: ``json.dumps`` here defaults to
+    ``allow_nan=True``, landing the non-standard ``NaN`` token on disk, and
+    the event log's own read path (plain, lenient ``json.loads``) parses it
+    straight back into a live Python float for the backfill to replay.
+    """
+    feedback = PackFeedback(
+        run_id="run-legacy",
+        phase="retrieve",
+        intent="fetch context",
+        outcome="success",
+        items_served=["k1"],
+        items_referenced=["k1"],
+        intent_family="plan",
+        relevance_scores={"k1": float("nan")},
+    )
+    payload = feedback.to_event_payload(pack_id=PACK_ID)
+    now = datetime.now(UTC) - timedelta(days=1)
+    conn = sqlite3.connect(
+        str(stores_dir / "events.db"), timeout=0, isolation_level=None
+    )
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO events ("
+            " event_id, event_type, source, entity_id, entity_type,"
+            " occurred_at, recorded_at, payload_json, metadata_json, schema_version"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "event-legacy-nan",
+                EventType.FEEDBACK_RECORDED.value,
+                "mcp",
+                PACK_ID,
+                "pack",
+                now.isoformat(),
+                now.isoformat(),
+                json.dumps(payload),
+                json.dumps({}),
+                SCHEMA_VERSION,
+            ),
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
 
 
 class TestBackfillOutcomesCommand:
@@ -171,3 +224,51 @@ class TestBackfillOutcomesCommand:
         assert payload["status"] == "error"
         assert payload["events_truncated"] is True
         assert "--event-limit" in as_text.output
+
+
+class TestALegacyNonFiniteRowIsATypedFailure:
+    """Replaying a pre-#835 NaN row must not surface a bare traceback (#839).
+
+    ``backfill_outcomes``'s ``--apply`` path writes through the real
+    ``OutcomeStore``, whose ``append_many`` dumps with ``allow_nan=False``
+    (#835) and raises an untyped ``ValueError`` on the first non-finite
+    score it meets, chunk-atomically rolling back every row alongside it.
+    Before this fix that ``ValueError`` was uncaught at the CLI boundary
+    (the global catch in ``trellis_cli.main`` only catches ``TrellisError``
+    and ``PackAssemblyError``), so it reached the operator as a bare
+    traceback instead of a described, typed failure.
+    """
+
+    def test_apply_reports_a_typed_failure_instead_of_a_traceback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _seed(tmp_path, monkeypatch, events=0)
+        _seed_legacy_nan_row(stores_dir)
+
+        result = runner.invoke(
+            app, ["admin", "backfill-outcomes", "--apply", "--format", "json"]
+        )
+
+        assert result.exit_code == EXIT_INTERNAL, result.output
+        payload: dict[str, Any] = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert payload["error_type"] == "ValueError"
+        assert _outcome_count(stores_dir) == 0
+
+    def test_apply_exits_the_same_way_in_both_formats(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _seed(tmp_path, monkeypatch, events=0)
+        _seed_legacy_nan_row(stores_dir)
+
+        as_json = runner.invoke(
+            app, ["admin", "backfill-outcomes", "--apply", "--format", "json"]
+        )
+        _reset_registry()
+        as_text = runner.invoke(app, ["admin", "backfill-outcomes", "--apply"])
+
+        assert as_json.exit_code == EXIT_INTERNAL, as_json.output
+        assert as_text.exit_code == as_json.exit_code, as_text.output
+        # Not a traceback: no frame markers, and the message surfaces.
+        assert "Traceback" not in as_text.output
+        assert "not JSON compliant" in plain(as_text.output)
