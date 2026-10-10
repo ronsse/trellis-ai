@@ -1861,6 +1861,27 @@ All notable changes to Trellis will be documented in this file.
   same table. Both stores now read `created_at` alongside `edge_id` under
   the same lock that reads the current row and write it back on the new
   version; `valid_from` still advances on every write.
+- **Three follow-ups to #834's embed-on-ingest fix apply its "describe,
+  don't quote; log once" discipline to the paths it didn't cover.**
+  `trellis admin reindex-vectors` read the vector store with an unwrapped
+  `getattr(..., None)`, which only ever absorbed an `AttributeError` the
+  real property never raises, so a backend misconfiguration escaped as a
+  bare traceback instead of this command's own error path; it now raises
+  a `StoreError` naming the cause's type (and, for a `ConfigError`, the
+  broken setting) and exits `EXIT_STORE` (5), the same code
+  `trellis admin api-keys` uses for a backend failure, regardless of
+  `--format`. `resolve_vector_store`
+  (`trellis.core.vector_metadata`) logged `exc_info=True` on every call
+  while a vector-store backend stayed broken — a full traceback carrying
+  the exception's message on every tag write, demotion and session
+  capture — rather than once per distinct cause per process; it now
+  describes the cause and logs through the same once-per-cause cache
+  idiom #834 introduced. The embed-on-ingest hook's upsert failure path
+  had the matching gap on its other `except` block: it logged on every
+  document and returned `str(exc)` — the message text — as the pack's
+  `reason`; it now describes (type name, plus the setting for a
+  `ConfigError`) and dedups the log the same way its resolve-failure path
+  already did.
 
 ## [0.9.0] - 2026-05-13
 

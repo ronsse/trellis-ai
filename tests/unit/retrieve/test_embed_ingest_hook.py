@@ -205,6 +205,10 @@ class TestHook:
         assert summary["embedded"] is False
 
     def test_embedder_failure_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Describe, don't quote: the embed-call failure (not a resolve
+        failure — ``embedding_fn`` resolved fine, calling it raised)
+        shares the upsert except block's reason shape, so ``reason`` is
+        the exception's type name, never its message text."""
         monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
 
         def broken(text: str) -> list[float]:
@@ -213,7 +217,8 @@ class TestHook:
 
         registry = _registry(embedding_fn=broken)
         summary = run_embed_on_ingest(registry, "d1", "content", source="t")
-        assert summary == {"embedded": False, "reason": "embedder down"}
+        assert summary == {"embedded": False, "reason": "RuntimeError"}
+        assert "embedder down" not in summary["reason"]
         registry.knowledge.vector_store.upsert.assert_not_called()
 
     def test_embedder_resolve_failure_swallowed(
@@ -425,9 +430,106 @@ class TestHook:
         registry = _registry()
         registry.knowledge.vector_store.upsert.side_effect = RuntimeError("db down")
         summary = run_embed_on_ingest(registry, "d1", "content", source="t")
-        assert summary is not None
-        assert summary["embedded"] is False
-        assert "db down" in summary["reason"]
+        assert summary == {"embedded": False, "reason": "RuntimeError"}
+        assert "db down" not in summary["reason"]
+
+
+class TestUpsertFailure:
+    """``build_vector_row``/``vector_store.upsert`` failing (both resolved
+    fine; the embed or the write itself raised) must describe the cause
+    and log it once per process per cause, matching the resolve path's
+    discipline above rather than the pre-fix ``logger.exception`` +
+    ``str(exc)`` shape (one traceback and one message-text leak per
+    document, since this block runs on every ingest while the backend
+    stays broken).
+    """
+
+    def test_reason_names_the_setting_for_a_config_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        registry.knowledge.vector_store.upsert.side_effect = ConfigError(
+            "dimension mismatch", setting="vector.dimensions"
+        )
+        summary = run_embed_on_ingest(registry, "d1", "content", source="t")
+        assert summary == {
+            "embedded": False,
+            "reason": "ConfigError: vector.dimensions",
+        }
+        assert "dimension mismatch" not in summary["reason"]
+
+    def test_logged_once_per_distinct_cause(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two failed upserts against the same persistently-broken backend
+        must produce exactly ONE warning record, not a traceback per
+        document."""
+        from structlog.testing import capture_logs
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        registry.knowledge.vector_store.upsert.side_effect = RuntimeError("db down")
+
+        with capture_logs() as logs:
+            first = run_embed_on_ingest(registry, "d1", "content", source="t")
+            second = run_embed_on_ingest(registry, "d2", "content", source="t")
+
+        assert first == {"embedded": False, "reason": "RuntimeError"}
+        assert second == {"embedded": False, "reason": "RuntimeError"}
+        matching = [
+            entry for entry in logs if entry["event"] == "embed_on_ingest_upsert_failed"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["log_level"] == "warning"
+        assert matching[0]["error_type"] == "RuntimeError"
+        assert matching[0]["setting"] is None
+
+    def test_log_never_carries_the_message_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        sentinel = "SENTINEL-leak-marker-9f3c-upsert"
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        registry.knowledge.vector_store.upsert.side_effect = RuntimeError(sentinel)
+
+        with capture_logs() as logs:
+            run_embed_on_ingest(registry, "d1", "content", source="t")
+
+        matching = [
+            entry for entry in logs if entry["event"] == "embed_on_ingest_upsert_failed"
+        ]
+        assert len(matching) == 1
+        # No ``exc_info=True`` -> structlog captures no traceback request at
+        # all, not merely one that got rendered away.
+        assert "exc_info" not in matching[0]
+        for value in matching[0].values():
+            assert sentinel not in str(value)
+
+    def test_logs_again_for_a_different_cause(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dedup is per-cause, not a global silence switch."""
+        from structlog.testing import capture_logs
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        registry.knowledge.vector_store.upsert.side_effect = RuntimeError("db down")
+
+        with capture_logs() as logs:
+            run_embed_on_ingest(registry, "d1", "content", source="t")
+            registry.knowledge.vector_store.upsert.side_effect = ConfigError(
+                "bad dims", setting="vector.dimensions"
+            )
+            run_embed_on_ingest(registry, "d2", "content", source="t")
+
+        matching = [
+            entry for entry in logs if entry["event"] == "embed_on_ingest_upsert_failed"
+        ]
+        assert len(matching) == 2
+        assert {m["error_type"] for m in matching} == {"RuntimeError", "ConfigError"}
 
 
 class TestVectorStoreResolve:

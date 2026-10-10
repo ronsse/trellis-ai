@@ -14,6 +14,8 @@ import json
 import pytest
 from typer.testing import CliRunner
 
+from trellis.errors import ConfigError
+from trellis.stores.registry import _KnowledgePlane
 from trellis_cli.admin import admin_app
 from trellis_cli.stores import _get_registry, _reset_registry
 
@@ -107,3 +109,69 @@ class TestReindexVectorsCLI:
         _seed_documents()
         summary = _run_json("--limit", "1")
         assert summary["scanned"] == 1
+
+
+class TestReindexVectorsStoreResolveFailure:
+    """A raising ``vector_store`` property must not escape as a traceback.
+
+    ``getattr(registry.knowledge, "vector_store", None)`` only ever
+    absorbed an ``AttributeError`` the real property never raises — any
+    OTHER exception from resolving it (a broken backend config) escaped
+    uncaught. It is now wrapped and reported through this command's own
+    error path at ``EXIT_STORE`` (5), same exit code
+    ``trellis admin api-keys`` uses for a backend failure
+    (``admin_api_keys.py::_store_error``), distinct from the
+    already-existing ``EXIT_INTERNAL`` (1) "unconfigured" branch covered
+    by ``test_missing_embedder_exits_loudly`` above.
+    """
+
+    def test_json_format_exits_store(self, cli_env, monkeypatch) -> None:
+        monkeypatch.setattr(
+            _KnowledgePlane,
+            "vector_store",
+            property(
+                lambda _self: (_ for _ in ()).throw(
+                    ConfigError("boom", setting="vectors.backend")
+                )
+            ),
+        )
+        result = runner.invoke(admin_app, ["reindex-vectors", "--format", "json"])
+        assert result.exit_code == 5
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        # Describe, don't quote: the type name and the broken setting, not
+        # the original message text ("boom") the exception carried.
+        assert "ConfigError" in payload["message"]
+        assert "vectors.backend" in payload["message"]
+        assert "boom" not in payload["message"]
+
+    def test_text_format_exits_store_too(self, cli_env, monkeypatch) -> None:
+        """Same exit code regardless of ``--format`` (parity rule)."""
+        monkeypatch.setattr(
+            _KnowledgePlane,
+            "vector_store",
+            property(
+                lambda _self: (_ for _ in ()).throw(
+                    ConfigError("boom", setting="vectors.backend")
+                )
+            ),
+        )
+        result = runner.invoke(admin_app, ["reindex-vectors"])
+        assert result.exit_code == 5
+        assert "ConfigError" in result.output
+        assert "boom" not in result.output
+
+    def test_describes_a_non_config_error_by_type_alone(
+        self, cli_env, monkeypatch
+    ) -> None:
+        """No ``setting`` to report: the message is just the type name."""
+        monkeypatch.setattr(
+            _KnowledgePlane,
+            "vector_store",
+            property(lambda _self: (_ for _ in ()).throw(RuntimeError("db down"))),
+        )
+        result = runner.invoke(admin_app, ["reindex-vectors", "--format", "json"])
+        assert result.exit_code == 5
+        payload = json.loads(result.stdout)
+        assert "RuntimeError" in payload["message"]
+        assert "db down" not in payload["message"]

@@ -18,6 +18,7 @@ from trellis.core.vector_metadata import (
     sync_vector_metadata,
     vector_metadata_diverges,
 )
+from trellis.errors import ConfigError
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.vector import VectorStore
 from trellis.stores.sqlite.vector import SQLiteVectorStore
@@ -229,3 +230,109 @@ class TestResolveVectorStore:
             lambda _self: (_ for _ in ()).throw(RuntimeError("no vector backend"))
         )
         assert resolve_vector_store(registry) is None
+
+
+class TestResolveVectorStoreFailureLogging:
+    """Describe, don't quote; log once — the same discipline #834 gave the
+    embed-on-ingest hook's resolve path, applied here because
+    ``resolve_vector_store`` runs on every tag write across the feedback
+    loop, REST/CLI demotion surfaces and session capture: the prior
+    ``logger.warning(..., exc_info=True)`` put a full traceback carrying
+    the exception's message on every one of those calls while the cause
+    persisted, rather than once per distinct cause per process.
+    """
+
+    def test_reason_names_the_setting_for_a_config_error(self) -> None:
+        registry = MagicMock()
+        type(registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                ConfigError("unknown vector backend", setting="vector.backend")
+            )
+        )
+        assert resolve_vector_store(registry) is None
+
+    def test_logged_once_per_distinct_cause(self) -> None:
+        """Two calls against the same persistently-broken registry must
+        produce exactly ONE warning record, not a traceback per write —
+        the pre-fix behaviour logged ``exc_info=True`` unconditionally."""
+        from structlog.testing import capture_logs
+
+        first_registry = MagicMock()
+        type(first_registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                ConfigError("down", setting="vector.backend")
+            )
+        )
+        second_registry = MagicMock()
+        type(second_registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                ConfigError("down", setting="vector.backend")
+            )
+        )
+
+        with capture_logs() as logs:
+            assert resolve_vector_store(first_registry) is None
+            assert resolve_vector_store(second_registry) is None
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["log_level"] == "warning"
+        assert matching[0]["error_type"] == "ConfigError"
+        assert matching[0]["setting"] == "vector.backend"
+
+    def test_log_never_carries_the_message_text_or_a_traceback(self) -> None:
+        from structlog.testing import capture_logs
+
+        sentinel = "SENTINEL-leak-marker-9f3c-metadata"
+        registry = MagicMock()
+        type(registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(RuntimeError(sentinel))
+        )
+
+        with capture_logs() as logs:
+            assert resolve_vector_store(registry) is None
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["setting"] is None
+        # No exc_info -> no "exception" key carrying a rendered traceback.
+        # No ``exc_info=True`` -> structlog captures no traceback request at
+        # all, not merely one that got rendered away.
+        assert "exc_info" not in matching[0]
+        for value in matching[0].values():
+            assert sentinel not in str(value)
+
+    def test_logs_again_for_a_different_cause(self) -> None:
+        """Dedup is per-cause, not a global silence switch."""
+        from structlog.testing import capture_logs
+
+        first_registry = MagicMock()
+        type(first_registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                ConfigError("down", setting="vector.backend")
+            )
+        )
+        second_registry = MagicMock()
+        type(second_registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(RuntimeError("different cause"))
+        )
+
+        with capture_logs() as logs:
+            resolve_vector_store(first_registry)
+            resolve_vector_store(second_registry)
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 2
+        assert {m["error_type"] for m in matching} == {"ConfigError", "RuntimeError"}

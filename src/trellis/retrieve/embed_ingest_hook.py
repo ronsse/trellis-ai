@@ -200,6 +200,31 @@ def _warn_resolve_failed_once(
     )
 
 
+@functools.cache
+def _warn_upsert_failed_once(error_type: str, setting: str | None) -> None:
+    """Emit ``embed_on_ingest_upsert_failed`` once per ``(error_type, setting)``.
+
+    The embed/upsert step (not a resolve — ``embedding_fn`` and
+    ``vector_store`` both resolved fine) fails identically for every
+    later document while its cause persists (backend down, dimension
+    mismatch), so logging a full traceback per document — the prior
+    behaviour — turned one cause into a traceback per write, same as the
+    resolve path above. ``functools.cache`` makes a repeat call with the
+    same arguments a no-op. WARNING, not ``.exception``: the type and
+    setting are what an operator acts on; the traceback is noise after
+    the first one.
+
+    ``_warn_upsert_failed_once.cache_clear()`` is test-facing only, to
+    isolate cases within one process — a production process does not
+    reset it mid-flight.
+    """
+    logger.warning(
+        "embed_on_ingest_upsert_failed",
+        error_type=error_type,
+        setting=setting,
+    )
+
+
 def run_embed_on_ingest(
     registry: StoreRegistry,
     doc_id: str,
@@ -223,17 +248,19 @@ def run_embed_on_ingest(
         ``{"embedded": True, "dimensions": int}`` on success, or
         ``{"embedded": False, "reason": "..."}`` when skipped (empty
         content, embedder/vector store unconfigured) or failed. Any
-        failure is caught and logged — it never propagates. When
+        failure is caught and logged — it never propagates. Whether
         ``registry.embedding_fn`` or ``registry.knowledge.vector_store``
-        itself fails to resolve (raises instead of returning), ``reason``
-        carries only the exception's type name and, when the exception
-        names one (see :class:`~trellis.errors.ConfigError`'s
+        itself fails to resolve (raises instead of returning), or the
+        embed/upsert call itself fails (backend down, dimension
+        mismatch), ``reason`` carries only the exception's type name and,
+        when the exception names one (see :class:`~trellis.errors.ConfigError`'s
         ``setting``), the broken setting — e.g. ``"ConfigError:
         embeddings.provider"`` — never the exception's message text,
-        which can echo a credential (this resolve path never sees document
-        content — it fails before any document is read). The matching
-        warning is logged once per distinct ``(component, cause)`` per
-        process, not once per call; see :func:`_warn_resolve_failed_once`.
+        which can echo document content or a credential. The matching
+        warning is logged once per distinct cause per process, not once
+        per call; see :func:`_warn_resolve_failed_once` (resolve
+        failures) and :func:`_warn_upsert_failed_once` (embed/upsert
+        failures).
     """
     if not embed_on_ingest_enabled():
         return None
@@ -295,9 +322,14 @@ def run_embed_on_ingest(
         # "the document is durably stored". Embedding is a feature-
         # flagged bonus pass; its failure (embedder down, dimension
         # mismatch) must never roll back a successful document write.
-        # Logged at exception level so persistent breakage is visible.
-        logger.exception("embed_on_ingest_failed", doc_id=doc_id, source=source)
-        return {"embedded": False, "reason": str(exc)}
+        # Describe, don't quote — same reason as the resolve path above:
+        # the exception's message can echo document content or a
+        # credential, and ``logger.exception`` on every document turned
+        # one persistently broken backend into a traceback per write.
+        error_type, setting = _describe_resolve_failure(exc)
+        _warn_upsert_failed_once(error_type, setting)
+        reason = f"{error_type}: {setting}" if setting else error_type
+        return {"embedded": False, "reason": reason}
 
     logger.info(
         "embed_on_ingest_completed",

@@ -25,12 +25,14 @@ import structlog
 import typer
 from rich.markup import escape
 
+from trellis.errors import ConfigError, StoreError
 from trellis.retrieve.embed_ingest_hook import build_vector_row
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
 from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
 
 if TYPE_CHECKING:
+    from trellis.stores.base.vector import VectorStore
     from trellis.stores.registry import StoreRegistry
 
 console = build_console()
@@ -38,6 +40,34 @@ logger = structlog.get_logger(__name__)
 
 #: Documents fetched (and vectors upserted) per round-trip.
 DEFAULT_BATCH_SIZE = 100
+
+
+def _resolve_vector_store(registry: StoreRegistry) -> VectorStore | None:
+    """``registry.knowledge.vector_store``, describing a resolve failure.
+
+    A real registry's ``vector_store`` property always exists (it is a
+    normal ``@property`` on ``_KnowledgePlane`` — see
+    ``trellis.stores.registry``), so the ``getattr(..., None)`` this
+    replaced never actually absorbed an ``AttributeError`` here; it only
+    hid whatever OTHER exception the property's own backend
+    instantiation raised (a bad backend config, an unreachable store),
+    which then escaped as a bare traceback instead of this command's own
+    error path. Describe, don't quote (same principle as #834's
+    embed-on-ingest hook): the raised :class:`~trellis.errors.StoreError`
+    names the cause's type and, for a :class:`~trellis.errors.ConfigError`,
+    the broken setting — never the original exception's message text.
+
+    Raises:
+        StoreError: when resolving the property itself raises.
+    """
+    try:
+        return registry.knowledge.vector_store
+    except Exception as exc:
+        error_type = type(exc).__name__
+        setting = exc.setting if isinstance(exc, ConfigError) else None
+        reason = f"{error_type}: {setting}" if setting else error_type
+        msg = f"reindex-vectors could not resolve the vector store ({reason})"
+        raise StoreError(msg, store="vector") from exc
 
 
 def run_reindex_vectors(
@@ -58,9 +88,12 @@ def run_reindex_vectors(
 
     Raises:
         ValueError: when the embedder or vector store is unconfigured.
+        StoreError: when resolving the vector store itself raises (a
+            broken backend config, not simply "none configured"); see
+            :func:`_resolve_vector_store`.
     """
     embedding_fn = registry.embedding_fn
-    vector_store = getattr(registry.knowledge, "vector_store", None)
+    vector_store = _resolve_vector_store(registry)
     document_store = registry.knowledge.document_store
 
     if embedding_fn is None or vector_store is None:
@@ -185,6 +218,12 @@ def register(admin_app: typer.Typer) -> None:
             else:
                 console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
             raise typer.Exit(code=EXIT_INTERNAL) from exc
+        except StoreError as exc:
+            if output_format == "json":
+                print(json.dumps({"status": "error", "message": str(exc)}))
+            else:
+                console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+            raise typer.Exit(code=EXIT_STORE) from exc
 
         if output_format == "json":
             print(json.dumps(summary))
