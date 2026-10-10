@@ -7,7 +7,10 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, HTTPException
 
-from trellis.core.error_sanitize import sanitize_error_message
+from trellis.core.error_sanitize import (
+    describe_validation_error,
+    sanitize_error_message,
+)
 from trellis.core.ids import generate_ulid
 from trellis.extract.trace_ingest_hook import (
     run_trace_extraction,
@@ -45,7 +48,10 @@ def ingest_trace(body: dict[str, Any]) -> IngestResponse:
     try:
         trace = Trace.model_validate(body)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid trace: {exc}") from exc
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid trace: {describe_validation_error(exc)}",
+        ) from exc
 
     registry = get_registry()
     executor = build_curate_executor(registry)
@@ -94,7 +100,10 @@ def ingest_evidence(body: dict[str, Any]) -> IngestResponse:
     try:
         evidence = Evidence.model_validate(body)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid evidence: {exc}") from exc
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid evidence: {describe_validation_error(exc)}",
+        ) from exc
 
     registry = get_registry()
     evidence_metadata: dict[str, Any] = {
@@ -246,6 +255,16 @@ def _is_terminal_failure(status: CommandStatus) -> bool:
     return status in (CommandStatus.FAILED, CommandStatus.REJECTED)
 
 
+def _sanitized_item_message(status: CommandStatus, message: str) -> str:
+    """Sanitize a per-item ``BulkItemResult.message`` only when *status*
+    is FAILED or REJECTED (#829 follow-up). A SUCCESS or DUPLICATE
+    message only restates the caller's own request -- a name or id --
+    so it is returned verbatim rather than risking the suppression
+    marker on an ordinary long name or email-named entity.
+    """
+    return sanitize_error_message(message) if _is_terminal_failure(status) else message
+
+
 @router.post("/ingest/bulk", response_model=BulkIngestResponse)
 def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
     """Bulk ingest entities, edges, and aliases in one request.
@@ -294,7 +313,9 @@ def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
                 status=entity_result.status.value,
                 id=entity_result.created_id,
                 name=entity.name,
-                message=entity_result.message,
+                message=_sanitized_item_message(
+                    entity_result.status, entity_result.message
+                ),
             )
         )
         if req.strategy == BatchStrategy.STOP_ON_ERROR and _is_terminal_failure(
@@ -322,7 +343,9 @@ def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
                 status=edge_result.status.value,
                 id=edge_result.created_id,
                 name=f"{edge.source_id}->{edge.target_id}",
-                message=edge_result.message,
+                message=_sanitized_item_message(
+                    edge_result.status, edge_result.message
+                ),
             )
         )
         if req.strategy == BatchStrategy.STOP_ON_ERROR and _is_terminal_failure(
@@ -349,7 +372,7 @@ def ingest_bulk(req: BulkIngestRequest) -> BulkIngestResponse:
                 status=result.status.value,
                 id=result.created_id,
                 name=f"{alias.source_system}:{alias.raw_id}",
-                message=result.message,
+                message=_sanitized_item_message(result.status, result.message),
             )
         )
         if req.strategy == BatchStrategy.STOP_ON_ERROR and _is_terminal_failure(
