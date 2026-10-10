@@ -480,6 +480,24 @@ class TestWorkerCurate:
         # Promote-half artifacts are written for human review.
         assert data["candidates_path"] is not None
         assert Path(data["candidates_path"]).exists()
+        # Promotable digest (#e159): this seed's one candidate has 3
+        # helpful citations and 0 unhelpful, so it is promotable end to
+        # end through the real JSON CLI payload, not just the unit tests
+        # on the pure digest builder.
+        promotable = data["learning_promotable"]
+        assert promotable["count"] == 1
+        assert len(promotable["top"]) == 1
+        top_row = promotable["top"][0]
+        assert top_row["helpful_count"] == 3
+        assert top_row["times_served"] == 3
+        assert top_row["success_rate"] == 1.0
+        # The item ("wc:doc:helpful") was only ever referenced in event
+        # payloads, never put into the document store, so the
+        # readable-name fallback can't resolve it and the bare item id
+        # survives in the name.
+        assert top_row["precedent_name"].endswith("wc:doc:helpful")
+        candidates_payload = json.loads(Path(data["candidates_path"]).read_text())
+        assert candidates_payload["promotable"] == promotable
         assert Path(data["decisions_path"]).exists()
         assert data["skipped_stages"] == []
 

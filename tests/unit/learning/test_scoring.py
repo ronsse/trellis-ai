@@ -17,6 +17,7 @@ from trellis.learning.evidence_gate import (
 )
 from trellis.learning.scoring import (
     LEARNING_NOISE_SUCCESS_KEY,
+    LEARNING_PROMOTABLE_MIN_HELPFUL_COUNT,
     LEARNING_PROMOTE_SUCCESS_KEY,
     analyze_learning_observations,
     build_learning_promotion_payloads,
@@ -25,6 +26,21 @@ from trellis.learning.scoring import (
     write_learning_review_artifacts,
 )
 from trellis.ops import ParameterRegistry
+
+
+class _FakeDocumentStore:
+    """Minimal ``DocumentStore.get`` test double: an in-memory id->doc map.
+
+    Mirrors the real contract (``get`` returns ``None`` cleanly on a miss,
+    confirmed against the sqlite backend) rather than raising, so these
+    tests exercise the same "unresolvable" path a real store takes.
+    """
+
+    def __init__(self, documents: dict[str, dict] | None = None) -> None:
+        self._documents = documents or {}
+
+    def get(self, doc_id: str) -> dict | None:
+        return self._documents.get(doc_id)
 
 
 @pytest.fixture
@@ -400,35 +416,44 @@ def _make_promotable_candidate(
     candidate_id: str = "asset_generation:abc123",
     recommendation_type: str = "promote_guidance",
     intent_family: str = "asset_generation",
+    *,
+    item_id: str = "item-x",
+    title: str | None = "Test Guidance",
+    times_served: int = 5,
+    success_rate: float = 0.9,
+    citation_evidence: dict | None = None,
 ) -> dict:
+    name_title = (title or item_id).strip()
     return {
         "candidate_id": candidate_id,
         "intent_family": intent_family,
         "recommendation_type": recommendation_type,
-        "item_id": "item-x",
+        "item_id": item_id,
         "item_type": "guidance",
-        "title": "Test Guidance",
-        "precedent_name": f"Learning: {intent_family} :: Test Guidance",
+        "title": title,
+        "precedent_name": f"Learning: {intent_family} :: {name_title}",
         "precedent_properties": {
             "category": "retrieval_guidance",
             "intent_family": intent_family,
-            "source_item_id": "item-x",
+            "source_item_id": item_id,
             "source_item_type": "guidance",
-            "success_rate": 0.9,
+            "success_rate": success_rate,
             "retry_rate": 0.1,
-            "support_count": 5,
+            "support_count": times_served,
             "source_of_truth": "reviewed_promotion",
         },
         "target_entity_ids": ["entity://foo"],
         "supporting_run_ids": ["run-1"],
         "phases": ["GENERATE"],
         "metrics": {
-            "times_served": 5,
-            "success_rate": 0.9,
+            "times_served": times_served,
+            "success_rate": success_rate,
             "retry_rate": 0.1,
             "injection_rate": 0.0,
             "avg_selection_efficiency": None,
         },
+        "citation_evidence": citation_evidence
+        or {"appearances": times_served, "helpful_count": 0, "unhelpful_count": 0},
     }
 
 
@@ -667,6 +692,335 @@ class TestWriteLearningReviewArtifacts:
         }
         paths = write_learning_review_artifacts(report=report, output_dir=nested)
         assert Path(paths["candidates_path"]).exists()
+
+
+# ---------------------------------------------------------------------------
+# Readable fallback names (#e159)
+# ---------------------------------------------------------------------------
+
+
+def _report_with_candidates(*candidates: dict) -> dict:
+    return {
+        "artifact_version": "1.0",
+        "generated_at_utc": "2024-01-01T00:00:00.000Z",
+        "artifacts_root": None,
+        "min_support": 2,
+        "observation_count": len(candidates),
+        "candidate_count": len(candidates),
+        "candidates": list(candidates),
+    }
+
+
+class TestReadableNameFallback:
+    def test_fallback_name_used_when_title_missing(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(item_id="item-no-title", title=None)
+        # A missing title means ``analyze_learning_observations`` already
+        # named this candidate with the bare item id (mirrors prod: see
+        # scoring.py's own precedent_name construction).
+        candidate["precedent_name"] = "Learning: asset_generation :: item-no-title"
+        store = _FakeDocumentStore(
+            {
+                "item-no-title": {
+                    "content": (
+                        "---\ntitle: ignored\n---\n"
+                        "## Readable Heading For Item\n\nBody text."
+                    )
+                }
+            }
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        updated = report["candidates"][0]
+        assert (
+            updated["precedent_name"]
+            == "Learning: asset_generation :: Readable Heading For Item"
+        )
+
+    def test_title_kept_when_present(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(
+            item_id="item-with-title", title="Existing Title"
+        )
+        original_name = candidate["precedent_name"]
+        store = _FakeDocumentStore(
+            {"item-with-title": {"content": "# A Totally Different Heading"}}
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        updated = report["candidates"][0]
+        assert updated["precedent_name"] == original_name
+
+    def test_unresolvable_item_keeps_bare_id(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(item_id="missing-item-id", title=None)
+        candidate["precedent_name"] = "Learning: asset_generation :: missing-item-id"
+        store = _FakeDocumentStore({})  # empty: nothing resolves
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        updated = report["candidates"][0]
+        expected = "Learning: asset_generation :: missing-item-id"
+        assert updated["precedent_name"] == expected
+
+    def test_no_document_store_keeps_bare_id(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(item_id="item-no-store", title=None)
+        candidate["precedent_name"] = "Learning: asset_generation :: item-no-store"
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        updated = report["candidates"][0]
+        expected = "Learning: asset_generation :: item-no-store"
+        assert updated["precedent_name"] == expected
+
+    def test_frontmatter_and_heading_marker_both_stripped(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(item_id="item-fm", title=None)
+        store = _FakeDocumentStore(
+            {
+                "item-fm": {
+                    "content": (
+                        "---\nkey: value\nother: 1\n---\n"
+                        "\n"
+                        "### Heading Marker Stripped\n"
+                        "More body text that should not appear in the name."
+                    )
+                }
+            }
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        updated = report["candidates"][0]
+        assert (
+            updated["precedent_name"]
+            == "Learning: asset_generation :: Heading Marker Stripped"
+        )
+
+    def test_blank_content_keeps_bare_id(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(item_id="item-blank", title=None)
+        candidate["precedent_name"] = "Learning: asset_generation :: item-blank"
+        store = _FakeDocumentStore({"item-blank": {"content": "   \n\n  "}})
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        updated = report["candidates"][0]
+        assert updated["precedent_name"] == "Learning: asset_generation :: item-blank"
+
+
+# ---------------------------------------------------------------------------
+# Promotable digest (#e159)
+# ---------------------------------------------------------------------------
+
+
+class TestPromotableDigest:
+    def test_count_and_top_include_eligible_candidate(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(
+            candidate_id="asset_generation:c1",
+            times_served=10,
+            success_rate=0.9,
+            citation_evidence={
+                "appearances": 10,
+                "helpful_count": 2,
+                "unhelpful_count": 0,
+            },
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        digest = report["promotable"]
+        assert digest["count"] == 1
+        assert len(digest["top"]) == 1
+        row = digest["top"][0]
+        assert row["candidate_id"] == "asset_generation:c1"
+        assert row["helpful_count"] == 2
+        assert row["times_served"] == 10
+        assert row["success_rate"] == 0.9
+
+    def test_unhelpful_citation_excludes_candidate(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(
+            candidate_id="asset_generation:c2",
+            citation_evidence={
+                "appearances": 5,
+                "helpful_count": 3,
+                "unhelpful_count": 1,
+            },
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        digest = report["promotable"]
+        assert digest["count"] == 0
+        assert digest["top"] == []
+
+    def test_below_threshold_helpful_count_excluded(self, tmp_path: Path) -> None:
+        assert LEARNING_PROMOTABLE_MIN_HELPFUL_COUNT == 1
+        candidate = _make_promotable_candidate(
+            candidate_id="asset_generation:c3",
+            citation_evidence={
+                "appearances": 5,
+                "helpful_count": 0,
+                "unhelpful_count": 0,
+            },
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        digest = report["promotable"]
+        assert digest["count"] == 0
+        assert digest["top"] == []
+
+    def test_non_promote_guidance_recommendation_excluded(self, tmp_path: Path) -> None:
+        # Narrower literal, not PROMOTE_RECOMMENDATIONS: a promote_precedent
+        # candidate with equally strong evidence must NOT appear.
+        promote_precedent = _make_promotable_candidate(
+            candidate_id="asset_generation:c4",
+            recommendation_type="promote_precedent",
+            citation_evidence={
+                "appearances": 10,
+                "helpful_count": 5,
+                "unhelpful_count": 0,
+            },
+        )
+        investigate_noise = _make_promotable_candidate(
+            candidate_id="asset_generation:c5",
+            recommendation_type="investigate_noise",
+            citation_evidence={
+                "appearances": 10,
+                "helpful_count": 5,
+                "unhelpful_count": 0,
+            },
+        )
+        report = _report_with_candidates(promote_precedent, investigate_noise)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        digest = report["promotable"]
+        assert digest["count"] == 0
+        assert digest["top"] == []
+
+    def test_ordering_by_helpful_count_desc(self, tmp_path: Path) -> None:
+        low = _make_promotable_candidate(
+            candidate_id="asset_generation:low",
+            citation_evidence={
+                "appearances": 5,
+                "helpful_count": 1,
+                "unhelpful_count": 0,
+            },
+        )
+        high = _make_promotable_candidate(
+            candidate_id="asset_generation:high",
+            citation_evidence={
+                "appearances": 5,
+                "helpful_count": 4,
+                "unhelpful_count": 0,
+            },
+        )
+        report = _report_with_candidates(low, high)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        top = report["promotable"]["top"]
+        assert [row["candidate_id"] for row in top] == [
+            "asset_generation:high",
+            "asset_generation:low",
+        ]
+
+    def test_ordering_tiebreaks_on_success_rate_then_times_served(
+        self, tmp_path: Path
+    ) -> None:
+        # All three share helpful_count=1, so success_rate breaks the first
+        # tie and times_served breaks the second.
+        a = _make_promotable_candidate(
+            candidate_id="asset_generation:a",
+            success_rate=0.5,
+            times_served=10,
+            citation_evidence={
+                "appearances": 10,
+                "helpful_count": 1,
+                "unhelpful_count": 0,
+            },
+        )
+        b = _make_promotable_candidate(
+            candidate_id="asset_generation:b",
+            success_rate=0.9,
+            times_served=1,
+            citation_evidence={
+                "appearances": 1,
+                "helpful_count": 1,
+                "unhelpful_count": 0,
+            },
+        )
+        c = _make_promotable_candidate(
+            candidate_id="asset_generation:c",
+            success_rate=0.9,
+            times_served=20,
+            citation_evidence={
+                "appearances": 20,
+                "helpful_count": 1,
+                "unhelpful_count": 0,
+            },
+        )
+        report = _report_with_candidates(a, b, c)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        top = report["promotable"]["top"]
+        assert [row["candidate_id"] for row in top] == [
+            "asset_generation:c",
+            "asset_generation:b",
+            "asset_generation:a",
+        ]
+
+    def test_top_capped_at_five(self, tmp_path: Path) -> None:
+        candidates = [
+            _make_promotable_candidate(
+                candidate_id=f"asset_generation:cand{i}",
+                citation_evidence={
+                    "appearances": 10,
+                    "helpful_count": 10 - i,
+                    "unhelpful_count": 0,
+                },
+            )
+            for i in range(7)
+        ]
+        report = _report_with_candidates(*candidates)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        digest = report["promotable"]
+        assert digest["count"] == 7
+        assert len(digest["top"]) == 5
+        assert [row["candidate_id"] for row in digest["top"]] == [
+            "asset_generation:cand0",
+            "asset_generation:cand1",
+            "asset_generation:cand2",
+            "asset_generation:cand3",
+            "asset_generation:cand4",
+        ]
+
+    def test_digest_uses_post_fallback_precedent_name(self, tmp_path: Path) -> None:
+        # The digest must reflect the readable-name fallback, not the stale
+        # bare-id name the pure aggregator produced — this is why the
+        # digest is computed inside write_learning_review_artifacts, after
+        # the fallback loop, rather than inside analyze_learning_observations.
+        candidate = _make_promotable_candidate(
+            candidate_id="asset_generation:fb",
+            item_id="item-fb",
+            title=None,
+            citation_evidence={
+                "appearances": 5,
+                "helpful_count": 1,
+                "unhelpful_count": 0,
+            },
+        )
+        candidate["precedent_name"] = "Learning: asset_generation :: item-fb"
+        store = _FakeDocumentStore(
+            {"item-fb": {"content": "Readable Fallback Name\nmore text"}}
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        row = report["promotable"]["top"][0]
+        expected = "Learning: asset_generation :: Readable Fallback Name"
+        assert row["precedent_name"] == expected
+
+    def test_empty_candidates_produces_empty_digest(self, tmp_path: Path) -> None:
+        report = _report_with_candidates()
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        assert report["promotable"] == {"count": 0, "top": []}
 
 
 # ---------------------------------------------------------------------------

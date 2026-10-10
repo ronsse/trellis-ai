@@ -6,6 +6,27 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Promotable-candidate digest and readable fallback names (#e159).** Prod
+  had scored 796 learning candidates with 0 ever promoted, and 13 of the top
+  15 `promote_guidance` candidates carried an ugly bare-item-id
+  `precedent_name` because `title` was missing at scoring time. Two fixes,
+  both surfacing-only — nothing here promotes anything:
+  - A title-less candidate now gets a readable fallback name — the first
+    non-empty line of its document (frontmatter and a leading markdown
+    heading marker stripped, truncated like the existing `precedent_name`
+    convention) — resolved once a `DocumentStore` is reachable, at the point
+    `write_learning_review_artifacts` writes the artifact. A candidate that
+    already has a `title`, or whose item can't be resolved, is unchanged; the
+    `promotion_name` override still wins over whichever `precedent_name`
+    results.
+  - `intent_learning_candidates.json` and `trellis worker curate --format
+    json` now carry a `promotable` / `learning_promotable` digest:
+    `count` of `promote_guidance` candidates with `helpful_count >=
+    LEARNING_PROMOTABLE_MIN_HELPFUL_COUNT` (`1`) and `unhelpful_count == 0`,
+    plus `top` (up to 5, ranked by `helpful_count` desc, then `success_rate`
+    desc, then `times_served` desc). Text output prints
+    `"N candidates promotable — review with trellis curate promote-learning
+    or the Review tab"` when `N > 0`.
 - **Write provenance on emitted events.** Every event emitted through
   `EventLog.emit` now carries `metadata["write_provenance"]`: the build that
   wrote it (version, git sha, dirty flag, and which mechanism resolved it) plus
