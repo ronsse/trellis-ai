@@ -6,6 +6,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Loop health panel (e167): `GET /api/v1/loops`.** Answers "is each
+  curation / learning loop actually doing anything?" for all seven loops
+  (noise demotion, advisory generation, advisory fitness,
+  learning-candidate scoring, precedent promotion, tuner, feedback
+  intake) from the EventLog alone — no new probe. `trellis worker curate`
+  and `trellis worker tune` now emit `CURATE_CYCLE_COMPLETED` /
+  `TUNE_CYCLE_COMPLETED` at the end of every **live** run (never on
+  `--dry-run`, which still writes nothing), carrying the same counters
+  `--format json` already reports; the emit is wrapped whole, so a broken
+  EventLog write cannot fail the cycle it is reporting on. Each row
+  carries `actuates: bool` and a one-line `what_it_changes`, and — the
+  one load-bearing distinction — a loop with no event yet reports
+  `last_run_at`/`last_status`/`counters` all `null` ("never run"), never
+  a bare `0` indistinguishable from "ran and found nothing to do". New
+  module `trellis.ops.loop_health`; route is admin-scoped, alongside the
+  other Review-queue surfaces in `trellis_api.routes.admin`.
 - **Promotion-ready-candidate digest and readable fallback names (#845).**
   Prod had scored 796 learning candidates with 0 ever promoted, and 13 of the
   top 15 `promote_guidance` candidates carried an ugly bare-item-id

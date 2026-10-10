@@ -18,6 +18,7 @@ from trellis.schemas.parameters import (
     ParameterScope,
     ParameterSet,
 )
+from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.outcome import SQLiteOutcomeStore
 from trellis.stores.sqlite.parameter import SQLiteParameterStore
@@ -291,6 +292,32 @@ def test_worker_tune_json_dry_run_is_the_flag_with_auto_promote_off(
     else:
         assert state.list_proposals() != []
         assert state.get_cursor("rule_tuner") is not None
+
+
+def test_worker_tune_live_run_emits_tune_cycle_completed_event(cli_env) -> None:
+    """A live ``worker tune`` leaves a durable, API-readable health record (e167).
+
+    Before this, a pass that promoted nothing emitted zero events, so
+    ``GET /admin/loops`` could not tell "ran and found nothing to do"
+    from "has never run". The dry-run side of this (no event at all)
+    is already pinned by
+    ``test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes``.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"], n=40, domain="orders")
+    events = cli_env["event_log"]
+
+    result = runner.invoke(app, ["worker", "tune", "--format", "json"])
+
+    assert result.exit_code == 0, plain(result.output)
+    payload = json.loads(result.stdout)
+    recorded = events.get_events(event_type=EventType.TUNE_CYCLE_COMPLETED, limit=10)
+    assert len(recorded) == 1, "exactly one pass ran, so exactly one event"
+    event_payload = recorded[0].payload
+    assert event_payload["tuner_name"] == payload["tuner_name"]
+    assert event_payload["proposals_considered"] == payload["proposals_considered"]
+    assert event_payload["auto_promoted"] == payload["auto_promoted"]
+    assert event_payload["pending_manual"] == payload["pending_manual"]
+    assert "write_provenance" in recorded[0].metadata
 
 
 def test_tune_text_renders_a_stored_domain_verbatim(
