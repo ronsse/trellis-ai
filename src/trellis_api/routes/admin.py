@@ -21,7 +21,11 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from trellis.core.error_sanitize import sanitize_error_message
+from trellis.core.error_sanitize import (
+    describe_json_error,
+    describe_os_error,
+    sanitize_error_message,
+)
 from trellis.core.path_presence import path_is_present
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import StaleStoreWriteError
@@ -806,7 +810,18 @@ def _load_learning_candidates() -> tuple[Path, dict[str, Any]]:
         logger.warning(
             "learning_candidates_read_failed", path=str(candidates_path), error=str(exc)
         )
-        msg = f"Could not read learning candidates from {candidates_path}: {exc}"
+        # Describe, don't quote: str(exc) can be the whole message for an
+        # OSError/ValueError built from a single text argument (#829
+        # follow-up), so this never falls back to it.
+        if isinstance(exc, OSError):
+            description = describe_os_error(exc)
+        elif isinstance(exc, json.JSONDecodeError):
+            description = describe_json_error(exc)
+        else:
+            description = type(exc).__name__
+        msg = (
+            f"Could not read learning candidates from {candidates_path}: {description}"
+        )
         raise _LearningCandidatesUnavailableError(
             msg,
             code="learning_candidates_unreadable",
