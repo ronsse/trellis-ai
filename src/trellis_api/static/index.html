@@ -361,6 +361,7 @@
             font-size: 0.75rem;
             font-weight: 600;
         }
+        .review-count-error { background: #350a0a; color: var(--error); }
         .review-body { padding: 0 1.5rem 1.25rem; }
         .review-card {
             background: var(--surface-2);
@@ -1491,8 +1492,8 @@
                 <div id="evo-items"></div>
             </div>
             <div class="status-section" id="evo-noise-section" style="display:none">
-                <h2>Noise Candidates</h2>
-                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Items that appear frequently but correlate with failure</p>
+                <h2>Usage-Rule Proposals</h2>
+                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Items a usage-rate rule proposes for demotion because they appear often but are rarely used. These are proposals, not demotions &mdash; an evidence gate screens each one, and only a write (<code style="font-family:var(--font-mono)">trellis analyze apply-noise-tags</code>, or the scheduled curation cycle) actually tags anything.</p>
                 <div id="evo-noise"></div>
             </div>
         </div>
@@ -1825,6 +1826,19 @@
             return new Date(iso).toLocaleString();
         }
 
+        // fmtDate() converts to the browser's local zone with no label --
+        // fine for a timestamp whose zone is otherwise obvious, but an
+        // artifact field that is explicitly named "_utc" would silently
+        // read as local time instead. Round-trips through Date so any
+        // offset in the source string still lands on the right UTC instant,
+        // then labels it rather than converting it away.
+        function fmtUtc(iso) {
+            if (!iso) return '';
+            const d = new Date(iso);
+            if (Number.isNaN(d.getTime())) return String(iso);
+            return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC').replace(/Z$/, ' UTC');
+        }
+
         // Encodes & < > and both quotes: between tags the text stays text, and
         // inside a quoted attribute a quote cannot end the attribute. An onclick
         // decodes it first, so ids go through data-id (below). Cut a value
@@ -1842,7 +1856,7 @@
         // would end the JS string. A template names the function in
         // data-action and carries the id in data-id; this listener calls it.
         const ID_ACTIONS = {
-            confirmPromoteProposal, rejectProposal, promoteProposal,
+            confirmPromoteProposal, confirmRejectProposal, rejectProposal, promoteProposal,
             draftAdr, copyAdr, downloadAdr,
             loadTraceDetail, navigateToEntity, navigateToDocument,
             loadMemoryDetail, loadEventDetail, navigateToPack, loadPackDetail,
@@ -2215,7 +2229,21 @@
         //  REVIEW (human-decision inbox)
         // ============================================================
         function setCount(id, n) {
-            document.getElementById(id).textContent = n;
+            const el = document.getElementById(id);
+            el.classList.remove('review-count-error');
+            el.removeAttribute('title');
+            el.textContent = n;
+        }
+
+        // A fetch failure is not a real zero: writing "0" here used to read
+        // as "no pending items" even while the section body below shows the
+        // error. "!" is distinct from any legitimate count, and the failure
+        // text sits in `title` so it survives a quick visual scan (P1-5).
+        function setCountError(id, msg) {
+            const el = document.getElementById(id);
+            el.classList.add('review-count-error');
+            el.title = msg;
+            el.textContent = '!';
         }
 
         function reviewEmpty(msg) {
@@ -2235,6 +2263,29 @@
             loadReviewCode();
         }
 
+        // A proposal with `reachable === false` can never be promoted --
+        // promote_proposal() and preview_promotion() both re-check the same
+        // reachability before any policy gate runs, so Approve on this row
+        // only buys a round trip to the same refusal. Show that up front,
+        // with the reason visible on the card (not hover-only), instead of
+        // making the operator click Approve and wait on a preview to learn
+        // it (P1-3). `reachable === null` means "not checked" (no in-tree
+        // reader claims this component_id) -- a different fact from both
+        // `true` and `false`, so it gets its own badge rather than reading
+        // as either.
+        function reachabilityHtml(p) {
+            if (p.reachable === false) {
+                const reasons = (p.unreachable_reasons || []).map(r => escHtml(r)).join('; ');
+                return `<div class="review-kv" style="color:var(--error)">` +
+                    `<span class="badge badge-err">unreachable</span> ${reasons || 'no reason given'}</div>`;
+            }
+            if (p.reachable === true) {
+                return '<div class="review-kv"><span class="badge badge-ok">reachable</span></div>';
+            }
+            return '<div class="review-kv"><span class="badge badge-warn">not checked</span> ' +
+                '<span style="color:var(--text-dim)">no in-tree parameter reader claims this component</span></div>';
+        }
+
         // -- Section 1: Tuner proposals --
         async function loadReviewProposals() {
             const body = document.getElementById('review-proposals-body');
@@ -2248,21 +2299,24 @@
                     <div class="review-card fade-in" id="proposal-${escHtml(p.proposal_id)}">
                         <h4>${escHtml(p.component_id)} <span class="badge badge-accent">${escHtml(p.tuner)}</span></h4>
                         <div class="review-meta">
+                            <span>status: ${escHtml(p.status)}</span>
+                            ${p.tool_name ? `<span>tool: ${escHtml(p.tool_name)}</span>` : ''}
                             ${p.domain ? `<span>domain: ${escHtml(p.domain)}</span>` : ''}
                             ${p.intent_family ? `<span>intent: ${escHtml(p.intent_family)}</span>` : ''}
                             <span>sample_size: ${escHtml(p.sample_size)}</span>
                             <span>effect_size: ${p.effect_size == null ? '—' : escHtml(Number(p.effect_size).toFixed(4))}</span>
                         </div>
+                        ${reachabilityHtml(p)}
                         <div class="review-kv">proposed: ${escHtml(JSON.stringify(p.proposed_values))}</div>
                         <div class="review-kv">baseline: ${escHtml(JSON.stringify(p.baseline_values))}</div>
                         <div class="review-predict" id="predict-${escHtml(p.proposal_id)}" style="display:none"></div>
                         <div class="review-actions">
-                            <button class="btn btn-sm" data-action="confirmPromoteProposal" data-id="${escHtml(p.proposal_id)}">Approve</button>
-                            <button class="btn btn-sm btn-danger" data-action="rejectProposal" data-id="${escHtml(p.proposal_id)}">Reject</button>
+                            <button class="btn btn-sm" data-action="confirmPromoteProposal" data-id="${escHtml(p.proposal_id)}"${p.reachable === false ? ' disabled' : ''}>Approve</button>
+                            <button class="btn btn-sm btn-danger" data-action="confirmRejectProposal" data-id="${escHtml(p.proposal_id)}">Reject</button>
                         </div>
                     </div>`).join('');
             } catch (err) {
-                setCount('review-proposals-count', 0);
+                setCountError('review-proposals-count', 'Failed to load proposals: ' + err.message);
                 body.innerHTML = reviewError('Failed to load proposals: ' + err.message);
             }
         }
@@ -2315,6 +2369,22 @@
             loadReviewProposals();
         }
 
+        // Reject is terminal (TUNER_PROPOSAL_REJECTED; unlike a bootstrap
+        // promote refusal there is no retry flag that recovers it), so it
+        // gets the same in-page click guard the Approve button already has
+        // via confirmPromoteProposal -- without window.confirm, which this
+        // runtime cannot show (P1-4). One click swaps the row's actions into
+        // a second, explicit confirm; Cancel restores the list unchanged.
+        function confirmRejectProposal(id) {
+            const card = document.getElementById('proposal-' + id);
+            if (!card) return;
+            const actions = card.querySelector('.review-actions');
+            actions.innerHTML =
+                '<span style="color:var(--error); font-size:0.82rem;">Reject is terminal.</span> ' +
+                `<button class="btn btn-sm btn-danger" data-action="rejectProposal" data-id="${escHtml(id)}">Confirm reject</button>` +
+                '<button class="btn btn-ghost btn-sm" onclick="loadReviewProposals()">Cancel</button>';
+        }
+
         async function rejectProposal(id) {
             try {
                 const r = await postJSON(`/proposals/${encodeURIComponent(id)}/reject`, { reason: 'rejected_by_reviewer' });
@@ -2339,10 +2409,33 @@
             body.innerHTML = loadingHtml('Loading learning candidates...');
             try {
                 const data = await fetchJSON('/learning/candidates');
+                // The route answers 200 with status="error" (artifact
+                // missing/unreadable) rather than a fetch failure, so it
+                // never reaches the catch below; render it as an error, not
+                // as "no candidates found" -- those read identically
+                // otherwise (P1-6).
+                if (data.status === 'error') {
+                    const msg = (data.hint || 'Could not read learning candidates.') +
+                        (data.code ? ` (${data.code})` : '');
+                    setCountError('review-learning-count', msg);
+                    body.innerHTML = reviewError(msg);
+                    return;
+                }
                 const items = data.candidates || [];
                 setCount('review-learning-count', items.length);
+                // The artifact is a point-in-time snapshot a worker wrote;
+                // without its age an operator cannot tell a current run from
+                // one regenerated weeks ago. `generated_at_utc` is already
+                // UTC (scoring.py's `_utc_now`), so it is labelled rather
+                // than passed through `fmtDate`, which would silently
+                // relabel it as the browser's local zone (P1-6).
+                const header = `<p style="font-size:0.78rem; color:var(--text-dim); margin-bottom:0.75rem;">` +
+                    `${escHtml(items.length)} candidate(s)` +
+                    (data.generated_at_utc ? ` &middot; generated ${escHtml(fmtUtc(data.generated_at_utc))}` : '') +
+                    (data.artifacts_dir ? ` &middot; ${escHtml(data.artifacts_dir)}` : '') +
+                    `</p>`;
                 if (items.length === 0) {
-                    body.innerHTML = reviewEmpty(data.hint || 'No learning candidates found.');
+                    body.innerHTML = header + reviewEmpty(data.hint || 'No learning candidates found.');
                     return;
                 }
                 // `promotable` is server-computed (same PROMOTE_RECOMMENDATIONS
@@ -2381,12 +2474,12 @@
                         ${approveControl}
                     </div>`;
                 }).join('');
-                body.innerHTML = cards +
+                body.innerHTML = header + cards +
                     `<div class="review-actions">
                         <button class="btn btn-sm" onclick="submitLearningPromotions()">Submit approved promotions</button>
                      </div>`;
             } catch (err) {
-                setCount('review-learning-count', 0);
+                setCountError('review-learning-count', 'Failed to load learning candidates: ' + err.message);
                 body.innerHTML = reviewError('Failed to load learning candidates: ' + err.message);
             }
         }
@@ -2434,7 +2527,7 @@
                         <div class="adr-panel" id="adr-${escHtml(c.candidate_id)}" style="display:none"></div>
                     </div>`).join('');
             } catch (err) {
-                setCount('review-schema-count', 0);
+                setCountError('review-schema-count', 'Failed to load schema-evolution candidates: ' + err.message);
                 body.innerHTML = reviewError('Failed to load schema-evolution candidates: ' + err.message);
             }
         }
@@ -2494,7 +2587,7 @@
                         ${p.markdown_preview ? `<div class="adr-panel">${escHtml(p.markdown_preview)}</div>` : ''}
                     </div>`).join('');
             } catch (err) {
-                setCount('review-code-count', 0);
+                setCountError('review-code-count', 'Failed to load code proposals: ' + err.message);
                 body.innerHTML = reviewError('Failed to load code proposals: ' + err.message);
             }
         }
@@ -2518,7 +2611,14 @@
                 summary.innerHTML = '';
                 summary.appendChild(renderCard('Total Packs', data.total_packs, 'context packs assembled'));
                 summary.appendChild(renderCard('With Feedback', data.total_feedback, 'packs with feedback'));
-                summary.appendChild(renderCard('Success Rate', (data.success_rate * 100).toFixed(1) + '%', 'overall effectiveness'));
+                // A rate computed over zero feedback is not a measurement, it's
+                // 0/0 dressed up as 0.0% — say so instead of reporting a number
+                // that implies the packs in this window were all failures.
+                const successRateText = data.total_feedback === 0
+                    ? 'not measured' : (data.success_rate * 100).toFixed(1) + '%';
+                const successRateSub = data.total_feedback === 0
+                    ? '0 feedback in this window' : 'overall effectiveness';
+                summary.appendChild(renderCard('Success Rate', successRateText, successRateSub));
                 summary.appendChild(renderCard('Items Scored', (data.item_scores || []).length, 'unique context items'));
 
                 if (data.item_scores && data.item_scores.length > 0) {
@@ -2542,9 +2642,31 @@
 
                 if (data.noise_candidates && data.noise_candidates.length > 0) {
                     noiseSection.style.display = 'block';
-                    noise.innerHTML = data.noise_candidates.map(id =>
-                        `<div class="status-row"><span class="mono truncate" title="${escHtml(id)}">${escHtml(id)}</span><span class="badge badge-warn">noise</span></div>`
-                    ).join('');
+                    // noise_candidates is the usage-rule's proposal, not a demotion
+                    // list: demotion_screen.admitted is what the evidence gate
+                    // actually cleared, and this read-only view never calls the
+                    // write path, so it cannot say whether admitted ids were
+                    // tagged by a separate apply-noise-tags run.
+                    const screen = data.demotion_screen;
+                    const admittedIds = screen ? screen.admitted : [];
+                    const admittedSet = new Set(admittedIds);
+                    let summaryLine = `${data.noise_candidates.length} proposed by the usage rule`;
+                    if (screen) {
+                        summaryLine += `; ${admittedIds.length} admitted by the evidence gate`;
+                        if (screen.suppressed) {
+                            summaryLine += ' (batch suppressed on thin corpus coverage)';
+                        }
+                    } else {
+                        summaryLine += '; no evidence gate ran over this batch';
+                    }
+                    summaryLine += '. This view does not write tags &mdash; admitted does not mean tagged.';
+                    noise.innerHTML = `<p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:0.75rem;">${summaryLine}</p>` +
+                        data.noise_candidates.map(id => {
+                            const admitted = admittedSet.has(id);
+                            const cls = admitted ? 'badge-warn' : 'badge-info';
+                            const label = admitted ? 'admitted' : 'proposed';
+                            return `<div class="status-row"><span class="mono truncate" title="${escHtml(id)}">${escHtml(id)}</span><span class="badge ${cls}" title="usage-rule proposal, not an applied demotion">${label}</span></div>`;
+                        }).join('');
                 } else {
                     noiseSection.style.display = 'none';
                 }
@@ -3570,7 +3692,11 @@
                 const items = data.precedents || [];
 
                 if (items.length === 0) {
-                    container.innerHTML = '<div class="empty-state"><div class="icon">&#x2713;</div><p>No precedents found. Promote traces to create precedents.</p></div>';
+                    container.innerHTML = '<div class="empty-state"><div class="icon">&#x2713;</div>' +
+                        '<p>No precedents yet. A precedent is created only when a learning candidate ' +
+                        'is approved &mdash; Review &rarr; Learning promotion candidates, or ' +
+                        '<code style="font-family:var(--font-mono)">trellis curate promote-learning</code>. ' +
+                        'Nothing schedules that promotion automatically today.</p></div>';
                     return;
                 }
 
