@@ -424,7 +424,12 @@ All notable changes to Trellis will be documented in this file.
   through too. `duration_ms` is an additive key on both `PACK_ASSEMBLED`
   payloads; no schema or contract pins the payload key set other than
   `test_pack_holdout_seam.py`'s hand-read base snapshot, which is updated
-  to expect it alongside the two holdout keys.
+  to expect it alongside the two holdout keys. Three CLI, API and retrieve
+  tests that compared two separately-built packs' full payloads for
+  equality (`test_pack_holdout_cli.py`, `test_pack_holdout_routes.py`,
+  `test_pack_holdout_seam.py` itself) masked `duration_ms` before
+  comparing, since it is now real elapsed time and two builds are not
+  expected to cost the same.
   ([#832](https://github.com/ronsse/trellis-ai/pull/832))
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
