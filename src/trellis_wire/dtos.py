@@ -473,11 +473,28 @@ class BulkIngestResponse(WireModel):
 # -- Admin --
 
 
+class BackendHealth(WireModel):
+    """One backend's probe outcome — mirrors ``/readyz``'s per-backend shape."""
+
+    status: str
+    latency_ms: float | None = None
+    error: str | None = None
+
+
 class HealthResponse(WireModel):
-    """Health check response."""
+    """Health check response.
+
+    ``checks`` is a flat bool-per-key view (``api`` plus one key per
+    probed backend) kept for backward compatibility with existing
+    callers; ``backends`` carries the same probe results with latency
+    and error detail for a dashboard. Both are derived from the same
+    probe run (``trellis_api.routes.health.probe_backends``) — never a
+    hard-coded literal.
+    """
 
     status: str = "ok"
     checks: dict[str, bool] = Field(default_factory=dict)
+    backends: dict[str, BackendHealth] | None = None
 
 
 class StatsResponse(WireModel):

@@ -1837,6 +1837,7 @@ def _seed_advisories(registry: StoreRegistry) -> AdvisoryStore:
                 success_rate_with=0.75,
                 success_rate_without=0.2,
                 effect_size=0.55,
+                evidence_confidence=1.0,
             ),
             scope="global",
         )
@@ -1852,6 +1853,7 @@ def _seed_advisories(registry: StoreRegistry) -> AdvisoryStore:
                 success_rate_with=0.3,
                 success_rate_without=0.86,
                 effect_size=-0.56,
+                evidence_confidence=0.9,
             ),
             scope="global",
         )

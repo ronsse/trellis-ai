@@ -75,6 +75,47 @@ def test_health(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
+    assert data["checks"]["api"] is True
+    # Every real backend an agent's request depends on, not a hard-coded
+    # "stores" literal — each key traces to a /readyz probe.
+    assert set(data["backends"].keys()) == {
+        "event_log",
+        "graph_store",
+        "vector_store",
+        "document_store",
+    }
+    for name, backend in data["backends"].items():
+        assert backend["status"] == "ok", (name, backend)
+        assert data["checks"][name] is True
+
+
+def test_health_reports_a_failing_store_as_failing(client, monkeypatch):
+    """P0: /api/v1/health used to return a literal {"api": True, "stores":
+    True} regardless of store state, so an operator debugging empty packs
+    had no reason to suspect a down backend. A broken probe must flip
+    both the per-store check and the overall status, and the HTTP status
+    stays 200 (the dashboard loads /stats and /health in one Promise.all;
+    a non-2xx here would blank the whole dashboard, not just this card)."""
+    registry = app_module._registry
+    assert registry is not None
+
+    def _broken_count() -> int:
+        msg = "graph backend unreachable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(registry.knowledge.graph_store, "count_nodes", _broken_count)
+
+    resp = client.get("/api/v1/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "degraded"
+    assert data["checks"]["graph_store"] is False
+    assert data["backends"]["graph_store"]["status"] == "degraded"
+    assert "graph backend unreachable" in data["backends"]["graph_store"]["error"]
+    # Other stores still report individually — one failure doesn't blank
+    # the whole card.
+    assert data["checks"]["event_log"] is True
+    assert data["backends"]["event_log"]["status"] == "ok"
 
 
 def test_stats_empty(client):
@@ -1171,6 +1212,7 @@ def _seed_advisories(stores_dir, count):
                     success_rate_with=0.6,
                     success_rate_without=0.0,
                     effect_size=0.6,
+                    evidence_confidence=1.0,
                 ),
                 scope="global",
             )

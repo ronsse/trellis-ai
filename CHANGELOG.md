@@ -413,6 +413,66 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The Review tab and its empty states stop hiding why.** Five defects in
+  `src/trellis_api/static/index.html` where the admin console read a failure
+  or an absence as "nothing pending," per the UI-quality review's P1 section:
+  - A tuner proposal card now shows `status`, `tool_name` and the
+    reachability verdict `/proposals` already computes; an unreachable
+    proposal's Approve control is disabled with the reason in its `title`
+    instead of inviting a click `promote_proposal()` would refuse. Reject —
+    terminal, unlike a recoverable bootstrap refusal — now routes through an
+    in-page two-step confirm instead of calling it directly.
+  - A fetch failure on any of the four Review-queue count badges
+    (proposals, learning, schema, code) used to write a literal `0` via
+    `setCount`, reading identically to an honest empty result. A new
+    `setCountError` renders a distinct "!" marker with the failure in
+    `title`, and `setCount` clears that state on a subsequent clean load.
+  - `GET /learning/candidates` answering 200 with `status: "error"` (the
+    artifact is missing or unreadable) never reached the page's `catch`
+    block and rendered as "no candidates found." It now renders as an error
+    with the server's own `hint`. The artifact's `generated_at_utc` is shown
+    through a new `fmtUtc()`, labelled UTC, instead of `fmtDate()`'s silent
+    `toLocaleString()` conversion to the browser's zone.
+  - The precedents empty state said "Promote traces to create precedents,"
+    implying any trace promotion sufficed. It now names the actual path (a
+    learning candidate approved via Review → Learning, or `trellis curate
+    promote-learning`) and says plainly that nothing schedules that
+    promotion automatically today.
+  - `/effectiveness` with zero feedback rendered a "0.0%" success rate,
+    reading as "every pack failed" rather than "nothing was measured"; it
+    now renders "not measured". `noise_candidates` is the usage-rule's
+    *proposal* (see `EffectivenessReport`'s docstring), not a demotion, so
+    the section is relabelled "Usage-Rule Proposals" and reports how many of
+    those proposals `demotion_screen.admitted` — the evidence gate's
+    verdict — actually cleared, without claiming any of them were tagged
+    (this view never calls the write path).
+- **`GET /api/v1/health` reports real store status; the Memories table
+  reads the tags a tagging pipeline actually writes.** Two defects found
+  in a UI quality review (P0):
+  - `health()` returned a literal `{"api": True, "stores": True}`
+    regardless of backend state — the dashboard's Store Health card read
+    green even while `/readyz` (which really probes) read 503. The probe
+    logic in `readyz` is now factored into `probe_backends` /
+    `overall_backend_status` (`src/trellis_api/routes/health.py`), and
+    `health()` calls the same functions, so the two surfaces can no
+    longer disagree. `HealthResponse` gains an additive, optional
+    `backends` field (per-backend status/latency/error) alongside the
+    existing `checks` bool map, which keeps the response shape backward
+    compatible for its two prior readers
+    (`tests/unit/api/test_routes.py`,
+    `tests/integration/api/test_live_smoke.py`). The dashboard's store
+    health rows now render each backend's latency or error string.
+  - The Memories table's `tagChips(metadata)` read `metadata.tags`, a key
+    no writer sets; the tagging pipeline writes the 4 retrieval-shaping
+    facets to `metadata["content_tags"]` (`ContentTags` in
+    `trellis.schemas.classification`), so the column was empty on every
+    row regardless of whether tagging ran. `tagChips` now reads
+    `content_tags` and renders only the facets a row actually has;
+    `content_tags_shadow` (LLM shadow-mode proposals never applied — see
+    `trellis.retrieve.servable`) is never rendered as if it were an
+    applied tag. The column header is renamed "Content tags" per
+    [`adr-terminology.md`](docs/design/adr-terminology.md).
+
 - **`trellis analyze learning-candidates` text output no longer crashes on
   an unmeasured retry rate.** The "Candidates by Recommendation" table
   formatted `metrics["retry_rate"]` with `:.1%` unconditionally;
@@ -450,6 +510,26 @@ All notable changes to Trellis will be documented in this file.
   becoming the one tell that gave a holdout draw away.
   ([#392](https://github.com/ronsse/trellis-ai/issues/392),
   [#844](https://github.com/ronsse/trellis-ai/pull/844))
+
+- **Stop serving advisories minted before the #394 generator repair.**
+  #844 rendered advisories on the flat path but shipped decision-ledger D-4's
+  option A (render everything matching), not the option B the owner
+  approved: the code made no attempt to distinguish pre-/post-#394 rows, so
+  the 51 known-degenerate legacy rows measured live on 2026-10-10 (vs. 361
+  post-repair, zero mismatches against the alternative id-prefix
+  discriminator) were eligible to ride every pack. `_select_advisories` now
+  drops any advisory whose `evidence.evidence_confidence is None` — the
+  field only the repaired generator populates — before ranking and the
+  delivery cap run, on both pack shapes, so a legacy row can never occupy a
+  rank or cap slot a post-repair row would have won. Reversible via
+  `TRELLIS_FILTER_LEGACY_ADVISORIES` (default on, same accepted-value
+  vocabulary as `TRELLIS_GRAPH_SEEDING`). `PACK_ASSEMBLED` carries the
+  withheld count as `advisories_filtered_legacy` (`0` when the knob is
+  off), counted before `advisories_matched`, so the advisory-fitness loop
+  never counts a withheld row as a presentation. Clearing the 51 legacy
+  rows from the live store is a separate, operator-only live-store
+  mutation, unchanged by this fix.
+  ([decision-ledger D-4](docs/design/decision-ledger.md#d-4--should-the-flat-pack-path-render-advisories-at-all--panel-split))
 
 - **Noise demotion counts what was written, not what the evidence gate
   admitted.** `apply_noise_tags` writes `signal_quality="noise"` only to
