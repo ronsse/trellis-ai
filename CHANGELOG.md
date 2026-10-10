@@ -566,13 +566,36 @@ All notable changes to Trellis will be documented in this file.
   every retrieval call site until the setting is fixed; a broken
   `vector_store` degrades retrieval to keyword and graph (`semantic:
   misconfigured`); embed-on-ingest is fail-soft for an embedder resolve
-  failure only. Added a recovery runbook,
+  failure. Added a recovery runbook,
   [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config):
   fix the setting, restart (the `embeddings:` block is read once, at
   `StoreRegistry` construction, so a running process can't see an edited
   config or environment), then run `trellis admin reindex-vectors` for
   documents that arrived while it was broken.
   ([#830](https://github.com/ronsse/trellis-ai/pull/830))
+- **A broken `vector_store` resolve is now fail-soft too, like the embedder
+  resolve #830 fixed above.** `run_embed_on_ingest` resolved
+  `registry.knowledge.vector_store` with a bare
+  `getattr(registry.knowledge, "vector_store", None)`: the default only
+  absorbs `AttributeError`, so a vector backend that raises while
+  instantiating (`ConfigError`, `BackendNotInstalledError`, a connection
+  error) propagated straight out of the hook — called, unwrapped, by every
+  caller (MCP `save_memory`, the mutate "soft" handler, corpus-sync ingest,
+  CLI dbt-manifest ingest) *after* the document was already durably stored,
+  so the write's own response failed for content that had, in fact, been
+  saved, inviting a client retry of an already-stored write. The resolve is
+  now wrapped the same way #830 wrapped the embedder's, returning
+  `{"embedded": False, "reason": ...}` instead of raising. The dedup helper
+  generalized to cover both: the WARNING event is renamed
+  `embed_on_ingest_resolve_failed` (from
+  `embed_on_ingest_embedder_resolve_failed`) and now carries a `component`
+  field (`embedding_fn` or `vector_store`); the once-per-cause cache key is
+  `(component, error_type, setting)`, not just `(error_type, setting)`, so
+  an embedder and a vector store failing with the same shape (e.g. both a
+  bare `RuntimeError` with no `setting`) log independently instead of one
+  suppressing the other. Playbook 15 and the MCP prewarm comment updated to
+  match.
+  ([#834](https://github.com/ronsse/trellis-ai/pull/834))
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
