@@ -468,6 +468,30 @@ All notable changes to Trellis will be documented in this file.
   config or environment), then run `trellis admin reindex-vectors` for
   documents that arrived while it was broken.
   ([#830](https://github.com/ronsse/trellis-ai/pull/830))
+- **Retrieval degrades, instead of failing, when the embedder fails to
+  resolve.** `build_strategies` used to read `registry.embedding_fn` outside
+  its own `try`, so the same raise #830 made quiet on ingest (a bad
+  `TRELLIS_EMBEDDING_FN` / `embeddings.provider` path, a missing provider
+  extra, a missing API key) still propagated uncaught out of every
+  retrieval surface — REST `POST /packs` (and sectioned), MCP
+  `get_context` / `get_sectioned_context`, and `trellis retrieve pack` all
+  re-read that property directly and turned a healthy keyword+graph pack
+  into a 409 / `INTERNAL_ERROR` / exit `5`. The embedder now resolves
+  inside `build_strategies`'s own `try`, and the outcome
+  (`BuildStrategiesResult.embedder_resolve_failure`) flows into
+  `describe_axes` once, so none of the five surfaces re-read
+  `registry.embedding_fn` to render it. A new axes state,
+  `semantic: "embedder_failed"`, carries `embedder_error_type` and
+  `embedder_setting` (the exception's type name and, when it names one,
+  the broken setting — never its message) and a note pointing at
+  `trellis admin reindex-vectors`, the same recovery step
+  [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config)
+  documents. The failure is recorded as one semantic `StrategyFailure` in
+  `PACK_ASSEMBLED` (tallied by `FailedStrategyReport`) but deliberately
+  excluded from both the required-strategy and all-axes-failed checks
+  below it, so a pack still raises `PackAssemblyError` when every
+  remaining axis has also failed, and still degrades — not raises — when
+  keyword or graph are healthy.
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited

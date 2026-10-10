@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 from structlog.testing import capture_logs
 
+from trellis.errors import BackendNotInstalledError, ConfigError
 from trellis.retrieve import strategies as strategies_module
 from trellis.retrieve.strategies import (
     DEFAULT_IMPORTANCE_DECAY_FLOOR,
@@ -18,11 +19,14 @@ from trellis.retrieve.strategies import (
     DEFAULT_RECENCY_HALF_LIFE_DAYS,
     GRAPH_RECENCY_CLOCK_FIELD,
     RECENCY_FLOOR,
+    EmbedderResolveFailure,
     GraphSearch,
     KeywordSearch,
     SemanticSearch,
     _apply_importance,
     _apply_recency_decay,
+    _warn_embedder_resolve_failed_once,
+    build_strategies,
 )
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 
@@ -963,3 +967,162 @@ class TestGraphRecencyClock:
         assert not [
             e for e in logs if e["event"] == "graph_search_recency_clock_unusable"
         ]
+
+
+class _KnowledgeStoresOnly:
+    """Minimal ``registry.knowledge`` stand-in -- construction only, never searched."""
+
+    def __init__(self) -> None:
+        self.document_store = object()
+        self.graph_store = object()
+        self.vector_store = object()
+
+
+class _EmbeddingFnRaises:
+    """Stand-in for StoreRegistry whose ``embedding_fn`` property raises.
+
+    Deliberately not a MagicMock: a mock's attribute access never raises on
+    its own, so it cannot stand in for the case under test (Q5-A) --
+    ``getattr(registry, "embedding_fn", None)`` suppresses only an
+    ``AttributeError`` from the attribute not existing, never a raise from
+    *inside* the property.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self.knowledge = _KnowledgeStoresOnly()
+        self._exc = exc
+
+    @property
+    def embedding_fn(self) -> Any:
+        raise self._exc
+
+
+class TestBuildStrategiesEmbedderResolveFailure:
+    """Q5-A: ``registry.embedding_fn`` raising must degrade, not propagate.
+
+    Before this fix, ``build_strategies`` read
+    ``getattr(registry, "embedding_fn", None)`` directly -- and ``getattr``
+    with a default suppresses only ``AttributeError``, not a raise from
+    inside the property itself. A misconfigured embedder therefore crashed
+    every pack build identically to a corrupt policy file, instead of
+    degrading to keyword + graph search the way a failed vector-backend
+    init already did.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_warn_cache(self) -> Any:
+        _warn_embedder_resolve_failed_once.cache_clear()
+        yield
+        _warn_embedder_resolve_failed_once.cache_clear()
+
+    def test_a_config_error_is_caught_not_propagated(self) -> None:
+        registry = _EmbeddingFnRaises(
+            ConfigError("embeddings.provider is not set", setting="embeddings.provider")
+        )
+
+        result = build_strategies(registry)  # type: ignore[arg-type]
+
+        assert not any(isinstance(s, SemanticSearch) for s in result.strategies)
+        assert {type(s).__name__ for s in result.strategies} == {
+            "KeywordSearch",
+            "GraphSearch",
+        }
+        assert result.embedder_configured is False
+        assert result.embedder_resolve_failure == EmbedderResolveFailure(
+            error_type="ConfigError", setting="embeddings.provider"
+        )
+
+    def test_a_backend_not_installed_error_is_caught_too(self) -> None:
+        """Not just the base ConfigError -- a subclass raised the same way."""
+        registry = _EmbeddingFnRaises(
+            BackendNotInstalledError(backend_name="openai", extra="llm-openai")
+        )
+
+        result = build_strategies(registry)  # type: ignore[arg-type]
+
+        assert result.embedder_configured is False
+        failure = result.embedder_resolve_failure
+        assert failure is not None
+        assert failure.error_type == "BackendNotInstalledError"
+        assert failure.setting == "backend.openai"
+
+    def test_a_non_config_error_is_caught_with_no_setting(self) -> None:
+        """Only a ConfigError carries a ``.setting`` hint; anything else
+        still degrades, just without naming a setting key."""
+        registry = _EmbeddingFnRaises(RuntimeError("boom"))
+
+        result = build_strategies(registry)  # type: ignore[arg-type]
+
+        assert result.embedder_configured is False
+        failure = result.embedder_resolve_failure
+        assert failure is not None
+        assert failure.error_type == "RuntimeError"
+        assert failure.setting is None
+
+    def test_the_message_text_never_appears_in_the_result(self) -> None:
+        """Describe, don't quote: the raw exception message must not leak
+        into the reported failure, even though it is right there on ``exc``."""
+        registry = _EmbeddingFnRaises(
+            ConfigError(
+                "postgresql://user:supersecret@host/db is unreachable",
+                setting="database.dsn",
+            )
+        )
+
+        result = build_strategies(registry)  # type: ignore[arg-type]
+
+        failure = result.embedder_resolve_failure
+        assert failure is not None
+        assert "supersecret" not in failure.error_type
+        assert "supersecret" not in (failure.setting or "")
+        strategy_failure = failure.to_strategy_failure()
+        assert "supersecret" not in strategy_failure.message
+        # The *safe* parts still must reach the message -- a message that
+        # never carries the setting would also pass the line above.
+        assert strategy_failure.message == "ConfigError: database.dsn"
+        assert strategy_failure.error_class == "ConfigError"
+        assert strategy_failure.strategy == "semantic"
+
+    def test_to_strategy_failure_omits_the_colon_when_there_is_no_setting(
+        self,
+    ) -> None:
+        """The no-setting branch of the same join, pinned the other way."""
+        registry = _EmbeddingFnRaises(RuntimeError("boom"))
+
+        result = build_strategies(registry)  # type: ignore[arg-type]
+
+        failure = result.embedder_resolve_failure
+        assert failure is not None
+        assert failure.to_strategy_failure().message == "RuntimeError"
+
+    def test_it_warns_once_per_distinct_cause(self) -> None:
+        registry = _EmbeddingFnRaises(ConfigError("x", setting="embeddings.provider"))
+
+        with capture_logs() as logs:
+            build_strategies(registry)  # type: ignore[arg-type]
+            build_strategies(registry)  # type: ignore[arg-type]
+
+        warned = [
+            e for e in logs if e["event"] == "semantic_search_embedder_resolve_failed"
+        ]
+        assert len(warned) == 1
+        assert warned[0]["log_level"] == "warning"
+        assert warned[0]["error_type"] == "ConfigError"
+        assert warned[0]["setting"] == "embeddings.provider"
+
+    def test_an_explicit_embedding_fn_argument_bypasses_the_registry_entirely(
+        self,
+    ) -> None:
+        """Passing ``embedding_fn`` directly must never even touch the
+        raising property -- a caller supplying its own callable (e.g. a
+        test) is unaffected by a broken registry config."""
+        registry = _EmbeddingFnRaises(ConfigError("x", setting="embeddings.provider"))
+
+        result = build_strategies(
+            registry,  # type: ignore[arg-type]
+            embedding_fn=lambda _text: [0.1, 0.2],
+        )
+
+        assert result.embedder_configured is True
+        assert result.embedder_resolve_failure is None
+        assert any(isinstance(s, SemanticSearch) for s in result.strategies)

@@ -34,13 +34,13 @@ the same build -- a combination the "both" test below exercises.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
+from trellis.errors import BackendNotInstalledError, ConfigError
 from trellis.mcp.server import get_context as _get_context
 from trellis.mcp.server import get_objective_context as _get_objective_context
 from trellis.mcp.server import get_sectioned_context as _get_sectioned_context
@@ -49,9 +49,8 @@ from trellis.mcp.server import search as _search
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import SearchStrategy
 from trellis.schemas.pack import PackItem
-
-if TYPE_CHECKING:
-    from trellis.stores.registry import StoreRegistry
+from trellis.stores.base.event_log import EventType
+from trellis.stores.registry import StoreRegistry
 
 get_context = unwrap_tool(_get_context)
 get_objective_context = unwrap_tool(_get_objective_context)
@@ -102,6 +101,17 @@ def _builder_one_failing_one_surviving(
     return PackBuilder(strategies=[bad, good])
 
 
+def _builder_one_failing_one_surviving_with_configured_embedder(
+    *_args: object, **_kwargs: object
+) -> PackBuilder:
+    """Same shape as ``_builder_one_failing_one_surviving``, plus
+    ``embedder_configured=True`` -- the combination the "both failed and
+    misconfigured" test below needs."""
+    bad = _make_failing_axis_strategy("keyword", _AXIS_FAILURE_SENTINEL)
+    good = _make_axis_strategy("graph", [_axis_item("d1")])
+    return PackBuilder(strategies=[bad, good], embedder_configured=True)
+
+
 def _builder_failing_axis_empty_survivor(
     *_args: object, **_kwargs: object
 ) -> PackBuilder:
@@ -118,20 +128,24 @@ def _builder_failing_axis_empty_survivor(
 def _builder_clean_without_semantic(*_args: object, **_kwargs: object) -> PackBuilder:
     """Keyword and graph both run and both find something; no axis failed.
 
-    Used only together with ``_configure_embedder`` -- that combination is
-    what ``describe_axes`` reads as "misconfigured" rather than
-    "not_configured" (tests/unit/retrieve/test_builder_factory.py's
-    ``TestDescribeAxes.test_absent_with_an_embedder_is_misconfigured``)."""
+    ``embedder_configured=True`` with no semantic strategy present is what
+    ``describe_axes`` reads as "misconfigured" rather than "not_configured"
+    (tests/unit/retrieve/test_builder_factory.py's
+    ``TestDescribeAxes.test_absent_with_an_embedder_is_misconfigured``) --
+    ``_flat_context``/``_sectioned_context`` source that bool from
+    ``builder.embedder_configured``, never a registry re-read (Q5-A), so
+    it is set on the builder directly rather than on the registry passed
+    to ``_build_pack_builder``."""
     keyword = _make_axis_strategy("keyword", [_axis_item("d1")])
     graph = _make_axis_strategy("graph", [_axis_item("d2")])
-    return PackBuilder(strategies=[keyword, graph])
+    return PackBuilder(strategies=[keyword, graph], embedder_configured=True)
 
 
 def _builder_empty_without_semantic(*_args: object, **_kwargs: object) -> PackBuilder:
     """Keyword and graph both run and both find nothing; no axis failed."""
     keyword = _make_axis_strategy("keyword", [])
     graph = _make_axis_strategy("graph", [])
-    return PackBuilder(strategies=[keyword, graph])
+    return PackBuilder(strategies=[keyword, graph], embedder_configured=True)
 
 
 def _builder_held_out_empty_without_semantic(
@@ -139,23 +153,9 @@ def _builder_held_out_empty_without_semantic(
 ) -> PackBuilder:
     keyword = _make_axis_strategy("keyword", [])
     graph = _make_axis_strategy("graph", [])
-    return PackBuilder(strategies=[keyword, graph], holdout_rate=1.0)
-
-
-def _configure_embedder(
-    monkeypatch: pytest.MonkeyPatch, registry: StoreRegistry
-) -> None:
-    """Force ``registry.embedding_fn`` truthy without touching config.
-
-    ``embedding_fn`` is a read-only property with internal lazy caching
-    (``StoreRegistry._embedding_fn_cache``, sentinel-valued until resolved)
-    and no setter, so the cache is set directly -- the one-layer-up
-    equivalent of ``describe_axes``'s own ``embedder_configured=True``
-    parameter in tests/unit/retrieve/test_builder_factory.py, needed here
-    because ``_flat_context``/``_sectioned_context`` read the registry
-    property themselves rather than taking a bool.
-    """
-    monkeypatch.setattr(registry, "_embedding_fn_cache", lambda text: [0.1])
+    return PackBuilder(
+        strategies=[keyword, graph], holdout_rate=1.0, embedder_configured=True
+    )
 
 
 @pytest.mark.parametrize("index", [False, True])
@@ -268,7 +268,6 @@ def test_get_context_reports_misconfigured_semantic_for_a_populated_pack(
     monkeypatch.setattr(
         server_mod, "_build_pack_builder", _builder_clean_without_semantic
     )
-    _configure_embedder(monkeypatch, temp_registry)
 
     result = get_context(INTENT)
     lines = result.split("\n")
@@ -284,7 +283,6 @@ def test_get_context_reports_misconfigured_semantic_for_an_empty_pack(
     monkeypatch.setattr(
         server_mod, "_build_pack_builder", _builder_empty_without_semantic
     )
-    _configure_embedder(monkeypatch, temp_registry)
 
     result = get_context(INTENT)
     lines = result.split("\n")
@@ -303,7 +301,6 @@ def test_get_context_reports_misconfigured_semantic_for_a_held_out_empty_pack(
     monkeypatch.setattr(
         server_mod, "_build_pack_builder", _builder_held_out_empty_without_semantic
     )
-    _configure_embedder(monkeypatch, temp_registry)
 
     result = get_context(INTENT)
     lines = result.split("\n")
@@ -324,9 +321,10 @@ def test_get_context_reports_both_failed_and_misconfigured_axes(
     graph" when keyword is one of the axes that just failed -- that claim
     was false in exactly this combination (#805 gate, finding 9)."""
     monkeypatch.setattr(
-        server_mod, "_build_pack_builder", _builder_one_failing_one_surviving
+        server_mod,
+        "_build_pack_builder",
+        _builder_one_failing_one_surviving_with_configured_embedder,
     )
-    _configure_embedder(monkeypatch, temp_registry)
 
     result = get_context(INTENT)
     lines = result.split("\n")
@@ -350,7 +348,6 @@ def test_search_reports_misconfigured_semantic_axis(
     monkeypatch.setattr(
         server_mod, "_build_pack_builder", _builder_clean_without_semantic
     )
-    _configure_embedder(monkeypatch, temp_registry)
 
     result = search(INTENT)
     lines = result.split("\n")
@@ -375,9 +372,10 @@ def test_get_context_built_semantic_axis_is_never_misconfigured(
     monkeypatch.setattr(
         server_mod,
         "_build_pack_builder",
-        lambda *_args, **_kwargs: PackBuilder(strategies=[keyword, semantic]),
+        lambda *_args, **_kwargs: PackBuilder(
+            strategies=[keyword, semantic], embedder_configured=True
+        ),
     )
-    _configure_embedder(monkeypatch, temp_registry)
 
     result = get_context(INTENT)
     lines = result.split("\n")
@@ -432,7 +430,6 @@ def test_sectioned_tools_report_misconfigured_semantic_axis(
     monkeypatch.setattr(
         server_mod, "_build_pack_builder", _builder_clean_without_semantic
     )
-    _configure_embedder(monkeypatch, temp_registry)
 
     result = _SECTIONED_CALLS[tool_name]()
     lines = result.split("\n")
@@ -462,3 +459,60 @@ def test_get_sectioned_context_clean_pack_has_no_axis_note(
     assert lines[2:4] == ["", "## docs"]
     assert "Retrieval axis failed" not in result
     assert "Semantic retrieval misconfigured" not in result
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: a real registry whose embedding_fn raises (Q5-A)
+# ---------------------------------------------------------------------------
+#
+# Every test above monkeypatches ``_build_pack_builder`` to hand the tool a
+# directly-constructed ``PackBuilder``, bypassing ``build_strategies``
+# entirely. The two tests below instead exercise the real path end to end
+# through a ``temp_registry`` whose ``embedding_fn`` property raises --
+# the exact scenario that answered 409/INTERNAL_ERROR/exit 5 across REST,
+# MCP and the CLI before this fix (q-review.md #9's acceptance test).
+
+
+def test_get_context_degrades_instead_of_raising(
+    temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(_self: object) -> None:
+        exc = ConfigError(
+            "embeddings.provider is not set", setting="embeddings.provider"
+        )
+        raise exc
+
+    monkeypatch.setattr(StoreRegistry, "embedding_fn", property(_boom))
+    temp_registry.knowledge.document_store.put(
+        "doc-a", "alpha bravo runbook drain queue"
+    )
+
+    result = get_context(INTENT)
+
+    assert not result.startswith("Error")
+    assert "**Semantic retrieval unavailable:**" in result
+    assert "(ConfigError: embeddings.provider)" in result
+    assert "reindex-vectors" in result
+
+    (event,) = temp_registry.operational.event_log.get_events(
+        event_type=EventType.PACK_ASSEMBLED, limit=10
+    )
+    failures = event.payload["strategy_failures"]
+    assert {f["strategy"] for f in failures} == {"semantic"}
+    assert failures[0]["error_class"] == "ConfigError"
+
+
+def test_get_context_degrades_for_an_uninstalled_backend_too(
+    temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not just the base ConfigError -- a subclass raised the same way."""
+
+    def _boom(_self: object) -> None:
+        raise BackendNotInstalledError(backend_name="openai", extra="llm-openai")
+
+    monkeypatch.setattr(StoreRegistry, "embedding_fn", property(_boom))
+
+    result = get_context(INTENT)
+
+    assert not result.startswith("Error")
+    assert "(BackendNotInstalledError: backend.openai)" in result

@@ -35,12 +35,13 @@ from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import NamespaceSeedExtractor, build_strategies
 from trellis.stores.advisory_source import load_advisory_store
 from trellis_wire.axes import (
+    format_embedder_failed_note,
     format_failed_axes_note,
     format_misconfigured_semantic_note,
 )
 
 if TYPE_CHECKING:
-    from trellis.retrieve.strategies import GraphSeedExtractor
+    from trellis.retrieve.strategies import EmbedderResolveFailure, GraphSeedExtractor
     from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
@@ -85,12 +86,20 @@ _FALSEY = frozenset({"0", "false", "no", "off"})
 
 
 class AxisReport(TypedDict):
-    """What :func:`describe_axes` returns. Serialised verbatim into JSON."""
+    """What :func:`describe_axes` returns. Serialised verbatim into JSON.
+
+    ``embedder_error_type``/``embedder_setting`` are always present (never
+    omitted) but only non-``None`` when ``semantic == "embedder_failed"`` —
+    the one state whose note is dynamic rather than a fixed string from
+    :data:`SEMANTIC_AXIS_NOTES` (Q5-A).
+    """
 
     available: list[str]
     ran: list[str]
     failed: list[str]
     semantic: str
+    embedder_error_type: str | None
+    embedder_setting: str | None
 
 
 def build_pack_builder(
@@ -108,12 +117,15 @@ def build_pack_builder(
             with, or ``None``.
     """
     param_registry = ParameterRegistry(registry.operational.parameter_store)
+    strategies_result = build_strategies(
+        registry,
+        parameter_registry=param_registry,
+        graph_seed_extractor=_build_seed_extractor(registry),
+    )
     return PackBuilder(
-        strategies=build_strategies(
-            registry,
-            parameter_registry=param_registry,
-            graph_seed_extractor=_build_seed_extractor(registry),
-        ),
+        strategies=strategies_result.strategies,
+        embedder_configured=strategies_result.embedder_configured,
+        embedder_resolve_failure=strategies_result.embedder_resolve_failure,
         event_log=registry.operational.event_log,
         advisory_store=load_advisory_store(registry.stores_dir, surface=surface),
         reranker=build_reranker("rrf", parameter_registry=param_registry),
@@ -179,6 +191,7 @@ def describe_axes(
     strategies_used: list[str],
     *,
     embedder_configured: bool,
+    embedder_resolve_failure: EmbedderResolveFailure | None = None,
 ) -> AxisReport:
     """Say which axes this deployment has, which ran, and which did not.
 
@@ -189,7 +202,7 @@ def describe_axes(
     reported the result without reporting the gap would reproduce #410 one
     layer up: an answer presented as the whole answer.
 
-    The three outcomes are kept apart because they call for different
+    The four outcomes are kept apart because they call for different
     fixes, the same posture ``capture_coverage``'s ``state`` field takes:
 
     * **configured and ran** — nothing to say.
@@ -198,8 +211,29 @@ def describe_axes(
     * **configured but absent** — an embedder resolved and the axis is
       still missing, which means the vector backend failed to initialise
       and ``build_strategies`` swallowed it.
+    * **embedder failed to resolve** — ``registry.embedding_fn`` itself
+      raised (Q5-A): a different failure from the one above, which
+      needs the operator to fix the *embedder* setting rather than the
+      vector backend. ``embedder_resolve_failure`` carries the error type
+      and setting name (never the exception message — describe, don't
+      quote) and takes precedence over ``embedder_configured`` here,
+      since an embedder that failed to resolve was never "configured" in
+      the sense that word means for the other three states.
     * **available but did not run** — the strategy raised during *this*
       build; ``PACK_ASSEMBLED.strategy_failures`` carries the exception.
+
+    Args:
+        builder: The :class:`PackBuilder` this pack was assembled from.
+        strategies_used: Names of the axes that actually ran this build
+            (``RetrievalReport.strategies_used``).
+        embedder_configured: Whether an embedder resolved for ``builder``.
+            Read ``builder.embedder_configured`` — never re-read
+            ``registry.embedding_fn``, which re-raises on every access
+            when misconfigured.
+        embedder_resolve_failure: ``builder.embedder_resolve_failure``, or
+            ``None`` for a builder this never applies to (e.g. a test
+            double). ``None`` is also the correct value whenever
+            ``embedder_configured`` is accurate on its own.
 
     Returns a mapping, not prose: the caller renders it (or serialises it
     verbatim into ``--format json``).
@@ -207,9 +241,18 @@ def describe_axes(
     available = list(builder.strategy_names)
     ran = list(strategies_used)
     failed = [name for name in available if name not in ran]
+    embedder_error_type: str | None = None
+    embedder_setting: str | None = None
     semantic_state = "ran"
     if SEMANTIC_AXIS not in available:
-        semantic_state = "misconfigured" if embedder_configured else "not_configured"
+        if embedder_resolve_failure is not None:
+            semantic_state = "embedder_failed"
+            embedder_error_type = embedder_resolve_failure.error_type
+            embedder_setting = embedder_resolve_failure.setting
+        else:
+            semantic_state = (
+                "misconfigured" if embedder_configured else "not_configured"
+            )
     elif SEMANTIC_AXIS in failed:
         semantic_state = "failed"
     return {
@@ -217,12 +260,21 @@ def describe_axes(
         "ran": ran,
         "failed": failed,
         "semantic": semantic_state,
+        "embedder_error_type": embedder_error_type,
+        "embedder_setting": embedder_setting,
     }
 
 
 #: Human sentence per :func:`describe_axes` ``semantic`` state. Empty for
 #: the healthy state — a warning that always prints is one that always gets
 #: skipped, the same rule ``retrieval_availability_note`` (#365) follows.
+#:
+#: No ``"embedder_failed"`` entry: that state's note names the actual error
+#: type and setting (Q5-A), which this table — one fixed string per
+#: state — cannot hold. Render it with :func:`format_embedder_failed_note`
+#: instead, the same way ``"misconfigured"``'s *dynamic* MCP rendering uses
+#: :func:`format_misconfigured_semantic_note` beside this table's static
+#: entry for the REST/JSON surfaces that only need the stable string.
 SEMANTIC_AXIS_NOTES: dict[str, str] = {
     "ran": "",
     "not_configured": (
@@ -242,10 +294,11 @@ SEMANTIC_AXIS_NOTES: dict[str, str] = {
     ),
 }
 
-# ``format_failed_axes_note`` and ``format_misconfigured_semantic_note``
-# take no ``PackBuilder``, so they live in :mod:`trellis_wire.axes`, where
-# the HTTP-only SDK can import them, and are re-exported here for MCP.
-# ``tests/unit/wire/test_axes.py`` pins the identity.
+# ``format_failed_axes_note``, ``format_misconfigured_semantic_note`` and
+# ``format_embedder_failed_note`` take no ``PackBuilder``, so they live in
+# :mod:`trellis_wire.axes`, where the HTTP-only SDK can import them, and are
+# re-exported here for MCP. ``tests/unit/wire/test_axes.py`` pins the
+# identity.
 
 
 __all__ = [
@@ -255,6 +308,7 @@ __all__ = [
     "AxisReport",
     "build_pack_builder",
     "describe_axes",
+    "format_embedder_failed_note",
     "format_failed_axes_note",
     "format_misconfigured_semantic_note",
 ]

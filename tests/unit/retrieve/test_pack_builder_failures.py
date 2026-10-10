@@ -24,7 +24,7 @@ from trellis.retrieve.pack_builder import (
     StrategyFailure,
 )
 from trellis.retrieve.rerankers.base import Reranker
-from trellis.retrieve.strategies import SearchStrategy
+from trellis.retrieve.strategies import EmbedderResolveFailure, SearchStrategy
 from trellis.schemas.pack import PackItem, SectionRequest
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -96,6 +96,44 @@ class TestAllStrategiesFailRaises:
         assert len(excinfo.value.strategy_failures) == 3
         names = {f.strategy for f in excinfo.value.strategy_failures}
         assert names == {"kw", "sem", "graph"}
+
+    def test_an_embedder_resolve_failure_never_masks_the_all_failed_raise(
+        self,
+    ) -> None:
+        """Q5-A: a failed-to-resolve embedder must not count toward,
+        or block, the all-failed check below it.
+
+        The semantic axis here never reached ``self._strategies`` at all
+        — ``build_strategies`` drops it before construction when the
+        embedder fails to resolve — so a builder with an
+        ``embedder_resolve_failure`` and two *real* strategies that both
+        fail has ``total_strategies == 2``. ``_record_embedder_resolve_failure``
+        must run after ``_raise_if_blocking_strategy_failures``, not
+        before it: recording the embedder failure first would grow
+        ``strategy_failures`` to 3 while ``total_strategies`` stayed 2,
+        so ``len(strategy_failures) == total_strategies`` would read
+        ``False`` and the all-failed raise would silently stop firing —
+        a pack with zero working axes reported as successfully
+        assembled, the exact silent-empty-pack shape C2 Phase 4 exists
+        to prevent, reopened one layer up by this feature.
+        """
+        s1 = _failing_strategy("kw", RuntimeError("a"))
+        s2 = _failing_strategy("graph", RuntimeError("c"))
+        builder = PackBuilder(
+            strategies=[s1, s2],
+            embedder_configured=False,
+            embedder_resolve_failure=EmbedderResolveFailure(
+                error_type="ConfigError", setting="embeddings.provider"
+            ),
+        )
+        with pytest.raises(PackAssemblyError) as excinfo:
+            builder.build("q")
+        assert "All 2 configured strategies failed" in str(excinfo.value)
+        # Exactly the two real strategies -- the embedder-resolve-failure
+        # entry is never part of what tripped this raise.
+        assert len(excinfo.value.strategy_failures) == 2
+        names = {f.strategy for f in excinfo.value.strategy_failures}
+        assert names == {"kw", "graph"}
 
 
 class TestPartialStrategyFailureRecorded:

@@ -121,6 +121,7 @@ from trellis.retrieve.builder_factory import (
     AxisReport,
     build_pack_builder,
     describe_axes,
+    format_embedder_failed_note,
     format_failed_axes_note,
     format_misconfigured_semantic_note,
 )
@@ -943,14 +944,19 @@ def _axis_note(axes: AxisReport) -> str:
     """Every markdown axis note ``axes`` calls for, joined.
 
     Shared by ``_flat_context`` and ``_sectioned_context``. A failed axis
-    (:func:`format_failed_axes_note`) and a misconfigured semantic axis
-    (:func:`format_misconfigured_semantic_note`) are independent states —
-    ``describe_axes`` can report either, or both, for the same build — so
-    both render when present rather than one shadowing the other.
+    (:func:`format_failed_axes_note`), a misconfigured semantic axis
+    (:func:`format_misconfigured_semantic_note`) and an embedder that
+    failed to resolve (:func:`format_embedder_failed_note`, Q5-A)
+    are independent states — ``describe_axes`` can report any of them,
+    or several together, for the same build — so each renders when
+    present rather than one shadowing another.
     """
     notes = [
         format_failed_axes_note(axes["failed"]),
         format_misconfigured_semantic_note(axes["semantic"]),
+        format_embedder_failed_note(
+            axes["embedder_error_type"], axes["embedder_setting"]
+        ),
     ]
     return "\n\n".join(note for note in notes if note)
 
@@ -1046,10 +1052,16 @@ def _flat_context(
     # surface (#775); this is the markdown equivalent — an agent reading
     # the reply never sees a JSON axes block, so the gap is stated in the
     # one place it will read it. Names only, never the exception text.
+    # Both kwargs come from the builder (set once, inside the try above,
+    # from build_strategies' own resolve attempt) rather than a second
+    # ``registry.embedding_fn`` read, which re-raises on every access when
+    # misconfigured and would turn this line into the same uncaught
+    # failure the try above exists to avoid (Q5-A).
     axes = describe_axes(
         builder,
         pack.retrieval_report.strategies_used,
-        embedder_configured=registry.embedding_fn is not None,
+        embedder_configured=builder.embedder_configured,
+        embedder_resolve_failure=builder.embedder_resolve_failure,
     )
     axis_note = _axis_note(axes)
 
@@ -1175,10 +1187,13 @@ def _sectioned_context(
         # section's stands for all. No caller passes sections=[].
         axis_note = ""
         if sectioned_pack.sections:
+            # Builder-sourced, not a second ``registry.embedding_fn`` read
+            # — see the flat path's identical note (Q5-A).
             axes = describe_axes(
                 builder,
                 sectioned_pack.sections[0].retrieval_report.strategies_used,
-                embedder_configured=registry.embedding_fn is not None,
+                embedder_configured=builder.embedder_configured,
+                embedder_resolve_failure=builder.embedder_resolve_failure,
             )
             axis_note = _axis_note(axes)
         result = format_sectioned_pack_as_markdown(

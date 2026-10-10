@@ -196,21 +196,29 @@ class TestTheOtherConfigErrorTheSweepFound:
     """A read route, a different raiser, no policy file in sight.
 
     The gate was not the only ``ConfigError`` reaching the boundary.
-    ``build_strategies`` resolves the embedder through
+    ``build_strategies`` used to resolve the embedder through
     ``getattr(registry, "embedding_fn", None)``, and ``getattr`` with a
     default does not suppress an exception raised *inside* the property —
     so a configured-but-uninstalled provider answered ``500
     internal_error`` on the pack routes, for a fault whose fix is the one
     ``pip install`` line the exception already carries.
 
-    Registering the base class rather than ``ConfigError`` is what makes
-    this work without a second edit, and what makes the ``code`` the
-    *subclass's* — ``backend_not_installed`` is strictly more actionable
-    than ``config_error`` and a per-class registration would have flattened
-    it.
+    **Superseded by Q5-A.** ``build_strategies`` now catches that
+    raise itself and reports it through ``PackBuilder.embedder_resolve_
+    failure`` instead of letting it propagate — keyword and graph still
+    run, and the response is a *degraded* 200 pack, not a 409. The
+    ``CONFIG_ERROR_STATUS`` registration below this class is unchanged
+    and still answers 409 for a ``ConfigError`` that reaches the boundary
+    from anywhere else (e.g. the policy-gate tests above); this one
+    exception, from this one property, on this one route family, simply
+    no longer reaches it. ``backend_not_installed``'s install-command
+    message is asserted via :mod:`trellis_wire.axes`'s
+    ``format_embedder_failed_note`` instead — see
+    ``tests/unit/retrieve/test_builder_factory.py`` and
+    ``tests/unit/wire/test_axes.py``.
     """
 
-    def test_an_uninstalled_backend_answers_with_its_install_command(
+    def test_an_uninstalled_backend_degrades_the_pack_instead_of_raising(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def _boom(_self: object) -> None:
@@ -220,10 +228,13 @@ class TestTheOtherConfigErrorTheSweepFound:
         resp = client.post("/api/v1/packs", json={"intent": "anything"})
         body = resp.json()
 
-        assert resp.status_code == CONFIG_ERROR_STATUS
-        assert body["code"] == "backend_not_installed"
-        assert 'uv pip install -e ".[llm-openai]"' in body["message"]
-        assert body["setting"] == "backend.openai"
+        assert resp.status_code == 200
+        axes = body["axes"]
+        assert axes["semantic"] == "embedder_failed"
+        assert axes["embedder_error_type"] == "BackendNotInstalledError"
+        assert axes["embedder_setting"] == "backend.openai"
+        assert "keyword" in axes["ran"]
+        assert "graph" in axes["ran"]
 
 
 class TestTheCatchAllKeepsWhatItShouldHave:

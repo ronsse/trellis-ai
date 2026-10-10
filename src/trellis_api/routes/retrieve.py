@@ -131,11 +131,15 @@ def assemble_pack(req: PackRequest) -> PackResponse:
     )
 
     # The axis report `trellis retrieve pack --format json` prints, so a
-    # caller can tell a pack missing a failed axis from a full one.
+    # caller can tell a pack missing a failed axis from a full one. Both
+    # kwargs come from the builder, not a second ``registry.embedding_fn``
+    # read — that property re-raises on every access when misconfigured
+    # (Q5-A).
     axes = describe_axes(
         builder,
         pack.retrieval_report.strategies_used,
-        embedder_configured=registry.embedding_fn is not None,
+        embedder_configured=builder.embedder_configured,
+        embedder_resolve_failure=builder.embedder_resolve_failure,
     )
 
     return PackResponse(
@@ -199,7 +203,8 @@ def assemble_sectioned_pack(req: SectionedPackRequest) -> SectionedPackResponse:
         **describe_axes(
             builder,
             pack.sections[0].retrieval_report.strategies_used,
-            embedder_configured=registry.embedding_fn is not None,
+            embedder_configured=builder.embedder_configured,
+            embedder_resolve_failure=builder.embedder_resolve_failure,
         )
     )
 
