@@ -72,6 +72,7 @@ def _describe_unsuccessful(result: CommandResult) -> str:
         return sanitize_error_message(result.message)
     return result.message
 
+
 #: ``requested_by`` on every link this module creates.
 SAVE_KNOWLEDGE_REQUESTER: Final = "mcp:save_knowledge"
 

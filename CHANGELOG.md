@@ -2051,6 +2051,31 @@ All notable changes to Trellis will be documented in this file.
   line. In both helpers, a `setting` that is not a string degrades to
   `None` instead of breaking the dedup cache, so every path still
   degrades rather than raising.
+- **Four more "describe, don't quote" (#206) sites follow up #829/#836/#837.**
+  MCP `server.py`'s three pydantic-validation sites (`save_experience`,
+  `record_observation`, `execute_mutation`) quoted `str(exc)` — including a
+  rejected field's own value — back to the calling agent; `supersession.py`'s
+  `_execute` and `knowledge_links.py`'s `_describe_unsuccessful` returned a
+  mutation's raw `CommandResult.message` whole on every status, missing the
+  `FAILED`/`REJECTED`-only gate #836 applied elsewhere in the same file. CLI
+  `admin_proposals.py`'s three broad `except Exception` handlers
+  (`generate-proposals`, `list-proposals`, `show-proposal`) built their JSON
+  `message` as `f"{type(exc).__name__}: {exc}"`, interpolating a raw
+  store/driver exception. SDK `TrellisClient.record_feedback` /
+  `AsyncTrellisClient.record_feedback` built a `TrellisProtocolError` as
+  `f"...: {exc}"` on a malformed response body; a pydantic `ValidationError`'s
+  own `str()` composes `input_value=<the body's own field value>` into every
+  line by design, so whatever a misbehaving proxy or wire-schema-skewed server
+  sent back was quoted back whole. All four now name the exception's type and
+  field location instead of its rendered text. `trellis_sdk` must not import
+  `trellis.*` (`tests/unit/sdk/test_isolation.py` AST-walks the package), so
+  its fix is a new, dependency-free `trellis_sdk._http.describe_body_parse_error`
+  rather than a call to `trellis.core.error_sanitize.describe_validation_error`
+  — a local port that keeps `loc`/`type` and drops pydantic's `msg` outright,
+  since this copy carries no sanitizer to defend a future custom validator's
+  own message. REST `admin.py`'s `_LearningCandidatesUnavailableError` path
+  was checked and found already routing every exception through
+  `describe_os_error`/`describe_json_error`/`sanitize_error_message`.
 
 ## [0.9.0] - 2026-05-13
 
