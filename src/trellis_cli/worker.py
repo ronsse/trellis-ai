@@ -411,6 +411,11 @@ class CurateCycleResult:
     """
 
     noise_tagged: int = 0
+    #: Admitted ids the demotion gate cleared but ``apply_noise_tags``
+    #: could not resolve as a document (a trace id or other non-document
+    #: id); nothing was written for these, unlike every id counted in
+    #: ``noise_tagged`` (#833).
+    noise_refused_non_document: int = 0
     advisories_generated: int = 0
     #: Findings that cleared the sample floor on the arm carrying them but
     #: had no comparison arm to be measured against, so nothing was emitted
@@ -485,6 +490,7 @@ class CurateCycleResult:
         """Flat JSON-friendly view for ``--format json`` and structured logs."""
         return {
             "noise_tagged": self.noise_tagged,
+            "noise_refused_non_document": self.noise_refused_non_document,
             "advisories_generated": self.advisories_generated,
             "advisories_refused": self.advisories_refused,
             "advisories_suppressed": self.advisories_suppressed,
@@ -585,6 +591,7 @@ def run_curation_cycle(
 
     return CurateCycleResult(
         noise_tagged=noise["noise_tagged"],
+        noise_refused_non_document=noise["noise_refused_non_document"],
         advisories_generated=advisory["advisories_generated"],
         advisories_refused=advisory["advisories_refused"],
         advisories_suppressed=advisory["advisories_suppressed"],
@@ -622,10 +629,20 @@ def _curate_stage_noise_tags(
     :class:`~trellis.retrieve.strategies.SemanticSearch` keeps serving the
     item's pre-demotion embed-time snapshot (#338, re-opened on this path
     by #381).
+
+    ``noise_tagged`` on a live run is the write count, not the gate's
+    admission: the evidence gate admits on citation evidence alone, with
+    no notion of which store an id belongs to, so an admitted trace id or
+    other non-document id reaches ``apply_noise_tags`` and nothing gets
+    written for it (#833). ``noise_refused_non_document``
+    names that remainder. On a dry run nothing is written either way, so
+    both counts come from a read-only ``document_store.get`` per admitted
+    id — cheap, and honest about what a live run on the same window would
+    actually demote.
     """
     if skip:
         skipped.append("noise_tags")
-        return {"noise_tagged": 0}
+        return {"noise_tagged": 0, "noise_refused_non_document": 0}
 
     from trellis.retrieve.effectiveness import (  # noqa: PLC0415
         analyze_effectiveness,
@@ -645,20 +662,34 @@ def _curate_stage_noise_tags(
                 days=days,
                 vector_store=vector_store,
             )
-        # What the evidence gate admitted, not what the usage-rate rule
-        # proposed (#336). The two differ by ~60% on the reference
-        # deployment, and reporting the proposal here would put a number
-        # in the nightly log that no write ever matched.
         screen = report.demotion_screen
-        noise_tagged = (
-            len(screen.admitted) if screen is not None else len(report.noise_candidates)
-        )
+        if report.noise_tags_written is not None:
+            # A live run: the authoritative write count and the admitted
+            # ids apply_noise_tags could not resolve as a document.
+            noise_tagged = report.noise_tags_written
+            noise_refused_non_document = len(report.noise_refused_not_document)
+        elif screen is not None:
+            # Dry run: nothing is written, so report what a live run would
+            # do on this same admitted set — a read, not a write.
+            noise_refused_non_document = sum(
+                1 for item_id in screen.admitted if document_store.get(item_id) is None
+            )
+            noise_tagged = len(screen.admitted) - noise_refused_non_document
+        else:
+            # No screen at all (a caller that did not screen) — same
+            # fallback as before this fix: report the raw proposal, with
+            # no way to say how much of it would resolve as a document.
+            noise_tagged = len(report.noise_candidates)
+            noise_refused_non_document = 0
         if record.enabled and noise_tagged and not dry_run:
             record.produced_finding(
                 f"curate-noise-tags-d{days}",
                 finding_type="NoiseTagsApplied",
             )
-    return {"noise_tagged": noise_tagged}
+    return {
+        "noise_tagged": noise_tagged,
+        "noise_refused_non_document": noise_refused_non_document,
+    }
 
 
 #: Bloat guard on the ``msg`` carried into the rejection row. Same value as
@@ -932,6 +963,7 @@ def _render_cycle_text(result: CurateCycleResult) -> None:
     console.print(f"[bold]worker curate[/bold] mode={mode}")
     console.print(
         f"  noise-tagged: {result.noise_tagged}  "
+        f"noise refused (not a document): {result.noise_refused_non_document}  "
         f"advisories generated: {result.advisories_generated}  "
         f"refused (no comparison arm): {result.advisories_refused}  "
         f"suppressed: {result.advisories_suppressed}  "

@@ -124,7 +124,7 @@ class TestAcceptance:
         builder = _semantic_builder(vector_store)
         assert _ids(builder) == ["noisy", "useful"]
 
-        assert apply_noise_tags(["noisy"], doc_store, vector_store) == 1
+        assert apply_noise_tags(["noisy"], doc_store, vector_store).updated == 1
 
         assert _ids(builder) == ["useful"]
 
@@ -183,7 +183,8 @@ class TestAcceptance:
         """
         doc_store.put("never_embedded", INTENT, {"title": "t"})
 
-        assert apply_noise_tags(["never_embedded"], doc_store, vector_store) == 1
+        result = apply_noise_tags(["never_embedded"], doc_store, vector_store)
+        assert result.updated == 1
 
         doc = doc_store.get("never_embedded")
         assert doc is not None
