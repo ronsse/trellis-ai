@@ -348,6 +348,17 @@ them: REST and CLI packs share `entity_type="pack"` and did return advisories (a
 event has no surface field, and the build is identified by `metadata.write_provenance`, not
 by the merge date. The SDK markdown helpers and the CLI text arm still render none.
 
+**2026-10-10 — the missing half of B ships.** `_select_advisories` now drops any
+advisory where `evidence.evidence_confidence is None` — the field #394 introduced, so its
+absence identifies a pre-repair row — before ranking and the cap runs, on both pack shapes,
+gated by `TRELLIS_FILTER_LEGACY_ADVISORIES` (default on). Filtering before rank/cap means a
+legacy row can never occupy a slot a post-repair row would have won; `PACK_ASSEMBLED` carries
+the count as `advisories_filtered_legacy`, so fitness scoring never counts a withheld row as a
+presentation. Measured against the live store on 2026-10-10: 51 legacy rows, 361 post-repair,
+zero mismatches against the alternative id-prefix discriminator. Clearing the 51 legacy rows
+from the live store is unchanged by this PR — still the operator's live-store mutation, not
+automated here.
+
 ---
 
 ## Taken
