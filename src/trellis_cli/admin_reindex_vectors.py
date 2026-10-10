@@ -25,9 +25,9 @@ import structlog
 import typer
 from rich.markup import escape
 
-from trellis.errors import ConfigError, StoreError
+from trellis.errors import StoreError, TrellisError
 from trellis.retrieve.embed_ingest_hook import build_vector_row
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK
 from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
 
@@ -43,30 +43,40 @@ DEFAULT_BATCH_SIZE = 100
 
 
 def _resolve_vector_store(registry: StoreRegistry) -> VectorStore | None:
-    """``registry.knowledge.vector_store``, describing a resolve failure.
+    """``registry.knowledge.vector_store``, describing an untyped resolve failure.
 
     A real registry's ``vector_store`` property always exists (it is a
     normal ``@property`` on ``_KnowledgePlane`` — see
     ``trellis.stores.registry``), so the ``getattr(..., None)`` this
     replaced never actually absorbed an ``AttributeError`` here; it only
     hid whatever OTHER exception the property's own backend
-    instantiation raised (a bad backend config, an unreachable store),
-    which then escaped as a bare traceback instead of this command's own
-    error path. Describe, don't quote (same principle as #834's
-    embed-on-ingest hook): the raised :class:`~trellis.errors.StoreError`
-    names the cause's type and, for a :class:`~trellis.errors.ConfigError`,
-    the broken setting — never the original exception's message text.
+    instantiation raised (a bad backend config, an unreachable store).
+
+    A typed :class:`~trellis.errors.TrellisError` (a
+    :class:`~trellis.errors.ConfigError`, say) already reaches the root
+    CLI boundary (:class:`trellis_cli.main._BoundaryGroup`) unharmed on
+    base — that boundary maps it to exit 5 (``EXIT_STORE``) with the
+    standard sanitized JSON envelope, keeping the error's own
+    ``error_code`` and, for a ``ConfigError``, its ``setting`` — so it is
+    re-raised unchanged here rather than re-wrapped. Only an *untyped*
+    exception (one the boundary cannot already describe) escaped as a
+    bare traceback with exit 1 instead of this command's own error path;
+    it is wrapped in a :class:`~trellis.errors.StoreError` naming the
+    cause's type, never its message text, so it reaches the same boundary
+    and exits 5 too.
 
     Raises:
-        StoreError: when resolving the property itself raises.
+        TrellisError: unchanged, when resolving the property raises one.
+        StoreError: when resolving the property raises anything else.
     """
     try:
         return registry.knowledge.vector_store
+    except TrellisError:
+        raise
     except Exception as exc:
-        error_type = type(exc).__name__
-        setting = exc.setting if isinstance(exc, ConfigError) else None
-        reason = f"{error_type}: {setting}" if setting else error_type
-        msg = f"reindex-vectors could not resolve the vector store ({reason})"
+        msg = (
+            f"reindex-vectors could not resolve the vector store ({type(exc).__name__})"
+        )
         raise StoreError(msg, store="vector") from exc
 
 
@@ -88,9 +98,11 @@ def run_reindex_vectors(
 
     Raises:
         ValueError: when the embedder or vector store is unconfigured.
-        StoreError: when resolving the vector store itself raises (a
-            broken backend config, not simply "none configured"); see
-            :func:`_resolve_vector_store`.
+        TrellisError: when resolving the vector store itself raises one
+            (a broken backend config, not simply "none configured"),
+            unchanged; see :func:`_resolve_vector_store`.
+        StoreError: when resolving the vector store raises anything
+            else.
     """
     embedding_fn = registry.embedding_fn
     vector_store = _resolve_vector_store(registry)
@@ -213,17 +225,18 @@ def register(admin_app: typer.Typer) -> None:
                 dry_run=dry_run,
             )
         except ValueError as exc:
+            # A ``StoreError`` from ``_resolve_vector_store`` (or any other
+            # ``TrellisError``) is deliberately left uncaught here: it
+            # propagates to the root CLI boundary
+            # (``trellis_cli.main._BoundaryGroup``), which renders it with
+            # the standard sanitized JSON envelope and exits ``EXIT_STORE``
+            # (5) regardless of ``--format``. A local catch pre-empted that
+            # boundary and printed the raw, unsanitized message (#839).
             if output_format == "json":
                 print(json.dumps({"status": "error", "message": str(exc)}))
             else:
                 console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
             raise typer.Exit(code=EXIT_INTERNAL) from exc
-        except StoreError as exc:
-            if output_format == "json":
-                print(json.dumps({"status": "error", "message": str(exc)}))
-            else:
-                console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
-            raise typer.Exit(code=EXIT_STORE) from exc
 
         if output_format == "json":
             print(json.dumps(summary))

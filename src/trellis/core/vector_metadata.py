@@ -212,8 +212,18 @@ def _describe_resolve_failure(exc: Exception) -> tuple[str, str | None]:
     ``str | None``. A plain ``getattr(exc, "setting", None)`` would let an
     unrelated exception's same-named, possibly-unhashable or untrusted
     attribute reach the ``functools.cache``-keyed dedup call below.
+
+    The type hint is not enforced at runtime, so ``setting`` is also
+    checked with ``isinstance(..., str)`` before it is kept: a
+    ``ConfigError`` constructed with a non-``str`` ``setting`` — a list,
+    say — would otherwise reach the ``functools.cache``-keyed dedup call
+    and raise ``TypeError: unhashable type`` there, breaking
+    :func:`resolve_vector_store`'s fail-soft degrade-to-``None`` contract
+    on the very first failure (#839). A non-``str`` setting degrades to
+    ``None`` like a missing one.
     """
-    return type(exc).__name__, exc.setting if isinstance(exc, ConfigError) else None
+    setting = exc.setting if isinstance(exc, ConfigError) else None
+    return type(exc).__name__, setting if isinstance(setting, str) else None
 
 
 @functools.cache

@@ -243,13 +243,93 @@ class TestResolveVectorStoreFailureLogging:
     """
 
     def test_reason_names_the_setting_for_a_config_error(self) -> None:
+        """Not just ``None`` — the log names *which* setting is broken.
+
+        A bare ``resolve_vector_store(registry) is None`` assertion alone
+        passes against ANY degrade-to-``None`` implementation, including
+        one that swallows the cause entirely; asserting the logged
+        ``error_type``/``setting`` is what actually pins "describe, don't
+        quote" rather than merely "fails soft" (#839).
+        """
+        from structlog.testing import capture_logs
+
         registry = MagicMock()
         type(registry.knowledge).vector_store = property(
             lambda _self: (_ for _ in ()).throw(
                 ConfigError("unknown vector backend", setting="vector.backend")
             )
         )
-        assert resolve_vector_store(registry) is None
+
+        with capture_logs() as logs:
+            assert resolve_vector_store(registry) is None
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["error_type"] == "ConfigError"
+        assert matching[0]["setting"] == "vector.backend"
+
+    def test_unhashable_setting_degrades_to_none_without_raising(self) -> None:
+        """A ``ConfigError`` whose ``setting`` is not a ``str`` (a list,
+        say — the type hint is not enforced at runtime) must not reach the
+        ``functools.cache``-keyed dedup call with it: ``cache`` hashes its
+        arguments, and a list raises ``TypeError: unhashable type`` there,
+        which would break ``resolve_vector_store``'s fail-soft contract on
+        the very first such failure (#839)."""
+        from structlog.testing import capture_logs
+
+        registry = MagicMock()
+        type(registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                ConfigError("unknown vector backend", setting=["vector.backend"])  # type: ignore[arg-type]
+            )
+        )
+
+        with capture_logs() as logs:
+            assert resolve_vector_store(registry) is None
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["error_type"] == "ConfigError"
+        assert matching[0]["setting"] is None
+
+    def test_foreign_setting_attribute_is_ignored(self) -> None:
+        """Only a real ``ConfigError`` contributes a ``setting`` — a
+        same-named attribute on an unrelated exception type is not
+        trusted, pinning the ``isinstance(exc, ConfigError)`` guard rather
+        than a bare ``getattr(exc, "setting", None)``."""
+        from structlog.testing import capture_logs
+
+        class _ForeignError(RuntimeError):
+            def __init__(self, message: str, *, setting: str) -> None:
+                super().__init__(message)
+                self.setting = setting
+
+        registry = MagicMock()
+        type(registry.knowledge).vector_store = property(
+            lambda _self: (_ for _ in ()).throw(
+                _ForeignError("boom", setting="not-a-real-config-setting")
+            )
+        )
+
+        with capture_logs() as logs:
+            assert resolve_vector_store(registry) is None
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "vector_store_unavailable_for_metadata_sync"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["error_type"] == "_ForeignError"
+        assert matching[0]["setting"] is None
 
     def test_logged_once_per_distinct_cause(self) -> None:
         """Two calls against the same persistently-broken registry must
