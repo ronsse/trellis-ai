@@ -633,13 +633,13 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "version_id": generate_ulid(),
             "node_type": node_type,
             "node_role": node_role,
-            "generation_spec_json": json.dumps(generation_spec)
+            "generation_spec_json": json.dumps(generation_spec, allow_nan=False)
             if generation_spec is not None
             else None,
-            "document_ids_json": json.dumps(document_ids)
+            "document_ids_json": json.dumps(document_ids, allow_nan=False)
             if document_ids is not None
             else None,
-            "properties_json": json.dumps(properties or {}),
+            "properties_json": json.dumps(properties or {}, allow_nan=False),
             # ``created_at`` is set in Cypher via coalesce so we don't
             # need to know the prior value here.
             "updated_at": now,
@@ -704,13 +704,13 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "version_id": generate_ulid(),
             "node_type": node_type,
             "node_role": node_role,
-            "generation_spec_json": json.dumps(generation_spec)
+            "generation_spec_json": json.dumps(generation_spec, allow_nan=False)
             if generation_spec is not None
             else None,
-            "document_ids_json": json.dumps(document_ids)
+            "document_ids_json": json.dumps(document_ids, allow_nan=False)
             if document_ids is not None
             else None,
-            "properties_json": json.dumps(properties or {}),
+            "properties_json": json.dumps(properties or {}, allow_nan=False),
             "updated_at": now,
             "valid_from": now,
             "valid_to": None,
@@ -853,16 +853,18 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                             "node_type": spec["node_type"],
                             "node_role": spec.get("node_role", "semantic"),
                             "generation_spec_json": (
-                                json.dumps(generation_spec)
+                                json.dumps(generation_spec, allow_nan=False)
                                 if generation_spec is not None
                                 else None
                             ),
                             "document_ids_json": (
-                                json.dumps(document_ids)
+                                json.dumps(document_ids, allow_nan=False)
                                 if document_ids is not None
                                 else None
                             ),
-                            "properties_json": json.dumps(spec.get("properties") or {}),
+                            "properties_json": json.dumps(
+                                spec.get("properties") or {}, allow_nan=False
+                            ),
                             "created_at": now,
                             "updated_at": now,
                             "valid_from": now,
@@ -1411,7 +1413,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "source_id": source_id,
             "target_id": target_id,
             "edge_type": edge_type,
-            "properties_json": json.dumps(properties or {}),
+            "properties_json": json.dumps(properties or {}, allow_nan=False),
             "valid_from": now,
             "valid_to": None,
             "source_trace_id": source_trace_id,
@@ -1532,7 +1534,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     "source_id": spec["source_id"],
                     "target_id": spec["target_id"],
                     "edge_type": spec["edge_type"],
-                    "properties_json": json.dumps(spec.get("properties") or {}),
+                    "properties_json": json.dumps(
+                        spec.get("properties") or {}, allow_nan=False
+                    ),
                     "valid_from": now,
                     "valid_to": None,
                     **per_row_provenance[i],

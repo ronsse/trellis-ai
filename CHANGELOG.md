@@ -398,6 +398,35 @@ All notable changes to Trellis will be documented in this file.
   id, and curate's `NoiseTagsApplied` finding now fires on the write
   count rather than the admission count.
   ([#833](https://github.com/ronsse/trellis-ai/pull/833))
+- **Every remaining `json.dumps` write path in the graph, document,
+  vector, outcome, tuner-state, parameter and blob stores now refuses
+  NaN/Infinity too, closing the gap #831 (above) left open.** The
+  advisory and policy JSON files (`DegradableJsonStore`) are unchanged
+  and still write a bare `NaN`/`Infinity` token. That PR fixed
+  the event logs and the SQLite/Postgres graph stores; the ArcadeDB/Neo4j
+  graph store (`bolt_opencypher/graph.py`, 11 call sites across
+  `upsert_node`, `update_node_if_current`, `upsert_nodes_bulk`,
+  `upsert_edge` and `upsert_edges_bulk`), the SQLite and Postgres document
+  stores, every vector store's metadata write (SQLite, pgvector, Neo4j —
+  `upsert` and the separately-implemented `upsert_bulk` are two distinct
+  call sites there — and ArcadeDB), the outcome/tuner-state/parameter
+  stores, and the local blob store's metadata sidecar all still wrote a
+  non-finite float as a silent `NaN`/`Infinity` JSON token. The fix is the
+  same `allow_nan=False` on each `json.dumps` call, and the same
+  `ValueError` raised before the write lands. Two gaps this also closes:
+  (1) MCP `save_memory` previously committed a document row with NaN
+  metadata durably *before* the later `MEMORY_STORED` event emit failed,
+  leaving an orphan a caller's error made look recoverable — fixing
+  `sqlite/document.py`'s `put()` means the write itself refuses first, so
+  nothing durable lands; (2) the SQLite graph store's
+  `upsert_nodes_bulk`/`upsert_edges_bulk` already rolled back a
+  non-finite row atomically before this PR (both build every `json.dumps`
+  call before any write statement runs), but had no test pinning a
+  two-row batch where an earlier row has a prior version and a later row
+  is non-finite — added, and confirmed non-vacuous by mutating the store
+  to commit each row as it's built (which the test catches: the prior
+  row's value leaks through).
+  ([#835](https://github.com/ronsse/trellis-ai/pull/835))
 - **The SQLite event log and both the SQLite and Postgres graph stores
   refuse a NaN/Infinity float at write time, instead of silently storing
   JSON text a stricter reader can't parse.** Python's `json.dumps` writes

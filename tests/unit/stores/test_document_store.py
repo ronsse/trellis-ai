@@ -514,3 +514,17 @@ def test_search_filter_on_malformed_metadata_names_the_json(
 
     with pytest.raises(sqlite3.OperationalError, match="malformed JSON"):
         doc_store.search("filterable", filters={"tags": ["target"]})
+
+
+def test_put_refuses_a_non_finite_metadata_value(
+    doc_store: SQLiteDocumentStore,
+) -> None:
+    """json.dumps(..., allow_nan=False) refuses NaN/Infinity before the INSERT runs.
+
+    Before this, SQLite stored the NaN token silently and a strict JSON
+    reader downstream (json.loads) could not parse it back.
+    """
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        doc_store.put("d1", "content", {"score": float("nan")})
+    assert doc_store.get("d1") is None
+    assert doc_store.count() == 0
