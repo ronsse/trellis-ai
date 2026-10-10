@@ -414,7 +414,7 @@ class CurateCycleResult:
     #: Admitted ids the demotion gate cleared but ``apply_noise_tags``
     #: could not resolve as a document (a trace id or other non-document
     #: id); nothing was written for these, unlike every id counted in
-    #: ``noise_tagged`` (noise-refused-non-document).
+    #: ``noise_tagged`` (#833).
     noise_refused_non_document: int = 0
     advisories_generated: int = 0
     #: Findings that cleared the sample floor on the arm carrying them but
@@ -634,7 +634,7 @@ def _curate_stage_noise_tags(
     admission: the evidence gate admits on citation evidence alone, with
     no notion of which store an id belongs to, so an admitted trace id or
     other non-document id reaches ``apply_noise_tags`` and nothing gets
-    written for it (noise-refused-non-document). ``noise_refused_non_document``
+    written for it (#833). ``noise_refused_non_document``
     names that remainder. On a dry run nothing is written either way, so
     both counts come from a read-only ``document_store.get`` per admitted
     id — cheap, and honest about what a live run on the same window would

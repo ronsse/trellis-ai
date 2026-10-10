@@ -195,7 +195,9 @@ class TestApplyNoiseTags:
         rendered = plain(result.stdout)
         assert "Noise tags applied to 0 of 1 proposed item(s)" in rendered
         assert "1 admitted item(s) refused: not found in the document store" in rendered
-        assert "ac:trace:phantom" in rendered
+        # The refused id is listed once, under "refused" — not also under
+        # the corrected "applied" count, which lists only written ids.
+        assert rendered.count("ac:trace:phantom") == 1
 
 
 class TestTokenUsage:

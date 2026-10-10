@@ -380,10 +380,9 @@ class TestRunEffectivenessFeedback:
         assert doc_id in report.noise_candidates
         assert report.demotion_screen is not None
         assert report.demotion_screen.admitted == [doc_id]
-        # The write outcome, not the gate's admission count
-        # (noise-refused-non-document) — identical here because the
-        # admitted id is a real document, but the two fields exist
-        # precisely because they can diverge.
+        # The write outcome, not the gate's admission count (#833) —
+        # identical here because the admitted id is a real document, but
+        # the two fields exist precisely because they can diverge.
         assert report.noise_tags_written == 1
         assert report.noise_refused_not_document == []
 

@@ -387,13 +387,17 @@ All notable changes to Trellis will be documented in this file.
   CLI `trellis analyze apply-noise-tags`'s text output each independently
   reported the admission count as the demotion count, overstating it by
   the non-document remainder. `apply_noise_tags` now returns a
-  `NoiseTagResult` (`updated`, `refused_not_document`);
-  `EffectivenessReport` carries `noise_tags_written` /
-  `noise_refused_not_document`; all three surfaces report the real write
-  count and name what was refused (`noise_refused_non_document` /
-  `noise_candidates_refused_not_document`). A curate dry run, which writes
-  nothing either way, previews the same split with a read-only
-  `document_store.get` check per admitted id.
+  `NoiseTagResult` (`updated`, `refused_not_document`) instead of a bare
+  `int`; `EffectivenessReport` carries `noise_tags_written` /
+  `noise_refused_not_document`. REST and the CLI report the real write
+  count beside the refused ids by name (`noise_refused_not_document` /
+  `noise_candidates_refused_not_document`); curate reports the write
+  count beside only a refused *count* (`noise_refused_non_document`), not
+  names. A curate dry run, which writes nothing either way, previews the
+  same split with a read-only `document_store.get` check per admitted
+  id, and curate's `NoiseTagsApplied` finding now fires on the write
+  count rather than the admission count.
+  ([#833](https://github.com/ronsse/trellis-ai/pull/833))
 - **The SQLite event log and both the SQLite and Postgres graph stores
   refuse a NaN/Infinity float at write time, instead of silently storing
   JSON text a stricter reader can't parse.** Python's `json.dumps` writes
@@ -432,6 +436,7 @@ All notable changes to Trellis will be documented in this file.
   their producers before this PR; the miner was the one still open, and
   is now closed here too.
   ([#831](https://github.com/ronsse/trellis-ai/pull/831))
+
 - **`Measurement.metric_value` refuses `Infinity` and `-Infinity`, not only
   `NaN`.** The field accepted any float that passed `math.isnan`, so a
   caller could record `Infinity`. `metric_value` now refuses `NaN`,

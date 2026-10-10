@@ -320,14 +320,18 @@ def _print_demotion_outcome(report: Any) -> None:
         f" (minimum {screen.min_attributed_packs})"
     )
     refused_not_document = getattr(report, "noise_refused_not_document", None) or []
+    refused_set = set(refused_not_document)
     written = getattr(report, "noise_tags_written", None)
     if screen.admitted:
         applied = written if written is not None else len(screen.admitted)
+        written_ids = [
+            item_id for item_id in screen.admitted if item_id not in refused_set
+        ]
         console.print(
             f"  [yellow]Noise tags applied to {applied}"
             f" of {proposed} proposed item(s)[/yellow]:"
         )
-        for item_id in screen.admitted:
+        for item_id in written_ids:
             console.print(f"    - {escape(item_id)}")
         if refused_not_document:
             console.print(

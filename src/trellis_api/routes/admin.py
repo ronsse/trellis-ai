@@ -169,7 +169,7 @@ def apply_noise_tags(
     # says "tagged", so it has to count writes. A gate admission that
     # resolves to no document (a trace id or other non-document id)
     # writes nothing; ``noise_candidates_refused_not_document`` below
-    # names that remainder (noise-refused-non-document).
+    # names that remainder (#833).
     # ``demotion_screen`` in the dumped report carries the full accounting.
     tagged = (
         report.noise_tags_written

@@ -1,6 +1,6 @@
 """Tests for ``POST /api/v1/effectiveness/apply-noise-tags``.
 
-Narrow coverage for the noise-refused-non-document fix: the route's
+Narrow coverage for the #833 fix: the route's
 ``noise_candidates_tagged`` must count what ``apply_noise_tags`` actually
 wrote, not what the demotion gate admitted, and
 ``noise_candidates_refused_not_document`` must name the remainder (a
@@ -20,6 +20,7 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 PHANTOM = "ar:trace:phantom"
+NOISY_DOC = "ar:doc:noisy"
 
 
 @pytest.fixture(autouse=True)
@@ -102,6 +103,55 @@ def _seed_phantom_admission(registry: StoreRegistry) -> None:
         )
 
 
+def _seed_document_admission(registry: StoreRegistry) -> None:
+    """Five packs citing a real document unhelpful — gate-admissible and
+    resolvable, so ``apply_noise_tags`` writes it rather than refusing it.
+    """
+    event_log = registry.operational.event_log
+    for i in range(5):
+        pack_id = f"ar-doc-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "intent_family": "ar-test",
+                "domain": "ar-test",
+                "injected_item_ids": [NOISY_DOC],
+                "injected_items": [
+                    {
+                        "item_id": NOISY_DOC,
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "run_id": f"ar-doc-run-{i}",
+                "intent_family": "ar-test",
+                "outcome": "failure",
+                "success": False,
+                "helpful_item_ids": [],
+                "unhelpful_item_ids": [NOISY_DOC],
+            },
+        )
+    registry.knowledge.document_store.put(
+        NOISY_DOC,
+        "noisy test content",
+        {"content_tags": {"signal_quality": "standard"}},
+    )
+
+
 class TestApplyNoiseTagsRoute:
     def test_empty_store_tags_nothing(self, client: TestClient) -> None:
         resp = client.post("/api/v1/effectiveness/apply-noise-tags")
@@ -131,3 +181,27 @@ class TestApplyNoiseTagsRoute:
         assert data["noise_tags_written"] == 0
         assert data["noise_refused_not_document"] == [PHANTOM]
         assert registry.knowledge.document_store.get(PHANTOM) is None
+
+    def test_a_document_admission_is_tagged(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """A gate-admitted id that resolves to a document is written.
+
+        Mutant coverage: a REST route that reported a hardcoded 0 (or
+        otherwise never read the write count) would still pass
+        ``test_a_non_document_admission_is_refused_not_tagged`` and
+        ``test_empty_store_tags_nothing``, both of which assert 0. This
+        pins the positive case the unit suite was missing.
+        """
+        _seed_document_admission(registry)
+        resp = client.post("/api/v1/effectiveness/apply-noise-tags")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["demotion_screen"]["admitted"] == [NOISY_DOC]
+        assert data["noise_candidates_tagged"] == 1
+        assert data["noise_candidates_refused_not_document"] == 0
+        assert data["noise_tags_written"] == 1
+        assert data["noise_refused_not_document"] == []
+        noisy = registry.knowledge.document_store.get(NOISY_DOC)
+        assert noisy is not None
+        assert noisy["metadata"]["content_tags"]["signal_quality"] == "noise"

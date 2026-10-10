@@ -253,8 +253,7 @@ class EffectivenessReport(TrellisModel):
     to, so an admitted trace id or other non-document id reaches
     :func:`~trellis.classify.feedback.apply_noise_tags` and nothing gets
     written for it. :attr:`noise_tags_written` and
-    :attr:`noise_refused_not_document` carry that split (noise-refused-
-    non-document).
+    :attr:`noise_refused_not_document` carry that split (#833).
     """
 
     total_packs: int
@@ -442,8 +441,7 @@ def run_effectiveness_feedback(
     Returns the :class:`EffectivenessReport` from step 1, with
     :attr:`~EffectivenessReport.noise_tags_written` and
     :attr:`~EffectivenessReport.noise_refused_not_document` filled in from
-    step 2 — the write outcome, not the gate's admission (noise-refused-
-    non-document).
+    step 2 — the write outcome, not the gate's admission (#833).
     """
     from trellis.classify.feedback import apply_noise_tags  # noqa: PLC0415
 

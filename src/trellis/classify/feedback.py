@@ -27,7 +27,7 @@ class NoiseTagResult:
     demotion gate (:mod:`trellis.classify.demotion_gate`) admitted them on
     citation evidence alone, with no notion of which store an id belongs
     to, so an admitted trace id or other non-document id reaches here and
-    nothing gets written for it (trellis-ai noise-refused-non-document). A
+    nothing gets written for it (trellis-ai #833). A
     caller that reported ``len(candidates_admitted)`` as "demoted" was
     counting the gate's admission, not this function's writes, for every
     id in this list.
