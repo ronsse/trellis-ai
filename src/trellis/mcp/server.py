@@ -3961,12 +3961,20 @@ def _prewarm_registry(registry: StoreRegistry) -> None:
             build()
         except Exception as exc:
             # GRACEFUL-DEGRADATION: log the component and the error type,
-            # not a traceback. Only embed-on-ingest and memory extraction
-            # stay fail-soft once the server is serving traffic — a
-            # vector_store or embedding_fn that fails here still raises at
-            # every retrieval call site until the setting is fixed (see
-            # the docstring above), so this is a startup signal to act on,
-            # not evidence the server degrades quietly for all three.
+            # not a traceback. This is a startup signal to act on, not
+            # evidence every component degrades quietly once the server is
+            # serving traffic — the three fail differently at call time:
+            #   - embedding_fn: resolved again by every later call (a raise
+            #     caches nothing), and raises at every retrieval call site
+            #     until the setting is fixed.
+            #   - vector_store: build_strategies (retrieve/strategies.py)
+            #     catches the init failure and degrades retrieval to
+            #     keyword + graph, with `semantic: misconfigured` in the
+            #     pack's axes block — it does not raise.
+            #   - memory_extractor: feature-flagged; see the docstring above.
+            # Only run_embed_on_ingest is fail-soft for an embedder resolve
+            # failure specifically — a broken vector_store still propagates
+            # out of that hook (pre-existing; not this PR's scope).
             logger.warning(
                 "mcp_prewarm_optional_unavailable",
                 component=label,

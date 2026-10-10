@@ -408,17 +408,20 @@ All notable changes to Trellis will be documented in this file.
   distinct `(error_type, setting)` per process, and the hook's returned
   `reason` carries only the exception's type name and, when the exception
   names one, the broken setting (e.g. `"ConfigError: embeddings.provider"`)
-  — never the exception's message text, which can echo a credential or
-  document content. The MCP http prewarm's `mcp_prewarm_optional_unavailable`
-  warning now names `error_type` too, and its comment no longer claims every
-  prewarmed component is fail-soft at runtime — a broken `vector_store` or
-  `embedding_fn` still raises at every retrieval call site until the setting
-  is fixed; only embed-on-ingest and memory extraction degrade quietly.
-  Added a recovery runbook,
+  — never the exception's message text, which can echo a credential (this
+  resolve path never sees document content). The MCP http prewarm's
+  `mcp_prewarm_optional_unavailable` warning now names `error_type` too,
+  and its comment states each prewarmed component's own runtime posture
+  instead of one blanket claim: an unresolvable `embedding_fn` raises at
+  every retrieval call site until the setting is fixed; a broken
+  `vector_store` degrades retrieval to keyword and graph (`semantic:
+  misconfigured`); embed-on-ingest is fail-soft for an embedder resolve
+  failure only. Added a recovery runbook,
   [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config):
-  fix the setting, restart (the resolve is memoized per process), then run
-  `trellis admin reindex-vectors` for documents that arrived while it was
-  broken.
+  fix the setting, restart (the `embeddings:` block is read once, at
+  `StoreRegistry` construction, so a running process can't see an edited
+  config or environment), then run `trellis admin reindex-vectors` for
+  documents that arrived while it was broken.
   ([#830](https://github.com/ronsse/trellis-ai/pull/830))
 
 - **A policy refusal exits `3` on every single-command `trellis curate`

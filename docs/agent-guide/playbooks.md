@@ -1021,15 +1021,38 @@ carries the same two fields and never the exception's own message text.
 
 ### Steps
 
-1. **Read the fields, not a traceback.** `setting` names the env var or
-   config key to edit (`TRELLIS_EMBEDDING_FN` or `embeddings.provider`);
-   `error_type` narrows the cause (`BackendNotInstalledError` → missing
-   extra, `ConfigError` → bad path or missing key, anything else → the
-   target module's own import-time bug).
+1. **Read the fields, not a traceback.** `setting` names what to fix, and
+   it is not always an editable key:
+   - `TRELLIS_EMBEDDING_FN` or `embeddings.provider` — a bad dotted import
+     path.
+   - `embeddings.api_key_env` — an OpenAI provider configured but no API
+     key resolved (set that key to the name of an env var holding it, set
+     `embeddings.api_key` to a literal, or export `OPENAI_API_KEY`).
+   - `backend.openai-embeddings` — the `llm-openai` extra is not
+     installed. This one names the backend, not a config key: there is
+     nothing to edit, only `uv pip install -e ".[llm-openai]"` to run.
+
+   `error_type` narrows the cause further: `BackendNotInstalledError` →
+   missing extra (see above), `ConfigError` → bad path or missing key,
+   anything else → the target module's own import-time bug.
 2. **Fix the setting** (install the extra, set the API key, correct the
-   dotted path) and **restart** the process — the embedder resolve is
-   memoized per `StoreRegistry` instance, so a config edit alone does not
-   take effect in an already-running server.
+   dotted path) and **restart**. This is not because the resolve is
+   memoized — a raise caches nothing, so every later access re-resolves
+   and fails the same way — but because the `embeddings:` block is read
+   once, when the `StoreRegistry` is constructed; a running process
+   cannot see an edited `config.yaml` or environment afterward. Under MCP
+   **http** or the REST API, "restart" means restarting that server
+   process. Under MCP **stdio** there is one process per client session,
+   so it means relaunching the client (the session that owns the config),
+   not a server-side command. The CLI resolves a fresh `StoreRegistry` on
+   every invocation, so it needs no restart at all.
+   - **To see the full cause before fixing anything** — the dotted-path
+     sub-reason (module missing, attribute missing, not callable), or
+     `BackendNotInstalledError`'s install hint — `error_type`/`setting`
+     don't carry it, but the CLI boundary's rendered message does. Run
+     `trellis admin reindex-vectors --dry-run --format json`: it resolves
+     `registry.embedding_fn` before its dry-run branch, so the same
+     failure surfaces there with the original message, at exit code `5`.
 3. **Backfill what arrived while it was broken.** With
    `TRELLIS_ENABLE_EMBED_ON_INGEST` on, documents written during the outage
    were stored (ingest never fails on this) but never embedded. Run:

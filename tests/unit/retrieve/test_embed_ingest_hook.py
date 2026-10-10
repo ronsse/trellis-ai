@@ -20,7 +20,6 @@ contract guarantees the wiring depends on:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,30 +30,18 @@ from trellis.retrieve.embed_ingest_hook import (
     EMBED_INPUT_CHAR_CAP,
     EMBED_ON_INGEST_FLAG,
     VECTOR_METADATA_EXCERPT_CHARS,
-    _warn_embedder_resolve_failed_once,
     build_vector_row,
     embed_on_ingest_enabled,
     run_embed_on_ingest,
 )
 from trellis.retrieve.excerpts import EXCERPT_ELLIPSIS
 
+# The once-per-cause dedup cache in ``_warn_embedder_resolve_failed_once``
+# is reset by the central autouse fixture in tests/conftest.py
+# (``_reset_embedder_resolve_failure_log_cache``), which isolates it across
+# every test file, not just this one.
+
 _EMBEDDING = [0.1, 0.2, 0.3]
-
-
-@pytest.fixture(autouse=True)
-def _reset_resolve_failure_log_cache() -> Iterator[None]:
-    """Isolate the once-per-process dedup cache between tests.
-
-    Without this, two tests that each hit a resolve failure with the
-    same ``(error_type, setting)`` — plausible, since most of this
-    file's failures are a plain ``RuntimeError`` with no ``setting`` —
-    would see the SECOND test's warning silently swallowed by the
-    FIRST test's cache entry, an order-dependent flake exactly like the
-    one :mod:`trellis.core.write_provenance`'s tests guard against.
-    """
-    _warn_embedder_resolve_failed_once.cache_clear()
-    yield
-    _warn_embedder_resolve_failed_once.cache_clear()
 
 
 def _registry(
@@ -268,6 +255,34 @@ class TestHook:
             "reason": "ConfigError: embeddings.provider",
         }
 
+    def test_embedder_resolve_failure_ignores_a_foreign_unhashable_setting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only a ``ConfigError``'s own ``.setting`` is trusted.
+
+        The resolve path can run arbitrary imported code (a bad
+        ``TRELLIS_EMBEDDING_FN`` target), so a non-``ConfigError`` exception
+        that happens to carry a same-named ``.setting`` attribute — here
+        deliberately unhashable — must not reach the
+        ``functools.cache``-keyed warning, which would raise ``TypeError:
+        unhashable type: 'list'`` and escape the fail-soft contract, nor the
+        returned ``reason``.
+        """
+        from unittest.mock import PropertyMock
+
+        class _ForeignError(RuntimeError):
+            def __init__(self) -> None:
+                super().__init__("boom")
+                self.setting = ["unhashable", "list"]
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry).embedding_fn = PropertyMock(side_effect=_ForeignError())
+
+        summary = run_embed_on_ingest(registry, "d1", "content", source="t")
+
+        assert summary == {"embedded": False, "reason": "_ForeignError"}
+
     def test_embedder_resolve_failure_logged_once_per_distinct_cause(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -302,6 +317,39 @@ class TestHook:
         assert matching[0]["log_level"] == "warning"
         assert matching[0]["error_type"] == "ConfigError"
         assert matching[0]["setting"] == "llm-openai"
+
+    def test_embedder_resolve_failure_log_never_carries_the_message_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Describe, don't quote (Q8) binds the LOG line, not only the
+        returned ``reason``. A mutant that logs ``setting or str(exc)``
+        instead of ``setting`` alone survives every other test in this
+        class because they all check ``reason`` or the dedup count, never
+        the logged ``setting`` value against the message text — and with
+        a ``setting`` present, ``setting or str(exc)`` is indistinguishable
+        from ``setting`` alone, so the exception here deliberately carries
+        none."""
+        from unittest.mock import PropertyMock
+
+        from structlog.testing import capture_logs
+
+        sentinel = "SENTINEL-leak-marker-9f3c"
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry).embedding_fn = PropertyMock(side_effect=RuntimeError(sentinel))
+
+        with capture_logs() as logs:
+            run_embed_on_ingest(registry, "d1", "content", source="t")
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "embed_on_ingest_embedder_resolve_failed"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["setting"] is None
+        for value in matching[0].values():
+            assert sentinel not in str(value)
 
     def test_embedder_resolve_failure_logs_again_for_a_different_cause(
         self, monkeypatch: pytest.MonkeyPatch

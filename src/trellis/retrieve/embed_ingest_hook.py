@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.core.write_config import EMBED_ON_INGEST_FLAG, WriteBehaviourConfig
+from trellis.errors import ConfigError
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.schemas.classification import SHADOW_TAGS_KEY
 
@@ -204,7 +205,8 @@ def run_embed_on_ingest(
         names one (see :class:`~trellis.errors.ConfigError`'s
         ``setting``), the broken setting — e.g. ``"ConfigError:
         embeddings.provider"`` — never the exception's message text,
-        which can echo a credential or document content. The matching
+        which can echo a credential (this resolve path never sees document
+        content — it fails before any document is read). The matching
         warning is logged once per distinct cause per process, not once
         per call; see :func:`_warn_embedder_resolve_failed_once`.
     """
@@ -222,8 +224,15 @@ def run_embed_on_ingest(
         # every later ingest identically — same fail-soft contract as an
         # embed failure (never fail the ingest), but made loud once per
         # cause instead of once per document.
+        #
+        # Describe, don't quote: `setting` is read from the exception's
+        # own `.setting` attribute only when the exception IS a
+        # ConfigError, whose `setting` is typed `str | None` (errors.py).
+        # A plain `getattr(exc, "setting", None)` would let an unrelated
+        # exception's same-named, possibly-unhashable or untrusted
+        # attribute reach the cache key and the returned `reason`.
         error_type = type(exc).__name__
-        setting = getattr(exc, "setting", None)
+        setting = exc.setting if isinstance(exc, ConfigError) else None
         _warn_embedder_resolve_failed_once(error_type, setting)
         reason = f"{error_type}: {setting}" if setting else error_type
         return {"embedded": False, "reason": reason}
