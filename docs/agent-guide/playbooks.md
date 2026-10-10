@@ -1008,32 +1008,41 @@ for a runnable end-to-end demo.
 ## Playbook 15: Recovering from a broken embedder config
 
 **When to use:** `embed_on_ingest_resolve_failed` with `component=embedding_fn`
-(ingest-time, from `run_embed_on_ingest`) or `mcp_prewarm_optional_unavailable`
-with `component=embedding_fn` (http startup) shows up in the logs. Both mean
-`registry.embedding_fn` is raising — a config error (bad
+(ingest-time, from `run_embed_on_ingest`), `mcp_prewarm_optional_unavailable`
+with `component=embedding_fn` (http startup), or a pack whose `axes.semantic`
+reads `"embedder_failed"` (retrieval-time, any surface) shows up. All three
+mean `registry.embedding_fn` is raising — a config error (bad
 `TRELLIS_EMBEDDING_FN` / `embeddings.provider` path, missing provider extra,
 missing API key), not a transient outage. The cause fails every ingest and
-every semantic-axis read identically until the setting is fixed, so the hook
-logs the resolve failure **once per distinct `(component, error_type,
-setting)` per process** rather than once per document — see each event's
-`error_type` and `setting` fields for what to fix; `reason` in a
-`run_embed_on_ingest` summary carries the same two fields and never the
-exception's own message text.
+every semantic-axis resolve identically until the setting is fixed, but
+nothing raises on it: the hook logs the resolve failure **once per distinct
+`(component, error_type, setting)` per process** rather than once per
+document — see each event's `error_type` and `setting` fields for what to
+fix; `reason` in a `run_embed_on_ingest` summary carries the same two fields
+and never the exception's own message text — and retrieval degrades instead
+of failing: keyword and graph still run, the pack carries `axes.semantic ==
+"embedder_failed"` plus `axes.embedder_error_type` / `axes.embedder_setting`
+(the same two fields, never the message), and
+`PACK_ASSEMBLED.strategy_failures` records one semantic entry per build
+without counting toward, or blocking, a required-strategy or
+all-axes-failed refusal.
 
 A broken `vector_store` resolve logs the same `embed_on_ingest_resolve_failed`
 (or `mcp_prewarm_optional_unavailable`) event with `component=vector_store`,
-and no-ops the same way. Its `setting` names a `stores.vector.*` key, or
-`backend.NAME` for a missing extra, rather than one of the embedder keys in
-step 1. A `ConfigError` can also mean the backend was unreachable when the
-store was first opened (pgvector reports a failed connection as
-`stores.vector.dsn`), so check reachability before editing anything. A
-failed store instantiation is not cached: once the backend is reachable,
-the next write resolves it again without a restart. An edited config still
-needs the restart step 2 describes. Step 2's "see the full cause" trick
-works unchanged here too — `reindex-vectors` resolves `vector_store` before
-its dry-run branch, so a `ConfigError` surfaces with its message at exit
-`5`. Either way, documents stored while the vector store was failing were
-never embedded, so step 3's backfill applies unchanged.
+and no-ops the same way; at retrieval time it is the pre-existing
+`axes.semantic == "misconfigured"` state (a *resolved* embedder whose vector
+backend failed), not `embedder_failed`. Its `setting` names a
+`stores.vector.*` key, or `backend.NAME` for a missing extra, rather than one
+of the embedder keys in step 1. A `ConfigError` can also mean the backend was
+unreachable when the store was first opened (pgvector reports a failed
+connection as `stores.vector.dsn`), so check reachability before editing
+anything. A failed store instantiation is not cached: once the backend is
+reachable, the next write resolves it again without a restart. An edited
+config still needs the restart step 2 describes. Step 2's "see the full
+cause" trick works unchanged here too — `reindex-vectors` resolves
+`vector_store` before its dry-run branch, so a `ConfigError` surfaces with
+its message at exit `5`. Either way, documents stored while the vector store
+was failing were never embedded, so step 3's backfill applies unchanged.
 
 ### Steps
 

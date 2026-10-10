@@ -225,8 +225,17 @@ def _stub_live_backend_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
     resolution — not that the factory does.
     """
     from trellis.retrieve import builder_factory
+    from trellis.retrieve.strategies import BuildStrategiesResult
 
-    monkeypatch.setattr(builder_factory, "build_strategies", lambda *a, **k: [])
+    monkeypatch.setattr(
+        builder_factory,
+        "build_strategies",
+        lambda *a, **k: BuildStrategiesResult(
+            strategies=[],
+            embedder_configured=False,
+            embedder_resolve_failure=None,
+        ),
+    )
     monkeypatch.setattr(builder_factory, "build_reranker", lambda *a, **k: None)
     monkeypatch.setattr(builder_factory, "ParameterRegistry", lambda *a, **k: None)
 

@@ -7,13 +7,29 @@ components:
 
         Mirrors :class:`trellis.retrieve.builder_factory.AxisReport`: axis names
 
-        and states only, never an exception message.'
+        and states only, never an exception message. ``embedder_error_type`` and
+
+        ``embedder_setting`` are non-``None`` only when ``semantic ==
+
+        "embedder_failed"`` (Q5-A); default to ``None`` so a client built
+
+        against an older server still parses this model.'
       properties:
         available:
           items:
             type: string
           title: Available
           type: array
+        embedder_error_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Embedder Error Type
+        embedder_setting:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Embedder Setting
         failed:
           items:
             type: string

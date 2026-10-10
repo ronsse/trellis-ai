@@ -33,6 +33,7 @@ from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import (
     GRAPH_SELECTION_RECENCY_WINDOW,
     GRAPH_SELECTION_SEEDED,
+    EmbedderResolveFailure,
     GraphSearch,
     NamespaceSeedExtractor,
     build_strategies,
@@ -99,6 +100,8 @@ class TestDescribeAxes:
             "ran": ["keyword", "graph", "semantic"],
             "failed": [],
             "semantic": "ran",
+            "embedder_error_type": None,
+            "embedder_setting": None,
         }
         assert SEMANTIC_AXIS_NOTES[axes["semantic"]] == ""
 
@@ -159,6 +162,37 @@ class TestDescribeAxes:
         )
         assert axes["failed"] == ["graph"]
         assert axes["semantic"] == "ran"
+
+    def test_embedder_resolve_failure_is_a_fifth_state(self) -> None:
+        """Q5-A.
+
+        Distinct from ``misconfigured`` (a resolved embedder whose vector
+        backend failed) — this is the embedder itself never resolving,
+        and it takes precedence over ``embedder_configured`` even when
+        that happens to be ``True``.
+        """
+        failure = EmbedderResolveFailure(
+            error_type="ConfigError", setting="embeddings.provider"
+        )
+        axes = describe_axes(
+            _builder("keyword", "graph"),
+            ["keyword", "graph"],
+            embedder_configured=True,
+            embedder_resolve_failure=failure,
+        )
+        assert axes["semantic"] == "embedder_failed"
+        assert axes["embedder_error_type"] == "ConfigError"
+        assert axes["embedder_setting"] == "embeddings.provider"
+
+    def test_embedder_resolve_failure_absent_leaves_the_new_keys_none(self) -> None:
+        axes = describe_axes(
+            _builder("keyword", "graph"),
+            ["keyword", "graph"],
+            embedder_configured=False,
+        )
+        assert axes["semantic"] == "not_configured"
+        assert axes["embedder_error_type"] is None
+        assert axes["embedder_setting"] is None
 
 
 class TestBuildPackBuilder:
@@ -306,7 +340,7 @@ class TestGraphSeedingWiring:
         the default down would silently overturn #371.
         """
         registry = self._registry(tmp_path)
-        strategies = build_strategies(registry)
+        strategies = build_strategies(registry).strategies
         axes = [s for s in strategies if isinstance(s, GraphSearch)]
         assert axes[0]._seed_extractor is None
         assert (

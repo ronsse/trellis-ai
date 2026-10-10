@@ -14,7 +14,7 @@ packs add :class:`ObservationSearch` to their strategy list:
 
     from trellis.retrieve.observation_strategy import ObservationSearch
 
-    strategies = build_strategies(registry, embedding_fn=...)
+    strategies = build_strategies(registry, embedding_fn=...).strategies
     strategies.append(ObservationSearch(registry.knowledge.graph_store))
     pack = PackBuilder(strategies=strategies).build(intent, ...)
 

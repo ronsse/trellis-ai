@@ -69,6 +69,7 @@ from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import (
     RECENCY_CLOCK_METADATA_KEY,
+    EmbedderResolveFailure,
     SearchStrategy,
 )
 from trellis.retrieve.tier_mapping import TierMapper
@@ -464,6 +465,8 @@ class PackBuilder:
         disclosure: DisclosureConfig | None = None,
         project: str | None = None,
         holdout_rate: float = 0.0,
+        embedder_configured: bool = False,
+        embedder_resolve_failure: EmbedderResolveFailure | None = None,
     ) -> None:
         if not 0.0 <= holdout_rate <= 1.0:
             msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
@@ -472,6 +475,16 @@ class PackBuilder:
         self._event_log = event_log
         self._advisory_store = advisory_store
         self._reranker = reranker
+        #: Whether an embedder resolved when :func:`build_strategies` built
+        #: ``strategies`` — the one-time outcome ``describe_axes`` call
+        #: sites read instead of re-reading ``registry.embedding_fn``
+        #: themselves (Q5-A).
+        self._embedder_configured = embedder_configured
+        #: Set when ``registry.embedding_fn`` raised instead of resolving.
+        #: ``None`` means either an embedder resolved or none is
+        #: configured at all — see :attr:`embedder_configured` to tell
+        #: those two apart.
+        self._embedder_resolve_failure = embedder_resolve_failure
         #: Fuzzy-dedup config. ``None`` disables (exact ``item_id`` dedup only).
         self._semantic_dedup = semantic_dedup
         #: Optional assembly-time evaluator. When set, :meth:`build` runs the
@@ -527,6 +540,48 @@ class PackBuilder:
     def holdout_rate(self) -> float:
         """The share of packs this builder withholds, in ``[0.0, 1.0]``."""
         return self._holdout_rate
+
+    @property
+    def embedder_configured(self) -> bool:
+        """Whether an embedder resolved when this builder's strategies were built.
+
+        Sourced once, at construction, from
+        :attr:`~trellis.retrieve.strategies.BuildStrategiesResult.embedder_configured`
+        — callers must read this instead of ``registry.embedding_fn``,
+        which re-raises on every access when misconfigured (Q5-A).
+        """
+        return self._embedder_configured
+
+    @property
+    def embedder_resolve_failure(self) -> EmbedderResolveFailure | None:
+        """Set when resolving the embedder raised instead of resolving.
+
+        ``None`` means either an embedder resolved (:attr:`embedder_configured`
+        is ``True``) or none is configured at all. See
+        :func:`~trellis.retrieve.strategies.build_strategies`.
+        """
+        return self._embedder_resolve_failure
+
+    def _record_embedder_resolve_failure(
+        self, strategy_failures: list[StrategyFailure]
+    ) -> None:
+        """Append the embedder-resolve-failure entry, mutating in place.
+
+        Call this *after* ``_raise_if_blocking_strategy_failures`` has
+        already run against ``strategy_failures`` and
+        ``len(self._strategies)`` (Q5-A). The semantic axis never
+        reached ``self._strategies`` — ``build_strategies`` drops it
+        before construction when the embedder fails to resolve — so it
+        was never a candidate for the required-strategy or all-failed
+        blocking check, and appending here keeps it that way: visible to
+        ``PACK_ASSEMBLED.strategy_failures`` (and the
+        ``FailedStrategyReport`` tally it feeds) but never able to raise
+        :class:`PackAssemblyError` on its own.
+        """
+        if self._embedder_resolve_failure is not None:
+            strategy_failures.append(
+                self._embedder_resolve_failure.to_strategy_failure()
+            )
 
     def add_strategy(self, strategy: SearchStrategy) -> None:
         """Add a search strategy."""
@@ -730,6 +785,7 @@ class PackBuilder:
             len(self._strategies),
             pack_kind="pack",
         )
+        self._record_embedder_resolve_failure(strategy_failures)
 
         # Promote metadata["source_strategy"] → strategy_source field
         all_items = self._promote_strategy_source(all_items)
@@ -1026,6 +1082,7 @@ class PackBuilder:
             len(self._strategies),
             pack_kind="sectioned pack",
         )
+        self._record_embedder_resolve_failure(strategy_failures)
 
         # 1a. Pairwise supersession gate (#613) — see build().
         all_items, superseded = partition_superseded(all_items)

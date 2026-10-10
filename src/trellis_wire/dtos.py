@@ -136,13 +136,18 @@ class AxisReportResponse(WireModel):
     """Which retrieval axes this pack has, ran, and did not.
 
     Mirrors :class:`trellis.retrieve.builder_factory.AxisReport`: axis names
-    and states only, never an exception message.
+    and states only, never an exception message. ``embedder_error_type`` and
+    ``embedder_setting`` are non-``None`` only when ``semantic ==
+    "embedder_failed"`` (Q5-A); default to ``None`` so a client built
+    against an older server still parses this model.
     """
 
     available: list[str]
     ran: list[str]
     failed: list[str]
     semantic: str
+    embedder_error_type: str | None = None
+    embedder_setting: str | None = None
 
 
 class PackResponse(WireModel):

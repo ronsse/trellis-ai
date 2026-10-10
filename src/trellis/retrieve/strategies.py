@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import re
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import (
     TYPE_CHECKING,
@@ -16,6 +18,7 @@ from typing import (
 
 import structlog
 
+from trellis.errors import ConfigError
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.schemas.extraction import (
@@ -40,6 +43,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from trellis.ops.registry import ParameterRegistry
+    from trellis.retrieve.pack_builder import StrategyFailure
     from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger()
@@ -1902,13 +1906,92 @@ class GraphSearch(SearchStrategy):
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class EmbedderResolveFailure:
+    """``registry.embedding_fn`` raised instead of resolving (Q5-A).
+
+    Distinct from a vector-backend init failure (the existing
+    ``"misconfigured"`` axis state): this fires when the embedder itself
+    could not be built — before :class:`SemanticSearch` is ever
+    constructed. ``error_type`` and ``setting`` are the type name and,
+    only for a :class:`~trellis.errors.ConfigError`, its ``setting`` hint
+    — never the exception message, which can carry a DSN fragment or
+    other config detail (describe, don't quote).
+    """
+
+    error_type: str
+    setting: str | None
+
+    def to_strategy_failure(self) -> StrategyFailure:
+        """Render as the shared :class:`~trellis.retrieve.pack_builder.StrategyFailure`.
+
+        Import stays local: :mod:`trellis.retrieve.pack_builder` imports
+        *from* this module, so importing it back here at module scope
+        would be circular.
+        """
+        from trellis.retrieve.pack_builder import StrategyFailure  # noqa: PLC0415
+
+        reason = (
+            f"{self.error_type}: {self.setting}" if self.setting else self.error_type
+        )
+        return StrategyFailure(
+            strategy=SEMANTIC_AXIS_STRATEGY_NAME,
+            error_class=self.error_type,
+            message=reason,
+        )
+
+
+#: Strategy name :func:`~trellis.retrieve.builder_factory.describe_axes` and
+#: :class:`~trellis.retrieve.pack_builder.StrategyFailure` both key on for
+#: the semantic axis — shared so the two sides can't drift (#371 shape).
+SEMANTIC_AXIS_STRATEGY_NAME = "semantic"
+
+
+@functools.cache
+def _warn_embedder_resolve_failed_once(error_type: str, setting: str | None) -> None:
+    """Emit ``semantic_search_embedder_resolve_failed`` once per cause.
+
+    Mirrors ``embed_ingest_hook._warn_embedder_resolve_failed_once``:
+    a broken embedder config fails ``registry.embedding_fn`` identically
+    on every pack build, so logging a full traceback per build — rather
+    than once per distinct ``(error_type, setting)`` per process — would
+    turn one misconfiguration into a traceback per retrieval call.
+    ``functools.cache`` makes a repeat call with the same arguments a
+    no-op. WARNING, not ``.exception``: the type and setting are what an
+    operator acts on.
+
+    ``_warn_embedder_resolve_failed_once.cache_clear()`` is test-facing
+    only.
+    """
+    logger.warning(
+        "semantic_search_embedder_resolve_failed",
+        error_type=error_type,
+        setting=setting,
+    )
+
+
+class BuildStrategiesResult(NamedTuple):
+    """What :func:`build_strategies` returns.
+
+    ``embedder_configured`` and ``embedder_resolve_failure`` carry the
+    one-time outcome of resolving the embedder so callers (the five
+    ``describe_axes`` call sites) never need a second
+    ``registry.embedding_fn`` read of their own — a second read re-raises
+    the same exception the first one already caught (Q5-A).
+    """
+
+    strategies: list[SearchStrategy]
+    embedder_configured: bool
+    embedder_resolve_failure: EmbedderResolveFailure | None
+
+
 def build_strategies(
     registry: StoreRegistry,
     embedding_fn: Any | None = None,
     *,
     parameter_registry: ParameterRegistry | None = None,
     graph_seed_extractor: GraphSeedExtractor | None = None,
-) -> list[SearchStrategy]:
+) -> BuildStrategiesResult:
     """Build the standard strategy list from a registry.
 
     Always includes KeywordSearch and GraphSearch.  Adds SemanticSearch when
@@ -1956,7 +2039,13 @@ def build_strategies(
         embedding_fn: Optional ``(str) -> list[float]`` callable.  When
             *None*, the helper checks ``registry.embedding_fn`` (which reads
             the ``embeddings`` config section).  If neither source provides
-            one, SemanticSearch is skipped.
+            one, SemanticSearch is skipped.  If ``registry.embedding_fn``
+            *raises* instead of resolving, the raise is caught here (Q5-A)
+            and reported through the returned
+            :attr:`BuildStrategiesResult.embedder_resolve_failure`, not
+            propagated — callers that need the detail read it from the
+            result instead of re-reading ``registry.embedding_fn``
+            themselves, which would re-trigger the same raise.
         parameter_registry: Optional :class:`ParameterRegistry` that
             strategies consult at call-time for per-(component, domain)
             scoring overrides.  When ``None`` the module-level defaults
@@ -1967,6 +2056,11 @@ def build_strategies(
             :class:`NamespaceSeedExtractor`, and it is the only in-repo
             caller that supplies one.  Never derived from ``embedding_fn``
             — see above.
+
+    Returns:
+        A :class:`BuildStrategiesResult` — never a bare list. Always
+        includes KeywordSearch and GraphSearch; SemanticSearch only when
+        an embedder resolved *and* the vector backend initialised.
     """
     strategies: list[SearchStrategy] = [
         KeywordSearch(registry.knowledge.document_store, registry=parameter_registry),
@@ -1977,7 +2071,35 @@ def build_strategies(
         ),
     ]
 
-    fn = embedding_fn or getattr(registry, "embedding_fn", None)
+    embedder_resolve_failure: EmbedderResolveFailure | None = None
+    if embedding_fn is not None:
+        fn = embedding_fn
+    else:
+        # GRACEFUL-DEGRADATION (Q5-A): ``registry.embedding_fn`` is a
+        # property that raises (``ConfigError``, ``BackendNotInstalledError``,
+        # ...) on a misconfigured embedder rather than returning ``None`` —
+        # ``getattr``'s default only swallows ``AttributeError``, which this
+        # is not. Resolving it inside this try, instead of letting the raise
+        # propagate out of ``build_strategies`` as it did before this fix,
+        # is what lets keyword + graph search continue; the caller learns
+        # about the failure through ``embedder_resolve_failure`` below, not
+        # through an exception.
+        try:
+            fn = getattr(registry, "embedding_fn", None)
+        except Exception as exc:
+            fn = None
+            # Describe, don't quote: ``setting`` is read from the
+            # exception's own ``.setting`` attribute only when the
+            # exception IS a ConfigError — see embed_ingest_hook.py's
+            # identical guard against an unrelated exception shape having
+            # its own untrusted ``.setting``.
+            error_type = type(exc).__name__
+            setting = exc.setting if isinstance(exc, ConfigError) else None
+            _warn_embedder_resolve_failed_once(error_type, setting)
+            embedder_resolve_failure = EmbedderResolveFailure(
+                error_type=error_type, setting=setting
+            )
+
     if fn is not None:
         try:
             strategies.append(
@@ -1994,4 +2116,8 @@ def build_strategies(
         except Exception:
             logger.warning("semantic_search_init_failed", exc_info=True)
 
-    return strategies
+    return BuildStrategiesResult(
+        strategies=strategies,
+        embedder_configured=fn is not None,
+        embedder_resolve_failure=embedder_resolve_failure,
+    )
