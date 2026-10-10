@@ -71,6 +71,17 @@ class TestSyncRecordFeedbackMalformedBody:
         assert HOSTILE not in message
         assert "event_log_in_sync" in message
         assert "bool_type" in message
+        # Exact match: pydantic's own per-error ``msg`` for this field
+        # ("Input should be a valid boolean...") carries no HOSTILE
+        # value either (``include_input=False`` already drops that),
+        # so a regression that appends ``msg`` back onto the "loc:
+        # type" pair would still satisfy every assertion above. Exact
+        # suffix, not full equality: ``TrellisHttpError`` prepends its
+        # own "[transport on ...]" prefix.
+        assert message.endswith(
+            "unexpected response body for /api/v1/packs/p1/feedback: "
+            "event_log_in_sync: bool_type"
+        )
 
 
 class TestAsyncRecordFeedbackMalformedBody:
@@ -89,3 +100,7 @@ class TestAsyncRecordFeedbackMalformedBody:
         assert HOSTILE not in message
         assert "event_log_in_sync" in message
         assert "bool_type" in message
+        assert message.endswith(
+            "unexpected response body for /api/v1/packs/p1/feedback: "
+            "event_log_in_sync: bool_type"
+        )

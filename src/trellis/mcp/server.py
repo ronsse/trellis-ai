@@ -1545,11 +1545,19 @@ def _resolve_evidence_pointer(
                 source="mcp:save_knowledge",
             )
         except MutationError as exc:
+            # ensure_evidence_document wraps a non-SUCCESS evidence.ingest
+            # result's CommandResult.message whole (evidence.py); that
+            # message can carry a store's own rejection detail on FAILED
+            # or REJECTED, so it is sanitized here too, unconditionally —
+            # evidence.ingest is built with derive_idempotency=False and
+            # the content-hash dedup returns before execute, so DUPLICATE
+            # cannot reach this raise.
+            detail = sanitize_error_message(str(exc))
             _raise_mutation_failed(
-                f"failed to store evidence: {exc}",
+                f"failed to store evidence: {detail}",
                 data={
                     "command_id": exc.command_id,
-                    "message": str(exc),
+                    "message": detail,
                 },
             )
         return (

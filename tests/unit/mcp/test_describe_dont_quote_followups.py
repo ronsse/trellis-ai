@@ -36,9 +36,10 @@ import pytest
 from mcp.shared.exceptions import McpError
 
 import trellis.mcp.server as server_mod
+import trellis.mutate as mutate_mod
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.mcp.knowledge_links import _describe_unsuccessful, link_knowledge_node
-from trellis.mcp.server import _result_message
+from trellis.mcp.server import _raise_create_failed, _result_message, _store_new_memory
 from trellis.mcp.supersession import _execute as supersession_execute
 from trellis.mutate import Command, CommandResult, CommandStatus, Operation
 from trellis.schemas.well_known import CONCEPT, SOFTWARE_APPLICATION
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
 
 save_experience = unwrap_tool(server_mod.save_experience)
+save_knowledge = unwrap_tool(server_mod.save_knowledge)
 record_observation = unwrap_tool(server_mod.record_observation)
 execute_mutation = unwrap_tool(server_mod.execute_mutation)
 
@@ -191,6 +193,104 @@ class TestResultMessage:
         assert payload["status"] == "rejected"
         assert payload["message"] == SUPPRESSED_MARKER
 
+    @pytest.mark.parametrize("status", [CommandStatus.REJECTED, CommandStatus.FAILED])
+    def test_execute_mutation_wiring_drops_the_value(
+        self, monkeypatch: pytest.MonkeyPatch, status: CommandStatus
+    ) -> None:
+        """End to end through ``execute_mutation``'s own response dict
+        (``server.py``'s ``"message": _result_message(result)`` line),
+        distinct from :class:`TestPydanticSitesDescribeNotQuote`'s
+        pre-flight validation cases above."""
+        hostile_result = _result(status, f"policy violation: api_key={HOSTILE}")
+        monkeypatch.setattr(
+            server_mod,
+            "build_curate_executor",
+            lambda *args, **kwargs: _StubExecutor(hostile_result),
+        )
+        raw = execute_mutation(
+            operation="link.create",
+            args={"source_id": "a", "target_id": "b", "edge_kind": "entity_related_to"},
+        )
+        assert HOSTILE not in raw
+        payload = json.loads(raw)
+        assert payload["status"] == status.value
+        assert payload["message"] == SUPPRESSED_MARKER
+
+    @pytest.mark.parametrize("status", [CommandStatus.REJECTED, CommandStatus.FAILED])
+    def test_save_experience_wiring_drops_the_value(
+        self, monkeypatch: pytest.MonkeyPatch, status: CommandStatus
+    ) -> None:
+        """End to end through ``save_experience``'s failure message
+        (``f"failed to store trace: {_result_message(result)}"``), a
+        site no existing test discriminated: the prior mutation-failure
+        test used a clean message that survives unsanitized."""
+        hostile_result = CommandResult(
+            command_id="c1",
+            status=status,
+            operation=Operation.TRACE_INGEST,
+            message=f"constraint violated: api_key={HOSTILE}",
+        )
+        monkeypatch.setattr(
+            server_mod,
+            "build_curate_executor",
+            lambda *args, **kwargs: _StubExecutor(hostile_result),
+        )
+        trace = {
+            "source": "agent",
+            "intent": "trigger executor failure",
+            "context": {"agent_id": "test-agent"},
+            "steps": [
+                {
+                    "step_type": "action",
+                    "name": "noop",
+                    "args": {},
+                    "result": {"status": "ok"},
+                }
+            ],
+        }
+        with pytest.raises(McpError) as excinfo:
+            save_experience(json.dumps(trace))
+        err = excinfo.value.error
+        assert HOSTILE not in err.message
+        assert HOSTILE not in str(err.data)
+        assert SUPPRESSED_MARKER in err.message
+
+    @pytest.mark.parametrize("status", [CommandStatus.REJECTED, CommandStatus.FAILED])
+    def test_raise_create_failed_wiring_drops_the_value(
+        self, status: CommandStatus
+    ) -> None:
+        """``_raise_create_failed`` (``save_knowledge``'s entity-create
+        failure) called directly with a hostile result."""
+        hostile_result = _result(status, f"constraint violated: api_key={HOSTILE}")
+        with pytest.raises(McpError) as excinfo:
+            _raise_create_failed(hostile_result, None, supersedes=None, applied=[])
+        err = excinfo.value.error
+        assert HOSTILE not in err.message
+        assert HOSTILE not in str(err.data)
+        assert SUPPRESSED_MARKER in err.message
+
+    @pytest.mark.parametrize("status", [CommandStatus.REJECTED, CommandStatus.FAILED])
+    def test_store_new_memory_wiring_drops_the_value(
+        self, temp_registry: StoreRegistry, status: CommandStatus
+    ) -> None:
+        """``_store_new_memory`` (``save_memory``'s reconcile-tier write)
+        called directly with a stub executor; the failure branch runs
+        before ``registry``/``document_store`` are ever touched."""
+        hostile_result = _result(status, f"constraint violated: api_key={HOSTILE}")
+        with pytest.raises(McpError) as excinfo:
+            _store_new_memory(
+                temp_registry,
+                _StubExecutor(hostile_result),
+                temp_registry.knowledge.document_store,
+                None,
+                "some memory content",
+                {},
+            )
+        err = excinfo.value.error
+        assert HOSTILE not in err.message
+        assert HOSTILE not in str(err.data)
+        assert SUPPRESSED_MARKER in err.message
+
 
 # ---------------------------------------------------------------------------
 # supersession.py's _execute: same status gate
@@ -243,6 +343,7 @@ def graph(temp_registry: StoreRegistry) -> GraphStore:
     store = temp_registry.knowledge.graph_store
     store.upsert_node("01NOTE", CONCEPT, {"name": "note"})
     store.upsert_node("tool:bash", SOFTWARE_APPLICATION, {"name": "Bash"})
+    store.upsert_node("domain:trellis", CONCEPT, {"name": "trellis"})
     return store
 
 
@@ -265,3 +366,63 @@ class TestLinkKnowledgeNodeWiring:
         assert HOSTILE not in joined
         assert SUPPRESSED_MARKER in joined
         assert "edge not created" in joined
+
+    def test_domain_link_rejection_drops_the_value(self, graph: GraphStore) -> None:
+        """End to end through ``link_knowledge_node``'s domain branch
+        (``_link_domains``): a rejected LINK_CREATE to a matched
+        ``domain:`` node must not leak its message either — a separate
+        site from ``_link_relates_to`` above."""
+        hostile_result = _result(
+            CommandStatus.REJECTED, f"policy violation: api_key={HOSTILE}"
+        )
+        lines = link_knowledge_node(
+            _StubExecutor(hostile_result),
+            graph,
+            node_id="01NOTE",
+            properties={"domain": "trellis"},
+            relates_to=None,
+            edge_kind="entity_related_to",
+        )
+        joined = "\n".join(lines)
+        assert HOSTILE not in joined
+        assert SUPPRESSED_MARKER in joined
+        assert "not created" in joined
+
+
+# ---------------------------------------------------------------------------
+# server.py's _resolve_evidence_pointer: save_knowledge's evidence path
+# ---------------------------------------------------------------------------
+
+
+class TestEvidencePointerDescribesNotQuote:
+    """``save_knowledge``'s auto-created-evidence-document failure path.
+
+    ``ensure_evidence_document`` (``trellis/mutate/evidence.py``) wraps a
+    non-SUCCESS ``evidence.ingest`` ``CommandResult.message`` whole in a
+    ``MutationError``; ``_resolve_evidence_pointer`` used to quote that
+    exception raw in both the McpError message and its ``data["message"]``
+    echo — the last of the roster's hand-read sites this follow-up sweep
+    did not originally close.
+    """
+
+    @pytest.mark.parametrize("status", [CommandStatus.FAILED, CommandStatus.REJECTED])
+    def test_save_knowledge_evidence_failure_drops_the_value(
+        self, monkeypatch: pytest.MonkeyPatch, status: CommandStatus
+    ) -> None:
+        hostile_result = CommandResult(
+            command_id="c1",
+            status=status,
+            operation=Operation.EVIDENCE_INGEST,
+            message=f"Execution failed: constraint violated: api_key={HOSTILE}",
+        )
+        monkeypatch.setattr(
+            mutate_mod,
+            "build_curate_executor",
+            lambda *args, **kwargs: _StubExecutor(hostile_result),
+        )
+        with pytest.raises(McpError) as excinfo:
+            save_knowledge(name="probe-entity", content="some evidence prose")
+        err = excinfo.value.error
+        assert HOSTILE not in err.message
+        assert HOSTILE not in str(err.data)
+        assert SUPPRESSED_MARKER in err.message

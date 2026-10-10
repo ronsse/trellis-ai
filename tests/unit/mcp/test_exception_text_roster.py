@@ -51,11 +51,6 @@ _SAFE_CALL_NAMES = frozenset(
 #: top-level function does; keyed by name, not line number, so moving the
 #: def does not desync the roster.
 EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
-    "_resolve_evidence_pointer": (
-        "MutationError.message is already rendered safe by "
-        "MutationExecutor's own design, never raw driver text (two sites: "
-        "the raised message and its data['message'] echo)."
-    ),
     "_SanitizeUncaughtToolErrors.on_call_tool": (
         "str(exc) feeds a startswith(prefix) comparison that decides "
         "whether to rebuild the message through _exception_detail; it is "
@@ -76,23 +71,31 @@ _MODULE_EXEMPTIONS: dict[str, dict[str, str]] = {
 }
 
 # Hand count (trellis-ai#748, shrunk by the MCP/CLI describe-dont-quote
-# follow-up sweep): 2 in _resolve_evidence_pointer, 1 in
-# _SanitizeUncaughtToolErrors.on_call_tool, all in server.py.
+# follow-up sweep and its fix round): 1, in
+# _SanitizeUncaughtToolErrors.on_call_tool, in server.py.
 # save_experience, record_observation and execute_mutation each used to
 # carry one more (a raw pydantic ValidationError interpolated into the
 # caller-facing message) -- the follow-up sweep switched all three to
 # describe_validation_error(exc), which passes exc as a plain call
 # argument rather than stringifying it, so the scan no longer sees them
-# and their roster entries were removed rather than left stale. Re-grep
-# '{exc}\|str(exc)' in src/trellis/mcp/server.py and subtract the one
-# log-only site (_build_llm_client, excluded structurally above) to
-# reconcile. The scan's other shapes, repr(), an attribute chain inside
-# str()/repr()/an f-string, a `%` right operand and a `.format(...)`
-# argument, have no site in server.py: re-grep
-# 'repr(exc\|{exc\.\|str(exc\.\|% exc\|format(exc' finds none. Every other
-# module under src/trellis/mcp (__init__.py, auth.py, knowledge_links.py,
-# reconcile.py, supersession.py) hand-reads clean at this count.
-_HAND_READ_SITE_COUNT = 3
+# and their roster entries were removed rather than left stale.
+# _resolve_evidence_pointer used to carry two more (the raised MutationError
+# message and its data['message'] echo): the fix round found that
+# MutationError.message is NOT already rendered safe -- it wraps a
+# non-SUCCESS evidence.ingest CommandResult.message whole (evidence.py),
+# which can carry a store's own rejection detail on FAILED/REJECTED -- so
+# both sites now go through sanitize_error_message(str(exc)) first, which
+# again passes a call argument rather than stringifying exc directly, and
+# the entry was removed rather than left stale. Re-grep '{exc}\|str(exc)'
+# in src/trellis/mcp/server.py and subtract the one log-only site
+# (_build_llm_client, excluded structurally above) to reconcile. The
+# scan's other shapes, repr(), an attribute chain inside str()/repr()/an
+# f-string, a `%` right operand and a `.format(...)` argument, have no
+# site in server.py: re-grep 'repr(exc\|{exc\.\|str(exc\.\|% exc\|format(exc'
+# finds none. Every other module under src/trellis/mcp (__init__.py,
+# auth.py, knowledge_links.py, reconcile.py, supersession.py) hand-reads
+# clean at this count.
+_HAND_READ_SITE_COUNT = 1
 
 _SERVER_PATH = Path(inspect.getsourcefile(server_mod) or "")
 _MCP_PACKAGE_DIR = _SERVER_PATH.parent

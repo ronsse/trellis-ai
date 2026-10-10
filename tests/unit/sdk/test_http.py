@@ -207,6 +207,12 @@ class TestDescribeBodyParseError:
         assert _HOSTILE not in detail
         assert "line" in detail
         assert "column" in detail
+        # Exact match, not just absence-of-leak: ``str(exc)`` for this
+        # same JSONDecodeError is "Expecting ':' delimiter: line 1
+        # column 49 (char 48)" -- it also omits the document and also
+        # contains "line"/"column", so it would pass every assertion
+        # above while being the un-fixed, raw-``str(exc)`` behaviour.
+        assert detail == "Expecting ':' delimiter (line 1, column 49)"
 
     def test_non_validation_exception_falls_back_to_type_name(self) -> None:
         exc = RuntimeError(f"connection failed: api_key={_HOSTILE}")
