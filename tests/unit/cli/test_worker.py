@@ -163,6 +163,16 @@ def _make_feedback(*, outcome: str, items: list[str]):
 
 _CURATE_KEPT = "wc:doc:kept"
 _CURATE_NOISY = "wc:doc:noisy"
+#: A second real document, admitted and written alongside ``_CURATE_NOISY``
+#: so the written and refused counts differ (2 vs 1) and a mutant that
+#: swaps them, or inverts the dry-run predicate, fails on the count
+#: itself rather than only incidentally on another assertion.
+_CURATE_NOISY_2 = "wc:doc:noisy2"
+#: A trace id, never put into the document store, used by
+#: ``test_live_run_separates_written_from_refused_not_document`` to stand
+#: in for an id the demotion gate admits on citation evidence alone
+#: (#833).
+_CURATE_PHANTOM = "wc:trace:phantom"
 _CURATE_FINDINGS = frozenset(
     {"NoiseTagsApplied", "AdvisoryCycleReport", "LearningCandidatesReport"}
 )
@@ -223,6 +233,58 @@ def _seed_curate_signal(registry: StoreRegistry) -> None:
     registry.knowledge.document_store.put(
         _CURATE_NOISY,
         "noisy test content",
+        {"content_tags": {"signal_quality": "standard"}},
+    )
+
+
+def _seed_second_noisy_document(registry: StoreRegistry, pack_prefix: str) -> None:
+    """Seed a second real document the gate admits and the writer resolves.
+
+    Mirrors ``_seed_curate_signal``'s evidence shape for ``_CURATE_NOISY``
+    but for ``_CURATE_NOISY_2``, so a live or dry curate cycle alongside a
+    refused non-document id writes (or previews) two documents, not one.
+    """
+    event_log = registry.operational.event_log
+    for i in range(5):
+        pack_id = f"{pack_prefix}-{i}"
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "intent": "test intent",
+                "intent_family": "wc-curate",
+                "domain": "wc-test",
+                "injected_item_ids": [_CURATE_NOISY_2],
+                "injected_items": [
+                    {
+                        "item_id": _CURATE_NOISY_2,
+                        "item_type": "document",
+                        "rank": 0,
+                        "strategy_source": "document",
+                    }
+                ],
+            },
+        )
+        event_log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "run_id": f"{pack_prefix}-run-{i}",
+                "intent_family": "wc-curate",
+                "outcome": "failure",
+                "success": False,
+                "helpful_item_ids": [],
+                "unhelpful_item_ids": [_CURATE_NOISY_2],
+            },
+        )
+    registry.knowledge.document_store.put(
+        _CURATE_NOISY_2,
+        "second noisy test content",
         {"content_tags": {"signal_quality": "standard"}},
     )
 
@@ -810,6 +872,177 @@ class TestWorkerCurate:
         assert noisy["metadata"]["content_tags"]["signal_quality"] == "noise"
         assert (out_dir / "intent_learning_candidates.json").is_file()
         assert (out_dir / "promotion_decisions.template.json").is_file()
+
+    def test_live_run_separates_written_from_refused_not_document(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """``noise_tagged`` counts writes, not gate admissions.
+
+        The demotion gate admits on citation evidence alone, with no
+        notion of which store an id belongs to. A phantom id cited
+        unhelpful just as often as the real noisy documents is admitted
+        right alongside them, but it was never put into the document
+        store, so ``apply_noise_tags`` writes nothing for it. A second
+        real document is seeded beside ``_CURATE_NOISY`` so the written
+        (2) and refused (1) counts differ: before the fix, ``noise_tagged``
+        reported all three as demoted (3); it has to report 2 and name
+        the other refused (#833).
+        """
+        _seed_curate_signal(temp_stores)
+        _seed_second_noisy_document(temp_stores, "wc-curate-noisy2")
+        event_log = temp_stores.operational.event_log
+        for i in range(5):
+            pack_id = f"wc-curate-phantom-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "wc-curate",
+                    "domain": "wc-test",
+                    "injected_item_ids": [_CURATE_PHANTOM],
+                    "injected_items": [
+                        {
+                            "item_id": _CURATE_PHANTOM,
+                            "item_type": "trace",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"wc-run-phantom-{i}",
+                    "intent_family": "wc-curate",
+                    "outcome": "failure",
+                    "success": False,
+                    "helpful_item_ids": [],
+                    "unhelpful_item_ids": [_CURATE_PHANTOM],
+                },
+            )
+        # Deliberately never put _CURATE_PHANTOM into the document
+        # store — it stands in for a trace id or other non-document id
+        # the gate still admits.
+        assert temp_stores.knowledge.document_store.get(_CURATE_PHANTOM) is None
+
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(out_dir),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["noise_tagged"] == 2
+        assert data["noise_refused_non_document"] == 1
+        noisy = temp_stores.knowledge.document_store.get(_CURATE_NOISY)
+        assert noisy is not None
+        assert noisy["metadata"]["content_tags"]["signal_quality"] == "noise"
+        noisy2 = temp_stores.knowledge.document_store.get(_CURATE_NOISY_2)
+        assert noisy2 is not None
+        assert noisy2["metadata"]["content_tags"]["signal_quality"] == "noise"
+
+    def test_dry_run_separates_written_from_refused_not_document(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """A dry run previews the same split, from a read, not a write.
+
+        Mirrors ``test_live_run_separates_written_from_refused_not_document``
+        but with ``--dry-run``: nothing is written either way, so
+        ``_curate_stage_noise_tags`` recomputes both counts with a
+        read-only ``document_store.get`` check per admitted id instead of
+        reading ``report.noise_tags_written`` (which a dry run never sets).
+        A second real document is seeded beside ``_CURATE_NOISY`` so the
+        would-be-written (2) and refused (1) counts differ. Before that
+        recomputation existed, a dry run reported the gate's raw
+        admission count (3) under ``noise_tagged`` with no way to see
+        that one of the three would refuse; it has to report 2 and 1,
+        same as the live run would, without writing anything.
+        """
+        _seed_curate_signal(temp_stores)
+        _seed_second_noisy_document(temp_stores, "wc-curate-noisy2-dry")
+        event_log = temp_stores.operational.event_log
+        for i in range(5):
+            pack_id = f"wc-curate-phantom-dry-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "wc-curate",
+                    "domain": "wc-test",
+                    "injected_item_ids": [_CURATE_PHANTOM],
+                    "injected_items": [
+                        {
+                            "item_id": _CURATE_PHANTOM,
+                            "item_type": "trace",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"wc-run-phantom-dry-{i}",
+                    "intent_family": "wc-curate",
+                    "outcome": "failure",
+                    "success": False,
+                    "helpful_item_ids": [],
+                    "unhelpful_item_ids": [_CURATE_PHANTOM],
+                },
+            )
+        assert temp_stores.knowledge.document_store.get(_CURATE_PHANTOM) is None
+        noisy_before = temp_stores.knowledge.document_store.get(_CURATE_NOISY)
+        noisy2_before = temp_stores.knowledge.document_store.get(_CURATE_NOISY_2)
+
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(out_dir),
+                "--dry-run",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["dry_run"] is True
+        assert data["noise_tagged"] == 2
+        assert data["noise_refused_non_document"] == 1
+        # A dry run writes nothing — the split above is a preview.
+        docs = temp_stores.knowledge.document_store
+        assert docs.get(_CURATE_NOISY) == noisy_before
+        assert docs.get(_CURATE_NOISY_2) == noisy2_before
+        assert docs.get(_CURATE_PHANTOM) is None
+        assert not out_dir.exists()
 
 
 # ===========================================================================
