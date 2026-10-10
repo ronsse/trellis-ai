@@ -95,3 +95,21 @@ def test_cursor_independent_per_tuner(store: SQLiteTunerStateStore):
     store.set_cursor("b", "cur_b")
     assert store.get_cursor("a") == "cur_a"
     assert store.get_cursor("b") == "cur_b"
+
+
+def test_put_proposal_refuses_a_non_finite_proposed_value(
+    store: SQLiteTunerStateStore,
+):
+    prop = _proposal(proposed_values={"alpha": float("nan")})
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        store.put_proposal(prop)
+    assert store.get_proposal(prop.proposal_id) is None
+
+
+def test_put_proposal_refuses_a_non_finite_metadata_value(
+    store: SQLiteTunerStateStore,
+):
+    prop = _proposal(metadata={"score": float("inf")})
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        store.put_proposal(prop)
+    assert store.get_proposal(prop.proposal_id) is None

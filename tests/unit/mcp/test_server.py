@@ -942,6 +942,29 @@ class TestSaveMemory:
             limit=100,
         )
 
+    def test_non_finite_metadata_writes_no_document(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """A NaN/Infinity metadata value must not leave a durable orphan.
+
+        Before the document store refused non-finite JSON (allow_nan=False
+        on the write path), ``save_memory`` committed the document row
+        first and only the later ``MEMORY_STORED`` emit failed — an
+        unrecoverable write the caller's error made look recoverable.
+        Once the document store also refuses, nothing durable lands.
+        """
+        with pytest.raises(McpError):
+            save_memory(
+                "memory content with non-finite metadata",
+                metadata={"score": float("nan")},
+            )
+
+        assert temp_registry.knowledge.document_store.count() == 0
+        assert not temp_registry.operational.event_log.get_events(
+            event_type=EventType.MEMORY_STORED,
+            limit=100,
+        )
+
     def test_embedding_runs_once_outside_dedup_lock(
         self,
         temp_registry: StoreRegistry,
@@ -1160,6 +1183,34 @@ class TestSaveMemoryEmbedOnIngest:
         assert row["metadata"]["doc_id"] == doc_id
         assert row["metadata"]["content"] == "embedded memory content"
         assert row["metadata"]["domain"] == "ops"
+
+    def test_flag_on_broken_vector_store_still_succeeds(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#830 follow-up 3: a ``vector_store`` that raises at resolve
+        time must not fail ``save_memory`` for a memory that was already
+        durably stored. Before the fix, ``run_embed_on_ingest``
+        let that ``ConfigError`` propagate straight out of the hook, past
+        the "fail-soft" comment at its own call site, into an McpError for
+        a write that had already landed — inviting a client retry of an
+        already-stored memory."""
+        from unittest.mock import PropertyMock
+
+        from trellis.stores.registry import _KnowledgePlane
+
+        monkeypatch.setenv("TRELLIS_ENABLE_EMBED_ON_INGEST", "1")
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _EMBED_FN_PATH)
+        monkeypatch.setattr(
+            _KnowledgePlane,
+            "vector_store",
+            PropertyMock(side_effect=ConfigError("down", setting="vector.backend")),
+        )
+
+        result = save_memory("stored despite a broken vector store")
+
+        assert result.startswith("Memory saved:")
+        doc_id = result.split(":", 1)[1].strip()
+        assert temp_registry.knowledge.document_store.get(doc_id) is not None
 
 
 # ---------------------------------------------------------------------------

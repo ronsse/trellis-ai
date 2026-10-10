@@ -36,7 +36,7 @@ from trellis.retrieve.embed_ingest_hook import (
 )
 from trellis.retrieve.excerpts import EXCERPT_ELLIPSIS
 
-# The once-per-cause dedup cache in ``_warn_embedder_resolve_failed_once``
+# The once-per-cause dedup cache in ``_warn_resolve_failed_once``
 # is reset by the central autouse fixture in tests/conftest.py
 # (``_reset_embedder_resolve_failure_log_cache``), which isolates it across
 # every test file, not just this one.
@@ -311,7 +311,8 @@ class TestHook:
         matching = [
             entry
             for entry in logs
-            if entry["event"] == "embed_on_ingest_embedder_resolve_failed"
+            if entry["event"] == "embed_on_ingest_resolve_failed"
+            and entry["component"] == "embedding_fn"
         ]
         assert len(matching) == 1
         assert matching[0]["log_level"] == "warning"
@@ -344,7 +345,8 @@ class TestHook:
         matching = [
             entry
             for entry in logs
-            if entry["event"] == "embed_on_ingest_embedder_resolve_failed"
+            if entry["event"] == "embed_on_ingest_resolve_failed"
+            and entry["component"] == "embedding_fn"
         ]
         assert len(matching) == 1
         assert matching[0]["setting"] is None
@@ -376,7 +378,8 @@ class TestHook:
         matching = [
             entry
             for entry in logs
-            if entry["event"] == "embed_on_ingest_embedder_resolve_failed"
+            if entry["event"] == "embed_on_ingest_resolve_failed"
+            and entry["component"] == "embedding_fn"
         ]
         assert len(matching) == 2
         assert {m["error_type"] for m in matching} == {"ConfigError", "RuntimeError"}
@@ -408,7 +411,8 @@ class TestHook:
         matching = [
             entry
             for entry in logs
-            if entry["event"] == "embed_on_ingest_embedder_resolve_failed"
+            if entry["event"] == "embed_on_ingest_resolve_failed"
+            and entry["component"] == "embedding_fn"
         ]
         assert len(matching) == 2
         assert {m["setting"] for m in matching} == {
@@ -424,3 +428,229 @@ class TestHook:
         assert summary is not None
         assert summary["embedded"] is False
         assert "db down" in summary["reason"]
+
+
+class TestVectorStoreResolve:
+    """``registry.knowledge.vector_store`` raising at resolve time (not
+    merely being ``None``) must be exactly as fail-soft as a broken
+    ``embedding_fn`` resolve (follow-up 3 from #830).
+
+    Before this fix, ``run_embed_on_ingest`` read the vector store with
+    ``getattr(registry.knowledge, "vector_store", None)``: the ``getattr``
+    default only ever absorbs an ``AttributeError`` raised by the lookup
+    itself, so a real backend's ``ConfigError``/``BackendNotInstalledError``
+    (or any other exception) from *inside* the property getter propagated
+    straight out of the hook — after the document had already been
+    durably stored by the caller. Every production caller (MCP
+    ``save_memory``, the mutate ``"soft"`` handler, the corpus-sync ingest
+    paths, the dbt-manifest CLI ingest) invokes the hook unwrapped, so that
+    raise reached the caller's response for a write that had already
+    landed, inviting a retry of an already-stored document.
+    """
+
+    def test_working_embedder_broken_vector_store_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import PropertyMock
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry.knowledge).vector_store = PropertyMock(
+            side_effect=RuntimeError("no module named 'typo'")
+        )
+        summary = run_embed_on_ingest(registry, "d1", "content", source="t")
+        assert summary == {"embedded": False, "reason": "RuntimeError"}
+        assert "typo" not in summary["reason"]
+
+    def test_vector_store_resolve_failure_reason_names_the_setting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import PropertyMock
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry.knowledge).vector_store = PropertyMock(
+            side_effect=ConfigError(
+                "unknown vector backend 'bogus'", setting="vector.backend"
+            )
+        )
+        summary = run_embed_on_ingest(registry, "d1", "content", source="t")
+        assert summary == {
+            "embedded": False,
+            "reason": "ConfigError: vector.backend",
+        }
+
+    def test_vector_store_resolve_failure_ignores_a_foreign_unhashable_setting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import PropertyMock
+
+        class _ForeignError(RuntimeError):
+            def __init__(self) -> None:
+                super().__init__("boom")
+                self.setting = ["unhashable", "list"]
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry.knowledge).vector_store = PropertyMock(
+            side_effect=_ForeignError()
+        )
+
+        summary = run_embed_on_ingest(registry, "d1", "content", source="t")
+
+        assert summary == {"embedded": False, "reason": "_ForeignError"}
+
+    def test_vector_store_resolve_failure_logged_once_per_distinct_cause(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two ingests against a persistently-broken vector store must
+        produce exactly ONE warning record — the pre-fix hook raised
+        instead of returning at all, so this fails on main with a
+        propagated ``ConfigError`` rather than two summaries."""
+        from unittest.mock import PropertyMock
+
+        from structlog.testing import capture_logs
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry.knowledge).vector_store = PropertyMock(
+            side_effect=ConfigError("down", setting="vector.backend")
+        )
+
+        with capture_logs() as logs:
+            first = run_embed_on_ingest(registry, "d1", "content", source="t")
+            second = run_embed_on_ingest(registry, "d2", "content", source="t")
+
+        assert first == {"embedded": False, "reason": "ConfigError: vector.backend"}
+        assert second == {"embedded": False, "reason": "ConfigError: vector.backend"}
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "embed_on_ingest_resolve_failed"
+            and entry["component"] == "vector_store"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["log_level"] == "warning"
+        assert matching[0]["error_type"] == "ConfigError"
+        assert matching[0]["setting"] == "vector.backend"
+
+    def test_vector_store_resolve_failure_log_never_carries_the_message_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import PropertyMock
+
+        from structlog.testing import capture_logs
+
+        sentinel = "SENTINEL-leak-marker-9f3c-vs"
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry.knowledge).vector_store = PropertyMock(
+            side_effect=RuntimeError(sentinel)
+        )
+
+        with capture_logs() as logs:
+            run_embed_on_ingest(registry, "d1", "content", source="t")
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "embed_on_ingest_resolve_failed"
+            and entry["component"] == "vector_store"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["setting"] is None
+        for value in matching[0].values():
+            assert sentinel not in str(value)
+
+    def test_vector_store_resolve_failure_logs_again_for_a_different_cause(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import PropertyMock
+
+        from structlog.testing import capture_logs
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry.knowledge).vector_store = PropertyMock(
+            side_effect=ConfigError("bad uri", setting="vector.uri")
+        )
+
+        with capture_logs() as logs:
+            run_embed_on_ingest(registry, "d1", "content", source="t")
+            type(registry.knowledge).vector_store = PropertyMock(
+                side_effect=RuntimeError("different cause")
+            )
+            run_embed_on_ingest(registry, "d2", "content", source="t")
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "embed_on_ingest_resolve_failed"
+            and entry["component"] == "vector_store"
+        ]
+        assert len(matching) == 2
+        assert {m["error_type"] for m in matching} == {"ConfigError", "RuntimeError"}
+
+    def test_embedder_and_vector_store_failures_with_the_same_cause_both_log(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``component`` must be part of the dedup cache key, not only the
+        log payload.
+
+        An embedder resolve failure and a vector_store resolve failure
+        that share the exact same ``(error_type, setting)`` — here both a
+        bare ``RuntimeError`` with no ``setting`` — are still two distinct
+        causes an operator needs to see. A mutant that drops ``component``
+        from the ``functools.cache`` key would let the first call's cache
+        entry silently swallow the second component's warning.
+        """
+        from unittest.mock import PropertyMock
+
+        from structlog.testing import capture_logs
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        registry = _registry()
+        type(registry).embedding_fn = PropertyMock(
+            side_effect=RuntimeError("embedder cause")
+        )
+
+        other_registry = _registry()
+        type(other_registry.knowledge).vector_store = PropertyMock(
+            side_effect=RuntimeError("vector store cause")
+        )
+
+        with capture_logs() as logs:
+            run_embed_on_ingest(registry, "d1", "content", source="t")
+            run_embed_on_ingest(other_registry, "d2", "content", source="t")
+
+        matching = [
+            entry
+            for entry in logs
+            if entry["event"] == "embed_on_ingest_resolve_failed"
+        ]
+        assert len(matching) == 2
+        assert {m["component"] for m in matching} == {"embedding_fn", "vector_store"}
+
+    def test_vector_store_resolve_failure_does_not_reach_embedder_or_upsert(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The embedder must never run when the vector store can't be
+        resolved — there is nowhere to upsert the result."""
+        from unittest.mock import PropertyMock
+
+        monkeypatch.setenv(EMBED_ON_INGEST_FLAG, "1")
+        calls: list[str] = []
+
+        def embedder(text: str) -> list[float]:
+            calls.append(text)
+            return list(_EMBEDDING)
+
+        registry = _registry(embedding_fn=embedder)
+        type(registry.knowledge).vector_store = PropertyMock(
+            side_effect=ConfigError("down", setting="vector.backend")
+        )
+
+        summary = run_embed_on_ingest(registry, "d1", "content", source="t")
+
+        assert summary == {"embedded": False, "reason": "ConfigError: vector.backend"}
+        assert calls == []

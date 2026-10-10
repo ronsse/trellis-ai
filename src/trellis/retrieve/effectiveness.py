@@ -243,10 +243,17 @@ class EffectivenessReport(TrellisModel):
     flags. It is not what gets demoted. :attr:`demotion_screen` carries
     the evidence gate's verdict over that proposal, and
     ``demotion_screen.admitted`` is the list
-    :func:`run_effectiveness_feedback` actually writes (#336). The two
+    :func:`run_effectiveness_feedback` *attempts* to write (#336). The two
     are reported separately on purpose: a proposal that shrinks by 60%
     at the gate is a fact about the proposal rule, and collapsing them
     into one number would hide it.
+
+    ``admitted`` is not what was written, either: the gate clears ids on
+    citation evidence alone, with no notion of which store an id belongs
+    to, so an admitted trace id or other non-document id reaches
+    :func:`~trellis.classify.feedback.apply_noise_tags` and nothing gets
+    written for it. :attr:`noise_tags_written` and
+    :attr:`noise_refused_not_document` carry that split (#833).
     """
 
     total_packs: int
@@ -259,6 +266,17 @@ class EffectivenessReport(TrellisModel):
     #: Gate verdict over ``noise_candidates``. ``None`` only when the
     #: report was built by a caller that did not screen.
     demotion_screen: NoiseDemotionScreen | None = None
+    #: Document-store writes :func:`apply_noise_tags` actually made for
+    #: ``demotion_screen.admitted``. ``None`` when this report was built
+    #: by :func:`analyze_effectiveness` alone (a dry run — no write was
+    #: attempted); ``0`` or higher once :func:`run_effectiveness_feedback`
+    #: has run, even when nothing ended up admitted.
+    noise_tags_written: int | None = None
+    #: Admitted ids :func:`apply_noise_tags` could not resolve in the
+    #: document store — a trace id or other non-document id the demotion
+    #: gate still admitted. Always empty when :attr:`noise_tags_written`
+    #: is ``None``.
+    noise_refused_not_document: list[str] = Field(default_factory=list)
 
 
 def analyze_effectiveness(
@@ -420,7 +438,10 @@ def run_effectiveness_feedback(
        keeps serving the pre-demotion snapshot).
     3. Log the outcome for operational visibility.
 
-    Returns the :class:`EffectivenessReport` (unchanged from step 1).
+    Returns the :class:`EffectivenessReport` from step 1, with
+    :attr:`~EffectivenessReport.noise_tags_written` and
+    :attr:`~EffectivenessReport.noise_refused_not_document` filled in from
+    step 2 — the write outcome, not the gate's admission (#833).
     """
     from trellis.classify.feedback import apply_noise_tags  # noqa: PLC0415
 
@@ -433,9 +454,19 @@ def run_effectiveness_feedback(
 
     screen = report.demotion_screen
     admitted = list(screen.admitted) if screen is not None else []
+    # This function always attempts a write pass (or determines there is
+    # nothing to write), unlike analyze_effectiveness's read-only report —
+    # 0 here means "ran, nothing written", never "not attempted".
+    report = report.model_copy(update={"noise_tags_written": 0})
 
     if admitted:
-        updated = apply_noise_tags(admitted, document_store, vector_store)
+        result = apply_noise_tags(admitted, document_store, vector_store)
+        report = report.model_copy(
+            update={
+                "noise_tags_written": result.updated,
+                "noise_refused_not_document": result.refused_not_document,
+            }
+        )
         logger.info(
             "effectiveness_feedback_applied",
             noise_candidates=len(report.noise_candidates),
@@ -443,7 +474,8 @@ def run_effectiveness_feedback(
             refused=screen.refused_count if screen is not None else 0,
             refused_by_reason=screen.refused_by_reason if screen is not None else {},
             attributed_packs=report.attributed_packs,
-            items_updated=updated,
+            items_updated=result.updated,
+            items_refused_not_document=len(result.refused_not_document),
             days=days,
             success_rate=report.success_rate,
         )

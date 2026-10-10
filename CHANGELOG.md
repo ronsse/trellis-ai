@@ -376,6 +376,57 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **Noise demotion counts what was written, not what the evidence gate
+  admitted.** `apply_noise_tags` writes `signal_quality="noise"` only to
+  ids that resolve in the document store; the demotion gate admits
+  candidates on citation evidence alone, with no notion of which store an
+  id belongs to, so an admitted trace id (or other non-document id)
+  reached the writer and nothing was written for it, silently (one
+  `logger.debug` per id). Curate's nightly `noise_tagged`, REST
+  `POST /effectiveness/apply-noise-tags`'s `noise_candidates_tagged`, and
+  CLI `trellis analyze apply-noise-tags`'s text output each independently
+  reported the admission count as the demotion count, overstating it by
+  the non-document remainder. `apply_noise_tags` now returns a
+  `NoiseTagResult` (`updated`, `refused_not_document`) instead of a bare
+  `int`; `EffectivenessReport` carries `noise_tags_written` /
+  `noise_refused_not_document`. REST and the CLI report the real write
+  count beside the refused ids by name (`noise_refused_not_document` /
+  `noise_candidates_refused_not_document`); curate reports the write
+  count beside only a refused *count* (`noise_refused_non_document`), not
+  names. A curate dry run, which writes nothing either way, previews the
+  same split with a read-only `document_store.get` check per admitted
+  id, and curate's `NoiseTagsApplied` finding now fires on the write
+  count rather than the admission count.
+  ([#833](https://github.com/ronsse/trellis-ai/pull/833))
+- **Every remaining `json.dumps` write path in the graph, document,
+  vector, outcome, tuner-state, parameter and blob stores now refuses
+  NaN/Infinity too, closing the gap #831 (above) left open.** The
+  advisory and policy JSON files (`DegradableJsonStore`) are unchanged
+  and still write a bare `NaN`/`Infinity` token. That PR fixed
+  the event logs and the SQLite/Postgres graph stores; the ArcadeDB/Neo4j
+  graph store (`bolt_opencypher/graph.py`, 11 call sites across
+  `upsert_node`, `update_node_if_current`, `upsert_nodes_bulk`,
+  `upsert_edge` and `upsert_edges_bulk`), the SQLite and Postgres document
+  stores, every vector store's metadata write (SQLite, pgvector, Neo4j —
+  `upsert` and the separately-implemented `upsert_bulk` are two distinct
+  call sites there — and ArcadeDB), the outcome/tuner-state/parameter
+  stores, and the local blob store's metadata sidecar all still wrote a
+  non-finite float as a silent `NaN`/`Infinity` JSON token. The fix is the
+  same `allow_nan=False` on each `json.dumps` call, and the same
+  `ValueError` raised before the write lands. Two gaps this also closes:
+  (1) MCP `save_memory` previously committed a document row with NaN
+  metadata durably *before* the later `MEMORY_STORED` event emit failed,
+  leaving an orphan a caller's error made look recoverable — fixing
+  `sqlite/document.py`'s `put()` means the write itself refuses first, so
+  nothing durable lands; (2) the SQLite graph store's
+  `upsert_nodes_bulk`/`upsert_edges_bulk` already rolled back a
+  non-finite row atomically before this PR (both build every `json.dumps`
+  call before any write statement runs), but had no test pinning a
+  two-row batch where an earlier row has a prior version and a later row
+  is non-finite — added, and confirmed non-vacuous by mutating the store
+  to commit each row as it's built (which the test catches: the prior
+  row's value leaks through).
+  ([#835](https://github.com/ronsse/trellis-ai/pull/835))
 - **The SQLite event log and both the SQLite and Postgres graph stores
   refuse a NaN/Infinity float at write time, instead of silently storing
   JSON text a stricter reader can't parse.** Python's `json.dumps` writes
@@ -595,13 +646,36 @@ All notable changes to Trellis will be documented in this file.
   every retrieval call site until the setting is fixed; a broken
   `vector_store` degrades retrieval to keyword and graph (`semantic:
   misconfigured`); embed-on-ingest is fail-soft for an embedder resolve
-  failure only. Added a recovery runbook,
+  failure. Added a recovery runbook,
   [Playbook 15](docs/agent-guide/playbooks.md#playbook-15-recovering-from-a-broken-embedder-config):
   fix the setting, restart (the `embeddings:` block is read once, at
   `StoreRegistry` construction, so a running process can't see an edited
   config or environment), then run `trellis admin reindex-vectors` for
   documents that arrived while it was broken.
   ([#830](https://github.com/ronsse/trellis-ai/pull/830))
+- **A broken `vector_store` resolve is now fail-soft too, like the embedder
+  resolve #830 fixed above.** `run_embed_on_ingest` resolved
+  `registry.knowledge.vector_store` with a bare
+  `getattr(registry.knowledge, "vector_store", None)`: the default only
+  absorbs `AttributeError`, so a vector backend that raises while
+  instantiating (`ConfigError`, `BackendNotInstalledError`, a connection
+  error) propagated straight out of the hook — called, unwrapped, by every
+  caller (MCP `save_memory`, the mutate "soft" handler, corpus-sync ingest,
+  CLI dbt-manifest ingest) *after* the document was already durably stored,
+  so the write's own response failed for content that had, in fact, been
+  saved, inviting a client retry of an already-stored write. The resolve is
+  now wrapped the same way #830 wrapped the embedder's, returning
+  `{"embedded": False, "reason": ...}` instead of raising. The dedup helper
+  generalized to cover both: the WARNING event is renamed
+  `embed_on_ingest_resolve_failed` (from
+  `embed_on_ingest_embedder_resolve_failed`) and now carries a `component`
+  field (`embedding_fn` or `vector_store`); the once-per-cause cache key is
+  `(component, error_type, setting)`, not just `(error_type, setting)`, so
+  an embedder and a vector store failing with the same shape (e.g. both a
+  bare `RuntimeError` with no `setting`) log independently instead of one
+  suppressing the other. Playbook 15 and the MCP prewarm comment updated to
+  match.
+  ([#834](https://github.com/ronsse/trellis-ai/pull/834))
 
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited

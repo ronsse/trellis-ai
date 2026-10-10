@@ -195,3 +195,20 @@ def test_base_sweep_not_implemented():
 
     with pytest.raises(NotImplementedError, match="sweep_expired"):
         _StubBlob().sweep_expired()
+
+
+class TestRefusesNonFiniteMetadata:
+    def test_put_refuses_a_non_finite_metadata_value(
+        self, store: LocalBlobStore, tmp_path: Path
+    ):
+        """json.dumps(..., allow_nan=False) refuses the metadata sidecar
+        write. ``put()`` writes the blob body first and the ``.meta``
+        sidecar second (two separate files, not one transaction), so the
+        refusal here is NOT the same atomicity guarantee the document,
+        vector and graph stores give — the body lands, the sidecar does
+        not. Pin that ordering rather than claim more than the code does.
+        """
+        with pytest.raises(ValueError, match="not JSON compliant"):
+            store.put("file.bin", b"hello", metadata={"score": float("nan")})
+        assert store.get("file.bin") == b"hello"
+        assert not (tmp_path / "blobs" / ".meta" / "file.bin.json").exists()
