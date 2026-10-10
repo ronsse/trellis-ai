@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 from collections import OrderedDict
-from typing import Protocol
+from typing import Any, Protocol
 
 import structlog
 
@@ -314,6 +314,7 @@ class MutationExecutor:
                 error_type=summary["error_type"],
                 error_code=summary["error_code"],
                 constraint=summary.get("constraint"),
+                cause=summary.get("cause"),
             )
             return CommandResult(
                 command_id=command.command_id,
@@ -398,6 +399,7 @@ class MutationExecutor:
                 error_type=summary["error_type"],
                 error_code=summary["error_code"],
                 constraint=summary.get("constraint"),
+                cause=summary.get("cause"),
             )
             return CommandResult(
                 command_id=command.command_id,
@@ -433,11 +435,13 @@ class MutationExecutor:
                 error_type=summary["error_type"],
                 error_code=summary["error_code"],
                 constraint=summary.get("constraint"),
+                cause=summary.get("cause"),
             )
             # The caller reads the type alone. No TrellisError reaches this
             # catch, and the text of anything else can be a driver's, which
-            # can carry query text and values. The traceback above and the
-            # audit event keep it.
+            # can carry query text and values. The traceback above keeps the
+            # exception's own text in full; the audit event keeps only
+            # ``summarize_exception``'s sanitized summary, never that text.
             return CommandResult(
                 command_id=command.command_id,
                 status=CommandStatus.FAILED,
@@ -565,6 +569,7 @@ class MutationExecutor:
         error_type: str | None = None,
         error_code: str | None = None,
         constraint: str | None = None,
+        cause: dict[str, Any] | None = None,
     ) -> str | None:
         """Emit a SUCCESS or FAILED event to the event log if available.
 
@@ -572,7 +577,7 @@ class MutationExecutor:
         :meth:`_emit_rejection` instead so every rejection event carries a
         ``reason`` field naming the stage that rejected the command.
 
-        ``error_type`` / ``error_code`` / ``constraint`` are the
+        ``error_type`` / ``error_code`` / ``constraint`` / ``cause`` are the
         :func:`~trellis.core.error_sanitize.summarize_exception` fields a
         FAILED caller passes alongside its already-sanitized ``message``;
         omitted (``None``) on the SUCCESS path, which has no exception to
@@ -595,6 +600,7 @@ class MutationExecutor:
             error_type=error_type,
             error_code=error_code,
             constraint=constraint,
+            cause=cause,
         )
 
     def _check_idempotency(
@@ -646,32 +652,40 @@ class MutationExecutor:
         # fails closed: running the handler without an answer could write
         # the command twice, which is what this stage exists to prevent. It
         # catches what ``_emit_event`` catches from the same event log. The
-        # message and the log line name the exception's type, not its text,
-        # as the typed store errors do (#702, #713), so the line carries no
-        # traceback; if the rejection event cannot be written either,
-        # ``_emit_event`` logs that failure without one too, since this one
-        # is its context. The key is not recorded, so a retry once the event
-        # log recovers runs.
+        # CommandResult names the exception's type only, not its text, as
+        # the typed store errors' CommandResult does (#702, #713); the
+        # audit event carries ``summarize_exception``'s sanitized summary
+        # instead, same as the typed and panic paths, so the stored event
+        # names more than the driver's class (the owner's requirement).
+        # Neither carries a traceback; if the rejection event cannot be
+        # written either, ``_emit_event`` logs that failure without one
+        # too, since this one is its context. The key is not recorded, so
+        # a retry once the event log recovers runs.
         try:
             persisted = self._event_log.has_idempotency_key(command.idempotency_key)
         except _audit_emit_failure_classes() as exc:
-            message = f"Idempotency check failed: {type(exc).__name__}"
+            result_message = f"Idempotency check failed: {type(exc).__name__}"
             log.error(  # noqa: TRY400 — no traceback on purpose; see above
                 "idempotency_check_failed",
                 key=command.idempotency_key,
                 error_type=type(exc).__name__,
             )
+            summary = summarize_exception(exc)
             audit = self._emit_rejection(
                 command,
                 reason="idempotency_check_failed",
-                message=message,
+                message=f"Idempotency check failed: {summary['message']}",
                 policy_warnings=policy_warnings,
+                error_type=summary["error_type"],
+                error_code=summary["error_code"],
+                constraint=summary.get("constraint"),
+                cause=summary.get("cause"),
             )
             return CommandResult(
                 command_id=command.command_id,
                 status=CommandStatus.FAILED,
                 operation=command.operation,
-                message=message,
+                message=result_message,
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
 
@@ -705,6 +719,7 @@ class MutationExecutor:
         error_type: str | None = None,
         error_code: str | None = None,
         constraint: str | None = None,
+        cause: dict[str, Any] | None = None,
     ) -> str | None:
         """Emit a uniform :attr:`EventType.MUTATION_REJECTED` event.
 
@@ -720,7 +735,7 @@ class MutationExecutor:
         deployment that has declared no policies emits a byte-identical
         event to the pre-gate world.
 
-        ``error_type`` / ``error_code`` / ``constraint`` are the
+        ``error_type`` / ``error_code`` / ``constraint`` / ``cause`` are the
         :func:`~trellis.core.error_sanitize.summarize_exception` fields a
         caller rejecting from a caught exception passes alongside its
         already-sanitized ``message``; omitted (``None``) by rejection
@@ -740,6 +755,7 @@ class MutationExecutor:
             error_type=error_type,
             error_code=error_code,
             constraint=constraint,
+            cause=cause,
         )
 
     def _emit_event(
@@ -754,23 +770,27 @@ class MutationExecutor:
         error_type: str | None = None,
         error_code: str | None = None,
         constraint: str | None = None,
+        cause: dict[str, Any] | None = None,
     ) -> str | None:
         """Build the payload and emit a single executor event.
 
         Returns ``None`` when the event was written, and a warning string
         naming the missing event when the write raised.
 
-        ``error_type`` / ``error_code`` / ``constraint`` are added to the
-        payload only when given (``None`` leaves the key absent, as
-        ``reason`` already does), so a SUCCESS event — which passes none
-        of them — stays byte-identical to the pre-this-change payload. A
-        FAILED or REJECTED caller passes
-        :func:`~trellis.core.error_sanitize.summarize_exception`'s three
-        fields; ``message`` is that same summary's ``message``, not
-        ``str(exc)`` — the audit record gets a structured, leak-safe
-        summary of the error, while the :class:`CommandResult` a caller
-        reads is built separately, upstream, from the raw exception, and
-        is unchanged by this.
+        ``error_type`` / ``error_code`` / ``constraint`` / ``cause`` are
+        added to the payload only when given (``None`` leaves the key
+        absent, as ``reason`` already does), so a SUCCESS event — which
+        passes none of them — stays byte-identical to the pre-this-change
+        payload. A FAILED or REJECTED caller passes
+        :func:`~trellis.core.error_sanitize.summarize_exception`'s fields;
+        ``message`` is that same summary's ``message``, not ``str(exc)`` —
+        the audit record gets a structured, leak-safe summary of the
+        error, while the :class:`CommandResult` a caller reads is built
+        separately, upstream, from the raw exception, and is unchanged by
+        this. ``cause`` is that summary's own nested dict — present only
+        when the caller's exception chained one via ``raise ... from
+        exc`` — and is stored as-is, already sanitized by
+        ``summarize_exception``.
 
         **Emitting the audit event can never change what the pipeline
         reports.** That is the whole invariant, and it is stated here rather
@@ -829,6 +849,8 @@ class MutationExecutor:
             payload["error_code"] = error_code
         if constraint is not None:
             payload["constraint"] = constraint
+        if cause is not None:
+            payload["cause"] = cause
         # Added only when a policy actually fired -- non-blockingly on
         # the SUCCESS path, or ahead of the blocking rule on the
         # ``policy_violation`` rejection path. Keeping the key absent

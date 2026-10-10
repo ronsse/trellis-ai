@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from importlib import import_module
+from typing import NoReturn
 
 import pytest
 import yaml
@@ -34,6 +35,24 @@ def _filler(length: int) -> str:
     is 40+ chars and nothing resembles ``@``/``=``/``:`` — safe against
     every ``_LEAK_PATTERNS`` entry and the long-opaque-token check."""
     return ("lorem " * (length // 6 + 2))[:length]
+
+
+def _raise_inner_failure() -> NoReturn:
+    inner_message = "inner failure"
+    raise RuntimeError(inner_message)
+
+
+def _raise_store_error_chained_by_context_only() -> NoReturn:
+    """Raise a ``StoreError`` whose ``__context__`` (not ``__cause__``)
+    is set: a bare ``raise`` inside an ``except`` block. ``from None``
+    only silences the traceback printer's chaining note
+    (``__suppress_context__``) to satisfy B904 — it does not clear
+    ``__context__`` itself, which stays set to the inner exception."""
+    try:
+        _raise_inner_failure()
+    except RuntimeError:
+        outer_message = "outer failure"
+        raise StoreError(outer_message, store="pg") from None
 
 
 class TestCleanPassthrough:
@@ -473,6 +492,69 @@ class TestSummarizeException:
     def test_validation_error_s_default_code_survives(self) -> None:
         summary = summarize_exception(ValidationError("bad field"))
         assert summary["error_code"] == "VALIDATION_ERROR"
+
+    def test_empty_text_yields_an_empty_message_not_a_crash(self) -> None:
+        """S8 (R3): ``text.splitlines()`` on an empty string is ``[]``,
+        so the ``if text else ""`` guard is load-bearing — a bare
+        ``RuntimeError()`` (``str(exc) == ""``) must not raise
+        ``IndexError`` out of ``summarize_exception``."""
+        assert summarize_exception(RuntimeError())["message"] == ""
+
+    def test_generic_branch_suppresses_an_unquoted_dsn(self) -> None:
+        """S11 (R3): the generic branch's ``sanitize_error_message`` call
+        is load-bearing on its own, separately from ``_mask_quoted`` — an
+        unquoted credential (a DSN with no surrounding quotes) in a
+        foreign exception's first line must still be suppressed."""
+        text = "connect postgresql://svc_user:s3cr3t@db.internal/trellis failed"
+        assert summarize_exception(RuntimeError(text))["message"] == SUPPRESSED_MARKER
+
+    def test_cause_key_absent_when_nothing_is_chained(self) -> None:
+        assert "cause" not in summarize_exception(RuntimeError("plain"))
+
+    def test_cause_key_absent_when_only_context_is_set(self) -> None:
+        """A bare ``raise`` inside an ``except`` block sets the implicit
+        ``__context__`` but leaves ``__cause__`` ``None`` (the helper's
+        ``from None`` only silences the traceback printer, per its own
+        docstring), and ``summarize_exception`` must not confuse the
+        two."""
+        captured: list[BaseException] = []
+        try:
+            _raise_store_error_chained_by_context_only()
+        except StoreError as caught:
+            captured.append(caught)
+        exc = captured[0]
+        assert exc.__cause__ is None
+        assert exc.__context__ is not None
+
+        assert "cause" not in summarize_exception(exc)
+
+    def test_cause_summarized_one_level_from_a_chained_driver_error(self) -> None:
+        """A ``StoreError`` wrapping a psycopg-shaped deadlock records the
+        cause's SQLSTATE, first-line message and constraint — one level
+        only, read from ``__cause__``, never recursing further."""
+
+        class _Diag:
+            constraint_name = "orders_pkey"
+
+        class _FakePsycopgError(RuntimeError):
+            sqlstate = "40P01"
+            diag = _Diag()
+
+        cause = _FakePsycopgError(
+            "deadlock detected\nDETAIL: Process 123 blocked by process 456."
+        )
+        exc = StoreError("Purge of node n1 failed: DeadlockDetected", store="graph")
+        exc.__cause__ = cause
+
+        summary = summarize_exception(exc)
+        assert summary["error_type"] == "StoreError"
+        assert summary["message"] == "Purge of node n1 failed: DeadlockDetected"
+        assert summary["cause"] == {
+            "error_type": "_FakePsycopgError",
+            "error_code": "40P01",
+            "message": "deadlock detected",
+            "constraint": "orders_pkey",
+        }
 
 
 class TestDescribeYamlError:

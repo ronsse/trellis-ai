@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
+from typing import NoReturn
 from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import PolicyViolationError, StoreError, ValidationError
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import (
@@ -39,6 +42,55 @@ def _handler(created_id: str | None = None, message: str = "ok") -> MagicMock:
     h = MagicMock()
     h.handle.return_value = (created_id, message)
     return h
+
+
+def _psycopg_shaped_cause(
+    message: str, *, sqlstate: str, constraint: str | None = None
+) -> RuntimeError:
+    """A fake exception carrying psycopg.Error's ``sqlstate``/``diag`` shape.
+
+    psycopg is an optional extra, unavailable in this environment;
+    ``summarize_exception`` reads these attributes duck-typed (not via
+    ``isinstance``), so a plain exception carrying them is read the same
+    way production reads the real ``psycopg.Error``. Subclasses
+    ``RuntimeError`` (not bare ``Exception``) so it is one of the
+    executor's enumerated panic-catch types even without psycopg
+    installed (``_optional_driver_panics``). Meant to be attached as a
+    Trellis error's ``__cause__`` — production wraps a driver error as
+    ``raise StoreError(...) from exc`` — never raised on its own.
+    """
+
+    class _Diag:
+        def __init__(self, name: str) -> None:
+            self.constraint_name = name
+
+    class _FakePsycopgError(RuntimeError):
+        pass
+
+    exc = _FakePsycopgError(message)
+    exc.sqlstate = sqlstate  # type: ignore[attr-defined]
+    if constraint is not None:
+        exc.diag = _Diag(constraint)  # type: ignore[attr-defined]
+    return exc
+
+
+def _raise_inner_driver_failure() -> NoReturn:
+    inner_message = "inner driver failure"
+    raise RuntimeError(inner_message)
+
+
+def _raise_store_error_chained_by_context_only() -> NoReturn:
+    """Raise a ``StoreError`` whose ``__context__`` (not ``__cause__``)
+    is set: a bare ``raise`` inside an ``except`` block, the shape R2
+    must not confuse with an explicit ``raise ... from exc`` chain.
+    ``from None`` only silences the traceback printer's chaining note
+    (``__suppress_context__``) to satisfy B904 — it does not clear
+    ``__context__`` itself, which stays set to the inner exception."""
+    try:
+        _raise_inner_driver_failure()
+    except RuntimeError:
+        outer_message = "backend down"
+        raise StoreError(outer_message, store="pg") from None
 
 
 class TestMutationExecutor:
@@ -206,7 +258,14 @@ class TestMutationExecutor:
         """Variant A' from adr-extraction-validation.md §5.5: a handler that
         raises ``ValidationError`` is treated as a structured rejection — the
         executor emits ``MUTATION_REJECTED`` with ``reason=exc.code`` and
-        returns ``CommandStatus.REJECTED`` (not FAILED)."""
+        returns ``CommandStatus.REJECTED`` (not FAILED).
+
+        Chained from a psycopg-shaped cause (R2): production wraps a
+        driver error the same way (``raise StoreError(...) from exc``),
+        so this proves the rejection audit reads the chained cause's own
+        code, message and constraint off ``__cause__`` generically — not
+        only on the typed ``StoreError`` site below.
+        """
         event_log = MagicMock()
         handler = MagicMock()
         exc = ValidationError(
@@ -214,10 +273,12 @@ class TestMutationExecutor:
             errors=["source missing", "target missing"],
             code="orphan_edge",
         )
-        # Duck-typed diag, same shape summarize_exception reads off a
-        # driver error — proves the constraint field is read generically,
-        # not only on the untyped-panic path's fake psycopg error below.
-        exc.diag = type("Diag", (), {"constraint_name": "edges_fk"})()  # type: ignore[attr-defined]
+        exc.__cause__ = _psycopg_shaped_cause(
+            'insert or update on table "edges" violates foreign key'
+            ' constraint "edges_fk"',
+            sqlstate="23503",
+            constraint="edges_fk",
+        )
         handler.handle.side_effect = exc
         executor = MutationExecutor(
             event_log=event_log,
@@ -236,11 +297,20 @@ class TestMutationExecutor:
         assert payload["reason"] == "orphan_edge"
         assert payload["status"] == CommandStatus.REJECTED
         assert "FK check failed" in payload["message"]
-        # The audit event also carries the error's type and the
-        # handler's own code as separate, filterable fields.
+        # The audit event carries the ValidationError's own type and code.
         assert payload["error_type"] == "ValidationError"
         assert payload["error_code"] == "orphan_edge"
-        assert payload["constraint"] == "edges_fk"
+        # ValidationError itself has no .diag, so no top-level constraint.
+        assert "constraint" not in payload
+        # The chained driver error's own code, message and constraint —
+        # read one level off __cause__, never __context__ — land nested.
+        cause = payload["cause"]
+        assert cause["error_type"] == "_FakePsycopgError"
+        assert cause["error_code"] == "23503"
+        assert cause["constraint"] == "edges_fk"
+        assert cause["message"] == (
+            'insert or update on table "..." violates foreign key constraint "..."'
+        )
 
     def test_handler_validation_error_without_explicit_code_uses_default(
         self,
@@ -267,14 +337,13 @@ class TestMutationExecutor:
         TrellisError)`` catch, distinct from both the rejection catches
         above and the untyped-panic catch below: FAILED, not REJECTED,
         and the audit event carries the error's type and its (fixed)
-        ``STORE_ERROR`` code."""
+        ``STORE_ERROR`` code. ``STORE_ERROR`` and ``"StoreError"`` are
+        both constants a handwritten assertion could satisfy by accident,
+        so this also asserts the ``message`` and ``constraint`` values,
+        which a constant cannot."""
         event_log = MagicMock()
         handler = MagicMock()
         exc = StoreError("backend down", store="pg")
-        # Duck-typed diag, same shape summarize_exception reads off a
-        # driver error — proves the constraint field is read generically
-        # on the typed (StoreError, TrellisError) catch too, not only on
-        # the untyped-panic path's fake psycopg error below.
         exc.diag = type("Diag", (), {"constraint_name": "pg_conn_pool"})()  # type: ignore[attr-defined]
         handler.handle.side_effect = exc
         executor = MutationExecutor(
@@ -290,6 +359,158 @@ class TestMutationExecutor:
         assert payload["error_type"] == "StoreError"
         assert payload["error_code"] == "STORE_ERROR"
         assert payload["constraint"] == "pg_conn_pool"
+        assert "cause" not in payload  # StoreError here chains nothing.
+
+    def test_a_store_error_s_wrapped_driver_cause_reaches_the_audit(self) -> None:
+        """R2 acceptance test. Production wraps a driver error as
+        ``raise StoreError(f"... failed: {type(exc).__name__}") from exc``
+        so the type-only wrapper text stays clear of the driver's own
+        text — which means the SQLSTATE, the driver's own message and the
+        violated constraint are reachable only off ``__cause__``. This
+        chains a ``StoreError`` from a psycopg-shaped Postgres deadlock
+        (SQLSTATE 40P01) whose second line carries a synthetic marker,
+        and asserts the marker never reaches the stored event while the
+        cause's own code, message and constraint do. Fails before R2.
+        """
+        event_log = MagicMock()
+        handler = MagicMock()
+        marker = "SYN-DEADLOCK-DETAIL-7f3a"
+        cause = _psycopg_shaped_cause(
+            f"deadlock detected\nDETAIL: Process 123 waits for ShareLock on"
+            f" transaction 456; blocked by {marker}.",
+            sqlstate="40P01",
+            constraint="orders_pkey",
+        )
+        exc = StoreError("Purge of node n1 failed: DeadlockDetected", store="graph")
+        exc.__cause__ = cause
+        handler.handle.side_effect = exc
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        result = executor.execute(_cmd())
+
+        # CommandResult.message is unchanged by R2 — still the wrapper's
+        # own type-only text, never the cause's.
+        assert result.status == CommandStatus.FAILED
+        assert result.message == (
+            "Execution failed: Purge of node n1 failed: DeadlockDetected"
+        )
+        payload = event_log.emit.call_args.kwargs["payload"]
+        assert payload["message"] == "Purge of node n1 failed: DeadlockDetected"
+        assert payload["error_type"] == "StoreError"
+        assert payload["error_code"] == "STORE_ERROR"
+        assert marker not in json.dumps(payload, default=str)
+        cause_summary = payload["cause"]
+        assert cause_summary["error_code"] == "40P01"
+        assert cause_summary["message"] == "deadlock detected"
+        assert cause_summary["constraint"] == "orders_pkey"
+
+    def test_no_cause_key_when_the_exception_chains_nothing(self) -> None:
+        event_log = MagicMock()
+        handler = MagicMock()
+        handler.handle.side_effect = StoreError("backend down", store="pg")
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+        executor.execute(_cmd())
+        payload = event_log.emit.call_args.kwargs["payload"]
+        assert "cause" not in payload
+
+    def test_no_cause_key_when_only_context_is_set(self) -> None:
+        """A bare ``raise`` inside an ``except`` block sets the implicit
+        ``__context__`` but leaves ``__cause__`` ``None`` (the helper's
+        ``from None`` only silences the traceback printer, per its own
+        docstring) — R2 must read ``__cause__`` only, never fall back to
+        the implicit chain."""
+        event_log = MagicMock()
+        handler = MagicMock()
+        captured: list[StoreError] = []
+        try:
+            _raise_store_error_chained_by_context_only()
+        except StoreError as caught:
+            captured.append(caught)
+        exc = captured[0]
+        assert exc.__cause__ is None
+        assert exc.__context__ is not None
+        handler.handle.side_effect = exc
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        executor.execute(_cmd())
+
+        payload = event_log.emit.call_args.kwargs["payload"]
+        assert "cause" not in payload
+
+    def test_a_bare_assertion_error_still_produces_one_failed_audit_event(
+        self,
+    ) -> None:
+        """S8 (R3): ``summarize_exception`` must not assume non-empty
+        text. A bare ``AssertionError()`` (or any ``raise X()`` with no
+        arguments) has ``str(exc) == ""``, so ``text.splitlines()`` is
+        ``[]`` — an unguarded ``[0]`` index raises ``IndexError`` out of
+        the panic catch, and the mutant that drops the guard produces
+        zero audit events instead of one FAILED rejection."""
+        event_log = MagicMock()
+        handler = MagicMock()
+        handler.handle.side_effect = AssertionError()
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        result = executor.execute(_cmd())
+
+        assert result.status == CommandStatus.FAILED
+        event_log.emit.assert_called_once()
+        event_type, _source = event_log.emit.call_args.args
+        assert event_type.value == "mutation.rejected"
+
+    def test_a_dsn_in_a_handler_raised_validation_error_is_suppressed(
+        self,
+    ) -> None:
+        """S12 + E1 (R3): the ValidationError-rejection path's audit
+        message must be built from ``summarize_exception``'s sanitized
+        summary, not ``str(exc)`` directly — a credential-bearing
+        message must reach the stored event as ``SUPPRESSED_MARKER``,
+        never verbatim."""
+        event_log = MagicMock()
+        handler = MagicMock()
+        handler.handle.side_effect = ValidationError(
+            "connect to postgresql://svc_user:s3cr3t@db.internal/trellis failed"
+        )
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        executor.execute(_cmd())
+
+        payload = event_log.emit.call_args.kwargs["payload"]
+        assert payload["message"] == SUPPRESSED_MARKER
+
+    def test_a_dsn_in_a_handler_raised_store_error_is_suppressed(self) -> None:
+        """S12 + E2 (R3): the typed ``StoreError``/``TrellisError`` path's
+        audit message must also go through the sanitize layer."""
+        event_log = MagicMock()
+        handler = MagicMock()
+        handler.handle.side_effect = StoreError(
+            "connect to postgresql://svc_user:s3cr3t@db.internal/trellis failed",
+            store="pg",
+        )
+        executor = MutationExecutor(
+            event_log=event_log,
+            handlers={Operation.ENTITY_CREATE: handler},
+        )
+
+        executor.execute(_cmd())
+
+        payload = event_log.emit.call_args.kwargs["payload"]
+        assert payload["message"] == SUPPRESSED_MARKER
 
 
 class TestIdempotencyCacheEviction:
@@ -605,20 +826,36 @@ class TestPersistedIdempotencyReadFails:
 
         result = executor.execute(command)
 
-        # The exception's type only: a driver's text stays out of the result
-        # and out of the persisted event.
-        expected = "Idempotency check failed: OperationalError"
+        # The CommandResult names the exception's type only; the real
+        # driver text ("malformed JSON" from json_extract, confirmed live)
+        # reaches only the persisted audit event, as a summary.
+        result_expected = "Idempotency check failed: OperationalError"
         assert (result.status, result.message, result.warnings) == (
             CommandStatus.FAILED,
-            expected,
+            result_expected,
             [],
         )
         assert handler.handle.call_count == 1  # the earlier command's call
         rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        audit_expected = "Idempotency check failed: malformed JSON"
         assert [
-            (e.payload["command_id"], e.payload["reason"], e.payload["message"])
+            (
+                e.payload["command_id"],
+                e.payload["reason"],
+                e.payload["message"],
+                e.payload["error_type"],
+                e.payload["error_code"],
+            )
             for e in rejected
-        ] == [(command.command_id, "idempotency_check_failed", expected)]
+        ] == [
+            (
+                command.command_id,
+                "idempotency_check_failed",
+                audit_expected,
+                "OperationalError",
+                "SQLITE_ERROR",
+            )
+        ]
 
         recover()
         retry = executor.execute(command)
@@ -630,6 +867,78 @@ class TestPersistedIdempotencyReadFails:
             earlier.command_id,
             command.command_id,
         ]
+
+    def test_the_driver_s_own_text_reaches_only_the_audit_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R1 acceptance test: fails at head. ``has_idempotency_key``
+        raising ``sqlite3.OperationalError("database is locked")`` must
+        store that text (not just ``OperationalError``) on the audit
+        event, while ``CommandResult.message`` stays type-only."""
+        log = SQLiteEventLog(tmp_path / "events.db")
+        handler = _handler(created_id="syn-node-1")
+        executor = MutationExecutor(
+            event_log=log, handlers={Operation.ENTITY_CREATE: handler}
+        )
+        command = _named("syn-entity", "syn-key-locked")
+
+        def refuse(*args: object) -> bool:
+            locked_message = "database is locked"
+            raise sqlite3.OperationalError(locked_message)
+
+        monkeypatch.setattr(log, "has_idempotency_key", refuse)
+
+        result = executor.execute(command)
+
+        assert (result.status, result.message) == (
+            CommandStatus.FAILED,
+            "Idempotency check failed: OperationalError",
+        )
+        rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert len(rejected) == 1
+        assert rejected[0].payload["message"] == (
+            "Idempotency check failed: database is locked"
+        )
+        assert rejected[0].payload["error_type"] == "OperationalError"
+
+    def test_a_chained_store_error_s_cause_reaches_the_idempotency_audit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R1 + R2: a Postgres event log wraps every driver error as a
+        ``StoreError`` (``stores/postgres/event_log.py``), so the
+        idempotency-read failure the owner asked to be summarized is, in
+        production, this chained shape rather than a raw driver
+        exception."""
+        log = SQLiteEventLog(tmp_path / "events.db")
+        handler = _handler(created_id="syn-node-1")
+        executor = MutationExecutor(
+            event_log=log, handlers={Operation.ENTITY_CREATE: handler}
+        )
+        command = _named("syn-entity", "syn-key-chained")
+
+        cause = _psycopg_shaped_cause(
+            "could not serialize access due to concurrent update",
+            sqlstate="40001",
+            constraint=None,
+        )
+        wrapped = StoreError("Idempotency check failed: OperationalError", store="pg")
+        wrapped.__cause__ = cause
+
+        def refuse(*args: object) -> bool:
+            raise wrapped
+
+        monkeypatch.setattr(log, "has_idempotency_key", refuse)
+
+        result = executor.execute(command)
+
+        assert result.status == CommandStatus.FAILED
+        rejected = log.get_events(event_type=EventType.MUTATION_REJECTED)
+        assert len(rejected) == 1
+        cause_summary = rejected[0].payload["cause"]
+        assert cause_summary["error_code"] == "40001"
+        assert cause_summary["message"] == (
+            "could not serialize access due to concurrent update"
+        )
 
     def test_an_unwritable_log_fails_closed_with_the_audit_warning(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

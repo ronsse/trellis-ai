@@ -376,6 +376,39 @@ def _driver_error_code(exc: BaseException) -> str | None:
     return None
 
 
+def _foreign_exception_summary(exc: BaseException) -> dict[str, Any]:
+    """``error_type``/``error_code``/``message``/``constraint`` for an
+    exception Trellis did not compose itself.
+
+    Shared by :func:`summarize_exception`'s own top-level branch for a
+    non-:class:`~trellis.errors.TrellisError` and by its ``cause`` branch
+    (a :class:`TrellisError` wraps one with ``raise ... from exc``): the
+    same rule applies to the type Trellis never spoke for, whether it
+    reached the caller directly or is chained one level down. ``message``
+    is the *first line* of ``str(exc)`` — a multi-line driver error's
+    ``DETAIL:``/``CONTEXT:`` continuation lines are the most likely place
+    for a quoted row value, and are dropped outright rather than merely
+    masked — then :func:`_mask_quoted` (so a same-line quoted value, such
+    as a Postgres ``Key (email)=('a@b.com')`` row, does not survive as
+    scannable text), then :func:`sanitize_error_message` as a second
+    layer over anything the mask regex does not recognize as quoted.
+    ``constraint`` is psycopg's ``diag.constraint_name``, only when the
+    driver names one; the key is omitted (not ``None``) otherwise, so a
+    reader can test for its presence rather than its value.
+    """
+    text = str(exc)
+    first_line = text.splitlines()[0] if text else ""
+    summary: dict[str, Any] = {
+        "error_type": type(exc).__name__,
+        "error_code": _driver_error_code(exc),
+        "message": sanitize_error_message(_mask_quoted(first_line)),
+    }
+    constraint = getattr(getattr(exc, "diag", None), "constraint_name", None)
+    if constraint:
+        summary["constraint"] = constraint
+    return summary
+
+
 def summarize_exception(exc: BaseException) -> dict[str, Any]:
     """Build the audit-safe structured summary of a caught exception.
 
@@ -397,29 +430,33 @@ def summarize_exception(exc: BaseException) -> dict[str, Any]:
       (Trellis composes that text itself without driver internals by
       convention; the sanitizer still runs as defense-in-depth in case a
       handler interpolated caller input into it). For any other
-      exception, the *first line* of ``str(exc)`` — a multi-line driver
-      error's ``DETAIL:``/``CONTEXT:`` continuation lines are the most
-      likely place for a quoted row value, and are dropped outright
-      rather than merely masked — then :func:`_mask_quoted` (so a
-      same-line quoted value, such as a Postgres ``Key
-      (email)=('a@b.com')`` row, does not survive as scannable text),
-      then :func:`sanitize_error_message` as a second layer over
-      anything the mask regex does not recognize as quoted.
+      exception, see :func:`_foreign_exception_summary`.
     * ``constraint`` — psycopg's ``diag.constraint_name``, only when the
       driver names one; the key is omitted (not ``None``) otherwise, so
       a reader can test for its presence rather than its value.
+    * ``cause`` — present only when ``exc.__cause__`` is set, one level
+      only (``__context__`` is never read): :func:`_foreign_exception_summary`
+      of that cause. Production wraps a driver error as ``StoreError(f"...
+      failed: {type(exc).__name__}") from exc`` precisely so the type-only
+      text stays clear of the driver's own text, leaving the SQLSTATE, the
+      driver's message and the violated constraint reachable only off
+      ``__cause__`` — this is what reads them back out, so a wrapped
+      Postgres deadlock records ``error_code: "40P01"`` and
+      ``message: "deadlock detected"`` on ``cause`` rather than only
+      ``DeadlockDetected`` on the wrapper's own ``error_type``.
     """
-    summary: dict[str, Any] = {
-        "error_type": type(exc).__name__,
-        "error_code": _driver_error_code(exc),
-    }
     if isinstance(exc, TrellisError):
-        summary["message"] = sanitize_error_message(exc.message)
+        summary: dict[str, Any] = {
+            "error_type": type(exc).__name__,
+            "error_code": _driver_error_code(exc),
+            "message": sanitize_error_message(exc.message),
+        }
+        constraint = getattr(getattr(exc, "diag", None), "constraint_name", None)
+        if constraint:
+            summary["constraint"] = constraint
     else:
-        text = str(exc)
-        first_line = text.splitlines()[0] if text else ""
-        summary["message"] = sanitize_error_message(_mask_quoted(first_line))
-    constraint = getattr(getattr(exc, "diag", None), "constraint_name", None)
-    if constraint:
-        summary["constraint"] = constraint
+        summary = _foreign_exception_summary(exc)
+    cause = exc.__cause__
+    if cause is not None:
+        summary["cause"] = _foreign_exception_summary(cause)
     return summary
