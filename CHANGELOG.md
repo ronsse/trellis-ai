@@ -2098,6 +2098,51 @@ All notable changes to Trellis will be documented in this file.
   `not_configured`. Embed-on-ingest stays fail-soft, and
   `trellis admin reindex-vectors` now refuses with the `ConfigError`
   (exit 5) instead of its generic missing-embedder message (exit 1).
+- **Three more "describe, don't quote" (#206) surfaces follow up #829/#836/#837 — MCP, admin-proposals CLI and the SDK.**
+  MCP `server.py`'s three pydantic-validation sites (`save_experience`,
+  `record_observation`, `execute_mutation`) quoted `str(exc)` — including a
+  rejected field's own value — back to the calling agent; they now render
+  through `describe_validation_error`, which never serializes the rejected
+  value at all. A mutation's `CommandResult.message` is now sanitized when,
+  and only when, its status is `FAILED` or `REJECTED` — the same gate #836
+  applied on the REST boundary (`_results.py`), not one already applied
+  elsewhere in this file. The gate covers `save_experience`, `save_knowledge`'s
+  entity create, `save_memory`, `record_observation` and `execute_mutation`
+  in `server.py`, `supersession.py`'s `_execute`, and both link writers in
+  the new `knowledge_links.py` module this PR adds — the code it replaces
+  interpolated `result.message` directly at the two link call sites, not
+  through any helper; `_describe_unsuccessful` did not exist before this PR.
+  `save_knowledge`'s evidence path wrapped a non-SUCCESS `evidence.ingest`
+  result's message in a `MutationError` and quoted it raw in both the McpError
+  message and its `data["message"]` echo; it now sanitizes that message too,
+  and its exemption leaves the MCP exception-text roster, which falls from
+  three hand-read sites to one. SUCCESS and DUPLICATE messages only restate
+  the caller's own request, so they pass through unchanged — this gate is a
+  status-gated deny-list, not a type/location renderer, so clean FAILED/REJECTED
+  text still passes through verbatim too. CLI `admin_proposals.py`'s three
+  broad `except Exception` handlers (`generate-proposals`, `list-proposals`,
+  `show-proposal`) built their JSON `message` as `f"{type(exc).__name__}: {exc}"`,
+  interpolating a raw store/driver exception; they now render through
+  `render_exception_detail`, which passes a `TrellisError`'s own text, or other
+  clean foreign text, through verbatim — only an operator sees this surface's
+  output, on their own terminal. SDK `TrellisClient.record_feedback` /
+  `AsyncTrellisClient.record_feedback` built a `TrellisProtocolError` as
+  `f"...: {exc}"` on a malformed response body; a pydantic `ValidationError`'s
+  own `str()` composes `input_value=<the body's own field value>` into every
+  line by design, so whatever a misbehaving proxy or wire-schema-skewed server
+  sent back was quoted back whole. `trellis_sdk` must not import `trellis.*`
+  (`tests/unit/sdk/test_isolation.py` AST-walks the package), so its fix is a
+  new, dependency-free `trellis_sdk._http.describe_body_parse_error` rather
+  than a call to `trellis.core.error_sanitize.describe_validation_error` — a
+  local port that keeps a JSON decode error's message/line/column and a
+  validation error's `loc`/`type`, dropping pydantic's `msg` outright, since
+  this copy carries no sanitizer to defend a future custom validator's own
+  message. These pydantic and SDK sites are the only ones that now name the
+  exception's type and field location instead of its rendered text; the
+  `CommandResult` sites above are a sanitizer, not a renderer. REST `admin.py`'s
+  `_LearningCandidatesUnavailableError` path was checked and found already
+  routing every exception through
+  `describe_os_error`/`describe_json_error`/`sanitize_error_message`.
 - **`build_strategies()`'s vector-backend init failure is now loud once per
   cause, not once per pack build.** Degrading to keyword + graph search when
   `SemanticSearch(registry.knowledge.vector_store, ...)` raised logged

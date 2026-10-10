@@ -34,7 +34,7 @@ from typing import Any
 
 import structlog
 
-from trellis.core.error_sanitize import render_exception_detail
+from trellis.core.error_sanitize import render_exception_detail, sanitize_error_message
 from trellis.core.hashing import content_hash
 from trellis.mutate import (
     Command,
@@ -339,8 +339,18 @@ def _stamp_entity(
     return _execute(build_curate_executor(registry), command)
 
 
+#: A FAILED/REJECTED ``CommandResult.message`` can carry driver or caller
+#: text (a store's rejection detail); SUCCESS and DUPLICATE only restate
+#: the caller's own request, so they pass through unsanitized, matching
+#: ``_results.py``'s ``_SANITIZED_STATUSES`` on the REST boundary (#836).
+_SANITIZED_STATUSES = frozenset({CommandStatus.FAILED, CommandStatus.REJECTED})
+
+
 def _execute(executor: MutationExecutor, command: Command) -> str | None:
     result = executor.execute(command)
     if result.status != CommandStatus.SUCCESS:
-        return f"{result.status.value}: {result.message}"
+        message = result.message
+        if result.status in _SANITIZED_STATUSES:
+            message = sanitize_error_message(message)
+        return f"{result.status.value}: {message}"
     return None

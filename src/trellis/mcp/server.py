@@ -48,7 +48,11 @@ from pydantic import ValidationError
 
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
 from trellis.core.document_write import put_document
-from trellis.core.error_sanitize import render_exception_detail
+from trellis.core.error_sanitize import (
+    describe_validation_error,
+    render_exception_detail,
+    sanitize_error_message,
+)
 from trellis.core.project import project_override, resolve_project
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.core.write_config import (
@@ -221,6 +225,22 @@ def _raise_mutation_failed(
 def _exception_detail(exc: BaseException) -> str:
     """Render a caught exception for a caller-facing message."""
     return render_exception_detail(exc)
+
+
+#: A FAILED/REJECTED ``CommandResult.message`` can carry driver or caller
+#: text (a store's rejection detail); SUCCESS and DUPLICATE only restate
+#: the caller's own request, so they pass through unsanitized, matching
+#: ``_results.py``'s ``_SANITIZED_STATUSES`` on the REST boundary (#836).
+_SANITIZED_RESULT_STATUSES = frozenset({CommandStatus.FAILED, CommandStatus.REJECTED})
+
+
+def _result_message(result: CommandResult) -> str:
+    """Sanitize ``result.message`` for a caller-facing reply, gated by
+    ``result.status`` rather than wrapped unconditionally (#836's
+    convention, applied to the MCP tool surface)."""
+    if result.status in _SANITIZED_RESULT_STATUSES:
+        return sanitize_error_message(result.message)
+    return result.message
 
 
 def _record_boundary_rejection(
@@ -1415,7 +1435,7 @@ def save_experience(trace_json: str) -> str:
         )
         hint_suffix = f" | fix: {'; '.join(hints)}" if hints else ""
         _raise_invalid_params(
-            f"invalid trace JSON: {exc}{hint_suffix}",
+            f"invalid trace JSON: {describe_validation_error(exc)}{hint_suffix}",
             data={
                 "field": "trace_json",
                 "error_class": type(exc).__name__,
@@ -1441,11 +1461,11 @@ def save_experience(trace_json: str) -> str:
     )
     if result.status != CommandStatus.SUCCESS:
         _raise_mutation_failed(
-            f"failed to store trace: {result.message}",
+            f"failed to store trace: {_result_message(result)}",
             data={
                 "status": result.status.value,
                 "command_id": result.command_id,
-                "message": result.message,
+                "message": _result_message(result),
             },
         )
     if already_ingested:
@@ -1525,11 +1545,19 @@ def _resolve_evidence_pointer(
                 source="mcp:save_knowledge",
             )
         except MutationError as exc:
+            # ensure_evidence_document wraps a non-SUCCESS evidence.ingest
+            # result's CommandResult.message whole (evidence.py); that
+            # message can carry a store's own rejection detail on FAILED
+            # or REJECTED, so it is sanitized here too, unconditionally —
+            # evidence.ingest is built with derive_idempotency=False and
+            # the content-hash dedup returns before execute, so DUPLICATE
+            # cannot reach this raise.
+            detail = sanitize_error_message(str(exc))
             _raise_mutation_failed(
-                f"failed to store evidence: {exc}",
+                f"failed to store evidence: {detail}",
                 data={
                     "command_id": exc.command_id,
-                    "message": str(exc),
+                    "message": detail,
                 },
             )
         return (
@@ -1665,11 +1693,11 @@ def _raise_create_failed(
     the old version is now withheld wherever its successor is served; the
     re-send that finishes the call does not repeat the stamps.
     """
-    message = f"failed to create entity: {create_result.message}"
+    message = f"failed to create entity: {_result_message(create_result)}"
     data: dict[str, Any] = {
         "status": create_result.status.value,
         "command_id": create_result.command_id,
-        "message": create_result.message,
+        "message": _result_message(create_result),
         "evidence_ref": evidence_ref,
     }
     if supersedes is not None:
@@ -2201,11 +2229,11 @@ def _store_new_memory(
         )
     if result.status is not CommandStatus.SUCCESS or result.created_id is None:
         _raise_mutation_failed(
-            f"failed to store memory: {result.message}",
+            f"failed to store memory: {_result_message(result)}",
             data={
                 "status": result.status.value,
                 "command_id": result.command_id,
-                "message": result.message,
+                "message": _result_message(result),
             },
         )
     stored_id = result.created_id
@@ -3614,7 +3642,12 @@ def record_observation(
     # client (see docstring). Returns structured {"status": "error"}
     # JSON so the caller can branch on the response.
     except Exception as exc:
-        return json.dumps({"status": "error", "message": f"Invalid observation: {exc}"})
+        return json.dumps(
+            {
+                "status": "error",
+                "message": f"Invalid observation: {describe_validation_error(exc)}",
+            }
+        )
 
     try:
         command = Command(
@@ -3638,7 +3671,7 @@ def record_observation(
         return json.dumps(
             {
                 "status": result.status.value,
-                "message": result.message,
+                "message": _result_message(result),
             }
         )
     return json.dumps(
@@ -3799,7 +3832,7 @@ def execute_mutation(
             )
     except Exception as exc:
         _raise_invalid_params(
-            f"invalid command: {exc}",
+            f"invalid command: {describe_validation_error(exc)}",
             data={"operation": str(op), "error_class": type(exc).__name__},
         )
 
@@ -3826,7 +3859,7 @@ def execute_mutation(
         "status": result.status.value,
         "command_id": result.command_id,
         "operation": str(result.operation),
-        "message": result.message,
+        "message": _result_message(result),
     }
     if result.created_id is not None:
         response["created_id"] = result.created_id
