@@ -2550,7 +2550,7 @@ The check is advisory telemetry and fails soft: if it raises, the pack is served
 
 ### Citing Pack Elements in Feedback
 
-The three sectioned-context tools render each response with a `pack_id` header and full item/advisory IDs in backticks so agents can cite specific elements when calling `record_feedback`:
+Every pack-assembling tool — the three sectioned-context tools and the flat `get_context` / `search` paths alike (#392, decision-ledger D-4) — renders each response with a `pack_id` header and full item/advisory IDs in backticks so agents can cite specific elements when calling `record_feedback`:
 
 ```markdown
 # Context for: deploy checklist

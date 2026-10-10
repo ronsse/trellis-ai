@@ -334,6 +334,19 @@ is the status quo and costs only opportunity.
 Also unresolved and *not* panel-eligible: **whether to clear the 51 legacy rows.** That is a
 live-store mutation and stays with the operator regardless of which option is chosen.
 
+**Resolved 2026-10-10 — owner approved B (render), no legacy-row filter.** The flat path now
+calls `format_advisories_as_markdown` the same way `_sectioned_context` does (#392, task
+e158). The operator decision stops at "render" — the code makes no attempt to distinguish
+pre-/post-#394 rows; whatever `_select_advisories` currently selects is what renders, on
+both pack shapes, as it already did on sectioned. Clearing the legacy rows (noted above)
+is still a live-store mutation and still the operator's, untouched by this change.
+Consequence for prior fitness reads: any `advisory-effectiveness` number computed before
+this merge that is attributable to a flat `pack_id` (`entity_type="pack"`, e.g. from
+`get_context`/`search`) counted an advisory as "presented" from `PACK_ASSEMBLED.advisory_ids`
+alone — that pack's agent never saw the text. Those historical rows are exposure counts, not
+presentation counts; only `PACK_ASSEMBLED` events emitted after this merge make the field
+true for flat packs.
+
 ---
 
 ## Taken

@@ -376,6 +376,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The flat `get_context` / `search` paths render advisories.**
+  `_flat_context` built `pack.advisories` via `PackBuilder._select_advisories`
+  on every call but never rendered them — only `_sectioned_context` called
+  `format_advisories_as_markdown`. Flat is the path agents actually use (37
+  flat packs served in production vs. 0 sectioned, per the decision-ledger
+  measurement), so advisories were mined nightly and attached to packs an
+  agent could never see, while the advisory-fitness loop
+  (`analyze_advisory_effectiveness`) still read `PACK_ASSEMBLED.advisory_ids`
+  off those same flat packs as "presented". `_flat_context` now calls
+  `format_advisories_as_markdown` in the same position `_sectioned_context`
+  does — after the items, before the capture-health banner — on both the
+  non-empty and empty-pack branches (an empty-item pack can still carry
+  advisories; only the pack-effect holdout zeroes both together), and in
+  both full and `index=True` rendering. An empty advisory list renders
+  nothing, so output is unchanged for every pack that has none. Decided and
+  approved as decision-ledger D-4, 2026-10-10.
+  ([#392](https://github.com/ronsse/trellis-ai/issues/392))
+
 - **Noise demotion counts what was written, not what the evidence gate
   admitted.** `apply_noise_tags` writes `signal_quality="noise"` only to
   ids that resolve in the document store; the demotion gate admits

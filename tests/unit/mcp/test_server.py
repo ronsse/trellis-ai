@@ -59,8 +59,10 @@ from trellis.mcp.server import (
 from trellis.mcp.server import (
     search as _search,
 )
+from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.well_known import APPLIES_TO, CONCEPT, SOFTWARE_APPLICATION
+from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -1818,6 +1820,126 @@ class TestSearch:
         )
         result = search("kubernetes")
         assert "kubernetes" in result.lower()
+
+
+def _seed_advisories(registry: StoreRegistry) -> AdvisoryStore:
+    """Two advisories with different categories, confidences, evidence and
+    directions of effect — never a population-of-one uniform fixture."""
+    store = AdvisoryStore(registry.stores_dir / "advisories.json")
+    store.put(
+        Advisory(
+            advisory_id="adv-flat-entity",
+            category=AdvisoryCategory.ENTITY,
+            confidence=0.88,
+            message="Packs citing the deploy runbook succeeded 75% vs 20% without.",
+            evidence=AdvisoryEvidence(
+                sample_size=12,
+                success_rate_with=0.75,
+                success_rate_without=0.2,
+                effect_size=0.55,
+            ),
+            scope="global",
+        )
+    )
+    store.put(
+        Advisory(
+            advisory_id="adv-flat-anti-pattern",
+            category=AdvisoryCategory.ANTI_PATTERN,
+            confidence=0.64,
+            message="Skipping the smoke test before promote correlated with rollback.",
+            evidence=AdvisoryEvidence(
+                sample_size=7,
+                success_rate_with=0.3,
+                success_rate_without=0.86,
+                effect_size=-0.56,
+            ),
+            scope="global",
+        )
+    )
+    return store
+
+
+class TestFlatContextRendersAdvisories:
+    """``_flat_context`` renders ``pack.advisories`` the way ``_sectioned_context``
+    always has (#392, decision-ledger D-4).
+
+    Before this fix, ``PackBuilder`` attached advisories to every flat pack
+    (``get_context`` / ``search``) exactly as it does to sectioned ones, but
+    only ``_sectioned_context`` called ``format_advisories_as_markdown`` on
+    them — so the nightly advisory-fitness loop, which reads
+    ``PACK_ASSEMBLED.advisory_ids`` as "presented", scored exposures on the
+    path agents actually call that no agent ever saw rendered.
+    """
+
+    def test_renders_advisories_alongside_items(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put(
+            "doc1", "How to deploy the platform safely", metadata={"domain": "platform"}
+        )
+        _seed_advisories(temp_registry)
+
+        result = get_context("deploy platform")
+
+        assert "## Advisories" in result
+        assert "`adv-flat-entity`" in result
+        assert "`adv-flat-anti-pattern`" in result
+        assert "**[entity]**" in result
+        assert "**[anti_pattern]**" in result
+
+    def test_omits_the_section_when_there_are_no_advisories(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Output is byte-identical to before this fix when the pack has no
+        advisories — the common case today, since nothing seeds the store."""
+        temp_registry.knowledge.document_store.put(
+            "doc1", "How to deploy the platform safely"
+        )
+
+        result = get_context("deploy platform")
+
+        assert "## Advisories" not in result
+
+    def test_empty_item_pack_still_renders_advisories(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """An empty-*item* pack is not an empty *pack*: advisory selection
+        (``PackBuilder._select_advisories``) does not depend on whether any
+        item was selected, so the "No context found" line and the advisory
+        section are both true at once — matching how ``_sectioned_context``
+        never special-cases empty sections before appending advisories."""
+        _seed_advisories(temp_registry)
+
+        result = get_context("something nothing in the corpus matches")
+
+        assert "No context found" in result
+        assert "## Advisories" in result
+        assert "`adv-flat-entity`" in result
+
+    def test_index_mode_also_renders_advisories(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        temp_registry.knowledge.document_store.put(
+            "doc1", "How to deploy the platform safely", metadata={"domain": "platform"}
+        )
+        _seed_advisories(temp_registry)
+
+        result = get_context("deploy platform", index=True)
+
+        assert "## Advisories" in result
+        assert "`adv-flat-entity`" in result
+
+    def test_search_tool_shares_the_fix(self, temp_registry: StoreRegistry) -> None:
+        """``search`` renders through the same ``_flat_context`` helper as
+        ``get_context``, so the fix does not need a second call site."""
+        temp_registry.knowledge.document_store.put(
+            "doc1", "kubernetes deployment guide"
+        )
+        _seed_advisories(temp_registry)
+
+        result = search("kubernetes")
+
+        assert "## Advisories" in result
 
 
 # ---------------------------------------------------------------------------
