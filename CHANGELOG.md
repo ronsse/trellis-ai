@@ -376,6 +376,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`Measurement.metric_value` refuses `Infinity` and `-Infinity`, not only
+  `NaN`.** The field accepted any float that passed `math.isnan`, so a
+  caller could record `Infinity`. `metric_value` now refuses `NaN`,
+  `Infinity` and `-Infinity` alike with "metric_value must be a finite
+  number" (422 at the REST boundary, `REJECTED` through
+  `MutationExecutor`, before any node is written), because a non-finite
+  value poisons downstream arithmetic — `inf - inf` or `0 * inf` is NaN,
+  and `max()` over a series containing one always picks it — and cannot
+  be stored by the Postgres event log, whose JSONB has no token for
+  `Infinity`; the field docstring no longer calls Infinity an open
+  question.
+  ([#827](https://github.com/ronsse/trellis-ai/pull/827))
+
 - **A pack build's latency is now recorded, not hard-coded to zero.**
   `PackBuilder.build()` and `build_sectioned()` both constructed their
   `RetrievalReport` with `duration_ms=0` — one path as a literal, the other
@@ -394,7 +407,6 @@ All notable changes to Trellis will be documented in this file.
   `test_pack_holdout_seam.py`'s hand-read base snapshot, which is updated
   to expect it alongside the two holdout keys.
   ([#832](https://github.com/ronsse/trellis-ai/pull/832))
-
 - **`trellis admin migrate-provenance` exits `5` when any edge fails to
   migrate, and sanitizes the errors it reports on stdout.** A per-edge
   upsert failure was recorded in `report.errors`, but the command still
