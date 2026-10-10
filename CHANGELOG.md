@@ -410,7 +410,7 @@ All notable changes to Trellis will be documented in this file.
   field instead of only existing in the structlog line. #831's deeper
   complaint — that the bare-ValueError case names neither the offending
   field nor the row — is not addressed by this change.
-  ([#PENDING](https://github.com/ronsse/trellis-ai/pull/PENDING))
+  ([#837](https://github.com/ronsse/trellis-ai/pull/837))
 - **The SQLite event log and both the SQLite and Postgres graph stores
   refuse a NaN/Infinity float at write time, instead of silently storing
   JSON text a stricter reader can't parse.** Python's `json.dumps` writes
