@@ -83,7 +83,7 @@ def register(app: Typer) -> None:
                 event_limit=event_limit,
             )
         except ValueError as exc:
-            # A legacy event row written before #835 closed the EventLog's
+            # A legacy event row written before #831 closed the EventLog's
             # own write-time guard can hold a non-finite relevance score.
             # Replaying it writes through the real OutcomeStore, whose
             # ``append_many`` refuses with a bare ``ValueError`` — not a

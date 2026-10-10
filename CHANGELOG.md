@@ -2032,21 +2032,24 @@ All notable changes to Trellis will be documented in this file.
   file some already-shipped build wrote with the non-standard token still
   reads back clean (the read path, `json.loads`, stays lenient on
   purpose). In practice only `AdvisoryStore` can drive this refusal
-  through a real write today: `Policy`'s only unconstrained field is
-  `metadata: dict[str, Any]`, and Pydantic's own `model_dump(mode="json")`
-  nulls a non-finite float nested under an `Any`-typed value before
+  through a real write today: `Policy`'s float-capable fields, `metadata`
+  and `PolicyRule.params`, are both `dict[str, Any]`, and Pydantic's own
+  `model_dump(mode="json")` nulls a non-finite float nested under an
+  `Any`-typed value before
   `_save` ever runs, so a live NaN cannot reach the guard through
   `Policy`'s public schema — the guard is still wired on the shared base
   regardless, and a new test pins that directly. Separately,
   `trellis admin backfill-outcomes --apply` replaying a legacy
   feedback event with a non-finite relevance score (predating the
-  EventLog's own #835 write guard, so a raw row written before that
+  EventLog's own #831 write guard, so a raw row written before that
   fix can still hold one) wrote through `OutcomeStore.append_many`,
   which raises exactly that bare `ValueError` — not a `TrellisError`,
   so the CLI's global boundary did not catch it, and it surfaced as an
   untyped traceback. The command now catches it at its own boundary and
-  reports a typed, sanitized failure (`EXIT_INTERNAL`, consistent across
-  `--format text`/`json`) instead.
+  reports a described failure — a sanitized JSON envelope or an escaped
+  one-line message — exiting `EXIT_INTERNAL` in both `--format text` and
+  `json`. The replay appends in 500-row transactions, so chunks before
+  the refused one may already be committed.
 
 ## [0.9.0] - 2026-05-13
 

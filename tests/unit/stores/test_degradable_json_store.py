@@ -158,10 +158,11 @@ SHAPE_PARAMS = [
 #: ``(case, non-finite value)``, filtered to ``advisory`` only.
 #: ``AdvisoryEvidence.effect_size`` is plainly ``float``, so a non-finite
 #: value survives ``model_dump(mode="json")`` as a live float and reaches
-#: ``_save``'s ``json.dumps``. ``policy``'s only unconstrained field is
-#: ``metadata: dict[str, Any]``, and Pydantic's own JSON-mode dump nulls a
-#: non-finite float nested under an ``Any``-typed value *before* ``_save``
-#: ever calls ``json.dumps`` — measured directly, not assumed:
+#: ``_save``'s ``json.dumps``. ``policy``'s float-capable fields,
+#: ``metadata`` and ``PolicyRule.params``, are both ``dict[str, Any]``,
+#: and Pydantic's own JSON-mode dump nulls a non-finite float nested
+#: under an ``Any``-typed value *before* ``_save`` ever calls
+#: ``json.dumps`` — measured directly, not assumed:
 #: ``Policy(...).model_copy(update={"metadata": {"score": float("nan")}})
 #: .model_dump(mode="json")["metadata"]`` is ``{"score": None}``. So no
 #: live NaN can reach the write guard through ``Policy``'s public schema
@@ -351,7 +352,7 @@ class TestStaleWritesAreRefusedOnEveryStore:
 
 
 class TestNonFiniteFloatsAreRefusedOnEveryStore:
-    """A NaN/Infinity float must refuse at write, never reach disk (#839).
+    """A NaN/Infinity float must refuse at write, never reach disk (#840).
 
     ``_save`` dumped with a lenient ``json.dumps`` (no ``allow_nan=False``),
     the same gap #835 closed on every other store's write path, left open
@@ -415,7 +416,7 @@ class TestNonFiniteFloatsAreRefusedOnEveryStore:
     ) -> None:
         """The guard is wired into ``_save``'s dump call, on both stores.
 
-        ``policy``'s only unconstrained field (``metadata: dict[str, Any]``)
+        ``policy``'s ``Any``-typed fields (``metadata``, ``PolicyRule.params``)
         cannot actually carry a live non-finite float as far as ``_save``:
         Pydantic nulls it first (see ``NON_FINITE_PARAMS``'s comment), which
         is why the behavioural write-refusal test above covers ``advisory``

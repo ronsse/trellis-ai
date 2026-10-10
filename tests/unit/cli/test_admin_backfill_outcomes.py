@@ -85,9 +85,9 @@ def _outcome_count(stores_dir: Path) -> int:
 def _seed_legacy_nan_row(stores_dir: Path) -> None:
     """Write a FEEDBACK_RECORDED row carrying a non-finite relevance score.
 
-    ``SQLiteEventLog.append`` dumps with ``allow_nan=False`` (#835), so no
+    ``SQLiteEventLog.append`` dumps with ``allow_nan=False`` (#831), so no
     call through the normal API can seed this. A raw INSERT simulates a row
-    a pre-#835 build already wrote: ``json.dumps`` here defaults to
+    a pre-#831 build already wrote: ``json.dumps`` here defaults to
     ``allow_nan=True``, landing the non-standard ``NaN`` token on disk, and
     the event log's own read path (plain, lenient ``json.loads``) parses it
     straight back into a live Python float for the backfill to replay.
@@ -226,8 +226,8 @@ class TestBackfillOutcomesCommand:
         assert "--event-limit" in as_text.output
 
 
-class TestALegacyNonFiniteRowIsATypedFailure:
-    """Replaying a pre-#835 NaN row must not surface a bare traceback (#839).
+class TestALegacyNonFiniteRowIsADescribedFailure:
+    """Replaying a pre-#831 NaN row must not surface a bare traceback (#840).
 
     ``backfill_outcomes``'s ``--apply`` path writes through the real
     ``OutcomeStore``, whose ``append_many`` dumps with ``allow_nan=False``
@@ -236,10 +236,10 @@ class TestALegacyNonFiniteRowIsATypedFailure:
     Before this fix that ``ValueError`` was uncaught at the CLI boundary
     (the global catch in ``trellis_cli.main`` only catches ``TrellisError``
     and ``PackAssemblyError``), so it reached the operator as a bare
-    traceback instead of a described, typed failure.
+    traceback instead of a described failure.
     """
 
-    def test_apply_reports_a_typed_failure_instead_of_a_traceback(
+    def test_apply_reports_a_described_failure_instead_of_a_traceback(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         stores_dir = _seed(tmp_path, monkeypatch, events=0)
@@ -269,6 +269,7 @@ class TestALegacyNonFiniteRowIsATypedFailure:
 
         assert as_json.exit_code == EXIT_INTERNAL, as_json.output
         assert as_text.exit_code == as_json.exit_code, as_text.output
-        # Not a traceback: no frame markers, and the message surfaces.
-        assert "Traceback" not in as_text.output
+        # Exited through typer.Exit, not an escaped exception, and the
+        # message surfaces.
+        assert isinstance(as_text.exception, SystemExit), as_text.exception
         assert "not JSON compliant" in plain(as_text.output)
