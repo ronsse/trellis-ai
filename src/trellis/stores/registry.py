@@ -12,7 +12,12 @@ from urllib.parse import urlparse
 
 import structlog
 
-from trellis.core.error_sanitize import describe_yaml_error
+from trellis.core.error_sanitize import (
+    describe_import_error,
+    describe_json_error,
+    describe_os_error,
+    describe_yaml_error,
+)
 from trellis.core.path_presence import path_is_present
 from trellis.errors import BackendNotInstalledError, ConfigError, ValidationError
 from trellis.stores.base import (
@@ -546,9 +551,12 @@ def _import_callable(
     try:
         module = importlib.import_module(module_path)
     except ImportError as exc:
+        # describe_import_error, not str(exc): a transitive import can
+        # fail on a module other than module_path, and that module's own
+        # error text can carry whatever a third-party package put in it.
         msg = (
             f"Could not import embedding callable {dotted_path!r}:"
-            f" module {module_path!r} is not importable ({exc})."
+            f" {describe_import_error(exc)}."
         )
         raise ConfigError(msg, setting=setting) from exc
     fn = getattr(module, attr_name, None)
@@ -910,7 +918,8 @@ class StoreRegistry:
                 raw_text = config_path.read_text()
             except OSError as exc:
                 msg = (
-                    f"Could not read Trellis config at {config_path}: {exc}."
+                    f"Could not read Trellis config at {config_path}: "
+                    f"{describe_os_error(exc)}."
                     " Check file permissions or pass an explicit config_dir."
                 )
                 raise ConfigError(msg, setting="config_dir") from exc
@@ -1358,7 +1367,8 @@ class StoreRegistry:
             raw = path.read_text()
         except OSError as exc:
             msg = (
-                f"Could not read fingerprint meta at {path}: {exc}."
+                f"Could not read fingerprint meta at {path}: "
+                f"{describe_os_error(exc)}."
                 " Fix the underlying I/O error or delete the file to"
                 " reset the fingerprint store (first-boot semantics)."
             )
@@ -1366,8 +1376,17 @@ class StoreRegistry:
         try:
             data = json.loads(raw)
         except ValueError as exc:
+            # Broad ValueError, not just JSONDecodeError (what json.loads
+            # actually raises), per the catch this module already uses;
+            # describe_json_error needs that narrower shape, so anything
+            # else falls back to its type name.
+            detail = (
+                describe_json_error(exc)
+                if isinstance(exc, json.JSONDecodeError)
+                else type(exc).__name__
+            )
             msg = (
-                f"Could not parse fingerprint meta at {path}: {exc}."
+                f"Could not parse fingerprint meta at {path}: {detail}."
                 " The file is corrupt. Delete it to reset the fingerprint"
                 " store (first-boot semantics) and re-run validate."
             )

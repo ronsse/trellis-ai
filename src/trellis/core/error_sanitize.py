@@ -23,6 +23,7 @@ belongs in the machine payload — that is what the log stream is for.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -48,10 +49,12 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\w+://[^\s/@?#]+@"),
     # Secret-shaped assignment: password=..., token: ...,
     # Authorization: Bearer ... . Word-bounded so prose like
-    # "password must be set" stays clean.
+    # "password must be set" stays clean. The optional quote after the
+    # key name matches a JSON or repr'd mapping's shape, "api_key": "...",
+    # where a closing quote sits between the key and the separator.
     re.compile(
         r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization|bearer)\b"
-        r"\s*[=:]\s*\S+"
+        r"['\"]?\s*[=:]\s*\S+"
     ),
     # Raw SQL statement shape. Curator/scout errors quoting warehouse
     # SQL must not put statement text into artifacts.
@@ -163,6 +166,115 @@ def _mask_quoted(text: str) -> str:
         return f"{quoted[0]}...{quoted[0]}"
 
     return _QUOTED.sub(_replace, text)
+
+
+def describe_os_error(exc: OSError) -> str:
+    """Describe an ``OSError`` by ``strerror``, ``errno`` and ``filename``,
+    never by ``str(exc)``.
+
+    ``str(exc)`` already renders roughly this shape ("[Errno 2] No such
+    file or directory: 'path'"), but as one opaque sentence whose
+    punctuation varies by platform and by whether ``filename`` is set at
+    all; describing the fields separately gives call sites one stable
+    shape to build a sentence around. ``filename`` is the path Trellis
+    itself resolved and asked the OS to open — safe to surface per the
+    storage and display rule's "paths Trellis itself resolved" row —
+    never a value read from inside that file.
+    """
+    parts: list[str] = []
+    if exc.strerror:
+        parts.append(exc.strerror)
+    if exc.errno is not None:
+        parts.append(f"errno {exc.errno}")
+    if exc.filename is not None:
+        parts.append(f"path {exc.filename!s}")
+    return ", ".join(parts) if parts else type(exc).__name__
+
+
+def describe_json_error(exc: json.JSONDecodeError) -> str:
+    """Describe a ``json.JSONDecodeError`` by ``msg``, ``lineno`` and
+    ``colno``, never by ``str(exc)``.
+
+    ``str(exc)`` is ``f"{msg}: line {lineno} column {colno} (char
+    {pos})"`` — already just these three fields plus ``pos``, which this
+    drops as redundant with line/column. Never quotes the document: a
+    JSON parse failure here is reading a Trellis-owned file (a policy or
+    fingerprint file), and the document can hold row data or a secret
+    the file stored in the clear.
+    """
+    return f"{exc.msg} (line {exc.lineno}, column {exc.colno})"
+
+
+def describe_validation_error(exc: BaseException) -> str:
+    """Describe a pydantic ``ValidationError`` by each failed field's
+    location, error type and pydantic's own ``msg``, never by the
+    exception's rendered ``str()``.
+
+    pydantic's own ``str(exc)`` composes ``input_value=<the caller's
+    value>`` into every line, by design (it is meant for a human
+    debugging their own call) — exactly the content the storage and
+    display rule forbids in an audit event or a caller-facing reply.
+    ``errors(include_input=False)`` gives the same failures without that
+    clause; this keeps ``loc`` (dotted), ``type`` and ``msg``. ``msg`` is
+    a separate field from ``input_value``: for every error type pydantic
+    raises itself (a missing field, a type mismatch, an enum/literal
+    miss), ``msg`` names only the *expectation*, never the caller's
+    actual value, so a field's own schema-authored sentence — "metric_value
+    must be a finite number" — survives without reintroducing what the
+    caller sent. For ``value_error``/``assertion_error``, ``msg`` is a
+    custom ``@field_validator``'s own exception text, which *could* embed
+    a value if that validator chooses to interpolate one in (none of this
+    module's current callers' validators do); since this function cannot
+    inspect a validator's source to know whether it did, ``msg`` is passed
+    through :func:`sanitize_error_message` as a defense-in-depth measure
+    before it is used.
+
+    Falls back to the exception's type name when *exc* has no
+    ``errors(include_input=...)`` method — not every exception a broad
+    ``except Exception`` catches around a ``model_validate`` call is a
+    pydantic ``ValidationError``.
+    """
+    errors_method = getattr(exc, "errors", None)
+    if not callable(errors_method):
+        return type(exc).__name__
+    try:
+        raw_errors = errors_method(include_input=False)
+    except TypeError:
+        return type(exc).__name__
+    pairs = []
+    for err in raw_errors:
+        loc = ".".join(str(part) for part in err.get("loc", ())) or "<root>"
+        err_type = err.get("type", "?")
+        msg = err.get("msg")
+        if msg:
+            pairs.append(f"{loc}: {err_type}: {sanitize_error_message(str(msg))}")
+        else:
+            pairs.append(f"{loc}: {err_type}")
+    return "; ".join(pairs) if pairs else type(exc).__name__
+
+
+def describe_import_error(exc: ImportError) -> str:
+    """Describe an ``ImportError`` by its own ``name`` field, never by
+    ``str(exc)``.
+
+    A dotted import path can fail on a *transitive* import inside the
+    target module rather than on the target itself; ``exc.name`` names
+    whichever module actually raised, which ``str(exc)`` folds into one
+    sentence that can also carry an unrelated third-party package's own
+    error text. The two ``ImportError`` shapes say different things and
+    must not share a sentence: ``ModuleNotFoundError`` (a subclass of
+    ``ImportError``) means the named module itself does not exist, while
+    a plain ``ImportError`` with a ``name`` means that module *was*
+    found and imported, but ``from <name> import <missing attr>`` failed
+    inside it — the earlier "module is not importable" wording claimed
+    the former for both, sending an operator to reinstall a package that
+    already works.
+    """
+    if not exc.name:
+        return type(exc).__name__
+    if isinstance(exc, ModuleNotFoundError):
+        return f"module {exc.name!r} was not found"
+    return f"an import from module {exc.name!r} failed"
 
 
 def describe_yaml_error(exc: BaseException) -> str:

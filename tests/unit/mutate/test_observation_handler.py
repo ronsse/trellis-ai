@@ -26,6 +26,15 @@ from trellis.schemas.well_known import MEASUREMENT
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
+#: A value that survives into pydantic's own ``str(exc)`` as
+#: ``input_value=<this>`` — planted where a numeric field belongs so a
+#: raw-interpolation defect would surface it in the immutable audit
+#: ``mutation.rejected`` payload, the path this file's test exercises
+#: (``build_curate_executor`` / ``MeasurementRecordHandler``, not the REST
+#: route -- a REST caller sending this body hits ``observations.py``'s own
+#: pre-validation 422 first, which is a separate, disclosed gap).
+_SENTINEL = "XQ1BR6asQyYAJ6tcK6JnaWKZ"
+
 
 @pytest.fixture
 def registry(tmp_path: Path) -> StoreRegistry:
@@ -209,6 +218,56 @@ class TestMeasurementRecordHandler:
 
         assert result.status == CommandStatus.REJECTED
         assert registry.knowledge.graph_store.query(node_type=MEASUREMENT) == []
+
+    def test_bad_field_value_rejection_omits_sentinel_from_message_and_audit(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A synthetic sentinel in a bad field never reaches the caller.
+
+        Pre-fix, ``handlers.py`` built the ``ValidationError`` message as
+        ``f"...: {exc}"``, and pydantic's own ``str(exc)`` embeds
+        ``input_value=<the bad value>`` — this sentinel would appear
+        verbatim in the immutable ``mutation.rejected`` audit event, which
+        is permanent once written. Routing through
+        :func:`build_curate_executor` (not calling the handler directly)
+        reaches the exact code path that writes that audit event.
+
+        This exercises the governed-pipeline path directly, not the REST
+        route: a caller who actually ``POST``s this body to
+        ``/measurements`` hits ``observations.py``'s own pre-validation
+        ``Measurement.model_validate`` call first, whose 422 still quotes
+        pydantic's raw text (a separate, disclosed gap this fix does not
+        close) — this test's ``result.message`` assertion below is about
+        the executor's rejection, not that REST response.
+        """
+        body = {
+            "subject_entity_id": "ds-1",
+            "subject_entity_type": "Dataset",
+            "metric_name": "null_rate",
+            "metric_value": _SENTINEL,  # str where a float is required
+            "observer_agent_id": "agent-1",
+        }
+        executor = build_curate_executor(registry)
+        cmd = Command(
+            operation=Operation.MEASUREMENT_RECORD, args={"measurement": body}
+        )
+
+        result = executor.execute(cmd)
+
+        assert result.status == CommandStatus.REJECTED
+        assert _SENTINEL not in result.message
+        # Not just "the sentinel is gone" -- the field it was planted in
+        # must still be *named*, so a describe-helper collapsed to
+        # ``type(exc).__name__`` (which drops every field name) fails
+        # this, not just the sentinel check above.
+        assert "metric_value" in result.message
+
+        rejected_events = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED
+        )
+        assert rejected_events, "expected a mutation.rejected audit event"
+        for event in rejected_events:
+            assert _SENTINEL not in str(event.payload)
 
     def test_writes_has_measurement_edge_not_has_observation(
         self, registry: StoreRegistry
