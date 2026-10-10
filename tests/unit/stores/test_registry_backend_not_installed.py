@@ -544,6 +544,10 @@ def test_embedding_fn_config_provider_non_string_raises_configerror_naming_the_y
     assert exc_info.value.setting == "embeddings.provider"
     assert f"of type {type(bad_value).__name__}" in exc_info.value.message
     assert repr(bad_value) not in exc_info.value.message
+    # The delete-the-key hint is for booleans only (YAML off/on/yes/no).
+    assert ("delete the key or set it to null" in exc_info.value.message) == (
+        isinstance(bad_value, bool)
+    )
 
 
 @pytest.mark.parametrize("bad_value", [pytest.param(True, id="bool_true")])
@@ -555,7 +559,7 @@ def test_embedding_fn_config_provider_bool_true_raises_with_delete_hint(
     set it to ``null``) rather than left to guess that a boolean is even
     the problem.
 
-    ``True`` is tested on its own because it is the one non-string value
+    ``True`` is tested on its own because it is the one boolean value
     that was already truthy under the *old* ``if provider:`` guard (so it
     already reached ``_import_callable`` and already raised, just without
     this hint) — pinning it keeps the hint addition from being credited to
@@ -570,6 +574,9 @@ def test_embedding_fn_config_provider_bool_true_raises_with_delete_hint(
     assert exc_info.value.setting == "embeddings.provider"
     assert "of type bool" in exc_info.value.message
     assert "delete the key or set it to null" in exc_info.value.message
+    # A second read refuses again rather than decaying to "not configured".
+    with pytest.raises(ConfigError):
+        _ = registry.embedding_fn
 
 
 @pytest.mark.parametrize(
