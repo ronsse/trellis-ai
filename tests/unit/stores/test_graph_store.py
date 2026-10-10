@@ -172,11 +172,14 @@ def test_delete_nonexistent(graph_store):
 # ``json.dumps(..., allow_nan=False)`` at every write site raises
 # ``ValueError`` before the INSERT runs, instead of silently storing JSON
 # text containing the non-standard ``NaN``/``Infinity``/``-Infinity``
-# tokens (SQLite's own JSON functions parse them, so the row would read
-# back fine here and break only a stricter downstream consumer, such as
-# the REST API or a non-Python backend). Covers all five write methods
-# that serialize a caller-supplied dict: upsert_node, upsert_nodes_bulk,
-# update_node_if_current, upsert_edge, upsert_edges_bulk.
+# tokens (Python's own ``json.loads`` parses them back on read, so the
+# row would round-trip fine here via this store's own read path, and
+# break only a stricter downstream consumer, such as the REST API, a
+# non-Python backend, or this same store's ``json_extract``-based
+# filtering, which reads a stored ``NaN`` back as ``NULL``). Covers all
+# five write methods that serialize a caller-supplied dict: upsert_node,
+# upsert_nodes_bulk, update_node_if_current, upsert_edge,
+# upsert_edges_bulk.
 # ---------------------------------------------------------------------------
 
 
@@ -206,6 +209,21 @@ def test_upsert_nodes_bulk_refuses_a_non_finite_property(graph_store):
                     "node_id": "n1",
                     "node_type": "service",
                     "properties": {"v": float("nan")},
+                }
+            ]
+        )
+    assert graph_store.count_nodes() == 0
+
+
+def test_upsert_nodes_bulk_refuses_a_non_finite_generation_spec_value(graph_store):
+    with pytest.raises(ValueError):
+        graph_store.upsert_nodes_bulk(
+            [
+                {
+                    "node_id": "n1",
+                    "node_type": "domain",
+                    "node_role": "curated",
+                    "generation_spec": {"confidence": float("nan")},
                 }
             ]
         )
