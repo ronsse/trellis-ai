@@ -1699,17 +1699,22 @@ class StoreRegistry:
         raises rather than falling back to it.
 
         Returns ``None`` only when no embedding is configured at all
-        (no env var, no ``embeddings.provider``). Raises
-        :class:`BackendNotInstalledError` when ``provider: openai`` is
+        (no env var, ``embeddings.provider`` absent, ``null``, or ``""``).
+        Raises :class:`BackendNotInstalledError` when ``provider: openai`` is
         configured but the ``llm-openai`` extra is missing, and
         :class:`ConfigError` when ``provider: openai`` finds no API key, or
         a dotted path is malformed, raises :class:`ImportError` on import,
         or names a missing or non-callable attribute — naming
         ``TRELLIS_EMBEDDING_FN`` when the path came from the env var,
-        ``embeddings.provider`` when it came from config. Any other
-        exception the target module raises while it imports propagates
-        unchanged. A raise caches nothing, so the next access resolves
-        again; a callable or ``None`` is cached.
+        ``embeddings.provider`` when it came from config. Also raises
+        :class:`ConfigError` (setting ``embeddings.provider``) when
+        ``embeddings.provider`` is set to anything other than a string —
+        a YAML boolean (``provider: off`` parses to ``False``), a number, a
+        list, or a mapping — rather than silently treating it as "not
+        configured"; the message names only the value's type, never the
+        value itself. Any other exception the target module raises while
+        it imports propagates unchanged. A raise caches nothing, so the
+        next access resolves again; a callable or ``None`` is cached.
         """
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]
@@ -1727,7 +1732,36 @@ class StoreRegistry:
         else:
             # 2. Check config
             provider = self._embedding_config.get("provider")
-            if provider:
+            # None and "" mean "not configured" (the pre-existing posture).
+            # Any other non-string (bool, int, list, mapping, ...) is an
+            # operator error rather than a second way to spell "off": YAML
+            # ``provider: off`` parses to the bool ``False``, which the old
+            # ``if provider:`` truthy check let through to this branch's
+            # ``else`` and silently treated as "not configured" — turning
+            # semantic search off with no error. Checked before the
+            # ``== "openai"`` dispatch so every non-string shape is caught
+            # here, not just the falsy ones; a truthy non-string (an int, a
+            # list, a mapping) would otherwise reach ``_import_callable``
+            # and raise there instead — still correct, but inconsistent
+            # with the falsy case, which this makes explicit for both.
+            if provider is not None and provider != "":
+                if not isinstance(provider, str):
+                    type_name = type(provider).__name__
+                    hint = (
+                        " Booleans are not accepted for embeddings.provider;"
+                        " delete the key or set it to null."
+                        if isinstance(provider, bool)
+                        else ""
+                    )
+                    # Named only by type, never echoed: a misplaced mapping
+                    # can hold a credential, and this message reaches the
+                    # REST body and the error log (same posture as
+                    # ``_import_callable``'s non-string check below).
+                    msg = (
+                        "embeddings.provider must be a string, got a value"
+                        f" of type {type_name}.{hint}"
+                    )
+                    raise ConfigError(msg, setting="embeddings.provider")
                 if provider == "openai":
                     resolved = _build_openai_embedding_fn(self._embedding_config)
                 else:

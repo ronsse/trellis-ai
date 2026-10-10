@@ -2051,6 +2051,21 @@ All notable changes to Trellis will be documented in this file.
   line. In both helpers, a `setting` that is not a string degrades to
   `None` instead of breaking the dedup cache, so every path still
   degrades rather than raising.
+- **A non-string `embeddings.provider` silently meant "not configured."**
+  `registry.embedding_fn` tested the config value with a bare
+  `if provider:`, so any falsy non-string — notably YAML `provider: off`,
+  which parses to the bool `False` — fell through to the "no embedder"
+  branch with no error, turning semantic search off with nothing to read
+  (`axes.semantic` just read `not_configured`, indistinguishable from an
+  operator who never set the key). `None` and `""` still mean "not
+  configured"; every other non-string (bool, int, list, mapping) now
+  raises `ConfigError(setting="embeddings.provider")`, naming only the
+  value's type, never the value itself — a misplaced mapping can hold a
+  credential. A bool gets an extra hint ("delete the key or set it to
+  null") since `off`/`on`/`yes`/`no` are the likely source. A truthy
+  non-string still degrades the pack rather than crashing retrieval
+  (`axes.semantic == "embedder_failed"`, per #838), matching every other
+  embedder-resolve failure.
 
 ## [0.9.0] - 2026-05-13
 

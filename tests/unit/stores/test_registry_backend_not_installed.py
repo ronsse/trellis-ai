@@ -496,13 +496,22 @@ def test_embedding_fn_config_provider_bad_path_setting_names_the_yaml_key(
     assert exc_info.value.setting == "embeddings.provider"
 
 
-#: Non-string ``embeddings.provider`` values that are truthy (so the
-#: ``if provider:`` call-site check lets them through to
-#: ``_import_callable``, unlike ``None``/``0``/``[]``/``{}``/``""`` below).
+#: Non-string ``embeddings.provider`` values, truthy and falsy alike. The
+#: call-site type check (in ``StoreRegistry.embedding_fn``) raises on all
+#: of these before any of them reach ``_import_callable`` — a falsy one
+#: (``0``, ``False``, ``[]``, ``{}``) used to mean "not configured" via the
+#: old ``if provider:`` guard; only ``None`` and ``""`` still do (see
+#: ``test_embedding_fn_falsy_provider_values_stay_not_configured`` below).
+#: ``False`` is the motivating case: YAML ``provider: off`` parses to the
+#: bool ``False``, which silently turned semantic search off with no error.
 _NON_STRING_PROVIDERS = [
     pytest.param(7, id="int"),
     pytest.param([1, 2], id="list"),
     pytest.param({"api_key": "synthetic-credential"}, id="mapping"),
+    pytest.param(0, id="zero"),
+    pytest.param(False, id="bool_false"),
+    pytest.param([], id="empty_list"),
+    pytest.param({}, id="empty_mapping"),
 ]
 
 
@@ -510,14 +519,21 @@ _NON_STRING_PROVIDERS = [
 def test_embedding_fn_config_provider_non_string_raises_configerror_naming_the_yaml_key(
     tmp_path: Path, bad_value: object
 ) -> None:
-    """A non-string ``embeddings.provider`` (an int, a list, a mapping) is
-    an operator error, named by its type rather than echoed.
+    """A non-string ``embeddings.provider`` (an int, a list, a mapping, a
+    bool, or a falsy value of any of those types) is an operator error,
+    named by its type rather than echoed.
 
     ``_import_callable`` called ``dotted_path.rpartition(".")`` directly,
     so a config.yaml author who wrote ``provider: 8080`` or a YAML list by
     accident got ``AttributeError`` → REST 500 instead of the same
     ``ConfigError`` a bad string path raises. The message reaches the REST
     body and the error log, so a misplaced mapping's credential must not.
+
+    The falsy members (``0``, ``False``, ``[]``, ``{}``) are the newer
+    half of this parametrization: the old ``if provider:`` call-site guard
+    let them through as "not configured" with no error at all, which is
+    how YAML's ``provider: off`` (a bool ``False``) silently disabled
+    semantic search.
     """
     config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": bad_value})
     registry = StoreRegistry.from_config_dir(
@@ -530,30 +546,93 @@ def test_embedding_fn_config_provider_non_string_raises_configerror_naming_the_y
     assert repr(bad_value) not in exc_info.value.message
 
 
+@pytest.mark.parametrize("bad_value", [pytest.param(True, id="bool_true")])
+def test_embedding_fn_config_provider_bool_true_raises_with_delete_hint(
+    tmp_path: Path, bad_value: object
+) -> None:
+    """A bool ``embeddings.provider`` gets a hint the other non-string types
+    don't: the operator is pointed at the one-line fix (delete the key, or
+    set it to ``null``) rather than left to guess that a boolean is even
+    the problem.
+
+    ``True`` is tested on its own because it is the one non-string value
+    that was already truthy under the *old* ``if provider:`` guard (so it
+    already reached ``_import_callable`` and already raised, just without
+    this hint) — pinning it keeps the hint addition from being credited to
+    a case that would have raised anyway.
+    """
+    config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": bad_value})
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        _ = registry.embedding_fn
+    assert exc_info.value.setting == "embeddings.provider"
+    assert "of type bool" in exc_info.value.message
+    assert "delete the key or set it to null" in exc_info.value.message
+
+
 @pytest.mark.parametrize(
-    "falsy_value",
+    "not_configured_value",
     [
         pytest.param(None, id="null"),
-        pytest.param(0, id="zero"),
-        pytest.param([], id="empty_list"),
-        pytest.param({}, id="empty_mapping"),
         pytest.param("", id="empty_string"),
     ],
 )
 def test_embedding_fn_falsy_provider_values_stay_not_configured(
-    tmp_path: Path, falsy_value: object
+    tmp_path: Path, not_configured_value: object
 ) -> None:
-    """A null or empty ``embeddings.provider`` still means "not configured".
+    """``None`` (an absent or explicit ``null`` key) and ``""`` still mean
+    "not configured" — the only two values that do.
 
-    The call site's ``if provider:`` guard, not ``_import_callable``,
-    decides this — pinned here so widening the malformed-path check inside
-    ``_import_callable`` cannot accidentally start rejecting these too.
+    Every other falsy, non-string value (``0``, ``False``, ``[]``, ``{}``)
+    now raises instead (see ``_NON_STRING_PROVIDERS`` above); pinning just
+    these two here means widening that check further cannot silently start
+    rejecting the two spellings of "off" operators actually use.
     """
-    config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": falsy_value})
+    config_dir = _write_config(
+        tmp_path / "cfg", embeddings={"provider": not_configured_value}
+    )
     registry = StoreRegistry.from_config_dir(
         config_dir=config_dir, data_dir=tmp_path / "data"
     )
     assert registry.embedding_fn is None
+
+
+def test_embedding_fn_bool_provider_degrades_pack_to_keyword_and_graph(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: ``provider: false`` degrades retrieval, it does not
+    crash it.
+
+    Q5-A (#838) made a persistently-raising ``registry.embedding_fn``
+    degrade a pack build to keyword + graph with ``semantic:
+    embedder_failed`` in the axes, rather than failing every retrieval
+    call. This is the only test in the suite that drives that whole path
+    — ``StoreRegistry`` config through to ``describe_axes`` — starting
+    from a realistic operator mistake (a YAML ``provider: off``/``False``)
+    rather than a synthetic raising stand-in.
+    """
+    from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
+
+    config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": False})
+    data_dir = tmp_path / "data"
+    registry = StoreRegistry.from_config_dir(config_dir=config_dir, data_dir=data_dir)
+
+    builder = build_pack_builder(registry, surface="test")
+    assert builder.strategy_names == ["keyword", "graph"]
+
+    pack = builder.build("does this still serve a pack")
+
+    axes = describe_axes(
+        builder,
+        pack.retrieval_report.strategies_used,
+        embedder_configured=builder.embedder_configured,
+        embedder_resolve_failure=builder.embedder_resolve_failure,
+    )
+    assert axes["semantic"] == "embedder_failed"
+    assert axes["embedder_setting"] == "embeddings.provider"
+    assert axes["embedder_error_type"] == "ConfigError"
 
 
 # -- F1: a dotted path's own import-time failure is not a bad path --------
