@@ -401,6 +401,7 @@ All notable changes to Trellis will be documented in this file.
   is non-finite — added, and confirmed non-vacuous by mutating the store
   to commit each row as it's built (which the test catches: the prior
   row's value leaks through).
+  ([#835](https://github.com/ronsse/trellis-ai/pull/835))
 
 - **The SQLite event log and both the SQLite and Postgres graph stores
   refuse a NaN/Infinity float at write time, instead of silently storing
