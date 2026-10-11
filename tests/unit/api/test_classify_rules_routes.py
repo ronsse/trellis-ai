@@ -389,6 +389,70 @@ class TestApplyRule:
         assert resp.status_code == 400, resp.text
         assert "reserved namespace" in resp.json()["detail"]
 
+    def test_reserved_namespace_alias_key_is_refused_4xx(
+        self, client: TestClient
+    ) -> None:
+        """``sensitivity -> privacy`` was previously accepted: only the
+        clean *target* was checked against the reserved namespace, never
+        the alias *key*, which becomes a domain name of its own once
+        merged (the alias side of ``alias -> canonical``)."""
+        resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "domain_alias",
+                "key": "sensitivity",
+                "target": "privacy",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert "reserved namespace" in resp.json()["detail"]
+
+        rules = client.get("/api/v1/classify/rules").json()
+        assert not any(
+            r["kind"] == "domain_alias" and r["key"] == "sensitivity"
+            for r in rules["rules"]
+        )
+
+    def test_nan_precision_is_422_and_writes_no_row(self, client: TestClient) -> None:
+        """``allow_inf_nan=False`` on the DTO refuses at parse time, before
+        the governed pipeline is ever entered -- standard JSON has no NaN
+        token, but Python's own encoder (and many JS clients) emit the
+        bare ``NaN``/``Infinity`` literal, which FastAPI's JSON parsing
+        otherwise accepts as an extension."""
+        resp = client.post(
+            "/api/v1/classify/rules",
+            content=(
+                b'{"kind": "tag_keyword", "key": "xyz", "target": "finance", '
+                b'"source_event_id": "01TESTEVENT0000000000000", '
+                b'"precision": NaN}'
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422, resp.text
+
+        rules = client.get("/api/v1/classify/rules").json()
+        assert not any(
+            r["kind"] == "tag_keyword" and r["key"] == "xyz" for r in rules["rules"]
+        )
+
+    def test_infinite_lift_is_422_and_writes_no_row(self, client: TestClient) -> None:
+        resp = client.post(
+            "/api/v1/classify/rules",
+            content=(
+                b'{"kind": "tag_keyword", "key": "xyz", "target": "finance", '
+                b'"source_event_id": "01TESTEVENT0000000000000", '
+                b'"lift": Infinity}'
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422, resp.text
+
+        rules = client.get("/api/v1/classify/rules").json()
+        assert not any(
+            r["kind"] == "tag_keyword" and r["key"] == "xyz" for r in rules["rules"]
+        )
+
     def test_audit_event_records_prior_overlay_value_on_reapply(
         self, client: TestClient, registry: StoreRegistry
     ) -> None:
@@ -529,6 +593,69 @@ class TestRevokeRule:
         )
         assert resp.status_code == 403
 
+    def test_revoke_exposing_a_config_chain_is_refused_4xx(
+        self, tmp_path: Path
+    ) -> None:
+        """Revoking an overlay alias can resurface a config.yaml alias
+        that chains with a different, still-applied overlay alias --
+        refused with the same ``invalid_alias_rule`` Apply uses, and the
+        shadowing row is left in place (mirrors
+        ``test_classify_rules_cli.py::TestRevokeRule::
+        test_revoke_exposing_a_config_chain_is_refused_both_formats``).
+
+        Setup: config.yaml has ``b-alias -> x-canonical``. Overlay applies
+        ``b-alias -> y-canonical`` (shadows config's row for that key, so
+        the merged map right now is just ``{b-alias: y-canonical}``) and
+        then ``x-canonical -> q-final`` (fine at the time: config's
+        ``b-alias`` is shadowed, so nothing points at ``x-canonical`` as a
+        key yet). Revoking ``b-alias`` un-shadows config's
+        ``b-alias -> x-canonical``, which now chains with the still-applied
+        ``x-canonical -> q-final``.
+        """
+        reg = StoreRegistry(
+            stores_dir=tmp_path / "stores",
+            classify_config={"domain_aliases": {"b-alias": "x-canonical"}},
+        )
+        app_module._registry = reg
+        try:
+            client = TestClient(create_app())
+            shadow = client.post(
+                "/api/v1/classify/rules",
+                json={
+                    "kind": "domain_alias",
+                    "key": "b-alias",
+                    "target": "y-canonical",
+                    "source_event_id": "01TESTEVENT0000000000000",
+                },
+            )
+            assert shadow.status_code == 200, shadow.text
+
+            second = client.post(
+                "/api/v1/classify/rules",
+                json={
+                    "kind": "domain_alias",
+                    "key": "x-canonical",
+                    "target": "q-final",
+                    "source_event_id": "01TESTEVENT0000000000000",
+                },
+            )
+            assert second.status_code == 200, second.text
+
+            revoke = client.delete("/api/v1/classify/rules/domain_alias/b-alias")
+            assert revoke.status_code == 400, revoke.text
+            detail = revoke.json()["detail"].lower()
+            assert "chain" in detail or "both an alias and a merge destination" in (
+                detail
+            )
+
+            rules = client.get("/api/v1/classify/rules").json()
+            row = _rule_row(rules, "domain_alias", "b-alias")
+            assert row["source"] == "overlay"
+            assert row["target"] == "y-canonical"
+        finally:
+            reg.close()
+            app_module._registry = None
+
     def test_audit_event_records_removed_fields(
         self, client: TestClient, registry: StoreRegistry
     ) -> None:
@@ -655,6 +782,32 @@ class TestListRules:
             row = _rule_row(body, "tag_keyword", "cfgword")
             assert row["source"] == "config"
             assert row["applied_at"] is None
+        finally:
+            reg.close()
+            app_module._registry = None
+
+    def test_config_only_chain_is_400_not_500(self, tmp_path: Path) -> None:
+        """A chain introduced purely by editing config.yaml -- no overlay
+        write to have caught it -- must read as a composed 400, never a
+        500/traceback (mirrors
+        ``test_classify_rules_cli.py::TestEffectiveRules::
+        test_config_only_chain_is_exit_internal_not_traceback_both_formats``).
+        """
+        reg = StoreRegistry(
+            stores_dir=tmp_path / "stores",
+            classify_config={
+                "domain_aliases": {"fin": "finance", "finance": "treasury"}
+            },
+        )
+        app_module._registry = reg
+        try:
+            client = TestClient(create_app())
+            resp = client.get("/api/v1/classify/rules")
+            assert resp.status_code == 400, resp.text
+            detail = resp.json()["detail"].lower()
+            assert "chain" in detail or "both an alias and a merge destination" in (
+                detail
+            )
         finally:
             reg.close()
             app_module._registry = None

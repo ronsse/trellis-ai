@@ -831,15 +831,26 @@ class ClassifyRuleApplyRequest(WireRequestModel):
     are copied onto the ``CLASSIFY_RULE_APPLIED`` audit event verbatim;
     they are optional only because a caller applying a rule with no
     mined candidate behind it (hand-typed) has none to carry.
+
+    Each metric's range mirrors what :mod:`trellis.learning.tag_evolution`
+    computes it from -- ``support`` is a document count (``ge=0``),
+    ``precision`` is ``support / keyword_documents`` (``ge=0, le=1``), and
+    ``lift`` is ``precision / base_rate`` (``ge=0``, unbounded above).
+    ``allow_inf_nan=False`` on the two floats refuses a raw ``NaN``/
+    ``Infinity`` a scripted client can still send even though
+    ``json.dumps`` never emits one by default -- without it, a float
+    field happily accepts either and the write only fails later, when
+    the audit event's own ``json.dumps(..., allow_nan=False)`` serializes
+    it, by which point the overlay row is already on disk.
     """
 
     kind: str
     key: str
     target: str
     source_event_id: str
-    support: int | None = None
-    precision: float | None = None
-    lift: float | None = None
+    support: int | None = Field(default=None, ge=0)
+    precision: float | None = Field(default=None, ge=0.0, le=1.0, allow_inf_nan=False)
+    lift: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
 
 
 class ClassifyCandidateDismissResponse(WireModel):

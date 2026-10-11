@@ -654,7 +654,7 @@ trellis classify tag-candidates [--facet <name>] [--limit <n>] [--emit/--no-emit
 | `--limit` | `50000` | Cap on documents scanned. |
 | `--emit / --no-emit` | emit | Emit a `TAG_KEYWORD_CANDIDATE` event per candidate. `--no-emit` is a dry run and does not advance the cooldown. |
 
-**Surface-only, never auto-applied.** The command proposes; it never writes `config.yaml`. The text output ends with a paste-ready `classify.domain_keywords` block — pasting it promotes, deleting those lines revokes. That is not a missing feature: `domain` is the one facet that *hard-excludes* a document from a domain-scoped query, so a wrong promoted keyword **hides** content rather than merely mis-ranking it (the #282 failure mode). A human approves every domain promotion.
+**Surface-only, never auto-applied.** The command proposes; it never writes `config.yaml`. The text output ends with a ready `trellis classify apply-rule tag_keyword <keyword> <tag> --source-event-id <event-id>` line per candidate — not a `config.yaml` fragment to hand-paste. The event id is looked up via `GET /api/v1/classify/candidates` (or the Tag Rules UI tab); promoting (or undoing) then goes through the governed Apply/Revoke review below. That is not a missing feature: `domain` is the one facet that *hard-excludes* a document from a domain-scoped query, so a wrong promoted keyword **hides** content rather than merely mis-ranking it (the #282 failure mode). A human approves every domain promotion.
 
 Thresholds come from the `ParameterRegistry` under component `learning.tag_evolution`. The **analyzer** never substitutes a default — a missing key raises, naming it and its recommended seed. The **command** seeds the recommended values for that run and warns on stderr, matching `trellis analyze schema-evolution`; nothing seeds this component automatically, so hard-failing would mean failing on every deployment. Seed them for real (making runs reproducible) from `trellis.learning.tag_evolution.RECOMMENDED_SEED_VALUES`:
 
@@ -686,11 +686,11 @@ Two properties of `KeywordDomainClassifier` shape the safety story. It matches k
 
 ### Classify rule review — Apply / Revoke 
 
-`tag-candidates` / `domain-candidates` (above) only *propose*: the paste-ready
-block in their text output is the only way to promote one, by hand, into
-`config.yaml`, with no audit trail. This section is the governed "approve"
-step that sits on top of mining — an **operator overlay**, not a third
-mining command.
+`tag-candidates` / `domain-candidates` (above) only *propose*: their text
+output ends with a ready `apply-rule` invocation per candidate rather than a
+`config.yaml` fragment to hand-paste (that path had no audit trail). This
+section is the governed "approve" step that sits on top of mining — an
+**operator overlay**, not a third mining command.
 
 **Precedence.** `trellis.classify.factory.effective_domain_keywords()` /
 `effective_domain_aliases()` merge three layers, lowest to highest: built-in

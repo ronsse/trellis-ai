@@ -15,8 +15,12 @@ from typing import Any
 import pytest
 import yaml
 
+from trellis.errors import ConfigError
 from trellis.schemas.classify_overrides import ClassifyOverrideRow
+from trellis.stores.base.event_log import EventType
 from trellis.stores.classify_overrides_store import (
+    CLASSIFY_OVERLAY_SURFACE,
+    CLASSIFY_OVERRIDES_FILENAME,
     ClassifyOverridesStore,
     resolve_classify_overrides_path,
 )
@@ -205,3 +209,83 @@ class TestOverlayReachesTheIngestionPipeline:
             "custom-endpoint-term and custom-overlay-term both logged."
         )
         assert "api" in config_plus_overlay.tags.get("domain", [])
+
+
+class TestDegradedOverlayRejectionIsObservable:
+    """A corrupt overlay must not silently mine a partial view -- and the
+    refusal must not be invisible either.
+
+    ``build_ingestion_pipeline`` already refused to build from a degraded
+    overlay with a ``ConfigError`` rather than quietly seeding the pipeline
+    from whatever happened to parse. What it left out is the same gap
+    #425 closed for ``policies.json``: this raise happens before any
+    ``Command`` exists, so there is no ``MUTATION_REJECTED``, and every
+    caller builds the pipeline outside its own ``WRITE_REJECTED`` boundary,
+    so there is no boundary rejection either -- ``trellis analyze health``
+    was structurally unable to see a degraded overlay. Modeled on
+    ``tests/unit/mutate/test_policy_wiring.py::TestGateLoadFailureIsObservable``.
+    """
+
+    @staticmethod
+    def _damage(stores_dir: Path, contents: str = "{ broken") -> None:
+        stores_dir.mkdir(parents=True, exist_ok=True)
+        (stores_dir / CLASSIFY_OVERRIDES_FILENAME).write_text(
+            contents, encoding="utf-8"
+        )
+
+    def test_degraded_overlay_still_refuses_rather_than_mining_a_partial_view(
+        self, tmp_path: Path
+    ) -> None:
+        stores_dir = tmp_path / "stores"
+        self._damage(stores_dir)
+        registry = StoreRegistry(stores_dir=stores_dir)
+
+        with pytest.raises(ConfigError, match="Refusing to build"):
+            registry.build_ingestion_pipeline()
+
+    def test_degraded_overlay_emits_write_rejected(self, tmp_path: Path) -> None:
+        stores_dir = tmp_path / "stores"
+        self._damage(stores_dir)
+        registry = StoreRegistry(stores_dir=stores_dir)
+
+        with pytest.raises(ConfigError):
+            registry.build_ingestion_pipeline()
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.WRITE_REJECTED, limit=10
+        )
+        assert len(events) == 1
+        event = events[0]
+        assert event.payload["tool"] == CLASSIFY_OVERLAY_SURFACE
+        assert event.payload["error_class"] == "ConfigError"
+        assert [r["kind"] for r in event.payload["rejections"]] == ["config_unreadable"]
+        # The recovery advice the ConfigError carries survives into the
+        # event, so an operator reading it gets the fix without re-running
+        # ``backfill``.
+        assert "classify_overrides.json" in event.payload["rejections"][0]["msg"]
+
+    def test_analyze_health_sees_the_degraded_overlay(self, tmp_path: Path) -> None:
+        from trellis.ops.write_health import summarize_write_health
+
+        stores_dir = tmp_path / "stores"
+        self._damage(stores_dir)
+        registry = StoreRegistry(stores_dir=stores_dir)
+
+        for _ in range(3):
+            with pytest.raises(ConfigError):
+                registry.build_ingestion_pipeline()
+
+        report = summarize_write_health(registry.operational.event_log, days=1)
+        assert report.by_tool[CLASSIFY_OVERLAY_SURFACE].boundary_rejected == 3
+        assert report.status == "warn"
+
+    def test_a_healthy_overlay_emits_nothing(self, tmp_path: Path) -> None:
+        """No overlay file at all is the common case; it must stay quiet."""
+        stores_dir = tmp_path / "stores"
+        registry = StoreRegistry(stores_dir=stores_dir)
+        registry.build_ingestion_pipeline()
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.WRITE_REJECTED, limit=10
+        )
+        assert events == []

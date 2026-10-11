@@ -162,8 +162,19 @@ _REPLAY_REASON = "idempotency_replay"
 #: duplication is pinned by execution rather than by eye —
 #: ``tests/unit/mcp/test_capture_surface_roster.py`` matches the two
 #: spellings and drives the real surface to prove no banner is raised.
+#:
+#: ``config:classify_overrides`` joins the same exception for the same
+#: reason: a degraded classify overlay makes
+#: ``StoreRegistry.build_ingestion_pipeline`` refuse, but that method's
+#: only caller is the ``backfill`` command — classify-on-write, Apply,
+#: Revoke and the miners all resolve the overlay through a different path
+#: that never raises. "Capture is failing" would be false for every one of
+#: them. The literal is spelled out here rather than imported from
+#: :data:`~trellis.stores.classify_overrides_store.CLASSIFY_OVERLAY_SURFACE`
+#: for the same import-weight reason as the advisory label; the two
+#: spellings are matched by the same roster test.
 NON_CAPTURE_SURFACES: frozenset[str] = frozenset(
-    {"mcp:record_feedback", "config:advisory_file"}
+    {"mcp:record_feedback", "config:advisory_file", "config:classify_overrides"}
 )
 
 #: Accept events that clear a capture surface **in addition to** the

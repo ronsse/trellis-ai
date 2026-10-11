@@ -440,8 +440,8 @@ def config_sourced_alias_target(
     return _extract_config_aliases(classify_config).get(alias)
 
 
-def reject_reserved_rule_target(target: str) -> None:
-    """Refuse a classify-rule ``target`` that names a reserved policy namespace.
+def reject_reserved_rule_target(value: str, *, what: str = "target") -> None:
+    """Refuse a classify-rule string that names a reserved policy namespace.
 
     Both overlay kinds feed ``target`` into the deployment's domain
     vocabulary -- a ``tag_keyword`` row's target is the domain a keyword
@@ -450,19 +450,31 @@ def reject_reserved_rule_target(target: str) -> None:
     :data:`~trellis.schemas.classification.RESERVED_NAMESPACES` guard
     :func:`~trellis.classify.classifiers.keyword.build_domain_keyword_map`
     already enforces for a ``config.yaml``-sourced domain. Called by
-    ``ClassifyRuleApplyHandler`` (:mod:`trellis.mutate.handlers`) *before*
-    the row reaches the operator overlay file, so a reserved target is
-    refused at apply time -- not discovered only once some later reader
-    tries to build a merged domain map from the file and fails.
+    ``ClassifyRuleApplyHandler`` and ``ClassifyRuleRevokeHandler``
+    (:mod:`trellis.mutate.handlers`) *before* the row reaches the operator
+    overlay file, so a reserved target is refused at apply time -- not
+    discovered only once some later reader tries to build a merged domain
+    map from it and fails.
+
+    A ``domain_alias`` row's ``key`` is itself a domain name once merged
+    (the alias side of ``alias -> canonical``), so it is checked too --
+    pass ``what="key"`` to label that call distinctly in the message.
+    Without this second call, ``sensitivity -> privacy`` was accepted:
+    the target (``privacy``) is clean, but the key (``sensitivity``)
+    silently hijacks a reserved namespace as an alias source. ``what``
+    only changes the human-facing label; the underlying reservation
+    error still reports a ``"domain value"`` field, because an alias key
+    collapses into a domain value the same way a target does once a
+    reader merges the map.
 
     Raises:
-        ValueError: ``target`` collides with a reserved namespace, exact
+        ValueError: ``value`` collides with a reserved namespace, exact
             or ``namespace:...``-prefixed.
     """
-    reserved = _reserved_name_for(target)
+    reserved = _reserved_name_for(value)
     if reserved is not None:
-        detail = _format_reservation_error(target, reserved, "domain value")
-        msg = f"classify rule target: {detail}"
+        detail = _format_reservation_error(value, reserved, "domain value")
+        msg = f"classify rule {what}: {detail}"
         raise ValueError(msg)
 
 

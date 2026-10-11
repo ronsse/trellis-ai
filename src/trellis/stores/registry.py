@@ -1828,6 +1828,76 @@ class StoreRegistry:
             return None
         return ClassifyOverridesStore(path)
 
+    def _record_classify_overlay_rejection(self, error: ConfigError) -> None:
+        """Make a degraded classify overlay visible to ``trellis analyze health``.
+
+        Mirrors :func:`trellis.mutate.policy_source._record_gate_load_failure`:
+        :meth:`build_ingestion_pipeline` raises before a
+        :class:`~trellis.mutate.commands.Command` exists, so there is no
+        ``MUTATION_REJECTED``, and this call sits outside a
+        ``MutationExecutor`` boundary, so there is no boundary rejection
+        either. A ``WRITE_REJECTED`` event is the only channel left, and
+        it is the one ``trellis analyze health`` already reads.
+
+        Unlike the policy file, this refusal is narrow, not global: see
+        :data:`~trellis.stores.classify_overrides_store.CLASSIFY_OVERLAY_SURFACE`
+        for why it belongs in :mod:`trellis.ops.capture_health`'s
+        ``NON_CAPTURE_SURFACES`` rather than the ``config:`` prefix's
+        global-recovery class.
+
+        Fail-soft: a broken event log must never escalate a refused
+        ``backfill`` into a different crash. The ``ConfigError`` is
+        re-raised by the caller either way.
+        """
+        # ``error``, not ``warning`` or ``info`` -- ``trellis_cli.main._root``
+        # defaults ``TRELLIS_LOG_LEVEL`` to ``WARNING``, and this is the
+        # line an operator meets the failure on before they think to run a
+        # health command.
+        logger.error(
+            "classify_overlay_load_failed",
+            error=str(error),
+            impact="backfill is refused until the overlay file loads or is fixed",
+        )
+
+        try:
+            event_log = self.operational.event_log
+        # GRACEFUL-DEGRADATION: telemetry only. An operational plane that
+        # cannot be resolved is a real problem, but not this one, and the
+        # ConfigError the caller is about to re-raise is the better error
+        # to surface.
+        except Exception:
+            logger.warning(
+                "classify_overlay_load_failed.event_log_unavailable",
+                exc_info=True,
+            )
+            return
+
+        from trellis.ops.write_health import record_write_rejection  # noqa: PLC0415
+        from trellis.stores.classify_overrides_store import (  # noqa: PLC0415
+            CLASSIFY_OVERLAY_SURFACE,
+        )
+
+        record_write_rejection(
+            event_log,
+            tool=CLASSIFY_OVERLAY_SURFACE,
+            error=error,
+            # An explicit row rather than ``classify_rejection``'s fallback,
+            # for the same reason the policy gate takes one: this is not a
+            # payload the caller can fix, and ``other@`` would pool it with
+            # every unclassified boundary failure. The ``msg`` is the
+            # ConfigError verbatim, so the recovery advice it carries
+            # reaches an operator reading the event without re-running
+            # ``backfill``.
+            rejections=[
+                {
+                    "kind": "config_unreadable",
+                    "loc": "classify_overrides.json",
+                    "msg": str(error)[:500],
+                }
+            ],
+            source=CLASSIFY_OVERLAY_SURFACE,
+        )
+
     def build_ingestion_pipeline(self) -> Any:
         """Construct the default deterministic ingestion ClassifierPipeline.
 
@@ -1868,6 +1938,12 @@ class StoreRegistry:
                 invocation refused) against that: a batch of documents
                 written with the wrong tags, indistinguishable afterwards
                 from documents the overlay never covered.
+
+                The refusal is also recorded as a ``WRITE_REJECTED`` event
+                before the ``ConfigError`` propagates
+                (:meth:`_record_classify_overlay_rejection`), so it reaches
+                ``trellis analyze health`` instead of surfacing only to
+                whichever caller happened to invoke ``backfill``.
         """
         from trellis.classify.factory import (  # noqa: PLC0415
             build_ingestion_pipeline,
@@ -1889,7 +1965,9 @@ class StoreRegistry:
                 "is hard-excluded from a domain-scoped query. Fix the "
                 f"overlay file, then retry: {degradation.recovery}"
             )
-            raise ConfigError(msg, setting="classify_overrides.json")
+            error = ConfigError(msg, setting="classify_overrides.json")
+            self._record_classify_overlay_rejection(error)
+            raise error
         overlay_domains = overrides.domain_keywords_map() if overrides else None
         return build_ingestion_pipeline(
             self._classify_config, overlay_domains=overlay_domains

@@ -725,10 +725,24 @@ def list_classify_rules() -> ClassifyRuleListResponse:
         (row.kind, row.key): row for row in overrides_store.list()
     }
 
+    try:
+        domain_keyword_map = registry.domain_keyword_map()
+        domain_alias_map = registry.domain_alias_map()
+    except (KeyError, ValueError) as exc:
+        # registry.domain_alias_map() raises a bare ValueError when
+        # config.yaml and/or the overlay merge into a self-map or chain
+        # (effective_domain_aliases) -- Revoke now refuses the write that
+        # would create one, but a config.yaml edit alone can still produce
+        # this with no overlay write to have caught it. A 500 here would
+        # be the only sign anything was wrong; 400 with the composed
+        # message names exactly which rows to fix, same convention as
+        # the mine route above.
+        raise HTTPException(status_code=400, detail=str(exc).strip("'\"")) from exc
+
     rows = effective_classify_rule_rows(
         classify_config=registry.classify_config,
-        domain_keyword_map=registry.domain_keyword_map(),
-        domain_alias_map=registry.domain_alias_map(),
+        domain_keyword_map=domain_keyword_map,
+        domain_alias_map=domain_alias_map,
         overlay_rows=overlay_rows,
     )
     degradation = overrides_store.degradation

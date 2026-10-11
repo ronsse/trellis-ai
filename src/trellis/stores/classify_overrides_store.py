@@ -54,6 +54,26 @@ logger = structlog.get_logger(__name__)
 #: ``policies.json``, ``advisories.json`` and ``schedule.json``.
 CLASSIFY_OVERRIDES_FILENAME = "classify_overrides.json"
 
+#: ``requested_by`` / ``source`` label for the ``WRITE_REJECTED`` event
+#: :meth:`~trellis.stores.registry.StoreRegistry._record_classify_overlay_rejection`
+#: emits when this store loads degraded and
+#: :meth:`~trellis.stores.registry.StoreRegistry.build_ingestion_pipeline`
+#: refuses to build from the partial view, so the failure reaches
+#: ``trellis analyze health`` the way a broken ``policies.json`` does —
+#: modeled directly on :data:`~trellis.stores.advisory_source.ADVISORY_WRITER_SURFACE`.
+#:
+#: ``config:``-prefixed like that label and ``config:policy_file``, but
+#: declared in :mod:`trellis.ops.capture_health`'s ``NON_CAPTURE_SURFACES``
+#: rather than left to the ``config:`` prefix's global-recovery treatment:
+#: unlike a broken policy file, a degraded overlay blocks exactly one
+#: command. ``trellis.classify.ingest.build_ingest_classifier`` — the path
+#: every document write actually classifies through — calls
+#: :func:`trellis.classify.factory.build_ingestion_pipeline` directly with
+#: no overlay argument, so classify-on-write, Apply, Revoke and the miners
+#: are all unaffected; only ``backfill`` (CLI and REST) calls this method
+#: and is refused. A global banner would be false for every other surface.
+CLASSIFY_OVERLAY_SURFACE = "config:classify_overrides"
+
 
 def resolve_classify_overrides_path(stores_dir: Path | None) -> Path | None:
     """``<stores_dir>/classify_overrides.json``, or ``None`` with no ``stores_dir``.

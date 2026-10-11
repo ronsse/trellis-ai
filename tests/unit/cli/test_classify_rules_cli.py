@@ -23,7 +23,7 @@ from tests.cli_output import plain
 if TYPE_CHECKING:
     import pytest
 
-from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE, EXIT_VALIDATION
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.main import app as root_app
 
 runner = CliRunner()
@@ -295,6 +295,175 @@ class TestApplyRule:
         assert payload["status"] == "rejected"
         assert "reserved namespace" in payload["message"]
 
+    def test_reserved_namespace_alias_key_apply_exits_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``sensitivity -> privacy`` was previously accepted: only the
+        clean target was checked, never the alias key."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "domain_alias",
+                "sensitivity",
+                "privacy",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+        assert "reserved namespace" in payload["message"]
+
+    def test_short_tag_keyword_apply_exits_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A one- or two-letter key defeats the classifier's two-hit
+        minimum on its own under substring semantics."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "ml",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+        assert "3-character minimum" in payload["message"]
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [r for r in rules if r["key"] == "ml"]
+
+    def test_nan_precision_cli_exits_validation_and_writes_no_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Click's FLOAT type parses ``"nan"`` via Python's ``float()``,
+        unlike the REST DTO's ``allow_inf_nan=False`` -- caught here,
+        before a Command is even built."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "zzzkw",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--precision",
+                "nan",
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [r for r in rules if r["key"] == "zzzkw"]
+
+    def test_infinite_lift_cli_exits_validation_and_writes_no_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "zzzkw",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--lift",
+                "inf",
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [r for r in rules if r["key"] == "zzzkw"]
+
+    def test_nan_precision_cli_text_format_also_exits_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exit code must not depend on ``--format``
+        (``tests/unit/test_format_exit_parity_rule.py``)."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "zzzkw",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--precision",
+                "nan",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+
+    def test_apply_rule_risk_warning_on_stderr_json_stdout_stays_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """N3: the UI's risk copy has a CLI stderr counterpart now.
+
+        Printed unconditionally, before the write even executes, so
+        ``--format json`` stdout must still parse as exactly the success
+        payload -- the warning never leaks onto stdout.
+        """
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "finance",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_OK, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "success"
+        assert "domain" in result.stderr
+        assert "keyword" in result.stderr.lower()
+
+    def test_apply_rule_risk_warning_on_stderr_text_format_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same warning, text format: still on stderr, exit code unchanged."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "domain_alias",
+                "fin",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+            ]
+        )
+        assert result.exit_code == EXIT_OK, result.output
+        assert "Merge" in result.stderr
+        assert "fin" in result.stderr
+        assert "does not change the domain on any document already stored" in (
+            result.stderr
+        )
+        assert "Merge" not in result.stdout
+
 
 # ---------------------------------------------------------------------------
 # revoke-rule
@@ -331,6 +500,20 @@ class TestRevokeRule:
         rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
         assert not [r for r in rules if r["key"] == "zzzkw"]
 
+    def test_revoke_rule_risk_warning_on_stderr_json_stdout_stays_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """N3: revoke's UI risk copy has a CLI stderr counterpart too."""
+        _init_stores(tmp_path, monkeypatch)
+        self._apply(tmp_path, monkeypatch)
+
+        result = _invoke(["revoke-rule", "tag_keyword", "zzzkw", "--format", "json"])
+        assert result.exit_code == EXIT_OK, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "success"
+        assert "Revoke" in result.stderr
+        assert "retag" in result.stderr
+
     def test_text_success_mentions_the_operation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -356,6 +539,71 @@ class TestRevokeRule:
 
         text_result = _invoke(["revoke-rule", "tag_keyword", "doesnotexist"])
         assert text_result.exit_code == EXIT_VALIDATION, text_result.output
+
+    def test_revoke_exposing_a_config_chain_is_refused_both_formats(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Revoking an overlay alias can resurface a config.yaml alias
+        that chains with a different, still-applied overlay alias --
+        refused with ``invalid_alias_rule``, the same code Apply uses, and
+        the shadowing row is left in place (mirrors
+        ``test_classify_rules_routes.py::TestRevokeRule::
+        test_revoke_exposing_a_config_chain_is_refused_4xx``).
+        """
+        monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+        init_result = runner.invoke(root_app, ["admin", "init"])
+        assert init_result.exit_code == EXIT_OK, init_result.output
+        config_path = tmp_path / "config" / "config.yaml"
+        config_path.write_text(
+            "classify:\n  domain_aliases:\n    b-alias: x-canonical\n",
+            encoding="utf-8",
+        )
+
+        shadow = _invoke(
+            [
+                "apply-rule",
+                "domain_alias",
+                "b-alias",
+                "y-canonical",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert shadow.exit_code == EXIT_OK, shadow.output
+
+        second = _invoke(
+            [
+                "apply-rule",
+                "domain_alias",
+                "x-canonical",
+                "q-final",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert second.exit_code == EXIT_OK, second.output
+
+        json_revoke = _invoke(
+            ["revoke-rule", "domain_alias", "b-alias", "--format", "json"]
+        )
+        assert json_revoke.exit_code == EXIT_VALIDATION, json_revoke.output
+        payload = json.loads(json_revoke.stdout)
+        assert payload["status"] == "rejected"
+
+        text_revoke = _invoke(["revoke-rule", "domain_alias", "b-alias"])
+        assert text_revoke.exit_code == EXIT_VALIDATION, text_revoke.output
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        row = next(
+            r for r in rules if r["kind"] == "domain_alias" and r["key"] == "b-alias"
+        )
+        assert row["source"] == "overlay"
+        assert row["target"] == "y-canonical"
 
     def test_revoke_config_sourced_rule_is_refused_not_a_no_op(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -425,6 +673,30 @@ class TestEffectiveRules:
         _init_stores(tmp_path, monkeypatch)
         assert _invoke(["effective-rules"]).exit_code == EXIT_OK
         assert _invoke(["effective-rules", "--format", "json"]).exit_code == EXIT_OK
+
+    def test_config_only_chain_is_exit_internal_not_traceback_both_formats(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A chain introduced purely by editing config.yaml -- no overlay
+        write to have caught it -- must read as a composed error, never a
+        traceback (mirrors
+        ``test_classify_rules_routes.py::TestListRules::
+        test_config_only_chain_is_400_not_500``)."""
+        _init_stores(tmp_path, monkeypatch)
+        config_path = tmp_path / "config" / "config.yaml"
+        config_path.write_text(
+            "classify:\n  domain_aliases:\n    fin: finance\n    finance: treasury\n",
+            encoding="utf-8",
+        )
+
+        json_result = _invoke(["effective-rules", "--format", "json"])
+        assert json_result.exit_code == EXIT_INTERNAL, json_result.output
+        payload = json.loads(json_result.stdout)
+        assert payload["status"] == "error"
+
+        text_result = _invoke(["effective-rules"])
+        assert text_result.exit_code == EXIT_INTERNAL, text_result.output
+        assert "Traceback" not in text_result.output
 
 
 # ---------------------------------------------------------------------------

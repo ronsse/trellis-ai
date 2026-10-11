@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -20,6 +22,7 @@ from trellis.errors import (
 )
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
+from trellis.learning.tag_evolution import MIN_TAG_KEYWORD_LENGTH
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.evidence_ingest import EvidenceEmbedMode
 from trellis.mutate.retention import (
@@ -619,6 +622,66 @@ class SettingsUpdateHandler:
         return name, f"Setting {name!r} {action}"
 
 
+def _validate_classify_rule_metrics(command_args: dict[str, Any]) -> None:
+    """Refuse a ``classify_rule.apply`` whose carried metrics are unusable.
+
+    ``support``/``precision``/``lift`` are optional, caller-supplied,
+    copied verbatim onto the ``CLASSIFY_RULE_APPLIED`` audit event -- the
+    REST DTO (:class:`~trellis_wire.dtos.ClassifyRuleApplyRequest`, which
+    sets ``allow_inf_nan=False``) and the CLI's own finiteness check both
+    narrow what reaches here for their own surfaces, but neither is a
+    governed boundary: an MCP tool call, a direct ``MutationExecutor.execute``
+    from Python, or a future caller skips both. This is the one check every
+    caller passes through.
+
+    Without it, a ``NaN``/``Infinity`` metric wrote the overlay row (
+    :meth:`~trellis.stores.classify_overrides_store.ClassifyOverridesStore.put`
+    has no opinion on these fields) and only then failed -- when the
+    *audit event* was serialized, not the overlay write -- leaving an
+    applied rule with no ``CLASSIFY_RULE_APPLIED`` event to show for it.
+    Called before any write, so a rejected call leaves no trace at all.
+
+    Ranges mirror what :mod:`trellis.learning.tag_evolution` computes
+    each metric from: ``support`` is a document count (``>= 0``),
+    ``precision`` is ``support / keyword_documents`` (``[0, 1]``), and
+    ``lift`` is ``precision / base_rate`` (``>= 0``, unbounded above).
+
+    Raises:
+        ValidationError: a metric is present but not a plain, finite
+            number in its valid range (``code="invalid_metric"``).
+    """
+    support = command_args.get("support")
+    if support is not None and (
+        isinstance(support, bool) or not isinstance(support, int) or support < 0
+    ):
+        msg = (
+            "classify_rule.apply: 'support' must be a non-negative "
+            f"integer or null, got {support!r}"
+        )
+        raise ValidationError(msg, errors=[msg], code="invalid_metric")
+
+    for name, low, high in (("precision", 0.0, 1.0), ("lift", 0.0, None)):
+        value = command_args.get(name)
+        if value is None:
+            continue
+        # bool is an int subclass and NaN/inf are valid `float` instances,
+        # so both need an explicit check beyond isinstance(value, float).
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+        ):
+            msg = (
+                f"classify_rule.apply: {name!r} must be a finite number or "
+                f"null, got {value!r}"
+            )
+            raise ValidationError(msg, errors=[msg], code="invalid_metric")
+        if value < low or (high is not None and value > high):
+            bound = f"[{low}, {high}]" if high is not None else f">= {low}"
+            msg = f"classify_rule.apply: {name!r} must be {bound}, got {value!r}"
+            raise ValidationError(msg, errors=[msg], code="invalid_metric")
+
+
 class ClassifyRuleApplyHandler:
     """Apply one mined tag/domain candidate into the operator overlay.
 
@@ -643,7 +706,9 @@ class ClassifyRuleApplyHandler:
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
 
-    def handle(self, command: Command) -> tuple[str | None, str]:  # noqa: PLR0915
+    def handle(  # noqa: PLR0912, PLR0915
+        self, command: Command
+    ) -> tuple[str | None, str]:
         from trellis.classify.factory import (  # noqa: PLC0415
             config_sourced_alias_target,
             effective_domain_aliases,
@@ -668,6 +733,22 @@ class ClassifyRuleApplyHandler:
         if not key or not isinstance(key, str):
             msg = "classify_rule.apply requires a non-empty string 'key'"
             raise ValidationError(msg, errors=[msg], code="invalid_key")
+        if kind == "tag_keyword" and len(key) < MIN_TAG_KEYWORD_LENGTH:
+            # The miner itself never proposes a token shorter than this
+            # (``_TOKEN_RE`` in tag_evolution.py), because a short keyword
+            # matches far too much under the classifier's substring
+            # semantics and defeats the two-distinct-keyword minimum that
+            # otherwise keeps one bad promotion from assigning a domain on
+            # its own. apply-rule does not route through that regex, so
+            # nothing else stops a one-letter key submitted by hand.
+            msg = (
+                f"classify_rule.apply: tag_keyword key {key!r} is shorter "
+                f"than the {MIN_TAG_KEYWORD_LENGTH}-character minimum "
+                "-- a short keyword matches far too much under the "
+                "classifier's substring semantics and would defeat the "
+                "two-hit minimum on its own."
+            )
+            raise ValidationError(msg, errors=[msg], code="tag_keyword_too_short")
         if not target or not isinstance(target, str):
             msg = "classify_rule.apply requires a non-empty string 'target'"
             raise ValidationError(msg, errors=[msg], code="invalid_target")
@@ -678,6 +759,7 @@ class ClassifyRuleApplyHandler:
                 "to the candidate it was mined from"
             )
             raise ValidationError(msg, errors=[msg], code="invalid_source_event_id")
+        _validate_classify_rule_metrics(command.args)
 
         row_id = f"{kind}:{key}"
         # Defence in depth, same posture as SettingsUpdateHandler: this
@@ -698,9 +780,15 @@ class ClassifyRuleApplyHandler:
         # A reserved policy namespace (sensitivity, lifecycle, ...) is never
         # a legitimate domain value -- checked before the row ever reaches
         # the overlay file, not discovered only once a later reader tries
-        # to build a merged domain map from it and fails.
+        # to build a merged domain map from it and fails. For a
+        # domain_alias row, the key is itself a domain name once merged
+        # (the alias side of ``alias -> canonical``), so it is checked
+        # too -- without this, ``sensitivity -> privacy`` was accepted
+        # because only the clean target was ever looked at.
         try:
             reject_reserved_rule_target(target)
+            if kind == "domain_alias":
+                reject_reserved_rule_target(key, what="key")
         except ValueError as exc:
             # reject_reserved_rule_target always raises ValueError(msg) with
             # a single string it composed itself, never a wrapped
@@ -768,13 +856,6 @@ class ClassifyRuleApplyHandler:
             applied_by=applied_by,
             source_event_id=source_event_id,
         )
-        try:
-            store.put(row)
-        except (DegradedStoreWriteError, StaleStoreWriteError) as exc:
-            raise ValidationError(
-                exc.message, errors=[exc.message], code=exc.code.lower()
-            ) from exc
-
         payload: dict[str, Any] = {
             "kind": kind,
             "key": key,
@@ -797,6 +878,36 @@ class ClassifyRuleApplyHandler:
         requested_by_claim = command.args.get("requested_by_claim")
         if requested_by_claim is not None:
             payload["requested_by_claim"] = requested_by_claim
+
+        # Built and probed BEFORE the overlay write: ``_validate_classify_rule_metrics``
+        # already refuses a non-finite support/precision/lift, so this
+        # should never fire in practice, but it is the backstop for
+        # whatever this payload gains next that isn't a plain, finite
+        # number -- the actual event log backend serializes with
+        # ``json.dumps(..., allow_nan=False)`` (SQLite) and a failure
+        # there, discovered only after ``store.put`` already wrote the
+        # row, is exactly the gap this reorder closes: a rule applied
+        # with no ``CLASSIFY_RULE_APPLIED`` event to show for it.
+        try:
+            json.dumps(payload, allow_nan=False)
+        except ValueError as exc:
+            # json.dumps(..., allow_nan=False) always raises
+            # ValueError(msg) with a single string argument ("Out of
+            # range float values are not JSON compliant: nan"), never a
+            # wrapped driver/library exception, so args[0] is exactly
+            # that message -- a structured-field read, not a bare
+            # str(exc) stringification of the caught exception.
+            detail = exc.args[0] if exc.args else "not serializable"
+            msg = f"classify_rule.apply: audit payload is not serializable: {detail}"
+            raise ValidationError(msg, errors=[msg], code="invalid_metric") from exc
+
+        try:
+            store.put(row)
+        except (DegradedStoreWriteError, StaleStoreWriteError) as exc:
+            raise ValidationError(
+                exc.message, errors=[exc.message], code=exc.code.lower()
+            ) from exc
+
         self._registry.operational.event_log.emit(
             EventType.CLASSIFY_RULE_APPLIED,
             source="mutation_executor",
@@ -821,10 +932,13 @@ class ClassifyRuleRevokeHandler:
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
 
-    def handle(self, command: Command) -> tuple[str | None, str]:  # noqa: PLR0915
+    def handle(  # noqa: PLR0912, PLR0915
+        self, command: Command
+    ) -> tuple[str | None, str]:
         from trellis.classify.factory import (  # noqa: PLC0415
             config_sourced_alias_target,
             config_sourced_tag_keyword_domains,
+            effective_domain_aliases,
             is_config_sourced_alias,
         )
         from trellis.stores.classify_overrides_store import (  # noqa: PLC0415
@@ -907,8 +1021,45 @@ class ClassifyRuleRevokeHandler:
             msg = f"No applied {kind} rule found for key {key!r}."
             raise ValidationError(msg, errors=[msg], code="no_such_rule")
 
+        if kind == "domain_alias":
+            # Revoking a row can re-expose a chain or self-map that was
+            # only hidden because this overlay entry shadowed a
+            # config.yaml alias -- e.g. config.yaml has ``fin -> finance``
+            # and ``finance -> treasury`` (already a chain on its own,
+            # but never merged because nothing read it that way until an
+            # overlay row pointed at one end of it), or an overlay applies
+            # ``fin -> money`` then ``finance -> treasury``, each fine
+            # alone, and revoking ``fin`` exposes ``finance -> treasury``
+            # chained with config's own ``fin -> finance``. Validate the
+            # prospective merged map -- this store's rows minus the key
+            # being revoked -- the same check Apply makes before it
+            # writes, so the chain is refused here rather than only
+            # discovered the next time a reader calls
+            # ``effective_domain_aliases``.
+            prospective = {
+                k: v for k, v in store.domain_aliases_map().items() if k != key
+            }
+            try:
+                effective_domain_aliases(
+                    self._registry.classify_config, overlay_aliases=prospective
+                )
+            except ValueError as exc:
+                # effective_domain_aliases always raises ValueError(msg)
+                # with a single string it composed itself, never a
+                # wrapped driver/library exception, so args[0] is exactly
+                # that message -- same structured-field read Apply uses.
+                msg = exc.args[0] if exc.args else "invalid alias rule"
+                raise ValidationError(
+                    msg, errors=[msg], code="invalid_alias_rule"
+                ) from exc
+
         try:
-            removed = store.remove(kind, key)
+            # ``existing`` above is non-None, so this row is live in a
+            # non-degraded store -- the only ways to reach this point --
+            # and ``remove`` refuses rather than returning ``False`` on a
+            # degraded/stale store (caught below). ``removed`` is
+            # therefore always ``True`` here; no variable is kept for it.
+            store.remove(kind, key)
         except (DegradedStoreWriteError, StaleStoreWriteError) as exc:
             raise ValidationError(
                 exc.message, errors=[exc.message], code=exc.code.lower()
@@ -938,8 +1089,7 @@ class ClassifyRuleRevokeHandler:
             entity_id=row_id,
             payload=payload,
         )
-        action = "revoked" if removed else "already absent"
-        return row_id, f"{kind} rule {key!r} {action}"
+        return row_id, f"{kind} rule {key!r} revoked"
 
 
 class EntityCreateHandler:
