@@ -497,6 +497,28 @@ class EventType(StrEnum):
     PARAMS_AUTO_PROMOTED = "parameters.auto_promoted"
     PARAMS_AUTO_ROLLED_BACK = "parameters.auto_rolled_back"
 
+    #: Emitted by ``trellis admin record-job-run`` at the start and end of
+    #: one dispatcher-driven job execution (see
+    #: ``trellis.stores.schedule_store.ScheduleStore``;
+    #: ``docs/design/p1-ui-control-plane.md`` §(b)). Modeled on
+    #: :attr:`CAPTURE_SWEEP_COMPLETED`: unconditional and fail-soft — a
+    #: job that fails still gets its ``JOB_RUN_COMPLETED`` with a nonzero
+    #: ``exit_code``, because "the dispatcher ran this job and it failed"
+    #: is exactly the fact ``trellis admin due-jobs`` and an operator need,
+    #: and a sweep that adjudicates nothing (crashes before reporting)
+    #: still has to say so via ``JOB_RUN_STARTED`` alone. ``entity_id`` is
+    #: the job name
+    #: (:attr:`ScheduledJob.name <trellis.schemas.schedule.ScheduledJob.name>`).
+    #: These are plain audit telemetry, not a governed mutation — there is
+    #: no state these events gate, only a record of what ran.
+    JOB_RUN_STARTED = "job.run_started"
+    #: Paired with :attr:`JOB_RUN_STARTED`. Carries ``started_at``,
+    #: ``finished_at``, ``duration_ms``, ``exit_code`` and
+    #: ``run_id`` (ties the pair together when a job is dispatched more
+    #: than once in the same second). ``due-jobs`` reads the latest
+    #: completed run per job name as its due-ness anchor.
+    JOB_RUN_COMPLETED = "job.run_completed"
+
 
 class Event(VersionedModel):
     """An immutable event record."""

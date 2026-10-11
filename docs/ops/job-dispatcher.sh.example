@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Reference host-side dispatcher for Trellis's schedule registry
+# (trellis-ai#e166, plan p1 "UI control plane" §(b)).
+#
+# DOCUMENTATION ONLY. This file is not installed, symlinked, sourced, or
+# run by anything in trellis-ai or its CI. Copy it into the deployment
+# owner's own ops repo (skynet-hub, alongside the existing
+# stacks/trellis/*-nightly.sh wrappers) and wire ONE cron line to it — see
+# "Deploy" below. The container never touches crontab; only this
+# host-side script does.
+#
+# What it does, every time cron wakes it:
+#   1. Ask the registry what's due right now:
+#        trellis admin due-jobs --format json
+#      (combines each job's `enabled` flag, cron `cadence`, the most
+#      recent JOB_RUN_COMPLETED in the EventLog, and any
+#      `run_requested_at` manual "Run now" trigger — see
+#      src/trellis/core/cron.py's `is_job_due`.)
+#   2. For each due job, exec its argv list directly.
+#   3. Record what happened, win or lose:
+#        trellis admin record-job-run --job NAME --duration-ms MS --exit-code N
+#      so the NEXT due-jobs call sees this run and the cadence clock
+#      advances — a job is never run twice for one tick just because
+#      nothing recorded the first attempt.
+#
+# No arbitrary command execution. `schedule.json` only ever holds argv
+# lists — `ScheduledJob.command` is a validated non-empty list[str] of
+# non-blank tokens, never a shell string (src/trellis/schemas/schedule.py).
+# This script never builds a command line as text and never passes one to
+# `sh -c` or `eval`: `cmd` below is a bash ARRAY built element-by-element
+# from the JSON array (`jq -r '.command[]'` + `mapfile`), and `"${cmd[@]}"`
+# execs that array directly. A job name, description, or cron cadence
+# stored in the registry is data to this script, never code — there is no
+# path from an edited schedule.json row to a shell interpreting anything.
+# See src/trellis/stores/schedule_store.py's module docstring for the
+# full argument, of which this script is the other half.
+#
+# Why ONE dispatcher + ONE cron line, not one cron line per job (the shape
+# of the real nightly scripts — capture/curate/backup/roadmap — that this
+# is modeled on): the whole point of the registry is that a job's
+# cadence, command, and enabled flag become editable later (a UI, plan p1
+# PR 6) without ever touching crontab again. A fixed per-job crontab line
+# is exactly what the registry replaces; this script is what reads it.
+#
+# `host_only` jobs (backup-nightly, roadmap-nightly — they need the
+# docker socket / `gh` auth respectively) are run here like any other: this
+# whole script only exists to run ON the host. The flag is for a FUTURE
+# container-side dispatcher to filter on, not for this one.
+#
+# Deploy (operator, skynet-side — NOT done by this PR):
+#   cp job-dispatcher.sh.example ~/projects/skynet-hub/stacks/trellis/job-dispatcher.sh
+#   chmod +x ~/projects/skynet-hub/stacks/trellis/job-dispatcher.sh
+#   crontab -e
+#   # add:
+#   * * * * * $HOME/projects/skynet-hub/stacks/trellis/job-dispatcher.sh >> $HOME/.trellis/logs/dispatcher.log 2>&1
+#
+# Every minute: due-jobs is one EventLog read per registered job and costs
+# nothing when nothing is due, and minute resolution is what a 5-field
+# cron expression itself promises — a coarser dispatcher tick would make
+# every cadence in schedule.json a lie about when it actually runs. The
+# `trellis admin init-schedule` seed jobs replace the existing crontab
+# entries for capture/curate/backup/roadmap one-for-one (same cadence,
+# same script) plus the tuner dry-run; remove those four lines from
+# `crontab -l` once this dispatcher is confirmed running them.
+#
+# First run: dry-run it by hand BEFORE wiring cron, and read the output —
+# a job firing that should not have means a cadence typo in
+# schedule.json, not a dispatcher bug:
+#   TRELLIS_CONFIG_DIR=$HOME/.trellis ./job-dispatcher.sh
+#
+# Concurrency: `flock -n` on a fixed lockfile guards the WHOLE tick, not
+# per-job — if one tick is still running a slow job when the next minute's
+# cron fires, the new tick skips itself (and says so) rather than
+# double-running anything. This is NOT `set -e`: one job's nonzero exit
+# must not abort the loop before record-job-run has a chance to record
+# it, or skip whatever jobs were still queued behind it in this tick.
+set -uo pipefail
+
+TRELLIS="$HOME/projects/trellis-ai/.venv/bin/trellis"
+LOCK="/tmp/trellis-job-dispatcher.lock"
+
+export TRELLIS_CONFIG_DIR="${TRELLIS_CONFIG_DIR:-$HOME/.trellis}"
+# Secrets (Postgres DSNs, etc.) are each JOB's own concern, not this
+# dispatcher's. The real nightly scripts this replaces already do their
+# own `op read` before invoking the real binary (see
+# ~/projects/skynet-hub/stacks/trellis/*-nightly.sh), so their argv in
+# schedule.json is just the wrapper script's path — it resolves its own
+# environment exactly as it does today, run by hand or by cron. A
+# registry entry that is a bare `trellis ...` subcommand (tune, worker
+# enrich, ...) runs with whatever environment this dispatcher process
+# itself has, same as any other cron job's child process.
+
+exec {lockfd}>"$LOCK"
+if ! flock -n "$lockfd"; then
+  echo "$(date -Is) dispatcher already running (lock held on $LOCK) — skipping this tick"
+  exit 0
+fi
+
+echo "=== dispatcher tick $(date -Is) ==="
+
+due_json="$("$TRELLIS" admin due-jobs --format json 2>&1)"
+due_status=$?
+if [[ $due_status -ne 0 ]]; then
+  # due-jobs exits EXIT_STORE (5) when schedule.json is degraded, but
+  # still reports whatever parsed. Surface the problem and keep going —
+  # the jobs that DID parse are still worth running this tick, and a
+  # fresh dispatcher tick retries whatever didn't a minute from now.
+  echo "WARN: due-jobs exited $due_status:"
+  echo "$due_json"
+fi
+
+count="$(printf '%s' "$due_json" | jq -r '.count // 0' 2>/dev/null || echo 0)"
+if [[ "$count" -eq 0 ]]; then
+  echo "no jobs due"
+  exit 0
+fi
+
+printf '%s' "$due_json" | jq -c '.due_jobs[]' | while IFS= read -r job_json; do
+  name="$(printf '%s' "$job_json" | jq -r '.name')"
+  timeout_s="$(printf '%s' "$job_json" | jq -r '.timeout_seconds')"
+
+  # The argv array, built straight from the JSON array — no shell ever
+  # sees these joined into one string, so nothing in `command` (or
+  # `name`/`description`, which never reach this far) is interpreted.
+  mapfile -t cmd < <(printf '%s' "$job_json" | jq -r '.command[]')
+
+  echo "--- running $name: ${cmd[*]}"
+  start_ms=$(date +%s%3N)
+  timeout "${timeout_s}s" "${cmd[@]}"
+  exit_code=$?
+  end_ms=$(date +%s%3N)
+  duration_ms=$(( end_ms - start_ms ))
+
+  # Record the run unconditionally — a failed job (nonzero exit_code) is
+  # itself a successful record-job-run call; only a failure to write the
+  # EventLog pair makes record-job-run itself exit nonzero.
+  "$TRELLIS" admin record-job-run \
+    --job "$name" \
+    --duration-ms "$duration_ms" \
+    --exit-code "$exit_code" \
+    --format json
+
+  echo "--- $name done: exit=$exit_code duration_ms=$duration_ms"
+done
+
+echo "=== dispatcher tick done $(date -Is) ==="

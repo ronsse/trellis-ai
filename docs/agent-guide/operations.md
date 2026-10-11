@@ -100,6 +100,110 @@ trellis admin serve [--port PORT] [--host HOST] [--format text|json]
 | `--port` | `8420` | Port to listen on |
 | `--host` | `0.0.0.0` | Host to bind to |
 
+### Schedule registry + job runs (#e166)
+
+`schedule.json` (`<data_dir>/stores/schedule.json`) is the pieces a **host-side
+dispatcher cron** needs so schedules can later be edited from a UI (plan p1
+§(b), PR 6) without the container ever touching crontab. The container only
+ever reads it today; there is no REST route or UI yet.
+
+Each row is a `ScheduledJob`: `name`, `command` (an **argv list**, never a
+shell string), `cadence` (a 5-field cron expression, or `null` for
+manual-only — triggered later by setting `run_requested_at`), `enabled`,
+`timeout_seconds`, an operator-facing `description`, and `host_only` (true
+for jobs that need the docker socket or `gh` auth — `backup-nightly` and
+`roadmap-nightly` — which the API container will never have). There is no
+code path anywhere in this registry, the store, or `due-jobs` /
+`record-job-run` that execs a command; see
+[`schedule_store.py`](../../src/trellis/stores/schedule_store.py)'s module
+docstring for the full argument. The one thing that does exec a job is the
+reference dispatcher at
+[`docs/ops/job-dispatcher.sh.example`](../ops/job-dispatcher.sh.example) —
+documentation, not installed by this repo — which builds the command as a
+bash array from the JSON array and execs it directly, never through `sh -c`
+or `eval`.
+
+`ScheduleStore` is a third [`DegradableJsonStore`](#if-the-file-is-damaged)
+subclass, alongside `PolicyStore` and `AdvisoryStore`: **reads degrade,
+writes refuse.** A duplicate `name` degrades the file (`list()`/`due-jobs`
+still serve what parsed) rather than silently collapsing two rows to one.
+
+#### `trellis admin init-schedule`
+
+Seed the registry with Trellis's own defaults: the nightly
+capture/curate/backup/roadmap sweeps, the tuner dry-run, and the manual-only
+commands from the UI gap inventory (`trellis_cli.schedule_seed`). Adds only
+jobs whose `name` is not already present — never overwrites an
+operator-edited row, so it is safe to re-run. `trellis admin migrate-graph`
+is deliberately not seeded: its whole shape is a pair of `--from-config` /
+`--to-config` YAML paths chosen per migration, so there is no stable default
+command to seed.
+
+```bash
+trellis admin init-schedule [--format text|json]
+```
+
+```json
+{"status": "ok", "added": ["capture-nightly", "curate-nightly", "..."], "skipped": []}
+```
+
+Exits `EXIT_STORE` (5) on an already-degraded file, under both formats.
+
+#### `trellis admin due-jobs`
+
+List registry jobs due to run now. Combines, per job
+(`trellis.core.cron.is_job_due`): `enabled` (false always wins),
+`run_requested_at` (newer than the last completed run is always due — the
+only way a `cadence: null` job ever becomes due), and `cadence` against the
+most recent `JOB_RUN_COMPLETED` for that job name in the EventLog. A job
+that has never completed is always due.
+
+```bash
+trellis admin due-jobs [--format text|json]
+```
+
+```json
+{"status": "ok", "count": 1, "due_jobs": [{"name": "tune", "command": ["trellis", "worker", "tune", "--dry-run", "--format", "json"], "cadence": "0 4 * * *", "host_only": false, "timeout_seconds": 3600, "last_completed_at": null, "run_requested_at": null}], "schedule_file": "/path/to/schedule.json", "schedule_file_present": true, "store_degradation": null}
+```
+
+Works on a degraded file — jobs that parsed are still checked — but reports
+`"status": "degraded"` and exits `EXIT_STORE` (5) under both formats, same
+posture as `trellis policy list`: a partial due-jobs answer must not reach a
+dispatcher looking like a complete one.
+
+#### `trellis admin record-job-run`
+
+Record one job execution as a `JOB_RUN_STARTED` / `JOB_RUN_COMPLETED` event
+pair, modeled on `CAPTURE_SWEEP_COMPLETED`: plain EventLog telemetry, not a
+governed mutation — there is no state these events gate. Call once,
+immediately after the job process exits.
+
+```bash
+trellis admin record-job-run --job NAME --duration-ms MS --exit-code N [--status STR] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--job` | — (required) | Job name (schedule registry key). |
+| `--duration-ms` | — (required) | Wall-clock duration of the run, in ms. |
+| `--exit-code` | — (required) | The job process's own exit code. |
+| `--status` | derived | Free-form label; defaults to `ok` / `failed` from `--exit-code`. Use e.g. `skipped_overlap` when the dispatcher's `flock` meant the job never ran. |
+| `--format` | `text` | `text` or `json`. |
+
+`started_at` is derived as `now - duration_ms`, not taken as a second
+argument — the dispatcher already measured the duration, so there is no
+second number that could disagree with it.
+
+```json
+{"status": "ok", "job": "tune", "run_id": "01M...", "exit_code": 0, "job_status": "ok", "recorded": true}
+```
+
+**Recording a *failed* job's run is itself a successful call and exits 0** —
+"the dispatcher ran this job and it failed" is exactly the fact this command
+exists to durably record. Only a failure to write the EventLog pair itself
+(store unavailable) is this command's own failure, and exits `EXIT_STORE`
+(5) under both formats.
+
 ---
 
 ## Ingest Commands

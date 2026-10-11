@@ -6,6 +6,35 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Schedule registry + job-run records (#e166).** The pieces a host-side
+  dispatcher cron needs so job schedules can later be edited from a UI
+  (plan p1 §(b)) without the container ever touching crontab:
+  - `schedule.json` (`<data_dir>/stores/schedule.json`): a `ScheduledJob` row
+    per job (`name`, `command` as an argv list — never a shell string —
+    `cadence`, `enabled`, `timeout_seconds`, an operator-facing
+    `description`, `host_only`, `run_requested_at`), backed by a new
+    `ScheduleStore`, the third `DegradableJsonStore` subclass alongside
+    `PolicyStore` and `AdvisoryStore` (reads degrade, writes refuse).
+  - `trellis admin init-schedule` seeds the registry with Trellis's own
+    default jobs — the nightly capture/curate/backup/roadmap sweeps, the
+    tuner dry-run, and the manual-only commands from the UI gap inventory —
+    without overwriting anything an operator already edited.
+  - `trellis admin due-jobs --format json` reports which jobs are due now,
+    combining `enabled`, `cadence` (`trellis.core.cron`), the most recent
+    `JOB_RUN_COMPLETED` in the EventLog, and `run_requested_at`.
+  - `trellis admin record-job-run` records one execution as a
+    `JOB_RUN_STARTED` / `JOB_RUN_COMPLETED` event pair, modeled on
+    `CAPTURE_SWEEP_COMPLETED`.
+  - `docs/ops/job-dispatcher.sh.example`: a reference host-side dispatcher
+    script (documentation only, not installed by this repo) showing the
+    `due-jobs` → exec argv → `record-job-run` loop under `flock`.
+
+  No REST route and no UI yet (a later PR, plan p1 PR 6). No command
+  anywhere in this registry, the store, or the two new CLI commands execs
+  anything; `command` is schema-validated as a non-empty list of non-blank
+  argv tokens, and the one thing that does exec a job — the reference
+  dispatcher script — builds it as a bash array and execs it directly,
+  never through a shell.
 - **Promotion-ready-candidate digest and readable fallback names (#845).**
   Prod had scored 796 learning candidates with 0 ever promoted, and 13 of the
   top 15 `promote_guidance` candidates carried an ugly bare-item-id
