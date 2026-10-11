@@ -110,6 +110,22 @@ def test_banner_claim_and_detail_ternaries_are_each_keyed_on_optional() -> None:
     assert detail_match.group(2).startswith("No API key is required right now.")
 
 
+def test_banner_mode_is_read_from_the_response_not_hard_coded() -> None:
+    """Every assertion above lives inside the ``mode === 'optional'``
+    ternaries, so a banner that hard-coded ``mode`` to the literal
+    ``'optional'`` instead of reading ``data.auth_mode`` would still
+    satisfy all of them -- it would still show the "optional" wording,
+    just always, even when the server actually reports ``off`` or
+    ``required``. Pins the assignment itself rather than only what it
+    feeds.
+    """
+    page = _page()
+    body = _between(
+        page, "function renderAuthBanner(data) {", "function formatRuntimeDir("
+    )
+    assert "const mode = data.auth_mode;" in body
+
+
 def test_runtime_panel_reads_fields_from_the_response_not_a_copy() -> None:
     page = _page()
     body = _between(

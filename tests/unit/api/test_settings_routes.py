@@ -191,6 +191,14 @@ class TestListSettings:
         explicit, visible fact instead. Renamed to ``parse_error`` (a fixed,
         value-free reason string, never a bool) so the raw out-of-range
         value can never leak back out through this field either.
+
+        The reason text itself states only that validation rejects the
+        row, not what happens next -- some knobs this field covers do not
+        fall back to a default at all (an env-pinned knob, or
+        ``WriteBehaviourConfig``'s own looser bool/unbounded-int
+        resolvers), so the text cannot claim that in general; this case
+        happens to fall back to the default too, which the
+        ``effective_value`` assertion above already shows.
         """
         settings_path = resolve_settings_path(registry.stores_dir)
         assert settings_path is not None
@@ -202,9 +210,7 @@ class TestListSettings:
 
         assert row["stored_value"] == 1.5
         assert row["effective_value"] == 0.0  # the module default
-        assert row["parse_error"] == (
-            "stored value is not a finite number in range; using the default"
-        )
+        assert row["parse_error"] == "stored value is not a finite number in range"
         assert "1.5" not in row["parse_error"]
 
     def test_a_valid_stored_row_is_not_flagged(

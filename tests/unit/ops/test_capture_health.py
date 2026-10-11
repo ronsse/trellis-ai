@@ -163,6 +163,67 @@ class TestResolveCaptureThresholds:
 
         assert window_hours == DEFAULT_WINDOW_HOURS
 
+    def test_the_exact_maximum_settings_window_is_honoured(self) -> None:
+        """``capture_warn_window_hours``'s registered ``maximum`` is 87,600
+        (10 years). The overflow-class tests above use 18,000,000, which
+        stays on the same side of 87,601 as 87,600 under an off-by-one
+        mutant of that bound -- this pins the boundary itself.
+        """
+        settings = {WINDOW_HOURS_SETTING: 87_600}
+
+        _threshold, window_hours = resolve_capture_thresholds(settings)
+
+        assert window_hours == 87_600
+
+    def test_one_past_the_maximum_settings_window_falls_back_to_the_default(
+        self,
+    ) -> None:
+        settings = {WINDOW_HOURS_SETTING: 87_601}
+
+        _threshold, window_hours = resolve_capture_thresholds(settings)
+
+        assert window_hours == DEFAULT_WINDOW_HOURS
+
+    def test_the_exact_maximum_env_window_is_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_WINDOW_HOURS", "87600")
+
+        _threshold, window_hours = resolve_capture_thresholds(None)
+
+        assert window_hours == 87_600
+
+    def test_one_past_the_maximum_env_window_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_WINDOW_HOURS", "87601")
+
+        _threshold, window_hours = resolve_capture_thresholds(None)
+
+        assert window_hours == DEFAULT_WINDOW_HOURS
+
+    def test_the_exact_maximum_settings_threshold_is_honoured(self) -> None:
+        """``capture_warn_threshold``'s registered ``maximum`` is
+        1,000,000 -- a sanity cap against a typo or overflow-class value,
+        not an operational ceiling. A mutant dropping that bound entirely
+        would still pass every other test in this class; this pins the
+        boundary itself.
+        """
+        settings = {THRESHOLD_SETTING: 1_000_000}
+
+        threshold, _window_hours = resolve_capture_thresholds(settings)
+
+        assert threshold == 1_000_000
+
+    def test_one_past_the_maximum_settings_threshold_falls_back_to_the_default(
+        self,
+    ) -> None:
+        settings = {THRESHOLD_SETTING: 1_000_001}
+
+        threshold, _window_hours = resolve_capture_thresholds(settings)
+
+        assert threshold == DEFAULT_THRESHOLD
+
 
 class TestCheckCaptureHealth:
     def test_empty_log_is_healthy(self, tmp_path: Path) -> None:
@@ -195,6 +256,30 @@ class TestCheckCaptureHealth:
         ]
         assert len(overflow_logs) == 1, logs
         assert overflow_logs[0]["window_hours"] == 18_000_000
+
+    def test_an_overflow_class_explicit_window_hours_still_warns_on_a_real_rejection(
+        self, tmp_path: Path
+    ) -> None:
+        """The test above never seeds a rejection, so it cannot tell a
+        correct fallback (``DEFAULT_WINDOW_HOURS``, 24) from a broken one
+        (0): with nothing in the event log, ``check_capture_health``
+        reports healthy either way. A fallback of 0 collapses the
+        trailing window to ``datetime.now() - timedelta(hours=0)`` --
+        "now" itself -- so a rejection that already happened falls
+        outside it and the banner never fires, exactly the silent-outage
+        failure this check exists to catch. Seeding a real rejection and
+        pinning ``warning.window_hours`` to the true default closes that
+        gap.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _reject_boundary(event_log, n=DEFAULT_THRESHOLD)
+
+        warning = check_capture_health(
+            event_log, threshold=DEFAULT_THRESHOLD, window_hours=18_000_000
+        )
+
+        assert warning is not None
+        assert warning.window_hours == DEFAULT_WINDOW_HOURS
 
     def test_below_threshold_is_healthy(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")

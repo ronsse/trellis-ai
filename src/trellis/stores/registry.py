@@ -1698,8 +1698,13 @@ class StoreRegistry:
         the config block is never consulted, so a path that fails to resolve
         raises rather than falling back to it.
 
-        Returns ``None`` only when no embedding is configured at all
-        (no env var, ``embeddings.provider`` absent, ``null``, or ``""``).
+        Returns ``None`` when no embedding is configured at all (no env
+        var, ``embeddings.provider`` absent, ``null``, or ``""``), and
+        also when the whole ``embeddings:`` block is not a mapping (a
+        bare string, bool, int, or list) — that shape is logged at
+        ``WARNING`` (the key and the value's type only, never the value)
+        and treated as unconfigured rather than raised, since it has no
+        ``provider`` field for the checks below to inspect.
         Raises :class:`BackendNotInstalledError` when ``provider: openai`` is
         configured but the ``llm-openai`` extra is missing, and
         :class:`ConfigError` when ``provider: openai`` finds no API key, or
@@ -1731,7 +1736,26 @@ class StoreRegistry:
                 logger.info("embedding_fn_loaded", source="env", path=custom_path)
         else:
             # 2. Check config
-            provider = self._embedding_config.get("provider")
+            if isinstance(self._embedding_config, Mapping):
+                provider = self._embedding_config.get("provider")
+            else:
+                # A non-Mapping 'embeddings:' block (a bare string, bool,
+                # int, or list -- YAML allows all of these at that key)
+                # has no 'provider' field to read at all. Logged at
+                # WARNING so the misconfiguration is discoverable, naming
+                # only the key and the type: the value itself could be a
+                # pasted credential. Treated the same as "not configured"
+                # rather than raised, matching every other shape this
+                # property already treats that way -- a caller wrapping
+                # this property (trellis_api.routes.admin.runtime, every
+                # retrieve/strategies.py degrade-to-keyword+graph site)
+                # must see "no embedder" here, never an AttributeError.
+                logger.warning(
+                    "embedding_config_not_mapping",
+                    key="embeddings",
+                    type=type(self._embedding_config).__name__,
+                )
+                provider = None
             # None and "" mean "not configured" (the pre-existing posture).
             # Any other non-string (bool, int, list, mapping, ...) is an
             # operator error rather than a second way to spell "off": YAML
@@ -1802,6 +1826,12 @@ class StoreRegistry:
         custom_path = os.environ.get("TRELLIS_EMBEDDING_FN")
         if custom_path:
             return f"{custom_path} (TRELLIS_EMBEDDING_FN)"
+        # A non-Mapping 'embeddings:' block has no 'provider' field to
+        # read -- guarded the same way :attr:`embedding_fn` is, so this
+        # never raises. :meth:`embedding_fn` already treats that shape as
+        # unconfigured, so there is no resolved value to show here either.
+        if not isinstance(self._embedding_config, Mapping):
+            return None
         provider = self._embedding_config.get("provider")
         if isinstance(provider, str) and provider:
             return f"{provider} (embeddings.provider)"
@@ -1811,8 +1841,10 @@ class StoreRegistry:
         """Which knob *name* governs :attr:`embedding_fn`, with no value.
 
         Same precedence as :meth:`embedding_source_label` (env wins over
-        config), but reports only ``"TRELLIS_EMBEDDING_FN"`` or
-        ``"embeddings.provider"`` — never the dotted path or provider
+        config), but reports only ``"TRELLIS_EMBEDDING_FN"``,
+        ``"embeddings.provider"``, or ``"embeddings"`` (when the whole
+        block is a non-empty, non-Mapping value, so there is no
+        ``provider`` field to name) — never the dotted path or provider
         string a caller supplied. Use this on a *failure* path, where the
         configured value is exactly the attacker- or typo-controlled text
         that must never reach a response body or a log line: unlike the
@@ -1824,6 +1856,14 @@ class StoreRegistry:
 
         if os.environ.get("TRELLIS_EMBEDDING_FN"):
             return "TRELLIS_EMBEDDING_FN"
+        if not isinstance(self._embedding_config, Mapping):
+            # Guarded the same way :attr:`embedding_fn` is -- a non-empty
+            # scalar/list block is a knob the operator did set, just not
+            # in a shape that has a 'provider' field; an empty/falsy one
+            # normalises to ``{}`` before it ever reaches this attribute
+            # (see the constructor), so this branch only sees a truthy,
+            # malformed value.
+            return "embeddings" if self._embedding_config else None
         provider = self._embedding_config.get("provider")
         if isinstance(provider, str) and provider:
             return "embeddings.provider"

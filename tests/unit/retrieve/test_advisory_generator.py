@@ -232,6 +232,53 @@ class TestResolveAdvisoryThresholds:
 
         assert effect_size == 0.15
 
+    def test_the_exact_maximum_settings_sample_size_is_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``advisory_min_sample_size`` is registered with
+        ``maximum=1_000_000`` -- a sanity cap against a typo or an
+        overflow-class value, not an operational ceiling, so the cap
+        value itself must still resolve rather than be rejected.
+        """
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: 1_000_000}
+
+        sample_size, _effect_size = resolve_advisory_thresholds(settings)
+
+        assert sample_size == 1_000_000
+
+    def test_one_past_the_maximum_settings_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: 1_000_001}
+
+        sample_size, _effect_size = resolve_advisory_thresholds(settings)
+
+        assert sample_size == 5
+
+    def test_the_exact_maximum_env_sample_size_is_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "1000000")
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 1_000_000
+
+    def test_one_past_the_maximum_env_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "1000001")
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 5
+
 
 class TestAdvisoryGeneratorEmpty:
     """Generator produces empty report with no data."""

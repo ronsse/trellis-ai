@@ -19,11 +19,14 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from tests.structlog_isolation import clear_cached_logger_proxies
 from trellis.core.settings_registry import (
     SETTINGS_REGISTRY,
     SettingSpec,
+    get_setting,
     validate_value,
 )
+from trellis.logging import configure_stderr_logging
 from trellis.mutate.policy_source import POLICY_FILENAME
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
@@ -407,3 +410,95 @@ class TestEffectiveValueNoteContent:
         match = re.search(r"\(effective value: (.*?)\)", note)
         assert match is not None, note
         assert match.group(1) == repr(expected), note
+
+
+_GARBAGE_SETTING_CASES = [
+    ("advisory_min_sample_size", "advisory_generator.bad_settings_int"),
+    ("advisory_min_effect_size", "advisory_generator.bad_settings_float"),
+    ("capture_warn_threshold", "capture_health.bad_settings_int"),
+    ("capture_warn_window_hours", "capture_health.bad_settings_int"),
+    ("noise_demotion_min_attributed_packs", "demotion_gate.bad_settings_int"),
+    ("noise_demotion_min_unhelpful_citations", "demotion_gate.bad_settings_int"),
+]
+
+
+class TestStoredGarbageOnAnotherSettingNeverLeaksItsValue:
+    """``settings set``/``unset`` resolve *every* registry entry through
+    ``trellis_api.routes.settings._effective_values`` whenever the
+    targeted knob's env var is set (``_truthfulness_note``'s "env" branch
+    calls ``_env_effective_value``, which delegates there -- see
+    ``TestEffectiveValueAcrossRegistry`` above) -- not just the one knob
+    the command targets. A garbage **stored** row on an unrelated knob --
+    planted directly via ``SettingsStore.set``, bypassing validation, the
+    shape a hand edit or a pre-validation legacy row would take -- is
+    read back and coerced, failing the way an operator's typo would. The
+    resolvers that catch that failure used to log the raw stored value at
+    WARNING (``value=<raw>``); a single ``settings set`` call on an
+    unrelated, env-pinned knob then echoed every malformed row elsewhere
+    in the store, needle included, to stderr. This targets
+    ``pack_holdout_rate`` with its own env var set so that branch runs.
+
+    The CLI suite mutes structlog to ``CRITICAL`` by default (see
+    ``conftest._suppress_structlog``) and ``click``'s ``CliRunner`` mixes
+    stderr into ``result.output`` regardless of where a logger writes
+    (``tests/cli_output.py``), so this test raises the level back to
+    ``WARNING`` and reads the rendered line straight out of
+    ``result.output`` rather than through
+    ``structlog.testing.capture_logs``: a Trellis CLI command reconfigures
+    structlog's processors afresh on every invocation (``trellis/logging.py``'s
+    ``_LazyStderr`` docstring), which replaces the list ``capture_logs``
+    is holding a reference to and silently orphans its capture for any
+    logger bound during that invocation. ``clear_cached_logger_proxies``
+    evicts whatever level a module's logger proxy cached from an earlier,
+    still-``CRITICAL`` test in this suite, so this one does not depend on
+    being the first to touch these resolvers (``tests/structlog_isolation.py``).
+    """
+
+    @pytest.mark.parametrize(
+        ("setting_name", "event"),
+        _GARBAGE_SETTING_CASES,
+        ids=[c[0] for c in _GARBAGE_SETTING_CASES],
+    )
+    def test_needle_absent_from_output_and_log_carries_no_value(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        setting_name: str,
+        event: str,
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        needle = "sk-proj-FAKEsettingsGarbageRowNeedle000111"
+        _store(tmp_path).set(setting_name, "x" + needle)
+
+        target = get_setting("pack_holdout_rate")
+        monkeypatch.setenv(target.env_var, "0.5")
+        monkeypatch.setenv("TRELLIS_LOG_LEVEL", "WARNING")
+        configure_stderr_logging()
+        clear_cached_logger_proxies()
+
+        # ``configure_stderr_logging()`` above pins this WARNING level into
+        # every logger proxy this invocation touches for the lifetime of the
+        # process (see ``tests/structlog_isolation.py`` -- the cache lives on
+        # the proxy, not in structlog's global config, so neither the next
+        # test's CRITICAL env var nor its own ``configure_stderr_logging()``
+        # call evicts it). Restore the suite's default level and clear the
+        # cache again before returning, success or failure, so this test
+        # cannot leave a later test reading a stray WARNING line into output
+        # it expects to be clean JSON.
+        try:
+            result = _invoke(["set", "pack_holdout_rate", "0.3", "--format", "json"])
+
+            assert result.exit_code == EXIT_OK, result.output
+            output = plain(result.output)
+            assert needle not in output
+
+            matching_lines = [line for line in output.splitlines() if event in line]
+            assert len(matching_lines) == 1, output
+            line = matching_lines[0]
+            assert f"setting={setting_name}" in line, line
+            assert "error_type=ValueError" in line, line
+            assert "value=" not in line, line
+        finally:
+            monkeypatch.setenv("TRELLIS_LOG_LEVEL", "CRITICAL")
+            configure_stderr_logging()
+            clear_cached_logger_proxies()

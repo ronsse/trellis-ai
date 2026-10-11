@@ -178,6 +178,56 @@ class TestResolveDemotionThresholds:
 
         assert citations == MIN_UNHELPFUL_CITATIONS
 
+    def test_the_exact_maximum_settings_value_is_honoured_for_both_thresholds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both thresholds are registered with ``maximum=1_000_000`` -- a
+        sanity cap against a typo or an overflow-class value, not an
+        operational ceiling, so the cap value itself must still resolve.
+        """
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+        settings = {
+            MIN_ATTRIBUTED_PACKS_SETTING: 1_000_000,
+            MIN_UNHELPFUL_CITATIONS_SETTING: 1_000_000,
+        }
+
+        assert resolve_demotion_thresholds(settings) == (1_000_000, 1_000_000)
+
+    def test_one_past_the_maximum_settings_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+        settings = {
+            MIN_ATTRIBUTED_PACKS_SETTING: 1_000_001,
+            MIN_UNHELPFUL_CITATIONS_SETTING: 1_000_001,
+        }
+
+        assert resolve_demotion_thresholds(settings) == (
+            MIN_ATTRIBUTED_PACKS,
+            MIN_UNHELPFUL_CITATIONS,
+        )
+
+    def test_the_exact_maximum_env_value_is_honoured_for_both_thresholds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_ATTRIBUTED_PACKS_ENV, "1000000")
+        monkeypatch.setenv(MIN_UNHELPFUL_CITATIONS_ENV, "1000000")
+
+        assert resolve_demotion_thresholds(None) == (1_000_000, 1_000_000)
+
+    def test_one_past_the_maximum_env_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_ATTRIBUTED_PACKS_ENV, "1000001")
+        monkeypatch.setenv(MIN_UNHELPFUL_CITATIONS_ENV, "1000001")
+
+        assert resolve_demotion_thresholds(None) == (
+            MIN_ATTRIBUTED_PACKS,
+            MIN_UNHELPFUL_CITATIONS,
+        )
+
 
 class TestConstantsArePinnedByValue:
     """The two thresholds, asserted as the numbers they actually are.

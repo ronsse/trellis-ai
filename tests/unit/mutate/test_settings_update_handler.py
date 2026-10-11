@@ -273,6 +273,59 @@ class TestRefusesRatherThanClamps:
         assert _store(registry).get("pack_holdout_rate") is None
 
 
+_FIVE_MAXIMA_CASES = [
+    ("capture_warn_window_hours", 87_600),
+    ("capture_warn_threshold", 1_000_000),
+    ("noise_demotion_min_attributed_packs", 1_000_000),
+    ("noise_demotion_min_unhelpful_citations", 1_000_000),
+    ("advisory_min_sample_size", 1_000_000),
+]
+
+
+class TestFiveMaximaAreInclusiveOnTheGovernedWritePath:
+    """Five settings carry a sanity-cap ``maximum`` -- 87_600 hours (ten
+    years) for ``capture_warn_window_hours``, 1_000_000 for the other
+    four -- meant to catch a typo or an overflow-class input, not an
+    operational ceiling. ``_check_bounds`` only raises when a value
+    exceeds ``spec.maximum``, so the maximum itself is a valid value
+    and only one past it is refused. Proven here on the governed write
+    path every real surface (the REST route, the CLI command) reaches
+    through ``SettingsUpdateHandler``, independent of the read-side
+    resolver coverage in ``test_capture_health.py``,
+    ``test_demotion_gate.py`` and ``test_advisory_generator.py``.
+    """
+
+    @pytest.mark.parametrize(
+        ("setting_name", "maximum"),
+        _FIVE_MAXIMA_CASES,
+        ids=[c[0] for c in _FIVE_MAXIMA_CASES],
+    )
+    def test_the_exact_maximum_is_accepted(
+        self, registry: StoreRegistry, setting_name: str, maximum: int
+    ) -> None:
+        handler = SettingsUpdateHandler(registry)
+        cmd = _cmd(setting_name, maximum)
+
+        handler.handle(cmd)
+
+        assert _store(registry).get(setting_name).value == maximum
+
+    @pytest.mark.parametrize(
+        ("setting_name", "maximum"),
+        _FIVE_MAXIMA_CASES,
+        ids=[c[0] for c in _FIVE_MAXIMA_CASES],
+    )
+    def test_one_past_the_maximum_is_rejected(
+        self, registry: StoreRegistry, setting_name: str, maximum: int
+    ) -> None:
+        handler = SettingsUpdateHandler(registry)
+        cmd = _cmd(setting_name, maximum + 1)
+
+        with pytest.raises(ValidationError):
+            handler.handle(cmd)
+        assert _store(registry).get(setting_name) is None
+
+
 class TestNullValueResets:
     def test_null_value_removes_an_existing_override(
         self, registry: StoreRegistry

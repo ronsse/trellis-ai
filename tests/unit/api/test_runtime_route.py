@@ -290,6 +290,83 @@ def test_embedder_failure_never_echoes_the_knob_value_in_the_log(
         assert "sk-live-RuntimeEmbedderSecretValue000111" not in str(value)
 
 
+@pytest.mark.parametrize(
+    ("embedding_config", "needle"),
+    [
+        pytest.param("openai", None, id="str"),
+        pytest.param(
+            ["sk-live-NonMappingEmbeddingConfigSecret000111"],
+            "sk-live-NonMappingEmbeddingConfigSecret000111",
+            id="list",
+        ),
+        pytest.param(True, None, id="bool"),
+        pytest.param(5, None, id="int"),
+        pytest.param(
+            "sk-live-NonMappingEmbeddingConfigSecret000222",
+            "sk-live-NonMappingEmbeddingConfigSecret000222",
+            id="fake-key-str",
+        ),
+    ],
+)
+def test_a_non_mapping_embeddings_config_is_reported_as_an_error_not_a_500(
+    tmp_path, embedding_config, needle
+) -> None:
+    """A truthy non-Mapping ``embeddings:`` block -- a bare string, a
+    list, ``True``, or a bare int -- used to reach ``.get("provider")``
+    inside :attr:`StoreRegistry.embedding_fn` as an uncaught
+    ``AttributeError``. The route's except branch then called
+    :meth:`StoreRegistry.embedding_source_knob` to build the degraded
+    message, which hit the same ``.get`` call on the same non-Mapping
+    value and raised a *second*, uncaught ``AttributeError`` -- an
+    operator's ``embeddings: <scalar-or-list>`` typo 500'd the whole
+    Runtime panel, auth banner included, instead of degrading to a
+    reported field like every other malformed config shape.
+
+    ``embedding_fn``, ``embedding_source_label`` and
+    ``embedding_source_knob`` now mapping-guard ``embeddings:`` and treat
+    that shape as unconfigured (logging only the key and the value's
+    *type*), so the panel reports ``"unknown (embeddings)"`` instead of
+    raising, and never echoes the configured value itself -- which, in
+    the ``list`` and ``fake-key-str`` cases here, is shaped exactly like
+    a pasted credential.
+    """
+    reg = StoreRegistry(
+        stores_dir=tmp_path / "stores", embedding_config=embedding_config
+    )
+    app_module._registry = reg
+    try:
+
+        @asynccontextmanager
+        async def noop_lifespan(app):
+            yield
+
+        app = FastAPI(lifespan=noop_lifespan)
+        app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
+        with TestClient(app) as c, capture_logs() as logs:
+            resp = c.get("/api/v1/runtime")
+    finally:
+        reg.close()
+        app_module._registry = None
+
+    assert resp.status_code == 200, resp.text
+    raw = resp.text
+    body = json.loads(raw)
+    assert body["embedder"] == "unknown (embeddings)"
+
+    not_mapping_logs = [
+        log for log in logs if log.get("event") == "embedding_config_not_mapping"
+    ]
+    assert len(not_mapping_logs) == 1, logs
+    assert not_mapping_logs[0]["key"] == "embeddings"
+    assert not_mapping_logs[0]["type"] == type(embedding_config).__name__
+
+    if needle is not None:
+        assert needle not in raw
+        for log in logs:
+            for value in log.values():
+                assert needle not in str(value)
+
+
 def test_llm_routes_cover_every_consumer_and_are_unrouted_by_default(
     client, registry
 ) -> None:

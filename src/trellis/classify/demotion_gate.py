@@ -152,11 +152,11 @@ def _resolve_int_threshold(
                 if spec is not None
                 else int(raw_setting)
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
             logger.warning(
                 "demotion_gate.bad_settings_int",
                 setting=setting_name,
-                value=raw_setting,
+                error_type=type(exc).__name__,
             )
             return default
     return default

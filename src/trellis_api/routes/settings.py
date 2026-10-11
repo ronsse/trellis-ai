@@ -268,8 +268,12 @@ def _stored_value_parse_error(spec: SettingSpec, raw: Any) -> str | None:
     The reason text is keyed only on ``spec.type``/``spec.enum`` -- never
     on ``raw`` -- so a stored secret-shaped string that fails validation
     (a mistyped knob holding a credential, say) cannot resurface through
-    this field the way the old ``stored_value_invalid`` bool's sibling
-    fields never did either.
+    this field. That is narrower than it may sound: ``_entry`` above
+    already puts the raw override on the same response, unconditionally,
+    as ``stored_value`` -- a different field built for a different job
+    (showing an operator what is actually on disk). This field's job is
+    only to say that row is unusable, never to be a second, redundant
+    echo of it.
     """
     try:
         validate_value(spec, raw)
@@ -279,14 +283,29 @@ def _stored_value_parse_error(spec: SettingSpec, raw: Any) -> str | None:
 
 
 def _parse_error_reason(spec: SettingSpec) -> str:
-    """The fixed, value-free reason text for ``spec``'s type."""
+    """The fixed, value-free reason text for ``spec``'s type.
+
+    States only that ``validate_value`` rejects the stored row, never
+    what happens next. An earlier wording appended "; using the default"
+    unconditionally, which does not hold for every knob this field
+    covers: an env-pinned knob ignores the stored row either way (the
+    environment variable wins, not a default); ``WriteBehaviourConfig``'s
+    own boolean fields accept a stored ``1``/``1.0`` that this registry's
+    stricter ``validate_value`` rejects; and ``minhash_seed_max_docs``,
+    ``reconcile_timeout_s`` and ``reconcile_model`` are resolved by
+    dedicated code that is unbounded, accepts ``inf``, or never checks
+    the type the way this field's probe does. The field still does its
+    job -- it flags that the registry's own validation disagrees with
+    what is on disk -- without asserting a specific resolution this
+    function cannot see.
+    """
     if spec.type == "bool":
-        return "stored value is not a recognized boolean; using the default"
+        return "stored value is not a recognized boolean"
     if spec.type in ("int", "float"):
-        return "stored value is not a finite number in range; using the default"
+        return "stored value is not a finite number in range"
     if spec.enum is not None:
-        return "stored value is not one of the allowed options; using the default"
-    return "stored value failed validation; using the default"
+        return "stored value is not one of the allowed options"
+    return "stored value failed validation"
 
 
 def _execute_command(cmd: Command) -> CommandResponse:

@@ -188,15 +188,18 @@ def runtime() -> RuntimeResponse:
     nothing else reads) — so this view cannot drift from how the server
     actually behaves. Deliberately excludes anything secret-shaped:
     ``stores`` is class names only, ``embedder`` names only the
-    configuration knob in play (``TRELLIS_EMBEDDING_FN`` or
-    ``embeddings.provider``, never a key or URL), ``llm_routes`` carries
-    tier names only (an ``LLMRoute``'s ``block`` — which can hold a
-    literal API key — is never touched, and a malformed route is
-    reported by its setting path, never the value that failed to
-    validate), and the two directory fields are plain paths. Resolving
-    the embedder is wrapped whole rather than guarded by exception type:
-    an unconfigured or misconfigured embedding knob must read as "none
-    configured" or "unknown" here, never 500 a panel that exists to show
+    configuration knob in play (``TRELLIS_EMBEDDING_FN``,
+    ``embeddings.provider``, or ``embeddings`` when the whole block is
+    malformed — never a key or URL), ``llm_routes`` carries tier names
+    only (an ``LLMRoute``'s ``block`` — which can hold a literal API key
+    — is never touched, and a malformed route is reported by its
+    setting path, never the value that failed to validate), and the two
+    directory fields are plain paths. Resolving the embedder is wrapped
+    whole, and the knob lookup used on both the raise and the
+    resolved-to-nothing paths is itself guarded against raising, so an
+    unconfigured or misconfigured embedding knob — including a
+    non-mapping ``embeddings:`` block — reads as "none configured" or
+    "unknown" here, never 500s a panel that exists to show
     configuration, not enforce it.
     """
     registry = get_registry()
@@ -219,7 +222,10 @@ def runtime() -> RuntimeResponse:
     # embedder's own degrade-to-keyword+graph callers, so a misconfigured
     # 'embeddings:' block or TRELLIS_EMBEDDING_FN reads as "unknown" here
     # rather than 500-ing a panel that exists to show configuration, not
-    # enforce it.
+    # enforce it. A non-mapping 'embeddings:' block (a bare string, bool,
+    # int, or list) no longer reaches this try at all -- embedding_fn
+    # itself degrades that shape to "unconfigured" -- so it is reported
+    # as "unknown" below, in the resolved-to-nothing branch, not here.
     embedder_name: str | None = None
     try:
         resolved_embedding_fn = registry.embedding_fn
@@ -228,7 +234,14 @@ def runtime() -> RuntimeResponse:
         # the failure path the configured string is exactly the
         # typo/attacker-controlled text that must not reach the response
         # body or the log. Only the knob name and the exception type.
-        knob = registry.embedding_source_knob()
+        # The knob lookup itself is wrapped too: it is guarded against
+        # this same failure shape (see StoreRegistry.embedding_source_knob),
+        # but a second, independent try/except here means a future bug in
+        # that guard degrades this field instead of 500-ing the panel.
+        try:
+            knob = registry.embedding_source_knob()
+        except Exception:  # GRACEFUL-DEGRADATION: a panel, not a gate
+            knob = None
         logger.warning(
             "runtime_embedder_probe_failed",
             knob=knob,
@@ -240,11 +253,19 @@ def runtime() -> RuntimeResponse:
             else f"unknown ({type(exc).__name__})"
         )
     else:
-        embedder_name = (
-            registry.embedding_source_label()
-            if resolved_embedding_fn is not None
-            else None
-        )
+        if resolved_embedding_fn is not None:
+            embedder_name = registry.embedding_source_label()
+        else:
+            # embedding_fn returns None both when nothing is configured
+            # and when the 'embeddings:' block is a non-mapping value it
+            # degrades rather than raises on (see its docstring) -- the
+            # two must not render identically, or a malformed block reads
+            # as a quiet, intentional "no embedder" instead of a
+            # misconfiguration the operator should fix. embedding_source_knob
+            # reports "embeddings" for exactly that second case and None
+            # for the first.
+            knob = registry.embedding_source_knob()
+            embedder_name = f"unknown ({knob})" if knob else None
 
     llm_routes: dict[str, str | None] = {}
     llm_routes_error: str | None = None
@@ -268,14 +289,13 @@ def runtime() -> RuntimeResponse:
             else "llm.routes/llm.tiers is invalid; see the server log."
         )
     except Exception as exc:  # GRACEFUL-DEGRADATION: a panel, not a gate
-        # S1 (re-gate #867): routing.py now raises LLMRoutingError for a
-        # non-Mapping 'llm:' block too, but this is the second,
-        # independent gate the embedder block above already uses --
-        # whatever reaches here next (a resolver bug, a future shape
-        # validate_llm_routing doesn't anticipate) degrades to a reported
-        # field rather than a 500 that blanks the whole panel, auth
-        # banner included. Fixed text only, never str(exc), which could
-        # echo a pasted credential.
+        # routing.py raises LLMRoutingError for a non-Mapping 'llm:' block,
+        # caught above; this is the second, independent gate the embedder
+        # block earlier in this function also uses -- whatever reaches
+        # here next (a resolver bug, a future shape validate_llm_routing
+        # doesn't anticipate) degrades to a reported field rather than a
+        # 500 that blanks the whole panel, auth banner included. Fixed
+        # text only, never str(exc), which could echo a pasted credential.
         logger.warning(
             "runtime_llm_routes_invalid",
             setting=None,
