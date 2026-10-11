@@ -42,6 +42,40 @@ All notable changes to Trellis will be documented in this file.
     and the effective-rule table with Revoke gated to `source ==
     "overlay"` rows (a `default`/`config` row was never written by the
     overlay store and the `DELETE` route refuses it).
+- **Analyze reports over HTTP + a Reports UI tab (#e182).** "Are our
+  learning loops performing?" was answerable only from the CLI
+  (`trellis analyze <report>`); it now has a read-scoped HTTP surface and a
+  UI tab, both calling the exact library functions the CLI calls — never a
+  copy of their logic.
+  - `GET /api/v1/analyze` lists the allowlisted reports with an operator
+    description and default params each.
+  - `GET /api/v1/analyze/{report}` runs one: `holdout`, `judged-outcomes`,
+    `advisory-effectiveness`, `value`, `dimension-predictiveness`,
+    `learning-candidates`, `domains`, `extractor-fallbacks`,
+    `pack-telemetry`, `token-usage`, `cost`. Each report has its own
+    `extra="forbid"` param DTO; an unknown report 404s listing the allowed
+    names, a bad or unknown param 422s. `pack-quality` (needs a scenarios
+    file, no bounded default shape), `replay`, `generate-advisories` and
+    `apply-noise-tags` (writes) are deliberately excluded.
+  - Payloads are finite JSON always — Infinity/NaN are sanitised to `null`
+    before the response leaves the process, never written inline. A report
+    that scans the whole EventLog is cached per-process for 60s, surfaced
+    via `computed_at` / `cached`.
+  - `advisory-effectiveness` refuses to score a degraded advisory store
+    (same check the CLI makes before its own dry-run), rather than silently
+    scoring an incomplete set.
+  - The UI's new "Reports" tab picks a report, fills params from its
+    defaults, and renders the result as cards with a raw-JSON toggle,
+    honest "insufficient data" / degraded states, and `computed_at`.
+  - A small readiness pill in the header (fed by the `/readyz` probe the
+    dashboard already fetches — no extra request) shows ready / degraded /
+    unknown, with failing backend names on hover when the caller is
+    authenticated.
+  - G9 (`parameter_promotions` truthfulness, plus outcome/version signal)
+    was re-measured rather than rebuilt: the metric and its annotated
+    promote/reject/degrade/auto-rollback event strip already ship on the
+    Metrics view (`src/trellis/retrieve/metrics_timeseries.py`) — no gap
+    found, no new work needed there.
 - **Schedule registry + job-run records (#e166).** The pieces a host-side
   dispatcher cron needs so job schedules can later be edited from a UI
   (plan p1 §(b)) without the container ever touching crontab — and the

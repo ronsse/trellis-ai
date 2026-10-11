@@ -2654,6 +2654,61 @@ paths:
       summary: Generate Advisories
       tags:
       - admin
+  /api/v1/analyze:
+    get:
+      description: List the reports available under ``GET /api/v1/analyze/{report}``.
+      operationId: list_analyze_reports_api_v1_analyze_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Analyze Reports Api V1 Analyze Get
+                type: object
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: List Analyze Reports
+      tags:
+      - analyze
+  /api/v1/analyze/{report}:
+    get:
+      description: 'Run one allowlisted ``trellis analyze`` report over HTTP.
+
+
+        Query params are validated against the report''s own bounded DTO
+
+        (``extra="forbid"``) rather than FastAPI''s automatic pydantic-model
+
+        binding, because that binding does not reject an unrecognized query
+
+        key — only a manual parse does.'
+      operationId: get_analyze_report_api_v1_analyze__report__get
+      parameters:
+      - in: path
+        name: report
+        required: true
+        schema:
+          title: Report
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: {}
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Get Analyze Report
+      tags:
+      - analyze
   /api/v1/classify/candidates:
     get:
       description: 'Recent tag/domain candidates, deduped to each one''s latest emission.

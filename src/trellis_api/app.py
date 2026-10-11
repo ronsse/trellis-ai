@@ -130,6 +130,7 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     from trellis_api.routes import (  # noqa: PLC0415
         admin,
+        analyze,
         classify_rules,
         curate,
         explore,
@@ -196,6 +197,7 @@ def create_app() -> FastAPI:
     # optional / required — see ``trellis_api.auth``). The map:
     #
     #   retrieve                     -> read
+    #   analyze                      -> read
     #   ingest                       -> ingest
     #   mutations / curate / extract -> mutate
     #   admin                        -> admin
@@ -231,6 +233,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         explore.router, prefix="/api/v1", tags=["explore"], dependencies=read_auth
+    )
+    app.include_router(
+        analyze.router, prefix="/api/v1", tags=["analyze"], dependencies=read_auth
     )
     app.include_router(
         curate.router, prefix="/api/v1", tags=["curate"], dependencies=mutate_auth
