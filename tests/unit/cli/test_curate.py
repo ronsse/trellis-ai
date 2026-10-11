@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -11,6 +12,10 @@ from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
 from trellis.learning import submit_learning_promotion
+from trellis.learning.candidate_auto_promote import (
+    CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_SETTING,
+    CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
+)
 from trellis.mutate.commands import (
     Command,
     CommandResult,
@@ -18,6 +23,8 @@ from trellis.mutate.commands import (
     Operation,
 )
 from trellis.mutate.executor import MutationExecutor
+from trellis.stores.base.event_log import EventType
+from trellis.stores.settings_store import SettingsStore
 from trellis_cli import curate as curate_cli
 from trellis_cli.main import app
 
@@ -886,6 +893,124 @@ class TestPromotionVisibleToGetLessons:
         )
         assert (
             len(list_precedents(registry.operational.event_log, domain="shipping")) == 0
+        )
+
+
+def _auto_promote_candidate(
+    candidate_id: str = "cand-1",
+    *,
+    helpful_count: int = 5,
+    distinct_helpful_sessions: int = 3,
+    unhelpful_count: int = 0,
+) -> dict:
+    return {
+        "candidate_id": candidate_id,
+        "recommendation_type": "promote_precedent",
+        "precedent_name": f"Precedent for {candidate_id}",
+        "citation_evidence": {
+            "helpful_count": helpful_count,
+            "distinct_helpful_sessions": distinct_helpful_sessions,
+            "unhelpful_count": unhelpful_count,
+        },
+        "target_entity_ids": [],
+    }
+
+
+class TestCurateAutoPromoteCandidates:
+    """Gate-861b B-2 and follow-up I: no CLI test existed for this command."""
+
+    def _write_candidates(self, tmp_path: Path, candidates: list[dict]) -> Path:
+        path = tmp_path / "candidates.json"
+        path.write_text(json.dumps({"candidates": candidates}))
+        return path
+
+    def test_dry_run_overrides_a_stored_commit_mode(self, tmp_path: Path) -> None:
+        """B-2: without --dry-run a stored mode=commit refuses the whole
+        run with a configuration error (exit 5) before any candidate is
+        evaluated; --dry-run must still work in that case, running
+        report-only and writing nothing — the policy must be forced to
+        report_only *before* it is constructed, not after.
+        """
+        stores_dir = Path(os.environ["TRELLIS_DATA_DIR"]) / "stores"
+        SettingsStore(stores_dir / "settings.json").set(
+            CANDIDATE_AUTO_PROMOTE_MODE_SETTING, "commit"
+        )
+        candidates_path = self._write_candidates(tmp_path, [_auto_promote_candidate()])
+
+        # Without --dry-run: the stored commit mode refuses construction.
+        refused = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(candidates_path),
+                "--format",
+                "json",
+            ],
+        )
+        assert refused.exit_code == 5, refused.output
+
+        # With --dry-run: forced to report_only before the policy is built.
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(candidates_path),
+                "--dry-run",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["mode"] == "report_only"
+        assert data["promoted_count"] == 0
+
+        event_log = curate_cli._get_registry().operational.event_log
+        mutation_events = event_log.get_events(event_type=EventType.MUTATION_EXECUTED)
+        assert mutation_events == []
+        evaluated_events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )
+        assert len(evaluated_events) == 1
+
+    def test_cli_resolves_the_policy_from_settings_not_a_hardcoded_default(
+        self, tmp_path: Path
+    ) -> None:
+        """Kills gate-861b's M5 (the CLI builds a default policy, ignoring
+        settings and env): a stored min_helpful_count floor above the
+        candidate's helpful_count must flip its disposition.
+        """
+        stores_dir = Path(os.environ["TRELLIS_DATA_DIR"]) / "stores"
+        SettingsStore(stores_dir / "settings.json").set(
+            CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_SETTING, 100
+        )
+        candidates_path = self._write_candidates(
+            tmp_path, [_auto_promote_candidate(helpful_count=5)]
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(candidates_path),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["ineligible_count"] == 1
+        assert data["would_promote_count"] == 0
+        assert (
+            data["outcomes"][0]["disposition"]
+            == "ineligible:insufficient_helpful_count"
         )
 
 

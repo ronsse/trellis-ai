@@ -420,6 +420,19 @@ def test_looser_than_manual_rejected_via_exit(config_dir: Path) -> None:
         worker._build_auto_promote_policy_or_exit()
 
 
+@pytest.mark.parametrize("raw", ["inf", "1e999", "nan"])
+def test_non_finite_env_threshold_rejected_via_exit_not_overflow(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    # A non-finite TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE must surface the
+    # same clean typer.Exit every other malformed config value gets here
+    # — never an uncaught OverflowError escaping past the
+    # `except ValueError` in _build_auto_promote_policy_or_exit.
+    monkeypatch.setenv("TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE", raw)
+    with pytest.raises(typer.Exit):
+        worker._build_auto_promote_policy_or_exit()
+
+
 # ===========================================================================
 # worker curate — full cycle (WP3)
 # ===========================================================================

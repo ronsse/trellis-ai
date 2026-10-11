@@ -255,7 +255,7 @@ def test_the_governing_key_roster_matches_the_live_constants() -> None:
     test may depend on anything.
 
     A subset check, not equality: :data:`GOVERNING_KEYS` also carries
-    settings-registry leaf keys (e177) that the AST scan collects by
+    settings-registry leaf keys that the AST scan collects by
     shape but that have no ``PARAM_COMPONENT_ID``-style live constant to
     import and compare against. Equality would make every such addition
     fail this test alongside the one it is meant to police; the roster's

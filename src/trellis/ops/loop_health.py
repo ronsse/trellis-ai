@@ -120,15 +120,18 @@ def _build_candidate_auto_promote_row(
     agreement = compute_agreement_metric(event_log, limit=limit)
 
     counters: dict[str, Any] | None = None
+    last_status: str | None = None
     if latest is not None:
         counts = latest.payload.get("counts") or {}
         snapshot = latest.payload.get("policy_snapshot") or {}
+        skipped = counts.get("skipped") or 0
         counters = {
             "last_run_mode": latest.payload.get("mode"),
             "last_run_would_promote": counts.get("would_promote"),
             "last_run_already_promoted": counts.get("already_promoted"),
             "last_run_promoted": counts.get("promoted"),
             "last_run_ineligible": counts.get("ineligible"),
+            "last_run_skipped": skipped,
             "configured_enabled": snapshot.get("enabled"),
             "configured_mode": snapshot.get("mode"),
             "agreement_agree": agreement.agree,
@@ -136,6 +139,12 @@ def _build_candidate_auto_promote_row(
             "agreement_undecided": agreement.undecided,
             "agreement_rate": agreement.rate,
         }
+        # An event existing is not the same claim as "the run was clean":
+        # a candidate with no usable id gets no outcome at all (see
+        # ``run_candidate_auto_promotion``'s ``skipped_count``), so a run
+        # that dropped input must not paint the same "ok" a run that
+        # evaluated everything it was given does.
+        last_status = "degraded" if skipped else "ok"
 
     row = LoopHealthRow(
         name="learning_candidate_auto_promote",
@@ -153,7 +162,7 @@ def _build_candidate_auto_promote_row(
             "writes a precedent."
         ),
         last_run_at=latest.occurred_at if latest else None,
-        last_status="ok" if latest else None,
+        last_status=last_status,
         counters=counters,
     )
     return row, candidate_scan.coverage
@@ -170,8 +179,8 @@ def summarize_loop_health(
 
     Eight rows, in the order the nightly cycle runs them: noise
     demotion, advisory generation, advisory fitness, learning-candidate
-    scoring, precedent promotion, learning-candidate auto-promotion
-    (e177), tuner, feedback intake.
+    scoring, precedent promotion, learning-candidate auto-promotion,
+    tuner, feedback intake.
     """
     now = now or datetime.now(UTC)
 
@@ -281,10 +290,11 @@ def summarize_loop_health(
         ),
         actuates=False,
         what_it_changes=(
-            "A human approves most promotions (Review tab or `trellis "
-            "curate promote-learning`); the scheduled, opt-in "
-            "learning_candidate_auto_promote loop below can also commit "
-            "one unattended when enabled. This row counts every "
+            "Nothing schedules a promotion: a human approves one (Review "
+            "tab or `trellis curate promote-learning`). The scheduled "
+            "learning_candidate_auto_promote loop below only reports what "
+            "it would promote — its `commit` mode is refused with a "
+            "configuration error. This row counts every "
             "PRECEDENT_PROMOTED event, which also includes any manual "
             "run of the unscheduled PrecedentMiner."
         ),

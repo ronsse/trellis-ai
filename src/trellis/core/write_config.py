@@ -31,6 +31,7 @@ monkeypatches a variable still sees the change, exactly as before.  The
 from __future__ import annotations
 
 import functools
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -221,6 +222,45 @@ def parse_finite_float(raw: Any) -> float:
         return float(raw)
     except (ValueError, OverflowError) as exc:
         msg = f"not a number: {raw!r}"
+        raise ValueError(msg) from exc
+
+
+def parse_finite_int(raw: Any) -> int:
+    """Parse *raw* to a finite ``int`` via ``float``, or raise ``ValueError``.
+
+    For an env-var knob that is logically an integer but, like every other
+    numeric env value in this module, arrives as a string someone may have
+    typed a decimal or scientific-notation value into (``"30.0"``,
+    ``"3e1"``) — hence the ``float`` round-trip rather than a bare
+    ``int(raw)``.
+
+    Unlike :func:`parse_finite_float`, this function *does* reject a
+    non-finite result. ``int(raw)`` has no non-finite case, but
+    ``int(float(raw))`` does, and the two failure modes are easy to
+    under-catch: ``int(float("nan"))`` raises ``ValueError`` (caught by
+    the obvious ``except ValueError``), but ``int(float("inf"))`` — and
+    the same for the literal string ``"1e999"``, which overflows ``float``
+    to ``inf`` — raises ``OverflowError`` instead, which an
+    ``except ValueError`` does not catch. A caller that wrote
+    ``int(float(raw))`` inline and wrapped only ``ValueError`` would 500 on
+    a settings-route read or crash a worker's startup on exactly the
+    ``inf``/``1e999`` input, while the ``nan`` sibling degraded cleanly —
+    an inconsistency with no good reason to preserve. This collapses both
+    into one ``ValueError``, mirroring :func:`parse_finite_float`'s own
+    ``OverflowError``-into-``ValueError`` normalization for the float-parse
+    step itself.
+    """
+    value = parse_finite_float(raw)
+    if not math.isfinite(value):
+        msg = f"must be a finite number, got {raw!r}"
+        raise ValueError(msg)
+    try:
+        return int(value)
+    except OverflowError as exc:  # pragma: no cover - defensive; value is
+        # already known finite above, so int() cannot overflow in
+        # practice, but a bare `except ValueError` upstream must never be
+        # the only thing standing between this and an uncaught OverflowError.
+        msg = f"not a valid integer: {raw!r}"
         raise ValueError(msg) from exc
 
 

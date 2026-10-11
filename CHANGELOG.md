@@ -95,7 +95,7 @@ All notable changes to Trellis will be documented in this file.
   project directories / `flock`-serialized worker invocation that a
   container does not have, matching `backup-nightly` and
   `roadmap-nightly`.
-- **Report-only evaluation of learning candidates (e177).** Owner's
+- **Report-only evaluation of learning candidates.** Owner's
   stated intent is "eventually we want automatic promotion"; this PR
   ships only the evaluation and reporting half of that — a candidate is
   never promoted or demoted by this code. Auto-demotion and a working
@@ -115,10 +115,12 @@ All notable changes to Trellis will be documented in this file.
     further effect since there is nothing else to force to report-only.
   - The pre-existing tuner-side `trellis.learning.tuners.auto_promote.AutoPromotePolicy`
     (`enabled`, `min_sample_size`, `min_effect_size`) is now also a
-    `SETTINGS_REGISTRY` family (`learning.auto_promote.*`), resolved by
-    the same `resolve_auto_promote_overrides` every caller already used —
-    registering it adds a UI-tunable surface, not a second resolution
-    path. Both families' effective values now appear in
+    `SETTINGS_REGISTRY` family (`learning.auto_promote.*`). `resolve_auto_promote_overrides`
+    is new in this PR — it is the first thing to resolve env > settings >
+    config.yaml > default for this family — and reads three new env vars:
+    `TRELLIS_ENABLE_AUTO_PROMOTE`, `TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE`,
+    `TRELLIS_AUTO_PROMOTE_MIN_EFFECT_SIZE`. Registering the family adds a
+    UI-tunable surface, not a second resolution path. Both families' effective values now appear in
     `GET /api/v1/settings` (#857), computed by calling each resolver
     directly rather than reimplementing env/settings/default precedence a
     third time.
@@ -136,8 +138,8 @@ All notable changes to Trellis will be documented in this file.
     captured on each citation, never a pack or run id. A citation with
     no captured session id cannot count toward `min_distinct_sessions`
     and is reported separately as `sessionless_citations`.
-  - Exactly one `LEARNING_AUTO_PROMOTE_EVALUATED` event per run, carrying
-    a per-candidate disposition, the
+  - One `LEARNING_AUTO_PROMOTE_EVALUATED` event per run that actually
+    evaluates candidates, carrying a per-candidate disposition, the
     would_promote/already_promoted/promoted/ineligible counts, and the
     policy snapshot that produced them. `report_to_dict` adds
     `already_promoted_count` alongside `would_promote_count`.
@@ -153,15 +155,26 @@ All notable changes to Trellis will be documented in this file.
     than leaving a reader to infer it from an un-explained constant.
     The `loop_health` panel gains an eighth row,
     `learning_candidate_auto_promote` (`actuates=False`: nothing it does
-    writes without a human in the loop today).
+    writes without a human in the loop today). A run that exits before
+    reaching evaluation — a missing/malformed `--candidates` file
+    (exit 2) or a refused `mode=commit` (exit 5, `ConfigError`) — emits
+    zero events, not one; "one event per run" describes a run that
+    evaluates candidates, not every invocation of the command.
   - `trellis curate auto-promote-candidates` (job catalog:
-    `auto-promote-candidates`, nightly); a missing or malformed
-    `--candidates` file now fails with a clean `BadParameter` message
-    instead of a raw traceback.
+    `auto-promote-candidates`, nightly). A missing `--candidates` file or
+    one that isn't valid JSON now fails with a clean `BadParameter`
+    message instead of a raw traceback; a `--candidates` file that *is*
+    valid JSON but not an object (e.g. a top-level list) still raises an
+    unhandled `AttributeError` (exit 1) — that shape is not covered by
+    this fix.
   - The Precedents tab's empty state names the real promotion path
     (`trellis curate promote-learning`) and, conditionally on whether
     `auto-promote-candidates` is scheduled, that the job reports but
     never commits — true both before and after the job is scheduled.
+  - **Removed `Operation.PRECEDENT_UPDATE` and `EventType.PRECEDENT_UPDATED`.**
+    The handler for that verb had no writer since the initial commit;
+    removing the dead enum members and `PrecedentUpdateHandler` closes
+    that gap rather than leaving an operation nothing ever requests.
 - **Loop health panel (e167): `GET /api/v1/loops`.** Answers "is each
   curation / learning loop actually doing anything?" for all seven loops
   (noise demotion, advisory generation, advisory fitness,

@@ -137,3 +137,19 @@ def test_loops_view_is_wired_into_nav_and_switch_view() -> None:
     assert 'id="view-loops"' in page
     assert re.search(r"views\s*=\s*\[[^\]]*'loops'[^\]]*\]", page)
     assert re.search(r"if\s*\(name === 'loops'\)\s*loadLoops\(\);", page)
+
+
+# ---------------------------------------------------------------------------
+# 4. learning_candidate_auto_promote has a real label, not the raw key.
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_auto_promote_loop_has_a_loop_labels_entry() -> None:
+    """#861 added an 8th loop-health row,
+    ``learning_candidate_auto_promote``. Without a ``LOOP_LABELS`` entry,
+    ``renderLoopRow``'s ``LOOP_LABELS[loop.name] || loop.name`` fallback
+    would print the raw snake_case key instead of a readable title.
+    """
+    page = _page()
+    loop_labels_body = _between(page, "const LOOP_LABELS = {", "\n        };")
+    assert re.search(r"learning_candidate_auto_promote\s*:\s*'[^']+'", loop_labels_body)

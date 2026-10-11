@@ -197,6 +197,17 @@ class SettingSpec:
     #: non-low risk badge. Must be checked against the knob's actual
     #: reading site, not carried over from an old description.
     risk_note: str | None = None
+    #: Values that pass type/enum/bounds checking but are refused anyway,
+    #: with ``refused_reason`` as the message. For a value that is
+    #: structurally valid and worth keeping in ``enum`` so the UI still
+    #: documents it as a real (future) option, but is not yet safe to
+    #: accept — e.g. ``learning.candidate_auto_promote.mode``'s
+    #: ``"commit"`` before auto-demotion ships. Checked in
+    #: :func:`validate_value` after ``_check_bounds``, so it layers a
+    #: business-rule refusal on top of, never instead of, the
+    #: type/enum/bounds one.
+    refused_values: tuple[Any, ...] = ()
+    refused_reason: str | None = None
 
 
 _SPECS: tuple[SettingSpec, ...] = (
@@ -634,14 +645,14 @@ _SPECS: tuple[SettingSpec, ...] = (
         type="bool",
         default=False,
         description=(
-            "Master switch for `trellis curate auto-promote-candidates`. "
-            "Off (default) or on, the job only ever reports what it "
-            "would promote — it never writes a precedent — because "
-            "learning.candidate_auto_promote.mode cannot be set to "
-            "`commit` yet (see that setting's own description for why). "
-            "Turning this on has no observable effect today; it starts "
-            "mattering once a later release adds a working commit mode, "
-            "which is also when this switch starts gating real writes."
+            "Has no observable effect today: off (default) or on, "
+            "`trellis curate auto-promote-candidates` only ever reports "
+            "what it would promote — it never writes a precedent — "
+            "because learning.candidate_auto_promote.mode cannot be set "
+            "to `commit` yet (see that setting's own description for "
+            "why). This master switch starts mattering once a later "
+            "release adds a working commit mode, which is also when it "
+            "starts gating real writes."
         ),
         surfaces=("cli",),
         restart_required=False,
@@ -672,15 +683,19 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="caution",
         risk_note=(
-            "Setting this to `commit` is accepted here but refused the "
-            "next time the job actually runs, with a configuration error "
-            "naming this setting — so the failure shows up later than "
-            "the moment it was set, not immediately."
+            "Setting this to `commit` is refused immediately, at save "
+            "time, with the same message the job itself would raise if "
+            "this check were somehow bypassed: 'commit mode is not "
+            "available until auto-demotion ships'. `commit` stays in the "
+            "enum above because it documents a real future value, not a "
+            "typo to reject silently."
         ),
         group="learning_loops",
         settings_live=True,
         env_var=CANDIDATE_AUTO_PROMOTE_MODE_ENV,
         enum=("report_only", "commit"),
+        refused_values=("commit",),
+        refused_reason=("commit mode is not available until auto-demotion ships"),
     ),
     SettingSpec(
         name="learning.candidate_auto_promote.min_helpful_count",
@@ -761,13 +776,13 @@ _SPECS: tuple[SettingSpec, ...] = (
         type="int",
         default=3,
         description=(
-            "Ceiling on how many candidates one `commit`-mode run may "
-            "promote, regardless of how many qualify. Has no effect "
-            "today since commit mode cannot run (see "
-            "learning.candidate_auto_promote.mode) — this bounds the "
-            "blast radius of a single scheduled run once commit mode "
-            "exists, so a bug that makes every candidate qualify still "
-            "only promotes a few before the job stops."
+            "Has no effect today since commit mode cannot run (see "
+            "learning.candidate_auto_promote.mode). It is a ceiling on "
+            "how many candidates one `commit`-mode run may promote, "
+            "regardless of how many qualify — bounding the blast radius "
+            "of a single scheduled run once commit mode exists, so a bug "
+            "that makes every candidate qualify still only promotes a "
+            "few before the job stops."
         ),
         surfaces=("cli",),
         restart_required=False,
@@ -974,6 +989,9 @@ def validate_value(spec: SettingSpec, raw: Any) -> bool | int | float | str:
     else:
         value = _coerce_str(spec.name, raw)
     _check_bounds(spec, value)
+    if spec.refused_values and value in spec.refused_values:
+        msg = spec.refused_reason or f"{spec.name}={value!r} is not accepted."
+        raise ValueError(msg)
     return value
 
 

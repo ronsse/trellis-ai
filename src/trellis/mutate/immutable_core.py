@@ -83,8 +83,8 @@ from trellis.mutate.commands import Command, Operation
 #: Two shapes share this one set on purpose. The first four are whole-loop
 #: ``ParameterScope.component_id`` values — moving them moves another
 #: loop's gate. The remaining entries are ``SETTINGS_REGISTRY`` leaf keys
-#: for ``LearningCandidateAutoPromotePolicy`` and ``AutoPromotePolicy``
-#: (e177, e177's own predecessor): no ``rule_tuner`` proposal can ever
+#: for ``LearningCandidateAutoPromotePolicy`` and its predecessor
+#: ``AutoPromotePolicy``: no ``rule_tuner`` proposal can ever
 #: name one as a ``component_id`` — they are env/settings/config knobs,
 #: not tuner scopes — but the AST scan in
 #: ``tests/unit/test_immutable_core_rule.py`` collects every

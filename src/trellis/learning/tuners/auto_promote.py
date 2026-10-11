@@ -44,6 +44,7 @@ is about to eyeball.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -53,7 +54,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.core.base import utc_now
-from trellis.core.write_config import TRUTHY
+from trellis.core.write_config import TRUTHY, parse_finite_float, parse_finite_int
 from trellis.learning.tuners.promotion import (
     DEFAULT_MIN_EFFECT_SIZE,
     DEFAULT_MIN_SAMPLE_SIZE,
@@ -153,6 +154,15 @@ class AutoPromotePolicy:
                 f"least as strict as the human-reviewed one."
             )
             raise ValueError(msg)
+        if not math.isfinite(self.min_effect_size):
+            msg = (
+                f"AutoPromotePolicy.min_effect_size={self.min_effect_size} "
+                "must be a finite number — a non-finite value compares False "
+                "against every bound in the effect-size gate "
+                "(`promotion.py`'s `comparable < policy.min_effect_size`), "
+                "which would let every proposal clear it."
+            )
+            raise ValueError(msg)
         if self.min_effect_size < DEFAULT_MIN_EFFECT_SIZE:
             msg = (
                 f"AutoPromotePolicy.min_effect_size={self.min_effect_size} is "
@@ -236,7 +246,7 @@ def resolve_auto_promote_overrides(
 
     raw_min_sample = src_env.get(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, "")
     if raw_min_sample.strip():
-        min_sample_size: int = int(float(raw_min_sample))
+        min_sample_size: int = parse_finite_int(raw_min_sample)
     elif AUTO_PROMOTE_MIN_SAMPLE_SIZE_SETTING in settings_map:
         min_sample_size = int(settings_map[AUTO_PROMOTE_MIN_SAMPLE_SIZE_SETTING])  # type: ignore[arg-type]
     else:
@@ -246,7 +256,24 @@ def resolve_auto_promote_overrides(
 
     raw_min_effect = src_env.get(AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV, "")
     if raw_min_effect.strip():
-        min_effect_size: float = float(raw_min_effect)
+        # ``parse_finite_float`` deliberately does not reject a non-finite
+        # result (its own docstring says so) -- normalizing OverflowError
+        # into ValueError is all it promises. The explicit isfinite check
+        # below is this resolver's own policy for that result, matching
+        # ``parse_finite_int``'s rejection of ``min_sample_size`` above:
+        # without it, GET /api/v1/settings never constructs
+        # ``AutoPromotePolicy`` (so `__post_init__`'s isfinite check never
+        # runs) and a `nan`/`inf` env value reaches the response as a
+        # silent `effective_value: null` with no `parse_error` instead of
+        # degrading to the registry default like every other garbage env
+        # value in this family.
+        min_effect_size: float = parse_finite_float(raw_min_effect)
+        if not math.isfinite(min_effect_size):
+            msg = (
+                f"{AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV}={raw_min_effect!r} must "
+                "be a finite number"
+            )
+            raise ValueError(msg)
     elif AUTO_PROMOTE_MIN_EFFECT_SIZE_SETTING in settings_map:
         min_effect_size = float(settings_map[AUTO_PROMOTE_MIN_EFFECT_SIZE_SETTING])  # type: ignore[arg-type]
     else:

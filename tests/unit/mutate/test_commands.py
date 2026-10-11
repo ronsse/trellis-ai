@@ -29,10 +29,14 @@ class TestOperation:
         # + ALIAS_UPSERT (governed alias/backfill writes)
         # + SETTINGS_UPDATE (governed settings-store write; null value
         # means "remove the override" rather than a separate RESET verb)
-        # - PRECEDENT_UPDATE (removed: automatic demotion, the only writer
-        # this verb existed for, does not ship in the report-only PR that
-        # introduced the auto-promote evaluator; commit mode is refused
-        # via ConfigError rather than reinstating this verb)
+        # - PRECEDENT_UPDATE (removed: this verb had no handler class
+        # anywhere in src/ since the initial commit (3b9cedbd) — see
+        # docs/design/adr-retention-prune.md's "Sibling unhandled verbs"
+        # row — so there was no writer to lose. Removed alongside
+        # EventType.PRECEDENT_UPDATED and PrecedentUpdateHandler's
+        # registration rather than carried forward unhandled into the
+        # report-only PR that introduced the auto-promote evaluator;
+        # commit mode there is refused via ConfigError, not via this verb)
         assert len(Operation) == 21
 
 

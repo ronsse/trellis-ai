@@ -90,7 +90,7 @@ from typing import Any, Literal
 
 import structlog
 
-from trellis.core.write_config import TRUTHY
+from trellis.core.write_config import TRUTHY, parse_finite_int
 from trellis.errors import ConfigError
 from trellis.learning.scoring import (
     PROMOTE_RECOMMENDATIONS,
@@ -279,11 +279,14 @@ class LearningCandidateAutoPromotePolicy:
         """``mode`` only takes effect when ``enabled``.
 
         Mirrors how ``AutoPromotePolicy.enabled`` gates
-        ``run_auto_promotion``'s write path: a disabled policy always
-        behaves as ``report_only``, whatever ``mode`` is configured to,
-        so flipping ``mode`` to ``commit`` ahead of flipping ``enabled``
-        is a safe no-op rather than a trap an operator can spring by
-        reordering two settings writes.
+        ``run_auto_promotion``'s write path: once a policy exists, a
+        disabled policy always behaves as ``report_only``, whatever
+        ``mode`` is configured to. But a policy with ``mode="commit"``
+        never gets that far: ``__post_init__`` refuses it unconditionally,
+        regardless of ``enabled``. So flipping ``mode`` to ``commit`` is
+        never a safe no-op — it fails policy construction, and therefore
+        the scheduled job, on the next run whether or not ``enabled`` is
+        set.
         """
         if not self.enabled:
             return "report_only"
@@ -323,7 +326,7 @@ def resolve_candidate_auto_promote_overrides(
     def resolve_int(env_name: str, setting_name: str, default: int) -> int:
         raw = src_env.get(env_name, "")
         if raw.strip():
-            return int(float(raw))
+            return parse_finite_int(raw)
         if setting_name in settings_map:
             return int(settings_map[setting_name])  # type: ignore[arg-type]
         return default
@@ -470,6 +473,17 @@ class CandidateAutoPromoteReport:
     configured_mode: CandidateAutoPromoteMode
     outcomes: list[CandidateAutoPromoteOutcome] = field(default_factory=list)
     event_id: str | None = None
+    #: Candidates with no usable ``candidate_id`` -- these get no
+    #: :class:`CandidateAutoPromoteOutcome` at all (there is nothing to
+    #: name it with), so unlike every other count on this report,
+    #: ``skipped_count`` cannot be derived from ``outcomes`` after the
+    #: fact. A run with a nonzero count here evaluated fewer candidates
+    #: than it was given, silently by the loop's own logic -- see
+    #: :func:`run_candidate_auto_promotion`'s module docstring note and
+    #: ``loop_health.py``'s ``last_status`` derivation, which reads this
+    #: same count off the emitted event to avoid reporting "ok" for a run
+    #: that dropped input.
+    skipped_count: int = 0
 
     @property
     def would_promote_count(self) -> int:
@@ -496,8 +510,16 @@ def _emit_evaluated_event(
     effective_mode: CandidateAutoPromoteMode,
     configured_mode: CandidateAutoPromoteMode,
     source: str,
+    skipped: int = 0,
 ) -> str | None:
-    """Emit the single ``LEARNING_AUTO_PROMOTE_EVALUATED`` event for a run."""
+    """Emit the single ``LEARNING_AUTO_PROMOTE_EVALUATED`` event for a run.
+
+    ``skipped`` is a candidate-id-less input that never became an
+    outcome at all -- it is reported alongside ``counts["total"]``
+    (which only ever counts ``outcomes``) so a reader can tell "every
+    candidate given to this run produced an outcome" apart from "some
+    were silently dropped before evaluation."
+    """
     would_promote = sum(1 for o in outcomes if o.disposition == "would_promote")
     promoted = sum(1 for o in outcomes if o.disposition == "promoted")
     already_promoted = sum(1 for o in outcomes if o.disposition == "already_promoted")
@@ -521,6 +543,7 @@ def _emit_evaluated_event(
             "promoted": promoted,
             "already_promoted": already_promoted,
             "ineligible": ineligible,
+            "skipped": skipped,
         },
         "policy_snapshot": {
             "enabled": policy.enabled,
@@ -590,12 +613,17 @@ def run_candidate_auto_promotion(
     that gate. It is left in place deliberately, unexercised, rather than
     removed, so that follow-up is a smaller diff.
 
-    ``force_report_only=True`` is how ``trellis curate
-    auto-promote-candidates --dry-run`` overrides the configured
-    ``mode`` regardless of what the policy resolved to — the flag is
-    checked ahead of :attr:`LearningCandidateAutoPromotePolicy.effective_mode`,
-    never mixed into the policy object itself, so a dry-run can never be
-    mistaken for a persisted configuration change.
+    ``force_report_only=True`` is an extra guard, checked ahead of
+    :attr:`LearningCandidateAutoPromotePolicy.effective_mode` and never
+    mixed into the policy object itself, so a dry-run can never be
+    mistaken for a persisted configuration change. It is not what makes
+    ``trellis curate auto-promote-candidates --dry-run`` work when
+    ``learning.candidate_auto_promote.mode`` is configured as
+    ``"commit"``: a ``mode="commit"`` policy cannot even be constructed
+    (``__post_init__`` raises :class:`~trellis.errors.ConfigError`
+    unconditionally), so the CLI applies ``--dry-run`` earlier, before
+    building the policy — see
+    ``trellis_cli.curate._build_candidate_auto_promote_policy``.
 
     Before evaluating any candidate, scans for every entity id that
     already has a successful ``precedent.promote``
@@ -604,9 +632,14 @@ def run_candidate_auto_promotion(
     rather than re-proposing it (see the module docstring's
     "Idempotency" section).
 
-    Each candidate gets exactly one :class:`CandidateAutoPromoteOutcome`.
-    Exactly one :attr:`EventType.LEARNING_AUTO_PROMOTE_EVALUATED` event is
-    emitted per call, covering every candidate in ``candidates`` — report-
+    Each candidate with a usable ``candidate_id`` gets exactly one
+    :class:`CandidateAutoPromoteOutcome`; one with no id (blank or
+    missing) gets none and is counted in
+    :attr:`CandidateAutoPromoteReport.skipped_count` instead, since
+    there is nothing to name an outcome with. Exactly one
+    :attr:`EventType.LEARNING_AUTO_PROMOTE_EVALUATED` event is emitted
+    per call, covering every candidate in ``candidates`` (its
+    ``counts.skipped`` field is how a reader sees that drop) — report-
     only and commit runs both emit it, so a report-only run is visible in
     the audit trail even though it writes nothing else.
 
@@ -629,10 +662,12 @@ def run_candidate_auto_promotion(
 
     outcomes: list[CandidateAutoPromoteOutcome] = []
     promotions_committed = 0
+    skipped = 0
 
     for candidate in candidates:
         candidate_id = str(candidate.get("candidate_id", "")).strip()
         if not candidate_id:
+            skipped += 1
             continue
         holdout_arm = _holdout_arm_status(candidate)
         candidate_entity_id = precedent_entity_id_for_candidate(candidate_id)
@@ -723,6 +758,7 @@ def run_candidate_auto_promotion(
         effective_mode=effective_mode,
         configured_mode=configured_mode,
         source=source,
+        skipped=skipped,
     )
 
     return CandidateAutoPromoteReport(
@@ -731,6 +767,7 @@ def run_candidate_auto_promotion(
         configured_mode=configured_mode,
         outcomes=outcomes,
         event_id=event_id,
+        skipped_count=skipped,
     )
 
 

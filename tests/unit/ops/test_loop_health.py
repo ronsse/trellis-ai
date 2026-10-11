@@ -270,3 +270,123 @@ class TestRowMetadata:
             assert isinstance(row.actuates, bool)
             assert row.what_it_changes
             assert row.description
+
+    def test_precedent_row_does_not_claim_auto_promote_can_commit(
+        self, tmp_path: Path
+    ) -> None:
+        """Pins gate-861b's B-1: the precedent_promotion row must keep
+        saying nothing schedules a promotion. `learning_candidate_auto_promote`
+        reports what it would promote; its `commit` mode is refused with a
+        configuration error, so this row must never claim the loop "can
+        also commit one unattended when enabled" (main's honest wording,
+        restored after this PR briefly replaced it with a false claim).
+        """
+        event_log, tuner_state = _stores(tmp_path)
+
+        report = summarize_loop_health(event_log, tuner_state)
+
+        row = _row(report, "precedent_promotion")
+        assert "Nothing schedules a promotion" in row.what_it_changes
+        assert "can also commit" not in row.what_it_changes
+        assert "unattended" not in row.what_it_changes
+
+        auto_promote_row = _row(report, "learning_candidate_auto_promote")
+        assert "it never writes a precedent" in auto_promote_row.what_it_changes
+
+
+class TestCandidateAutoPromoteRowStatus:
+    """``last_status`` must reflect what the run actually did, not just
+    "an event exists" -- a run that silently dropped input (a candidate
+    with no usable id, see ``run_candidate_auto_promotion``'s
+    ``skipped_count``) must not read the same "ok" as one that evaluated
+    every candidate it was given.
+    """
+
+    def test_clean_run_reports_ok(self, tmp_path: Path) -> None:
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
+            source="candidate_auto_promote",
+            payload={
+                "mode": "report_only",
+                "configured_mode": "report_only",
+                "dispositions": [],
+                "counts": {
+                    "total": 2,
+                    "would_promote": 1,
+                    "promoted": 0,
+                    "already_promoted": 0,
+                    "ineligible": 1,
+                    "skipped": 0,
+                },
+                "policy_snapshot": {"enabled": True, "mode": "report_only"},
+            },
+        )
+
+        report = summarize_loop_health(event_log, tuner_state)
+
+        row = _row(report, "learning_candidate_auto_promote")
+        assert row.last_status == "ok"
+        assert row.counters is not None
+        assert row.counters["last_run_skipped"] == 0
+
+    def test_run_that_skipped_a_candidate_reports_degraded_not_ok(
+        self, tmp_path: Path
+    ) -> None:
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
+            source="candidate_auto_promote",
+            payload={
+                "mode": "report_only",
+                "configured_mode": "report_only",
+                "dispositions": [],
+                "counts": {
+                    "total": 1,
+                    "would_promote": 1,
+                    "promoted": 0,
+                    "already_promoted": 0,
+                    "ineligible": 0,
+                    "skipped": 1,
+                },
+                "policy_snapshot": {"enabled": True, "mode": "report_only"},
+            },
+        )
+
+        report = summarize_loop_health(event_log, tuner_state)
+
+        row = _row(report, "learning_candidate_auto_promote")
+        assert row.last_status == "degraded"
+        assert row.counters is not None
+        assert row.counters["last_run_skipped"] == 1
+
+    def test_missing_skipped_key_defaults_to_zero_and_ok(self, tmp_path: Path) -> None:
+        """An event emitted before this field existed (or any payload
+        that simply omits it) must degrade to 0, not raise or read as
+        truthy.
+        """
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
+            source="candidate_auto_promote",
+            payload={
+                "mode": "report_only",
+                "configured_mode": "report_only",
+                "dispositions": [],
+                "counts": {
+                    "total": 0,
+                    "would_promote": 0,
+                    "promoted": 0,
+                    "already_promoted": 0,
+                    "ineligible": 0,
+                },
+                "policy_snapshot": {"enabled": True, "mode": "report_only"},
+            },
+        )
+
+        report = summarize_loop_health(event_log, tuner_state)
+
+        row = _row(report, "learning_candidate_auto_promote")
+        assert row.last_status == "ok"
+        assert row.counters is not None
+        assert row.counters["last_run_skipped"] == 0

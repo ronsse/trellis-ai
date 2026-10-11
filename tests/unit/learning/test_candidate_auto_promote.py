@@ -1,4 +1,4 @@
-"""Tests for :mod:`trellis.learning.candidate_auto_promote` (e177).
+"""Tests for :mod:`trellis.learning.candidate_auto_promote`.
 
 Report-only, evaluation-only: ``enabled=False`` / ``mode="report_only"``
 ship as the default, and the load-bearing claims under test are (1) a
@@ -30,6 +30,7 @@ branch still needs to stay correct for the follow-up that lifts the gate.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -38,6 +39,7 @@ import pytest
 
 from trellis.errors import ConfigError
 from trellis.learning.candidate_auto_promote import (
+    _PROMOTION_SCAN_LIMIT,
     AUTO_PROMOTE_REQUESTED_BY,
     CANDIDATE_AUTO_PROMOTE_ENABLED_ENV,
     CANDIDATE_AUTO_PROMOTE_ENABLED_SETTING,
@@ -60,6 +62,7 @@ from trellis.learning.candidate_auto_promote import (
     LearningCandidateAutoPromotePolicy,
     _evaluate_candidate,
     _holdout_arm_status,
+    _scan_already_promoted_entity_ids,
     agreement_metric_to_dict,
     compute_agreement_metric,
     precedent_entity_id_for_candidate,
@@ -70,7 +73,7 @@ from trellis.learning.candidate_auto_promote import (
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Operation
 from trellis.mutate.executor import MutationExecutor
-from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.event_log import Event, EventLog, EventType
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
@@ -308,6 +311,37 @@ class TestFloorRefusalOnConstruction:
             LearningCandidateAutoPromotePolicy(**resolved)
 
 
+class TestNonFiniteEnvValuesRaiseCleanly:
+    """Mirrors ``tests/unit/learning/tuners/test_resolve_auto_promote_overrides
+    .py``'s sibling class. All three int-typed knobs here resolve through
+    the same ``resolve_int`` closure, and ``int(float("inf"))`` raises
+    ``OverflowError`` — not ``ValueError`` — unless the closure's
+    ``raw.strip()`` branch rejects non-finite values before ``int()`` ever
+    sees them. A caller that wraps only ``except ValueError`` (the settings
+    route, ``admin_settings.py``) does not catch ``OverflowError``.
+    """
+
+    @pytest.mark.parametrize(
+        "env_name",
+        [
+            CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV,
+            CANDIDATE_AUTO_PROMOTE_MIN_DISTINCT_SESSIONS_ENV,
+            CANDIDATE_AUTO_PROMOTE_MAX_PROMOTIONS_PER_RUN_ENV,
+        ],
+    )
+    @pytest.mark.parametrize("raw", ["inf", "-inf", "1e999", "nan"])
+    def test_non_finite_env_raises_value_error_never_overflow(
+        self, env_name: str, raw: str
+    ) -> None:
+        try:
+            with pytest.raises(ValueError, match="finite"):
+                resolve_candidate_auto_promote_overrides(env={env_name: raw})
+        except OverflowError:
+            pytest.fail(
+                "OverflowError escaped resolve_candidate_auto_promote_overrides"
+            )
+
+
 class TestEvaluateCandidate:
     def test_qualifying_candidate_passes(self) -> None:
         policy = LearningCandidateAutoPromotePolicy()
@@ -481,12 +515,78 @@ class TestRunCandidateAutoPromotionReportOnly:
             "promoted": 0,
             "already_promoted": 0,
             "ineligible": 1,
+            "skipped": 0,
         }
         assert payload["policy_snapshot"]["enabled"] is False
         assert payload["policy_snapshot"]["min_distinct_sessions"] == (
             DEFAULT_MIN_DISTINCT_SESSIONS
         )
         assert report.event_id == events[0].event_id
+        assert report.skipped_count == 0
+
+    @pytest.mark.parametrize("bad_id", ["", "   ", "\t\n"])
+    def test_candidate_with_no_id_is_skipped_not_evaluated(
+        self, event_log: EventLog, bad_id: str
+    ) -> None:
+        """A candidate with a blank/whitespace-only ``candidate_id`` gets
+        no :class:`CandidateAutoPromoteOutcome` at all (there is nothing
+        to name it with) -- it must not silently vanish: it is counted in
+        both ``report.skipped_count`` and the emitted event's
+        ``counts.skipped``, so a run that drops input is distinguishable
+        from one that evaluated everything it was given.
+        """
+        policy = LearningCandidateAutoPromotePolicy(enabled=False)
+        candidates = [
+            _candidate(bad_id),
+            _candidate("cand-good"),
+        ]
+
+        report = run_candidate_auto_promotion(
+            candidates=candidates, policy=policy, event_log=event_log
+        )
+
+        # Only the one real candidate produced an outcome.
+        assert len(report.outcomes) == 1
+        assert report.outcomes[0].candidate_id == "cand-good"
+        assert report.skipped_count == 1
+
+        events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )
+        assert len(events) == 1
+        counts = events[0].payload["counts"]
+        assert counts["total"] == 1
+        assert counts["skipped"] == 1
+
+    def test_missing_candidate_id_key_is_also_skipped(
+        self, event_log: EventLog
+    ) -> None:
+        policy = LearningCandidateAutoPromotePolicy(enabled=False)
+        candidate_no_key = _candidate("cand-1")
+        del candidate_no_key["candidate_id"]
+
+        report = run_candidate_auto_promotion(
+            candidates=[candidate_no_key], policy=policy, event_log=event_log
+        )
+
+        assert report.outcomes == []
+        assert report.skipped_count == 1
+
+    def test_all_candidates_with_ids_report_zero_skipped(
+        self, event_log: EventLog
+    ) -> None:
+        policy = LearningCandidateAutoPromotePolicy(enabled=False)
+        candidates = [_candidate("cand-1"), _candidate("cand-2")]
+
+        report = run_candidate_auto_promotion(
+            candidates=candidates, policy=policy, event_log=event_log
+        )
+
+        assert report.skipped_count == 0
+        events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )
+        assert events[0].payload["counts"]["skipped"] == 0
 
 
 class TestRunCandidateAutoPromotionCommit:
@@ -697,6 +797,64 @@ class TestAlreadyPromotedExclusion:
         assert dispositions["cand-new"] == "would_promote"
         assert report.would_promote_count == 1
         assert report.already_promoted_count == 1
+
+
+class TestAlreadyPromotedScanOrderMatchesUnderTruncation:
+    """gate-861 round 2, mutant M6: ``_scan_already_promoted_entity_ids``
+    drops ``order="desc"`` and still passes the whole suite, because no
+    existing test seeds more than ``_PROMOTION_SCAN_LIMIT`` (500)
+    successful ``precedent.promote`` events. ``get_events``'s default is
+    ``order="asc"`` (oldest-first), so on a truncated scan that default
+    keeps the *oldest* rows and drops the newest — the exact inversion
+    the docstring calls out as the hazard ``order="desc"`` exists to
+    avoid: a just-promoted entity would read back as not-yet-promoted on
+    a busy log and the auto-promote job would propose it all over again.
+    """
+
+    @staticmethod
+    def _emit_promoted_at(
+        event_log: EventLog, candidate_id: str, *, at: datetime
+    ) -> str:
+        entity_id = precedent_entity_id_for_candidate(candidate_id)
+        event_log.append(
+            Event(
+                event_type=EventType.MUTATION_EXECUTED,
+                source="test",
+                entity_id=entity_id,
+                payload={
+                    "operation": Operation.PRECEDENT_PROMOTE.value,
+                    "status": "success",
+                    "requested_by": AUTO_PROMOTE_REQUESTED_BY,
+                },
+                occurred_at=at,
+            )
+        )
+        return entity_id
+
+    def test_newest_promotion_survives_truncation_not_the_oldest(
+        self, event_log: EventLog
+    ) -> None:
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        # One more successful promotion than the scan limit, each at a
+        # distinct, strictly increasing timestamp so truncation direction
+        # is unambiguous: candidate 0 is the oldest, candidate
+        # ``_PROMOTION_SCAN_LIMIT`` (500) is the single newest.
+        for n in range(_PROMOTION_SCAN_LIMIT + 1):
+            self._emit_promoted_at(
+                event_log, f"cand-{n}", at=base + timedelta(seconds=n)
+            )
+        oldest_entity_id = precedent_entity_id_for_candidate("cand-0")
+        newest_entity_id = precedent_entity_id_for_candidate(
+            f"cand-{_PROMOTION_SCAN_LIMIT}"
+        )
+
+        already_promoted = _scan_already_promoted_entity_ids(
+            event_log, limit=_PROMOTION_SCAN_LIMIT
+        )
+
+        assert len(already_promoted) == _PROMOTION_SCAN_LIMIT
+        assert newest_entity_id in already_promoted
+        assert oldest_entity_id not in already_promoted
 
 
 class TestComputeAgreementMetric:

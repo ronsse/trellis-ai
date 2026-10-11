@@ -236,3 +236,74 @@ class TestRefusesWhatFromEnvWouldSilentlyDegrade:
         assert spec is not None
         with pytest.raises(ValueError, match="finite"):
             validate_value(spec, 10**400)
+
+
+class TestRefusedValues:
+    """``SettingSpec.refused_values`` layers a business-rule refusal on
+    top of, never instead of, type/enum/bounds checking: a value can be
+    structurally valid (the right type, a declared enum member, in
+    bounds) and still be refused. The declarative mechanism is tested
+    against a synthetic spec; the real registry entry it backs today
+    (``learning.candidate_auto_promote.mode``'s ``"commit"``) is tested
+    directly below.
+    """
+
+    def test_a_refused_value_is_rejected_even_though_it_is_a_valid_enum_member(
+        self,
+    ) -> None:
+        spec = get_setting("memory_extraction")
+        assert spec is not None
+        bool_spec = replace(
+            spec,
+            name="synthetic_bool_setting",
+            type="bool",
+            enum=None,
+            refused_values=(True,),
+            refused_reason="synthetic refusal",
+        )
+        with pytest.raises(ValueError, match="synthetic refusal"):
+            validate_value(bool_spec, True)
+        # The non-refused value still passes -- the check is scoped to
+        # the exact member(s) named, not every value of that type.
+        assert validate_value(bool_spec, False) is False
+
+    def test_no_refused_values_declared_is_a_no_op(self) -> None:
+        spec = get_setting("memory_extraction")
+        assert spec is not None
+        assert spec.refused_values == ()
+        assert validate_value(spec, True) is True
+
+    def test_missing_refused_reason_falls_back_to_a_generic_message(self) -> None:
+        spec = get_setting("memory_extraction")
+        assert spec is not None
+        bool_spec = replace(
+            spec,
+            name="synthetic_bool_setting",
+            type="bool",
+            enum=None,
+            refused_values=(True,),
+            refused_reason=None,
+        )
+        with pytest.raises(ValueError, match="not accepted"):
+            validate_value(bool_spec, True)
+
+    def test_candidate_auto_promote_mode_commit_is_refused(self) -> None:
+        """``"commit"`` is a declared enum member of this setting -- it
+        documents a real future value for the UI/CLI -- so it clears
+        ``_check_bounds``'s enum check. It is still refused, with the
+        same message
+        ``LearningCandidateAutoPromotePolicy.__post_init__`` raises for a
+        ``mode="commit"`` policy, so an operator who saves this value is
+        refused immediately rather than only finding out the next time
+        the job runs.
+        """
+        spec = get_setting("learning.candidate_auto_promote.mode")
+        assert spec is not None
+        assert "commit" in (spec.enum or ())
+        with pytest.raises(ValueError, match="auto-demotion"):
+            validate_value(spec, "commit")
+
+    def test_candidate_auto_promote_mode_report_only_is_accepted(self) -> None:
+        spec = get_setting("learning.candidate_auto_promote.mode")
+        assert spec is not None
+        assert validate_value(spec, "report_only") == "report_only"

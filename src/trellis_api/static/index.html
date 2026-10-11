@@ -2210,6 +2210,24 @@
             return `<span title="${escHtml(iso)}">${escHtml(timeAgo(iso))}</span>`;
         }
 
+        // An effect size can be null (not measured), a finite number, or
+        // literally Infinity: a tuner proposal gated against an empty
+        // baseline divides by zero server-side and reports Infinity rather
+        // than silently clamping it, because that value is itself the
+        // signal "this has no real baseline to compare against" — JSON
+        // carries that as the bare token `Infinity` (not a string), and
+        // `Number(Infinity).toFixed(n)` renders the literal word
+        // "Infinity" with no unit, which reads as a bug rather than as
+        // what it means. NaN gets the same label: nothing here has a
+        // legitimate reason to report NaN, so it is grouped with "no
+        // baseline" rather than given its own silently-wrong case.
+        function fmtEffectSize(value, digits) {
+            if (value == null) return '—';
+            const n = Number(value);
+            if (!Number.isFinite(n)) return '∞ (no baseline)';
+            return n.toFixed(digits);
+        }
+
         // Encodes & < > and both quotes: between tags the text stays text, and
         // inside a quoted attribute a quote cannot end the attribute. An onclick
         // decodes it first, so ids go through data-id (below). Cut a value
@@ -2713,7 +2731,7 @@
                             ${p.domain ? `<span>domain: ${escHtml(p.domain)}</span>` : ''}
                             ${p.intent_family ? `<span>intent: ${escHtml(p.intent_family)}</span>` : ''}
                             <span>sample_size: ${escHtml(p.sample_size)}</span>
-                            <span>effect_size: ${p.effect_size == null ? '—' : escHtml(Number(p.effect_size).toFixed(4))}</span>
+                            <span>effect_size: ${escHtml(fmtEffectSize(p.effect_size, 4))}</span>
                         </div>
                         ${reachabilityHtml(p)}
                         <div class="review-kv">proposed: ${escHtml(JSON.stringify(p.proposed_values))}</div>
@@ -2751,7 +2769,7 @@
                 predict.innerHTML =
                     `<strong style="color:${ok ? 'var(--success)' : 'var(--error)'}">` +
                     `Predicted: ${escHtml(pv.predicted_status)}</strong> — ${escHtml(pv.reason)}` +
-                    (pv.effect_size == null ? '' : ` (effect_size ${escHtml(Number(pv.effect_size).toFixed(4))})`) +
+                    (pv.effect_size == null ? '' : ` (effect_size ${escHtml(fmtEffectSize(pv.effect_size, 4))})`) +
                     (isNoBaseline
                         ? '<br><span style="color:var(--text-dim)">First promotion for this scope: use ' +
                           '<code style="font-family:var(--font-mono)">trellis metrics promote --allow-no-baseline</code>.</span>'
@@ -5059,6 +5077,7 @@
             precedent_promotion: 'Precedent promotion',
             tuner: 'Tuner',
             feedback_intake: 'Feedback intake',
+            learning_candidate_auto_promote: 'Learning-candidate auto-promotion (report-only)',
         };
 
         // The nightly cron (worker curate) drives most of these loops once a
@@ -5813,7 +5832,7 @@
                 <td>${escHtml(a.category)}</td>
                 <td>${escHtml(scopeCell)}</td>
                 <td>${a.confidence == null ? 'not measured' : escHtml(a.confidence.toFixed(2))}</td>
-                <td title="sample_size=${escHtml(String(ev.sample_size ?? ''))}, success_with=${escHtml(String(ev.success_rate_with ?? ''))}, success_without=${escHtml(String(ev.success_rate_without ?? ''))}">evidence_confidence: ${escHtml(evidenceConf)}, effect: ${ev.effect_size == null ? 'not measured' : escHtml(ev.effect_size.toFixed(2))}</td>
+                <td title="sample_size=${escHtml(String(ev.sample_size ?? ''))}, success_with=${escHtml(String(ev.success_rate_with ?? ''))}, success_without=${escHtml(String(ev.success_rate_without ?? ''))}">evidence_confidence: ${escHtml(evidenceConf)}, effect: ${ev.effect_size == null ? 'not measured' : escHtml(fmtEffectSize(ev.effect_size, 2))}</td>
                 <td>${statusBadge}</td>
                 <td>${escHtml(fmtTime(a.created_at, { empty: 'not measured' }))}</td>
                 <td>${a.fitness_scored_at ? escHtml(fmtTime(a.fitness_scored_at, { empty: 'not measured' })) : 'not yet scored'}</td>

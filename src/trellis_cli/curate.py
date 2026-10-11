@@ -798,12 +798,22 @@ def promote_learning(
 
 def _build_candidate_auto_promote_policy(
     stores_dir: Path | None,
+    *,
+    force_report_only: bool = False,
 ) -> LearningCandidateAutoPromotePolicy:
     """env > settings > default, per :func:`resolve_candidate_auto_promote_overrides`.
 
     A settings-store read failure degrades to the defaults alone —
     advisory, like every other settings-aware read in this CLI — never
     fails the job over a catalog/settings-file problem.
+
+    ``force_report_only`` (``--dry-run``) is applied here, to the mode
+    *before* the policy is constructed — never after. A ``mode="commit"``
+    policy raises :class:`~trellis.errors.ConfigError` unconditionally in
+    ``__post_init__`` (there is no way to construct one and then force it
+    back to report-only), so a stored ``mode="commit"`` would make
+    ``--dry-run`` itself fail with exit 5 if the override happened any
+    later than this.
     """
     try:
         settings = load_settings_values(stores_dir)
@@ -811,9 +821,10 @@ def _build_candidate_auto_promote_policy(
         logger.warning("candidate_auto_promote_settings_read_failed", exc_info=True)
         settings = {}
     overrides = resolve_candidate_auto_promote_overrides(settings=settings)
+    mode = "report_only" if force_report_only else overrides["mode"]
     return LearningCandidateAutoPromotePolicy(
         enabled=bool(overrides["enabled"]),
-        mode=overrides["mode"],  # type: ignore[arg-type]
+        mode=mode,  # type: ignore[arg-type]
         min_helpful_count=int(overrides["min_helpful_count"]),
         min_distinct_sessions=int(overrides["min_distinct_sessions"]),
         require_zero_unhelpful=bool(overrides["require_zero_unhelpful"]),
@@ -836,11 +847,12 @@ def auto_promote_candidates(
         False,
         "--dry-run",
         help=(
-            "Force report_only for this run. Redundant today — "
-            "learning.candidate_auto_promote.mode can only ever resolve to "
-            "report_only, so every run already behaves this way — but kept "
-            "so a script that always passes --dry-run keeps working "
-            "unchanged if a later release adds a working commit mode."
+            "Force report_only for this run, applied before the policy is "
+            "built. Without --dry-run, a stored "
+            "learning.candidate_auto_promote.mode of commit makes every "
+            "run fail with a configuration error (commit mode is not "
+            "available yet); --dry-run avoids that by forcing report_only "
+            "ahead of the check, regardless of what mode resolved to."
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
@@ -853,8 +865,11 @@ def auto_promote_candidates(
     automatic run), or ``ineligible:<reason>`` — and writes nothing else.
     ``learning.candidate_auto_promote.mode`` cannot be set to ``commit``:
     constructing the policy with that mode raises
-    :class:`~trellis.errors.ConfigError`. Unattended commit is a follow-up
-    once an auto-demotion rollback exists to monitor it.
+    :class:`~trellis.errors.ConfigError`, exit 5 — unless ``--dry-run``
+    is passed, since ``--dry-run`` forces report_only ahead of that
+    construction, so a configured ``commit`` never reaches it. Unattended
+    commit is a follow-up once an auto-demotion rollback exists to
+    monitor it.
     """
     registry = _get_registry()
     if candidates_path is None:
@@ -882,15 +897,15 @@ def auto_promote_candidates(
     if not isinstance(candidates, list):
         candidates = []
 
-    policy = _build_candidate_auto_promote_policy(registry.stores_dir)
+    policy = _build_candidate_auto_promote_policy(
+        registry.stores_dir, force_report_only=dry_run
+    )
     event_log = get_event_log()
-    executor = build_curate_executor(registry)
 
     report = run_candidate_auto_promotion(
         candidates=candidates,
         policy=policy,
         event_log=event_log,
-        executor=executor,
         force_report_only=dry_run,
     )
 

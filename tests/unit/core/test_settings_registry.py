@@ -80,13 +80,58 @@ class TestCatalogMembership:
         assert len(SETTINGS_REGISTRY) == 23
 
     def test_auto_promote_families_are_registered(self) -> None:
-        """Both knob families are now registered (plan p1 PR 7) — the
-        opposite of the pre-this-PR state, where they were explicitly
-        excluded pending this owner decision.
+        """Both knob families are now registered — the opposite of the
+        pre-this-PR state, where they were explicitly excluded pending
+        this owner decision.
         """
         assert set(SETTINGS_REGISTRY) >= _AUTO_PROMOTE_NAMES
         prefixes = ("learning.auto_promote", "learning.candidate_auto_promote")
         assert all(name.startswith(prefixes) for name in _AUTO_PROMOTE_NAMES)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "learning.candidate_auto_promote.enabled",
+            "learning.candidate_auto_promote.max_promotions_per_run",
+        ],
+    )
+    def test_no_observable_effect_knobs_disclose_it_in_the_first_sentence(
+        self, name: str
+    ) -> None:
+        """Both knobs are switches with no observable effect until a
+        future commit-mode release — the description must say so as its
+        first sentence, not bury it after an explanation of what the
+        knob will eventually do, so an operator reading only the first
+        line still learns the knob is inert today.
+        """
+        spec = get_setting(name)
+        assert spec is not None
+        first_sentence = spec.description.split(".")[0]
+        assert "no observable effect" in first_sentence or (
+            "no effect today" in first_sentence
+        )
+
+    def test_candidate_auto_promote_mode_refuses_commit(self) -> None:
+        """Pins the declarative refusal :func:`validate_value` enforces
+        (follow-up C / gate-861b): ``commit`` stays a legal enum member
+        (it documents a real future value) but is named in
+        ``refused_values`` with a ``refused_reason`` an operator can act
+        on.
+        """
+        spec = get_setting("learning.candidate_auto_promote.mode")
+        assert spec is not None
+        assert spec.refused_values == ("commit",)
+        assert spec.refused_reason
+        assert "auto-demotion" in spec.refused_reason
+
+    def test_no_other_entry_declares_refused_values(self) -> None:
+        """``refused_values`` is new and, today, used by exactly one
+        entry -- catches an accidental copy-paste onto another spec.
+        """
+        refusing = [
+            name for name, spec in SETTINGS_REGISTRY.items() if spec.refused_values
+        ]
+        assert refusing == ["learning.candidate_auto_promote.mode"]
 
 
 class TestEverySpecIsWellFormed:
@@ -361,6 +406,61 @@ class TestLookupHelpers:
 
     def test_list_settings_preserves_registration_order(self) -> None:
         assert list_settings() == list(SETTINGS_REGISTRY.values())
+
+
+class TestCandidateAutoPromoteFloorsMatchThePolicyConstants:
+    """gate-861 round 2, mutant M4: the registry's ``minimum=`` for
+    ``learning.candidate_auto_promote.min_distinct_sessions`` was changed
+    from the symbolic ``MIN_DISTINCT_SESSIONS_FLOOR`` to a hardcoded
+    literal ``1`` and nothing here noticed — a looser registry floor lets
+    a settings write *accept* a value that
+    ``LearningCandidateAutoPromotePolicy.__post_init__`` (which checks the
+    real constant, not the registry) then refuses at construction, the
+    exact "accepted by settings, refused by the job" gap follow-up K
+    describes. Pin every registry ``minimum`` for this family against the
+    production constant it is supposed to mirror, not against its
+    current numeric value, so a future deliberate floor change doesn't
+    require touching this test.
+    """
+
+    def test_min_helpful_count_minimum_matches_the_floor_constant(self) -> None:
+        from trellis.learning.candidate_auto_promote import MIN_HELPFUL_COUNT_FLOOR
+
+        spec = get_setting("learning.candidate_auto_promote.min_helpful_count")
+        assert spec is not None
+        assert spec.minimum == MIN_HELPFUL_COUNT_FLOOR
+
+    def test_min_distinct_sessions_minimum_matches_the_floor_constant(self) -> None:
+        from trellis.learning.candidate_auto_promote import (
+            MIN_DISTINCT_SESSIONS_FLOOR,
+        )
+
+        spec = get_setting("learning.candidate_auto_promote.min_distinct_sessions")
+        assert spec is not None
+        assert spec.minimum == MIN_DISTINCT_SESSIONS_FLOOR
+
+    def test_max_promotions_per_run_minimum_matches_the_floor_constant(self) -> None:
+        from trellis.learning.candidate_auto_promote import (
+            MAX_PROMOTIONS_PER_RUN_FLOOR,
+        )
+
+        spec = get_setting("learning.candidate_auto_promote.max_promotions_per_run")
+        assert spec is not None
+        assert spec.minimum == MAX_PROMOTIONS_PER_RUN_FLOOR
+
+    def test_min_sample_size_minimum_matches_the_manual_floor_constant(self) -> None:
+        from trellis.learning.tuners.promotion import DEFAULT_MIN_SAMPLE_SIZE
+
+        spec = get_setting("learning.auto_promote.min_sample_size")
+        assert spec is not None
+        assert spec.minimum == DEFAULT_MIN_SAMPLE_SIZE
+
+    def test_min_effect_size_minimum_matches_the_manual_floor_constant(self) -> None:
+        from trellis.learning.tuners.promotion import DEFAULT_MIN_EFFECT_SIZE
+
+        spec = get_setting("learning.auto_promote.min_effect_size")
+        assert spec is not None
+        assert spec.minimum == DEFAULT_MIN_EFFECT_SIZE
 
 
 def _assert_no_duplicate_names(specs: tuple[SettingSpec, ...]) -> None:

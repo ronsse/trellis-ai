@@ -150,3 +150,37 @@ class TestFloorRefusalOnConstruction:
         )
         assert policy.min_sample_size == 5
         assert policy.min_effect_size == 0.15
+
+
+class TestNonFiniteEnvValuesRaiseCleanly:
+    """``min_sample_size`` goes through ``int(float(raw))`` internally.
+
+    ``int(float("nan"))`` raises ``ValueError`` on its own, but
+    ``int(float("inf"))`` — and ``"1e999"``, which overflows ``float`` to
+    ``inf`` — raises ``OverflowError`` instead. A caller (the settings
+    route, the worker CLI) that only wraps ``except ValueError`` around
+    this resolver would let that ``OverflowError`` fly uncaught: an API
+    500 or a crashing CLI traceback instead of a clean refusal. Every
+    non-finite spelling must come out as the same ``ValueError``.
+    """
+
+    @pytest.mark.parametrize("raw", ["inf", "-inf", "Infinity", "1e999", "nan"])
+    def test_min_sample_size_non_finite_env_raises_value_error(self, raw: str) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            resolve_auto_promote_overrides(env={AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV: raw})
+
+    def test_min_sample_size_non_finite_env_never_raises_overflow_error(
+        self,
+    ) -> None:
+        # The specific regression: OverflowError must never escape this
+        # function, because `except ValueError` at every real call site
+        # (routes/settings.py, worker.py, admin_settings.py) does not
+        # catch it.
+        try:
+            resolve_auto_promote_overrides(
+                env={AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV: "inf"}
+            )
+        except OverflowError:
+            pytest.fail("OverflowError escaped resolve_auto_promote_overrides")
+        except ValueError:
+            pass

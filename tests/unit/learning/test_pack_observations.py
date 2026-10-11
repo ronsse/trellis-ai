@@ -60,34 +60,43 @@ def _emit_pack_assembled(
     domain: str,
     intent: str,
     items: list[dict[str, str]],
+    session_id: str | None = None,
 ) -> None:
     """Emit a PACK_ASSEMBLED event with a ``injected_items`` payload
     matching what ``PackBuilder._emit_telemetry`` produces in
-    production."""
+    production.
+
+    ``session_id`` defaults to omitted, matching a real pack built
+    without a caller-supplied session id (``pack.session_id`` is
+    ``None`` in that case — see ``pack_builder.py``'s
+    ``"session_id": pack.session_id`` telemetry line)."""
+    payload: dict[str, object] = {
+        "intent": intent,
+        "domain": domain,
+        "items_count": len(items),
+        "injected_item_ids": [i["item_id"] for i in items],
+        "injected_items": [
+            {
+                "item_id": i["item_id"],
+                "item_type": i["item_type"],
+                "rank": rank + 1,
+                "selection_reason": "selected_by_relevance",
+                "score_breakdown": {},
+                "estimated_tokens": 32,
+                "strategy_source": i.get("strategy_source", "keyword"),
+            }
+            for rank, i in enumerate(items)
+        ],
+        "strategies_used": ["keyword"],
+    }
+    if session_id is not None:
+        payload["session_id"] = session_id
     event_log.emit(
         EventType.PACK_ASSEMBLED,
         source="test",
         entity_id=pack_id,
         entity_type="pack",
-        payload={
-            "intent": intent,
-            "domain": domain,
-            "items_count": len(items),
-            "injected_item_ids": [i["item_id"] for i in items],
-            "injected_items": [
-                {
-                    "item_id": i["item_id"],
-                    "item_type": i["item_type"],
-                    "rank": rank + 1,
-                    "selection_reason": "selected_by_relevance",
-                    "score_breakdown": {},
-                    "estimated_tokens": 32,
-                    "strategy_source": i.get("strategy_source", "keyword"),
-                }
-                for rank, i in enumerate(items)
-            ],
-            "strategies_used": ["keyword"],
-        },
+        payload=payload,
     )
 
 
@@ -323,6 +332,184 @@ class TestBuildLearningObservations:
         # negative-effective window is the safest pin.
         observations = build_learning_observations_from_event_log(event_log, days=-1)
         assert observations == []
+
+
+class TestSessionIdJoin:
+    """B-4 (gate-861 round 2): ``observation["session_id"]`` must come from
+    ``PACK_ASSEMBLED.session_id`` alone, never fall back to ``run_id`` or
+    ``pack_id`` — see the extensive comment at ``_join_one``'s
+    ``"session_id"`` line in ``pack_observations.py``.
+
+    The gate's mutant M3 reintroduces exactly that fallback. It survived
+    the whole suite because no test here ever ran a pack through
+    ``session_id``-sensitive feedback shaped the way the MCP
+    ``record_feedback`` tool actually produces it: when a caller names no
+    trace, MCP sets ``run_id = pack_id`` (``mcp/server.py``'s
+    ``run_id=trace_id if has_trace else pack_id``), so every sessionless
+    pack has a ``run_id`` that is unique to that one pack — which is
+    exactly the shape under which a session_id-falls-back-to-run_id
+    mutant would manufacture a distinct "session" per pack instead of
+    reporting them as sessionless. ``_record`` below is called with
+    ``run_id=pack_id`` throughout to reproduce that MCP shape.
+    """
+
+    def test_session_id_present_is_carried_through(
+        self, event_log, tmp_path: Path
+    ) -> None:
+        _emit_pack_assembled(
+            event_log,
+            pack_id="pack-sess",
+            domain="x",
+            intent="t",
+            items=[{"item_id": "i1", "item_type": "entity"}],
+            session_id="sess-abc",
+        )
+        _record(
+            event_log,
+            tmp_path,
+            pack_id="pack-sess",
+            run_id="pack-sess",
+            intent="t",
+            intent_family="fam",
+            items_served=["i1"],
+            items_referenced=["i1"],
+            outcome="success",
+        )
+        (obs,) = build_learning_observations_from_event_log(event_log)
+        assert obs["session_id"] == "sess-abc"
+
+    def test_no_session_id_reports_none_not_the_pack_unique_run_id(
+        self, event_log, tmp_path: Path
+    ) -> None:
+        """No ``session_id`` on the pack must report ``None`` — not the
+        MCP-shaped ``run_id`` (which equals ``pack_id`` here and so is
+        unique per pack, the exact value M3's fallback would read)."""
+        _emit_pack_assembled(
+            event_log,
+            pack_id="pack-nosess",
+            domain="x",
+            intent="t",
+            items=[{"item_id": "i1", "item_type": "entity"}],
+        )
+        _record(
+            event_log,
+            tmp_path,
+            pack_id="pack-nosess",
+            run_id="pack-nosess",
+            intent="t",
+            intent_family="fam",
+            items_served=["i1"],
+            items_referenced=["i1"],
+            outcome="success",
+        )
+        (obs,) = build_learning_observations_from_event_log(event_log)
+        assert obs["run_id"] == "pack-nosess"
+        assert obs["session_id"] is None
+
+    def test_whitespace_only_session_id_reports_none(
+        self, event_log, tmp_path: Path
+    ) -> None:
+        _emit_pack_assembled(
+            event_log,
+            pack_id="pack-blanksess",
+            domain="x",
+            intent="t",
+            items=[{"item_id": "i1", "item_type": "entity"}],
+            session_id="   ",
+        )
+        _record(
+            event_log,
+            tmp_path,
+            pack_id="pack-blanksess",
+            run_id="pack-blanksess",
+            intent="t",
+            intent_family="fam",
+            items_served=["i1"],
+            items_referenced=["i1"],
+            outcome="success",
+        )
+        (obs,) = build_learning_observations_from_event_log(event_log)
+        assert obs["session_id"] is None
+
+    def test_end_to_end_sessionless_packs_are_not_distinct_sessions(
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
+    ) -> None:
+        """Five sessionless, MCP-shaped packs (``run_id == pack_id``,
+        unique per pack) citing the same item helpful must score as
+        ``distinct_helpful_sessions == 0`` / ``sessionless_citations == 5``
+        once joined and scored — not 5 distinct sessions, which is what
+        M3's run_id fallback would produce."""
+        for n in range(5):
+            pack_id = f"pack-sessionless-{n}"
+            _emit_pack_assembled(
+                event_log,
+                pack_id=pack_id,
+                domain="x",
+                intent="generate sql",
+                items=[{"item_id": "shared:item", "item_type": "guidance"}],
+            )
+            _record(
+                event_log,
+                tmp_path,
+                pack_id=pack_id,
+                run_id=pack_id,
+                intent="generate sql",
+                intent_family="asset_generation",
+                items_served=["shared:item"],
+                items_referenced=["shared:item"],
+                outcome="success",
+            )
+
+        observations = build_learning_observations_from_event_log(event_log)
+        assert len(observations) == 5
+        assert all(obs["session_id"] is None for obs in observations)
+
+        report = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=2,
+        )
+        candidate = report["candidates"][0]
+        assert candidate["citation_evidence"]["distinct_helpful_sessions"] == 0
+        assert candidate["citation_evidence"]["sessionless_citations"] == 5
+
+    def test_end_to_end_one_session_many_packs_counts_as_one(
+        self, event_log, tmp_path: Path, learning_registry: ParameterRegistry
+    ) -> None:
+        """The same five packs, this time sharing one real session id,
+        must score as ``distinct_helpful_sessions == 1`` /
+        ``sessionless_citations == 0``."""
+        for n in range(5):
+            pack_id = f"pack-samesession-{n}"
+            _emit_pack_assembled(
+                event_log,
+                pack_id=pack_id,
+                domain="x",
+                intent="generate sql",
+                items=[{"item_id": "shared:item", "item_type": "guidance"}],
+                session_id="sess-shared",
+            )
+            _record(
+                event_log,
+                tmp_path,
+                pack_id=pack_id,
+                run_id=pack_id,
+                intent="generate sql",
+                intent_family="asset_generation",
+                items_served=["shared:item"],
+                items_referenced=["shared:item"],
+                outcome="success",
+            )
+
+        observations = build_learning_observations_from_event_log(event_log)
+        report = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=2,
+        )
+        candidate = report["candidates"][0]
+        assert candidate["citation_evidence"]["distinct_helpful_sessions"] == 1
+        assert candidate["citation_evidence"]["sessionless_citations"] == 0
 
 
 # ---------------------------------------------------------------------------

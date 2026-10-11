@@ -564,6 +564,34 @@ class TestAutoPromoteGarbageEnvDegradesInstead500:
         assert row["parse_error"] is not None
         assert "garbage" in row["parse_error"]
 
+    @pytest.mark.parametrize("raw", ["inf", "-inf", "1e999", "nan"])
+    def test_non_finite_tuner_int_does_not_500_the_route(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        """Same claim as the ``"notanumber"`` case above, but for the
+        specific non-finite spellings that raise ``OverflowError`` rather
+        than ``ValueError`` from a naive ``int(float(raw))`` -- the
+        regression this route's ``except (ValueError, TypeError)`` cannot
+        see unless the resolver itself never lets ``OverflowError``
+        through (``parse_finite_int``)."""
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, raw)
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.auto_promote.min_sample_size")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+
+    @pytest.mark.parametrize("raw", ["inf", "1e999", "nan"])
+    def test_non_finite_candidate_int_does_not_500_the_route(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        monkeypatch.setenv(CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV, raw)
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.candidate_auto_promote.min_helpful_count")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+
     def test_bad_knob_in_one_family_does_not_blank_the_sibling_family(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -622,5 +650,61 @@ class TestAutoPromoteGarbageEnvDegradesInstead500:
 
         monkeypatch.setenv(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, "notanumber")
         spec = get_setting("learning.auto_promote.enabled")
+        value = _env_effective_value(spec, {})
+        assert value == spec.default
+
+    @pytest.mark.parametrize("raw", ["inf", "1e999", "nan"])
+    def test_cli_note_degrades_on_a_non_finite_sibling_env_too(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        """Same claim as the test above, for the ``OverflowError``-raising
+        spellings rather than a garbage string -- ``_auto_promote_family_
+        value``'s own ``except (ValueError, TypeError)`` does not catch
+        ``OverflowError``, so this only stays clean because the resolver
+        itself never raises one."""
+        from trellis.core.settings_registry import get_setting
+        from trellis_cli.admin_settings import _env_effective_value
+
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, raw)
+        spec = get_setting("learning.auto_promote.enabled")
+        value = _env_effective_value(spec, {})
+        assert value == spec.default
+
+    @pytest.mark.parametrize("raw", ["nan", "inf", "-inf"])
+    def test_non_finite_tuner_float_degrades_instead_of_null(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        """``min_effect_size`` is the one float-typed knob in either
+        auto-promote family, and it took a different path to the same
+        hazard the int-typed knobs above are pinned against:
+        ``resolve_auto_promote_overrides`` parsed it with a bare
+        ``float(raw)`` (no finiteness check — unlike ``min_sample_size``'s
+        ``parse_finite_int``), and because this route never constructs
+        ``AutoPromotePolicy`` (so `__post_init__`'s own ``math.isfinite``
+        check never runs on this path), a ``nan``/``inf`` env value never
+        raised at all. It reached the response as
+        ``effective_value: None`` with no ``parse_error`` — FastAPI's
+        encoder silently maps a non-finite float to JSON ``null`` — which
+        reads as "no value", not as the operator-visible "this env value
+        is garbage, showing you the default instead" every other knob in
+        this family gets."""
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV, raw)
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.auto_promote.min_effect_size")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+
+    @pytest.mark.parametrize("raw", ["nan", "inf", "-inf"])
+    def test_cli_note_degrades_on_a_non_finite_effect_size_too(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        """Companion to the route-level test above, for the CLI's own
+        success-note computation -- the same resolver backs both."""
+        from trellis.core.settings_registry import get_setting
+        from trellis_cli.admin_settings import _env_effective_value
+
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV, raw)
+        spec = get_setting("learning.auto_promote.min_effect_size")
         value = _env_effective_value(spec, {})
         assert value == spec.default
