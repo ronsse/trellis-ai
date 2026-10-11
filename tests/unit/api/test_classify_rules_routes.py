@@ -167,6 +167,35 @@ class TestListCandidates:
         resp = client.post("/api/v1/classify/candidates/does-not-exist/dismiss")
         assert resp.status_code == 404
 
+    def test_dismiss_spreads_identity_and_dismissed_by_prefers_key_id(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``CLASSIFY_CANDIDATE_DISMISSED``'s payload spreads
+        ``_audit_identity(ctx)`` (``key_id``/``key_name``) alongside
+        ``dismissed_by``, and with a real authenticated caller
+        ``dismissed_by`` is that caller's ``key_id`` -- not the
+        ``"unknown"`` fallback that only applies with no identity at
+        all."""
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token, key_id = _mint_with_key_id(registry, [SCOPE_ADMIN])
+        _emit_tag_keyword_candidate(registry)
+
+        resp = client.post(
+            "/api/v1/classify/candidates/cand-1/dismiss",
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_CANDIDATE_DISMISSED, order="asc", limit=10
+        )
+        payload = events[-1].payload
+        assert payload["key_id"] == key_id
+        assert payload["dismissed_by"] == key_id
+
     def test_applied_candidate_reads_status_applied(
         self, client: TestClient, registry: StoreRegistry
     ) -> None:
@@ -718,6 +747,42 @@ class TestRevokeRule:
         assert payload["removed_applied_at"] is not None
         assert payload["removed_source_event_id"] == "01TESTEVENT0000000000000"
         assert payload["config_target"] is None
+
+    def test_audit_event_carries_actor_identity_and_constant_requested_by(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Mirrors ``TestApplyRule::test_audit_event_carries_actor_and_metrics``
+        for Revoke: the payload's ``key_id``/``key_name`` come from the
+        authenticated caller (``_audit_identity(ctx)``), but unlike Apply's
+        ``applied_by``, ``revoked_by`` is the route's own constant label,
+        not the caller's identity."""
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token, key_id = _mint_with_key_id(registry, [SCOPE_ADMIN])
+        headers = {"X-API-Key": token}
+        apply_resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "xyz",
+                "target": "finance",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+            headers=headers,
+        )
+        assert apply_resp.status_code == 200, apply_resp.text
+
+        resp = client.delete("/api/v1/classify/rules/tag_keyword/xyz", headers=headers)
+        assert resp.status_code == 200, resp.text
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_REVOKED, order="asc", limit=10
+        )
+        payload = events[-1].payload
+        assert payload["key_id"] == key_id
+        assert payload["revoked_by"] == "api:classify.revoke-rule"
 
 
 # ---------------------------------------------------------------------------

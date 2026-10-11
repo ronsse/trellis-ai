@@ -567,14 +567,21 @@ def mine_classify_candidates(req: ClassifyMineRequest) -> ClassifyMineResponse:
 def _audit_identity(ctx: AuthContext) -> dict[str, str | None]:
     """Project the auth context to the identity fields stamped on audits.
 
-    Same idiom ``trellis_api.routes.admin`` uses for
-    ``REVIEW_DECISION_RECORDED``: structured ``key_id``/``key_name``
-    travel on ``Command.metadata`` (handlers read them back for
-    ``applied_by``/``revoked_by``), while ``requested_by`` itself stays a
-    constant label naming the entry point (e.g. ``"api:classify.apply-rule"``)
-    rather than embedding the caller — a label-shaped value is easy to
-    exact-match in a roster such as ``UNATTENDED_WRITERS``; one that
-    varies per caller is not.
+    Unlike ``trellis_api.routes.admin``'s own ``_audit_identity``, which
+    spreads ``key_id``/``key_name`` straight into the
+    ``REVIEW_DECISION_RECORDED`` payload at emission time (bypassing
+    ``Command``/``MutationExecutor`` entirely), these travel on
+    ``Command.metadata``. The Apply handler reads
+    ``metadata["key_id"]``/``["key_name"]`` back to prefer them over
+    ``requested_by`` for the audit event's ``applied_by`` field; the
+    Revoke handler never folds them into ``revoked_by`` (which stays
+    ``requested_by`` unconditionally) but both handlers copy them onto
+    the audit payload as their own ``key_id``/``key_name`` fields
+    regardless. ``requested_by`` itself stays a constant label naming
+    the entry point (e.g. ``"api:classify.apply-rule"``) rather than
+    embedding the caller — a label-shaped value is easy to exact-match
+    in a roster such as ``UNATTENDED_WRITERS``; one that varies per
+    caller is not.
     """
     return {"key_id": ctx.key_id, "key_name": ctx.name}
 

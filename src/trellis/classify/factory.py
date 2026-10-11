@@ -471,12 +471,20 @@ def reject_reserved_rule_target(
 
     An alias key is folded case-insensitively before the check (pass
     ``casefold=True``): ``RESERVED_NAMESPACES`` holds lowercase strings,
-    and an alias key is matched against domain values case-sensitively
-    nowhere else in the merged map, so ``Sensitivity``/``SENSITIVITY``
-    would otherwise slip past the exact-match comparison below and
-    collide with the reserved namespace under any reader that
-    lowercases domain names. A ``target`` is never folded here: it is
-    stored and compared verbatim by every other reader.
+    so an un-folded ``Sensitivity``/``SENSITIVITY`` would slip past the
+    exact-match comparison below. This is a defensive choice, not a
+    load-bearing one -- every real reader that resolves an alias key
+    against a domain value
+    (:func:`~trellis.learning.domain_normalization.normalize_domain_tags`)
+    matches it exactly, case-sensitively, with no reader anywhere that
+    folds case first, so a mixed-case reserved alias key would not
+    actually collide with anything downstream even left un-refused.
+    The fold is cheap and catches a typo-shaped case variant, so it
+    stays. A ``target`` is never folded here: it is a human-chosen
+    domain name, not matched against an existing key, and stored and
+    compared verbatim by every other reader -- folding it would carry
+    the same lack of downstream payoff without even the typo-catching
+    upside.
 
     Raises:
         ValueError: ``value`` collides with a reserved namespace, exact

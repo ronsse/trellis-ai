@@ -1055,12 +1055,17 @@ def _print_revoke_rule_risk_warning(kind: str, key: str) -> None:
 def _audit_identity() -> dict[str, str | None]:
     """CLI-actor identity stamped on a classify-rule audit event.
 
-    Same idiom as the Schedules CLI: a local invocation carries no
-    authenticated credential, so this stamps the OS user in place of the
-    REST route's ``key_id``/``key_name`` (:func:`_audit_identity` in
-    ``trellis_api.routes.classify_rules``) -- an audit row is
-    attributable either way, and ``--by`` (``requested_by``) stays a
-    free-text override of the constant surface label, untouched by this.
+    A local invocation carries no authenticated credential, so this
+    stamps the OS user in place of the REST route's ``key_id``/
+    ``key_name`` (:func:`_audit_identity` in
+    ``trellis_api.routes.classify_rules``) -- no other CLI module
+    stamps identity this way. Apply's handler prefers this identity
+    over ``requested_by`` for the audit event's ``applied_by`` field,
+    so ``--by`` no longer reaches ``applied_by`` at all on
+    ``apply-rule``; it still sets ``requested_by`` itself, a free-text
+    label for the entry point, which ``revoke-rule`` copies directly as
+    ``revoked_by`` (Revoke never reads this identity back the way Apply
+    does).
     """
     import getpass  # noqa: PLC0415
 
@@ -1103,7 +1108,11 @@ def apply_rule(
     requested_by: str = typer.Option(
         "cli:classify-apply-rule",
         "--by",
-        help="Audit trail: who/what requested this write.",
+        help=(
+            "Sets Command.requested_by, the audit event's constant "
+            "entry-point label -- it does not reach applied_by, which "
+            "always comes from the stamped OS-user identity instead."
+        ),
     ),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json."
@@ -1154,7 +1163,11 @@ def revoke_rule(
     requested_by: str = typer.Option(
         "cli:classify-revoke-rule",
         "--by",
-        help="Audit trail: who/what requested this write.",
+        help=(
+            "Sets Command.requested_by, which the audit event copies "
+            "directly as revoked_by -- unlike apply-rule, where the "
+            "stamped OS-user identity wins instead."
+        ),
     ),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json."

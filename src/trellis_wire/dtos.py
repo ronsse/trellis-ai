@@ -839,9 +839,14 @@ class ClassifyRuleApplyRequest(WireRequestModel):
     ``allow_inf_nan=False`` on the two floats refuses a raw ``NaN``/
     ``Infinity`` a scripted client can still send even though
     ``json.dumps`` never emits one by default -- without it, a float
-    field happily accepts either and the write only fails later, when
-    the audit event's own ``json.dumps(..., allow_nan=False)`` serializes
-    it, by which point the overlay row is already on disk.
+    field happily accepts either and REST answers 400 from deeper in
+    the pipeline instead of a clean 422 at the boundary.
+    :class:`~trellis.mutate.handlers.ClassifyRuleApplyHandler` re-checks
+    the same ranges itself before any write
+    (``_validate_classify_rule_metrics``), so a caller that reaches the
+    handler directly -- the CLI, a direct ``MutationExecutor.execute``
+    -- is refused the same way even without this field; it buys REST
+    callers a cheaper, more specific error, not the only backstop.
     """
 
     kind: str

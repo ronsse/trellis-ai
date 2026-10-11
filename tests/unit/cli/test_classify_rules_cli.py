@@ -636,6 +636,94 @@ class TestApplyRule:
         assert not [r for r in rules if r["kind"] == "domain_alias"]
         assert self._applied_event_count() == before
 
+    def test_whitespace_source_event_id_cli_exits_validation_writes_no_row_no_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Surrounding whitespace on ``--source-event-id`` must not split
+        row vs payload: ``source_event_id`` runs through the same
+        identifier validator as key/target, so it is refused before
+        anything is written, not stripped-and-stored by
+        ``ClassifyOverrideRow``'s own whitespace stripping."""
+        _init_stores(tmp_path, monkeypatch)
+        before = self._applied_event_count()
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "zzzkw",
+                "finance",
+                "--source-event-id",
+                f" {_SOURCE_EVENT_ID} ",
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [r for r in rules if r["key"] == "zzzkw"]
+        assert self._applied_event_count() == before
+
+    def test_overlong_source_event_id_cli_exits_validation_writes_no_row_no_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pins the length cap through the CLI surface, not just the
+        handler directly."""
+        _init_stores(tmp_path, monkeypatch)
+        before = self._applied_event_count()
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "zzzkw",
+                "finance",
+                "--source-event-id",
+                "e" * 10_000,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [r for r in rules if r["key"] == "zzzkw"]
+        assert self._applied_event_count() == before
+
+    def test_apply_rule_stamps_cli_identity_on_the_audit_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``apply-rule`` always calls ``_audit_identity()`` as
+        ``Command.metadata`` -- ``key_id`` is always ``None`` locally (no
+        authenticated credential), ``key_name`` is the stamped
+        ``"cli:<os user>"``, and the handler prefers that identity over
+        ``requested_by`` for ``applied_by``."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "zzzkw",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_OK, result.output
+
+        events = _get_registry().operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_APPLIED, limit=10
+        )
+        payload = events[-1].payload
+        assert payload["key_id"] is None
+        assert payload["key_name"].startswith("cli:")
+        assert payload["applied_by"] == payload["key_name"]
+
 
 # ---------------------------------------------------------------------------
 # revoke-rule
@@ -671,6 +759,29 @@ class TestRevokeRule:
 
         rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
         assert not [r for r in rules if r["key"] == "zzzkw"]
+
+    def test_revoke_rule_stamps_cli_identity_but_not_on_revoked_by(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``revoke-rule`` calls the same ``_audit_identity()`` as
+        ``apply-rule`` (``key_id`` always ``None`` locally, ``key_name``
+        the stamped ``"cli:<os user>"``), but unlike Apply's
+        ``applied_by``, Revoke's ``revoked_by`` is ``requested_by``
+        verbatim -- the CLI's constant ``"cli:classify-revoke-rule"``
+        default, not the stamped identity."""
+        _init_stores(tmp_path, monkeypatch)
+        self._apply(tmp_path, monkeypatch)
+
+        result = _invoke(["revoke-rule", "tag_keyword", "zzzkw", "--format", "json"])
+        assert result.exit_code == EXIT_OK, result.output
+
+        events = _get_registry().operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_REVOKED, limit=10
+        )
+        payload = events[-1].payload
+        assert payload["key_id"] is None
+        assert payload["key_name"].startswith("cli:")
+        assert payload["revoked_by"] == "cli:classify-revoke-rule"
 
     def test_revoke_rule_risk_warning_on_stderr_json_stdout_stays_clean(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -871,7 +982,7 @@ class TestEffectiveRules:
         assert "Traceback" not in text_result.output
         # Pins C1: a mutation that re-raises the chain's bare ``ValueError``
         # instead of composing ``typer.Exit(code=EXIT_INTERNAL)`` would
-        # still exit 2 (``ValueError`` is not caught, so Click's own
+        # still exit 1 (``ValueError`` is not caught, so Click's own
         # unhandled-exception handling could coincidentally produce the
         # same code) but CliRunner.invoke's ``result.exception`` would be
         # that ``ValueError``, not a ``SystemExit`` -- and the composed

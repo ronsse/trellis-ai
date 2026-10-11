@@ -629,11 +629,14 @@ def _validate_classify_rule_metrics(command_args: dict[str, Any]) -> None:
     ``support``/``precision``/``lift`` are optional, caller-supplied,
     copied verbatim onto the ``CLASSIFY_RULE_APPLIED`` audit event -- the
     REST DTO (:class:`~trellis_wire.dtos.ClassifyRuleApplyRequest`, which
-    sets ``allow_inf_nan=False``) and the CLI's own finiteness check both
-    narrow what reaches here for their own surfaces, but neither is a
-    governed boundary: an MCP tool call, a direct ``MutationExecutor.execute``
-    from Python, or a future caller skips both. This is the one check every
-    caller passes through.
+    sets ``allow_inf_nan=False``) narrows what reaches here for that one
+    surface, but it is not a governed boundary: the CLI has no finiteness
+    check of its own, and a direct ``MutationExecutor.execute`` from
+    Python skips the DTO too. This is the one check every caller passes
+    through -- MCP cannot reach ``classify_rule.apply`` at all, since its
+    handlers register only on ``build_classify_rules_executor``, which
+    ``build_curate_executor`` (the executor MCP's ``execute_mutation``
+    uses) does not.
 
     Without it, a ``NaN``/``Infinity`` metric wrote the overlay row (
     :meth:`~trellis.stores.classify_overrides_store.ClassifyOverridesStore.put`
@@ -686,13 +689,14 @@ def _validate_classify_rule_metrics(command_args: dict[str, Any]) -> None:
 _MAX_CLASSIFY_RULE_IDENTIFIER_LENGTH = 200
 
 
-def _validate_classify_rule_identifier(value: str, *, field: str) -> None:
-    """Refuse a classify-rule ``key``/``target`` that is not already normal.
+def _validate_classify_rule_identifier(value: str, *, field: str, code: str) -> None:
+    """Refuse a classify-rule identifier that is not already normal.
 
-    Shared by both :class:`ClassifyRuleApplyHandler` and
-    :class:`ClassifyRuleRevokeHandler`, called before either touches the
-    overlay store, so a refusal here leaves no row and no event -- the
-    same posture as ``_validate_classify_rule_metrics`` above.
+    Shared by :class:`ClassifyRuleApplyHandler` (``key``, ``target``, and
+    ``source_event_id``) and :class:`ClassifyRuleRevokeHandler` (``key``),
+    called before either touches the overlay store, so a refusal here
+    leaves no row and no event -- the same posture as
+    ``_validate_classify_rule_metrics`` above.
 
     Refuses rather than normalising:
     :class:`~trellis.schemas.classify_overrides.ClassifyOverrideRow` strips
@@ -704,18 +708,26 @@ def _validate_classify_rule_identifier(value: str, *, field: str) -> None:
     control character (:func:`unicodedata.category` category ``"Cc"``,
     which includes NUL and ESC) can break a downstream consumer outright --
     a NUL embedded in a Postgres ``jsonb`` audit payload fails to write at
-    all. A key or target over the length limit risks the same failure on
-    some backends' index-row limits, writing the overlay row and then
-    failing only when the audit event is emitted.
+    all. A key, target, or source_event_id over the length limit risks the
+    same failure on some backends' index-row limits, writing the overlay
+    row and then failing only when the audit event is emitted.
+
+    Args:
+        value: the string to check.
+        field: which field this is, used only in the error message.
+        code: the :class:`~trellis.errors.ValidationError` code to raise.
+            Each caller passes its own (``"invalid_key"``,
+            ``"invalid_target"``, ``"invalid_source_event_id"``) rather
+            than this function deriving one from ``field``, since the
+            type-check each caller already raises for the same field uses
+            that same code and the two must not disagree.
 
     Raises:
         ValidationError: ``value`` has leading/trailing whitespace,
             contains a control character, or exceeds
             ``_MAX_CLASSIFY_RULE_IDENTIFIER_LENGTH`` characters
-            (``code="invalid_key"``/``"invalid_target"``, matching the
-            type-check code each caller already raises for this field).
+            (raised with the caller-supplied ``code``).
     """
-    code = "invalid_key" if field == "key" else "invalid_target"
     if value != value.strip():
         msg = (
             f"classify_rule: {field} {value!r} has leading or trailing "
@@ -736,6 +748,92 @@ def _validate_classify_rule_identifier(value: str, *, field: str) -> None:
                 f"character ({unicodedata.category(ch)!r})"
             )
             raise ValidationError(msg, errors=[msg], code=code)
+
+
+_SURROGATE_RANGE_LOW = 0xD800
+_SURROGATE_RANGE_HIGH = 0xDFFF
+
+
+def _contains_nul_or_lone_surrogate(value: str) -> bool:
+    """True if ``value`` has a NUL byte or an unpaired UTF-16 surrogate.
+
+    Both are accepted by a Python ``str`` -- a sequence of Unicode code
+    points, not UTF-16 code units, so a surrogate code point (U+D800 to
+    U+DFFF) needs no missing partner to exist -- but neither can
+    round-trip through a Postgres ``jsonb`` column: a NUL byte raises
+    ``UntranslatableCharacter`` and a lone surrogate cannot be encoded to
+    UTF-8 at all. SQLite's text columns accept both silently, which is
+    why a payload carrying either only ever fails in a Postgres
+    deployment, never in the SQLite-backed test suite.
+    """
+    return any(
+        ch == "\x00" or _SURROGATE_RANGE_LOW <= ord(ch) <= _SURROGATE_RANGE_HIGH
+        for ch in value
+    )
+
+
+def _find_unsafe_jsonb_string(
+    obj: Any, path: str = "payload"
+) -> tuple[str, str] | None:
+    """Walk ``obj`` for the first string a jsonb column cannot store.
+
+    Recurses into ``dict``/``list`` nesting at any depth; every other
+    leaf type (``int``, ``float``, ``bool``, ``None``, a datetime already
+    rendered to ``str`` by the caller) is skipped, since a NUL or lone
+    surrogate can only ever occur inside a Python ``str``.
+
+    Returns:
+        ``(path, value)`` for the first unsafe string found, walking
+        dict values in insertion order and list items in index order, or
+        ``None`` if no string in the structure is unsafe.
+    """
+    if isinstance(obj, str):
+        return (path, obj) if _contains_nul_or_lone_surrogate(obj) else None
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            found = _find_unsafe_jsonb_string(value, f"{path}[{key!r}]")
+            if found is not None:
+                return found
+        return None
+    if isinstance(obj, list):
+        for index, value in enumerate(obj):
+            found = _find_unsafe_jsonb_string(value, f"{path}[{index}]")
+            if found is not None:
+                return found
+        return None
+    return None
+
+
+def _validate_jsonb_safe_payload(payload: dict[str, Any], *, operation: str) -> None:
+    """Refuse an audit ``payload`` a Postgres ``jsonb`` column cannot store.
+
+    ``_validate_classify_rule_identifier`` already refuses a NUL or
+    control character in ``key``/``target``/``source_event_id`` directly,
+    but the payload also carries fields that validator never sees --
+    caller identity (``command.metadata``'s ``key_id``/``key_name``), a
+    prior row's own fields (e.g. ``existing.source_event_id``, which may
+    predate that validator or have been written by hand-editing the
+    overlay file), and whatever a future field adds -- so this is the
+    backstop that covers the whole payload rather than one field at a
+    time. Called before the write it would otherwise follow
+    (``store.put`` in Apply, ``store.remove`` in Revoke), so a refusal
+    here leaves the prior state -- row present or absent -- exactly as
+    it was, with no row written and no event emitted.
+
+    Raises:
+        ValidationError: some string value, at any nesting depth,
+            contains a NUL byte or an unpaired UTF-16 surrogate
+            (``code="unsafe_audit_payload"``).
+    """
+    found = _find_unsafe_jsonb_string(payload)
+    if found is not None:
+        path, value = found
+        msg = (
+            f"classify_rule.{operation}: audit payload {path} contains a "
+            "NUL byte or an unpaired surrogate that a jsonb column cannot "
+            f"store: {value!r}"
+        )
+        raise ValidationError(msg, errors=[msg], code="unsafe_audit_payload")
 
 
 class ClassifyRuleApplyHandler:
@@ -789,7 +887,7 @@ class ClassifyRuleApplyHandler:
         if not key or not isinstance(key, str):
             msg = "classify_rule.apply requires a non-empty string 'key'"
             raise ValidationError(msg, errors=[msg], code="invalid_key")
-        _validate_classify_rule_identifier(key, field="key")
+        _validate_classify_rule_identifier(key, field="key", code="invalid_key")
         if kind == "tag_keyword" and len(key) < MIN_TAG_KEYWORD_LENGTH:
             # The miner itself never proposes a token shorter than this
             # (``_TOKEN_RE`` in tag_evolution.py), because a short keyword
@@ -809,7 +907,9 @@ class ClassifyRuleApplyHandler:
         if not target or not isinstance(target, str):
             msg = "classify_rule.apply requires a non-empty string 'target'"
             raise ValidationError(msg, errors=[msg], code="invalid_target")
-        _validate_classify_rule_identifier(target, field="target")
+        _validate_classify_rule_identifier(
+            target, field="target", code="invalid_target"
+        )
         if not source_event_id or not isinstance(source_event_id, str):
             msg = (
                 "classify_rule.apply requires a non-empty string "
@@ -817,6 +917,9 @@ class ClassifyRuleApplyHandler:
                 "to the candidate it was mined from"
             )
             raise ValidationError(msg, errors=[msg], code="invalid_source_event_id")
+        _validate_classify_rule_identifier(
+            source_event_id, field="source_event_id", code="invalid_source_event_id"
+        )
         _validate_classify_rule_metrics(command.args)
 
         row_id = f"{kind}:{key}"
@@ -905,6 +1008,24 @@ class ClassifyRuleApplyHandler:
             else None
         )
 
+        # Probed before use, not just before the write: ``applied_by``
+        # below can resolve to a caller-supplied metadata string that
+        # ``ClassifyOverrideRow`` itself would reject with its own
+        # ``pydantic_core.ValidationError`` (unable to encode a lone
+        # surrogate) rather than this handler's ``ValidationError`` --
+        # the row construction a few lines down happens before the
+        # payload-level ``_validate_jsonb_safe_payload`` call ever runs,
+        # so a NUL/surrogate confined to ``metadata`` needs its own,
+        # earlier check to get the same ``unsafe_audit_payload`` code and
+        # leave no row written.
+        _validate_jsonb_safe_payload(
+            {
+                "key_id": command.metadata.get("key_id"),
+                "key_name": command.metadata.get("key_name"),
+            },
+            operation="apply",
+        )
+
         # Structured caller identity, when the surface supplies one
         # (REST: the authenticated key's id/name; CLI: the OS user),
         # beats the constant surface label in ``command.requested_by``
@@ -931,6 +1052,8 @@ class ClassifyRuleApplyHandler:
             "precision": command.args.get("precision"),
             "lift": command.args.get("lift"),
             "applied_by": applied_by,
+            "key_id": command.metadata.get("key_id"),
+            "key_name": command.metadata.get("key_name"),
             "source_event_id": source_event_id,
             "prior_target": existing.target if existing is not None else None,
             "prior_applied_by": existing.applied_by if existing is not None else None,
@@ -967,6 +1090,15 @@ class ClassifyRuleApplyHandler:
             detail = exc.args[0] if exc.args else "not serializable"
             msg = f"classify_rule.apply: audit payload is not serializable: {detail}"
             raise ValidationError(msg, errors=[msg], code="invalid_metric") from exc
+
+        # A second, independent probe on the same built payload: the
+        # json.dumps check above catches a non-finite float, but a NUL
+        # byte or lone surrogate round-trips through json.dumps just
+        # fine and only fails once a Postgres jsonb column refuses to
+        # store it -- the gap this closes, same posture and same reason
+        # as the probe above (before the write, so a refusal leaves no
+        # row and no event).
+        _validate_jsonb_safe_payload(payload, operation="apply")
 
         try:
             store.put(row)
@@ -1022,7 +1154,7 @@ class ClassifyRuleRevokeHandler:
         if not key or not isinstance(key, str):
             msg = "classify_rule.revoke requires a non-empty string 'key'"
             raise ValidationError(msg, errors=[msg], code="invalid_key")
-        _validate_classify_rule_identifier(key, field="key")
+        _validate_classify_rule_identifier(key, field="key", code="invalid_key")
 
         row_id = f"{kind}:{key}"
         if command.target_type != "classify_rule" or command.target_id != row_id:
@@ -1121,18 +1253,6 @@ class ClassifyRuleRevokeHandler:
                     msg, errors=[msg], code="invalid_alias_rule"
                 ) from exc
 
-        try:
-            # ``existing`` above is non-None, so this row is live in a
-            # non-degraded store -- the only ways to reach this point --
-            # and ``remove`` refuses rather than returning ``False`` on a
-            # degraded/stale store (caught below). ``removed`` is
-            # therefore always ``True`` here; no variable is kept for it.
-            store.remove(kind, key)
-        except (DegradedStoreWriteError, StaleStoreWriteError) as exc:
-            raise ValidationError(
-                exc.message, errors=[exc.message], code=exc.code.lower()
-            ) from exc
-
         config_target = (
             config_sourced_alias_target(self._registry.classify_config, key)
             if kind == "domain_alias"
@@ -1153,6 +1273,31 @@ class ClassifyRuleRevokeHandler:
         requested_by_claim = command.args.get("requested_by_claim")
         if requested_by_claim is not None:
             payload["requested_by_claim"] = requested_by_claim
+
+        # Built and probed BEFORE the store write -- the mirror image of
+        # Apply's reorder, and for the same reason: a NUL or lone
+        # surrogate can reach this payload through a field this handler
+        # never otherwise validates (``command.metadata``'s identity
+        # fields, or ``existing``'s own ``source_event_id``/``applied_by``,
+        # which may have been written by an earlier build or by
+        # hand-editing the overlay file). Discovering that only after
+        # ``store.remove`` already ran would revoke the rule with no
+        # ``CLASSIFY_RULE_REVOKED`` event to show for it; probing first
+        # leaves the row in place on a refusal.
+        _validate_jsonb_safe_payload(payload, operation="revoke")
+
+        try:
+            # ``existing`` above is non-None, so this row is live in a
+            # non-degraded store -- the only ways to reach this point --
+            # and ``remove`` refuses rather than returning ``False`` on a
+            # degraded/stale store (caught below). ``removed`` is
+            # therefore always ``True`` here; no variable is kept for it.
+            store.remove(kind, key)
+        except (DegradedStoreWriteError, StaleStoreWriteError) as exc:
+            raise ValidationError(
+                exc.message, errors=[exc.message], code=exc.code.lower()
+            ) from exc
+
         self._registry.operational.event_log.emit(
             EventType.CLASSIFY_RULE_REVOKED,
             source="mutation_executor",

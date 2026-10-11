@@ -2,19 +2,24 @@
 
 The REST (``tests/unit/api/test_classify_rules_routes.py``) and CLI
 (``tests/unit/cli/test_classify_rules_cli.py``) test files prove the same
-handler validation rules through their own surfaces, each layered with a
-surface-specific guard in front (the DTO's ``allow_inf_nan=False``, the
-CLI's own finiteness check) that stops a bad value before it ever reaches
-here. This file calls the handlers directly, the same pattern
+handler validation rules through their own surfaces. REST layers a
+surface-specific guard in front (the DTO's ``allow_inf_nan=False``) that
+stops a bad value before it ever reaches here; the CLI has no finiteness
+check of its own and reaches this exact code path unguarded. This file
+calls the handlers directly, the same pattern
 ``test_settings_update_handler.py`` uses, so it is the one place a metric
 genuinely reaches ``_validate_classify_rule_metrics`` -- the check every
-caller (REST, CLI, MCP, a future worker) passes through, not just the two
-that currently guard themselves.
+caller that *can* reach it (REST, CLI, a direct
+``MutationExecutor.execute`` from Python) passes through. MCP's
+``execute_mutation`` is not one of those callers: the classify-rule
+handlers register only on ``build_classify_rules_executor``, which
+``build_curate_executor`` (what MCP uses) does not.
 """
 
 from __future__ import annotations
 
 import math
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -22,6 +27,7 @@ import pytest
 from trellis.errors import ValidationError
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers import ClassifyRuleApplyHandler, ClassifyRuleRevokeHandler
+from trellis.schemas.classify_overrides import ClassifyOverrideRow
 from trellis.stores.base.event_log import EventType
 from trellis.stores.classify_overrides_store import (
     ClassifyOverridesStore,
@@ -640,19 +646,229 @@ class TestClassifyRuleIdentifierNormalForm:
             assert exc_info.value.code == "reserved_namespace_target"
             assert _store(registry).get("domain_alias", variant) is None
 
-    def test_domain_alias_target_reserved_namespace_check_is_not_casefolded_away(
+    def test_domain_alias_target_is_not_casefolded(
         self, registry: StoreRegistry
     ) -> None:
-        """Sanity check for the test above: a target is never folded, so
-        this failure mode is specific to the alias *key* check, not a
-        change to the target check's own behaviour."""
+        """Sanity check for the test above: a target is never folded.
+        ``Sensitivity`` (mixed case) collides with the reserved namespace
+        ``sensitivity`` only under case-insensitive comparison -- unlike
+        the alias-*key* check above, the target check compares verbatim,
+        so this is accepted and stored exactly as given, not refused as
+        ``reserved_namespace_target``."""
         handler = ClassifyRuleApplyHandler(registry)
-        cmd = _apply_cmd("tag_keyword", "secretword", "sensitivity")
+        cmd = _apply_cmd("domain_alias", "secretalias", "Sensitivity")
+
+        handler.handle(cmd)
+
+        row = _store(registry).get("domain_alias", "secretalias")
+        assert row is not None
+        assert row.target == "Sensitivity"
+
+    # -- B1: source_event_id is the third field through the same validator --
+
+    def test_apply_nul_source_event_id_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd(
+            "tag_keyword", "zzzkw", "finance", source_event_id="01EVT\x00000"
+        )
 
         with pytest.raises(ValidationError) as exc_info:
             handler.handle(cmd)
 
-        assert exc_info.value.code == "reserved_namespace_target"
+        assert exc_info.value.code == "invalid_source_event_id"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+    def test_apply_leading_whitespace_source_event_id_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "zzzkw", "finance", source_event_id=" 01EVT000")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_source_event_id"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+    def test_apply_overlong_source_event_id_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd(
+            "tag_keyword", "zzzkw", "finance", source_event_id="e" * 10_000
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_source_event_id"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+    # -- S3: pin the 200-char boundary itself, on both sides, for key and target --
+
+    def test_apply_key_at_200_chars_is_accepted(self, registry: StoreRegistry) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        key = "k" * 200
+        cmd = _apply_cmd("tag_keyword", key, "finance")
+
+        handler.handle(cmd)
+
+        assert _store(registry).get("tag_keyword", key) is not None
+
+    def test_apply_key_at_201_chars_is_refused(self, registry: StoreRegistry) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        key = "k" * 201
+        cmd = _apply_cmd("tag_keyword", key, "finance")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_key"
+        assert _store(registry).get("tag_keyword", key) is None
+
+    def test_apply_target_at_200_chars_is_accepted(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        target = "t" * 200
+        cmd = _apply_cmd("tag_keyword", "zzzkw", target)
+
+        handler.handle(cmd)
+
+        row = _store(registry).get("tag_keyword", "zzzkw")
+        assert row is not None
+        assert row.target == target
+
+    def test_apply_target_at_201_chars_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        target = "t" * 201
+        cmd = _apply_cmd("tag_keyword", "zzzkw", target)
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_target"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+
+    # -- S3: non-ASCII whitespace and a non-NUL Cc character are refused too --
+
+    def test_apply_key_with_nbsp_is_refused(self, registry: StoreRegistry) -> None:
+        """U+00A0 (NBSP) is whitespace under ``str.strip()`` but is not
+        the ASCII space the validator could be narrowed to check for
+        instead -- it must still be refused."""
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "\u00a0zzzkw", "finance")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_key"
+        assert _store(registry).get("tag_keyword", "\u00a0zzzkw") is None
+
+    def test_apply_key_with_esc_control_char_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        """ESC (U+001B) is category ``Cc`` like NUL, but is not NUL itself
+        -- a validator narrowed to check only for ``"\\x00"`` would let
+        this through."""
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "zzz\x1bkw", "finance")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_key"
+        assert _store(registry).get("tag_keyword", "zzz\x1bkw") is None
+
+
+# ---------------------------------------------------------------------------
+# B1 / S2 — JSONB-safety backstop on the whole audit payload
+# ---------------------------------------------------------------------------
+
+
+class TestJsonbSafeAuditPayload:
+    """A NUL byte or lone UTF-16 surrogate anywhere in the audit payload
+    fails a Postgres ``jsonb`` column outright (``UntranslatableCharacter``
+    / unencodable to UTF-8) even when the SQLite-backed test suite cannot
+    see it. ``_validate_jsonb_safe_payload`` is a backstop independent of
+    backend: it refuses before the write it would otherwise follow in
+    either handler, so a refusal here always leaves prior state --
+    row present or absent -- untouched."""
+
+    def test_apply_metadata_key_name_lone_surrogate_is_refused_no_row_no_event(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The same backstop on Apply's side: a NUL or lone surrogate in
+        ``command.metadata`` (not reachable through the key/target/
+        source_event_id identifier validator) must not reach the
+        overlay row or the audit event either."""
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd(
+            "tag_keyword",
+            "zzzkw",
+            "finance",
+            metadata={"key_name": "cli:\udcff"},
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "unsafe_audit_payload"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+    def test_revoke_metadata_key_name_lone_surrogate_is_refused_row_untouched(
+        self, registry: StoreRegistry
+    ) -> None:
+        apply_handler = ClassifyRuleApplyHandler(registry)
+        apply_handler.handle(_apply_cmd("tag_keyword", "zzzkw", "finance"))
+
+        revoke_handler = ClassifyRuleRevokeHandler(registry)
+        cmd = _revoke_cmd("tag_keyword", "zzzkw", metadata={"key_name": "cli:\udcff"})
+
+        with pytest.raises(ValidationError) as exc_info:
+            revoke_handler.handle(cmd)
+
+        assert exc_info.value.code == "unsafe_audit_payload"
+        assert _store(registry).get("tag_keyword", "zzzkw") is not None
+        assert _revoked_event_count(registry) == 0
+
+    def test_revoke_row_with_nul_in_source_event_id_is_refused_row_untouched(
+        self, registry: StoreRegistry
+    ) -> None:
+        """A row carrying a NUL in ``source_event_id`` -- as Apply's own
+        validator now refuses on the way in, this can only be legacy
+        data from an earlier build or a hand-edited overlay file -- must
+        still be refused on Revoke rather than removed with a broken
+        audit event."""
+        store = _store(registry)
+        store.put(
+            ClassifyOverrideRow(
+                kind="tag_keyword",
+                key="legacykw",
+                target="finance",
+                applied_at=datetime.now(UTC),
+                applied_by="legacy-writer",
+                source_event_id="01EVT\x00legacy",
+            )
+        )
+
+        revoke_handler = ClassifyRuleRevokeHandler(registry)
+        cmd = _revoke_cmd("tag_keyword", "legacykw")
+
+        with pytest.raises(ValidationError) as exc_info:
+            revoke_handler.handle(cmd)
+
+        assert exc_info.value.code == "unsafe_audit_payload"
+        assert _store(registry).get("tag_keyword", "legacykw") is not None
+        assert _revoked_event_count(registry) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -742,3 +958,115 @@ class TestAppliedByUsesStructuredIdentity:
         row = _store(registry).get("tag_keyword", "zzzkw")
         assert row is not None
         assert row.applied_by == "api:classify.apply-rule"
+
+    def test_applied_by_falls_back_to_metadata_key_name_without_key_id(
+        self, registry: StoreRegistry
+    ) -> None:
+        """``key_id`` is the preferred identity, but a caller that only
+        has a name (no stable id -- e.g. a CLI OS-user stamp) still wins
+        over the constant surface label in ``requested_by``."""
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd(
+            "tag_keyword",
+            "zzzkw",
+            "finance",
+            requested_by="cli:classify-apply-rule",
+            metadata={"key_name": "cli:alice"},
+        )
+
+        handler.handle(cmd)
+
+        row = _store(registry).get("tag_keyword", "zzzkw")
+        assert row is not None
+        assert row.applied_by == "cli:alice"
+
+
+# ---------------------------------------------------------------------------
+# S3 identity pins — Revoke's payload carries key_id/key_name too
+# ---------------------------------------------------------------------------
+
+
+class TestRevokePayloadCarriesStructuredIdentity:
+    def test_revoke_payload_carries_metadata_key_id(
+        self, registry: StoreRegistry
+    ) -> None:
+        apply_handler = ClassifyRuleApplyHandler(registry)
+        apply_handler.handle(_apply_cmd("tag_keyword", "zzzkw", "finance"))
+
+        revoke_handler = ClassifyRuleRevokeHandler(registry)
+        cmd = _revoke_cmd(
+            "tag_keyword",
+            "zzzkw",
+            metadata={"key_id": "key_abc123", "key_name": "ci-bot"},
+        )
+
+        revoke_handler.handle(cmd)
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_REVOKED, limit=10
+        )
+        assert events[-1].payload["key_id"] == "key_abc123"
+
+    def test_revoke_payload_carries_metadata_key_name(
+        self, registry: StoreRegistry
+    ) -> None:
+        apply_handler = ClassifyRuleApplyHandler(registry)
+        apply_handler.handle(_apply_cmd("tag_keyword", "zzzkw", "finance"))
+
+        revoke_handler = ClassifyRuleRevokeHandler(registry)
+        cmd = _revoke_cmd(
+            "tag_keyword",
+            "zzzkw",
+            metadata={"key_id": "key_abc123", "key_name": "ci-bot"},
+        )
+
+        revoke_handler.handle(cmd)
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_REVOKED, limit=10
+        )
+        assert events[-1].payload["key_name"] == "ci-bot"
+
+    def test_revoke_payload_key_id_is_none_without_metadata(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Sanity check for the two tests above: with no metadata at
+        all, Revoke's payload still carries the ``key_id``/``key_name``
+        fields (so a reader can rely on their presence), just as
+        ``None``, rather than omitting them."""
+        apply_handler = ClassifyRuleApplyHandler(registry)
+        apply_handler.handle(_apply_cmd("tag_keyword", "zzzkw", "finance"))
+
+        revoke_handler = ClassifyRuleRevokeHandler(registry)
+        revoke_handler.handle(_revoke_cmd("tag_keyword", "zzzkw"))
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_REVOKED, limit=10
+        )
+        assert events[-1].payload["key_id"] is None
+        assert events[-1].payload["key_name"] is None
+
+    def test_revoke_by_is_requested_by_not_structured_identity(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Asymmetric with Apply's ``applied_by`` on purpose: ``revoked_by``
+        is always ``command.requested_by`` verbatim, even when metadata
+        carries a ``key_id``/``key_name`` that would outrank it on the
+        Apply side."""
+        apply_handler = ClassifyRuleApplyHandler(registry)
+        apply_handler.handle(_apply_cmd("tag_keyword", "zzzkw", "finance"))
+
+        revoke_handler = ClassifyRuleRevokeHandler(registry)
+        cmd = _revoke_cmd(
+            "tag_keyword",
+            "zzzkw",
+            requested_by="api:classify.revoke-rule",
+            metadata={"key_id": "key_abc123", "key_name": "ci-bot"},
+        )
+
+        revoke_handler.handle(cmd)
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_REVOKED, limit=10
+        )
+        assert events[-1].payload["revoked_by"] == "api:classify.revoke-rule"
