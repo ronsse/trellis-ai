@@ -1,8 +1,9 @@
 """Settings registry — the catalog of tunables an operator may override.
 
-A :class:`SettingSpec` is metadata: name, type, bounds, env var, a
-shipped default, an operator-facing description, which surfaces read it,
-and a risk tier. :func:`validate_value` is the one piece of behaviour
+A :class:`SettingSpec` is metadata: name, a human label, type, bounds, env
+var, a shipped default, operator-facing text (``description`` plus an
+optional ``risk_note``), which surfaces read it, a risk tier, and which UI
+group it belongs to. :func:`validate_value` is the one piece of behaviour
 this module owns — it coerces and bounds-checks a raw value against a
 spec's declared ``type``/``minimum``/``maximum``/``enum``, raising
 ``ValueError`` rather than clamping, for
@@ -55,6 +56,17 @@ start (see its own entry) — which instead carries
 :mod:`tests.unit.core.test_settings_registry` proves every entry is one
 or the other, against a deliberately defective mutant entry that is
 neither.
+
+Operator text vs. maintainer detail
+------------------------------------
+``description`` and ``risk_note`` are rendered verbatim by the admin UI's
+Settings tab, so they are written for an operator deciding whether to
+flip a switch: what it does, what changes on vs. off (or low vs. high),
+the default, and when you'd reach for it. They carry no issue/PR numbers,
+no deployment history, and no internal process trivia (exact benchmark
+numbers, module/function names, env-parsing edge cases) — that detail
+lives in a code comment next to the relevant :class:`SettingSpec`
+instead, where a maintainer reading this file will still find it.
 """
 
 from __future__ import annotations
@@ -66,15 +78,39 @@ from typing import Any, Literal
 
 from trellis.core.write_config import ENV_VAR_BY_FIELD, parse_finite_float
 
-#: Mirrors the plan's own vocabulary (`docs/design` plan p1, §(a)) rather
-#: than a tier invented for this module: ``"safe"`` (no meaningful
-#: downside beyond its stated function), ``"restart"`` (its cost or effect
-#: lands at the next process's first use, not instantaneously — a naive
-#: control inviting a stall mid-request), ``"unsafe"`` (silently degrades
-#: correctness, cost or the learning loop's own input if exposed as a bare
-#: toggle; needs a caption, not just a control).
-Risk = Literal["safe", "restart", "unsafe"]
+#: Three tiers, in increasing order of "read the room before you flip
+#: this": ``"low"`` (no meaningful downside beyond its stated function —
+#: no ``risk_note``), ``"caution"`` (a real cost or behavioural shift an
+#: operator should know about before changing it — carries a
+#: ``risk_note``), ``"high"`` (silently degrades correctness, cost or the
+#: learning loop's own input if exposed as a bare toggle — also carries a
+#: ``risk_note``, and the UI badges it distinctly from ``"caution"``).
+#: Independent of ``restart_required``, which is its own flag: a knob can
+#: need a restart at any risk tier, or none at all.
+Risk = Literal["low", "caution", "high"]
 SettingType = Literal["bool", "int", "float", "str"]
+
+#: The UI's filter-box categories (brief e179, step 8): which area of the
+#: system a knob belongs to, independent of ``risk`` or ``settings_live``.
+#: ``"learning_loops"`` is currently unoccupied by this module's 14
+#: entries — it is reserved for the concurrent ``learning.auto_promote.*``
+#: PR, so the UI's filter box already has a place for those once they
+#: land, with no UI change.
+SettingGroup = Literal[
+    "retrieval", "ingest_tagging", "learning_loops", "feedback_attribution", "ops"
+]
+
+#: The one place a human-facing group name lives, so a UI reading this
+#: registry never hardcodes a display label (brief e179, step 8's "not
+#: UI strings"). Keys are exactly :data:`SettingGroup`'s members —
+#: ``tests.unit.core.test_settings_registry`` proves the sets match.
+GROUP_LABELS: dict[SettingGroup, str] = {
+    "retrieval": "Retrieval",
+    "ingest_tagging": "Ingest & tagging",
+    "learning_loops": "Learning loops",
+    "feedback_attribution": "Feedback & attribution",
+    "ops": "Ops",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,12 +118,24 @@ class SettingSpec:
     """One declared tunable. See the module docstring for what this is not."""
 
     name: str
+    #: Short, human-readable name the UI shows in place of ``name`` —
+    #: e.g. "Embed on ingest" for ``embed_on_ingest``. Plain words, no
+    #: code handles.
+    label: str
     type: SettingType
     default: bool | int | float | str
+    #: Operator-facing prose — see the module docstring's "Operator text
+    #: vs. maintainer detail" section. What it does; what an agent or the
+    #: system does differently on vs. off (or low vs. high); the default;
+    #: when an operator would change it.
     description: str
     surfaces: tuple[str, ...]
     restart_required: bool
     risk: Risk
+    #: Which of the UI's five filter-box areas this knob belongs to (see
+    #: :data:`SettingGroup`). Independent of ``risk``: a knob can be
+    #: low-risk and still belong to a sensitive area, or vice versa.
+    group: SettingGroup
     #: Whether a *settings* override reaches this knob's real enforcement
     #: today (see the module docstring's "settings_live" section) — not
     #: merely whether it is reported correctly by the two surfaces that
@@ -113,117 +161,159 @@ class SettingSpec:
     #: ``validate_value`` must refuse it too rather than store a value the
     #: env path would never actually apply.
     minimum_exclusive: bool = False
+    #: One operator-facing sentence — cost, blast radius, a known issue,
+    #: or what a restart means for this knob. Required (non-empty) for
+    #: every entry whose ``risk`` is not ``"low"``; ``None`` for every
+    #: ``"low"`` entry, since the UI only shows this note beside a
+    #: non-low risk badge. Must be checked against the knob's actual
+    #: reading site, not carried over from an old description.
+    risk_note: str | None = None
 
 
 _SPECS: tuple[SettingSpec, ...] = (
     SettingSpec(
         name="classify_on_ingest",
+        label="Classify on ingest",
         type="bool",
         default=False,
         description=(
-            "Run the deterministic tagging pipeline inline at write time "
-            "(mcp.save_memory, cli ingest, api documents). Ingestion mode "
-            "classifiers are deterministic-only — microseconds per item, "
-            "no LLM call — so there is no meaningful cost to turning this "
-            "on; it is off by default because an existing deployment's "
-            "items simply have no ContentTags until classified, and "
-            "enabling this does not retroactively tag them."
+            "Runs the deterministic tagging pipeline as part of saving an "
+            "item, instead of as a separate pass afterward. On, every "
+            "newly saved item gets its content tags immediately, so "
+            "tag-based filtering works on it right away. Off (the "
+            "default), new items carry no tags until a separate "
+            "classification pass runs over them. Turning this on does "
+            "not retroactively tag items that were saved before the "
+            "change."
         ),
+        # Ingestion-mode classifiers are deterministic-only (no LLM
+        # call) — microseconds per item — so there is no meaningful cost
+        # to this one beyond what's in the description above.
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
-        risk="safe",
+        risk="low",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["classify_on_ingest"],
     ),
     SettingSpec(
         name="embed_on_ingest",
+        label="Embed on ingest",
         type="bool",
         default=False,
         description=(
-            "Generate an embedding inline at write time (mcp.save_memory, "
-            "cli ingest, api documents), so semantic search sees an item "
-            "immediately rather than after a separate embed pass. Costs "
-            "one embedder call per write — cheap for a local embedder, a "
-            "real per-call bill for a hosted one — so check which embedder "
-            "is configured before enabling on a write-heavy surface."
+            "Generates an embedding as part of saving an item, instead "
+            "of waiting for a separate embedding pass. On, a newly saved "
+            "item becomes visible to semantic search immediately. Off "
+            "(the default), new items need that separate pass to run "
+            "before semantic search can find them. This costs one "
+            "embedder call per write, which is effectively free for a "
+            "local embedder but a real per-call expense for a hosted "
+            "one — check which embedder is configured before enabling "
+            "this on a write-heavy workload."
         ),
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
-        risk="safe",
+        risk="low",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["embed_on_ingest"],
     ),
     SettingSpec(
         name="memory_extraction",
+        label="Extract entities from memories",
         type="bool",
         default=False,
         description=(
-            "Mine entities out of saved memories at write time. Flagged "
-            "unsafe to expose as a bare toggle: on the reference "
-            "deployment this has been on since 2026-10-01 and `mentions` "
-            "edges are still zero for an undiagnosed reason, so turning "
-            "this on elsewhere inherits a known, open correctness gap "
-            "rather than a working feature — present it with that caveat, "
-            "not as an ordinary switch."
+            "Mines entities out of a memory's content at the moment it "
+            "is saved, adding what it finds to the knowledge graph. On, "
+            "the graph grows from memory content automatically as "
+            "memories arrive. Off (the default), memories are saved "
+            "as-is and nothing new is added to the graph from them. "
+            "Turn this on if you want memories, not just traces, to "
+            "feed the graph."
         ),
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
-        risk="unsafe",
+        risk="high",
+        risk_note=(
+            "Runs extraction on every memory write and adds entities a "
+            "memory mentions, which is not proof they exist; those stay "
+            "out of packs until confirmed, but the graph grows with "
+            "every write and the additions are not undone by turning "
+            "this off again."
+        ),
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["memory_extraction"],
     ),
     SettingSpec(
         name="reconcile_on_write",
+        label="Reconcile on write",
         type="bool",
         default=False,
         description=(
-            "Ask a model for an ADD/UPDATE/SUPERSEDE/NOOP verdict at "
-            "capture time (mcp save_memory path) instead of treating "
-            "every write as an unconditional add. Flagged unsafe to "
-            "expose bare: it is an LLM-judged call on the write path, so "
-            "every write pays that call's latency and cost, and it is "
-            "also the gate for enabling the pairwise supersession "
-            "rollout (`TRELLIS_ENABLE_RECONCILE_ON_WRITE`) — show a "
-            "cost-per-call estimate alongside the control, never a bare "
-            "switch."
+            "Asks a model to judge whether a newly saved memory should "
+            "be added, merged into an existing one, marked as "
+            "superseding it, or treated as a no-op — instead of always "
+            "recording it as a new add. On, duplicate and superseding "
+            "writes get folded into the right outcome automatically. "
+            "Off (the default), every write is recorded as a new add "
+            "and no such judgment runs. A memory this marks superseded "
+            "is withheld from a pack whenever its successor is also a "
+            "candidate there, so turning this on changes what packs "
+            "serve, not only how writes are recorded."
         ),
         surfaces=("mcp",),
         restart_required=False,
-        risk="unsafe",
+        risk="high",
+        risk_note=(
+            "Every write pays the latency and cost of an extra model "
+            "call, since the verdict is judged live on the write path."
+        ),
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["reconcile_on_write"],
     ),
     SettingSpec(
         name="trace_extraction",
+        label="Extract entities from traces",
         type="bool",
         default=False,
         description=(
-            "Extract entities from ingested traces at write time. "
-            "Deterministic-tier extraction is the default dispatch "
-            "priority (`DETERMINISTIC > HYBRID > LLM`, LLM fallback off "
-            "by default), so turning this on does not by itself add an "
-            "LLM call — the cost is bounded parsing work per trace."
+            "Extracts entities from a trace as it is ingested. On, "
+            "every ingested trace is scanned for entities right away. "
+            "Off (the default), traces are stored without extraction. "
+            "The deterministic extractor runs first and an LLM fallback "
+            "stays off by default, so turning this on adds bounded "
+            "parsing work per trace rather than a new model call."
         ),
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
-        risk="safe",
+        risk="low",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["trace_extraction"],
     ),
     SettingSpec(
         name="trace_extraction_min_confidence",
+        label="Trace extraction confidence floor",
         type="float",
         default=None,  # type: ignore[arg-type]  # unset means "no gate", the shipped state
         description=(
-            "Confidence floor applied to trace-extraction drafts, in "
-            "[0, 1]. Unset (the default) gates nothing — every draft is "
-            "submitted. An unparseable or out-of-range value degrades to "
-            "unset with a warning rather than to 0.0, so a typo can only "
-            "under-gate, never silently drop every draft."
+            "Sets a confidence floor, between 0 and 1, that an "
+            "extracted entity draft must clear before it is submitted "
+            "to the graph. Unset (the default) applies no floor, so "
+            "every draft is submitted regardless of confidence. Raise "
+            "this if low-confidence drafts are cluttering the graph; an "
+            "unparseable or out-of-range value is treated as unset "
+            "rather than as zero, so a mistyped value can only let more "
+            "through, never silently block everything."
         ),
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
-        risk="safe",
+        risk="low",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["trace_extraction_min_confidence"],
         minimum=0.0,
@@ -231,70 +321,90 @@ _SPECS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         name="require_pack_attribution",
+        label="Require pack attribution",
         type="bool",
         default=False,
         description=(
-            "Require at least one cited item on a pack-targeted feedback "
-            "call (mcp record_feedback, REST POST /packs/{pack_id}/feedback). "
-            "Off is today's shipped behaviour: a caller naming a pack_id "
-            "with no citations still records a rating. Turning this on "
-            "changes the contract — such a call is rejected, with the "
-            "pack's actual item ids handed back — so expect previously-"
-            "accepted calls to start failing until callers adapt."
+            "Requires at least one cited item on any feedback call "
+            "that names a pack. Off (the default), a caller can rate a "
+            "pack with no citations at all. On, such a call is "
+            "rejected and handed back the pack's own item ids so the "
+            "caller can retry with a citation attached. Enable this "
+            "once your feedback callers are consistently able to cite "
+            "something — previously-accepted uncited calls will start "
+            "failing the moment you turn it on."
         ),
         surfaces=("mcp", "api"),
         restart_required=False,
-        risk="safe",
+        risk="low",
+        group="feedback_attribution",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["require_pack_attribution"],
     ),
     SettingSpec(
         name="require_bodied_attribution",
+        label="Require bodied-item attribution",
         type="bool",
         default=False,
         description=(
-            "Require a verdict on every graduated-disclosure 'bodied' "
-            "item of a pack-targeted feedback call, not just one "
-            "citation (stricter than require_pack_attribution). "
-            "write_config.py's own measurement: this asks for roughly six "
-            "more verdicts per call than callers demonstrably volunteer "
-            "today (~46% more). Its documented failure mode is the "
-            "grading surface going quiet rather than answering more "
-            "fully, which is worse for the learning loop than an "
-            "incomplete rating — treat as unsafe to flip without "
-            "watching the feedback rate afterward."
+            "Requires a verdict — helpful, unhelpful, or ignored — on "
+            "every item a pack showed in full, not just one citation "
+            "for the pack as a whole. Off (the default), a feedback "
+            "call can satisfy pack-level attribution without "
+            "addressing every such item. On, callers must account for "
+            "each one, giving the learning loop much richer per-item "
+            "signal. This setting and require_pack_attribution compose "
+            "independently — turning this on does not change what the "
+            "other one asks for."
         ),
+        # Measured on the reference deployment's own feedback history:
+        # this asks for roughly six more verdicts per call than callers
+        # demonstrably volunteer today (~46% more than the ~8.9 they
+        # already supply per attributed call) — see write_config.py's
+        # REQUIRE_BODIED_ATTRIBUTION_FLAG docstring for the full
+        # arithmetic. That ceiling, not a correctness concern, is why
+        # this ships off.
         surfaces=("mcp", "api"),
         restart_required=False,
-        risk="unsafe",
+        risk="caution",
+        risk_note=(
+            "Raises the number of verdicts a caller must supply per "
+            "call well above what callers demonstrably volunteer "
+            "today, so a grading surface that can't keep up may "
+            "respond less often rather than more fully — watch the "
+            "feedback rate after enabling this."
+        ),
+        group="feedback_attribution",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["require_bodied_attribution"],
     ),
     SettingSpec(
         name="minhash_seed_max_docs",
+        label="MinHash dedup seed size",
         type="int",
         default=0,
         description=(
-            "How many stored documents to load into the MCP fuzzy-dedup "
-            "index at first use. 0 (default) seeds nothing. Not "
-            "settings-live and cannot become so without a process restart: "
-            "``_get_minhash_index`` reads this once, lazily, on an MCP "
-            "server process's first ``save_memory`` call, then caches the "
-            "built index for that process's lifetime — a settings write "
-            "after that first call has no effect until the next process "
-            "starts. Flagged 'restart' risk on top of that: the cost lands "
-            "at that *next* process's first save_memory call — measured at "
-            "~32ms per document (128 MinHash permutations), so a corpus of "
-            "735 whole documents costs ~24s of blocking CPU on that first "
-            "call, scaling linearly with corpus size. Present as 'takes "
-            "effect on next session start; will block for ~Ns', never a "
-            "bare slider. Capped well above any plausible corpus (not an "
-            "operational ceiling, just a sanity bound against a typo or "
-            "an overflow-class value such as 10**400)."
+            "How many stored documents to load into the "
+            "fuzzy-duplicate-detection index the first time an agent "
+            "process uses it. 0 (the default) seeds nothing. This is "
+            "read once, the first time it's needed in a process, and "
+            "then stays fixed for that process's whole lifetime — "
+            "changing it only takes effect the next time the process "
+            "restarts, never while it's running. That first use blocks "
+            "while the index builds, and the delay grows with how many "
+            "documents you seed, so set this to the smallest number "
+            "that covers what you need."
         ),
+        # Measured at ~32ms per document (128 MinHash permutations), so
+        # a corpus of 735 whole documents costs ~24s of blocking CPU on
+        # that first save_memory call, scaling linearly with corpus
+        # size. The upper bound below is a sanity cap against a typo or
+        # an overflow-class value (e.g. 10**400), not an operational
+        # ceiling.
         surfaces=("mcp",),
         restart_required=True,
-        risk="restart",
+        risk="low",
+        group="ops",
         settings_live=False,
         env_var=ENV_VAR_BY_FIELD["minhash_seed_max_docs"],
         minimum=0,
@@ -302,23 +412,28 @@ _SPECS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         name="pack_holdout_rate",
+        label="Pack holdout rate",
         type="float",
         default=0.0,
         description=(
-            "Share of assembled packs withheld from the caller, in "
-            "[0, 1], for the pack-effect A/B measurement. 0.0 (default) "
-            "withholds nothing. Flagged unsafe to expose bare: it "
-            "directly degrades what live agents receive — a withheld "
-            "pack reaches the caller as an ordinary empty one with no "
-            "visible symptom beyond measurement, so a fat-fingered value "
-            "silently degrades retrieval quality fleet-wide until someone "
-            "runs `trellis analyze replay`. Settings-live: read per pack "
-            "build in `build_pack_builder`, env > settings > default, "
-            "same as the other two surfaces."
+            "Share of assembled packs, between 0 and 1, that are "
+            "withheld entirely from the requesting agent rather than "
+            "served normally. 0.0 (the default) withholds nothing. A "
+            "withheld pack reaches the caller as an ordinary-looking "
+            "empty pack, with no distinguishing signal beyond the "
+            "measurement it feeds. Use this only when you deliberately "
+            "want to run a pack-effect measurement."
         ),
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
-        risk="unsafe",
+        risk="high",
+        risk_note=(
+            "This fraction of agents' context requests gets no pack at "
+            "all, in exchange for a controlled before/after measurement "
+            "of pack effect — treat any nonzero value as active "
+            "instrumentation, not a default posture."
+        ),
+        group="retrieval",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["pack_holdout_rate"],
         minimum=0.0,
@@ -326,45 +441,41 @@ _SPECS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         name="reconcile_model",
+        label="Reconcile model",
         type="str",
         default="hermes3:8b",
         description=(
-            "Model identifier labelled on reconcile verdict events "
-            "(mcp capture-time ADD/UPDATE/SUPERSEDE/NOOP judging). "
-            "Free text — no enum is enforced today, by this store or by "
-            "anything that reads it — so a typo is not rejected, it "
-            "silently changes verdict quality with no error anywhere. "
-            "Blank or whitespace-only is refused rather than stored: the "
-            "env reader for this knob treats an empty value as absent "
-            "and falls back to the shipped default, so storing '' would "
-            "claim an override that never actually applies. "
-            "A future governed write should validate this against the "
-            "deployment's actually-configured routing targets before "
-            "accepting it."
+            "The model name recorded on reconcile verdict events when "
+            "the model client does not report its own. It is a label "
+            "for the audit trail only: it does not choose which model "
+            "judges verdicts, which comes from the configured LLM "
+            "client. Free text, not checked against available models; "
+            "a blank or whitespace-only value is refused."
         ),
         surfaces=("mcp",),
         restart_required=False,
-        risk="safe",
+        risk="low",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["reconcile_model"],
     ),
     SettingSpec(
         name="reconcile_timeout_s",
+        label="Reconcile timeout",
         type="float",
         default=20.0,
         description=(
             "Per-verdict timeout, in seconds, for the reconcile tier. "
-            "Non-positive or unparseable *env* values degrade to the "
-            "shipped default (20.0) rather than to 0 or an unbounded "
-            "wait, so a typo there cannot hang or instantly time out "
-            "every verdict. A *settings* write holds itself to the same "
-            "standard instead of storing a value its own env reader "
-            "would silently discard: 0, a negative number and -0.0 "
-            "(equal to 0.0 in Python) are all refused here, not clamped."
+            "The default is 20 seconds. Must be a positive number — "
+            "zero and negative values are refused rather than stored, "
+            "since such a value would have no effect anyway. Raise "
+            "this if verdicts are being judged by a slower model; "
+            "lower it if you'd rather fail fast than wait."
         ),
         surfaces=("mcp",),
         restart_required=False,
-        risk="safe",
+        risk="low",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["reconcile_timeout_s"],
         minimum=0.0,
@@ -372,47 +483,49 @@ _SPECS: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         name="graph_seeding",
+        label="Graph seeding",
         type="bool",
         default=True,
         description=(
-            "Seed the graph retrieval axis from the pack's intent "
-            "(TRELLIS_GRAPH_SEEDING) instead of falling back to an "
-            "intent-blind recency window. Defaults on. Kept out of "
-            "`write_config.py`/`WriteBehaviourConfig` on purpose — mixing "
-            "a retrieval toggle into the write-behaviour module would "
-            "make `trellis admin write-config` report something it does "
-            "not govern — but settings-live via its own env > settings > "
-            "default read in `builder_factory._graph_seeding_enabled`, "
-            "called once per `build_pack_builder`."
+            "Seeds the graph retrieval axis from a pack's intent, "
+            "rather than falling back to a plain recency window that "
+            "ignores what the request is about. On by default. "
+            "Turning this off makes graph results an intent-blind "
+            "recency window, which generally returns less relevant "
+            "graph context."
         ),
+        # Kept out of write_config.py/WriteBehaviourConfig on purpose:
+        # mixing a retrieval toggle into the write-behaviour module
+        # would make `trellis admin write-config` report something it
+        # does not govern.
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
-        risk="safe",
+        risk="low",
+        group="retrieval",
         settings_live=True,
         env_var="TRELLIS_GRAPH_SEEDING",
     ),
     SettingSpec(
         name="filter_legacy_advisories",
+        label="Filter legacy advisories",
         type="bool",
         default=True,
         description=(
-            "Drop pre-#848 advisories (ones with no scoped-success "
-            "history, so a learning-loop effectiveness check has nothing "
-            "to grade them on) from what a pack serves. Defaults on, "
-            "matching the shipped behaviour before this setting existed. "
-            "Kept out of `write_config.py`/`WriteBehaviourConfig` for the "
-            "same reason as `graph_seeding`: it governs what retrieval "
-            "serves, not how a write behaves. Settings-live via its own "
-            "env > settings > default read in "
-            "`pack_builder._filter_legacy_advisories_enabled`, called "
-            "once per `build_pack_builder` and threaded through as a "
-            "resolved bool — a `PackBuilder` constructed directly (no "
-            "factory in front of it, as several tests do) instead falls "
-            "back to a live, env-only read with the same default."
+            "Withholds advisories written by the advisory generator "
+            "before it was repaired. Those rows were given a new random "
+            "id on every nightly run, so regeneration never replaces "
+            "them, and they carry no evidence-confidence data, so the "
+            "learning loop cannot grade them. On by default. Turning "
+            "this off serves those old rows again; it does not delete "
+            "them."
         ),
+        # Kept out of write_config.py/WriteBehaviourConfig for the same
+        # reason as graph_seeding: it governs what retrieval serves,
+        # not how a write behaves.
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
-        risk="safe",
+        risk="low",
+        group="retrieval",
         settings_live=True,
         env_var="TRELLIS_FILTER_LEGACY_ADVISORIES",
     ),
@@ -617,8 +730,10 @@ def validate_value(spec: SettingSpec, raw: Any) -> bool | int | float | str:
 
 
 __all__ = [
+    "GROUP_LABELS",
     "SETTINGS_REGISTRY",
     "Risk",
+    "SettingGroup",
     "SettingSpec",
     "SettingType",
     "get_setting",
