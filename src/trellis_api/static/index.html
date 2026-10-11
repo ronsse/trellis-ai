@@ -8,6 +8,10 @@
     <script src="vendor/cytoscape/cytoscape.min.js" onerror="window.__cytoscapeLoadFailed = true;"></script>
     <style>
         :root {
+            /* Dark is the default look (no prefers-color-scheme / toggle
+               needed to get it). Every token a light override touches is
+               defined here first, so no colour exists only inside a theme
+               block -- tested by tests/unit/api/test_ui_theme_tokens.py. */
             --bg: #0f1117;
             --surface: #1a1d27;
             --surface-2: #222532;
@@ -21,11 +25,76 @@
             --warn: #f59e0b;
             --error: #ef4444;
             --info: #3b82f6;
+            /* Tint pairs for badges and the degraded-store banner. ok/warn/err
+               already clear 4.5:1 against their tint using the shared
+               --success/--warn/--error foreground, so only info/accent get a
+               dedicated foreground (the shared --info/--accent are too dark
+               on their own tint and have other consumers that must not
+               change shade). */
+            --success-tint-bg: #052e16;
+            --warn-tint-bg: #422006;
+            --danger-tint-bg: #350a0a;
+            --info-tint-bg: #172554;
+            --accent-tint-bg: #312e81;
+            --info-tint-fg: #60a5fa;
+            --accent-tint-fg: #a5b4fc;
             --transition: 0.2s ease;
             --rail: 234px;
             --rail-collapsed: 58px;
             --topbar-h: 52px;
             --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', ui-monospace, 'Roboto Mono', monospace;
+        }
+
+        /* Light palette: applied by OS preference unless the manual toggle
+           (localStorage "trellis-theme") has forced dark, and unconditionally
+           when the toggle has forced light. Same token set as :root above --
+           nothing here introduces a colour that bare :root doesn't also
+           define. */
+        @media (prefers-color-scheme: light) {
+            :root:not([data-theme="dark"]) {
+                --bg: #f7f8fb;
+                --surface: #ffffff;
+                --surface-2: #eef0f5;
+                --border: #d8dae3;
+                --text: #1a1d27;
+                --text-dim: #5b5f72;
+                --accent: #4338ca;
+                --accent-dim: #3730a3;
+                --accent-glow: rgba(67, 56, 202, 0.12);
+                --success: #0f7a37;
+                --warn: #a14e04;
+                --error: #b91c1c;
+                --info: #1d4ed8;
+                --success-tint-bg: #dcfce7;
+                --warn-tint-bg: #fef3c7;
+                --danger-tint-bg: #fee2e2;
+                --info-tint-bg: #dbeafe;
+                --accent-tint-bg: #e0e7ff;
+                --info-tint-fg: #1d4ed8;
+                --accent-tint-fg: #4338ca;
+            }
+        }
+        :root[data-theme="light"] {
+            --bg: #f7f8fb;
+            --surface: #ffffff;
+            --surface-2: #eef0f5;
+            --border: #d8dae3;
+            --text: #1a1d27;
+            --text-dim: #5b5f72;
+            --accent: #4338ca;
+            --accent-dim: #3730a3;
+            --accent-glow: rgba(67, 56, 202, 0.12);
+            --success: #0f7a37;
+            --warn: #a14e04;
+            --error: #b91c1c;
+            --info: #1d4ed8;
+            --success-tint-bg: #dcfce7;
+            --warn-tint-bg: #fef3c7;
+            --danger-tint-bg: #fee2e2;
+            --info-tint-bg: #dbeafe;
+            --accent-tint-bg: #e0e7ff;
+            --info-tint-fg: #1d4ed8;
+            --accent-tint-fg: #4338ca;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -403,7 +472,7 @@
             font-size: 0.75rem;
             font-weight: 600;
         }
-        .review-count-error { background: #350a0a; color: var(--error); }
+        .review-count-error { background: var(--danger-tint-bg); color: var(--error); }
         .review-body { padding: 0 1.5rem 1.25rem; }
         .review-card {
             background: var(--surface-2);
@@ -442,7 +511,7 @@
             color: var(--error);
             background: transparent;
         }
-        button.btn-danger:hover { background: #350a0a; }
+        button.btn-danger:hover { background: var(--danger-tint-bg); }
         .review-rationale {
             width: 100%;
             margin-top: 0.5rem;
@@ -483,11 +552,11 @@
             font-size: 0.75rem;
             font-weight: 600;
         }
-        .badge-ok { background: #052e16; color: var(--success); }
-        .badge-warn { background: #422006; color: var(--warn); }
-        .badge-err { background: #350a0a; color: var(--error); }
-        .badge-info { background: #172554; color: var(--info); }
-        .badge-accent { background: #312e81; color: var(--accent); }
+        .badge-ok { background: var(--success-tint-bg); color: var(--success); }
+        .badge-warn { background: var(--warn-tint-bg); color: var(--warn); }
+        .badge-err { background: var(--danger-tint-bg); color: var(--error); }
+        .badge-info { background: var(--info-tint-bg); color: var(--info-tint-fg); }
+        .badge-accent { background: var(--accent-tint-bg); color: var(--accent-tint-fg); }
 
         /* Readiness pill (G14): tiny by design -- a dot in the topbar, not
            a card. Failing component names surface only on hover. */
@@ -1149,7 +1218,8 @@
             padding: 3rem;
             color: var(--text-dim);
         }
-        .empty-state .icon { font-size: 2rem; margin-bottom: 0.5rem; }
+        .empty-state .icon { margin-bottom: 0.5rem; }
+        .empty-state .icon svg { display: inline-block; }
         .mono { font-family: var(--font-mono); font-size: 0.82rem; }
         .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 280px; display: inline-block; vertical-align: bottom; }
         /* ...but the renderers also put .truncate on the <td> itself, and a cell
@@ -1237,7 +1307,7 @@
             gap: 0.3rem;
             padding: 0.75rem 1.25rem;
             margin-bottom: 1rem;
-            background: #350a0a;
+            background: var(--danger-tint-bg);
             border: 1px solid var(--error);
             border-radius: 8px;
             font-size: 0.85rem;
@@ -1497,6 +1567,20 @@
         .dv-copy:hover { opacity: 1; color: var(--accent); border-color: var(--border); }
         .dv-copy.done { opacity: 1; color: var(--success); }
     </style>
+    <script>
+        // Applied before first paint so a stored manual override doesn't
+        // flash the OS-preference theme first. No stored value -> no
+        // attribute -> the CSS prefers-color-scheme block alone decides,
+        // same as before this existed.
+        (function () {
+            try {
+                var stored = localStorage.getItem('trellis-theme');
+                if (stored === 'light' || stored === 'dark') {
+                    document.documentElement.setAttribute('data-theme', stored);
+                }
+            } catch (e) { /* storage unavailable (private mode, blocked) */ }
+        })();
+    </script>
 </head>
 <body>
 <div class="app-shell">
@@ -1559,7 +1643,13 @@
             <span class="readiness-pill is-unknown" id="readiness-pill" title="Readiness: checking&hellip;"></span>
             <span class="spacer"></span>
             <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>0</kbd> Views &middot; <kbd>Alt</kbd>+<kbd>1</kbd>-<kbd>5</kbd> More views &middot; <kbd>\</kbd> Sidebar &middot; <kbd>Esc</kbd> Close</span>
-            <button class="btn-icon" id="api-key-toggle" title="API key" aria-label="Show or hide the API key panel" onclick="toggleKeyBanner()">&#x1F511;</button>
+            <button class="btn-icon" id="theme-toggle" title="Switch colour theme" aria-label="Switch between dark and light theme" onclick="toggleTheme()">
+                <svg id="theme-icon-dark" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
+                <svg id="theme-icon-light" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M4.5 4.5l1.8 1.8M17.7 17.7l1.8 1.8M2.5 12h2.5M19 12h2.5M4.5 19.5l1.8-1.8M17.7 6.3l1.8-1.8"/></svg>
+            </button>
+            <button class="btn-icon" id="api-key-toggle" title="API key" aria-label="Show or hide the API key panel" onclick="toggleKeyBanner()">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="3.3"/><path d="M10.3 12.7 19 4"/><path d="M15.5 7.5 18 10M18.5 6.5 21 9"/></svg>
+            </button>
         </header>
 
     <!-- API key banner (shown on demand or after a 401) -->
@@ -2120,6 +2210,42 @@
             const banner = document.getElementById('key-banner');
             if (banner.style.display === 'none') showKeyBanner('');
             else banner.style.display = 'none';
+        }
+
+        const THEME_STORAGE = 'trellis-theme';
+
+        // The manual override (if any) was already applied before first
+        // paint by the inline script in <head>; this just tracks it going
+        // forward and keeps the toggle icon in sync.
+        function effectiveTheme() {
+            const forced = document.documentElement.getAttribute('data-theme');
+            if (forced === 'light' || forced === 'dark') return forced;
+            const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+            return prefersLight ? 'light' : 'dark';
+        }
+
+        function updateThemeToggleIcon() {
+            const darkIcon = document.getElementById('theme-icon-dark');
+            const lightIcon = document.getElementById('theme-icon-light');
+            if (!darkIcon || !lightIcon) return;
+            const isLight = effectiveTheme() === 'light';
+            darkIcon.style.display = isLight ? 'none' : '';
+            lightIcon.style.display = isLight ? '' : 'none';
+        }
+
+        function toggleTheme() {
+            const next = effectiveTheme() === 'light' ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-theme', next);
+            try { localStorage.setItem(THEME_STORAGE, next); } catch { /* private mode */ }
+            updateThemeToggleIcon();
+        }
+
+        updateThemeToggleIcon();
+        if (window.matchMedia) {
+            // No stored override -> follow a live OS theme change too.
+            window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+                if (!document.documentElement.getAttribute('data-theme')) updateThemeToggleIcon();
+            });
         }
 
         function saveApiKey() {
@@ -4258,7 +4384,7 @@
                 const traces = data.traces || [];
 
                 if (traces.length === 0) {
-                    body.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="icon">&#x1F4CB;</div><p>No traces found</p></div></td></tr>';
+                    body.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div><p>No traces found</p></div></td></tr>';
                     renderCursorPagerFooter('trace', tracePager, 0, data.total || 0);
                     return;
                 }
@@ -4403,11 +4529,34 @@
         // ============================================================
         //  PRECEDENTS
         // ============================================================
+        let precDomainsLoaded = false;
+
+        async function loadPrecedentDomains() {
+            const domainSelect = document.getElementById('prec-domain');
+            if (!domainSelect) return;
+            try {
+                // Server-side counts across every promoted precedent, not
+                // just the current page -- a page can easily miss a real
+                // domain, or offer one with zero precedents left once a
+                // filter is applied.
+                const data = await fetchJSON('/precedents/domains');
+                const currentVal = domainSelect.value;
+                domainSelect.innerHTML = '<option value="">All domains</option>';
+                for (const d of data.domains || []) {
+                    domainSelect.innerHTML += `<option value="${escHtml(d.domain)}" ${d.domain === currentVal ? 'selected' : ''}>${escHtml(d.domain)} (${d.count})</option>`;
+                }
+                precDomainsLoaded = true;
+            } catch {
+                /* filter options are a convenience, never a load blocker */
+            }
+        }
+
         async function loadPrecedents() {
             const domain = document.getElementById('prec-domain').value;
             const limit = document.getElementById('prec-limit').value;
             const container = document.getElementById('precedents-container');
             container.innerHTML = loadingHtml('Loading precedents...');
+            if (!precDomainsLoaded) loadPrecedentDomains();
 
             try {
                 let url = `/precedents?limit=${limit}`;
@@ -4422,16 +4571,6 @@
                         '<code style="font-family:var(--font-mono)">trellis curate promote-learning</code>. ' +
                         'Nothing schedules that promotion automatically today.</p></div>';
                     return;
-                }
-
-                // Populate domain filter
-                const domains = new Set();
-                items.forEach(p => { if (p.domain) domains.add(p.domain); });
-                const domainSelect = document.getElementById('prec-domain');
-                const currentVal = domainSelect.value;
-                domainSelect.innerHTML = '<option value="">All domains</option>';
-                for (const d of [...domains].sort()) {
-                    domainSelect.innerHTML += `<option value="${escHtml(d)}" ${d === currentVal ? 'selected' : ''}>${escHtml(d)}</option>`;
                 }
 
                 container.innerHTML = `<div class="precedent-grid">${items.map(p => `
@@ -4490,7 +4629,7 @@
                 const docs = data.documents || [];
 
                 if (docs.length === 0) {
-                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon">&#x1F4DA;</div><p>No documents found</p></div></td></tr>';
+                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A2 2 0 0 1 6 4h6v16H6a2 2 0 0 1-2-2z"/><path d="M20 5.5A2 2 0 0 0 18 4h-6v16h6a2 2 0 0 0 2-2z"/></svg></div><p>No documents found</p></div></td></tr>';
                     document.getElementById('mem-pagination').style.display = 'none';
                     return;
                 }
@@ -4646,7 +4785,7 @@
                 }
 
                 if (events.length === 0) {
-                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon">&#x1F4E1;</div><p>No events match</p></div></td></tr>';
+                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19v-5"/><circle cx="12" cy="12" r="2"/><path d="M8.5 10a5 5 0 0 1 0 4M15.5 10a5 5 0 0 1 0 4M5.5 7a9 9 0 0 1 0 10M18.5 7a9 9 0 0 1 0 10"/></svg></div><p>No events match</p></div></td></tr>';
                     renderCursorPagerFooter('event', eventPager, 0, data.total || 0);
                     return;
                 }
@@ -4765,7 +4904,7 @@
                 const packs = data.packs || [];
 
                 if (packs.length === 0) {
-                    body.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="icon">&#x1F4E6;</div><p>No packs assembled yet</p><p style="font-size:0.8rem; color:var(--text-dim)">Packs appear here when agents call get_context or POST /packs</p></div></td></tr>';
+                    body.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8l9-5 9 5-9 5-9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg></div><p>No packs assembled yet</p><p style="font-size:0.8rem; color:var(--text-dim)">Packs appear here when agents call get_context or POST /packs</p></div></td></tr>';
                     renderCursorPagerFooter('pack', packPager, 0, data.total || 0);
                     return;
                 }
@@ -4926,8 +5065,8 @@
                         <h4 style="font-size:0.9rem; margin-bottom:0.5rem">Record feedback</h4>
                         <textarea id="pack-feedback-comment" class="review-rationale" placeholder="Optional comment"></textarea>
                         <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap">
-                            <button class="btn btn-sm" data-act="submitPackFeedbackHelpful">👍 Helpful overall</button>
-                            <button class="btn btn-sm btn-danger" data-act="submitPackFeedbackUnhelpful">👎 Not helpful</button>
+                            <button class="btn btn-sm" data-act="submitPackFeedbackHelpful"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px;margin-right:0.3rem"><path d="M7 11v9H4a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1z"/><path d="M7 11l4-7a2 2 0 0 1 2 2v4h5.5a2 2 0 0 1 1.9 2.7l-2 6A2 2 0 0 1 16.5 20H7"/></svg>Helpful overall</button>
+                            <button class="btn btn-sm btn-danger" data-act="submitPackFeedbackUnhelpful"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px;margin-right:0.3rem"><path d="M7 13V4H4a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1z"/><path d="M7 13l4 7a2 2 0 0 0 2-2v-4h5.5a2 2 0 0 0 1.9-2.7l-2-6A2 2 0 0 0 16.5 4H7"/></svg>Not helpful</button>
                             <span id="pack-feedback-status" style="font-size:0.8rem"></span>
                         </div>
                     </div>`;
@@ -5136,7 +5275,7 @@
                     banner.className = 'empty-state';
                     banner.style.cssText = 'margin:1.5rem;padding:2rem;text-align:center;background:var(--surface);border:1px dashed var(--border);border-radius:8px;';
                     banner.innerHTML = `
-                        <div style="font-size:2.5rem;margin-bottom:0.75rem">&#x1F331;</div>
+                        <div style="margin-bottom:0.75rem"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21v-9"/><path d="M12 12C7 12 5 9 5 5c4 0 7 2 7 7z"/><path d="M12 12c5 0 7-3 7-7-4 0-7 2-7 7z"/></svg></div>
                         <h3 style="margin-bottom:0.5rem;color:var(--text)">Welcome to Trellis</h3>
                         <p style="color:var(--text-dim);max-width:480px;margin:0 auto 1rem">
                             Your knowledge graph is empty. Load sample data to explore the dashboard,
