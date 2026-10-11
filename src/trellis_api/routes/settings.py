@@ -145,9 +145,7 @@ def _effective_values(
         ),
         (
             "learning.candidate_auto_promote.",
-            lambda: resolve_candidate_auto_promote_overrides(
-                settings=settings_values
-            ),
+            lambda: resolve_candidate_auto_promote_overrides(settings=settings_values),
         ),
     ):
         try:

@@ -556,14 +556,10 @@ class TestAutoPromoteGarbageEnvDegradesInstead500:
     def test_unparseable_candidate_int_does_not_500_the_route(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(
-            CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV, "garbage"
-        )
+        monkeypatch.setenv(CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV, "garbage")
         resp = client.get("/api/v1/settings")
         assert resp.status_code == 200, resp.text
-        row = _entry(
-            resp.json(), "learning.candidate_auto_promote.min_helpful_count"
-        )
+        row = _entry(resp.json(), "learning.candidate_auto_promote.min_helpful_count")
         assert row["effective_value"] == row["default"]
         assert row["parse_error"] is not None
         assert "garbage" in row["parse_error"]
@@ -594,9 +590,7 @@ class TestAutoPromoteGarbageEnvDegradesInstead500:
         degrades together) but every setting outside that one family
         -- including ``learning.auto_promote.*``, a sibling family with
         its own, separate resolver -- reports with no parse error."""
-        monkeypatch.setenv(
-            CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV, "garbage"
-        )
+        monkeypatch.setenv(CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV, "garbage")
         resp = client.get("/api/v1/settings")
         assert resp.status_code == 200, resp.text
         body = resp.json()
