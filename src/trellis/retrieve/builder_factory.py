@@ -34,6 +34,7 @@ from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import NamespaceSeedExtractor, build_strategies
 from trellis.stores.advisory_source import load_advisory_store
+from trellis.stores.settings_store import load_settings_values
 from trellis_wire.axes import (
     format_embedder_failed_note,
     format_failed_axes_note,
@@ -138,7 +139,16 @@ def build_pack_builder(
         project=project,
         # The pack-effect holdout (``TRELLIS_PACK_HOLDOUT_RATE``), read per
         # build like every surface's builder, so no surface escapes it.
-        holdout_rate=WriteBehaviourConfig.from_env().pack_holdout_rate,
+        # ``env > settings > default`` (#settings-store PR 1/2): this is
+        # the one ``WriteBehaviourConfig`` field a *settings*-store
+        # override actually changes at its real enforcement site today —
+        # see ``SettingSpec(name="pack_holdout_rate").settings_live`` in
+        # ``trellis.core.settings_registry``. Reading the settings file
+        # here costs the same one extra file read ``load_advisory_store``
+        # already pays per pack build, immediately above.
+        holdout_rate=WriteBehaviourConfig.from_env_and_settings(
+            settings=load_settings_values(registry.stores_dir)
+        ).pack_holdout_rate,
     )
 
 

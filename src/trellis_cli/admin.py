@@ -34,12 +34,14 @@ from trellis.core.write_config import (
     MEMORY_EXTRACTION_FLAG,
     TRUTHY,
     WriteBehaviourConfig,
+    resolve_overridden_by,
 )
 from trellis.core.write_provenance import build_write_provenance
 from trellis.errors import BackendNotInstalledError, StoreWriteRefusedError
 from trellis.llm.routing import LLMConsumer, LLMRoute, LLMRoutingError
 from trellis.schedule.catalog import JOB_CATALOG
 from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.settings_store import load_settings_values
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.claude_integration import get_skills_target_dir, install_skills
 from trellis_cli.config import TrellisConfig, get_config_dir, get_data_dir
@@ -420,10 +422,23 @@ def write_config(
     a working tree that has moved on reports the sha it was installed at,
     confidently and wrongly. That row compares it against the tree's live
     ``HEAD``.
+
+    Each knob's ``overridden_by`` names which of ``env`` / ``settings`` /
+    ``default`` is in force — read fresh from
+    ``<data_dir>/stores/settings.json`` on every call (no caching,
+    matching every other reader in this module), so a concurrent
+    ``trellis admin settings`` write is visible on the next invocation. A
+    **settings**-sourced row is reported truthfully even where it has no
+    live effect yet (``SettingSpec.settings_live`` in
+    ``trellis.core.settings_registry`` — today that is every field except
+    ``pack_holdout_rate``).
     """
-    config = WriteBehaviourConfig.from_env()
+    stores_dir = get_data_dir() / "stores"
+    settings_values = load_settings_values(stores_dir)
+    config = WriteBehaviourConfig.from_env_and_settings(settings=settings_values)
     provenance = build_write_provenance(config)
     staleness = resolve_stamp_staleness()
+    overridden_by = resolve_overridden_by(settings=settings_values)
 
     if output_format == "json":
         # The stamp verbatim (so it can be diffed against a stored row)
@@ -435,7 +450,7 @@ def write_config(
         # where they stand.
         payload = {
             "write_provenance": provenance,
-            "knobs": config.describe(),
+            "knobs": config.describe(overridden_by=overridden_by),
             "stamp_staleness": {
                 "state": staleness.state,
                 "source_tree_commit": staleness.source_tree_commit,
@@ -462,13 +477,15 @@ def write_config(
     knobs.add_column("Env var", overflow="fold")
     knobs.add_column("Value", overflow="fold")
     knobs.add_column("Default", overflow="fold")
-    for row in config.describe():
+    knobs.add_column("Overridden by", overflow="fold")
+    for row in config.describe(overridden_by=overridden_by):
         style = "yellow" if row["overridden"] else None
         knobs.add_row(
             row["name"],
             row["env_var"],
             str(row["value"]),
             str(row["default"]),
+            row["overridden_by"],
             style=style,
         )
     console.print(knobs)
