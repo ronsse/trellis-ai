@@ -15,6 +15,7 @@ from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
+from trellis.stores.base.event_log import EventType, scan_events
 from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis_api.app import get_registry
 from trellis_wire.dtos import (
@@ -418,3 +419,33 @@ def list_precedents(
     registry = get_registry()
     items = _list_precedents(registry.operational.event_log, domain=domain, limit=limit)
     return {"status": "ok", "count": len(items), "precedents": items}
+
+
+@router.get("/precedents/domains", summary="Count promoted precedents per domain")
+def list_precedent_domains() -> dict[str, Any]:
+    """Count promoted precedents per ``domain``, for a domain filter's options.
+
+    Unlike the ``domain`` dropdown built from one fetched page of
+    precedents, this scans every ``PRECEDENT_PROMOTED`` event (capped at
+    :data:`~trellis.stores.base.event_log.DEFAULT_SCAN_LIMIT`, same as any
+    other analyzer), so it lists a domain that exists but isn't on the
+    current page, and never offers one with zero precedents left once a
+    filter is applied.
+    """
+    event_log = get_registry().operational.event_log
+    scan = scan_events(event_log, event_type=EventType.PRECEDENT_PROMOTED)
+    counts: dict[str, int] = {}
+    for event in scan.events:
+        domain = event.payload.get("domain")
+        if domain:
+            counts[domain] = counts.get(domain, 0) + 1
+    domains = [
+        {"domain": domain, "count": count}
+        for domain, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    return {
+        "status": "ok",
+        "total": sum(counts.values()),
+        "domains": domains,
+        "truncated": scan.coverage.truncated,
+    }
