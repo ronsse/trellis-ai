@@ -576,14 +576,13 @@ async def list_analyze_reports() -> dict[str, Any]:
     }
 
 
+# A plain ``def``, not ``async def``: every report is a synchronous scan of
+# the stores, and FastAPI runs a sync handler in its threadpool. As a
+# coroutine, one slow report would block the event loop and stall every
+# other request the process is serving.
 @router.get("/analyze/{report}")
 def get_analyze_report(report: str, request: Request) -> JSONResponse:
     """Run one allowlisted ``trellis analyze`` report over HTTP.
-
-    A plain ``def``, not ``async def``: every report is a synchronous scan
-    of the stores, and FastAPI runs a sync handler in its threadpool. As a
-    coroutine, one slow report would block the event loop and stall every
-    other request the process is serving.
 
     Query params are validated against the report's own bounded DTO
     (``extra="forbid"``) rather than FastAPI's automatic pydantic-model
