@@ -4371,25 +4371,33 @@ paths:
 
         actually behaves. Deliberately excludes anything secret-shaped:
 
-        ``stores`` is class names only, ``embedder`` names only the
+        ``stores`` is class names only, ``embedder`` is the resolved
 
-        configuration knob in play (``TRELLIS_EMBEDDING_FN`` or
+        embedder''s dotted path or provider name followed by the configuration
 
-        ``embeddings.provider``, never a key or URL), ``llm_routes`` carries
+        knob in play (``TRELLIS_EMBEDDING_FN``, ``embeddings.provider``, or
 
-        tier names only (an ``LLMRoute``''s ``block`` — which can hold a
+        ``embeddings`` when the whole block is malformed), never a key or
 
-        literal API key — is never touched, and a malformed route is
+        URL, ``llm_routes`` carries tier names
 
-        reported by its setting path, never the value that failed to
+        only (an ``LLMRoute``''s ``block`` — which can hold a literal API key
 
-        validate), and the two directory fields are plain paths. Resolving
+        — is never touched, and a malformed route is reported by its
 
-        the embedder is wrapped whole rather than guarded by exception type:
+        setting path, never the value that failed to validate), and the two
 
-        an unconfigured or misconfigured embedding knob must read as "none
+        directory fields are plain paths. Resolving the embedder is wrapped
 
-        configured" or "unknown" here, never 500 a panel that exists to show
+        whole, and the knob lookup used on both the raise and the
+
+        resolved-to-nothing paths is itself guarded against raising, so an
+
+        unconfigured or misconfigured embedding knob — including a
+
+        non-mapping ``embeddings:`` block — reads as "none configured" or
+
+        "unknown" here, never 500s a panel that exists to show
 
         configuration, not enforce it.'
       operationId: runtime_api_v1_runtime_get

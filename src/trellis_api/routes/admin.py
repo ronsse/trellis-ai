@@ -187,10 +187,11 @@ def runtime() -> RuntimeResponse:
     surface actually calls, not the separate ``llm.embedding:`` block
     nothing else reads) — so this view cannot drift from how the server
     actually behaves. Deliberately excludes anything secret-shaped:
-    ``stores`` is class names only, ``embedder`` names only the
-    configuration knob in play (``TRELLIS_EMBEDDING_FN``,
-    ``embeddings.provider``, or ``embeddings`` when the whole block is
-    malformed — never a key or URL), ``llm_routes`` carries tier names
+    ``stores`` is class names only, ``embedder`` is the resolved
+    embedder's dotted path or provider name followed by the configuration
+    knob in play (``TRELLIS_EMBEDDING_FN``, ``embeddings.provider``, or
+    ``embeddings`` when the whole block is malformed), never a key or
+    URL, ``llm_routes`` carries tier names
     only (an ``LLMRoute``'s ``block`` — which can hold a literal API key
     — is never touched, and a malformed route is reported by its
     setting path, never the value that failed to validate), and the two
@@ -223,7 +224,7 @@ def runtime() -> RuntimeResponse:
     # 'embeddings:' block or TRELLIS_EMBEDDING_FN reads as "unknown" here
     # rather than 500-ing a panel that exists to show configuration, not
     # enforce it. A non-mapping 'embeddings:' block (a bare string, bool,
-    # int, or list) no longer reaches this try at all -- embedding_fn
+    # int, or list) no longer raises inside this try -- embedding_fn
     # itself degrades that shape to "unconfigured" -- so it is reported
     # as "unknown" below, in the resolved-to-nothing branch, not here.
     embedder_name: str | None = None
