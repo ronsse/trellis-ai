@@ -8,33 +8,82 @@ All notable changes to Trellis will be documented in this file.
 
 - **Schedule registry + job-run records (#e166).** The pieces a host-side
   dispatcher cron needs so job schedules can later be edited from a UI
-  (plan p1 §(b)) without the container ever touching crontab:
-  - `schedule.json` (`<data_dir>/stores/schedule.json`): a `ScheduledJob` row
-    per job (`name`, `command` as an argv list — never a shell string —
-    `cadence`, `enabled`, `timeout_seconds`, an operator-facing
-    `description`, `host_only`, `run_requested_at`), backed by a new
-    `ScheduleStore`, the third `DegradableJsonStore` subclass alongside
+  (plan p1 §(b)) without the container ever touching crontab — and the
+  command boundary redesigned so the shared, read-write-mounted
+  `schedule.json` can never choose *what* runs:
+  - `trellis.schedule.catalog.JOB_CATALOG`: the **only** source of a job's
+    command. A Trellis-native job (`tune`, `worker-enrich`, …) carries its
+    argv fixed in source; a host-only job (`capture-nightly`,
+    `curate-nightly`, `backup-nightly`, `roadmap-nightly` — they need the
+    docker socket / `gh` auth the container doesn't have) names only an
+    executable the operator places at `$TRELLIS_HOST_JOBS_DIR/<name>`,
+    outside the shared data mount. No absolute personal path in the repo.
+  - `schedule.json` (`<data_dir>/stores/schedule.json`) holds only
+    operator-tunable state per `ScheduledJob` row: `name` (must be a
+    catalog key — an unknown name degrades the row, never runs it),
+    `cadence`, `enabled`, a bounded `timeout_seconds` override (1–86400),
+    `run_requested_at`. `command`, `description` and `host_only` are gone
+    from the persisted row — `extra="forbid"` means a legacy or tampered
+    row still carrying `command` degrades instead of executing it. Backed
+    by `ScheduleStore`, the third `DegradableJsonStore` subclass alongside
     `PolicyStore` and `AdvisoryStore` (reads degrade, writes refuse).
-  - `trellis admin init-schedule` seeds the registry with Trellis's own
-    default jobs — the nightly capture/curate/backup/roadmap sweeps, the
-    tuner dry-run, and the manual-only commands from the UI gap inventory —
+  - `trellis admin init-schedule` seeds the registry from the catalog's
+    defaults — the nightly capture/curate/backup/roadmap sweeps, the tuner
+    dry-run, and the manual-only commands from the UI gap inventory —
     without overwriting anything an operator already edited.
-  - `trellis admin due-jobs --format json` reports which jobs are due now,
-    combining `enabled`, `cadence` (`trellis.core.cron`), the most recent
-    `JOB_RUN_COMPLETED` in the EventLog, and `run_requested_at`.
+  - `trellis admin due-jobs --format json` joins each due row with its
+    catalog entry and reports which jobs are due now, combining `enabled`,
+    `cadence` (`trellis.core.cron`), the most recent `JOB_RUN_COMPLETED` in
+    the EventLog, and `run_requested_at`. For a host-only job it reports
+    `command: null` and `host_only: true` — a marker, not a path — so the
+    host dispatcher resolves `$TRELLIS_HOST_JOBS_DIR/<name>` itself, after
+    checking the name matches `^[a-z0-9-]+$` (no path traversal).
   - `trellis admin record-job-run` records one execution as a
     `JOB_RUN_STARTED` / `JOB_RUN_COMPLETED` event pair, modeled on
     `CAPTURE_SWEEP_COMPLETED`.
   - `docs/ops/job-dispatcher.sh.example`: a reference host-side dispatcher
     script (documentation only, not installed by this repo) showing the
-    `due-jobs` → exec argv → `record-job-run` loop under `flock`.
+    `due-jobs` → exec argv (or resolve + exec a host-only path) →
+    `record-job-run` loop under `flock`.
 
-  No REST route and no UI yet (a later PR, plan p1 PR 6). No command
-  anywhere in this registry, the store, or the two new CLI commands execs
-  anything; `command` is schema-validated as a non-empty list of non-blank
-  argv tokens, and the one thing that does exec a job — the reference
-  dispatcher script — builds it as a bash array and execs it directly,
-  never through a shell.
+  No REST route and no UI yet (a later PR, plan p1 PR 6). **The actual
+  boundary:** commands are fixed in source or confined to one host-only
+  directory outside the shared mount; editing `schedule.json` — by hand, a
+  compromised container, or the future PR 6 API — can change only
+  *whether* and *when* a catalog job runs, never *what* runs. (An earlier
+  draft of this entry claimed "no arbitrary command execution anywhere" on
+  the strength of argv-not-shell alone; that claim did not hold once
+  `schedule.json`'s own `command` field was the thing deciding what an
+  argv-exec'd — this redesign is the fix.)
+- **Pack feedback from the Packs detail view.** `POST /packs/{pack_id}/feedback`
+  was the only learning-loop input the dashboard could add and the UI never
+  called it — the "Feedback" count on a pack's detail page only ever grew by
+  an agent calling the route directly. The injected-items table now carries a
+  Helpful/Unhelpful checkbox per row (checking one clears the other), plus an
+  optional comment and two overall-verdict buttons ("Helpful overall" /
+  "Not helpful") that set `success` and leave `rating` for the server to
+  derive, matching the existing REST/MCP contract. A successful submit shows
+  whether the event reached the EventLog yet (`event_log_in_sync`) and
+  reloads the pack so the new row and count reflect it; a failed submit shows
+  the error and re-enables the buttons instead of resetting the form. UI
+  only — the route and `PackFeedbackRequest`/`PackFeedbackResponse` shapes
+  are unchanged.
+- **Advisories and Policies tabs in the web UI (#850).** Both surfaces
+  existed only as CLI/REST before this: `GET /advisories` (+
+  `POST /advisories/generate`, an admin action gated behind an inline
+  two-step confirm, never `window.confirm`) and `/policies*` (list is
+  read-scope, create/delete escalate to admin — a 403 now renders as "needs
+  an admin-scoped key" rather than a blank panel). A degraded
+  `AdvisoryStore`/`PolicyStore` (`DegradableJsonStore`) renders a dedicated
+  banner from `store_degradation` so a damaged file never reads the same as
+  an empty one, and `GET /advisories`' `stores_dir not configured` sentinel
+  (a 200 with `{"status": "error"}`, not an HTTP failure) is checked
+  explicitly rather than falling through to a silently empty table. Every
+  interpolated value goes through `escHtml`; dates are rendered through a new
+  UTC-labelled `fmtDateUtc` rather than the existing unlabelled `fmtDate`. The
+  policy create form submits exactly one rule per policy, matching
+  `trellis policy add`'s own shape; each field carries a one-line
+  description, including the deny-wins resolution order.
 - **Promotion-ready-candidate digest and readable fallback names (#845).**
   Prod had scored 796 learning candidates with 0 ever promoted, and 13 of the
   top 15 `promote_guidance` candidates carried an ugly bare-item-id
