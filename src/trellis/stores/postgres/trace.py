@@ -183,6 +183,15 @@ class PostgresTraceStore(PostgresStoreBase, TraceStore):
         assert row is not None
         return int(row[0])
 
+    def count_by_domain(self) -> dict[str, int]:
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT domain, COUNT(*) FROM traces"
+                " WHERE domain IS NOT NULL GROUP BY domain"
+            )
+            rows = cur.fetchall()
+        return {row[0]: int(row[1]) for row in rows}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

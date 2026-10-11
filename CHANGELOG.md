@@ -361,6 +361,64 @@ All notable changes to Trellis will be documented in this file.
   injected `http=`, raises `ValueError`.
   (follow-up from the [#804](https://github.com/ronsse/trellis-ai/pull/804) gate)
 
+### Fixed
+
+- **UI P2 sweep (e174): tables, values, time, naming, accessibility,
+  build footer.** Nine findings from a UI-quality review's P2 section
+  ("consistency, clarity, enterprise hygiene"), re-located against
+  current `main` since several had already moved or been fixed by
+  #849-#852/#855:
+  - **Tables.** Traces, Events and Packs share one cursor-pager family
+    (`makeCursorPager`/`renderCursorPagerFooter`) with real "N of total
+    &middot; newer/older" footers; Memories' existing offset-based
+    pagination already satisfied this and was left alone. A Trace,
+    Document or Pack detail miss names the id instead of rendering blank;
+    an Event miss (paged by cursor window, not id lookup) also names the
+    loaded window. The Traces domain filter is now populated from a
+    server-side `GET /traces/domains` count over the whole store, not
+    just the currently-loaded page.
+  - **Values.** Swept the remaining `|| '-'`/`|| 0` fallbacks that were
+    conflating a legitimate zero with "missing"; the sole surviving
+    `|| '-'` is a string-join fallback, not a numeric one. `/packs`
+    summaries gain a `sectioned` field so a sectioned pack's attribution
+    badge reads "unattributable (sectioned)" instead of implying a zero
+    outcome, and `get_pack` gains `holdout_blinded` so the UI can say
+    *why* a blinded holdout payload reads short.
+  - **Time.** `fmtDate`/`fmtUtc`/`fmtDateUtc` collapsed into one `fmtTime`
+    that always renders in UTC and labels it; `fmtTimeCell` pairs a
+    relative "3h ago" with the raw ISO instant as its `title`.
+  - **Build footer.** The sidebar now reads "API build" (not "Backend")
+    and surfaces `stamp_stale` / `fallback-version` / `commit: null` from
+    `GET /api/version` as an honest warning instead of a normal version.
+  - **Toasts.** A dedicated `#toast-region[aria-live="polite"]` replaces
+    the previous reuse of the static `#error` banner; a terminal-action
+    toast pauses on hover/focus and carries an explicit dismiss button.
+  - **Naming.** The "Evolution" tab is now "Effectiveness"; "self-learning"
+    is never used.
+  - **Help text.** Added one-line `.field-hint` descriptions for the
+    Metrics `days`/`group_by` controls and the Graph Explorer's
+    depth/sort controls. The Dashboard stat cards already had per-card
+    descriptions via `renderCard`'s `sub` param, and the Review tab has
+    no filter controls to describe — both sub-items were already
+    satisfied or do not apply to current code, not re-implemented.
+  - **Accessibility.** 18 previously-unlabeled `<select>`/`<input>`
+    elements got `aria-label`s; the four clickable `<tr>` row templates
+    (Traces/Memories/Events/Packs) are now `tabindex="0" role="button"`
+    with a keyboard handler for Enter/Space; the "Why no approve?"
+    explanations are now visible text, not only a hover `title`; every
+    icon-only button (API-key toggle, value-copy, row-expand, the five
+    graph-toolbar buttons) carries an `aria-label`; the graph canvas gets
+    `role="img"` plus a `aria-describedby` text alternative; the
+    search-results-panel's close control is a real `<button>`, not a
+    `<span>` with an `onclick`; a `/stats` or `/health` fetch failure on
+    the Dashboard now renders inside the card that failed instead of the
+    shared `#error` line. The key-banner close control was already a
+    `<button>` from a prior merged PR — no change needed there.
+  - **Welcome banner.** Unchanged this sweep — already gated on a green
+    `/readyz` and zero counts together, from a prior fix.
+  New failing-before tests in `tests/unit/api/test_ui_p2_sweep.py` pin
+  every item above that wasn't already covered.
+
 ### Changed
 
 - **BREAKING: `trellis admin quickstart` no longer writes Claude Code settings

@@ -11,7 +11,7 @@ Three claims under test:
    "Not measured" and a distinct "never run" badge — never folded into the
    same path as a real, zero-valued run (``renderLoopRow``'s ``if
    (!loop.last_run_at)`` branch).
-2. A real run's timestamp is labelled UTC (``fmtUtc``) with a relative age
+2. A real run's timestamp is labelled UTC (``fmtTime``) with a relative age
    (``timeAgo``), and staleness (no run in over ``LOOP_STALE_HOURS``) is
    computed from that same timestamp, not from ``last_status`` — a loop can
    report ``last_status: "ok"`` from its last run while that run itself is
@@ -78,7 +78,10 @@ def test_never_run_branch_is_the_falsy_last_run_at_check() -> None:
 def test_real_run_timestamp_uses_fmt_utc_and_time_ago() -> None:
     body = _render_loop_row_body(_page())
     else_branch = _between(body, "} else {", "\n            }\n")
-    assert "fmtUtc(loop.last_run_at)" in else_branch
+    # fmtUtc/fmtDateUtc were collapsed into fmtTime (one UTC-labelled
+    # formatter family, e174 item 3) -- this still pins a UTC-rendering
+    # call, not just any timestamp read.
+    assert "fmtTime(loop.last_run_at)" in else_branch
     assert "timeAgo(loop.last_run_at)" in else_branch
 
 

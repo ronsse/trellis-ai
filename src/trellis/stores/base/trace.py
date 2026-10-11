@@ -40,5 +40,15 @@ class TraceStore(ABC):
         """Count traces with optional filters."""
 
     @abstractmethod
+    def count_by_domain(self) -> dict[str, int]:
+        """Count traces grouped by ``domain``, keyed by the stored value.
+
+        A trace with no domain is omitted, not keyed under ``None`` — a
+        caller building a domain filter wants only values it could pass
+        back into ``query(domain=...)``. Backs a server-side-count filter
+        populated from the whole store rather than one fetched page.
+        """
+
+    @abstractmethod
     def close(self) -> None:
         """Cleanup."""

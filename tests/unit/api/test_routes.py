@@ -696,6 +696,41 @@ def test_list_traces(client):
     assert data["traces"][0]["intent"] == "list test"
 
 
+def test_list_traces_until_pages_older_history(client):
+    """``until`` is ``/traces``'s page-older convention, same as /events —
+    there is no offset param to page with instead."""
+    client.post("/api/v1/traces", json=_make_trace(intent="older"))
+    older_at = client.get("/api/v1/traces").json()["traces"][0]["created_at"]
+    client.post("/api/v1/traces", json=_make_trace(intent="newer"))
+
+    resp = client.get("/api/v1/traces", params={"until": older_at})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [t["intent"] for t in data["traces"]] == ["older"]
+    # total is the unfiltered store count, not the paged slice
+    assert data["total"] == 2
+
+
+def test_list_trace_domains_counts_the_whole_store_not_one_page(client):
+    """The domain filter's options come from a server-side count over every
+    stored trace, not the fetched page -- so a domain with zero traces on
+    the current (small) page, but traces elsewhere, still shows up, and one
+    with zero traces anywhere never does."""
+    for _ in range(3):
+        client.post("/api/v1/traces", json=_make_trace(domain="platform"))
+    client.post("/api/v1/traces", json=_make_trace(domain="data"))
+    client.post("/api/v1/traces", json=_make_trace())  # no domain
+
+    resp = client.get("/api/v1/traces/domains")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 4
+    assert data["domains"] == [
+        {"domain": "platform", "count": 3},
+        {"domain": "data", "count": 1},
+    ]
+
+
 def test_get_trace_not_found(client):
     resp = client.get("/api/v1/traces/nonexistent")
     assert resp.status_code == 404
