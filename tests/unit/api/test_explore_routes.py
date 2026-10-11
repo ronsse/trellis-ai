@@ -460,6 +460,53 @@ def test_pack_detail_404(client):
     assert resp.status_code == 404
 
 
+def _seed_pack_with_feedback(registry, pack_id, count):
+    """Seed one pack plus ``count`` feedback events scoped to it.
+
+    ``count`` is always > 1 here (never a population-1 fixture): callers
+    pick a value either side of the route's ``limit=50`` cap on purpose,
+    so the same helper proves both the untruncated and truncated cases.
+    """
+    log = registry.operational.event_log
+    log.emit(
+        EventType.PACK_ASSEMBLED,
+        source="pack_builder",
+        entity_id=pack_id,
+        entity_type="pack",
+        payload=_PACK_PAYLOAD,
+    )
+    for i in range(count):
+        log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mutation_executor",
+            entity_id=pack_id,
+            payload={"pack_id": pack_id, "rating": 1, "comment": f"fb-{i}"},
+        )
+
+
+def test_pack_detail_feedback_total_not_truncated_below_cap(client, registry):
+    _seed_pack_with_feedback(registry, "pack-small", 3)
+    resp = client.get("/api/v1/packs/pack-small")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["feedback"]) == 3
+    assert data["feedback_total"] == 3
+    assert data["feedback_truncated"] is False
+
+
+def test_pack_detail_feedback_total_true_count_above_cap(client, registry):
+    _seed_pack_with_feedback(registry, "pack-big", 55)
+    resp = client.get("/api/v1/packs/pack-big")
+    assert resp.status_code == 200
+    data = resp.json()
+    # The displayed list stays capped at 50 (unchanged behaviour) ...
+    assert len(data["feedback"]) == 50
+    # ... but the true total and the truncation flag now say so, rather
+    # than leaving the UI to read 50 as "all of it".
+    assert data["feedback_total"] == 55
+    assert data["feedback_truncated"] is True
+
+
 # ---------------------------------------------------------------------------
 # Graph node history
 # ---------------------------------------------------------------------------

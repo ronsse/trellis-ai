@@ -1224,7 +1224,26 @@ components:
 
         (or a metric with no events in the window) yields an empty
 
-        ``series`` list.'
+        ``series`` list.
+
+
+        ``scan_truncated`` / ``scanned_events`` flatten
+
+        :class:`trellis.stores.base.event_log.ScanCoverage` (``truncated`` /
+
+        ``scanned``) into plain scalars rather than nesting that core model
+
+        directly: ``trellis_wire`` has zero dependency on ``trellis`` core by
+
+        design (see ``trellis_wire.base``), so only the two fields the UI
+
+        needs cross the boundary. ``scan_truncated`` is true when the
+
+        underlying EventLog read(s) hit their cap, meaning buckets near the
+
+        recent end of the window may be missing data rather than genuinely
+
+        showing none (P1-8).'
       properties:
         bucket:
           default: day
@@ -1241,6 +1260,15 @@ components:
         metric:
           title: Metric
           type: string
+        scan_truncated:
+          default: false
+          title: Scan Truncated
+          type: boolean
+        scanned_events:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Scanned Events
         series:
           items:
             $ref: '#/components/schemas/TimeseriesSeriesResponse'
@@ -3367,7 +3395,18 @@ paths:
 
         ``bucket`` (or a non-positive ``days``) returns 422 rather than a
 
-        silent empty result, so a typo surfaces loudly.'
+        silent empty result, so a typo surfaces loudly.
+
+
+        ``scan_truncated`` / ``scanned_events`` carry
+
+        :func:`compute_timeseries`''s :class:`~trellis.stores.base.event_log.ScanCoverage`
+
+        (P1-8): when ``scan_truncated`` is true, the EventLog read hit its
+
+        cap and the window''s recent-end buckets may be missing data rather
+
+        than genuinely empty.'
       operationId: metrics_timeseries_api_v1_metrics_timeseries_get
       parameters:
       - description: One of the five improvement metrics
@@ -3629,7 +3668,18 @@ paths:
 
         withheld pack''s row, the ``holdout_*`` keys but ``holdout_rate`` (the
 
-        would-be pack) reach ``admin`` callers only.'
+        would-be pack) reach ``admin`` callers only.
+
+
+        ``feedback`` stays capped at 50 rows, but ``feedback_total`` (the
+
+        true count, read via a bounded ``DEFAULT_SCAN_LIMIT`` over-fetch
+
+        since :meth:`EventLog.count` cannot filter by ``payload_filters``)
+
+        and ``feedback_truncated`` (``feedback_total > len(feedback)``) now
+
+        say when the 50-row list is not the whole picture (P1-9).'
       operationId: get_pack_api_v1_packs__pack_id__get
       parameters:
       - in: path

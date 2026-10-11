@@ -765,6 +765,16 @@ class MetricsTimeseriesResponse(WireModel):
     them, and carries one series per resolved group key. An empty store
     (or a metric with no events in the window) yields an empty
     ``series`` list.
+
+    ``scan_truncated`` / ``scanned_events`` flatten
+    :class:`trellis.stores.base.event_log.ScanCoverage` (``truncated`` /
+    ``scanned``) into plain scalars rather than nesting that core model
+    directly: ``trellis_wire`` has zero dependency on ``trellis`` core by
+    design (see ``trellis_wire.base``), so only the two fields the UI
+    needs cross the boundary. ``scan_truncated`` is true when the
+    underlying EventLog read(s) hit their cap, meaning buckets near the
+    recent end of the window may be missing data rather than genuinely
+    showing none (P1-8).
     """
 
     metric: str
@@ -772,6 +782,8 @@ class MetricsTimeseriesResponse(WireModel):
     group_by: str = "none"
     days: int = 30
     series: list[TimeseriesSeriesResponse] = Field(default_factory=list)
+    scan_truncated: bool = False
+    scanned_events: int | None = None
 
 
 # -- Loop health (e167) --

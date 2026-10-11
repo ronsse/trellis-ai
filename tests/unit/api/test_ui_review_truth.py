@@ -1,6 +1,6 @@
 """The Review tab and its empty states stop hiding why.
 
-Five defects, pinned one test group each:
+Six defects, pinned one test group each:
 
 1. A tuner proposal with ``reachable === false`` can never be promoted —
    ``promote_proposal()`` and ``preview_promotion()`` both re-check the same
@@ -33,6 +33,14 @@ Five defects, pinned one test group each:
    longer says "noise", and the section now reports how many of those
    proposals the evidence gate (``demotion_screen.admitted``) actually
    cleared.
+6. That same section had no write action and no third figure for what
+   actually got tagged — the summary line stopped at "N proposed ... M
+   admitted" with no word on ``noise_tags_written``, and nothing in the
+   UI called ``POST /effectiveness/apply-noise-tags``. The line now adds
+   a third segment, a new "Apply noise tags…" action runs that route
+   behind a two-step inline confirm (never ``window.confirm``), and the
+   section states that demotion requires evidence of unhelpfulness so an
+   admitted-vs-proposed gap is expected, not a bug.
 """
 
 from __future__ import annotations
@@ -327,3 +335,60 @@ def test_noise_section_reports_how_many_the_evidence_gate_admitted() -> None:
     # final render while leaving the dead computation above it in place
     # would otherwise pass this test.
     assert re.search(r"noise\.innerHTML = `[^`]*\$\{summaryLine\}", body)
+
+
+def test_noise_summary_line_adds_a_third_segment_for_tags_written() -> None:
+    # The two-segment line ("N proposed ... M admitted ...") said nothing
+    # about what apply-noise-tags actually wrote, so an operator could not
+    # tell a dry read (/effectiveness, noise_tags_written always null)
+    # from a completed write pass (/effectiveness/apply-noise-tags) just
+    # by looking at this section.
+    body = _load_evolution_body(_page())
+    assert "data.noise_tags_written" in body
+    assert "noise tags written" in body
+
+
+def test_evolution_section_states_demotion_requires_evidence_of_unhelpfulness() -> None:
+    page = _page()
+    section = _between(
+        page,
+        '<div class="status-section" id="evo-noise-section" style="display:none">',
+        '<div id="evo-noise"></div>',
+    )
+    assert "evidence of unhelpfulness" in section
+    assert "demotion_gate" in section
+
+
+def test_apply_noise_tags_button_exists_behind_a_two_step_inline_confirm() -> None:
+    page = _page()
+    assert 'onclick="showApplyNoiseTagsConfirm()"' in page
+    assert "function showApplyNoiseTagsConfirm() {" in page
+    assert "function cancelApplyNoiseTags() {" in page
+    assert "async function runApplyNoiseTags() {" in page
+    confirm_region = _between(
+        page,
+        "function showApplyNoiseTagsConfirm() {",
+        "async function runApplyNoiseTags() {",
+    )
+    # window.confirm cannot render in this runtime (see the advisories
+    # generate / proposal reject precedents) — the confirm step must be
+    # an inline DOM swap instead.
+    assert "window.confirm" not in confirm_region
+    assert "btn-danger" in confirm_region
+
+
+def test_apply_noise_tags_posts_to_the_existing_route_and_shows_counts() -> None:
+    page = _page()
+    body = _between(
+        page,
+        "async function runApplyNoiseTags() {",
+        "\n        }\n",
+    )
+    assert "postJSON(`/effectiveness/apply-noise-tags" in body
+    assert "noise_candidates_tagged" in body
+    assert "noise_candidates_refused_not_document" in body
+    # A successful apply re-renders straight from the POST response (which
+    # carries the same report-shaped fields as GET /effectiveness, just
+    # with noise_tags_written populated) rather than re-fetching GET
+    # /effectiveness, which would revert noise_tags_written back to null.
+    assert "renderNoiseSection(data)" in body

@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_ADMIN, scopes_satisfy
 from trellis.core.pack_holdout import blind_holdout
-from trellis.stores.base.event_log import Event, EventType
+from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 
@@ -262,6 +262,12 @@ def get_pack(
     ``trellis.learning.pack_observations.join_pack_feedback``). On a
     withheld pack's row, the ``holdout_*`` keys but ``holdout_rate`` (the
     would-be pack) reach ``admin`` callers only.
+
+    ``feedback`` stays capped at 50 rows, but ``feedback_total`` (the
+    true count, read via a bounded ``DEFAULT_SCAN_LIMIT`` over-fetch
+    since :meth:`EventLog.count` cannot filter by ``payload_filters``)
+    and ``feedback_truncated`` (``feedback_total > len(feedback)``) now
+    say when the 50-row list is not the whole picture (P1-9).
     """
     registry = get_registry()
     event_log = registry.operational.event_log
@@ -271,11 +277,18 @@ def get_pack(
     if not events:
         raise HTTPException(status_code=404, detail=f"Pack not found: {pack_id}")
     event = events[0]
-    feedback = event_log.get_events(
+    # One bounded fetch serves both the displayed slice and the true
+    # total, so the two can never disagree about which 50 rows they
+    # describe. A pack accumulating >= DEFAULT_SCAN_LIMIT feedback rows
+    # is not expected in practice; ``feedback_total`` would then read as
+    # a floor rather than an exact count, same as any other capped scan.
+    feedback_scan = event_log.get_events(
         event_type=EventType.FEEDBACK_RECORDED,
         payload_filters={"pack_id": pack_id},
-        limit=50,
+        limit=DEFAULT_SCAN_LIMIT,
     )
+    feedback_total = len(feedback_scan)
+    feedback = feedback_scan[:50]
     payload = event.payload or {}
     return {
         "status": "ok",
@@ -284,6 +297,8 @@ def get_pack(
             "payload": blind_holdout(payload) if _blind(ctx) else payload,
         },
         "feedback": [f.model_dump(mode="json") for f in feedback],
+        "feedback_total": feedback_total,
+        "feedback_truncated": feedback_total > len(feedback),
     }
 
 
