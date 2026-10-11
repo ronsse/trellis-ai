@@ -117,6 +117,21 @@ def test_buttons_disable_before_the_request_and_success_reports_sync_state() -> 
     assert "await loadPackDetail(packId)" in body
 
 
+def test_feedback_card_shows_capped_total_when_truncated() -> None:
+    # feedback.length is always <=50 (GET /packs/{pack_id}'s display cap)
+    # and used to be the whole card -- reading as "that's everything" even
+    # when far more feedback exists. The card must branch on the route's
+    # new feedback_total/feedback_truncated fields (P1-9) instead of the
+    # raw array length alone.
+    body = _load_pack_detail_body(INDEX_HTML.read_text(encoding="utf-8"))
+    assert "data.feedback_truncated" in body
+    assert "data.feedback_total" in body
+    assert (
+        '<div class="value">${feedback.length}</div>'
+        '<div class="sub">signals recorded</div>' not in body
+    )
+
+
 def test_pack_feedback_form_is_wired_through_a_local_data_act_dispatch() -> None:
     # Scoped to this view's own container, not the global data-action
     # registry (ID_ACTIONS) that test_ui_inline_handlers.py pins for
