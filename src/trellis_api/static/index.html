@@ -5,9 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Trellis</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg width='32' height='32' viewBox='0 0 192 192' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cline x1='96' y1='152' x2='48' y2='112' stroke='%236366f1' stroke-width='10' stroke-linecap='round' opacity='0.6'/%3E%3Cline x1='96' y1='152' x2='144' y2='112' stroke='%236366f1' stroke-width='10' stroke-linecap='round' opacity='0.6'/%3E%3Cline x1='48' y1='112' x2='96' y2='96' stroke='%23818cf8' stroke-width='10' stroke-linecap='round' opacity='0.7'/%3E%3Cline x1='144' y1='112' x2='96' y2='96' stroke='%23818cf8' stroke-width='10' stroke-linecap='round' opacity='0.7'/%3E%3Cline x1='96' y1='96' x2='96' y2='40' stroke='%23a5b4fc' stroke-width='10' stroke-linecap='round' opacity='0.8'/%3E%3Ccircle cx='96' cy='152' r='18' fill='%236366f1'/%3E%3Ccircle cx='48' cy='112' r='16' fill='%23818cf8'/%3E%3Ccircle cx='144' cy='112' r='16' fill='%23818cf8'/%3E%3Ccircle cx='96' cy='96' r='18' fill='%23818cf8'/%3E%3Ccircle cx='96' cy='40' r='20' fill='%23c7d2fe'/%3E%3C/svg%3E">
-    <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+    <script src="vendor/cytoscape/cytoscape.min.js" onerror="window.__cytoscapeLoadFailed = true;"></script>
     <style>
         :root {
+            /* Dark is the default look (no prefers-color-scheme / toggle
+               needed to get it). Every token a light override touches is
+               defined here first, so no colour exists only inside a theme
+               block -- tested by tests/unit/api/test_ui_theme_tokens.py. */
             --bg: #0f1117;
             --surface: #1a1d27;
             --surface-2: #222532;
@@ -21,11 +25,76 @@
             --warn: #f59e0b;
             --error: #ef4444;
             --info: #3b82f6;
+            /* Tint pairs for badges and the degraded-store banner. ok/warn/err
+               already clear 4.5:1 against their tint using the shared
+               --success/--warn/--error foreground, so only info/accent get a
+               dedicated foreground (the shared --info/--accent are too dark
+               on their own tint and have other consumers that must not
+               change shade). */
+            --success-tint-bg: #052e16;
+            --warn-tint-bg: #422006;
+            --danger-tint-bg: #350a0a;
+            --info-tint-bg: #172554;
+            --accent-tint-bg: #312e81;
+            --info-tint-fg: #60a5fa;
+            --accent-tint-fg: #a5b4fc;
             --transition: 0.2s ease;
             --rail: 234px;
             --rail-collapsed: 58px;
             --topbar-h: 52px;
             --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', ui-monospace, 'Roboto Mono', monospace;
+        }
+
+        /* Light palette: applied by OS preference unless the manual toggle
+           (localStorage "trellis-theme") has forced dark, and unconditionally
+           when the toggle has forced light. Same token set as :root above --
+           nothing here introduces a colour that bare :root doesn't also
+           define. */
+        @media (prefers-color-scheme: light) {
+            :root:not([data-theme="dark"]) {
+                --bg: #f7f8fb;
+                --surface: #ffffff;
+                --surface-2: #eef0f5;
+                --border: #d8dae3;
+                --text: #1a1d27;
+                --text-dim: #5b5f72;
+                --accent: #4338ca;
+                --accent-dim: #3730a3;
+                --accent-glow: rgba(67, 56, 202, 0.12);
+                --success: #0f7a37;
+                --warn: #a14e04;
+                --error: #b91c1c;
+                --info: #1d4ed8;
+                --success-tint-bg: #dcfce7;
+                --warn-tint-bg: #fef3c7;
+                --danger-tint-bg: #fee2e2;
+                --info-tint-bg: #dbeafe;
+                --accent-tint-bg: #e0e7ff;
+                --info-tint-fg: #1d4ed8;
+                --accent-tint-fg: #4338ca;
+            }
+        }
+        :root[data-theme="light"] {
+            --bg: #f7f8fb;
+            --surface: #ffffff;
+            --surface-2: #eef0f5;
+            --border: #d8dae3;
+            --text: #1a1d27;
+            --text-dim: #5b5f72;
+            --accent: #4338ca;
+            --accent-dim: #3730a3;
+            --accent-glow: rgba(67, 56, 202, 0.12);
+            --success: #0f7a37;
+            --warn: #a14e04;
+            --error: #b91c1c;
+            --info: #1d4ed8;
+            --success-tint-bg: #dcfce7;
+            --warn-tint-bg: #fef3c7;
+            --danger-tint-bg: #fee2e2;
+            --info-tint-bg: #dbeafe;
+            --accent-tint-bg: #e0e7ff;
+            --info-tint-fg: #1d4ed8;
+            --accent-tint-fg: #4338ca;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -116,6 +185,22 @@
             opacity: 0.45;
             transition: opacity var(--transition);
         }
+        /* Shown only once a 403 has proven the stored key lacks admin scope
+           (see markKeyNonAdmin); names the gap rather than letting the tab
+           fail silently on click. */
+        .sidebar-nav a .nav-scope-badge {
+            flex: none;
+            font-size: 0.6rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            color: var(--warn);
+            border: 1px solid var(--warn);
+            border-radius: 4px;
+            padding: 0.05rem 0.3rem;
+            opacity: 0.85;
+        }
+        body.nav-collapsed .sidebar-nav a .nav-scope-badge { display: none; }
         .sidebar-nav a:hover { color: var(--text); background: var(--surface-2); }
         .sidebar-nav a:hover > svg { opacity: 1; }
         .sidebar-nav a.active { color: var(--text); background: var(--accent-glow); }
@@ -387,7 +472,7 @@
             font-size: 0.75rem;
             font-weight: 600;
         }
-        .review-count-error { background: #350a0a; color: var(--error); }
+        .review-count-error { background: var(--danger-tint-bg); color: var(--error); }
         .review-body { padding: 0 1.5rem 1.25rem; }
         .review-card {
             background: var(--surface-2);
@@ -426,7 +511,7 @@
             color: var(--error);
             background: transparent;
         }
-        button.btn-danger:hover { background: #350a0a; }
+        button.btn-danger:hover { background: var(--danger-tint-bg); }
         .review-rationale {
             width: 100%;
             margin-top: 0.5rem;
@@ -467,11 +552,11 @@
             font-size: 0.75rem;
             font-weight: 600;
         }
-        .badge-ok { background: #052e16; color: var(--success); }
-        .badge-warn { background: #422006; color: var(--warn); }
-        .badge-err { background: #350a0a; color: var(--error); }
-        .badge-info { background: #172554; color: var(--info); }
-        .badge-accent { background: #312e81; color: var(--accent); }
+        .badge-ok { background: var(--success-tint-bg); color: var(--success); }
+        .badge-warn { background: var(--warn-tint-bg); color: var(--warn); }
+        .badge-err { background: var(--danger-tint-bg); color: var(--error); }
+        .badge-info { background: var(--info-tint-bg); color: var(--info-tint-fg); }
+        .badge-accent { background: var(--accent-tint-bg); color: var(--accent-tint-fg); }
 
         /* Readiness pill (G14): tiny by design -- a dot in the topbar, not
            a card. Failing component names surface only on hover. */
@@ -1133,7 +1218,8 @@
             padding: 3rem;
             color: var(--text-dim);
         }
-        .empty-state .icon { font-size: 2rem; margin-bottom: 0.5rem; }
+        .empty-state .icon { margin-bottom: 0.5rem; }
+        .empty-state .icon svg { display: inline-block; }
         .mono { font-family: var(--font-mono); font-size: 0.82rem; }
         .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 280px; display: inline-block; vertical-align: bottom; }
         /* ...but the renderers also put .truncate on the <td> itself, and a cell
@@ -1221,7 +1307,7 @@
             gap: 0.3rem;
             padding: 0.75rem 1.25rem;
             margin-bottom: 1rem;
-            background: #350a0a;
+            background: var(--danger-tint-bg);
             border: 1px solid var(--error);
             border-radius: 8px;
             font-size: 0.85rem;
@@ -1470,6 +1556,20 @@
         .dv-copy:hover { opacity: 1; color: var(--accent); border-color: var(--border); }
         .dv-copy.done { opacity: 1; color: var(--success); }
     </style>
+    <script>
+        // Applied before first paint so a stored manual override doesn't
+        // flash the OS-preference theme first. No stored value -> no
+        // attribute -> the CSS prefers-color-scheme block alone decides,
+        // same as before this existed.
+        (function () {
+            try {
+                var stored = localStorage.getItem('trellis-theme');
+                if (stored === 'light' || stored === 'dark') {
+                    document.documentElement.setAttribute('data-theme', stored);
+                }
+            } catch (e) { /* storage unavailable (private mode, blocked) */ }
+        })();
+    </script>
 </head>
 <body>
 <div class="app-shell">
@@ -1532,8 +1632,14 @@
             <span class="view-title" id="view-title">Dashboard</span>
             <span class="readiness-pill is-unknown" id="readiness-pill" title="Readiness: checking&hellip;"></span>
             <span class="spacer"></span>
-            <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>0</kbd> Views &middot; <kbd>\</kbd> Sidebar &middot; <kbd>Esc</kbd> Close</span>
-            <button class="btn-icon" id="api-key-toggle" title="API key" aria-label="Show or hide the API key panel" onclick="toggleKeyBanner()">&#x1F511;</button>
+            <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>0</kbd> Views &middot; <kbd>Alt</kbd>+<kbd>1</kbd>-<kbd>5</kbd> More views &middot; <kbd>\</kbd> Sidebar &middot; <kbd>Esc</kbd> Close</span>
+            <button class="btn-icon" id="theme-toggle" title="Switch colour theme" aria-label="Switch between dark and light theme" onclick="toggleTheme()">
+                <svg id="theme-icon-dark" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
+                <svg id="theme-icon-light" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M4.5 4.5l1.8 1.8M17.7 17.7l1.8 1.8M2.5 12h2.5M19 12h2.5M4.5 19.5l1.8-1.8M17.7 6.3l1.8-1.8"/></svg>
+            </button>
+            <button class="btn-icon" id="api-key-toggle" title="API key" aria-label="Show or hide the API key panel" onclick="toggleKeyBanner()">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="3.3"/><path d="M10.3 12.7 19 4"/><path d="M15.5 7.5 18 10M18.5 6.5 21 9"/></svg>
+            </button>
         </header>
 
     <!-- API key banner (shown on demand or after a 401) -->
@@ -1722,6 +1828,12 @@
             <div class="graph-breadcrumbs" id="graph-breadcrumbs"></div>
             <div class="graph-wrapper">
                 <div id="cy" role="img" aria-label="Graph explorer canvas" aria-describedby="cy-text-alt"></div>
+                <div id="cy-load-error" class="degraded-banner" style="display:none">
+                    <span class="degraded-title">Graph library failed to load</span>
+                    <span class="degraded-detail">The graph-rendering script did not load, so this tab
+                        cannot draw the canvas. Reload the page; if this keeps happening, the server may
+                        be missing a static asset it should be serving.</span>
+                </div>
                 <div class="graph-toolbar" id="graph-toolbar">
                     <button onclick="graphZoom(1.3)" title="Zoom in" aria-label="Zoom in">+</button>
                     <button onclick="graphZoom(0.7)" title="Zoom out" aria-label="Zoom out">&minus;</button>
@@ -2129,6 +2241,42 @@
             else banner.style.display = 'none';
         }
 
+        const THEME_STORAGE = 'trellis-theme';
+
+        // The manual override (if any) was already applied before first
+        // paint by the inline script in <head>; this just tracks it going
+        // forward and keeps the toggle icon in sync.
+        function effectiveTheme() {
+            const forced = document.documentElement.getAttribute('data-theme');
+            if (forced === 'light' || forced === 'dark') return forced;
+            const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+            return prefersLight ? 'light' : 'dark';
+        }
+
+        function updateThemeToggleIcon() {
+            const darkIcon = document.getElementById('theme-icon-dark');
+            const lightIcon = document.getElementById('theme-icon-light');
+            if (!darkIcon || !lightIcon) return;
+            const isLight = effectiveTheme() === 'light';
+            darkIcon.style.display = isLight ? 'none' : '';
+            lightIcon.style.display = isLight ? '' : 'none';
+        }
+
+        function toggleTheme() {
+            const next = effectiveTheme() === 'light' ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-theme', next);
+            try { localStorage.setItem(THEME_STORAGE, next); } catch { /* private mode */ }
+            updateThemeToggleIcon();
+        }
+
+        updateThemeToggleIcon();
+        if (window.matchMedia) {
+            // No stored override -> follow a live OS theme change too.
+            window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+                if (!document.documentElement.getAttribute('data-theme')) updateThemeToggleIcon();
+            });
+        }
+
         function saveApiKey() {
             const value = document.getElementById('api-key-input').value.trim();
             if (!value) return;
@@ -2166,8 +2314,15 @@
             if (res.status === 403) {
                 let detail = '';
                 try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
+                // require_scope() is the only source of a 403 here, and it
+                // only ever fires when the key lacks admin scope (admin
+                // satisfies every other scope check) -- so this is proof,
+                // not a guess, and is the one place that can catch a 403
+                // from a tab the nav badges don't cover yet.
+                markKeyNonAdmin();
                 showKeyBanner('Key accepted but not permitted: ' + (detail || 'insufficient scope')
-                              + '. This UI needs an admin-scoped key.');
+                              + '. Other tabs may still work with this key — see the sidebar for which '
+                              + 'ones are marked "admin".');
                 throw new Error('403 Forbidden (' + (detail || 'insufficient scope') + ')');
             }
         }
@@ -2275,6 +2430,33 @@
             return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
+        // Shared formatter for any score/ratio/effect-size value that reaches
+        // the UI through arithmetic this page does not control. `.toFixed()`
+        // does not throw on a non-finite number -- it silently stringifies
+        // it, so a bare `x.toFixed(2)` can render the literal text "Infinity"
+        // or "NaN". This is not hypothetical here: a tuner gate has shipped
+        // `effect_size: Infinity` from an empty baseline (divide-by-zero in a
+        // ratio with no prior data). fmtNum/fmtPct route every such value
+        // through Number.isFinite() first and only ever return a normal
+        // bounded numeral or one of three named states -- never a raw
+        // non-finite token. Output is always plain digits/punctuation, so
+        // callers do not need to wrap the result in escHtml().
+        function fmtNum(value, digits = 2) {
+            if (value == null) return 'not measured';
+            const n = Number(value);
+            if (Number.isNaN(n)) return '—';
+            if (!Number.isFinite(n)) return (n > 0 ? '∞' : '-∞') + ' (no baseline)';
+            return n.toFixed(digits);
+        }
+
+        function fmtPct(value, digits = 1) {
+            if (value == null) return 'not measured';
+            const n = Number(value);
+            if (Number.isNaN(n)) return '—';
+            if (!Number.isFinite(n)) return (n > 0 ? '∞' : '-∞') + ' (no baseline)';
+            return (n * 100).toFixed(digits) + '%';
+        }
+
         // An id can be agent-written (entity, document and trace ids are), so
         // none reaches a handler through inline JavaScript: the browser decodes
         // escHtml's entities before it runs an onclick, and a quote in the id
@@ -2327,17 +2509,67 @@
         }
 
         // -- View switching --
-        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs', 'advisories', 'policies', 'loops', 'tagrules', 'settings', 'reports'];
+        // Nav DOM order is the single source of truth for the view list, the
+        // digit/Alt+digit shortcuts below, and their on-screen key hints --
+        // this used to be a hand-maintained array that had drifted from the
+        // nav's actual order past the 10th entry.
+        const navLinks = Array.from(document.querySelectorAll('nav a[data-view]'));
+        const views = navLinks.map(a => a.dataset.view);
         const viewLoaded = {};
         // init() reveals the dashboard when its fetches resolve. Track where the
         // user actually is, so a click made while the API is still answering is
         // not overwritten by the dashboard landing on top of it.
         let currentView = 'dashboard';
-        document.querySelectorAll('nav a[data-view]').forEach(link => {
+
+        // Tabs backed by admin-scoped routes (see app.py's router->scope
+        // map: admin.py, settings.py). A key without admin scope 403s on
+        // every one of these; rather than let each tab discover that on its
+        // own click, the first 403 any fetch sees (throwIfAuthRefused)
+        // flips keyIsNonAdmin and this badges them instead of staying quiet
+        // until the click happens.
+        const ADMIN_ONLY_VIEWS = ['dashboard', 'metrics', 'review', 'evolution', 'loops', 'advisories', 'settings'];
+        let keyIsNonAdmin = false;
+
+        function applyScopeBadges() {
+            navLinks.forEach(link => {
+                let badge = link.querySelector('.nav-scope-badge');
+                if (keyIsNonAdmin && ADMIN_ONLY_VIEWS.includes(link.dataset.view)) {
+                    if (!badge) {
+                        badge = document.createElement('span');
+                        badge.className = 'nav-scope-badge';
+                        badge.textContent = 'admin';
+                        badge.title = 'Calls admin-scoped routes; the stored key does not have admin scope.';
+                        link.appendChild(badge);
+                    }
+                } else if (badge) {
+                    badge.remove();
+                }
+            });
+        }
+
+        function markKeyNonAdmin() {
+            if (keyIsNonAdmin) return;
+            keyIsNonAdmin = true;
+            applyScopeBadges();
+        }
+
+        navLinks.forEach((link, idx) => {
             link.addEventListener('click', e => {
                 e.preventDefault();
                 switchView(link.dataset.view);
             });
+            // Key hint: 1-9, then 0, then Alt+1.. for anything past the
+            // tenth tab -- derived from the same idx the keydown handler
+            // below uses, so the hint shown can never diverge from the key
+            // that actually fires.
+            const hint = idx < 9 ? String(idx + 1) : idx === 9 ? '0' : 'Alt+' + (idx - 9);
+            let keyEl = link.querySelector('.nav-key');
+            if (!keyEl) {
+                keyEl = document.createElement('span');
+                keyEl.className = 'nav-key';
+                link.appendChild(keyEl);
+            }
+            keyEl.textContent = hint;
         });
 
         function switchView(name) {
@@ -2398,6 +2630,12 @@
                 toggleSidebar();
                 return;
             }
+            if (e.altKey && e.key >= '1' && e.key <= '9') {
+                // Tabs past the tenth (see the nav-key hint generated above).
+                const idx = 9 + parseInt(e.key, 10);
+                if (views[idx]) { e.preventDefault(); switchView(views[idx]); }
+                return;
+            }
             if (e.key >= '1' && e.key <= '9') {
                 switchView(views[parseInt(e.key) - 1]);
             }
@@ -2431,7 +2669,7 @@
             // failed probe must show the reason, not just a red badge.
             let extra = '';
             if (detail && typeof detail.latency_ms === 'number') {
-                extra += ` <span style="color:var(--text-dim); font-size:0.8rem">${detail.latency_ms.toFixed(1)}ms</span>`;
+                extra += ` <span style="color:var(--text-dim); font-size:0.8rem">${fmtNum(detail.latency_ms, 1)}ms</span>`;
             }
             if (detail && detail.error) {
                 extra += ` <span style="color:var(--error); font-size:0.8rem">${escHtml(detail.error)}</span>`;
@@ -2612,7 +2850,7 @@
                     c.setAttribute('cx', coords[j][0]); c.setAttribute('cy', coords[j][1]);
                     c.setAttribute('r', '2.5'); c.setAttribute('fill', color);
                     const title = document.createElementNS(ns, 'title');
-                    const shown = meta.pct ? (p.value * 100).toFixed(1) + '%' : p.value;
+                    const shown = meta.pct ? fmtPct(p.value, 1) : p.value;
                     title.textContent = `${s.group_key} · ${p.bucket_start}: ${shown} (n=${p.sample_count})`;
                     c.appendChild(title);
                     svg.appendChild(c);
@@ -2771,7 +3009,7 @@
                             ${p.domain ? `<span>domain: ${escHtml(p.domain)}</span>` : ''}
                             ${p.intent_family ? `<span>intent: ${escHtml(p.intent_family)}</span>` : ''}
                             <span>sample_size: ${escHtml(p.sample_size)}</span>
-                            <span>effect_size: ${p.effect_size == null ? '—' : escHtml(Number(p.effect_size).toFixed(4))}</span>
+                            <span>effect_size: ${fmtNum(p.effect_size, 4)}</span>
                         </div>
                         ${reachabilityHtml(p)}
                         <div class="review-kv">proposed: ${escHtml(JSON.stringify(p.proposed_values))}</div>
@@ -2809,7 +3047,7 @@
                 predict.innerHTML =
                     `<strong style="color:${ok ? 'var(--success)' : 'var(--error)'}">` +
                     `Predicted: ${escHtml(pv.predicted_status)}</strong> — ${escHtml(pv.reason)}` +
-                    (pv.effect_size == null ? '' : ` (effect_size ${escHtml(Number(pv.effect_size).toFixed(4))})`) +
+                    (pv.effect_size == null ? '' : ` (effect_size ${fmtNum(pv.effect_size, 4)})`) +
                     (isNoBaseline
                         ? '<br><span style="color:var(--text-dim)">First promotion for this scope: use ' +
                           '<code style="font-family:var(--font-mono)">trellis metrics promote --allow-no-baseline</code>.</span>'
@@ -3115,7 +3353,7 @@
                 // 0/0 dressed up as 0.0% — say so instead of reporting a number
                 // that implies the packs in this window were all failures.
                 const successRateText = data.total_feedback === 0
-                    ? 'not measured' : (data.success_rate * 100).toFixed(1) + '%';
+                    ? 'not measured' : fmtPct(data.success_rate, 1);
                 const successRateSub = data.total_feedback === 0
                     ? '0 feedback in this window' : 'overall effectiveness';
                 summary.appendChild(renderCard('Success Rate', successRateText, successRateSub));
@@ -3124,14 +3362,19 @@
                 if (data.item_scores && data.item_scores.length > 0) {
                     let html = '<table><thead><tr><th>Item ID</th><th>Appearances</th><th>Successes</th><th>Failures</th><th style="width:30%">Success Rate</th></tr></thead><tbody>';
                     for (const item of data.item_scores) {
-                        const pct = (item.success_rate * 100).toFixed(1);
+                        // A CSS width needs a bounded number even when the rate itself
+                        // isn't one (0 appearances can leave success_rate as 0/0); the
+                        // visible label goes through fmtPct so it never shows that raw.
+                        const barWidth = Number.isFinite(item.success_rate)
+                            ? Math.max(0, Math.min(100, item.success_rate * 100)) : 0;
+                        const pctLabel = fmtPct(item.success_rate, 1);
                         const cls = item.success_rate >= 0.7 ? 'good' : item.success_rate >= 0.4 ? 'mid' : 'bad';
                         html += `<tr>
                             <td class="mono truncate" title="${escHtml(item.item_id)}">${escHtml(item.item_id)}</td>
                             <td>${item.appearances}</td>
                             <td>${item.successes}</td>
                             <td>${item.failures}</td>
-                            <td><div class="bar-container"><div class="bar-bg"><div class="bar-fill ${cls}" style="width:${pct}%"></div></div><span class="bar-label">${pct}%</span></div></td>
+                            <td><div class="bar-container"><div class="bar-bg"><div class="bar-fill ${cls}" style="width:${barWidth}%"></div></div><span class="bar-label">${pctLabel}</span></div></td>
                         </tr>`;
                     }
                     html += '</tbody></table>';
@@ -3300,6 +3543,16 @@
         function initGraph() {
             if (graphInitialized) return;
             graphInitialized = true;
+
+            if (typeof cytoscape === 'undefined') {
+                const errEl = document.getElementById('cy-load-error');
+                const cyEl = document.getElementById('cy');
+                const toolbarEl = document.getElementById('graph-toolbar');
+                if (errEl) errEl.style.display = 'flex';
+                if (cyEl) cyEl.style.display = 'none';
+                if (toolbarEl) toolbarEl.style.display = 'none';
+                return;
+            }
 
             // Layout selector
             document.querySelectorAll('#layout-selector button').forEach(btn => {
@@ -4164,7 +4417,7 @@
                 const traces = data.traces || [];
 
                 if (traces.length === 0) {
-                    body.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="icon">&#x1F4CB;</div><p>No traces found</p></div></td></tr>';
+                    body.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></div><p>No traces found</p></div></td></tr>';
                     renderCursorPagerFooter('trace', tracePager, 0, data.total || 0);
                     return;
                 }
@@ -4309,11 +4562,34 @@
         // ============================================================
         //  PRECEDENTS
         // ============================================================
+        let precDomainsLoaded = false;
+
+        async function loadPrecedentDomains() {
+            const domainSelect = document.getElementById('prec-domain');
+            if (!domainSelect) return;
+            try {
+                // Server-side counts across every promoted precedent, not
+                // just the current page -- a page can easily miss a real
+                // domain, or offer one with zero precedents left once a
+                // filter is applied.
+                const data = await fetchJSON('/precedents/domains');
+                const currentVal = domainSelect.value;
+                domainSelect.innerHTML = '<option value="">All domains</option>';
+                for (const d of data.domains || []) {
+                    domainSelect.innerHTML += `<option value="${escHtml(d.domain)}" ${d.domain === currentVal ? 'selected' : ''}>${escHtml(d.domain)} (${d.count})</option>`;
+                }
+                precDomainsLoaded = true;
+            } catch {
+                /* filter options are a convenience, never a load blocker */
+            }
+        }
+
         async function loadPrecedents() {
             const domain = document.getElementById('prec-domain').value;
             const limit = document.getElementById('prec-limit').value;
             const container = document.getElementById('precedents-container');
             container.innerHTML = loadingHtml('Loading precedents...');
+            if (!precDomainsLoaded) loadPrecedentDomains();
 
             try {
                 let url = `/precedents?limit=${limit}`;
@@ -4328,16 +4604,6 @@
                         '<code style="font-family:var(--font-mono)">trellis curate promote-learning</code>. ' +
                         'Nothing schedules that promotion automatically today.</p></div>';
                     return;
-                }
-
-                // Populate domain filter
-                const domains = new Set();
-                items.forEach(p => { if (p.domain) domains.add(p.domain); });
-                const domainSelect = document.getElementById('prec-domain');
-                const currentVal = domainSelect.value;
-                domainSelect.innerHTML = '<option value="">All domains</option>';
-                for (const d of [...domains].sort()) {
-                    domainSelect.innerHTML += `<option value="${escHtml(d)}" ${d === currentVal ? 'selected' : ''}>${escHtml(d)}</option>`;
                 }
 
                 container.innerHTML = `<div class="precedent-grid">${items.map(p => `
@@ -4396,7 +4662,7 @@
                 const docs = data.documents || [];
 
                 if (docs.length === 0) {
-                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon">&#x1F4DA;</div><p>No documents found</p></div></td></tr>';
+                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A2 2 0 0 1 6 4h6v16H6a2 2 0 0 1-2-2z"/><path d="M20 5.5A2 2 0 0 0 18 4h-6v16h6a2 2 0 0 0 2-2z"/></svg></div><p>No documents found</p></div></td></tr>';
                     document.getElementById('mem-pagination').style.display = 'none';
                     return;
                 }
@@ -4407,7 +4673,7 @@
                         <td class="mono truncate" style="max-width:220px; font-size:0.78rem" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
                         <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
                         <td>${tagChips(d.metadata)}</td>
-                        <td style="white-space:nowrap">${(d.content_length / 1000).toFixed(1)}k</td>
+                        <td style="white-space:nowrap">${fmtNum(d.content_length / 1000, 1)}k</td>
                     </tr>
                 `).join('');
 
@@ -4552,7 +4818,7 @@
                 }
 
                 if (events.length === 0) {
-                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon">&#x1F4E1;</div><p>No events match</p></div></td></tr>';
+                    body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19v-5"/><circle cx="12" cy="12" r="2"/><path d="M8.5 10a5 5 0 0 1 0 4M15.5 10a5 5 0 0 1 0 4M5.5 7a9 9 0 0 1 0 10M18.5 7a9 9 0 0 1 0 10"/></svg></div><p>No events match</p></div></td></tr>';
                     renderCursorPagerFooter('event', eventPager, 0, data.total || 0);
                     return;
                 }
@@ -4671,7 +4937,7 @@
                 const packs = data.packs || [];
 
                 if (packs.length === 0) {
-                    body.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="icon">&#x1F4E6;</div><p>No packs assembled yet</p><p style="font-size:0.8rem; color:var(--text-dim)">Packs appear here when agents call get_context or POST /packs</p></div></td></tr>';
+                    body.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8l9-5 9 5-9 5-9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg></div><p>No packs assembled yet</p><p style="font-size:0.8rem; color:var(--text-dim)">Packs appear here when agents call get_context or POST /packs</p></div></td></tr>';
                     renderCursorPagerFooter('pack', packPager, 0, data.total || 0);
                     return;
                 }
@@ -4696,7 +4962,7 @@
         function scoreBreakdownStr(sb) {
             if (!sb || typeof sb !== 'object') return '';
             return Object.entries(sb).map(([k, v]) =>
-                `${k}: ${typeof v === 'number' ? v.toFixed(3) : v}`).join(', ');
+                `${k}: ${typeof v === 'number' ? fmtNum(v, 3) : v}`).join(', ');
         }
 
         async function loadPackDetail(packId) {
@@ -4776,7 +5042,7 @@
                                     <td class="mono truncate" style="max-width:240px; font-size:0.75rem" title="${escHtml(r.item_id)}">${escHtml(r.item_id)}</td>
                                     <td style="font-size:0.78rem">${escHtml(r.item_type || '')}</td>
                                     <td style="font-size:0.78rem">${escHtml(r.strategy_source || '')}</td>
-                                    <td>${r.relevance_score != null ? Number(r.relevance_score).toFixed(3) : '-'}</td>
+                                    <td>${r.relevance_score != null ? fmtNum(r.relevance_score, 3) : '-'}</td>
                                     <td style="font-size:0.78rem">${escHtml(r.reason || '')}</td>
                                 </tr>`).join('')}
                             </tbody>
@@ -4832,8 +5098,8 @@
                         <h4 style="font-size:0.9rem; margin-bottom:0.5rem">Record feedback</h4>
                         <textarea id="pack-feedback-comment" class="review-rationale" placeholder="Optional comment"></textarea>
                         <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap">
-                            <button class="btn btn-sm" data-act="submitPackFeedbackHelpful">👍 Helpful overall</button>
-                            <button class="btn btn-sm btn-danger" data-act="submitPackFeedbackUnhelpful">👎 Not helpful</button>
+                            <button class="btn btn-sm" data-act="submitPackFeedbackHelpful"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px;margin-right:0.3rem"><path d="M7 11v9H4a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1z"/><path d="M7 11l4-7a2 2 0 0 1 2 2v4h5.5a2 2 0 0 1 1.9 2.7l-2 6A2 2 0 0 1 16.5 20H7"/></svg>Helpful overall</button>
+                            <button class="btn btn-sm btn-danger" data-act="submitPackFeedbackUnhelpful"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px;margin-right:0.3rem"><path d="M7 13V4H4a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1z"/><path d="M7 13l4 7a2 2 0 0 0 2-2v-4h5.5a2 2 0 0 0 1.9-2.7l-2-6A2 2 0 0 0 16.5 4H7"/></svg>Not helpful</button>
                             <span id="pack-feedback-status" style="font-size:0.8rem"></span>
                         </div>
                     </div>`;
@@ -5042,7 +5308,7 @@
                     banner.className = 'empty-state';
                     banner.style.cssText = 'margin:1.5rem;padding:2rem;text-align:center;background:var(--surface);border:1px dashed var(--border);border-radius:8px;';
                     banner.innerHTML = `
-                        <div style="font-size:2.5rem;margin-bottom:0.75rem">&#x1F331;</div>
+                        <div style="margin-bottom:0.75rem"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21v-9"/><path d="M12 12C7 12 5 9 5 5c4 0 7 2 7 7z"/><path d="M12 12c5 0 7-3 7-7-4 0-7 2-7 7z"/></svg></div>
                         <h3 style="margin-bottom:0.5rem;color:var(--text)">Welcome to Trellis</h3>
                         <p style="color:var(--text-dim);max-width:480px;margin:0 auto 1rem">
                             Your knowledge graph is empty. Load sample data to explore the dashboard,
@@ -5090,8 +5356,11 @@
                 // sits a few pixels above this message.
                 if (/^40[13]\b/.test(err.message)) {
                     error.textContent = /^403/.test(err.message)
-                        ? 'Signed in, but this key lacks the scope this dashboard needs. '
-                          + 'Enter an admin-scoped key in the banner above.'
+                        ? 'Signed in, but this key lacks the admin scope this dashboard needs. '
+                          + 'Enter an admin-scoped key in the banner above, or use the sidebar — '
+                          + 'Traces, Memories, Events, Packs, Graph, Precedents, Reports and Policies '
+                          + '(view only) work with a read-scoped key; tabs needing admin are now '
+                          + 'marked "admin" in the sidebar.'
                         : 'This Trellis API requires an API key. Enter one in the banner above '
                           + '(or click the key icon in the header) to load the dashboard.';
                 } else {
@@ -5270,7 +5539,7 @@
             try {
                 const data = await fetchJSON(`/analyze/${encodeURIComponent(name)}${qs ? '?' + qs : ''}`);
                 lastReportPayload = data;
-                metaEl.innerHTML = `computed_at: ${escHtml(data.computed_at || 'unknown')}` +
+                metaEl.innerHTML = `computed_at: ${escHtml(fmtTime(data.computed_at, { empty: 'unknown' }))}` +
                     (data.cached ? ' <span class="badge badge-info">cached</span>' : '');
                 renderReportOutput();
             } catch (err) {
@@ -5862,14 +6131,14 @@
             const statusBadge = a.status === 'suppressed'
                 ? `<span class="badge badge-warn" title="${escHtml(a.suppression_reason || 'suppressed')}">suppressed</span>`
                 : `<span class="badge badge-ok">active</span>`;
-            const evidenceConf = ev.evidence_confidence == null ? 'not measured' : ev.evidence_confidence.toFixed(2);
+            const evidenceConf = fmtNum(ev.evidence_confidence, 2);
             const scopeCell = a.scope + (a.entity_id ? ` (entity: ${a.entity_id})` : '');
             return `<tr>
                 <td title="${escHtml(a.advisory_id)}"><code>${escHtml(String(a.advisory_id).substring(0, 12))}</code></td>
                 <td>${escHtml(a.category)}</td>
                 <td>${escHtml(scopeCell)}</td>
-                <td>${a.confidence == null ? 'not measured' : escHtml(a.confidence.toFixed(2))}</td>
-                <td title="sample_size=${escHtml(String(ev.sample_size ?? ''))}, success_with=${escHtml(String(ev.success_rate_with ?? ''))}, success_without=${escHtml(String(ev.success_rate_without ?? ''))}">evidence_confidence: ${escHtml(evidenceConf)}, effect: ${ev.effect_size == null ? 'not measured' : escHtml(ev.effect_size.toFixed(2))}</td>
+                <td>${fmtNum(a.confidence, 2)}</td>
+                <td title="sample_size=${escHtml(String(ev.sample_size ?? ''))}, success_with=${escHtml(String(ev.success_rate_with ?? ''))}, success_without=${escHtml(String(ev.success_rate_without ?? ''))}">evidence_confidence: ${evidenceConf}, effect: ${fmtNum(ev.effect_size, 2)}</td>
                 <td>${statusBadge}</td>
                 <td>${escHtml(fmtTime(a.created_at, { empty: 'not measured' }))}</td>
                 <td>${a.fitness_scored_at ? escHtml(fmtTime(a.fitness_scored_at, { empty: 'not measured' })) : 'not yet scored'}</td>
@@ -6194,7 +6463,10 @@
         function renderTagCandidateRow(c) {
             const m = c.metrics || {};
             const support = m.support ?? '';
-            const precision = typeof m.precision === 'number' ? m.precision.toFixed(2) : (m.cooccurrence_rate ?? '');
+            // tag_keyword candidates carry precision, domain_alias ones
+            // carry cooccurrence_rate -- both are the same shape of ratio,
+            // so one shared, non-finite-safe formatter renders either.
+            const precision = fmtNum(m.precision ?? m.cooccurrence_rate);
             return `<tr id="tagcand-row-${escHtml(c.candidate_id)}">
                 <td>${escHtml(c.kind)}</td>
                 <td><code>${escHtml(c.key)}</code></td>

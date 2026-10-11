@@ -68,7 +68,15 @@ def test_tagrules_view_is_wired_into_nav_and_switch_view() -> None:
     page = _page()
     assert 'data-view="tagrules" data-label="Tag rules"' in page
     assert 'id="view-tagrules"' in page
-    assert re.search(r"views\s*=\s*\[[^\]]*'tagrules'[^\]]*\]", page)
+    # ``views`` is derived from the nav's own DOM order (PR #865) rather
+    # than a hand-maintained array literal, so the thing worth pinning is
+    # that the tagrules link sits inside the <nav> element that
+    # derivation scans -- not a literal 'tagrules' substring in source
+    # text, which the derivation no longer has.
+    nav_section = re.search(r'<nav class="sidebar-nav">(.*?)</nav>', page, re.DOTALL)
+    assert nav_section is not None
+    assert 'data-view="tagrules"' in nav_section.group(1)
+    assert "const views = navLinks.map(a => a.dataset.view);" in page
     assert re.search(r"if\s*\(name === 'tagrules'\)\s*loadTagRules\(\);", page)
 
 

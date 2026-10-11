@@ -1333,6 +1333,43 @@ def test_precedents_empty(client):
     assert data["count"] == 0
 
 
+def test_list_precedent_domains_counts_every_promoted_precedent(client):
+    """The domain filter's options come from a server-side count over every
+    promoted precedent, not the fetched page -- a domain with zero
+    precedents on the current (small) page, but precedents elsewhere,
+    still shows up, and one with zero precedents anywhere never does."""
+    event_log = app_module._registry.operational.event_log
+    for i in range(3):
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id=f"platform-{i}",
+            payload={"domain": "platform", "title": "t"},
+        )
+    event_log.emit(
+        EventType.PRECEDENT_PROMOTED,
+        source="test",
+        entity_id="data-0",
+        payload={"domain": "data", "title": "t"},
+    )
+    event_log.emit(
+        EventType.PRECEDENT_PROMOTED,
+        source="test",
+        entity_id="no-domain-0",
+        payload={"title": "t"},  # no domain
+    )
+
+    resp = client.get("/api/v1/precedents/domains")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 4
+    assert data["domains"] == [
+        {"domain": "platform", "count": 3},
+        {"domain": "data", "count": 1},
+    ]
+    assert data["truncated"] is False
+
+
 # -- Batch mutations --
 
 

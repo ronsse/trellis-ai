@@ -259,7 +259,7 @@ def test_precedents_empty_state_names_the_real_promotion_path() -> None:
     body = _between(
         page,
         "async function loadPrecedents() {",
-        "// Populate domain filter",
+        'container.innerHTML = `<div class="precedent-grid">',
     )
     empty_branch = _between(
         body, "if (items.length === 0) {", "return;\n                }"
@@ -287,10 +287,14 @@ def test_success_rate_renders_not_measured_when_there_is_no_feedback() -> None:
     # specifically while successRateSub stayed correct).
     text_assign = re.search(r"const successRateText = (.*?);\n", body, re.DOTALL)
     assert text_assign is not None, "successRateText assignment not found"
+    # The ratio itself now renders through the shared fmtPct() helper (see
+    # test_ui_number_formatting.py), which also guards against a non-finite
+    # success_rate -- but the total_feedback === 0 gate asserted here is the
+    # claim this test exists to pin: "not measured" wins over a computed
+    # 0.0% when there is no feedback to compute it from.
     assert text_assign.group(1) == (
         "data.total_feedback === 0\n"
-        "                    ? 'not measured' : "
-        "(data.success_rate * 100).toFixed(1) + '%'"
+        "                    ? 'not measured' : fmtPct(data.success_rate, 1)"
     )
     sub_assign = re.search(r"const successRateSub = (.*?);\n", body, re.DOTALL)
     assert sub_assign is not None, "successRateSub assignment not found"

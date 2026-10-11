@@ -4636,6 +4636,37 @@ paths:
       summary: Promote
       tags:
       - curate
+  /api/v1/precedents/domains:
+    get:
+      description: 'Count promoted precedents per ``domain``, for a domain filter''s options.
+
+
+        Unlike the ``domain`` dropdown built from one fetched page of
+
+        precedents, this scans every ``PRECEDENT_PROMOTED`` event (capped at
+
+        :data:`~trellis.stores.base.event_log.DEFAULT_SCAN_LIMIT`, same as any
+
+        other analyzer), so it lists a domain that exists but isn''t on the
+
+        current page, and never offers one with zero precedents left once a
+
+        filter is applied.'
+      operationId: list_precedent_domains_api_v1_precedents_domains_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Precedent Domains Api V1 Precedents Domains Get
+                type: object
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: Count promoted precedents per domain
+      tags:
+      - retrieve
   /api/v1/proposals:
     get:
       description: 'List pending tuner proposals awaiting a human approve / reject.
