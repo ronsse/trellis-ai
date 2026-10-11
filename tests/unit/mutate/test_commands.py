@@ -27,7 +27,9 @@ class TestOperation:
         # inverse of retention.prune, without which phase-one archival's
         # "walk it back by re-stamping" claim has no sanctioned path)
         # + ALIAS_UPSERT (governed alias/backfill writes)
-        assert len(Operation) == 21
+        # + SETTINGS_UPDATE (governed settings-store write; null value
+        # means "remove the override" rather than a separate RESET verb)
+        assert len(Operation) == 22
 
 
 class TestCommand:

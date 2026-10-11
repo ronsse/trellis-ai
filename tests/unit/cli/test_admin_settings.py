@@ -1,0 +1,160 @@
+"""Tests for ``trellis admin settings set|unset`` (PR 3, CLI parity).
+
+Both subcommands submit the same ``Operation.SETTINGS_UPDATE`` command
+the REST route and MCP surface do (see ``trellis_cli/admin_settings.py``
+and ``tests/unit/api/test_settings_routes.py``), so this file does not
+re-prove the handler's validation rules (covered end to end in
+``tests/unit/mutate/test_settings_update_handler.py``) -- it proves the
+CLI wiring itself: argument plumbing, ``--format`` output shapes, and
+exit-code parity between them (``tests/unit/test_format_exit_parity_rule.py``).
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from typer.testing import CliRunner
+
+from tests.cli_output import plain
+
+if TYPE_CHECKING:
+    import pytest
+
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
+from trellis_cli.exit_codes import EXIT_OK, EXIT_VALIDATION
+from trellis_cli.main import app as root_app
+
+runner = CliRunner()
+
+
+def _invoke(args: list[str]):  # type: ignore[no-untyped-def]
+    return runner.invoke(root_app, ["admin", "settings", *args])
+
+
+def _init_stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+    init_result = runner.invoke(root_app, ["admin", "init"])
+    assert init_result.exit_code == EXIT_OK, init_result.output
+
+
+def _store(tmp_path: Path) -> SettingsStore:
+    stores_dir = tmp_path / "data" / "stores"
+    path = resolve_settings_path(stores_dir)
+    assert path is not None
+    return SettingsStore(path)
+
+
+# ---------------------------------------------------------------------------
+# set
+# ---------------------------------------------------------------------------
+
+
+class TestSet:
+    def test_json_success_shape_and_persists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["set", "pack_holdout_rate", "0.3", "--format", "json"])
+        assert result.exit_code == EXIT_OK, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "success"
+        assert payload["created_id"] == "pack_holdout_rate"
+        assert payload["warnings"] == []
+        assert _store(tmp_path).get("pack_holdout_rate").value == 0.3
+
+    def test_text_success_mentions_the_operation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["set", "pack_holdout_rate", "0.3"])
+        assert result.exit_code == EXIT_OK, result.output
+        assert "settings.update" in plain(result.output)
+
+    def test_by_flag_is_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "set",
+                "pack_holdout_rate",
+                "0.3",
+                "--by",
+                "audit-test",
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_OK, result.output
+
+    def test_boolean_setting_accepts_string_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["set", "memory_extraction", "true", "--format", "json"])
+        assert result.exit_code == EXIT_OK, result.output
+        assert _store(tmp_path).get("memory_extraction").value is True
+
+    def test_unknown_name_exits_validation_both_formats(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        json_result = _invoke(["set", "not_a_real_setting", "1", "--format", "json"])
+        assert json_result.exit_code == EXIT_VALIDATION, json_result.output
+        text_result = _invoke(["set", "not_a_real_setting", "1"])
+        assert text_result.exit_code == EXIT_VALIDATION, text_result.output
+
+    def test_wrong_type_exits_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["set", "memory_extraction", "not-a-bool", "--format", "json"])
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+        assert "boolean" in payload["message"]
+
+    def test_out_of_range_exits_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["set", "pack_holdout_rate", "5.0", "--format", "json"])
+        assert result.exit_code == EXIT_VALIDATION, result.output
+
+
+# ---------------------------------------------------------------------------
+# unset
+# ---------------------------------------------------------------------------
+
+
+class TestUnset:
+    def test_removes_an_existing_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        set_result = _invoke(["set", "pack_holdout_rate", "0.4", "--format", "json"])
+        assert set_result.exit_code == EXIT_OK, set_result.output
+        assert _store(tmp_path).get("pack_holdout_rate") is not None
+
+        unset_result = _invoke(["unset", "pack_holdout_rate", "--format", "json"])
+        assert unset_result.exit_code == EXIT_OK, unset_result.output
+        assert _store(tmp_path).get("pack_holdout_rate") is None
+
+    def test_unsetting_an_already_unset_name_is_still_ok(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["unset", "pack_holdout_rate", "--format", "json"])
+        assert result.exit_code == EXIT_OK, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "success"
+
+    def test_unknown_name_exits_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["unset", "not_a_real_setting", "--format", "json"])
+        assert result.exit_code == EXIT_VALIDATION, result.output

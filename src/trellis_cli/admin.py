@@ -2696,3 +2696,12 @@ from trellis_cli.admin_backfill_outcomes import (  # noqa: E402
 )
 
 _register_backfill_outcomes(admin_app)
+
+
+# ---------------------------------------------------------------------------
+# settings set/unset — governed settings-store write (PR 3, p1 plan)
+# ---------------------------------------------------------------------------
+
+from trellis_cli.admin_settings import register as _register_settings  # noqa: E402
+
+_register_settings(admin_app)

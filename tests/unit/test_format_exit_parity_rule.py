@@ -928,6 +928,9 @@ def test_the_conditional_exit_helper_roster_is_exactly_the_private_may_exiters()
     }
     assert {k: v for k, v in conditional.items() if v} == {
         "admin": ["_load_graph_store_from_yaml", "_lookup_candidate_payload"],
+        # Same shape as curate._execute_command below: exits on a REJECTED
+        # or FAILED Command and returns on any other.
+        "admin_settings": ["_execute"],
         "analyze": [
             "_build_learning_registry_or_exit",
             "_exit_if_advisory_store_degraded",

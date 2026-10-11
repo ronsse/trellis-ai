@@ -42,6 +42,9 @@ class Operation(StrEnum):
     RETENTION_PRUNE = "retention.prune"
     RETENTION_RESTORE = "retention.restore"
 
+    # Admin
+    SETTINGS_UPDATE = "settings.update"
+
 
 class CommandStatus(StrEnum):
     """Outcome status of a command execution."""
@@ -183,6 +186,11 @@ class OperationRegistry:
         # ``RETENTION_PRUNED`` payload), and a criteria-driven undo would
         # re-derive the same population that was wrong the first time.
         self._schemas[Operation.RETENTION_RESTORE] = {"item_ids", "reason"}
+        # ``value`` is required as a *key*, not a truthy value: ``None``
+        # means "remove the override" (SettingsUpdateHandler's own
+        # docstring), so the presence check below must not reject a
+        # literal null the way an `if not command.args.get("value")` would.
+        self._schemas[Operation.SETTINGS_UPDATE] = {"name", "value"}
 
     def validate(self, command: Command) -> tuple[bool, list[str]]:
         """Validate a command's args against its operation's schema.

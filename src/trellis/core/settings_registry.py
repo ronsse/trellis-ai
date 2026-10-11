@@ -1,13 +1,20 @@
 """Settings registry — the catalog of tunables an operator may override.
 
-A :class:`SettingSpec` is metadata only: name, type, bounds, a shipped
-default, an operator-facing description, which surfaces read it, and a
-risk tier. **It does not validate anything in this PR** — no write route,
-no CLI write command and no :class:`~trellis.mutate.executor.MutationExecutor`
-operation exist yet for settings (tracked for a follow-up PR, which is
-exactly where this registry's ``type``/``minimum``/``maximum``/``enum``
-fields are meant to gate a write). Today the registry is read by:
+A :class:`SettingSpec` is metadata: name, type, bounds, env var, a
+shipped default, an operator-facing description, which surfaces read it,
+and a risk tier. :func:`validate_value` is the one piece of behaviour
+this module owns — it coerces and bounds-checks a raw value against a
+spec's declared ``type``/``minimum``/``maximum``/``enum``, raising
+``ValueError`` rather than clamping, for
+:class:`~trellis.mutate.handlers.SettingsUpdateHandler` (the governed
+write route this registry's fields were always meant to gate) to
+translate into a rejection. Beyond that this module still does not read
+or write ``settings.json`` itself — that is
+:class:`~trellis.stores.settings_store.SettingsStore`'s job. Today the
+registry is read by:
 
+* :class:`~trellis.mutate.handlers.SettingsUpdateHandler`, via
+  :func:`validate_value` and :func:`get_setting`;
 * an operator or test skimming :data:`SETTINGS_REGISTRY` directly;
 * :func:`trellis.core.write_config.WriteBehaviourConfig.from_env_and_settings`
   and :func:`~trellis.core.write_config.resolve_overridden_by` **not at
@@ -51,8 +58,12 @@ than a claim nothing can catch drifting.
 
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
+
+from trellis.core.write_config import ENV_VAR_BY_FIELD
 
 #: Mirrors the plan's own vocabulary (`docs/design` plan p1, §(a)) rather
 #: than a tier invented for this module: ``"safe"`` (no meaningful
@@ -82,6 +93,14 @@ class SettingSpec:
     #: always see settings (``trellis admin write-config``, ``GET
     #: /api/version``).
     settings_live: bool
+    #: The environment variable whose presence outranks a settings-store
+    #: override for this knob (env > settings > default). For the 12
+    #: :class:`~trellis.core.write_config.WriteBehaviourConfig` fields this
+    #: is literally ``ENV_VAR_BY_FIELD[name]``; ``graph_seeding`` is the one
+    #: entry outside that module (``trellis.retrieve.builder_factory``'s
+    #: own ``GRAPH_SEEDING_ENV``, spelled here as a literal rather than
+    #: imported — ``trellis.core`` does not depend on ``trellis.retrieve``).
+    env_var: str
     minimum: float | None = None
     maximum: float | None = None
     enum: tuple[str, ...] | None = None
@@ -105,6 +124,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["classify_on_ingest"],
     ),
     SettingSpec(
         name="embed_on_ingest",
@@ -122,6 +142,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["embed_on_ingest"],
     ),
     SettingSpec(
         name="memory_extraction",
@@ -140,6 +161,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["memory_extraction"],
     ),
     SettingSpec(
         name="reconcile_on_write",
@@ -160,6 +182,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["reconcile_on_write"],
     ),
     SettingSpec(
         name="trace_extraction",
@@ -176,6 +199,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["trace_extraction"],
     ),
     SettingSpec(
         name="trace_extraction_min_confidence",
@@ -192,6 +216,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["trace_extraction_min_confidence"],
         minimum=0.0,
         maximum=1.0,
     ),
@@ -212,6 +237,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["require_pack_attribution"],
     ),
     SettingSpec(
         name="require_bodied_attribution",
@@ -233,6 +259,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["require_bodied_attribution"],
     ),
     SettingSpec(
         name="minhash_seed_max_docs",
@@ -253,6 +280,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="restart",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["minhash_seed_max_docs"],
         minimum=0,
     ),
     SettingSpec(
@@ -277,6 +305,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["pack_holdout_rate"],
         minimum=0.0,
         maximum=1.0,
     ),
@@ -298,6 +327,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["reconcile_model"],
     ),
     SettingSpec(
         name="reconcile_timeout_s",
@@ -313,6 +343,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["reconcile_timeout_s"],
         minimum=0.0,
     ),
     SettingSpec(
@@ -336,6 +367,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=False,
+        env_var="TRELLIS_GRAPH_SEEDING",
     ),
 )
 
@@ -363,6 +395,145 @@ def list_settings() -> list[SettingSpec]:
     return list(SETTINGS_REGISTRY.values())
 
 
+def resolve_source(spec: SettingSpec, settings_values: dict[str, Any]) -> str:
+    """Which layer is in force for *spec* right now.
+
+    ``"env"``, ``"settings"`` or ``"default"``.
+
+    Env beats a stored override beats the shipped default — the same
+    precedence :func:`trellis.core.write_config.resolve_overridden_by`
+    reports for its own twelve fields, generalised to every registered
+    spec (``graph_seeding`` included, which that function's
+    ``ENV_VAR_BY_FIELD`` does not cover) by reading ``spec.env_var``
+    directly rather than through a second lookup table.
+
+    Shared by two callers that must agree: ``SettingsUpdateHandler``
+    stamps this on every ``SETTINGS_UPDATED`` event's
+    ``overridden_by_at_write``, and ``GET /api/v1/settings`` reports it
+    for every entry, not just the one most recently written.
+    """
+    if os.environ.get(spec.env_var, "").strip():
+        return "env"
+    return "settings" if spec.name in settings_values else "default"
+
+
+#: Case-insensitive spellings ``validate_value`` accepts for a boolean,
+#: mirroring the forgiving vocabulary ``WriteBehaviourConfig.from_env``
+#: already accepts for the *environment* spelling of the same knobs — a
+#: settings-store override and an env override should not disagree about
+#: what ``"yes"`` means.
+_BOOL_TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
+_BOOL_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def _coerce_bool(name: str, raw: Any) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in _BOOL_TRUE_TOKENS:
+            return True
+        if token in _BOOL_FALSE_TOKENS:
+            return False
+    msg = f"{name} must be a boolean (true/false), got {raw!r}"
+    raise ValueError(msg)
+
+
+def _coerce_int(name: str, raw: Any) -> int:
+    if isinstance(raw, bool):
+        msg = f"{name} must be an integer, got a boolean ({raw!r})"
+        # ValueError (not TypeError): validate_value's contract is "always
+        # raises ValueError", so the handler's one `except ValueError` catches
+        # every rejection reason uniformly.
+        raise ValueError(msg)  # noqa: TRY004
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float) and raw.is_integer():
+        return int(raw)
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            pass
+    msg = f"{name} must be an integer, got {raw!r}"
+    raise ValueError(msg)
+
+
+def _coerce_float(name: str, raw: Any) -> float:
+    if isinstance(raw, bool):
+        msg = f"{name} must be a number, got a boolean ({raw!r})"
+        # ValueError (not TypeError): same contract as _coerce_int above.
+        raise ValueError(msg)  # noqa: TRY004
+    value: float | None = None
+    if isinstance(raw, int | float):
+        value = float(raw)
+    elif isinstance(raw, str):
+        try:
+            value = float(raw.strip())
+        except ValueError:
+            value = None
+    if value is None or not math.isfinite(value):
+        msg = f"{name} must be a finite number, got {raw!r}"
+        raise ValueError(msg)
+    return value
+
+
+def _coerce_str(name: str, raw: Any) -> str:
+    if not isinstance(raw, str):
+        msg = f"{name} must be a string, got {raw!r}"
+        # ValueError (not TypeError): same contract as _coerce_int above.
+        raise ValueError(msg)  # noqa: TRY004
+    return raw
+
+
+def _check_bounds(spec: SettingSpec, value: bool | int | float | str) -> None:
+    """Enum wins outright; otherwise a numeric min/max, bools exempt."""
+    if spec.enum is not None:
+        if not isinstance(value, str) or value not in spec.enum:
+            msg = f"{spec.name} must be one of {list(spec.enum)!r}, got {value!r}"
+            raise ValueError(msg)
+        return
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return
+    if spec.minimum is not None and value < spec.minimum:
+        msg = f"{spec.name} must be >= {spec.minimum!r}, got {value!r}"
+        raise ValueError(msg)
+    if spec.maximum is not None and value > spec.maximum:
+        msg = f"{spec.name} must be <= {spec.maximum!r}, got {value!r}"
+        raise ValueError(msg)
+
+
+def validate_value(spec: SettingSpec, raw: Any) -> bool | int | float | str:
+    """Coerce ``raw`` to ``spec.type`` and bounds-check it, or raise.
+
+    Always raises :class:`ValueError` on any failure — never clamps, never
+    silently substitutes the default. The caller
+    (:class:`~trellis.mutate.handlers.SettingsUpdateHandler`) is the one
+    place this is meant to be called from; it translates the
+    ``ValueError`` into a governed rejection so the real reason reaches
+    both the ``CommandResult`` and the audit event.
+
+    A string is accepted for every type (not just ``"str"``) because every
+    wire caller — CLI argv, a JSON body's string field, an MCP tool
+    argument — may hand this a string even for a boolean or numeric
+    setting; coercion here is what ``WriteBehaviourConfig.from_env``
+    already does for the environment spelling of the same values, applied
+    to the settings-store spelling instead. ``raw is None`` is never
+    passed here — the handler treats it as "remove the override" before
+    this function is reached.
+    """
+    if spec.type == "bool":
+        value: bool | int | float | str = _coerce_bool(spec.name, raw)
+    elif spec.type == "int":
+        value = _coerce_int(spec.name, raw)
+    elif spec.type == "float":
+        value = _coerce_float(spec.name, raw)
+    else:
+        value = _coerce_str(spec.name, raw)
+    _check_bounds(spec, value)
+    return value
+
+
 __all__ = [
     "SETTINGS_REGISTRY",
     "Risk",
@@ -370,4 +541,6 @@ __all__ = [
     "SettingType",
     "get_setting",
     "list_settings",
+    "resolve_source",
+    "validate_value",
 ]

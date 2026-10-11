@@ -1,0 +1,342 @@
+"""Tests for the admin-scoped ``/api/v1/settings`` routes (PR 3).
+
+Mirrors ``tests/unit/api/test_auth.py``'s fixture pattern exactly (a
+fresh in-memory ``StoreRegistry`` bound to ``trellis_api.app``, and a
+``TestClient`` that is never entered as a context manager so the
+lifespan never re-inits ``_registry`` out from under the fixture).
+
+Covers: 401/403 without the admin scope, the GET catalog shape for
+every registered setting, PUT/POST success through the real
+``Operation.SETTINGS_UPDATE`` governed path, refusals (unknown name,
+wrong type, out of range, degraded store), the null-value reset, and
+the env-pinned-write response shape -- the one behaviour unique to this
+route rather than merely a passthrough of the handler already tested in
+``tests/unit/mutate/test_settings_update_handler.py``.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+import trellis_api.app as app_module
+from trellis.auth import SCOPE_ADMIN, SCOPE_READ, generate_api_key
+from trellis.core.settings_registry import SETTINGS_REGISTRY
+from trellis.stores.base.event_log import EventType
+from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
+from trellis_api.app import create_app
+
+PACK_HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
+MEMORY_EXTRACTION_ENV = "TRELLIS_ENABLE_MEMORY_EXTRACTION"
+GRAPH_SEEDING_ENV = "TRELLIS_GRAPH_SEEDING"
+
+
+@pytest.fixture
+def registry(tmp_path: Path):
+    """Fresh registry bound to the app module for each test."""
+    reg = StoreRegistry(stores_dir=tmp_path / "stores")
+    app_module._registry = reg
+    yield reg
+    reg.close()
+    app_module._registry = None
+
+
+@pytest.fixture
+def client(registry: StoreRegistry) -> TestClient:
+    """In-memory app over the fixture registry.
+
+    Not context-managed -- see the module docstring.
+    """
+    app = create_app()
+    return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _clean_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TRELLIS_API_KEY", raising=False)
+    monkeypatch.delenv("TRELLIS_AUTH_MODE", raising=False)
+    for env_var in (PACK_HOLDOUT_RATE_ENV, MEMORY_EXTRACTION_ENV, GRAPH_SEEDING_ENV):
+        monkeypatch.delenv(env_var, raising=False)
+
+
+def _mint(registry: StoreRegistry, scopes: list[str], name: str = "test-key") -> str:
+    token, record = generate_api_key(name, scopes)
+    registry.operational.api_key_store.create(record)
+    return token
+
+
+def _store(registry: StoreRegistry) -> SettingsStore:
+    path = resolve_settings_path(registry.stores_dir)
+    assert path is not None
+    return SettingsStore(path)
+
+
+def _entry(body: dict, name: str) -> dict:
+    (match,) = (row for row in body["settings"] if row["name"] == name)
+    return match
+
+
+# ---------------------------------------------------------------------------
+# Auth: admin scope only
+# ---------------------------------------------------------------------------
+
+
+class TestAuth:
+    @pytest.fixture(autouse=True)
+    def _required(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+
+    def test_get_missing_credential_is_401(self, client: TestClient) -> None:
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 401
+
+    def test_get_read_scope_denied_403(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        token = _mint(registry, [SCOPE_READ])
+        resp = client.get("/api/v1/settings", headers={"X-API-Key": token})
+        assert resp.status_code == 403
+
+    def test_put_read_scope_denied_403(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        token = _mint(registry, [SCOPE_READ])
+        resp = client.put(
+            "/api/v1/settings/pack_holdout_rate",
+            json={"value": 0.1},
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 403
+
+    def test_admin_key_passes_on_get(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        token = _mint(registry, [SCOPE_ADMIN])
+        resp = client.get("/api/v1/settings", headers={"X-API-Key": token})
+        assert resp.status_code == 200, resp.text
+
+
+# ---------------------------------------------------------------------------
+# GET /settings
+# ---------------------------------------------------------------------------
+
+
+class TestListSettings:
+    def test_returns_every_registry_entry_with_full_shape(
+        self, client: TestClient
+    ) -> None:
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body["settings"]) == len(SETTINGS_REGISTRY)
+        row = _entry(body, "pack_holdout_rate")
+        assert row == {
+            "name": "pack_holdout_rate",
+            "type": "float",
+            "default": 0.0,
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "enum": None,
+            "description": row["description"],  # non-empty, checked below
+            "surfaces": list(row["surfaces"]),
+            "restart_required": False,
+            "risk": "unsafe",
+            "settings_live": True,
+            "env_var": PACK_HOLDOUT_RATE_ENV,
+            "effective_value": 0.0,
+            "overridden_by": "default",
+        }
+        assert row["description"]
+
+    def test_store_degradation_is_none_when_healthy(self, client: TestClient) -> None:
+        resp = client.get("/api/v1/settings")
+        assert resp.json()["store_degradation"] is None
+
+    def test_store_degradation_reported_when_file_is_corrupt(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        path = resolve_settings_path(registry.stores_dir)
+        assert path is not None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not valid json", encoding="utf-8")
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["store_degradation"] is not None
+
+
+# ---------------------------------------------------------------------------
+# PUT/POST /settings/{name} — success and refusals
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateSetting:
+    def test_put_success_returns_command_response_and_persists(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        resp = client.put("/api/v1/settings/pack_holdout_rate", json={"value": 0.3})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "success"
+        assert body["created_id"] == "pack_holdout_rate"
+        assert _store(registry).get("pack_holdout_rate").value == 0.3
+
+        follow_up = client.get("/api/v1/settings").json()
+        row = _entry(follow_up, "pack_holdout_rate")
+        assert row["effective_value"] == 0.3
+        assert row["overridden_by"] == "settings"
+
+    def test_post_is_equivalent_to_put(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        resp = client.post("/api/v1/settings/pack_holdout_rate", json={"value": 0.25})
+        assert resp.status_code == 200, resp.text
+        assert _store(registry).get("pack_holdout_rate").value == 0.25
+
+    def test_unknown_name_is_400(self, client: TestClient) -> None:
+        resp = client.put("/api/v1/settings/not_a_real_setting", json={"value": 1})
+        assert resp.status_code == 400
+        assert "not_a_real_setting" in resp.json()["detail"]
+
+    def test_unknown_name_still_goes_through_the_governed_path(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """The route must not short-circuit before ``MutationExecutor``.
+
+        An earlier draft of this route pre-checked the name and raised
+        an ``HTTPException`` before building the ``Command`` at all --
+        which skipped Stage 2 and left no audit trail, unlike every
+        other refusal reason. This asserts the real governed path ran:
+        a ``MUTATION_REJECTED`` event lands for the attempt (the handler
+        raises ``ValidationError(code="unknown_setting")``, and
+        ``executor._emit_rejection`` is the one path every rejection
+        reason -- unknown name, wrong type, out of range, degraded
+        store -- emits through; there is no separate ``WRITE_REJECTED``
+        event type for this case, see ``executor.py``).
+        """
+        resp = client.put("/api/v1/settings/not_a_real_setting", json={"value": 1})
+        assert resp.status_code == 400
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED, entity_id="not_a_real_setting"
+        )
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["reason"] == "unknown_setting"
+        assert "not_a_real_setting" in payload["message"]
+
+    def test_wrong_type_is_400(self, client: TestClient) -> None:
+        resp = client.put(
+            "/api/v1/settings/memory_extraction", json={"value": "not-a-bool"}
+        )
+        assert resp.status_code == 400
+        assert "boolean" in resp.json()["detail"]
+
+    def test_out_of_range_is_400(self, client: TestClient) -> None:
+        resp = client.put("/api/v1/settings/pack_holdout_rate", json={"value": 5.0})
+        assert resp.status_code == 400
+
+    def test_missing_value_field_is_422(self, client: TestClient) -> None:
+        resp = client.put("/api/v1/settings/pack_holdout_rate", json={})
+        assert resp.status_code == 422
+
+    def test_null_value_resets_the_override(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        set_resp = client.put("/api/v1/settings/pack_holdout_rate", json={"value": 0.4})
+        assert set_resp.status_code == 200, set_resp.text
+
+        reset_resp = client.put(
+            "/api/v1/settings/pack_holdout_rate", json={"value": None}
+        )
+        assert reset_resp.status_code == 200, reset_resp.text
+        assert _store(registry).get("pack_holdout_rate") is None
+
+        follow_up = client.get("/api/v1/settings").json()
+        row = _entry(follow_up, "pack_holdout_rate")
+        assert row["effective_value"] == 0.0
+        assert row["overridden_by"] == "default"
+
+    def test_degraded_store_refuses_the_write(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        path = resolve_settings_path(registry.stores_dir)
+        assert path is not None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not valid json", encoding="utf-8")
+
+        resp = client.put("/api/v1/settings/pack_holdout_rate", json={"value": 0.1})
+        assert resp.status_code == 400
+        assert "degrad" in resp.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Env-pinned write: still stores, but reports the env value as effective
+# ---------------------------------------------------------------------------
+
+
+class TestEnvPinnedWrite:
+    def test_env_pinned_write_returns_accepted_shape_and_still_stores(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(PACK_HOLDOUT_RATE_ENV, "0.9")
+
+        resp = client.put("/api/v1/settings/pack_holdout_rate", json={"value": 0.3})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["accepted"] is True
+        assert body["name"] == "pack_holdout_rate"
+        assert body["stored_value"] == 0.3
+        assert body["effective_value"] == 0.9
+        assert body["overridden_by"] == "env"
+        assert PACK_HOLDOUT_RATE_ENV in body["note"]
+
+        # The write still landed -- ready the moment the env var is unset.
+        assert _store(registry).get("pack_holdout_rate").value == 0.3
+
+    def test_env_pinned_write_not_shaped_as_a_command_response(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(PACK_HOLDOUT_RATE_ENV, "0.9")
+        resp = client.put("/api/v1/settings/pack_holdout_rate", json={"value": 0.3})
+        body = resp.json()
+        # Distinct from the plain CommandResponse shape: no "operation"/"message".
+        assert "operation" not in body
+        assert "created_id" not in body
+
+
+# ---------------------------------------------------------------------------
+# graph_seeding's asymmetric env semantics, reused rather than reimplemented
+# ---------------------------------------------------------------------------
+
+
+class TestGraphSeedingEffectiveValue:
+    def test_unset_env_defaults_on(self, client: TestClient) -> None:
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, "graph_seeding")
+        assert row["effective_value"] is True
+        assert row["overridden_by"] == "default"
+
+    def test_unrecognised_env_token_is_still_on(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(GRAPH_SEEDING_ENV, "banana")
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, "graph_seeding")
+        assert row["effective_value"] is True
+        assert row["overridden_by"] == "env"
+
+    def test_explicit_falsey_token_turns_it_off(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(GRAPH_SEEDING_ENV, "false")
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, "graph_seeding")
+        assert row["effective_value"] is False
+        assert row["overridden_by"] == "env"
