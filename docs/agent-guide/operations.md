@@ -2082,6 +2082,80 @@ If a command with the same key has already succeeded (in-memory or in the event 
 
 ## Analyze Commands
 
+### `GET /api/v1/analyze` and `GET /api/v1/analyze/{report}` (#e182)
+
+Gap G15: every `trellis analyze <report>` command had a CLI only — the UI
+could not ask "are our learning loops performing or doing anything?" at
+all. Read scope. Each report calls the *exact* library function its CLI
+counterpart calls (never a subprocess, never a re-derivation), so a route
+and its CLI command can disagree about transport but never about
+arithmetic.
+
+`GET /api/v1/analyze` lists every allowed report name, an operator-facing
+description (what it measures, what a good vs. a bad value looks like,
+which loop it informs), and that report's default query params.
+`GET /api/v1/analyze/{report}` runs one. An unrecognized `{report}` is a
+404 naming every allowed name (never a 500 from an unhandled import); an
+unrecognized or out-of-range query param is a 422 (`extra="forbid"` on
+every params model, so a typo'd param name is rejected rather than
+silently ignored).
+
+Eleven reports: `holdout`, `judged-outcomes`, `advisory-effectiveness`,
+`value`, `dimension-predictiveness`, `learning-candidates`, `domains`,
+`extractor-fallbacks`, `pack-telemetry`, `token-usage`, `cost`. Three
+families are deliberately absent, not forgotten: `replay` takes a change
+spec rather than bounded query params; `generate-advisories` and
+`apply-noise-tags` are write paths and this router is read-scope only
+end to end; `pack-quality` requires a `--scenarios` YAML file that must
+already exist on the server's local disk, with no shipped default set —
+there is no bounded query-param shape for "a path on the server's
+filesystem," so it is a premise refutation rather than unfinished work.
+
+**Finite JSON, always.** Every response passes through a recursive
+non-finite-float sanitizer before `JSONResponse`, which also sets
+`allow_nan=False`: a latent `inf`/`nan` becomes `null` rather than
+crashing the request or putting a non-JSON token on the wire. This is
+defense in depth — every library report already types an unmeasured
+quantity as `float | None`.
+
+**Caching.** A per-process, 60s TTL cache covers every report (several
+aggregate the whole requested window per request, at the same cost
+report to report). Every response names `computed_at` (when the report
+was actually computed) and `cached` (whether this response reused that
+computation), so a caller can tell a stale read from a fresh one.
+
+```json
+{
+  "report": "advisory-effectiveness",
+  "params": {"days": 30, "min_presentations": 3},
+  "computed_at": "2026-10-10T23:00:00+00:00",
+  "cached": false,
+  "data": {"status": "degraded", "store_degradation": {"reason": "..."}}
+}
+```
+
+`advisory-effectiveness` can answer `{"status": "degraded", ...}` instead
+of a scored report — the same gate the CLI's `advisory-effectiveness` and
+`generate-advisories` commands use: a degraded advisory file scores a set
+that is missing whatever failed to parse, so the route reports the
+degradation itself rather than a silently-incomplete measurement.
+`learning-candidates` answers the pure aggregator's output plus a `note`
+field explaining what it deliberately does not do: no
+candidates/decisions file is written (a GET route must not write, and
+must not race the Review queue's own reader/writer over that directory),
+so there is no `promotion_ready` field and candidate names fall back to
+bare item ids rather than the document-store-backed readable name — both
+are computed only by `trellis analyze learning-candidates` or the nightly
+worker.
+
+The operator UI's **Reports** tab (`src/trellis_api/static/index.html`)
+renders this: a report picker populated from `GET /api/v1/analyze`, an
+editable params form seeded from each report's defaults, `computed_at`
+and a `cached` badge, scalar fields as cards and nested structures as
+collapsible JSON, a degraded-store payload rendered as a visible refusal
+rather than folded into the generic card view, and a fetch failure
+rendered as a visible error rather than a silently empty panel.
+
 ### `trellis analyze context-effectiveness`
 
 Analyze which context items correlate with task success.

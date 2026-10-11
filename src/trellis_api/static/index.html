@@ -473,6 +473,22 @@
         .badge-info { background: #172554; color: var(--info); }
         .badge-accent { background: #312e81; color: var(--accent); }
 
+        /* Readiness pill (G14): tiny by design -- a dot in the topbar, not
+           a card. Failing component names surface only on hover. */
+        .readiness-pill {
+            display: inline-block;
+            width: 0.5rem;
+            height: 0.5rem;
+            border-radius: 50%;
+            margin-left: 0.6rem;
+            background: var(--text-dim);
+            flex-shrink: 0;
+            cursor: help;
+        }
+        .readiness-pill.is-ready { background: var(--success); }
+        .readiness-pill.is-degraded { background: var(--error); }
+        .readiness-pill.is-unknown { background: var(--text-dim); }
+
         /* Loading spinner */
         .spinner {
             display: inline-block;
@@ -1496,6 +1512,7 @@
             <a href="#" data-view="events" data-label="Events"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h12M9 12h12M9 18h12"/><circle cx="4" cy="6" r="1.3"/><circle cx="4" cy="12" r="1.3"/><circle cx="4" cy="18" r="1.3"/></svg><span class="nav-label">Events</span><span class="nav-key">9</span></a>
             <a href="#" data-view="packs" data-label="Packs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 16V8a1.9 1.9 0 0 0-.95-1.64l-6.6-3.8a1.9 1.9 0 0 0-1.9 0l-6.6 3.8A1.9 1.9 0 0 0 3.5 8v8a1.9 1.9 0 0 0 .95 1.64l6.6 3.8a1.9 1.9 0 0 0 1.9 0l6.6-3.8A1.9 1.9 0 0 0 20.5 16z"/><path d="M3.8 7.1L12 11.8l8.2-4.7M12 21.3V11.8"/></svg><span class="nav-label">Packs</span><span class="nav-key">0</span></a>
             <a href="#" data-view="loops" data-label="Loops"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4M5.6 5.6l2.6 2.6M18.4 5.6l-2.6 2.6M5.6 18.4l2.6-2.6M18.4 18.4l-2.6-2.6"/></svg><span class="nav-label">Loops</span></a>
+            <a href="#" data-view="reports" data-label="Reports"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.5h9l3.5 3.5v15a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><path d="M15 2.5V6h3.5"/><path d="M8 11h8M8 14.5h8M8 18h5"/></svg><span class="nav-label">Reports</span></a>
             <a href="#" data-view="advisories" data-label="Advisories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l8.5 4.9v9.2L12 21.5l-8.5-4.9V7.4z"/><path d="M12 8.2v5"/><circle cx="12" cy="16" r="0.9" fill="currentColor" stroke="none"/></svg><span class="nav-label">Advisories</span></a>
             <a href="#" data-view="policies" data-label="Policies"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l7.5 3v6.2c0 4.3-3.1 7.4-7.5 9.3-4.4-1.9-7.5-5-7.5-9.3V5.5z"/><path d="M9 12l2.2 2.2L15.5 9.5"/></svg><span class="nav-label">Policies</span></a>
             <a href="#" data-view="settings" data-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.7 7.7 0 0 0 0-2l2-1.5-2-3.4-2.3.9a7.6 7.6 0 0 0-1.7-1l-.3-2.5h-4l-.3 2.5a7.6 7.6 0 0 0-1.7 1l-2.3-.9-2 3.4L6.6 11a7.7 7.7 0 0 0 0 2l-2 1.5 2 3.4 2.3-.9c.5.4 1.1.75 1.7 1l.3 2.5h4l.3-2.5c.6-.25 1.2-.6 1.7-1l2.3.9 2-3.4z"/></svg><span class="nav-label">Settings</span></a>
@@ -1512,6 +1529,7 @@
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9.5 4v16"/></svg>
             </button>
             <span class="view-title" id="view-title">Dashboard</span>
+            <span class="readiness-pill is-unknown" id="readiness-pill" title="Readiness: checking&hellip;"></span>
             <span class="spacer"></span>
             <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>0</kbd> Views &middot; <kbd>\</kbd> Sidebar &middot; <kbd>Esc</kbd> Close</span>
             <button class="btn-icon" id="api-key-toggle" title="API key" aria-label="Show or hide the API key panel" onclick="toggleKeyBanner()">&#x1F511;</button>
@@ -1894,6 +1912,34 @@
             <div id="loops-rows"></div>
         </div>
 
+        <div id="view-reports" style="display:none">
+            <div class="section-header">
+                <h2>Reports</h2>
+                <div class="search-bar" style="margin:0; gap:0.5rem; align-items:center">
+                    <label style="font-size:0.75rem; color:var(--text-dim); display:flex; align-items:center; gap:0.3rem">
+                        <input type="checkbox" id="report-raw-toggle" onchange="renderReportOutput()"> raw JSON
+                    </label>
+                    <button onclick="loadReportsTab()">Refresh list</button>
+                </div>
+            </div>
+            <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
+                Read-only analyze reports &mdash; the same library functions
+                <code class="mono">trellis analyze &lt;report&gt;</code> calls on the CLI. An
+                unmeasured value reads "not measured", never a bare zero.
+            </p>
+            <div style="display:flex; flex-wrap:wrap; gap:1rem; align-items:flex-end; margin-bottom:0.75rem">
+                <label style="display:flex; flex-direction:column; font-size:0.75rem; color:var(--text-dim); gap:0.2rem">
+                    report
+                    <select id="report-picker" onchange="onReportPickerChange()" style="font-size:0.85rem; min-width:14rem"></select>
+                </label>
+                <div id="report-params" style="display:flex; flex-wrap:wrap; gap:0.75rem"></div>
+                <button onclick="runReport()">Run</button>
+            </div>
+            <p id="report-description" style="font-size:0.78rem; color:var(--text-dim); margin-bottom:0.75rem"></p>
+            <div id="report-meta" class="mono" style="font-size:0.75rem; color:var(--text-dim); margin-bottom:0.75rem"></div>
+            <div id="report-output"></div>
+        </div>
+
         <div id="view-advisories" style="display:none">
             <div id="advisories-banner"></div>
             <div class="search-bar">
@@ -2224,7 +2270,7 @@
         }
 
         // -- View switching --
-        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs', 'advisories', 'policies', 'loops', 'settings'];
+        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs', 'advisories', 'policies', 'loops', 'settings', 'reports'];
         const viewLoaded = {};
         // init() reveals the dashboard when its fetches resolve. Track where the
         // user actually is, so a click made while the API is still answering is
@@ -2260,6 +2306,7 @@
                 if (name === 'events') loadEvents();
                 if (name === 'packs') loadPacks();
                 if (name === 'loops') loadLoops();
+                if (name === 'reports') loadReportsTab();
                 if (name === 'advisories') loadAdvisories();
                 if (name === 'policies') loadPolicies();
                 if (name === 'settings') loadSettings();
@@ -4848,6 +4895,42 @@
         // ============================================================
         //  INIT
         // ============================================================
+        // Readiness pill (G14) -- fed by the /readyz probe init() already
+        // fetches for the empty-state banner, so this adds no extra request.
+        // Unauthenticated callers (TRELLIS_OPS_DETAIL unset) get only the
+        // status line; `backends` is present for an authenticated caller or
+        // TRELLIS_OPS_DETAIL=public, and only then do failing names show.
+        function renderReadinessPill(ready) {
+            const el = document.getElementById('readiness-pill');
+            if (!el) return;
+            const statusVal = (ready && ready.status) || 'unknown';
+            el.classList.remove('is-ready', 'is-degraded', 'is-unknown');
+            if (statusVal === 'ready') {
+                el.classList.add('is-ready');
+                el.title = 'Readiness: ready (all probed backends ok)';
+                return;
+            }
+            if (statusVal === 'degraded' || statusVal === 'initializing') {
+                el.classList.add('is-degraded');
+                const backends = ready && ready.backends;
+                if (backends) {
+                    const failing = Object.entries(backends)
+                        .filter(([, b]) => b && b.status !== 'ok')
+                        .map(([name]) => name);
+                    el.title = failing.length
+                        ? `Readiness: degraded — failing: ${failing.map(escHtml).join(', ')}`
+                        : 'Readiness: degraded';
+                } else {
+                    el.title = statusVal === 'initializing'
+                        ? 'Readiness: starting up'
+                        : 'Readiness: degraded (sign in for per-backend detail)';
+                }
+                return;
+            }
+            el.classList.add('is-unknown');
+            el.title = 'Readiness: unknown (probe unreachable)';
+        }
+
         async function init() {
             const loading = document.getElementById('loading');
             const error = document.getElementById('error');
@@ -4874,6 +4957,7 @@
                     fetch('/readyz', { headers: readyKey ? { 'X-API-Key': readyKey } : {} })
                         .then(r => r.json()).catch(() => ({ status: 'unknown' }))
                 ]);
+                renderReadinessPill(ready);
 
                 const cardsEl = document.getElementById('stats-cards');
                 let stats = null;
@@ -5044,6 +5128,160 @@
                     <div class="loop-row-when">${whenHtml}</div>
                     <div class="loop-row-counters">${countersHtml}</div>
                 </div>`;
+        }
+
+        // ============================================================
+        //  REPORTS TAB (G15/G9/G14's report half)
+        //  GET /api/v1/analyze lists the allowlisted reports; GET
+        //  /api/v1/analyze/{report} runs one, calling the exact library
+        //  function `trellis analyze <report>` calls on the CLI. Params
+        //  are plain text inputs seeded from each report's default_params
+        //  -- there is no schema introspection here, so an empty value is
+        //  sent as "omit" (the server applies its own default) rather
+        //  than guessing a type.
+        // ============================================================
+        let reportDescriptions = {};
+        let reportDefaults = {};
+        let lastReportPayload = null;
+
+        async function loadReportsTab() {
+            const picker = document.getElementById('report-picker');
+            const outputEl = document.getElementById('report-output');
+            const metaEl = document.getElementById('report-meta');
+            picker.innerHTML = '<option>Loading&hellip;</option>';
+            outputEl.innerHTML = '';
+            metaEl.textContent = '';
+            try {
+                const data = await fetchJSON('/analyze');
+                const reports = (data.reports || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+                if (reports.length === 0) {
+                    picker.innerHTML = '';
+                    outputEl.innerHTML = '<div class="empty-state"><p>No reports available</p></div>';
+                    return;
+                }
+                reportDescriptions = {};
+                reportDefaults = {};
+                reports.forEach(r => {
+                    reportDescriptions[r.name] = r.description || '';
+                    reportDefaults[r.name] = r.default_params || {};
+                });
+                picker.innerHTML = reports.map(r =>
+                    `<option value="${escHtml(r.name)}">${escHtml(r.name)}</option>`
+                ).join('');
+                onReportPickerChange();
+                runReport();
+            } catch (err) {
+                picker.innerHTML = '';
+                outputEl.innerHTML = `<div style="color:var(--error); padding:1.5rem; text-align:center">` +
+                    `Failed to load report list: ${escHtml(err.message)}</div>`;
+            }
+        }
+
+        function onReportPickerChange() {
+            const name = document.getElementById('report-picker').value;
+            document.getElementById('report-description').textContent = reportDescriptions[name] || '';
+            const paramsEl = document.getElementById('report-params');
+            const defaults = reportDefaults[name] || {};
+            const entries = Object.entries(defaults);
+            if (entries.length === 0) {
+                paramsEl.innerHTML = '<span style="font-size:0.75rem; color:var(--text-dim)">no parameters</span>';
+                return;
+            }
+            paramsEl.innerHTML = entries.map(([key, val]) =>
+                `<label style="display:flex; flex-direction:column; font-size:0.75rem; color:var(--text-dim); gap:0.2rem">` +
+                    `${escHtml(key)}<input type="text" class="report-param-input" data-param="${escHtml(key)}" ` +
+                    // escHtml(null) is '', so a default-less param renders an empty input rather
+                    // than the literal text "null".
+                    `value="${escHtml(val)}" style="font-size:0.8rem; width:8rem"></label>`
+            ).join('');
+        }
+
+        async function runReport() {
+            const picker = document.getElementById('report-picker');
+            const name = picker.value;
+            if (!name) return;
+            const outputEl = document.getElementById('report-output');
+            const metaEl = document.getElementById('report-meta');
+            outputEl.innerHTML = loadingHtml(`Running ${name}...`);
+            metaEl.textContent = '';
+            lastReportPayload = null;
+            const params = new URLSearchParams();
+            document.querySelectorAll('.report-param-input').forEach(input => {
+                const raw = input.value.trim();
+                if (raw !== '') params.set(input.dataset.param, raw);
+            });
+            const qs = params.toString();
+            try {
+                const data = await fetchJSON(`/analyze/${encodeURIComponent(name)}${qs ? '?' + qs : ''}`);
+                lastReportPayload = data;
+                metaEl.innerHTML = `computed_at: ${escHtml(data.computed_at || 'unknown')}` +
+                    (data.cached ? ' <span class="badge badge-info">cached</span>' : '');
+                renderReportOutput();
+            } catch (err) {
+                metaEl.textContent = '';
+                outputEl.innerHTML = `<div style="color:var(--error); padding:1.5rem; text-align:center">` +
+                    `Failed to run report: ${escHtml(err.message)}</div>`;
+            }
+        }
+
+        function renderReportOutput() {
+            const outputEl = document.getElementById('report-output');
+            if (!lastReportPayload) return;
+            const raw = document.getElementById('report-raw-toggle').checked;
+            if (raw) {
+                outputEl.innerHTML = `<pre class="mono" style="white-space:pre-wrap; font-size:0.78rem">` +
+                    `${escHtml(JSON.stringify(lastReportPayload.data, null, 2))}</pre>`;
+                return;
+            }
+            outputEl.innerHTML = renderReportData(lastReportPayload.data);
+        }
+
+        function renderReportData(data) {
+            if (data === null || data === undefined) {
+                return '<div class="empty-state"><p>No data returned</p></div>';
+            }
+            if (typeof data === 'object' && !Array.isArray(data) && data.status === 'degraded') {
+                return `<div style="color:var(--error); padding:1rem">` +
+                    `Backing store is degraded, so this report refuses to run rather than ` +
+                    `scoring an incomplete set: ${escHtml(JSON.stringify(data.store_degradation || {}))}</div>`;
+            }
+            if (typeof data !== 'object') {
+                return `<div class="card"><div class="value">${escHtml(data)}</div></div>`;
+            }
+            const scalarEntries = [];
+            const complexEntries = [];
+            Object.entries(data).forEach(([key, val]) => {
+                if (val !== null && typeof val === 'object') {
+                    complexEntries.push([key, val]);
+                } else {
+                    scalarEntries.push([key, val]);
+                }
+            });
+            let html = '';
+            if (scalarEntries.length) {
+                html += '<div class="cards">' + scalarEntries.map(([key, val]) => `
+                    <div class="card">
+                        <h3>${escHtml(key)}</h3>
+                        <div class="value" style="font-size:1.3rem">` +
+                        (val === null
+                            ? '<span style="color:var(--text-dim); font-size:0.9rem">not measured</span>'
+                            : escHtml(val)) +
+                        `</div>
+                    </div>`).join('') + '</div>';
+            }
+            if (complexEntries.length) {
+                html += complexEntries.map(([key, val]) => `
+                    <details style="margin-top:0.5rem">
+                        <summary style="cursor:pointer; font-size:0.85rem">${escHtml(key)}` +
+                        (Array.isArray(val) ? ` <span class="badge badge-info">${val.length}</span>` : '') +
+                        `</summary>
+                        <pre class="mono" style="white-space:pre-wrap; font-size:0.75rem">${escHtml(JSON.stringify(val, null, 2))}</pre>
+                    </details>`).join('');
+            }
+            if (!html) {
+                html = '<div class="empty-state"><p>Insufficient data for this report</p></div>';
+            }
+            return html;
         }
 
         // ============================================================
