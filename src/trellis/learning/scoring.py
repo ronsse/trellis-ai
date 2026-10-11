@@ -127,6 +127,24 @@ def normalize_intent_family(
     return "general_context"
 
 
+def _record_helpful_session(
+    metrics: dict[str, Any], observation: Mapping[str, Any]
+) -> None:
+    """Credit one helpful citation's session toward distinct-session evidence.
+
+    Split out of ``_accumulate_item`` to keep that function's branch count
+    under the lint ceiling; behavior is unchanged — see
+    ``helpful_session_ids``'s comment at the metrics dict for why a real
+    ``session_id`` and "no session id at all" are counted separately rather
+    than one being folded into the other.
+    """
+    session_id = str(observation.get("session_id") or "").strip()
+    if session_id:
+        metrics["helpful_session_ids"].add(session_id)
+    else:
+        metrics["sessionless_helpful_count"] += 1
+
+
 def _accumulate_item(
     candidate_map: dict[tuple[str, str], dict[str, Any]],
     observation: Mapping[str, Any],
@@ -236,11 +254,7 @@ def _accumulate_item(
     # repeated judgement rather than about one bad pack.
     if bool(item.get("cited_helpful")):
         metrics["helpful_citations"] += 1
-        session_id = str(observation.get("session_id") or "").strip()
-        if session_id:
-            metrics["helpful_session_ids"].add(session_id)
-        else:
-            metrics["sessionless_helpful_count"] += 1
+        _record_helpful_session(metrics, observation)
     if bool(item.get("cited_unhelpful")):
         metrics["unhelpful_citations"] += 1
 

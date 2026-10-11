@@ -1018,7 +1018,6 @@ Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes
 | `evidence.ingest` | Ingest | Ingest evidence |
 | `evidence.attach` | Ingest | Attach evidence to a target |
 | `precedent.promote` | Curate | Promote trace to precedent |
-| `precedent.update` | Curate | Update a precedent |
 | `entity.create` | Curate | Create an entity |
 | `entity.update` | Curate | Update an entity |
 | `entity.merge` | Curate | Merge two entities |

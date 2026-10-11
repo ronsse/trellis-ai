@@ -70,7 +70,9 @@ def _get_settings_store(registry: StoreRegistry) -> SettingsStore:
     return SettingsStore(path)
 
 
-def _effective_values(settings_values: dict[str, Any]) -> dict[str, Any]:
+def _effective_values(
+    settings_values: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
     """Resolved value for every registry entry, env > settings > default.
 
     The twelve :class:`WriteBehaviourConfig` fields go through
@@ -92,6 +94,21 @@ def _effective_values(settings_values: dict[str, Any]) -> dict[str, Any]:
     the same way the other fields are (an optimistic preview -- see
     ``settings_live``, which is ``False`` for ``graph_seeding`` precisely
     because that preview is not yet wired to any real call site).
+
+    Returns ``(effective, parse_errors)``. ``WriteBehaviourConfig``'s own
+    twelve fields can't land in ``parse_errors``: every one of its
+    per-field helpers (``_truthy``, ``_min_confidence``, the clamps)
+    already degrades a garbage value to a default with a warning log,
+    never a raised exception. The two auto-promote resolvers below make
+    no such promise -- ``resolve_auto_promote_overrides`` and
+    ``resolve_candidate_auto_promote_overrides`` do ``int(float(raw))``
+    on a non-blank env value and let ``ValueError``/``TypeError`` fly, by
+    design, for their real caller (the CLI / worker), which wants a loud
+    failure. This route is read by an operator who did not necessarily
+    set the bad value and must still see every *other* setting, so a
+    family that fails to resolve degrades to each of its entries'
+    registry defaults here, with the parse error recorded against each
+    affected entry name rather than raised past this function.
     """
     effective = WriteBehaviourConfig.from_env_and_settings(
         settings=settings_values
@@ -120,15 +137,38 @@ def _effective_values(settings_values: dict[str, Any]) -> dict[str, Any]:
     # mislead when the stored/default value IS what's reported and
     # config.yaml sets something else -- the same honest-preview caveat
     # settings_live=False already carries for minhash_seed_max_docs.
-    for field, value in resolve_auto_promote_overrides(
-        settings=settings_values
-    ).items():
-        effective[f"learning.auto_promote.{field}"] = value
-    for field, candidate_value in resolve_candidate_auto_promote_overrides(
-        settings=settings_values
-    ).items():
-        effective[f"learning.candidate_auto_promote.{field}"] = candidate_value
-    return effective
+    parse_errors: dict[str, str] = {}
+    for prefix, resolve in (
+        (
+            "learning.auto_promote.",
+            lambda: resolve_auto_promote_overrides(settings=settings_values),
+        ),
+        (
+            "learning.candidate_auto_promote.",
+            lambda: resolve_candidate_auto_promote_overrides(
+                settings=settings_values
+            ),
+        ),
+    ):
+        try:
+            resolved = resolve()
+        except (ValueError, TypeError) as exc:
+            # One bad knob in a family must not blank every other
+            # setting off the response -- degrade every entry in *this*
+            # family to its registry default and record why, rather
+            # than letting the exception reach list_settings() and turn
+            # the whole route into a 500. A typo'd
+            # TRELLIS_CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT must not
+            # take down every other operator control.
+            message = str(exc)
+            for spec in SETTINGS_REGISTRY.values():
+                if spec.name.startswith(prefix):
+                    effective[spec.name] = spec.default
+                    parse_errors[spec.name] = message
+            continue
+        for field, value in resolved.items():
+            effective[f"{prefix}{field}"] = value
+    return effective, parse_errors
 
 
 def _entry(
@@ -136,6 +176,7 @@ def _entry(
     settings_values: dict[str, Any],
     effective: dict[str, Any],
     stored_rows: dict[str, SettingRow],
+    parse_errors: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     stored_row = stored_rows.get(spec.name)
     return {
@@ -169,6 +210,12 @@ def _entry(
         "updated_at": (
             stored_row.updated_at.isoformat() if stored_row is not None else None
         ),
+        # Non-``None`` only when this entry's family (today, one of the
+        # two auto-promote families) failed to resolve from the
+        # environment/settings -- "effective_value" is then that
+        # entry's registry default, not a crash, and this field is the
+        # operator-visible reason why.
+        "parse_error": (parse_errors or {}).get(spec.name),
     }
 
 
@@ -227,10 +274,10 @@ def list_settings() -> dict[str, Any]:
     settings_values = store.as_values()
     stored_rows = {row.name: row for row in store.list()}
     degradation = store.degradation
-    effective = _effective_values(settings_values)
+    effective, parse_errors = _effective_values(settings_values)
     return {
         "settings": [
-            _entry(spec, settings_values, effective, stored_rows)
+            _entry(spec, settings_values, effective, stored_rows, parse_errors)
             for spec in SETTINGS_REGISTRY.values()
         ],
         "store_degradation": (
@@ -331,7 +378,7 @@ def update_setting(
             "note": restart_note,
         }
 
-    effective_value = _effective_values(settings_values)[name]
+    effective_value = _effective_values(settings_values)[0][name]
     if req.value is None:
         note = (
             f"{spec.env_var} is set, so it governs {name!r} right now; "

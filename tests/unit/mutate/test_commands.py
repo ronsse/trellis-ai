@@ -29,7 +29,11 @@ class TestOperation:
         # + ALIAS_UPSERT (governed alias/backfill writes)
         # + SETTINGS_UPDATE (governed settings-store write; null value
         # means "remove the override" rather than a separate RESET verb)
-        assert len(Operation) == 22
+        # - PRECEDENT_UPDATE (removed: automatic demotion, the only writer
+        # this verb existed for, does not ship in the report-only PR that
+        # introduced the auto-promote evaluator; commit mode is refused
+        # via ConfigError rather than reinstating this verb)
+        assert len(Operation) == 21
 
 
 class TestCommand:

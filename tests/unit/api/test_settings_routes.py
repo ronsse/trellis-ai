@@ -170,6 +170,7 @@ class TestListSettings:
             "overridden_by": "default",
             "stored_value": None,
             "updated_at": None,
+            "parse_error": None,
         }
         assert row["label"]
         assert row["description"]
@@ -512,3 +513,120 @@ class TestGraphSeedingEffectiveValue:
         row = _entry(body, "graph_seeding")
         assert row["effective_value"] is False
         assert row["overridden_by"] == "env"
+
+
+# ---------------------------------------------------------------------------
+# A garbage auto-promote env value must degrade that family's entries, not
+# 500 the whole route -- resolve_auto_promote_overrides and
+# resolve_candidate_auto_promote_overrides both do int(float(raw))/float(raw)
+# on a non-blank env value and let ValueError/TypeError fly for their real
+# caller (the CLI/worker, which wants a loud failure); this route reads for
+# an operator who still needs to see every *other* setting.
+# ---------------------------------------------------------------------------
+
+AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV = "TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE"
+AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV = "TRELLIS_AUTO_PROMOTE_MIN_EFFECT_SIZE"
+CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV = (
+    "TRELLIS_CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT"
+)
+
+
+class TestAutoPromoteGarbageEnvDegradesInstead500:
+    def test_unparseable_tuner_int_does_not_500_the_route(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, "notanumber")
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.auto_promote.min_sample_size")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+        assert "notanumber" in row["parse_error"]
+
+    def test_unparseable_tuner_float_does_not_500_the_route(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV, "not-a-float")
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.auto_promote.min_effect_size")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+
+    def test_unparseable_candidate_int_does_not_500_the_route(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV, "garbage"
+        )
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(
+            resp.json(), "learning.candidate_auto_promote.min_helpful_count"
+        )
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+        assert "garbage" in row["parse_error"]
+
+    def test_bad_knob_in_one_family_does_not_blank_the_sibling_family(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A garbage ``learning.auto_promote.*`` env value must not touch
+        ``learning.candidate_auto_promote.*`` entries -- each family
+        resolves (and so fails) independently."""
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, "notanumber")
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        broken = _entry(body, "learning.auto_promote.min_sample_size")
+        assert broken["parse_error"] is not None
+        sibling = _entry(body, "learning.candidate_auto_promote.min_helpful_count")
+        assert sibling["parse_error"] is None
+        unrelated = _entry(body, "pack_holdout_rate")
+        assert unrelated["parse_error"] is None
+        assert unrelated["effective_value"] == 0.0
+
+    def test_every_other_family_still_reports_normally(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One field's garbage env value takes down its whole family (the
+        resolver fails atomically, so every entry sharing that prefix
+        degrades together) but every setting outside that one family
+        -- including ``learning.auto_promote.*``, a sibling family with
+        its own, separate resolver -- reports with no parse error."""
+        monkeypatch.setenv(
+            CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV, "garbage"
+        )
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body["settings"]) == len(SETTINGS_REGISTRY)
+        broken_names = {
+            row["name"] for row in body["settings"] if row["parse_error"] is not None
+        }
+        assert broken_names == {
+            row["name"]
+            for row in body["settings"]
+            if row["name"].startswith("learning.candidate_auto_promote.")
+        }
+        assert broken_names  # the family is non-empty, so this isn't vacuous
+        unaffected = _entry(body, "learning.auto_promote.min_sample_size")
+        assert unaffected["parse_error"] is None
+
+    def test_cli_note_degrades_too_when_a_sibling_knobs_env_is_garbage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Companion to the route-level tests above: the CLI's own
+        success-note computation (``trellis_cli.admin_settings``) hits the
+        exact same resolver functions. Writing ``enabled`` must not raise
+        just because a *different* knob in the same family
+        (``min_sample_size``) has a garbage env value -- that is the
+        family's problem to report, not a reason to crash the note for a
+        value that actually resolved."""
+        from trellis.core.settings_registry import get_setting
+        from trellis_cli.admin_settings import _env_effective_value
+
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, "notanumber")
+        spec = get_setting("learning.auto_promote.enabled")
+        value = _env_effective_value(spec, {})
+        assert value == spec.default

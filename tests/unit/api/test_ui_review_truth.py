@@ -271,7 +271,8 @@ def test_precedents_empty_state_names_the_real_promotion_path() -> None:
     # and never claims a commit mode exists (it is refused today).
     assert "auto-promote-candidates" in empty_branch
     assert "if" in empty_branch.lower()
-    assert "it never" in empty_branch and "promotes anything itself" in empty_branch
+    assert "it never" in empty_branch
+    assert "promotes anything itself" in empty_branch
     assert "commit mode" not in empty_branch
     # The old claim ("Promote traces to create precedents") implied any
     # trace promotion was sufficient; it must actually be gone, not merely

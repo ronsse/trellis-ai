@@ -35,6 +35,10 @@ from rich.markup import escape
 
 from trellis.core.settings_registry import SettingSpec, get_setting, resolve_source
 from trellis.core.write_config import WriteBehaviourConfig
+from trellis.learning.candidate_auto_promote import (
+    resolve_candidate_auto_promote_overrides,
+)
+from trellis.learning.tuners.auto_promote import resolve_auto_promote_overrides
 from trellis.mutate import Command, CommandStatus, Operation, build_settings_executor
 from trellis.retrieve.builder_factory import _graph_seeding_enabled
 from trellis.retrieve.pack_builder import _filter_legacy_advisories_enabled
@@ -63,19 +67,60 @@ def _settings_values(registry: StoreRegistry) -> dict[str, Any]:
     return SettingsStore(path).as_values()
 
 
+#: Name prefixes of the two auto-promote settings families -- neither is
+#: a :class:`WriteBehaviourConfig` field, so :func:`_env_effective_value`
+#: resolves them through their own precedence functions below instead of
+#: that dataclass's ``as_dict()``.
+_AUTO_PROMOTE_PREFIX = "learning.auto_promote."
+_CANDIDATE_AUTO_PROMOTE_PREFIX = "learning.candidate_auto_promote."
+
+
+def _auto_promote_family_value(
+    spec: SettingSpec, settings_values: dict[str, Any], *, prefix: str
+) -> Any:
+    """One field from whichever auto-promote family *prefix* names.
+
+    A sibling knob's unparseable env value degrades this one to its
+    registry default rather than raising past a successful write (the
+    write itself already validated the value actually being set; a
+    *different* knob in the same family having a bad raw env string is
+    not this call's business to fail on).
+    """
+    field = spec.name[len(prefix) :]
+    resolve = (
+        resolve_auto_promote_overrides
+        if prefix == _AUTO_PROMOTE_PREFIX
+        else resolve_candidate_auto_promote_overrides
+    )
+    try:
+        return resolve(settings=settings_values)[field]
+    except (ValueError, TypeError):
+        return spec.default
+
+
 def _env_effective_value(spec: SettingSpec, settings_values: dict[str, Any]) -> Any:
     """The real environment-governed value for *spec*, env-only knobs included.
 
     ``graph_seeding``/``filter_legacy_advisories`` have their own
     asymmetric env semantics (see ``trellis_api.routes.settings``'s
     ``_effective_values`` docstring, which this mirrors rather than
-    reimplements independently); every other knob is a
+    reimplements independently); the two ``learning.auto_promote.*`` /
+    ``learning.candidate_auto_promote.*`` families resolve through
+    :func:`_auto_promote_family_value`. Every other knob is a
     :class:`WriteBehaviourConfig` field.
     """
     if spec.name == "graph_seeding":
         return _graph_seeding_enabled()
     if spec.name == "filter_legacy_advisories":
         return _filter_legacy_advisories_enabled()
+    if spec.name.startswith(_AUTO_PROMOTE_PREFIX):
+        return _auto_promote_family_value(
+            spec, settings_values, prefix=_AUTO_PROMOTE_PREFIX
+        )
+    if spec.name.startswith(_CANDIDATE_AUTO_PROMOTE_PREFIX):
+        return _auto_promote_family_value(
+            spec, settings_values, prefix=_CANDIDATE_AUTO_PROMOTE_PREFIX
+        )
     return WriteBehaviourConfig.from_env_and_settings(
         settings=settings_values
     ).as_dict()[spec.name]

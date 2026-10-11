@@ -1997,7 +1997,6 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `precedent.promote` | `trace_id`, `title`, `description` | Promote a trace to a precedent (also available via CLI) |
-| `precedent.update` | `precedent_id` | Update an existing precedent |
 
 ### Link Operations
 

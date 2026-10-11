@@ -6007,6 +6007,13 @@
             // never folded into this class (brief e179 rework, step 2).
             const riskClass = s.risk === 'high' ? 'risk-high' : (s.risk === 'caution' ? 'risk-caution' : '');
             const pinNote = settingEnvPinNote(s);
+            // A garbage environment value for this entry's family
+            // degrades effective_value to the registry default instead
+            // of 500ing the whole route -- show why, right where the
+            // operator who set it is already looking.
+            const parseErrorHtml = s.parse_error
+                ? `<div class="field-hint"><span class="badge badge-err">unparseable env value</span> ${escHtml(s.parse_error)}</div>`
+                : '';
             const liveHtml = s.restart_required
                 ? '<span class="badge badge-warn">Restart required</span>'
                 : '<span class="badge badge-ok">Live &mdash; next request</span>';
@@ -6024,6 +6031,7 @@
                 <td>
                     <div><code>${escHtml(String(s.effective_value))}</code> ${settingSourceBadge(s.overridden_by)}</div>
                     ${pinNote ? `<div class="field-hint">${pinNote}</div>` : ''}
+                    ${parseErrorHtml}
                 </td>
                 <td>${(s.stored_value === null || s.stored_value === undefined) ? '<span class="field-hint">(none)</span>' : `<code>${escHtml(String(s.stored_value))}</code>`}</td>
                 <td>${liveHtml}</td>
