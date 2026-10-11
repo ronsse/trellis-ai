@@ -6,6 +6,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Pack feedback from the Packs detail view.** `POST /packs/{pack_id}/feedback`
+  was the only learning-loop input the dashboard could add and the UI never
+  called it — the "Feedback" count on a pack's detail page only ever grew by
+  an agent calling the route directly. The injected-items table now carries a
+  Helpful/Unhelpful checkbox per row (checking one clears the other), plus an
+  optional comment and two overall-verdict buttons ("Helpful overall" /
+  "Not helpful") that set `success` and leave `rating` for the server to
+  derive, matching the existing REST/MCP contract. A successful submit shows
+  whether the event reached the EventLog yet (`event_log_in_sync`) and
+  reloads the pack so the new row and count reflect it; a failed submit shows
+  the error and re-enables the buttons instead of resetting the form. UI
+  only — the route and `PackFeedbackRequest`/`PackFeedbackResponse` shapes
+  are unchanged.
 - **Advisories and Policies tabs in the web UI (#850).** Both surfaces
   existed only as CLI/REST before this: `GET /advisories` (+
   `POST /advisories/generate`, an admin action gated behind an inline

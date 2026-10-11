@@ -4172,7 +4172,7 @@
                 if (injected.length > 0) {
                     injectedHtml = `
                     <div style="overflow-x:auto"><table>
-                        <thead><tr><th>#</th><th>Item</th><th>Type</th><th>Strategy</th><th>Reason</th><th>Scores</th><th>Tokens</th></tr></thead>
+                        <thead><tr><th>#</th><th>Item</th><th>Type</th><th>Strategy</th><th>Reason</th><th>Scores</th><th>Tokens</th><th>Helpful</th><th>Unhelpful</th></tr></thead>
                         <tbody>${injected.map(it => `
                             <tr>
                                 <td>${it.rank != null ? it.rank : '-'}</td>
@@ -4182,6 +4182,8 @@
                                 <td style="font-size:0.78rem">${escHtml(it.selection_reason || '')}</td>
                                 <td style="font-size:0.72rem; color:var(--text-dim)">${escHtml(scoreBreakdownStr(it.score_breakdown))}</td>
                                 <td>${it.estimated_tokens != null ? it.estimated_tokens : '-'}</td>
+                                <td style="text-align:center"><input type="checkbox" class="fb-helpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark helpful"></td>
+                                <td style="text-align:center"><input type="checkbox" class="fb-unhelpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark unhelpful"></td>
                             </tr>`).join('')}
                         </tbody>
                     </table></div>`;
@@ -4239,6 +4241,24 @@
                     feedbackHtml += '</div>';
                 }
 
+                // Element-level verdicts ride the injected-items table's new
+                // Helpful/Unhelpful checkboxes (data-item-id, read via
+                // querySelectorAll rather than spliced into a selector or an
+                // inline handler -- item_id is an opaque agent-written id).
+                // The overall verdict buttons set success/rating the same
+                // way the REST/MCP surfaces already derive rating from
+                // success when omitted, so this form never invents a float.
+                const feedbackFormHtml = `
+                    <div style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem">
+                        <h4 style="font-size:0.9rem; margin-bottom:0.5rem">Record feedback</h4>
+                        <textarea id="pack-feedback-comment" class="review-rationale" placeholder="Optional comment"></textarea>
+                        <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap">
+                            <button class="btn btn-sm" data-act="submitPackFeedbackHelpful">👍 Helpful overall</button>
+                            <button class="btn btn-sm btn-danger" data-act="submitPackFeedbackUnhelpful">👎 Not helpful</button>
+                            <span id="pack-feedback-status" style="font-size:0.8rem"></span>
+                        </div>
+                    </div>`;
+
                 container.innerHTML = `
                     <div class="trace-detail fade-in">
                         <h3>
@@ -4254,9 +4274,66 @@
                         ${rejectedHtml}
                         ${budgetHtml}
                         ${feedbackHtml}
+                        ${feedbackFormHtml}
                     </div>
                 `;
                 container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+                // Checking one verdict for a row clears the other -- looked
+                // up through the row the checkbox sits in (closest('tr')),
+                // never through a selector built from the row's item_id, so
+                // an item_id holding selector-special characters cannot
+                // break this wiring.
+                container.querySelectorAll('.fb-helpful-cb, .fb-unhelpful-cb').forEach(cb => {
+                    cb.addEventListener('change', () => {
+                        if (!cb.checked) return;
+                        const row = cb.closest('tr');
+                        if (!row) return;
+                        const otherSel = cb.classList.contains('fb-helpful-cb') ? '.fb-unhelpful-cb' : '.fb-helpful-cb';
+                        const other = row.querySelector(otherSel);
+                        if (other) other.checked = false;
+                    });
+                });
+
+                async function submitPackFeedback(success) {
+                    const statusEl = document.getElementById('pack-feedback-status');
+                    const buttons = container.querySelectorAll('[data-act="submitPackFeedbackHelpful"], [data-act="submitPackFeedbackUnhelpful"]');
+                    buttons.forEach(b => { b.disabled = true; });
+                    if (statusEl) statusEl.textContent = 'Submitting...';
+                    try {
+                        const commentEl = document.getElementById('pack-feedback-comment');
+                        const comment = commentEl ? commentEl.value.trim() : '';
+                        const helpful_item_ids = Array.from(container.querySelectorAll('.fb-helpful-cb:checked')).map(cb => cb.dataset.itemId);
+                        const unhelpful_item_ids = Array.from(container.querySelectorAll('.fb-unhelpful-cb:checked')).map(cb => cb.dataset.itemId);
+                        const resp = await postJSON(`/packs/${encodeURIComponent(packId)}/feedback`, {
+                            success,
+                            comment: comment || null,
+                            helpful_item_ids,
+                            unhelpful_item_ids,
+                        });
+                        if (statusEl) {
+                            // event_log_in_sync: false means only the durable
+                            // JSONL row landed and a reconcile is owed -- per
+                            // PackFeedbackResponse's docstring, this must not
+                            // read as the feedback having driven behavior yet.
+                            statusEl.innerHTML = resp.event_log_in_sync
+                                ? '<span style="color:var(--success)">Feedback recorded.</span>'
+                                : '<span style="color:var(--warn)">Feedback written to the durable log; a reconcile is owed before it reaches the event log.</span>';
+                        }
+                        await loadPackDetail(packId);
+                    } catch (err) {
+                        // Absence must not read as success (#849): show the
+                        // error and re-enable the buttons rather than
+                        // silently resetting the form.
+                        if (statusEl) statusEl.innerHTML = `<span style="color:var(--error)">Failed to record feedback: ${escHtml(err.message)}</span>`;
+                        buttons.forEach(b => { b.disabled = false; });
+                    }
+                }
+                const feedbackFormActions = {
+                    submitPackFeedbackHelpful: () => submitPackFeedback(true),
+                    submitPackFeedbackUnhelpful: () => submitPackFeedback(false),
+                };
+                container.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', feedbackFormActions[b.dataset.act]));
             } catch (err) {
                 container.innerHTML = `<div class="trace-detail"><p style="color:var(--error)">Failed to load pack: ${escHtml(err.message)}</p></div>`;
             }
