@@ -66,7 +66,9 @@ health-check failure can never block or corrupt retrieval.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 from pydantic import Field
@@ -81,6 +83,66 @@ _WINDOW_ENV = "TRELLIS_CAPTURE_WARN_WINDOW_HOURS"
 
 DEFAULT_THRESHOLD = 3
 DEFAULT_WINDOW_HOURS = 24
+
+#: Settings-registry wiring for the two knobs above — env wins over a
+#: stored override, which wins over the module default. See
+#: ``trellis.core.settings_registry``'s ``capture_warn_threshold`` /
+#: ``capture_warn_window_hours`` entries.
+THRESHOLD_SETTING = "capture_warn_threshold"
+WINDOW_HOURS_SETTING = "capture_warn_window_hours"
+
+
+def _resolve_int_knob(
+    *,
+    env_var: str,
+    setting_name: str,
+    default: int,
+    settings: Mapping[str, Any] | None,
+) -> int:
+    raw_env = os.environ.get(env_var, "").strip()
+    if raw_env:
+        try:
+            value = int(raw_env)
+        except ValueError:
+            logger.warning("capture_health.bad_env_int", var=env_var, value=raw_env)
+            return default
+        return value if value >= 0 else default
+    if settings is not None and setting_name in settings:
+        try:
+            value = int(settings[setting_name])
+        except (TypeError, ValueError):
+            return default
+        return value if value >= 0 else default
+    return default
+
+
+def resolve_capture_thresholds(
+    settings: Mapping[str, Any] | None = None,
+) -> tuple[int, int]:
+    """Resolve ``(threshold, window_hours)`` for :func:`check_capture_health`.
+
+    Env beats a settings-store override beats the module default — the
+    same precedence every other read-side knob in this codebase applies.
+    A caller that already received an explicit per-call override (a CLI
+    flag, a query parameter) should pass that straight to
+    :func:`check_capture_health` instead of calling this at all; this is
+    for the common case where nothing was explicitly passed.
+    """
+    return (
+        _resolve_int_knob(
+            env_var=_THRESHOLD_ENV,
+            setting_name=THRESHOLD_SETTING,
+            default=DEFAULT_THRESHOLD,
+            settings=settings,
+        ),
+        _resolve_int_knob(
+            env_var=_WINDOW_ENV,
+            setting_name=WINDOW_HOURS_SETTING,
+            default=DEFAULT_WINDOW_HOURS,
+            settings=settings,
+        ),
+    )
+
 
 #: Cap on the detail fetch once the counts have crossed the threshold —
 #: enough to attribute surfaces and date the outage without pulling an

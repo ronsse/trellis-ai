@@ -14,7 +14,11 @@ from pydantic import ValidationError
 
 from trellis.classify.demotion_gate import (
     MIN_ATTRIBUTED_PACKS,
+    MIN_ATTRIBUTED_PACKS_ENV,
+    MIN_ATTRIBUTED_PACKS_SETTING,
     MIN_UNHELPFUL_CITATIONS,
+    MIN_UNHELPFUL_CITATIONS_ENV,
+    MIN_UNHELPFUL_CITATIONS_SETTING,
     REFUSED_CONTESTED,
     REFUSED_INSUFFICIENT,
     REFUSED_NO_EVIDENCE,
@@ -22,6 +26,7 @@ from trellis.classify.demotion_gate import (
     REFUSED_THIN_CORPUS,
     DemotionEvidence,
     NoiseDemotionScreen,
+    resolve_demotion_thresholds,
     screen_noise_candidates,
 )
 
@@ -44,6 +49,60 @@ def screen(*evidence: DemotionEvidence, attributed_packs: int = AMPLE, **kw):
         attributed_packs=attributed_packs,
         **kw,
     )
+
+
+class TestResolveDemotionThresholds:
+    """``resolve_demotion_thresholds`` is the one path every caller (the
+    nightly curation worker, the REST and CLI effectiveness surfaces) uses
+    to turn a settings-store snapshot into the two numbers this gate
+    checks — proven here at the resolver level, independent of any one
+    caller's wiring.
+    """
+
+    def test_no_env_and_no_settings_returns_the_module_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+
+        assert resolve_demotion_thresholds(None) == (
+            MIN_ATTRIBUTED_PACKS,
+            MIN_UNHELPFUL_CITATIONS,
+        )
+
+    def test_a_settings_only_override_is_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_ATTRIBUTED_PACKS_ENV, raising=False)
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+        settings = {
+            MIN_ATTRIBUTED_PACKS_SETTING: 9,
+            MIN_UNHELPFUL_CITATIONS_SETTING: 4,
+        }
+
+        assert resolve_demotion_thresholds(settings) == (9, 4)
+
+    def test_env_beats_a_settings_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_ATTRIBUTED_PACKS_ENV, "11")
+        monkeypatch.setenv(MIN_UNHELPFUL_CITATIONS_ENV, "7")
+        settings = {
+            MIN_ATTRIBUTED_PACKS_SETTING: 9,
+            MIN_UNHELPFUL_CITATIONS_SETTING: 4,
+        }
+
+        assert resolve_demotion_thresholds(settings) == (11, 7)
+
+    def test_an_unparseable_env_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_ATTRIBUTED_PACKS_ENV, "not-a-number")
+        monkeypatch.delenv(MIN_UNHELPFUL_CITATIONS_ENV, raising=False)
+
+        packs, _citations = resolve_demotion_thresholds(None)
+
+        assert packs == MIN_ATTRIBUTED_PACKS
 
 
 class TestConstantsArePinnedByValue:

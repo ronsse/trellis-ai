@@ -1,0 +1,132 @@
+"""The Settings tab stops implying things the registry response doesn't say.
+
+Three defects, pinned one test each:
+
+1. The table never showed which surfaces (MCP, the REST API, the CLI) a
+   setting's own real enforcement site reads — an operator had no way to
+   tell from the UI whether changing a knob would affect the one surface
+   they care about. A "Read by" column now renders ``surfaces`` straight
+   from the registry response, with no hardcoded knob list of its own.
+2. ``formatSettingBounds`` rendered every ``minimum`` as "min N", which
+   reads as "N is accepted". For the one entry whose ``minimum`` is a
+   *strict* lower bound (``minimum_exclusive``), N is refused, not
+   accepted, so that case now renders "> N" instead.
+3. A setting whose shipped default is "unset" (``default: null`` /
+   ``effective_value: null``) rendered the literal text "null" — in the
+   effective-value cell via ``String(null)``, and in the editable input's
+   ``value`` attribute via the same — because ``String()`` turns
+   JavaScript's ``null`` into a real four-character string. Both now go
+   through a shared "(unset)" / empty-field treatment instead.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import trellis_api
+
+INDEX_HTML = Path(trellis_api.__file__).parent / "static" / "index.html"
+
+
+def _page() -> str:
+    return INDEX_HTML.read_text(encoding="utf-8")
+
+
+def _between(page: str, start: str, end: str) -> str:
+    found = re.search(re.escape(start) + r"(.*?)" + re.escape(end), page, re.DOTALL)
+    assert found is not None, f"could not find region between {start!r} and {end!r}"
+    return found.group(1)
+
+
+def _function_body(page: str, signature: str, next_signature: str) -> str:
+    return _between(page, signature, next_signature)
+
+
+# ---------------------------------------------------------------------------
+# 1. "Read by" reflects the real `surfaces` field
+# ---------------------------------------------------------------------------
+
+
+def test_settings_table_has_a_read_by_column() -> None:
+    page = _page()
+    header = _between(page, '<table class="settings-table">', "</thead>")
+    assert "<th>Read by</th>" in header
+
+
+def test_read_by_cell_renders_the_real_surfaces_field_not_a_fixed_list() -> None:
+    page = _page()
+    row_body = _function_body(
+        page,
+        "function renderSettingRow(s, groups, degraded) {",
+        "function coerceSettingValue(",
+    )
+    assert "formatSurfaces(s.surfaces)" in row_body
+
+    format_surfaces_body = _function_body(
+        page, "function formatSurfaces(surfaces) {", "function formatSettingValue(v) {"
+    )
+    # Reads straight from the response field, never a hardcoded roster of
+    # setting names -- a new surface still renders (falls back to its own
+    # uppercase spelling) rather than disappearing.
+    assert ".map(" in format_surfaces_body
+    assert "SURFACE_DISPLAY_NAMES[s] || s.toUpperCase()" in format_surfaces_body
+
+
+# ---------------------------------------------------------------------------
+# 2. minimum_exclusive renders "> N", not "min N"
+# ---------------------------------------------------------------------------
+
+
+def test_minimum_exclusive_renders_strict_inequality_not_min() -> None:
+    page = _page()
+    body = _function_body(
+        page, "function formatSettingBounds(s) {", "// Surface codes as the registry"
+    )
+    assert "s.minimum_exclusive" in body
+    assert "`> ${s.minimum}`" in body
+    assert "`min ${s.minimum}`" in body  # the inclusive case must still exist
+
+
+# ---------------------------------------------------------------------------
+# 3. An unset (null) default/effective value never renders as "null"
+# ---------------------------------------------------------------------------
+
+
+def test_format_setting_value_treats_null_as_unset_not_the_string_null() -> None:
+    page = _page()
+    body = _function_body(
+        page, "function formatSettingValue(v) {", "function renderSettingsTable() {"
+    )
+    assert "v === null || v === undefined" in body
+    assert "'(unset)'" in body
+    # And it must not simply fall through to String(v), which is how the
+    # literal "null" got rendered in the first place.
+    assert "String(v)" in body  # still used for the non-null branch
+
+
+def test_effective_value_cell_goes_through_the_null_safe_formatter() -> None:
+    page = _page()
+    row_body = _function_body(
+        page,
+        "function renderSettingRow(s, groups, degraded) {",
+        "function coerceSettingValue(",
+    )
+    assert "formatSettingValue(s.effective_value)" in row_body
+    # The literal that used to leak "null" into the cell.
+    assert "String(s.effective_value)" not in row_body
+
+
+def test_the_value_input_never_puts_the_literal_null_in_its_value_attribute() -> None:
+    page = _page()
+    body = _function_body(
+        page,
+        "function renderValueInput(s, inputId, currentValue, disabled) {",
+        "function renderSettingActions(",
+    )
+    assert "currentValue === null || currentValue === undefined" in body
+    assert "? ''" in body
+    # Both the number and text branches must read the null-safe variable,
+    # not currentValue directly, inside escHtml().
+    assert "escHtml(rawValue)" in body
+    assert "escHtml(String(currentValue))" not in body

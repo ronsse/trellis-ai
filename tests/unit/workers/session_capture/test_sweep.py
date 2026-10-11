@@ -68,6 +68,32 @@ class TestStrictMode:
         monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", raw)
         assert capture_sweep.strict_mode() is True
 
+    def test_a_settings_only_false_override_is_honoured(self, monkeypatch) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode({"capture_strict": False}) is False
+
+    def test_a_settings_only_string_false_is_honoured(self, monkeypatch) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode({"capture_strict": "false"}) is False
+
+    def test_a_settings_only_true_override_stays_strict(self, monkeypatch) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode({"capture_strict": True}) is True
+
+    def test_env_beats_a_settings_override(self, monkeypatch) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "1")
+        assert capture_sweep.strict_mode({"capture_strict": False}) is True
+
+    def test_none_settings_falls_back_to_the_default(self, monkeypatch) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode(None) is True
+
+    def test_a_settings_mapping_missing_the_key_falls_back_to_the_default(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode({"some_other_setting": 1}) is True
+
 
 class TestBuildJudgeClient:
     def test_returns_the_configured_client(self, registry) -> None:

@@ -72,6 +72,7 @@ change what the path does.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -98,6 +99,71 @@ MIN_ATTRIBUTED_PACKS = 5
 #: corpus — the gate has to be able to say *yes*, or it is the same
 #: constant it replaces pointing the other way.
 MIN_UNHELPFUL_CITATIONS = 2
+
+#: Settings-registry wiring for the two thresholds above — env wins over a
+#: stored override, which wins over the module constant. Every caller
+#: that builds the two counts this gate checks (the nightly curation
+#: worker and the CLI/REST surfaces that run the same analysis on demand)
+#: resolves through :func:`resolve_demotion_thresholds` rather than
+#: passing the bare constants, so a settings-store change reaches all of
+#: them identically. See ``trellis.core.settings_registry``'s
+#: ``noise_demotion_min_attributed_packs`` / ``noise_demotion_min_unhelpful_citations``
+#: entries.
+MIN_ATTRIBUTED_PACKS_ENV = "TRELLIS_NOISE_DEMOTION_MIN_ATTRIBUTED_PACKS"
+MIN_UNHELPFUL_CITATIONS_ENV = "TRELLIS_NOISE_DEMOTION_MIN_UNHELPFUL_CITATIONS"
+MIN_ATTRIBUTED_PACKS_SETTING = "noise_demotion_min_attributed_packs"
+MIN_UNHELPFUL_CITATIONS_SETTING = "noise_demotion_min_unhelpful_citations"
+
+
+def _resolve_int_threshold(
+    *,
+    env_var: str,
+    setting_name: str,
+    default: int,
+    settings: Mapping[str, Any] | None,
+) -> int:
+    raw_env = os.environ.get(env_var, "").strip()
+    if raw_env:
+        try:
+            return int(raw_env)
+        except ValueError:
+            logger.warning("demotion_gate.bad_env_int", var=env_var, value=raw_env)
+            return default
+    if settings is not None and setting_name in settings:
+        try:
+            return int(settings[setting_name])
+        except (TypeError, ValueError):
+            return default
+    return default
+
+
+def resolve_demotion_thresholds(
+    settings: Mapping[str, Any] | None = None,
+) -> tuple[int, int]:
+    """Resolve ``(min_attributed_packs, min_unhelpful_citations)``.
+
+    Env beats a settings-store override beats the module default — the
+    same precedence every other read-side knob in this codebase applies
+    (see :mod:`trellis.retrieve.builder_factory`'s ``graph_seeding``).
+    A caller that already received an explicit per-call override (a CLI
+    flag, a query parameter) should use that instead of calling this at
+    all; this is for the common case where nothing was explicitly passed.
+    """
+    return (
+        _resolve_int_threshold(
+            env_var=MIN_ATTRIBUTED_PACKS_ENV,
+            setting_name=MIN_ATTRIBUTED_PACKS_SETTING,
+            default=MIN_ATTRIBUTED_PACKS,
+            settings=settings,
+        ),
+        _resolve_int_threshold(
+            env_var=MIN_UNHELPFUL_CITATIONS_ENV,
+            setting_name=MIN_UNHELPFUL_CITATIONS_SETTING,
+            default=MIN_UNHELPFUL_CITATIONS,
+            settings=settings,
+        ),
+    )
+
 
 #: Refusal slugs. Machine-readable, stable, and distinct per cause — a
 #: reader has to be able to tell "nobody graded this" from "graders

@@ -88,6 +88,31 @@ def _effective_values(settings_values: dict[str, Any]) -> dict[str, Any]:
     the same way the other fields are (an optimistic preview -- see
     ``settings_live``, which is ``False`` for ``graph_seeding`` precisely
     because that preview is not yet wired to any real call site).
+
+    The remaining registry entries each have a dedicated resolver with
+    the exact same env-beats-settings-beats-default precedence, built
+    for the production call site rather than for this route -- calling
+    it here, instead of re-deriving the value from ``spec`` generically,
+    is what keeps this list from drifting from what a request actually
+    gets:
+
+    * :func:`trellis.classify.demotion_gate.resolve_demotion_thresholds`
+      for ``noise_demotion_min_attributed_packs`` /
+      ``noise_demotion_min_unhelpful_citations``.
+    * :func:`trellis.retrieve.advisory_generator.resolve_advisory_thresholds`
+      for ``advisory_min_sample_size`` / ``advisory_min_effect_size``.
+    * :func:`trellis.ops.capture_health.resolve_capture_thresholds` for
+      ``capture_warn_threshold`` / ``capture_warn_window_hours``.
+    * :func:`trellis_workers.session_capture.sweep.strict_mode` for
+      ``capture_strict`` (imported locally -- ``trellis_api`` otherwise
+      has no reason to load the worker package at import time).
+
+    ``graph_max_subgraph_depth`` is the one entry in this second group
+    that is *not* settings-live: :data:`trellis.stores.base.graph.MAX_SUBGRAPH_DEPTH`
+    is resolved once at import, from the environment only, so a stored
+    override cannot take effect without a restart. It gets the same
+    optimistic-preview treatment as ``graph_seeding`` above rather than
+    a live call, for that reason.
     """
     effective = WriteBehaviourConfig.from_env_and_settings(
         settings=settings_values
@@ -104,6 +129,50 @@ def _effective_values(settings_values: dict[str, Any]) -> dict[str, Any]:
             effective[name] = bool(settings_values[name])
         else:
             effective[name] = spec.default
+
+    from trellis.classify.demotion_gate import (  # noqa: PLC0415
+        resolve_demotion_thresholds,
+    )
+    from trellis.ops.capture_health import (  # noqa: PLC0415
+        resolve_capture_thresholds,
+    )
+    from trellis.retrieve.advisory_generator import (  # noqa: PLC0415
+        resolve_advisory_thresholds,
+    )
+    from trellis_workers.session_capture.sweep import strict_mode  # noqa: PLC0415
+
+    (
+        effective["noise_demotion_min_attributed_packs"],
+        effective["noise_demotion_min_unhelpful_citations"],
+    ) = resolve_demotion_thresholds(settings_values)
+    (
+        effective["advisory_min_sample_size"],
+        effective["advisory_min_effect_size"],
+    ) = resolve_advisory_thresholds(settings_values)
+    (
+        effective["capture_warn_threshold"],
+        effective["capture_warn_window_hours"],
+    ) = resolve_capture_thresholds(settings_values)
+    effective["capture_strict"] = strict_mode(settings_values)
+
+    depth_spec = SETTINGS_REGISTRY["graph_max_subgraph_depth"]
+    depth_source = resolve_source(depth_spec, settings_values)
+    if depth_source == "env":
+        from trellis.stores.base.graph import (  # noqa: PLC0415
+            _resolve_max_subgraph_depth,
+        )
+
+        effective["graph_max_subgraph_depth"] = _resolve_max_subgraph_depth()
+    elif depth_source == "settings":
+        try:
+            effective["graph_max_subgraph_depth"] = int(
+                settings_values["graph_max_subgraph_depth"]
+            )
+        except (TypeError, ValueError):
+            effective["graph_max_subgraph_depth"] = depth_spec.default
+    else:
+        effective["graph_max_subgraph_depth"] = depth_spec.default
+
     return effective
 
 
@@ -121,6 +190,11 @@ def _entry(
         "default": spec.default,
         "minimum": spec.minimum,
         "maximum": spec.maximum,
+        # Whether ``minimum`` excludes the boundary itself (``value >
+        # minimum`` required, not ``>=``) -- the UI renders "> N" instead
+        # of "min N" when this is set, since "min 0" reads as 0 being a
+        # valid value for a knob that actually refuses it.
+        "minimum_exclusive": spec.minimum_exclusive,
         "enum": list(spec.enum) if spec.enum is not None else None,
         "description": spec.description,
         "risk_note": spec.risk_note,

@@ -19,9 +19,12 @@ from trellis.ops import capture_health
 from trellis.ops.capture_health import (
     DEFAULT_THRESHOLD,
     DEFAULT_WINDOW_HOURS,
+    THRESHOLD_SETTING,
+    WINDOW_HOURS_SETTING,
     CaptureHealthWarning,
     check_capture_health,
     format_capture_warning,
+    resolve_capture_thresholds,
 )
 from trellis.stores.base.event_log import Event, EventLog, EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
@@ -74,6 +77,50 @@ def _memory_stored(event_log: EventLog, requested_by: str = "mcp:save_memory") -
         "save_memory",
         payload={"doc_id": "d1", "requested_by": requested_by},
     )
+
+
+class TestResolveCaptureThresholds:
+    """``resolve_capture_thresholds`` is the one path the MCP server's
+    capture-warning banner uses to turn a settings-store snapshot into the
+    ``(threshold, window_hours)`` pair passed to :func:`check_capture_health`.
+    """
+
+    def test_no_env_and_no_settings_returns_the_module_defaults(self) -> None:
+        assert resolve_capture_thresholds(None) == (
+            DEFAULT_THRESHOLD,
+            DEFAULT_WINDOW_HOURS,
+        )
+
+    def test_a_settings_only_override_is_honoured(self) -> None:
+        settings = {THRESHOLD_SETTING: 7, WINDOW_HOURS_SETTING: 48}
+
+        assert resolve_capture_thresholds(settings) == (7, 48)
+
+    def test_env_beats_a_settings_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_THRESHOLD", "9")
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_WINDOW_HOURS", "72")
+        settings = {THRESHOLD_SETTING: 7, WINDOW_HOURS_SETTING: 48}
+
+        assert resolve_capture_thresholds(settings) == (9, 72)
+
+    def test_a_negative_settings_value_falls_back_to_the_default(self) -> None:
+        settings = {THRESHOLD_SETTING: -1}
+
+        threshold, _window_hours = resolve_capture_thresholds(settings)
+
+        assert threshold == DEFAULT_THRESHOLD
+
+    def test_zero_is_a_valid_settings_override(self) -> None:
+        """0 disables the check entirely -- it must not be treated as
+        falsy and degraded to the default.
+        """
+        settings = {THRESHOLD_SETTING: 0}
+
+        threshold, _window_hours = resolve_capture_thresholds(settings)
+
+        assert threshold == 0
 
 
 class TestCheckCaptureHealth:

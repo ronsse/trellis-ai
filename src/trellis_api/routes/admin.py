@@ -15,6 +15,7 @@ proposals are read-only here.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -45,13 +46,17 @@ from trellis.learning.tuners import (
     promote_proposal,
     reject_proposal,
 )
+from trellis.llm.routing import LLMConsumer, LLMRoutingError
 from trellis.mutate import build_curate_executor
 from trellis.ops.loop_health import summarize_loop_health
 from trellis.ops.parameter_reachability import (
     READ_POINTS,
     reachability_reasons,
 )
-from trellis.retrieve.advisory_generator import AdvisoryGenerator
+from trellis.retrieve.advisory_generator import (
+    AdvisoryGenerator,
+    resolve_advisory_thresholds,
+)
 from trellis.retrieve.effectiveness import (
     analyze_effectiveness,
     run_effectiveness_feedback,
@@ -60,9 +65,16 @@ from trellis.retrieve.metrics_timeseries import compute_timeseries
 from trellis.stores.advisory_source import load_advisory_store
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.vector import VectorStore
-from trellis_api.app import get_registry
-from trellis_api.auth import AuthContext, authenticate
-from trellis_api.routes.health import probe_backends
+from trellis.stores.settings_store import load_settings_values
+from trellis_api.app import get_bind_info, get_registry
+from trellis_api.auth import (
+    AUTH_MODE_REQUIRED,
+    AuthContext,
+    authenticate,
+    resolve_auth_mode,
+)
+from trellis_api.observability import resolve_metrics_public
+from trellis_api.routes.health import probe_backends, resolve_ops_detail
 from trellis_wire.dtos import (
     BackendHealth,
     CodeProposalListResponse,
@@ -79,6 +91,7 @@ from trellis_wire.dtos import (
     ProposalDecisionResponse,
     ProposalPreviewResponse,
     ProposalRejectRequest,
+    RuntimeResponse,
     SchemaEvolutionCandidate,
     SchemaEvolutionListResponse,
     StatsResponse,
@@ -91,6 +104,12 @@ from trellis_wire.dtos import (
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+#: Read by the HOST job dispatcher (``docs/ops/job-dispatcher.sh.example``),
+#: never by this process — ``GET /api/v1/runtime`` echoes it unvalidated,
+#: purely so the admin UI can show what a host-only nightly job would
+#: resolve against, without claiming this process consults it itself.
+_HOST_JOBS_DIR_ENV = "TRELLIS_HOST_JOBS_DIR"
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -157,6 +176,70 @@ def stats() -> StatsResponse:
     )
 
 
+@router.get("/runtime", response_model=RuntimeResponse)
+def runtime() -> RuntimeResponse:
+    """Report this process's effective configuration for the admin UI.
+
+    Every field is read straight from the resolver the real enforcement
+    uses — ``resolve_auth_mode``, ``resolve_ops_detail``,
+    ``resolve_metrics_public``, ``get_bind_info`` — so this view cannot
+    drift from how the server actually behaves. Deliberately excludes
+    anything secret-shaped: ``stores``/``embedder`` are class names only,
+    ``llm_routes`` carries tier names only (an ``LLMRoute``'s ``block`` —
+    which can hold a literal API key — is never touched), and the two
+    directory fields are plain paths. Building the embedder is wrapped
+    whole rather than guarded by exception type: an unconfigured or
+    misconfigured ``llm.embedding:`` block must read as "none configured"
+    here, never 500 a panel that exists to show configuration, not
+    enforce it.
+    """
+    registry = get_registry()
+    host, port = get_bind_info()
+
+    stores = {
+        "graph_store": type(registry.knowledge.graph_store).__name__,
+        "vector_store": type(registry.knowledge.vector_store).__name__,
+        "document_store": type(registry.knowledge.document_store).__name__,
+        "blob_store": type(registry.knowledge.blob_store).__name__,
+        "event_log": type(registry.operational.event_log).__name__,
+        "trace_store": type(registry.operational.trace_store).__name__,
+    }
+
+    embedder_name: str | None = None
+    try:
+        embedder = registry.build_embedder_client()
+    except Exception as exc:  # GRACEFUL-DEGRADATION: a panel, not a gate
+        logger.warning("runtime_embedder_probe_failed", error=str(exc))
+    else:
+        embedder_name = type(embedder).__name__ if embedder is not None else None
+
+    llm_routes: dict[str, str | None] = {}
+    llm_routes_error: str | None = None
+    try:
+        for consumer in LLMConsumer:
+            llm_routes[consumer.value] = registry.llm_route(consumer).tier
+    except LLMRoutingError as exc:
+        llm_routes_error = exc.message
+
+    learning_dir = resolve_learning_artifacts_dir(registry.stores_dir)
+    mode = resolve_auth_mode()
+
+    return RuntimeResponse(
+        auth_mode=mode,
+        auth_mode_permissive=mode != AUTH_MODE_REQUIRED,
+        ops_detail=resolve_ops_detail(),
+        metrics_public=resolve_metrics_public(),
+        bind_host=host,
+        bind_port=port,
+        stores=stores,
+        embedder=embedder_name,
+        llm_routes=llm_routes,
+        llm_routes_error=llm_routes_error,
+        learning_artifacts_dir=str(learning_dir) if learning_dir else None,
+        host_jobs_dir=os.environ.get(_HOST_JOBS_DIR_ENV) or None,
+    )
+
+
 @router.get("/loops", response_model=LoopHealthResponse)
 def loop_health() -> LoopHealthResponse:
     """Is each curation / learning loop actually doing anything? (e167)
@@ -196,10 +279,12 @@ def effectiveness(
 ) -> dict[str, Any]:
     """Analyze context pack effectiveness."""
     registry = get_registry()
+    settings_values = load_settings_values(registry.stores_dir)
     report = analyze_effectiveness(
         registry.operational.event_log,
         days=days,
         min_appearances=min_appearances,
+        demotion_settings=settings_values,
     )
     return {"status": "ok", **report.model_dump()}
 
@@ -215,6 +300,7 @@ def apply_noise_tags(
     signal_quality="noise" so PackBuilder excludes them by default.
     """
     registry = get_registry()
+    settings_values = load_settings_values(registry.stores_dir)
     report = run_effectiveness_feedback(
         registry.operational.event_log,
         registry.knowledge.document_store,
@@ -223,6 +309,7 @@ def apply_noise_tags(
         # #338: mirror the demotion onto the vector row, or the semantic
         # axis keeps serving the pre-demotion snapshot.
         vector_store=resolve_vector_store(registry),
+        demotion_settings=settings_values,
     )
     # What apply_noise_tags actually wrote, not what the evidence gate
     # admitted (#336) and not the usage-rate rule's proposal — the key
@@ -347,8 +434,12 @@ _ADVISORY_REFUSED_STATUS = 409
 def generate_advisories(
     response: Response,
     days: int = Query(30, description="Days of history to analyze"),
-    min_sample: int = Query(5, description="Min sample size"),
-    min_effect: float = Query(0.15, description="Min effect size"),
+    min_sample: int | None = Query(
+        None, description="Min sample size; defaults to the configured setting"
+    ),
+    min_effect: float | None = Query(
+        None, description="Min effect size; defaults to the configured setting"
+    ),
 ) -> dict[str, Any]:
     """Generate advisories from outcome data.
 
@@ -373,6 +464,12 @@ def generate_advisories(
     # put them, so the only thing that changes on the wire is the status
     # line that was lying.
     registry = get_registry()
+    settings_values = load_settings_values(registry.stores_dir)
+    default_min_sample, default_min_effect = resolve_advisory_thresholds(
+        settings_values
+    )
+    effective_min_sample = min_sample if min_sample is not None else default_min_sample
+    effective_min_effect = min_effect if min_effect is not None else default_min_effect
     store = load_advisory_store(registry.stores_dir, surface="api.admin.generate")
     if store is None:
         # The third asymmetric arm, fixed with the same reasoning as the
@@ -391,8 +488,8 @@ def generate_advisories(
     generator = AdvisoryGenerator(
         registry.operational.event_log,
         store,
-        min_sample_size=min_sample,
-        min_effect_size=min_effect,
+        min_sample_size=effective_min_sample,
+        min_effect_size=effective_min_effect,
     )
     try:
         report = generator.generate(days=days)

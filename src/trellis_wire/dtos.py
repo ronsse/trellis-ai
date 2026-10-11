@@ -537,6 +537,74 @@ class StatsResponse(WireModel):
     events: int = 0
 
 
+class RuntimeResponse(WireModel):
+    """Response body for ``GET /api/v1/runtime`` — the admin Runtime panel.
+
+    A read-only snapshot of this process's effective configuration,
+    sourced from the same resolvers the behaviour itself consults
+    (``trellis_api.auth.resolve_auth_mode``,
+    ``trellis_api.routes.health.resolve_ops_detail``,
+    ``trellis_api.observability.resolve_metrics_public``,
+    ``trellis_api.app.get_bind_info``) so this view can never drift from
+    what a real request gets.
+
+    Deliberately excludes anything secret-shaped: ``stores`` and
+    ``embedder`` are class names only, ``llm_routes`` carries tier names
+    only (never a provider base URL, credential source, or API-key env
+    name), and the two directory fields are plain filesystem paths with
+    no embedded credentials. See
+    ``tests/unit/api/test_runtime_route.py``'s secret-leakage test for the
+    seeded-secret assertion backing that claim.
+    """
+
+    auth_mode: str
+    auth_mode_permissive: bool = Field(
+        description=(
+            "True when a request presenting no credential is granted"
+            " every scope (auth mode 'off' or 'optional') — the exact"
+            " condition the UI's warning banner fires on."
+        )
+    )
+    ops_detail: str
+    metrics_public: bool
+    bind_host: str
+    bind_port: int
+    stores: dict[str, str] = Field(
+        default_factory=dict,
+        description="Backend class name per store, keyed by store name.",
+    )
+    embedder: str | None = Field(
+        default=None,
+        description=(
+            "Embedder backend class name, or null when no embedder is configured."
+        ),
+    )
+    llm_routes: dict[str, str | None] = Field(
+        default_factory=dict,
+        description=(
+            "Tier name each LLM consumer routes to, keyed by consumer"
+            " name; null means the consumer is unrouted (falls back to"
+            " the parent llm: block)."
+        ),
+    )
+    llm_routes_error: str | None = Field(
+        default=None,
+        description="Set instead of llm_routes when llm.routes is malformed.",
+    )
+    learning_artifacts_dir: str | None = None
+    host_jobs_dir: str | None = Field(
+        default=None,
+        description=(
+            "TRELLIS_HOST_JOBS_DIR as seen by this process. Only the host"
+            " job dispatcher (docs/ops/job-dispatcher.sh.example) resolves"
+            " an executable path under it — this process never reads the"
+            " directory itself, so a null here means the variable is"
+            " unset in this process's environment, not that host-only jobs"
+            " are unconfigured."
+        ),
+    )
+
+
 # -- Settings (PR 3, governed settings write) --
 
 

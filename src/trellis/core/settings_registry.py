@@ -27,10 +27,18 @@ Scope, stated once rather than per entry
 -----------------------------------------
 Registered: the 12 :class:`~trellis.core.write_config.WriteBehaviourConfig`
 fields, plus ``graph_seeding``
-(:data:`trellis.retrieve.builder_factory.GRAPH_SEEDING_ENV`) and
+(:data:`trellis.retrieve.builder_factory.GRAPH_SEEDING_ENV`),
 ``filter_legacy_advisories``
-(:data:`trellis.retrieve.pack_builder.FILTER_LEGACY_ADVISORIES_ENV`) as
-catalog entries outside ``WriteBehaviourConfig``. Deliberately **not**
+(:data:`trellis.retrieve.pack_builder.FILTER_LEGACY_ADVISORIES_ENV`), and
+eight more read-side knobs as catalog entries outside
+``WriteBehaviourConfig``: the knowledge-graph subgraph depth cap, the two
+noise-demotion evidence thresholds, the two advisory-generation
+thresholds, and the three capture-health knobs (the warning threshold,
+its trailing window, and whether a partial session-capture sweep fails
+the run). Each of those eight is registered only once its real
+enforcement site(s) were confirmed to resolve env > settings > default
+through a dedicated resolver, same as every other ``settings_live=True``
+entry below. Deliberately **not**
 registered: ``learning.auto_promote.*`` (the tuner's own config,
 `config.yaml`-sourced, not `StoreRegistry`-backed — pending an owner
 decision per the plan this PR implements) and anything
@@ -46,13 +54,15 @@ knob's real enforcement today, not merely what ``trellis admin
 write-config`` / ``GET /api/version`` report about it. Every real
 enforcement call site (``trace_ingest_hook.py``, ``memory_ingest_hook.py``,
 ``embed_ingest_hook.py``, ``classify/ingest.py``, ``mcp/reconcile.py``,
-``mcp/server.py``, ``builder_factory.py``, ``pack_builder.py``) now
-resolves env > settings > default via
+``mcp/server.py``, ``builder_factory.py``, ``pack_builder.py``,
+``demotion_gate.py``, ``advisory_generator.py``, ``capture_health.py``,
+``session_capture/sweep.py``) now resolves env > settings > default via
 :func:`trellis.core.write_config.resolve_write_behaviour` or an
 equivalent per-knob settings-aware read, so ``settings_live`` is ``True``
-for every entry except ``minhash_seed_max_docs`` — read once at process
-start (see its own entry) — which instead carries
-``restart_required=True`` and states why in its description.
+for every entry except ``minhash_seed_max_docs`` and
+``graph_max_subgraph_depth`` — both read once at process start (see
+their own entries) — which instead carry ``restart_required=True`` and
+state why in their descriptions.
 :mod:`tests.unit.core.test_settings_registry` proves every entry is one
 or the other, against a deliberately defective mutant entry that is
 neither.
@@ -92,7 +102,7 @@ SettingType = Literal["bool", "int", "float", "str"]
 
 #: The UI's filter-box categories (brief e179, step 8): which area of the
 #: system a knob belongs to, independent of ``risk`` or ``settings_live``.
-#: ``"learning_loops"`` is currently unoccupied by this module's 14
+#: ``"learning_loops"`` is currently unoccupied by this module's 22
 #: entries — it is reserved for the concurrent ``learning.auto_promote.*``
 #: PR, so the UI's filter box already has a place for those once they
 #: land, with no UI change.
@@ -528,6 +538,206 @@ _SPECS: tuple[SettingSpec, ...] = (
         group="retrieval",
         settings_live=True,
         env_var="TRELLIS_FILTER_LEGACY_ADVISORIES",
+    ),
+    SettingSpec(
+        name="graph_max_subgraph_depth",
+        label="Graph subgraph depth cap",
+        type="int",
+        default=6,
+        description=(
+            "Caps how many hops a knowledge-graph subgraph query can "
+            "follow out from its starting node. A request for a deeper "
+            "traversal than this is refused outright rather than served "
+            "a slow, truncated result. The default is 6. This is read "
+            "once when the process starts, so changing it only takes "
+            "effect after a restart."
+        ),
+        surfaces=("mcp", "api"),
+        restart_required=True,
+        risk="caution",
+        risk_note=(
+            "Raising this lets a single query follow more hops, and on "
+            "a well-connected graph the number of paths a query can "
+            "explore grows multiplicatively with each extra hop — a "
+            "high value can turn one call into a slow, expensive scan."
+        ),
+        group="ops",
+        settings_live=False,
+        env_var="TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH",
+        minimum=1,
+        maximum=1000,
+    ),
+    SettingSpec(
+        name="noise_demotion_min_attributed_packs",
+        label="Noise-demotion coverage floor",
+        type="int",
+        default=5,
+        description=(
+            "Minimum number of packs, in the analysis window, that must "
+            "carry a per-item helpful/unhelpful verdict before any item "
+            "can be proposed for demotion to noise. Below this floor "
+            "there isn't enough graded coverage to trust a rate computed "
+            "from it, so the whole batch is refused rather than demoting "
+            "on a guess. The default is 5."
+        ),
+        surfaces=("api", "cli"),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "Lowering this toward 1 lets a demotion decision run against "
+            "a window with almost no graded coverage; raising it makes a "
+            "thin week refuse to demote anything rather than act on weak "
+            "evidence."
+        ),
+        group="feedback_attribution",
+        settings_live=True,
+        env_var="TRELLIS_NOISE_DEMOTION_MIN_ATTRIBUTED_PACKS",
+        minimum=1,
+    ),
+    SettingSpec(
+        name="noise_demotion_min_unhelpful_citations",
+        label="Noise-demotion evidence floor",
+        type="int",
+        default=2,
+        description=(
+            "Minimum number of explicit unhelpful citations an item must "
+            "receive — and it must be cited unhelpful more often than "
+            "helpful — before it can be proposed for demotion to noise. "
+            "The default is 2: a single unhelpful citation is treated as "
+            "too little to act on."
+        ),
+        surfaces=("api", "cli"),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "Setting this to 1 lets a single unhelpful citation demote "
+            "an item on its own; the coverage floor above still has to "
+            "be met before that can happen."
+        ),
+        group="feedback_attribution",
+        settings_live=True,
+        env_var="TRELLIS_NOISE_DEMOTION_MIN_UNHELPFUL_CITATIONS",
+        minimum=1,
+    ),
+    SettingSpec(
+        name="advisory_min_sample_size",
+        label="Advisory minimum sample size",
+        type="int",
+        default=5,
+        description=(
+            "Minimum number of graded observations behind a comparison "
+            "before the advisory generator will write it up as an "
+            "advisory. Below this, a pattern is coming from too few "
+            "examples to trust. The default is 5."
+        ),
+        surfaces=("api", "cli"),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "Lowering this lets an advisory get written from fewer "
+            "graded observations, which makes it more likely to "
+            "generalize from a small, unrepresentative handful of "
+            "outcomes."
+        ),
+        group="feedback_attribution",
+        settings_live=True,
+        env_var="TRELLIS_ADVISORY_MIN_SAMPLE_SIZE",
+        minimum=1,
+    ),
+    SettingSpec(
+        name="advisory_min_effect_size",
+        label="Advisory minimum effect size",
+        type="float",
+        default=0.15,
+        description=(
+            "Minimum gap, in success rate, between the agents who "
+            "followed an advisory's condition and those who didn't, "
+            "before that comparison is worth writing up. A smaller "
+            "observed gap is treated as noise, not signal. The default "
+            "is 0.15 — a 15 percentage point gap."
+        ),
+        surfaces=("api", "cli"),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "Lowering this toward 0 lets advisories get written from "
+            "smaller and smaller observed differences, which are more "
+            "likely to be noise rather than a real effect."
+        ),
+        group="feedback_attribution",
+        settings_live=True,
+        env_var="TRELLIS_ADVISORY_MIN_EFFECT_SIZE",
+        minimum=0.0,
+        maximum=1.0,
+    ),
+    SettingSpec(
+        name="capture_warn_threshold",
+        label="Capture-warning rejection threshold",
+        type="int",
+        default=3,
+        description=(
+            "How many rejected writes a single capture surface needs, "
+            "with none accepted in the same window, before a warning is "
+            "prepended to every pack it serves. The default is 3, and 0 "
+            "turns the check off entirely — no warning is ever raised."
+        ),
+        surfaces=("mcp",),
+        restart_required=False,
+        risk="low",
+        group="ops",
+        settings_live=True,
+        env_var="TRELLIS_CAPTURE_WARN_THRESHOLD",
+        minimum=0,
+    ),
+    SettingSpec(
+        name="capture_warn_window_hours",
+        label="Capture-warning window",
+        type="int",
+        default=24,
+        description=(
+            "Trailing window, in hours, that the capture-warning "
+            "rejection threshold counts rejections over. The default is "
+            "24 hours. A shorter window clears the warning faster once "
+            "writes start succeeding again; a longer one keeps it up "
+            "longer after a brief outage."
+        ),
+        surfaces=("mcp",),
+        restart_required=False,
+        risk="low",
+        group="ops",
+        settings_live=True,
+        env_var="TRELLIS_CAPTURE_WARN_WINDOW_HOURS",
+        minimum=0,
+    ),
+    SettingSpec(
+        name="capture_strict",
+        label="Strict session-capture sweeps",
+        type="bool",
+        default=True,
+        description=(
+            "Whether a session-capture sweep that leaves sessions "
+            "unjudged, or skips one that raised, counts as a failed "
+            "run. On (the default), such a sweep exits with an error, "
+            "so a monitoring job that only watches the exit code still "
+            "notices. Off, the sweep reports the counts and exits "
+            "cleanly instead — those sessions stay un-watermarked and "
+            "are retried on the next sweep. A sweep that captured "
+            "nothing at all because no judge was configured always "
+            "fails, regardless of this setting."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "Turning this off makes a sweep with partial failures exit "
+            "cleanly, so a monitoring job watching only the exit code "
+            "stops noticing them — the affected sessions are still "
+            "retried on the next sweep, but nothing will flag that they "
+            "needed one."
+        ),
+        group="ops",
+        settings_live=True,
+        env_var="TRELLIS_CAPTURE_STRICT",
     ),
 )
 

@@ -5,12 +5,23 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from structlog.testing import capture_logs
 
+if TYPE_CHECKING:
+    import pytest
+
 from tests.recovery_command import expected_recovery
-from trellis.retrieve.advisory_generator import AdvisoryGenerator
+from trellis.retrieve.advisory_generator import (
+    MIN_EFFECT_SIZE_ENV,
+    MIN_EFFECT_SIZE_SETTING,
+    MIN_SAMPLE_SIZE_ENV,
+    MIN_SAMPLE_SIZE_SETTING,
+    AdvisoryGenerator,
+    resolve_advisory_thresholds,
+)
 from trellis.retrieve.effectiveness import run_advisory_fitness_loop
 from trellis.retrieve.formatters import format_advisories_as_markdown
 from trellis.schemas.advisory import AdvisoryCategory, AdvisoryStatus
@@ -63,6 +74,50 @@ def _feedback_event(
         pack_id,
         {"pack_id": pack_id, "success": success},
     )
+
+
+class TestResolveAdvisoryThresholds:
+    """``resolve_advisory_thresholds`` is the one path every caller (the
+    nightly curation worker, the REST route and the CLI command) uses to
+    turn a settings-store snapshot into the two thresholds the generator
+    is constructed with.
+    """
+
+    def test_no_env_and_no_settings_returns_the_module_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        assert resolve_advisory_thresholds(None) == (5, 0.15)
+
+    def test_a_settings_only_override_is_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: 12, MIN_EFFECT_SIZE_SETTING: 0.3}
+
+        assert resolve_advisory_thresholds(settings) == (12, 0.3)
+
+    def test_env_beats_a_settings_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "20")
+        monkeypatch.setenv(MIN_EFFECT_SIZE_ENV, "0.5")
+        settings = {MIN_SAMPLE_SIZE_SETTING: 12, MIN_EFFECT_SIZE_SETTING: 0.3}
+
+        assert resolve_advisory_thresholds(settings) == (20, 0.5)
+
+    def test_an_unparseable_env_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "not-a-number")
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 5
 
 
 class TestAdvisoryGeneratorEmpty:

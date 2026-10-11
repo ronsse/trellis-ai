@@ -157,6 +157,7 @@ class TestListSettings:
             "default": 0.0,
             "minimum": 0.0,
             "maximum": 1.0,
+            "minimum_exclusive": False,
             "enum": None,
             "description": row["description"],  # non-empty, checked below
             "risk_note": row["risk_note"],  # non-empty, checked below (risk=high)
@@ -187,6 +188,24 @@ class TestListSettings:
         assert all(
             isinstance(label, str) and label for label in body["groups"].values()
         )
+
+    def test_minimum_exclusive_is_reported_for_the_one_entry_that_sets_it(
+        self, client: TestClient
+    ) -> None:
+        """``reconcile_timeout_s`` refuses 0 (its own ``minimum``) because
+        its env reader degrades a zero timeout to the shipped default
+        rather than honouring it -- the UI must say "> 0", not "min 0",
+        or an operator reads 0 as an accepted value it silently is not.
+        """
+        resp = client.get("/api/v1/settings")
+        row = _entry(resp.json(), "reconcile_timeout_s")
+        assert row["minimum"] == 0.0
+        assert row["minimum_exclusive"] is True
+
+        # And the common case must stay the inclusive default -- this is
+        # what distinguishes "reported" from "always true".
+        other = _entry(resp.json(), "pack_holdout_rate")
+        assert other["minimum_exclusive"] is False
 
     def test_stored_value_and_updated_at_reflect_a_real_override(
         self, client: TestClient, registry: StoreRegistry
@@ -486,6 +505,157 @@ class TestEnvPinnedWrite:
 # ---------------------------------------------------------------------------
 # graph_seeding's asymmetric env semantics, reused rather than reimplemented
 # ---------------------------------------------------------------------------
+
+
+#: ``(setting_name, env_var, default, env_value, parsed_env, settings_value)``
+#: for every registry entry with a dedicated resolver. These crashed
+#: ``GET /settings`` outright until ``_effective_values`` called each real
+#: resolver -- ``effective[spec.name]`` raised ``KeyError`` for all eight,
+#: because the function only ever populated the twelve ``WriteBehaviourConfig``
+#: fields plus the two hand-cased booleans above it. Covering every entry
+#: here (not just one as a representative) is deliberate: the bug was
+#: per-entry, so proof has to be too.
+_RESOLVER_BACKED_KNOBS = (
+    (
+        "noise_demotion_min_attributed_packs",
+        "TRELLIS_NOISE_DEMOTION_MIN_ATTRIBUTED_PACKS",
+        5,
+        "9",
+        9,
+        7,
+    ),
+    (
+        "noise_demotion_min_unhelpful_citations",
+        "TRELLIS_NOISE_DEMOTION_MIN_UNHELPFUL_CITATIONS",
+        2,
+        "4",
+        4,
+        3,
+    ),
+    ("advisory_min_sample_size", "TRELLIS_ADVISORY_MIN_SAMPLE_SIZE", 5, "8", 8, 6),
+    (
+        "advisory_min_effect_size",
+        "TRELLIS_ADVISORY_MIN_EFFECT_SIZE",
+        0.15,
+        "0.3",
+        0.3,
+        0.25,
+    ),
+    ("capture_warn_threshold", "TRELLIS_CAPTURE_WARN_THRESHOLD", 3, "7", 7, 1),
+    (
+        "capture_warn_window_hours",
+        "TRELLIS_CAPTURE_WARN_WINDOW_HOURS",
+        24,
+        "48",
+        48,
+        12,
+    ),
+    ("graph_max_subgraph_depth", "TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH", 6, "10", 10, 8),
+)
+
+
+class TestResolverBackedEffectiveValues:
+    """Each entry's ``effective_value`` must equal its real resolver's
+    output, not a generic reimplementation -- proven by actually setting
+    the env var / settings-store override and reading the resolved value
+    back, the same way ``TestGraphSeedingEffectiveValue`` below proves it
+    for the two hand-cased booleans.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "env_var", "default", "env_value", "parsed_env", "settings_value"),
+        _RESOLVER_BACKED_KNOBS,
+    )
+    def test_defaults_when_nothing_is_set(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        env_var: str,
+        default: float,
+        env_value: str,
+        parsed_env: float,
+        settings_value: float,
+    ) -> None:
+        monkeypatch.delenv(env_var, raising=False)
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, name)
+        assert row["effective_value"] == default
+        assert row["overridden_by"] == "default"
+
+    @pytest.mark.parametrize(
+        ("name", "env_var", "default", "env_value", "parsed_env", "settings_value"),
+        _RESOLVER_BACKED_KNOBS,
+    )
+    def test_env_overrides_the_default(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        env_var: str,
+        default: float,
+        env_value: str,
+        parsed_env: float,
+        settings_value: float,
+    ) -> None:
+        monkeypatch.setenv(env_var, env_value)
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, name)
+        assert row["effective_value"] == parsed_env
+        assert row["overridden_by"] == "env"
+
+    @pytest.mark.parametrize(
+        ("name", "env_var", "default", "env_value", "parsed_env", "settings_value"),
+        _RESOLVER_BACKED_KNOBS,
+    )
+    def test_a_stored_override_is_previewed_when_env_is_unset(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        name: str,
+        env_var: str,
+        default: float,
+        env_value: str,
+        parsed_env: float,
+        settings_value: float,
+    ) -> None:
+        _store(registry).set(name, settings_value)
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, name)
+        assert row["effective_value"] == settings_value
+        assert row["overridden_by"] == "settings"
+
+
+class TestCaptureStrictEffectiveValue:
+    """``capture_strict`` is boolean and shares the opt-out-token
+    semantics ``strict_mode`` already applies to a sweep -- 0/false/no/off
+    disable it, everything else (including an unrecognised token) leaves
+    it strict, same asymmetric contract as ``graph_seeding``.
+    """
+
+    def test_defaults_to_strict(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        row = _entry(client.get("/api/v1/settings").json(), "capture_strict")
+        assert row["effective_value"] is True
+        assert row["overridden_by"] == "default"
+
+    def test_env_opt_out_disables_it(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "0")
+        row = _entry(client.get("/api/v1/settings").json(), "capture_strict")
+        assert row["effective_value"] is False
+        assert row["overridden_by"] == "env"
+
+    def test_stored_false_override_is_honoured(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        _store(registry).set("capture_strict", False)
+        row = _entry(client.get("/api/v1/settings").json(), "capture_strict")
+        assert row["effective_value"] is False
+        assert row["overridden_by"] == "settings"
 
 
 class TestGraphSeedingEffectiveValue:

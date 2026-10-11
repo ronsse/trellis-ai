@@ -25,8 +25,9 @@ an empty report, and the per-session case is counted by
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -51,6 +52,15 @@ ENV_SAMPLE = "TRELLIS_CAPTURE_SAMPLE_DENOMINATOR"
 ENV_SOURCE_SYSTEM = "TRELLIS_CAPTURE_SOURCE_SYSTEM"
 ENV_MODEL = "TRELLIS_DISTILL_MODEL"
 ENV_STRICT = "TRELLIS_CAPTURE_STRICT"
+
+#: Settings-registry wiring for :func:`strict_mode` — env wins over a
+#: stored override, which wins over the default (``True``). Only the
+#: ``trellis worker capture-sessions`` front door resolves a setting (it
+#: has a :class:`StoreRegistry` to read one from); the standalone
+#: ``python -m trellis_workers.session_capture`` entry point has none and
+#: stays env-only. See ``trellis.core.settings_registry``'s
+#: ``capture_strict`` entry.
+STRICT_SETTING = "capture_strict"
 
 #: Actionable remediation appended to every judge-unavailable message.
 JUDGE_REMEDIATION = (
@@ -87,22 +97,39 @@ def _sample_denominator() -> int:
     return value if value >= 1 else DEFAULT_SAMPLE_DENOMINATOR
 
 
-def strict_mode() -> bool:
+_OPT_OUT_TOKENS = {"0", "false", "no", "off"}
+
+
+def strict_mode(settings: Mapping[str, Any] | None = None) -> bool:
     """Whether a *partial* sweep should fail the run.
 
     A sweep is partial when the judge went away part-way through and left
     sessions unjudged, or when a session raised and was skipped
     (``CaptureReport.sessions_errored``). Default ``True``: such a sweep did
     not do the job it was scheduled to do, and a green systemd unit would
-    hide that. Set ``TRELLIS_CAPTURE_STRICT=0`` to report the counts and exit
-    zero instead — those sessions stay un-watermarked and are retried on the
-    next sweep, so an operator who considers a single transient model timeout
-    in a forty-session run self-healing rather than a failure can opt out. The
+    hide that. Set ``TRELLIS_CAPTURE_STRICT=0`` (or store ``capture_strict:
+    false`` via the settings surface) to report the counts and exit zero
+    instead — those sessions stay un-watermarked and are retried on the next
+    sweep, so an operator who considers a single transient model timeout in
+    a forty-session run self-healing rather than a failure can opt out. The
     *total* no-op (no judge at all) always fails, strict or not: nothing is
     retried because nothing ran.
+
+    ``settings`` is an optional settings-store snapshot
+    (:func:`trellis.stores.settings_store.load_settings_values`); the env
+    var wins when set, then the stored override, then the ``True``
+    default. ``None`` (the standalone entry point's case, which has no
+    registry to read a store from) skips straight to env-then-default.
     """
     raw = os.environ.get(ENV_STRICT, "").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    if raw:
+        return raw not in _OPT_OUT_TOKENS
+    if settings is not None and STRICT_SETTING in settings:
+        stored = settings[STRICT_SETTING]
+        if isinstance(stored, str):
+            return stored.strip().lower() not in _OPT_OUT_TOKENS
+        return bool(stored)
+    return True
 
 
 def build_judge_client(registry: StoreRegistry) -> LLMClient:
