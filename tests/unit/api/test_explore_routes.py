@@ -438,6 +438,41 @@ def test_packs_list(client, registry):
     # Summary rows never carry the full payload
     assert "payload" not in pack
     assert "injected_items" not in pack
+    # _PACK_PAYLOAD carries injected_items[], so it is a flat pack
+    assert pack["sectioned"] is False
+
+
+def test_packs_list_flags_a_sectioned_pack(client, registry):
+    """build_sectioned emits sections and no injected_items[] (pack_value.py's
+    own discriminator) -- the summary row says so, so the UI can label it
+    "unattributable (sectioned)" instead of implying zero items served."""
+    log = registry.operational.event_log
+    log.emit(
+        EventType.PACK_ASSEMBLED,
+        source="pack_builder",
+        entity_id="pack-sectioned",
+        entity_type="sectioned_pack",
+        payload={
+            "intent": "survey",
+            "sections": [{"name": "patterns", "items": []}],
+        },
+    )
+    resp = client.get("/api/v1/packs")
+    assert resp.status_code == 200
+    pack = resp.json()["packs"][0]
+    assert pack["sectioned"] is True
+
+
+def test_packs_list_until_pages_older_history(client, registry):
+    _seed_pack(registry, pack_id="pack-older")
+    older_at = client.get("/api/v1/packs").json()["packs"][0]["created_at"]
+    _seed_pack(registry, pack_id="pack-newer")
+
+    resp = client.get("/api/v1/packs", params={"until": older_at})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [p["pack_id"] for p in data["packs"]] == ["pack-older"]
+    assert data["total"] == 2
 
 
 def test_pack_detail_with_feedback(client, registry):

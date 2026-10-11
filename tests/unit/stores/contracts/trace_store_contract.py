@@ -303,6 +303,19 @@ class TraceStoreContractTests:
         assert store.count(source="ghost") == 0
         assert store.count(domain="ghost") == 0
 
+    def test_count_by_domain_groups_and_omits_none(self, store: TraceStore) -> None:
+        store.append(_make_trace(context=TraceContext(domain="platform")))
+        store.append(_make_trace(context=TraceContext(domain="data")))
+        store.append(_make_trace(context=TraceContext(domain="platform")))
+        store.append(_make_trace(context=TraceContext(agent_id="agent-1")))
+        counts = store.count_by_domain()
+        assert counts == {"platform": 2, "data": 1}
+
+    def test_count_by_domain_empty_store_returns_empty_dict(
+        self, store: TraceStore
+    ) -> None:
+        assert store.count_by_domain() == {}
+
     # ------------------------------------------------------------------
     # round-trip — nested structures preserved
     # ------------------------------------------------------------------

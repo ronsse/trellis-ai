@@ -6,6 +6,60 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Schedule registry + job-run records (#e166).** The pieces a host-side
+  dispatcher cron needs so job schedules can later be edited from a UI
+  (plan p1 §(b)) without the container ever touching crontab — and the
+  command boundary redesigned so the shared, read-write-mounted
+  `schedule.json` can never choose *what* runs:
+  - `trellis.schedule.catalog.JOB_CATALOG`: the **only** source of a job's
+    command. A Trellis-native job (`tune`, `worker-enrich`, …) carries its
+    argv fixed in source; a host-only job (`capture-nightly`,
+    `curate-nightly`, `backup-nightly`, `roadmap-nightly` — they need the
+    docker socket / `gh` auth the container doesn't have) names only an
+    executable the operator places at `$TRELLIS_HOST_JOBS_DIR/<name>`,
+    outside the shared data mount. No absolute personal path in the repo.
+  - `schedule.json` (`<data_dir>/stores/schedule.json`) holds only
+    operator-tunable state per `ScheduledJob` row: `name` (must be a
+    catalog key — an unknown name degrades the row, never runs it),
+    `cadence`, `enabled`, a bounded `timeout_seconds` override (1–86400),
+    `run_requested_at`. `command`, `description` and `host_only` are gone
+    from the persisted row — `extra="forbid"` means a legacy or tampered
+    row still carrying `command` degrades instead of executing it. Backed
+    by `ScheduleStore`, the third `DegradableJsonStore` subclass alongside
+    `PolicyStore` and `AdvisoryStore` (reads degrade, writes refuse).
+  - `trellis admin init-schedule` seeds the registry from the catalog's
+    defaults — the nightly capture/curate/backup/roadmap sweeps, the tuner
+    dry-run, and the manual-only commands from the UI gap inventory —
+    without overwriting anything an operator already edited.
+  - `trellis admin due-jobs --format json` joins each due row with its
+    catalog entry and reports which jobs are due now, combining `enabled`,
+    `cadence` (`trellis.core.cron`), the most recent `JOB_RUN_COMPLETED` in
+    the EventLog, and `run_requested_at`. For a host-only job it reports
+    `command: null` and `host_only: true` — a marker, not a path — so the
+    host dispatcher resolves `$TRELLIS_HOST_JOBS_DIR/<name>` itself, after
+    checking the name matches `^[a-z0-9-]+$` (no path traversal).
+  - `trellis admin record-job-run` records one execution as a
+    `JOB_RUN_STARTED` / `JOB_RUN_COMPLETED` event pair, modeled on
+    `CAPTURE_SWEEP_COMPLETED`.
+  - `docs/ops/job-dispatcher.sh.example`: a reference host-side dispatcher
+    script (documentation only, not installed by this repo) showing the
+    `due-jobs` → exec argv (or resolve + exec a host-only path) →
+    `record-job-run` loop under `flock`.
+
+  No REST route and no UI yet (a later PR, plan p1 PR 6). **The actual
+  boundary:** commands are fixed in source or confined to one host-only
+  directory outside the shared mount; editing `schedule.json` — by hand, a
+  compromised container, or the future PR 6 API — can change only
+  *whether* and *when* a catalog job runs, never *what* runs. (An earlier
+  draft of this entry claimed "no arbitrary command execution anywhere" on
+  the strength of argv-not-shell alone; that claim did not hold once
+  `schedule.json`'s own `command` field was the thing deciding what an
+  argv-exec'd — this redesign is the fix.) **Deviation from the original
+  PR:** `capture-nightly` and `curate-nightly` are now catalogued
+  `host_only=True` (they were `False`) — both need the host's Claude Code
+  project directories / `flock`-serialized worker invocation that a
+  container does not have, matching `backup-nightly` and
+  `roadmap-nightly`.
 - **Loop health panel (e167): `GET /api/v1/loops`.** Answers "is each
   curation / learning loop actually doing anything?" for all seven loops
   (noise demotion, advisory generation, advisory fitness,
@@ -306,6 +360,64 @@ All notable changes to Trellis will be documented in this file.
   read from the environment. An empty `api_key=`, or one beside an
   injected `http=`, raises `ValueError`.
   (follow-up from the [#804](https://github.com/ronsse/trellis-ai/pull/804) gate)
+
+### Fixed
+
+- **UI P2 sweep (e174): tables, values, time, naming, accessibility,
+  build footer.** Nine findings from a UI-quality review's P2 section
+  ("consistency, clarity, enterprise hygiene"), re-located against
+  current `main` since several had already moved or been fixed by
+  #849-#852/#855:
+  - **Tables.** Traces, Events and Packs share one cursor-pager family
+    (`makeCursorPager`/`renderCursorPagerFooter`) with real "N of total
+    &middot; newer/older" footers; Memories' existing offset-based
+    pagination already satisfied this and was left alone. A Trace,
+    Document or Pack detail miss names the id instead of rendering blank;
+    an Event miss (paged by cursor window, not id lookup) also names the
+    loaded window. The Traces domain filter is now populated from a
+    server-side `GET /traces/domains` count over the whole store, not
+    just the currently-loaded page.
+  - **Values.** Swept the remaining `|| '-'`/`|| 0` fallbacks that were
+    conflating a legitimate zero with "missing"; the sole surviving
+    `|| '-'` is a string-join fallback, not a numeric one. `/packs`
+    summaries gain a `sectioned` field so a sectioned pack's attribution
+    badge reads "unattributable (sectioned)" instead of implying a zero
+    outcome, and `get_pack` gains `holdout_blinded` so the UI can say
+    *why* a blinded holdout payload reads short.
+  - **Time.** `fmtDate`/`fmtUtc`/`fmtDateUtc` collapsed into one `fmtTime`
+    that always renders in UTC and labels it; `fmtTimeCell` pairs a
+    relative "3h ago" with the raw ISO instant as its `title`.
+  - **Build footer.** The sidebar now reads "API build" (not "Backend")
+    and surfaces `stamp_stale` / `fallback-version` / `commit: null` from
+    `GET /api/version` as an honest warning instead of a normal version.
+  - **Toasts.** A dedicated `#toast-region[aria-live="polite"]` replaces
+    the previous reuse of the static `#error` banner; a terminal-action
+    toast pauses on hover/focus and carries an explicit dismiss button.
+  - **Naming.** The "Evolution" tab is now "Effectiveness"; "self-learning"
+    is never used.
+  - **Help text.** Added one-line `.field-hint` descriptions for the
+    Metrics `days`/`group_by` controls and the Graph Explorer's
+    depth/sort controls. The Dashboard stat cards already had per-card
+    descriptions via `renderCard`'s `sub` param, and the Review tab has
+    no filter controls to describe — both sub-items were already
+    satisfied or do not apply to current code, not re-implemented.
+  - **Accessibility.** 18 previously-unlabeled `<select>`/`<input>`
+    elements got `aria-label`s; the four clickable `<tr>` row templates
+    (Traces/Memories/Events/Packs) are now `tabindex="0" role="button"`
+    with a keyboard handler for Enter/Space; the "Why no approve?"
+    explanations are now visible text, not only a hover `title`; every
+    icon-only button (API-key toggle, value-copy, row-expand, the five
+    graph-toolbar buttons) carries an `aria-label`; the graph canvas gets
+    `role="img"` plus a `aria-describedby` text alternative; the
+    search-results-panel's close control is a real `<button>`, not a
+    `<span>` with an `onclick`; a `/stats` or `/health` fetch failure on
+    the Dashboard now renders inside the card that failed instead of the
+    shared `#error` line. The key-banner close control was already a
+    `<button>` from a prior merged PR — no change needed there.
+  - **Welcome banner.** Unchanged this sweep — already gated on a green
+    `/readyz` and zero counts together, from a prior fix.
+  New failing-before tests in `tests/unit/api/test_ui_p2_sweep.py` pin
+  every item above that wasn't already covered.
 
 ### Changed
 

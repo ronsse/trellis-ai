@@ -153,6 +153,130 @@ trellis admin serve [--port PORT] [--host HOST] [--format text|json]
 | `--port` | `8420` | Port to listen on |
 | `--host` | `0.0.0.0` | Host to bind to |
 
+### Schedule registry + job runs (#e166)
+
+`schedule.json` (`<data_dir>/stores/schedule.json`) is the pieces a **host-side
+dispatcher cron** needs so schedules can later be edited from a UI (plan p1
+§(b), PR 6) without the container ever touching crontab. The container only
+ever reads it today; there is no REST route or UI yet.
+
+**The command boundary.** `schedule.json` holds only operator-tunable state —
+it never holds a command. Each row is a `ScheduledJob`: `name` (must be a key
+in `trellis.schedule.catalog.JOB_CATALOG`, validated on every read and write —
+an unknown name degrades the row, it is never treated as a job to run),
+`cadence` (a 5-field cron expression, or `null` for manual-only — triggered
+later by setting `run_requested_at`), `enabled`, an optional `timeout_seconds`
+override (bounded `1..86400`; `null` defers to the catalog default), and
+`run_requested_at`. The command, operator-facing description, and `host_only`
+flag all come from [`trellis.schedule.catalog`](../../src/trellis/schedule/catalog.py)
+under that same `name` — the **only** source of what a job runs. A
+Trellis-native job carries its argv fixed in source; a host-only job
+(`capture-nightly`, `curate-nightly`, `backup-nightly`, `roadmap-nightly` —
+they need the host's project directories, the docker socket, or `gh` auth,
+none of which the API container has) carries no argv at all — its executable
+is `$TRELLIS_HOST_JOBS_DIR/<name>`, placed there by the operator outside the
+shared data mount, resolved by the host dispatcher itself after checking
+`name` against `^[a-z0-9-]+$` (`trellis.schedule.catalog.validate_host_job_name`).
+Because the model is `extra="forbid"`, a legacy or tampered row still
+carrying the old `command` field fails validation the same way an unknown
+`name` does — it degrades, it does not run. So editing `schedule.json`, by
+hand or (once PR 6 ships) over an API, can change only *whether* and *when* a
+catalog job runs, never *what* runs; see
+[`catalog.py`](../../src/trellis/schedule/catalog.py)'s module docstring and
+[`schedule_store.py`](../../src/trellis/stores/schedule_store.py)'s for the
+full argument. The one thing that execs a job is the reference dispatcher at
+[`docs/ops/job-dispatcher.sh.example`](../ops/job-dispatcher.sh.example) —
+documentation, not installed by this repo — which reads the command from
+`due-jobs`' catalog-joined output (never from `schedule.json`), builds it as
+a bash array, and execs it directly, never through `sh -c` or `eval`.
+
+`ScheduleStore` is a third [`DegradableJsonStore`](#if-the-file-is-damaged)
+subclass, alongside `PolicyStore` and `AdvisoryStore`: **reads degrade,
+writes refuse.** A duplicate `name` degrades the file (`list()`/`due-jobs`
+still serve what parsed) rather than silently collapsing two rows to one.
+
+#### `trellis admin init-schedule`
+
+Seed the registry from the catalog's defaults: the nightly
+capture/curate/backup/roadmap sweeps, the tuner dry-run, and the manual-only
+commands from the UI gap inventory (`trellis_cli.schedule_seed`, which builds
+one minimal row per `trellis.schedule.catalog.JOB_CATALOG` entry). Adds only
+jobs whose `name` is not already present — never overwrites an
+operator-edited row, so it is safe to re-run. `trellis admin migrate-graph`
+is deliberately not in the catalog: its whole shape is a pair of
+`--from-config` / `--to-config` YAML paths chosen per migration, so there is
+no stable default command to seed.
+
+```bash
+trellis admin init-schedule [--format text|json]
+```
+
+```json
+{"status": "ok", "added": ["capture-nightly", "curate-nightly", "..."], "skipped": []}
+```
+
+Exits `EXIT_STORE` (5) on an already-degraded file, under both formats.
+
+#### `trellis admin due-jobs`
+
+List registry jobs due to run now. Combines, per job
+(`trellis.core.cron.is_job_due`): `enabled` (false always wins),
+`run_requested_at` (newer than the last completed run is always due — the
+only way a `cadence: null` job ever becomes due), and `cadence` against the
+most recent `JOB_RUN_COMPLETED` for that job name in the EventLog. A job
+that has never completed is always due.
+
+```bash
+trellis admin due-jobs [--format text|json]
+```
+
+```json
+{"status": "ok", "count": 2, "due_jobs": [{"name": "tune", "command": ["trellis", "worker", "tune", "--dry-run", "--format", "json"], "host_only": false, "cadence": "0 4 * * *", "timeout_seconds": 3600, "last_completed_at": null, "run_requested_at": null}, {"name": "backup-nightly", "command": null, "host_only": true, "cadence": "30 4 * * *", "timeout_seconds": 3600, "last_completed_at": null, "run_requested_at": null}], "schedule_file": "/path/to/schedule.json", "schedule_file_present": true, "store_degradation": null}
+```
+
+`command` is joined from `trellis.schedule.catalog.JOB_CATALOG` by `name`,
+never read from `schedule.json`. A host-only row reports `command: null` — a
+marker, not a path — so the dispatcher resolves
+`$TRELLIS_HOST_JOBS_DIR/<name>` itself; see "The command boundary" above.
+
+Works on a degraded file — jobs that parsed are still checked — but reports
+`"status": "degraded"` and exits `EXIT_STORE` (5) under both formats, same
+posture as `trellis policy list`: a partial due-jobs answer must not reach a
+dispatcher looking like a complete one.
+
+#### `trellis admin record-job-run`
+
+Record one job execution as a `JOB_RUN_STARTED` / `JOB_RUN_COMPLETED` event
+pair, modeled on `CAPTURE_SWEEP_COMPLETED`: plain EventLog telemetry, not a
+governed mutation — there is no state these events gate. Call once,
+immediately after the job process exits.
+
+```bash
+trellis admin record-job-run --job NAME --duration-ms MS --exit-code N [--status STR] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--job` | — (required) | Job name (schedule registry key). |
+| `--duration-ms` | — (required) | Wall-clock duration of the run, in ms. |
+| `--exit-code` | — (required) | The job process's own exit code. |
+| `--status` | derived | Free-form label; defaults to `ok` / `failed` from `--exit-code`. Use e.g. `skipped_overlap` when the dispatcher's `flock` meant the job never ran. |
+| `--format` | `text` | `text` or `json`. |
+
+`started_at` is derived as `now - duration_ms`, not taken as a second
+argument — the dispatcher already measured the duration, so there is no
+second number that could disagree with it.
+
+```json
+{"status": "ok", "job": "tune", "run_id": "01M...", "exit_code": 0, "job_status": "ok", "recorded": true}
+```
+
+**Recording a *failed* job's run is itself a successful call and exits 0** —
+"the dispatcher ran this job and it failed" is exactly the fact this command
+exists to durably record. Only a failure to write the EventLog pair itself
+(store unavailable) is this command's own failure, and exits `EXIT_STORE`
+(5) under both formats.
+
 ---
 
 ## Ingest Commands
@@ -1073,14 +1197,23 @@ Callers that omit `overridden_by` keep the older two-valued behaviour
 flag), so this is additive, not a breaking change to `describe()`'s shape.
 
 **`settings_live` tells you whether an override does anything yet.** The
-registry catalogs every tunable `write_config.py` knows about; it is not a
-claim that each one has a settings-aware enforcement site. Today only
-`pack_holdout_rate` does — `src/trellis/retrieve/builder_factory.py` reads
-through the settings store on the pack-assembly path. Every other row is
-still reported truthfully (`overridden_by` says `"settings"` the moment you
-set one), but a `graph_seeding` or `memory_extraction` override has no
-runtime effect until its own call site is wired the same way;
-`SettingSpec.settings_live` is `False` for all twelve of them.
+registry catalogs every tunable `write_config.py` knows about plus two
+retrieval-side knobs resolved outside it (`graph_seeding`,
+`filter_legacy_advisories`); it is not a claim that each one has a
+settings-aware enforcement site, only that this one does. Every registered
+knob now resolves env > settings > default at its real enforcement site —
+each per-knob reader (`classify/ingest.py`, `extract/memory_ingest_hook.py`,
+`extract/trace_ingest_hook.py`, `retrieve/embed_ingest_hook.py`,
+`mcp/reconcile.py`, `mcp/server.py`) delegates to
+`write_config.resolve_write_behaviour()`, and `graph_seeding` /
+`filter_legacy_advisories` each carry their own settings-aware read in
+`builder_factory.py` / `pack_builder.py` — so a settings override reaches
+runtime the moment you set one. The lone exception is
+`minhash_seed_max_docs`: it is read once, lazily, at an MCP process's first
+`save_memory` call and cached for that process's lifetime, so a settings
+write after that first call has no effect until the next process starts.
+`SettingSpec.settings_live` is `False` only for that one knob, which
+instead carries `restart_required=True`.
 
 ### Failure posture: degrades, never raises
 
@@ -1743,7 +1876,7 @@ Three properties worth knowing:
 - **Counts and reasons only — never ids, never excerpts.** Naming the ids would invite a re-fetch of exactly what a gate decided not to serve. The ids stay in `PACK_ASSEMBLED.payload["withholding"]["withheld_item_ids"]`, which is an operator surface with a different access path.
 - **Graduated disclosure (#359) contributes nothing here.** A pointer is a *served* item — ranked, cited, fetchable via `get_items` — and calling it withheld would blur the distinction that change was careful to make.
 
-**One deliberate exception: the pack holdout.** `TRELLIS_PACK_HOLDOUT_RATE` (default `0`, off) withholds a whole built pack, items and advisories, from a random share of retrieval calls, so pack effect can be measured against a control arm. A pack is held out when a SHA-256 draw on its `pack_id` falls below the rate, so its arm is fixed by the id and is the same in every process. The caller receives an ordinary empty pack with its `pack_id` and no `Withheld:` line, because an agent that can tell it is in the control arm is no longer a control; a held-out pack reads exactly like a greenfield one. The record is complete on the operator path: see the `holdout` keys in the [`PACK_ASSEMBLED` payload table](#pack_assembled-event-payload). `GET /api/v1/events` and `GET /api/v1/packs/{pack_id}` return the would-be pack to `admin` callers only; any other key reads `holdout` and `holdout_rate` without it. The aggregate readers of `PACK_ASSEMBLED` (promotion, effectiveness and advisory fitness, advisory generation, pack telemetry and sections, serve attribution) drop held-out packs and the feedback naming them, so they report the served arm. While the rate is above `0`, `get_context` (full and `index=True`) and `search` render every empty pack with its `pack_id` header instead of the bare `No context found for: …` (or `No results found for: …`) line, so the capture join reads both kinds of empty pack alike. Each serving process reads the rate from its own environment on every build, so set it where the MCP server and the API run. `trellis admin write-config --format json` and `GET /api/version` report it, and an unparseable or out-of-range value means `0` with a warning (`pack_holdout_rate_unparseable` / `pack_holdout_rate_out_of_range`). It is the one knob a [settings-store](#settings-store) override already reaches at runtime (`SettingSpec.settings_live`); both surfaces' `overridden_by` names whether `env`, `settings` or `default` is in force. Why the exception: [`claude-md-rationale.md`](../design/claude-md-rationale.md).
+**One deliberate exception: the pack holdout.** `TRELLIS_PACK_HOLDOUT_RATE` (default `0`, off) withholds a whole built pack, items and advisories, from a random share of retrieval calls, so pack effect can be measured against a control arm. A pack is held out when a SHA-256 draw on its `pack_id` falls below the rate, so its arm is fixed by the id and is the same in every process. The caller receives an ordinary empty pack with its `pack_id` and no `Withheld:` line, because an agent that can tell it is in the control arm is no longer a control; a held-out pack reads exactly like a greenfield one. The record is complete on the operator path: see the `holdout` keys in the [`PACK_ASSEMBLED` payload table](#pack_assembled-event-payload). `GET /api/v1/events` and `GET /api/v1/packs/{pack_id}` return the would-be pack to `admin` callers only; any other key reads `holdout` and `holdout_rate` without it. The aggregate readers of `PACK_ASSEMBLED` (promotion, effectiveness and advisory fitness, advisory generation, pack telemetry and sections, serve attribution) drop held-out packs and the feedback naming them, so they report the served arm. While the rate is above `0`, `get_context` (full and `index=True`) and `search` render every empty pack with its `pack_id` header instead of the bare `No context found for: …` (or `No results found for: …`) line, so the capture join reads both kinds of empty pack alike. Each serving process reads the rate from its own environment on every build, so set it where the MCP server and the API run. `trellis admin write-config --format json` and `GET /api/version` report it, and an unparseable or out-of-range value means `0` with a warning (`pack_holdout_rate_unparseable` / `pack_holdout_rate_out_of_range`). A [settings-store](#settings-store) override reaches it at runtime (`SettingSpec.settings_live`, true for this knob and every other registered one — see "Precedence: env > settings > default" above); both surfaces' `overridden_by` names whether `env`, `settings` or `default` is in force. Why the exception: [`claude-md-rationale.md`](../design/claude-md-rationale.md).
 
 `PACK_ASSEMBLED.payload["withholding"]` is emitted on both pack kinds **even when nothing was withheld** (`{"total": 0, "by_reason": {}, ...}`), so an analyzer can tell "the summary ran and found nothing" from "the summary never ran". The two collect-seam gates — `signal_quality="noise"` and `Lifecycle.state="archived"` — now write `rejected_items` rows (reasons `noise` and `archived`) where previously their only observable was a `logger.debug` line that fires under **no shipped default** (`configure_stderr_logging` pins INFO, the CLI pins WARNING). `trellis -vv` or `TRELLIS_LOG_LEVEL=DEBUG` does enable it — which is precisely the point: the signal existed only for someone who already suspected the problem and went looking.
 

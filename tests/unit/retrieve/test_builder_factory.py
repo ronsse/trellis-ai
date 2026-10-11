@@ -29,7 +29,7 @@ from trellis.retrieve.builder_factory import (
     build_pack_builder,
     describe_axes,
 )
-from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.pack_builder import FILTER_LEGACY_ADVISORIES_ENV, PackBuilder
 from trellis.retrieve.strategies import (
     GRAPH_SELECTION_RECENCY_WINDOW,
     GRAPH_SELECTION_SEEDED,
@@ -42,6 +42,7 @@ from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidenc
 from trellis.stores.advisory_source import ADVISORY_FILENAME
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore
 
 if TYPE_CHECKING:
     from trellis.retrieve.strategies import SearchStrategy
@@ -380,6 +381,34 @@ class TestGraphSeedingWiring:
         builder = build_pack_builder(self._registry(tmp_path), surface="test")
         assert self._graph_axis(builder)._seed_extractor is not None
 
+    def test_a_settings_only_override_turns_it_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``graph_seeding`` is ``settings_live=True`` in
+        ``SETTINGS_REGISTRY`` — proven end to end here, not just at the
+        ``_graph_seeding_enabled`` unit level, with no env var set at all.
+        """
+        monkeypatch.delenv(GRAPH_SEEDING_ENV, raising=False)
+        registry = self._registry(tmp_path)
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set("graph_seeding", False)
+
+        builder = build_pack_builder(registry, surface="test")
+
+        assert self._graph_axis(builder)._seed_extractor is None
+
+    def test_env_still_beats_a_settings_override_here(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry = self._registry(tmp_path)
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set("graph_seeding", False)
+        monkeypatch.setenv(GRAPH_SEEDING_ENV, "true")
+
+        builder = build_pack_builder(registry, surface="test")
+
+        assert self._graph_axis(builder)._seed_extractor is not None
+
     def test_an_intent_naming_a_real_entity_takes_the_seeded_branch(
         self, tmp_path: Path
     ) -> None:
@@ -426,6 +455,92 @@ class TestGraphSeedingWiring:
         assert {i.metadata["graph_selection"] for i in graph_items} == {
             GRAPH_SELECTION_RECENCY_WINDOW
         }
+
+
+class TestFilterLegacyAdvisoriesWiring:
+    """``filter_legacy_advisories`` is resolved once, with settings, by the
+    factory (see ``PackBuilder._filter_legacy_advisories``'s own docstring)
+    and handed to the constructor as a bool — unlike ``graph_seeding``, a
+    direct ``PackBuilder(advisory_store=...)`` construction (no factory in
+    front of it, see ``TestLegacyAdvisoryFilter`` in ``test_pack_builder.py``)
+    never sees a settings override at all, only env. This class proves the
+    factory path specifically.
+    """
+
+    @staticmethod
+    def _registry(tmp_path: Path) -> StoreRegistry:
+        return TestBuildPackBuilder._registry(tmp_path)
+
+    @staticmethod
+    def _seed_mixed_advisories(registry: StoreRegistry) -> None:
+        store = AdvisoryStore(Path(registry.stores_dir) / ADVISORY_FILENAME)
+        store.put(
+            Advisory(
+                category=AdvisoryCategory.ENTITY,
+                confidence=0.8,
+                message="legacy row, pre-#394",
+                evidence=AdvisoryEvidence(
+                    sample_size=10,
+                    success_rate_with=0.8,
+                    success_rate_without=0.4,
+                    effect_size=0.4,
+                    evidence_confidence=None,
+                ),
+                scope="global",
+            )
+        )
+        store.put(
+            Advisory(
+                category=AdvisoryCategory.ENTITY,
+                confidence=0.8,
+                message="post-repair row",
+                evidence=AdvisoryEvidence(
+                    sample_size=10,
+                    success_rate_with=0.8,
+                    success_rate_without=0.4,
+                    effect_size=0.4,
+                    evidence_confidence=1.0,
+                ),
+                scope="global",
+            )
+        )
+
+    def test_a_settings_only_override_turns_filtering_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``filter_legacy_advisories`` is ``settings_live=True`` in
+        ``SETTINGS_REGISTRY`` — proven end to end through the factory, with
+        no env var set at all. Default is on, so the override restores the
+        legacy row.
+        """
+        monkeypatch.delenv(FILTER_LEGACY_ADVISORIES_ENV, raising=False)
+        registry = self._registry(tmp_path)
+        self._seed_mixed_advisories(registry)
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "filter_legacy_advisories", False
+        )
+
+        pack = build_pack_builder(registry, surface="test").build("q")
+
+        messages = {a.message for a in pack.advisories}
+        assert messages == {"legacy row, pre-#394", "post-repair row"}
+
+    def test_env_still_beats_a_settings_override_here(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry = self._registry(tmp_path)
+        self._seed_mixed_advisories(registry)
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "filter_legacy_advisories", False
+        )
+        monkeypatch.setenv(FILTER_LEGACY_ADVISORIES_ENV, "true")
+
+        pack = build_pack_builder(registry, surface="test").build("q")
+
+        messages = {a.message for a in pack.advisories}
+        assert messages == {"post-repair row"}
 
 
 def _src_root() -> Path:

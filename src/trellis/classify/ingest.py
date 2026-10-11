@@ -38,10 +38,11 @@ import structlog
 from trellis.classify.factory import build_ingestion_pipeline
 from trellis.classify.importance import compute_importance
 from trellis.classify.protocol import ClassificationContext
-from trellis.core.write_config import CLASSIFY_ON_INGEST_FLAG, WriteBehaviourConfig
+from trellis.core.write_config import CLASSIFY_ON_INGEST_FLAG, resolve_write_behaviour
 
 if TYPE_CHECKING:
     from trellis.classify.pipeline import ClassifierPipeline
+    from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
 
@@ -60,9 +61,16 @@ logger = structlog.get_logger(__name__)
 CLASSIFY_METADATA_KEYS = ("content_tags", "auto_importance")
 
 
-def classify_on_ingest_enabled() -> bool:
-    """``True`` iff ``TRELLIS_ENABLE_CLASSIFY_ON_INGEST`` is set truthy."""
-    return WriteBehaviourConfig.from_env().classify_on_ingest
+def classify_on_ingest_enabled(registry: StoreRegistry | None = None) -> bool:
+    """``True`` iff classify-on-ingest is on, env > settings > default.
+
+    ``TRELLIS_ENABLE_CLASSIFY_ON_INGEST`` still wins when set; a
+    ``registry``-scoped settings override (see
+    :func:`trellis.core.write_config.resolve_write_behaviour`) takes effect
+    otherwise. ``registry=None`` (no store context) resolves env/default
+    only, exactly as before this knob was settings-aware.
+    """
+    return resolve_write_behaviour(registry).classify_on_ingest
 
 
 def build_ingest_classifier() -> ClassifierPipeline:
@@ -162,6 +170,7 @@ def classify_metadata_on_write(
     *,
     source_system: str = "",
     doc_id: str = "",
+    registry: StoreRegistry | None = None,
 ) -> dict[str, Any]:
     """Return ``metadata`` with deterministic tags merged in, if warranted.
 
@@ -200,11 +209,13 @@ def classify_metadata_on_write(
             ``metadata['source_system']`` when not given.
         doc_id: Document id, for logging / classification context. May be
             empty for store-assigned ids (the document is not written yet).
+        registry: Store context for a settings-store override on the
+            enable flag. ``None`` resolves env/default only.
 
     Returns:
         The metadata to persist — tagged, or the caller's own mapping.
     """
-    if not classify_on_ingest_enabled():
+    if not classify_on_ingest_enabled(registry):
         return metadata
 
     try:

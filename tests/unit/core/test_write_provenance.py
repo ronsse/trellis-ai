@@ -233,3 +233,76 @@ class TestStalenessKeys:
 
         assert json.dumps(build_write_provenance()) == healthy
         assert "stamp_stale" not in stamp_metadata(None)[WRITE_PROVENANCE_KEY]
+
+
+class TestSettingsMergedIntoTheDefaultStamp:
+    """``env_flags`` records *what was permitted*, and now that a settings
+    override can make a knob live, the default (no explicit ``config=``)
+    stamp must reflect the merged env > settings > default value, not
+    freeze at the environment alone — the exact claim
+    :func:`trellis.core.write_provenance._resolve_write_behaviour_for_stamp`'s
+    own docstring makes, pinned here against a real settings file guessed
+    from ``TRELLIS_DATA_DIR`` rather than at the pure-config level.
+    """
+
+    @staticmethod
+    def _point_at(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path))
+        (tmp_path / "stores").mkdir(parents=True, exist_ok=True)
+
+    def test_a_settings_only_override_reaches_the_default_stamp(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.stores.settings_store import SettingsStore
+
+        self._point_at(tmp_path, monkeypatch)
+        SettingsStore(tmp_path / "stores" / "settings.json").set(
+            "pack_holdout_rate", 0.3
+        )
+
+        stamp = build_write_provenance()
+
+        assert stamp["env_flags"]["pack_holdout_rate"] == 0.3
+
+    def test_env_still_beats_settings_in_the_default_stamp(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.stores.settings_store import SettingsStore
+
+        self._point_at(tmp_path, monkeypatch)
+        SettingsStore(tmp_path / "stores" / "settings.json").set(
+            "pack_holdout_rate", 0.9
+        )
+        monkeypatch.setenv(ENV_VAR_BY_FIELD["pack_holdout_rate"], "0.1")
+
+        stamp = build_write_provenance()
+
+        assert stamp["env_flags"]["pack_holdout_rate"] == 0.1
+
+    def test_a_settings_read_failure_degrades_to_env_only_and_logs(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Advisory, like the resolver this mirrors
+        (:func:`trellis.core.write_config.resolve_write_behaviour`): a
+        broken settings read must never fail — or silently skew — a write's
+        stamp.
+        """
+        import structlog.testing
+
+        self._point_at(tmp_path, monkeypatch)
+        monkeypatch.setenv(ENV_VAR_BY_FIELD["pack_holdout_rate"], "0.2")
+
+        def _boom(stores_dir: object) -> dict[str, object]:
+            msg = "settings store exploded"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("trellis.stores.settings_store.load_settings_values", _boom)
+
+        with structlog.testing.capture_logs() as logs:
+            stamp = build_write_provenance()
+
+        assert stamp["env_flags"]["pack_holdout_rate"] == 0.2
+        assert any(
+            entry.get("event") == "write_provenance_settings_resolve_failed"
+            for entry in logs
+        )
