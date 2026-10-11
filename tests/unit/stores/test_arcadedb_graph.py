@@ -67,7 +67,10 @@ def graph_store():
         ensure_database_exists=True,
     )
     with store._driver.session(database=store._database) as session:
-        session.run("MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim DETACH DELETE n")
+        session.run(
+            "MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim "
+            "OR n:EdgeClaim DETACH DELETE n"
+        )
     yield store
     store.close()
 
@@ -582,7 +585,8 @@ class TestArcadeDBEdgeProvenance:
             # Clean rows from prior tests in this class.
             with graph_store._driver.session(database=graph_store._database) as session:
                 session.run(
-                    "MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim DETACH DELETE n"
+                    "MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim "
+                    "OR n:EdgeClaim DETACH DELETE n"
                 )
             graph_store.upsert_node("a", "service", {})
             graph_store.upsert_node("b", "service", {})

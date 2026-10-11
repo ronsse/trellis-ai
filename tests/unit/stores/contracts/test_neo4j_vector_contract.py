@@ -134,7 +134,8 @@ class TestNeo4jVectorContract(VectorStoreContractTests):
         # each case, as test_neo4j_vector.py and the graph contract do.
         with graph._driver.session(database=graph._database) as session:
             session.run(
-                "MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim DETACH DELETE n"
+                "MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim "
+                "OR n:EdgeClaim DETACH DELETE n"
             )
         self._graph = graph
 
