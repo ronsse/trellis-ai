@@ -42,6 +42,12 @@ class Operation(StrEnum):
     RETENTION_PRUNE = "retention.prune"
     RETENTION_RESTORE = "retention.restore"
 
+    # Admin — routed only through an admin-scope executor
+    # (``build_schedule_executor``), never through
+    # ``create_curate_handlers``: see ``mutate/schedule_handlers.py``.
+    SCHEDULE_UPDATE = "schedule.update"
+    JOB_RUN_REQUEST = "job.run_request"
+
 
 class CommandStatus(StrEnum):
     """Outcome status of a command execution."""
@@ -183,6 +189,12 @@ class OperationRegistry:
         # ``RETENTION_PRUNED`` payload), and a criteria-driven undo would
         # re-derive the same population that was wrong the first time.
         self._schemas[Operation.RETENTION_RESTORE] = {"item_ids", "reason"}
+        # Both admin operations push their own field allowlist in the
+        # handler (``ScheduleUpdateHandler`` / ``JobRunRequestHandler``):
+        # every field but ``target_id`` is optional on an update, and a
+        # run-request takes none, so neither has a required-arg set here.
+        self._schemas[Operation.SCHEDULE_UPDATE] = set()
+        self._schemas[Operation.JOB_RUN_REQUEST] = set()
 
     def validate(self, command: Command) -> tuple[bool, list[str]]:
         """Validate a command's args against its operation's schema.

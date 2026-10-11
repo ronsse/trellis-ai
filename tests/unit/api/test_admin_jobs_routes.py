@@ -13,6 +13,7 @@ losing it.
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
@@ -25,6 +26,7 @@ from trellis.auth import SCOPE_ADMIN, SCOPE_READ, generate_api_key
 from trellis.core.base import utc_now
 from trellis.errors import StaleStoreWriteError
 from trellis.schedule.catalog import JOB_CATALOG
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.schedule import ScheduledJob
 from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.registry import StoreRegistry
@@ -452,6 +454,76 @@ class TestRunAdminJob:
         resp = client.post("/api/v1/admin/jobs/tune/run")
         assert resp.status_code == 409
         assert resp.json()["detail"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — a policy scoped to the schedule entity type refuses the route
+# ---------------------------------------------------------------------------
+
+
+def _deny_schedule(registry, operation: str) -> None:
+    """Declare one enforced ``deny`` rule for *operation*, scoped to schedules.
+
+    ``PATCH``/``run`` both stamp ``target_type="schedule"`` on the
+    ``Command`` they build, so an ``entity_type`` policy scoped to
+    ``"schedule"`` matches exactly as it would for any other entity type
+    (mirrors ``tests/unit/mcp/test_execute_mutation.py``'s
+    ``_deny_traces``). Both routes build their executor via
+    ``build_schedule_executor``, whose ``policy_gate`` is wired
+    identically to ``build_curate_executor``'s, so this is Stage 2
+    running on the admin-only surface, not a special case for it.
+    """
+    policy = Policy(
+        policy_type="mutation",
+        scope=PolicyScope(level="entity_type", value="schedule"),
+        rules=[
+            PolicyRule(operation=operation, condition="synthetic-freeze", action="deny")
+        ],
+        enforcement="enforce",
+    )
+    registry.stores_dir.mkdir(parents=True, exist_ok=True)
+    (registry.stores_dir / "policies.json").write_text(
+        json.dumps({"policies": [policy.model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+
+class TestPolicyDeny:
+    def test_a_policy_scoped_to_schedules_refuses_the_patch(self, client, registry):
+        _deny_schedule(registry, "schedule.update")
+
+        resp = client.patch("/api/v1/admin/jobs/tune", json={"enabled": False})
+
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        message = detail if isinstance(detail, str) else detail.get("message", detail)
+        assert "denied by policy" in str(message).lower()
+        # Nothing was written: the catalog default, not a degraded row.
+        store = ScheduleStore(_schedule_path(registry))
+        assert store.get("tune") is None
+
+    def test_a_policy_scoped_to_schedules_refuses_the_run(self, client, registry):
+        _deny_schedule(registry, "job.run_request")
+
+        resp = client.post("/api/v1/admin/jobs/tune/run")
+
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        message = detail if isinstance(detail, str) else detail.get("message", detail)
+        assert "denied by policy" in str(message).lower()
+        store = ScheduleStore(_schedule_path(registry))
+        assert store.get("tune") is None
+
+    def test_a_policy_scoped_to_schedules_leaves_other_admin_jobs_alone(
+        self, client, registry
+    ):
+        """The policy is scoped to ``schedule.update``; ``run`` on the
+        same job (a different operation) is untouched."""
+        _deny_schedule(registry, "schedule.update")
+
+        resp = client.post("/api/v1/admin/jobs/tune/run")
+
+        assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------

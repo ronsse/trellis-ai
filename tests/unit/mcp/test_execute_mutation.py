@@ -532,3 +532,40 @@ class TestTraceIngestTarget:
         assert temp_registry.operational.trace_store.count() == 0
         event = _audit_event(temp_registry, payload["command_id"])
         assert (event.entity_type, event.entity_id) == (None, None)
+
+
+class TestScheduleAdminOperationsAreNotMcpReachable:
+    """``schedule.update``/``job.run_request`` resolve as real operations
+
+    (``_resolve_operation`` finds them in the ``Operation`` enum) but have
+    no handler in ``build_curate_executor`` — only
+    ``trellis.mutate.build_schedule_executor`` wires them, and only the
+    admin REST route and ``trellis admin schedule`` build an executor from
+    that function. A mutate-scoped MCP credential must not be able to
+    edit a job's schedule or request a run, so this is the refusal, not
+    an oversight (see ``trellis.mutate.schedule_handlers``'s module
+    docstring).
+    """
+
+    @pytest.mark.parametrize("operation", ["schedule.update", "job.run_request"])
+    def test_no_handler_registered_is_a_plain_failed_result(
+        self, temp_registry: StoreRegistry, operation: str
+    ) -> None:
+        payload = json.loads(execute_mutation(operation=operation, args={}))
+
+        assert payload["status"] == "failed"
+        assert "no handler registered" in payload["message"].lower()
+        assert operation in payload["message"].lower()
+        # Not an McpError: a structured outcome, exactly like any other
+        # unhandled operation reaching this executor.
+
+    @pytest.mark.parametrize("operation", ["schedule.update", "job.run_request"])
+    def test_screaming_snake_form_is_refused_identically(
+        self, temp_registry: StoreRegistry, operation: str
+    ) -> None:
+        payload = json.loads(
+            execute_mutation(operation=operation.upper().replace(".", "_"), args={})
+        )
+
+        assert payload["status"] == "failed"
+        assert "no handler registered" in payload["message"].lower()

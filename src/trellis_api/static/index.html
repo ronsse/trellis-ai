@@ -5915,7 +5915,7 @@
             if (!el) return;
             if (seen) { el.innerHTML = ''; return; }
             const seenText = lastSeenAt
-                ? `last seen starting a job at ${fmtDateUtc(lastSeenAt)}`
+                ? `last seen starting a job at ${fmtTime(lastSeenAt)}`
                 : 'never seen starting a job';
             el.innerHTML = `<div class="warn-banner">
                 <span class="warn-title">No dispatcher reporting</span>
@@ -5955,11 +5955,11 @@
         function lastRunText(lastRun) {
             if (!lastRun) return 'never run';
             if (lastRun.finished_at == null) {
-                return `running since ${fmtDateUtc(lastRun.started_at)}`;
+                return `running since ${fmtTime(lastRun.started_at)}`;
             }
             const statusCls = lastRun.exit_code === 0 ? 'badge-ok' : 'badge-err';
             return `<span class="badge ${statusCls}">${escHtml(lastRun.status || 'unknown')}</span> ` +
-                `exit ${escHtml(String(lastRun.exit_code))}, finished ${fmtDateUtc(lastRun.finished_at)}`;
+                `exit ${escHtml(String(lastRun.exit_code))}, finished ${fmtTime(lastRun.finished_at)}`;
         }
 
         function renderScheduleRow(job) {
@@ -5972,7 +5972,7 @@
                 <td>${escHtml(String(job.timeout_seconds))}s</td>
                 <td>${jobFlagBadges(job)}</td>
                 <td>${lastRunText(job.last_run)}</td>
-                <td>${job.next_due_at ? fmtDateUtc(job.next_due_at) : '&mdash;'}</td>
+                <td>${job.next_due_at ? fmtTime(job.next_due_at) : '&mdash;'}</td>
                 <td id="sched-actions-${escHtml(name)}">
                     <button class="btn btn-sm" data-action="showEditJobForm" data-id="${escHtml(name)}">Edit</button>
                     <button class="btn btn-sm" data-action="confirmRunJob" data-id="${escHtml(name)}">Run now</button>

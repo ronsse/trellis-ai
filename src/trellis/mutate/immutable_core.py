@@ -138,6 +138,10 @@ DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         Operation.LABEL_REMOVE,
         Operation.REDACTION_APPLY,
         Operation.RETENTION_PRUNE,
+        # schedule.update overwrites a flat ``DegradableJsonStore`` row in
+        # place (no SCD-2 history, unlike ``entity.update``) — the same
+        # "a later read cannot recover it" rationale as ``alias.upsert``.
+        Operation.SCHEDULE_UPDATE,
     }
 )
 
@@ -161,6 +165,10 @@ NON_DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         Operation.OBSERVATION_RECORD,
         Operation.MEASUREMENT_RECORD,
         Operation.RETENTION_RESTORE,
+        # job.run_request only coalesces a ``run_requested_at`` signal for
+        # the dispatcher to pick up — a record character, like
+        # feedback.record / observation.record / measurement.record.
+        Operation.JOB_RUN_REQUEST,
     }
 )
 

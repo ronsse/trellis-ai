@@ -21,19 +21,17 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import ValidationError
 
 from trellis.core.base import utc_now
 from trellis.core.cron import next_tick_after
 from trellis.core.error_sanitize import (
     describe_json_error,
     describe_os_error,
-    describe_validation_error,
     sanitize_error_message,
 )
 from trellis.core.path_presence import path_is_present
 from trellis.core.vector_metadata import resolve_vector_store
-from trellis.errors import StaleStoreWriteError, StoreWriteRefusedError
+from trellis.errors import StaleStoreWriteError
 from trellis.learning.artifacts import (
     LEARNING_ARTIFACTS_DIR_ENV,
     LEARNING_CANDIDATES_FILENAME,
@@ -50,7 +48,14 @@ from trellis.learning.tuners import (
     promote_proposal,
     reject_proposal,
 )
-from trellis.mutate import build_curate_executor
+from trellis.mutate import (
+    Command,
+    CommandResult,
+    CommandStatus,
+    Operation,
+    build_curate_executor,
+    build_schedule_executor,
+)
 from trellis.ops.loop_health import summarize_loop_health
 from trellis.ops.parameter_reachability import (
     READ_POINTS,
@@ -1459,32 +1464,47 @@ def _get_schedule_store() -> ScheduleStore:
     return ScheduleStore(stores_dir / "schedule.json")
 
 
-def _schedule_refusal_http_error(
-    store: ScheduleStore, exc: StoreWriteRefusedError
-) -> HTTPException:
-    """409 for a schedule write the store refused.
+#: ``metadata["rejection_reason"]`` values that mean "the store itself
+#: refused the write" — these map to 409 (retryable / operator-actionable)
+#: rather than 422 (fix the request body).
+_STORE_REFUSAL_REASONS = frozenset({"degraded_store_write", "stale_store_write"})
 
-    409, not 503: a degraded file does not repair itself, so "retry
-    later" is the wrong instruction for that case; a *stale* refusal is
-    the retryable one, which is why ``code`` distinguishes them (mirrors
-    ``policies.py``'s ``_refusal_http_error``). Unlike that helper,
-    ``message`` here is ``str(exc)`` itself — the store's own refusal
-    text, recovery command included — rather than a fixed restatement:
-    the store already composes one safe to return (nothing beyond what
-    ``GET /admin/jobs`` already discloses), and returning it verbatim is
-    what lets an operator act on the response without a second lookup.
+
+def _schedule_result_http_error(result: CommandResult) -> HTTPException:
+    """Map a non-SUCCESS schedule-admin ``CommandResult`` to an HTTPException.
+
+    ``ScheduleUpdateHandler`` / ``JobRunRequestHandler`` convert every
+    store refusal into a ``ValidationError`` whose ``code`` becomes
+    ``metadata["rejection_reason"]`` — ``degraded_store_write`` or
+    ``stale_store_write`` — so those two read 409 here, same as the old
+    direct-``store.put()`` path did (mirrors ``policies.py``'s
+    ``_refusal_http_error``: 409, not 503, because a degraded file does
+    not repair itself). ``result.message`` is the handler's own text —
+    the store's refusal message, recovery command baked in by
+    ``StoreWriteRefusedError.__init__`` — so ``recovery`` here duplicates
+    ``message`` rather than carrying a second value: a ``CommandResult``
+    has no channel beyond ``message`` and ``metadata["rejection_reason"]``
+    for what a handler-raised exception said (``executor.py``'s
+    ``except ValidationError`` branch). Anything else REJECTED (bad
+    cadence, unknown field, catalog mismatch) is the caller's own input,
+    so it reads 422 with the raw message, matching the field-level 422s
+    ``AdminJobPatchRequest`` already raises for a malformed body. A
+    non-REJECTED failure (a defect, not an expected refusal) reads 500.
     """
-    degradation = store.degradation
+    reason = result.metadata.get("rejection_reason")
+    if result.status == CommandStatus.REJECTED and reason in _STORE_REFUSAL_REASONS:
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": reason,
+                "message": result.message,
+                "recovery": result.message,
+            },
+        )
+    if result.status == CommandStatus.REJECTED:
+        return HTTPException(status_code=422, detail=result.message)
     return HTTPException(
-        status_code=409,
-        detail={
-            "code": exc.code.lower() if exc.code else "store_write_refused",
-            "message": str(exc),
-            "recovery": exc.recovery,
-            "store_degradation": (
-                degradation.to_dict() if degradation is not None else None
-            ),
-        },
+        status_code=500, detail=sanitize_error_message(result.message)
     )
 
 
@@ -1674,48 +1694,29 @@ def patch_admin_job(
             job=_job_summary(spec, current, event_log, now=utc_now())
         )
 
-    merged = current.model_dump(mode="json")
-    old_values: dict[str, Any] = {}
-    new_values: dict[str, Any] = {}
+    args: dict[str, Any] = {}
     if "enabled" in fields_set:
-        old_values["enabled"] = current.enabled
-        new_values["enabled"] = body.enabled
-        merged["enabled"] = body.enabled
+        args["enabled"] = body.enabled
     if "cadence" in fields_set:
-        old_values["cadence"] = current.cadence
-        new_values["cadence"] = body.cadence
-        merged["cadence"] = body.cadence
+        args["cadence"] = body.cadence
     if "timeout_seconds" in fields_set:
-        old_values["timeout_seconds"] = current.timeout_seconds
-        new_values["timeout_seconds"] = body.timeout_seconds
-        merged["timeout_seconds"] = body.timeout_seconds
-    merged["name"] = spec.name
-    merged["updated_at"] = utc_now().isoformat()
+        args["timeout_seconds"] = body.timeout_seconds
 
-    try:
-        updated = ScheduledJob.model_validate(merged)
-    except (ValidationError, TypeError) as exc:
-        raise HTTPException(
-            status_code=422, detail=describe_validation_error(exc)
-        ) from exc
-
-    try:
-        store.put(updated)
-    except StoreWriteRefusedError as exc:
-        raise _schedule_refusal_http_error(store, exc) from exc
-
-    event_log.emit(
-        EventType.SCHEDULE_UPDATED,
-        source="trellis_api.admin.patch_job",
-        entity_id=f"job:{name}",
-        entity_type="scheduled_job",
-        payload={
-            "job": name,
-            "old": old_values,
-            "new": new_values,
-            **_audit_identity(ctx),
-        },
+    command = Command(
+        operation=Operation.SCHEDULE_UPDATE,
+        target_type="schedule",
+        target_id=name,
+        args=args,
+        requested_by="api:admin.schedule-update",
+        metadata=_audit_identity(ctx),
     )
+    result = build_schedule_executor(registry).execute(command)
+    if result.status != CommandStatus.SUCCESS:
+        raise _schedule_result_http_error(result)
+
+    # Re-read: ``store`` cached its rows at construction, before the
+    # handler's own ``ScheduleStore`` instance committed the write.
+    updated = _job_row_or_default(_get_schedule_store(), spec)
     return AdminJobPatchResponse(
         job=_job_summary(spec, updated, event_log, now=utc_now())
     )
@@ -1744,33 +1745,25 @@ def run_admin_job(
     spec = JOB_CATALOG.get(name)
     if spec is None:
         raise HTTPException(status_code=404, detail=f"Unknown job: {name}")
-    store = _get_schedule_store()
-    current = _job_row_or_default(store, spec)
-    now = utc_now()
-    updated = current.model_copy(
-        update={"name": spec.name, "run_requested_at": now, "updated_at": now}
-    )
-
-    try:
-        store.put(updated)
-    except StoreWriteRefusedError as exc:
-        raise _schedule_refusal_http_error(store, exc) from exc
 
     registry = get_registry()
-    registry.operational.event_log.emit(
-        EventType.JOB_RUN_REQUESTED,
-        source="trellis_api.admin.run_job",
-        entity_id=f"job:{name}",
-        entity_type="scheduled_job",
-        payload={
-            "job": name,
-            "previous_run_requested_at": (
-                current.run_requested_at.isoformat()
-                if current.run_requested_at is not None
-                else None
-            ),
-            "run_requested_at": now.isoformat(),
-            **_audit_identity(ctx),
-        },
+    command = Command(
+        operation=Operation.JOB_RUN_REQUEST,
+        target_type="schedule",
+        target_id=name,
+        requested_by="api:admin.job-run-request",
+        metadata=_audit_identity(ctx),
     )
-    return AdminJobRunResponse(name=name, run_requested_at=now.isoformat())
+    result = build_schedule_executor(registry).execute(command)
+    if result.status != CommandStatus.SUCCESS:
+        raise _schedule_result_http_error(result)
+
+    # Re-read rather than trust a locally-computed timestamp: the
+    # handler, not this route, is what decided and wrote ``now``.
+    updated = _job_row_or_default(_get_schedule_store(), spec)
+    run_requested_at = (
+        updated.run_requested_at.isoformat()
+        if updated.run_requested_at is not None
+        else utc_now().isoformat()
+    )
+    return AdminJobRunResponse(name=name, run_requested_at=run_requested_at)

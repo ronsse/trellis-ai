@@ -39,6 +39,26 @@ All notable changes to Trellis will be documented in this file.
   comparison was always `False` and every `--enabled`/`--cadence`/`--timeout`
   flag was silently a no-op regardless of what was passed. Fixed by
   comparing `source.name == "COMMANDLINE"` instead.
+- **Schedule writes route through `MutationExecutor`, not a direct store
+  call (e175 rework, PR #860).** The admin route and CLI above now submit
+  `Operation.SCHEDULE_UPDATE` / `Operation.JOB_RUN_REQUEST` `Command`s to a
+  new `trellis.mutate.build_schedule_executor`, whose `ScheduleUpdateHandler`
+  / `JobRunRequestHandler` (`trellis/mutate/schedule_handlers.py`) are the
+  only code left that calls `ScheduleStore.put`. Both handlers re-enforce
+  the same boundary the wire layer already had — a catalog job name only;
+  only `enabled`/`cadence`/`timeout_seconds` on update, no fields at all on
+  a run request; every check runs before the store write, so a rejected
+  command never reaches `ScheduleStore.put`. The two operations are
+  deliberately **not** in `create_curate_handlers`: that dict backs `POST
+  /api/v1/commands/batch` (`mutate` scope) and MCP `execute_mutation`, and
+  a mutate-scoped credential must not be able to edit a job's schedule or
+  request a run — those stay admin-only through a separate authorization
+  axis. Submitting either operation to the curate-wired executor fails
+  with "no handler registered for: \<operation\>", the same path an
+  unknown operation gets anywhere else. `changed_by`/audit identity comes
+  from the authenticated principal, never a client-supplied field, and a
+  policy scoped to `entity_type=schedule` now refuses the route and the
+  CLI the same way it refuses any other governed mutation.
 - **Schedule registry + job-run records (#e166).** The pieces a host-side
   dispatcher cron needs so job schedules can later be edited from a UI
   (plan p1 §(b)) without the container ever touching crontab — and the

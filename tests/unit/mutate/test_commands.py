@@ -27,7 +27,11 @@ class TestOperation:
         # inverse of retention.prune, without which phase-one archival's
         # "walk it back by re-stamping" claim has no sanctioned path)
         # + ALIAS_UPSERT (governed alias/backfill writes)
-        assert len(Operation) == 21
+        # + SCHEDULE_UPDATE + JOB_RUN_REQUEST (plan p1 PR 6 rework — admin-only
+        # schedule-registry writes, handled only by
+        # trellis.mutate.build_schedule_executor, never create_curate_handlers;
+        # see trellis/mutate/schedule_handlers.py)
+        assert len(Operation) == 23
 
 
 class TestCommand:

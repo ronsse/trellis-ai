@@ -297,6 +297,24 @@ generic message) while it is degraded or stale; both emit an audit event
 only the fields that actually changed, plus the caller's identity
 (`key_id`/`key_name` over REST, `cli:<os user>` from the CLI).
 
+**Both writes route through `MutationExecutor`.** The PATCH and run routes,
+and the two CLI subcommands below, submit `Operation.SCHEDULE_UPDATE` /
+`Operation.JOB_RUN_REQUEST` `Command`s (stamped `target_type="schedule"`,
+`target_id=<job name>`) to `trellis.mutate.build_schedule_executor` — a
+sibling of `build_curate_executor` with the same `policy_gate`, but a
+disjoint handler dict. `ScheduleUpdateHandler` / `JobRunRequestHandler`
+(`src/trellis/mutate/schedule_handlers.py`) are the only code that calls
+`ScheduleStore.put`; every boundary described above (field allowlist,
+catalog membership, degraded/stale refusal) is enforced there, before the
+store write. These two operations are deliberately absent from
+`create_curate_handlers`, so neither `POST /api/v1/commands/batch` nor MCP
+`execute_mutation` can reach them — a `mutate`-scoped credential cannot
+edit a schedule or request a run; that is admin-scoped only, via a
+separate authorization axis. A policy with `entity_type="schedule"` denies
+the PATCH/run routes and the CLI the same way it denies any other governed
+mutation. `changed_by` is always the authenticated principal; no request
+body or CLI flag can set it.
+
 #### `GET /api/v1/admin/jobs`
 
 Lists every `JOB_CATALOG` job, joined with its `schedule.json` row

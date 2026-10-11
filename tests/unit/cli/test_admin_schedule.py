@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.schedule import ScheduledJob
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -739,3 +740,82 @@ class TestScheduleRun:
         assert result.exit_code == EXIT_STORE, result.output
         payload = json.loads(result.stdout)
         assert payload["status"] == "error"
+
+
+def _deny_schedule(stores_dir: Path, operation: str) -> None:
+    """Declare one enforced ``deny`` rule for *operation*, scoped to schedules.
+
+    Mirrors ``tests/unit/api/test_admin_jobs_routes.py``'s helper of the
+    same name: both ``set``/``run`` stamp ``target_type="schedule"`` on
+    the ``Command`` they build and execute via
+    ``trellis.mutate.build_schedule_executor``, whose ``policy_gate`` is
+    wired identically to ``build_curate_executor``'s — this is Stage 2
+    running on the CLI half of the admin-only surface.
+    """
+    policy = Policy(
+        policy_type="mutation",
+        scope=PolicyScope(level="entity_type", value="schedule"),
+        rules=[
+            PolicyRule(operation=operation, condition="synthetic-freeze", action="deny")
+        ],
+        enforcement="enforce",
+    )
+    (stores_dir / "policies.json").write_text(
+        json.dumps({"policies": [policy.model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+
+class TestPolicyDeny:
+    def test_a_policy_scoped_to_schedules_refuses_set(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(stores_dir, [_job(name="tune", cadence="0 4 * * *")])
+        _deny_schedule(stores_dir, "schedule.update")
+
+        result = runner.invoke(
+            app,
+            ["admin", "schedule", "set", "tune", "--disabled", "--format", "json"],
+        )
+
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["code"] == "validation_error"
+        assert "denied by policy" in payload["message"].lower()
+        # Nothing changed: the seeded row, not a partial write.
+        store = ScheduleStore(stores_dir / "schedule.json")
+        assert store.get("tune").enabled is True
+
+    def test_a_policy_scoped_to_schedules_refuses_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(stores_dir, [_job(name="tune", cadence="0 4 * * *")])
+        _deny_schedule(stores_dir, "job.run_request")
+
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "json"]
+        )
+
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["code"] == "validation_error"
+        assert "denied by policy" in payload["message"].lower()
+        store = ScheduleStore(stores_dir / "schedule.json")
+        assert store.get("tune").run_requested_at is None
+
+    def test_a_policy_scoped_to_schedules_leaves_other_commands_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The policy is scoped to ``schedule.update``; ``run`` on the
+        same job (a different operation) is untouched."""
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(stores_dir, [_job(name="tune", cadence="0 4 * * *")])
+        _deny_schedule(stores_dir, "schedule.update")
+
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.output

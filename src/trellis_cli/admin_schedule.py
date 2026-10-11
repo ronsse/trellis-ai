@@ -6,10 +6,13 @@ writable fields (``enabled``, ``cadence``, ``timeout_seconds`` via
 ``set``; ``run_requested_at`` via ``run``), the same catalog-name
 validation, the same refusal when the schedule store is degraded or
 stale, and the same audit events (``SCHEDULE_UPDATED`` /
-``JOB_RUN_REQUESTED``). There is no second write path here — both
-surfaces call straight through to :meth:`ScheduleStore.put` and
-:meth:`EventLog.emit`; this module exists only because a host operator
-needs a terminal command, not a browser, to flip a job's cadence.
+``JOB_RUN_REQUESTED``). Both surfaces build a
+:class:`~trellis.mutate.commands.Command` and execute it through
+:func:`trellis.mutate.build_schedule_executor` — the only code that
+calls :meth:`ScheduleStore.put` is
+:mod:`trellis.mutate.schedule_handlers`, never this module directly.
+This module exists only because a host operator needs a terminal
+command, not a browser, to flip a job's cadence.
 
 ``set`` tracks which options were actually passed on the command line
 (via ``ctx.get_parameter_source``, compared by ``.name`` rather than by
@@ -30,18 +33,22 @@ import json
 from typing import Any
 
 import typer
-from pydantic import ValidationError
 from rich.markup import escape
 
 from trellis.core.base import utc_now
 from trellis.core.error_sanitize import sanitize_error_message
-from trellis.errors import StoreWriteRefusedError
+from trellis.mutate import (
+    Command,
+    CommandResult,
+    CommandStatus,
+    Operation,
+    build_schedule_executor,
+)
 from trellis.schedule.catalog import JOB_CATALOG
 from trellis.schemas.schedule import ScheduledJob
-from trellis.stores.base.event_log import EventType
-from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE, EXIT_VALIDATION
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.output import build_console
-from trellis_cli.stores import get_event_log, get_schedule_store
+from trellis_cli.stores import _get_registry, get_schedule_store
 
 console = build_console()
 
@@ -71,6 +78,40 @@ def _audit_identity() -> dict[str, str | None]:
     except Exception:  # pragma: no cover - exotic/no-passwd environments
         user = None
     return {"key_id": None, "key_name": f"cli:{user}" if user else "cli"}
+
+
+#: ``metadata["rejection_reason"]`` values that mean "the store itself
+#: refused the write" — see ``trellis_api.routes.admin``'s matching set
+#: for the HTTP-side rationale.
+_STORE_REFUSAL_REASONS = frozenset({"degraded_store_write", "stale_store_write"})
+
+
+def _cli_result_failure(result: CommandResult) -> tuple[int, str, str]:
+    """Map a non-SUCCESS schedule-admin ``CommandResult`` to (exit_code, code, message).
+
+    Deliberately **not** :func:`trellis_cli.exit_codes.refusal_exit_code`:
+    that shared helper maps every non-policy ``REJECTED`` reason to
+    ``EXIT_VALIDATION`` and has no store-refusal case at all, so a
+    degraded/stale store would read as a validation failure rather than
+    ``EXIT_STORE`` — the same split
+    ``trellis_api.routes.admin._schedule_result_http_error`` makes for
+    409 vs. 422. The outward ``code`` for every other ``REJECTED`` reason
+    is the literal ``"validation_error"`` regardless of the handler's own
+    ``rejection_reason`` (``invalid_field``, ``unknown_job``,
+    ``schedule_validation``, ...): the CLI's pre-existing contract names
+    one code for "the request you typed was bad" and a store refusal is
+    the only ``REJECTED`` case that gets its own.
+    """
+    reason = result.metadata.get("rejection_reason")
+    if result.status == CommandStatus.REJECTED and reason in _STORE_REFUSAL_REASONS:
+        return EXIT_STORE, str(reason), result.message
+    if result.status == CommandStatus.REJECTED:
+        return EXIT_VALIDATION, "validation_error", result.message
+    return (
+        EXIT_INTERNAL,
+        "execution_failed",
+        sanitize_error_message(result.message),
+    )
 
 
 def _emit_result(output_format: str, payload: dict[str, Any], text: str) -> None:
@@ -130,61 +171,36 @@ def set_job_command(
         )
         raise typer.Exit(code=EXIT_VALIDATION)
 
-    store = get_schedule_store()
-    current = store.get(name) or ScheduledJob(
-        name=spec.name, cadence=spec.default_cadence
-    )
-
-    merged = current.model_dump(mode="json")
-    old_values: dict[str, Any] = {}
-    new_values: dict[str, Any] = {}
+    args: dict[str, Any] = {}
     if enabled_set:
-        old_values["enabled"] = current.enabled
-        new_values["enabled"] = enabled
-        merged["enabled"] = enabled
+        args["enabled"] = enabled
     if cadence_set:
-        resolved_cadence = (
+        args["cadence"] = (
             None
             if cadence is None or cadence.strip().lower() == _CLEAR_CADENCE_SENTINEL
             else cadence
         )
-        old_values["cadence"] = current.cadence
-        new_values["cadence"] = resolved_cadence
-        merged["cadence"] = resolved_cadence
     if timeout_set:
-        old_values["timeout_seconds"] = current.timeout_seconds
-        new_values["timeout_seconds"] = timeout_seconds
-        merged["timeout_seconds"] = timeout_seconds
-    merged["name"] = spec.name
-    merged["updated_at"] = utc_now().isoformat()
+        args["timeout_seconds"] = timeout_seconds
 
-    try:
-        updated = ScheduledJob.model_validate(merged)
-    except (ValidationError, TypeError) as exc:
-        _emit_failure(
-            output_format, "validation_error", sanitize_error_message(str(exc))
-        )
-        raise typer.Exit(code=EXIT_VALIDATION) from exc
+    command = Command(
+        operation=Operation.SCHEDULE_UPDATE,
+        target_type="schedule",
+        target_id=name,
+        args=args,
+        requested_by="cli:admin.schedule-set",
+        metadata=_audit_identity(),
+    )
+    result = build_schedule_executor(_get_registry()).execute(command)
+    if result.status != CommandStatus.SUCCESS:
+        exit_code, code, message = _cli_result_failure(result)
+        _emit_failure(output_format, code, message)
+        raise typer.Exit(code=exit_code)
 
-    try:
-        store.put(updated)
-    except StoreWriteRefusedError as exc:
-        _emit_failure(
-            output_format, (exc.code or "store_write_refused").lower(), str(exc)
-        )
-        raise typer.Exit(code=EXIT_STORE) from exc
-
-    get_event_log().emit(
-        EventType.SCHEDULE_UPDATED,
-        source="trellis_cli.admin_schedule.set",
-        entity_id=f"job:{name}",
-        entity_type="scheduled_job",
-        payload={
-            "job": name,
-            "old": old_values,
-            "new": new_values,
-            **_audit_identity(),
-        },
+    # Re-read: no store instance was built in this function before the
+    # executor's own handler committed the write.
+    updated = get_schedule_store().get(name) or ScheduledJob(
+        name=spec.name, cadence=spec.default_cadence
     )
 
     effective_timeout = (
@@ -231,38 +247,28 @@ def run_job_command(*, name: str, output_format: str) -> None:
         )
         raise typer.Exit(code=EXIT_VALIDATION)
 
-    store = get_schedule_store()
-    current = store.get(name) or ScheduledJob(
+    command = Command(
+        operation=Operation.JOB_RUN_REQUEST,
+        target_type="schedule",
+        target_id=name,
+        requested_by="cli:admin.schedule-run",
+        metadata=_audit_identity(),
+    )
+    result = build_schedule_executor(_get_registry()).execute(command)
+    if result.status != CommandStatus.SUCCESS:
+        exit_code, code, message = _cli_result_failure(result)
+        _emit_failure(output_format, code, message)
+        raise typer.Exit(code=exit_code)
+
+    # Re-read rather than trust a locally-computed timestamp: the
+    # handler, not this command, is what decided and wrote ``now``.
+    updated = get_schedule_store().get(name) or ScheduledJob(
         name=spec.name, cadence=spec.default_cadence
     )
-    now = utc_now()
-    updated = current.model_copy(
-        update={"name": spec.name, "run_requested_at": now, "updated_at": now}
-    )
-
-    try:
-        store.put(updated)
-    except StoreWriteRefusedError as exc:
-        _emit_failure(
-            output_format, (exc.code or "store_write_refused").lower(), str(exc)
-        )
-        raise typer.Exit(code=EXIT_STORE) from exc
-
-    get_event_log().emit(
-        EventType.JOB_RUN_REQUESTED,
-        source="trellis_cli.admin_schedule.run",
-        entity_id=f"job:{name}",
-        entity_type="scheduled_job",
-        payload={
-            "job": name,
-            "previous_run_requested_at": (
-                current.run_requested_at.isoformat()
-                if current.run_requested_at is not None
-                else None
-            ),
-            "run_requested_at": now.isoformat(),
-            **_audit_identity(),
-        },
+    run_requested_at = (
+        updated.run_requested_at.isoformat()
+        if updated.run_requested_at is not None
+        else utc_now().isoformat()
     )
 
     hint = (
@@ -274,10 +280,10 @@ def run_job_command(*, name: str, output_format: str) -> None:
         {
             "status": "ok",
             "name": name,
-            "run_requested_at": now.isoformat(),
+            "run_requested_at": run_requested_at,
             "dispatcher_hint": hint,
         },
-        f"[green]Run requested[/green] for {escape(name)} at {now.isoformat()}.\n"
+        f"[green]Run requested[/green] for {escape(name)} at {run_requested_at}.\n"
         f"[dim]{escape(hint)}[/dim]",
     )
     raise typer.Exit(code=EXIT_OK)
