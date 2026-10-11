@@ -203,7 +203,7 @@ def run_capture(  # noqa: PLR0915
     # watermark is saved after that point, the next sweep would pay for the
     # same sessions again. Dry runs too: they call the judge.
     _ = registry.knowledge.document_store
-    reconcile_enabled = reconcile_on_write_enabled()
+    reconcile_enabled = reconcile_on_write_enabled(registry)
     report = CaptureReport(
         transcripts_root=str(transcripts_root),
         dry_run=dry_run,

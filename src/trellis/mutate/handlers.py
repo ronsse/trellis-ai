@@ -123,6 +123,7 @@ class EvidenceIngestHandler:
             content,
             source_system=str(metadata.get("source_system") or ""),
             doc_id=doc_id,
+            registry=self._registry,
         )
         # Through the seam even though both embed modes below rebuild the
         # whole row: ``run_embed_on_ingest`` is gated on

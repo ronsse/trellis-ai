@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from trellis.core.write_config import EMBED_ON_INGEST_FLAG, WriteBehaviourConfig
+from trellis.core.write_config import EMBED_ON_INGEST_FLAG, resolve_write_behaviour
 from trellis.errors import ConfigError
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.schemas.classification import SHADOW_TAGS_KEY
@@ -91,9 +91,13 @@ EMBED_INPUT_CHAR_CAP = 8000
 VECTOR_METADATA_EXCERPT_CHARS = 500
 
 
-def embed_on_ingest_enabled() -> bool:
-    """``True`` iff ``TRELLIS_ENABLE_EMBED_ON_INGEST`` is set truthy."""
-    return WriteBehaviourConfig.from_env().embed_on_ingest
+def embed_on_ingest_enabled(registry: StoreRegistry | None = None) -> bool:
+    """``True`` iff embed-on-ingest is on, env > settings > default.
+
+    ``TRELLIS_ENABLE_EMBED_ON_INGEST`` still wins when set; a
+    ``registry``-scoped settings override takes effect otherwise.
+    """
+    return resolve_write_behaviour(registry).embed_on_ingest
 
 
 def build_vector_row(
@@ -282,7 +286,7 @@ def run_embed_on_ingest(
         keyed by ``step`` — the two are tracked separately so a failure
         in one cannot silence a same-shaped failure in the other).
     """
-    if not embed_on_ingest_enabled():
+    if not embed_on_ingest_enabled(registry):
         return None
 
     if not content or not content.strip():
