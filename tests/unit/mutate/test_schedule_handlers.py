@@ -75,9 +75,7 @@ class TestNotRegisteredInCurateHandlers:
         self, registry: StoreRegistry
     ) -> None:
         executor = build_curate_executor(registry)
-        result = executor.execute(
-            Command(operation=Operation.SCHEDULE_UPDATE, args={})
-        )
+        result = executor.execute(Command(operation=Operation.SCHEDULE_UPDATE, args={}))
         assert result.status == CommandStatus.FAILED
         assert "no handler registered" in result.message.lower()
 

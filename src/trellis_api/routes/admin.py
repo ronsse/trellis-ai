@@ -1503,9 +1503,7 @@ def _schedule_result_http_error(result: CommandResult) -> HTTPException:
         )
     if result.status == CommandStatus.REJECTED:
         return HTTPException(status_code=422, detail=result.message)
-    return HTTPException(
-        status_code=500, detail=sanitize_error_message(result.message)
-    )
+    return HTTPException(status_code=500, detail=sanitize_error_message(result.message))
 
 
 def _last_job_run(event_log: EventLog, name: str) -> AdminJobLastRun | None:
