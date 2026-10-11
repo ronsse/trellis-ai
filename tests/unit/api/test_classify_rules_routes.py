@@ -1,0 +1,417 @@
+"""Tests for the ``/api/v1/classify/candidates`` and ``/classify/rules`` routes.
+
+Mirrors ``tests/unit/api/test_settings_routes.py``'s fixture pattern exactly
+(a fresh in-memory ``StoreRegistry`` bound to ``trellis_api.app``, and a
+``TestClient`` that is never entered as a context manager so the lifespan
+never re-inits ``_registry`` out from under the fixture).
+
+Covers the governed Apply/Revoke review flow end to end: overlay
+precedence with no restart required, revoke-works and revoke-refused (both
+a genuinely-unknown key and a config.yaml-sourced one), the audit event's
+actor/metrics, non-admin 403 on every write route, ``GET /candidates``
+never invoking a miner, and a dismissed candidate dropping out of the open
+listing.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+
+import trellis_api.app as app_module
+from trellis.auth import SCOPE_ADMIN, SCOPE_READ, generate_api_key
+from trellis.stores.base.event_log import EventType
+from trellis.stores.registry import StoreRegistry
+from trellis_api.app import create_app
+
+
+@pytest.fixture
+def registry(tmp_path: Path):
+    """Fresh registry bound to the app module for each test."""
+    reg = StoreRegistry(stores_dir=tmp_path / "stores")
+    app_module._registry = reg
+    yield reg
+    reg.close()
+    app_module._registry = None
+
+
+@pytest.fixture
+def client(registry: StoreRegistry) -> TestClient:
+    """In-memory app over the fixture registry. Not context-managed."""
+    app = create_app()
+    return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _clean_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TRELLIS_API_KEY", raising=False)
+    monkeypatch.delenv("TRELLIS_AUTH_MODE", raising=False)
+
+
+def _mint(registry: StoreRegistry, scopes: list[str], name: str = "test-key") -> str:
+    token, record = generate_api_key(name, scopes)
+    registry.operational.api_key_store.create(record)
+    return token
+
+
+def _mint_with_key_id(
+    registry: StoreRegistry, scopes: list[str], name: str = "test-key"
+) -> tuple[str, str]:
+    token, record = generate_api_key(name, scopes)
+    registry.operational.api_key_store.create(record)
+    return token, record.key_id
+
+
+def _emit_tag_keyword_candidate(
+    registry: StoreRegistry,
+    *,
+    candidate_id: str = "cand-1",
+    keyword: str = "widget",
+    tag: str = "manufacturing",
+) -> str:
+    event = registry.operational.event_log.emit(
+        EventType.TAG_KEYWORD_CANDIDATE,
+        source="test",
+        entity_id=candidate_id,
+        entity_type="tag_keyword",
+        payload={
+            "candidate_id": candidate_id,
+            "keyword": keyword,
+            "tag": tag,
+            "support": 40,
+            "precision": 0.8,
+            "lift": 0.3,
+            "recurrence_count": 1,
+            "example_count": 3,
+            "notes": [],
+        },
+    )
+    return event.event_id
+
+
+def _rule_row(body: dict[str, Any], kind: str, key: str) -> dict[str, Any]:
+    (match,) = (
+        row for row in body["rules"] if row["kind"] == kind and row["key"] == key
+    )
+    return match
+
+
+# ---------------------------------------------------------------------------
+# GET /classify/candidates — never mines, dedupes, reflects dismiss/apply
+# ---------------------------------------------------------------------------
+
+
+class TestListCandidates:
+    def test_empty_when_no_events(self, client: TestClient) -> None:
+        resp = client.get("/api/v1/classify/candidates")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"count": 0, "candidates": []}
+
+    def test_does_not_invoke_a_miner(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A GET must only read events a prior mine run emitted."""
+
+        def _boom(*_args: Any, **_kwargs: Any) -> Any:
+            msg = "GET /classify/candidates must never mine"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(
+            "trellis_api.routes.classify_rules.analyze_tag_keyword_candidates", _boom
+        )
+        monkeypatch.setattr(
+            "trellis_api.routes.classify_rules.analyze_domain_alias_candidates", _boom
+        )
+        resp = client.get("/api/v1/classify/candidates")
+        assert resp.status_code == 200, resp.text
+
+    def test_open_candidate_is_listed(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        _emit_tag_keyword_candidate(registry)
+        resp = client.get("/api/v1/classify/candidates")
+        body = resp.json()
+        assert body["count"] == 1
+        row = body["candidates"][0]
+        assert row["candidate_id"] == "cand-1"
+        assert row["kind"] == "tag_keyword"
+        assert row["key"] == "widget"
+        assert row["target"] == "manufacturing"
+        assert row["status"] == "open"
+        assert row["metrics"]["support"] == 40
+        assert row["metrics"]["precision"] == 0.8
+
+    def test_dismissed_candidate_is_excluded_from_open(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        _emit_tag_keyword_candidate(registry)
+        resp = client.post("/api/v1/classify/candidates/cand-1/dismiss")
+        assert resp.status_code == 200, resp.text
+
+        body = client.get("/api/v1/classify/candidates").json()
+        assert body["count"] == 1
+        assert body["candidates"][0]["status"] == "dismissed"
+        assert not any(
+            c["status"] == "open" and c["candidate_id"] == "cand-1"
+            for c in body["candidates"]
+        )
+
+    def test_dismiss_missing_candidate_is_404(self, client: TestClient) -> None:
+        resp = client.post("/api/v1/classify/candidates/does-not-exist/dismiss")
+        assert resp.status_code == 404
+
+    def test_applied_candidate_reads_status_applied(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        event_id = _emit_tag_keyword_candidate(registry)
+        apply_resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "widget",
+                "target": "manufacturing",
+                "source_event_id": event_id,
+            },
+        )
+        assert apply_resp.status_code == 200, apply_resp.text
+
+        body = client.get("/api/v1/classify/candidates").json()
+        assert body["candidates"][0]["status"] == "applied"
+
+
+# ---------------------------------------------------------------------------
+# POST /classify/candidates/mine — admin only, defaulted thresholds
+# ---------------------------------------------------------------------------
+
+
+class TestMineCandidates:
+    def test_mine_with_recommended_defaults_runs_clean_on_empty_corpus(
+        self, client: TestClient
+    ) -> None:
+        resp = client.post(
+            "/api/v1/classify/candidates/mine", json={"kinds": ["tag_keyword"]}
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["tag_keyword_count"] == 0
+        assert body["domain_alias_count"] == 0
+        assert "learning.tag_evolution" in body["used_recommended_defaults"]
+
+    def test_unknown_kind_is_400(self, client: TestClient) -> None:
+        resp = client.post(
+            "/api/v1/classify/candidates/mine", json={"kinds": ["not_a_kind"]}
+        )
+        assert resp.status_code == 400
+
+    def test_empty_kinds_is_400(self, client: TestClient) -> None:
+        resp = client.post("/api/v1/classify/candidates/mine", json={"kinds": []})
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# POST /classify/rules — apply, governed through MutationExecutor
+# ---------------------------------------------------------------------------
+
+
+class TestApplyRule:
+    def test_apply_creates_overlay_row_visible_without_restart(
+        self, client: TestClient
+    ) -> None:
+        resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "xyz",
+                "target": "finance",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "success"
+        assert body["created_id"] == "tag_keyword:xyz"
+
+        # Same process, same request cycle, no restart -- the whole point
+        # of re-reading the overlay store per call rather than caching it.
+        rules = client.get("/api/v1/classify/rules").json()
+        row = _rule_row(rules, "tag_keyword", "xyz")
+        assert row["source"] == "overlay"
+        assert row["target"] == "finance"
+        assert row["source_event_id"] == "01TESTEVENT0000000000000"
+
+    def test_audit_event_carries_actor_and_metrics(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token, key_id = _mint_with_key_id(registry, [SCOPE_ADMIN])
+        resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "xyz",
+                "target": "finance",
+                "source_event_id": "01TESTEVENT0000000000000",
+                "support": 40,
+                "precision": 0.8,
+                "lift": 0.3,
+            },
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_APPLIED, order="asc", limit=10
+        )
+        payload = events[-1].payload
+        assert payload["applied_by"] == f"api:classify:{key_id}"
+        assert payload["support"] == 40
+        assert payload["precision"] == 0.8
+        assert payload["lift"] == 0.3
+
+    def test_apply_missing_fields_is_422(self, client: TestClient) -> None:
+        resp = client.post("/api/v1/classify/rules", json={"kind": "tag_keyword"})
+        assert resp.status_code == 422
+
+    def test_non_admin_key_is_403(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token = _mint(registry, [SCOPE_READ])
+        resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "xyz",
+                "target": "finance",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# DELETE /classify/rules/{kind}/{key} — revoke
+# ---------------------------------------------------------------------------
+
+
+class TestRevokeRule:
+    def _apply(
+        self, client: TestClient, key: str = "xyz", target: str = "finance"
+    ) -> None:
+        resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": key,
+                "target": target,
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+    def test_revoke_overlay_row_succeeds_and_removes_it(
+        self, client: TestClient
+    ) -> None:
+        self._apply(client)
+        resp = client.delete("/api/v1/classify/rules/tag_keyword/xyz")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "success"
+
+        rules = client.get("/api/v1/classify/rules").json()
+        assert not any(
+            r["kind"] == "tag_keyword" and r["key"] == "xyz" for r in rules["rules"]
+        )
+
+    def test_revoke_unknown_key_is_400(self, client: TestClient) -> None:
+        resp = client.delete("/api/v1/classify/rules/tag_keyword/does-not-exist")
+        assert resp.status_code == 400
+        assert "No applied tag_keyword rule found" in resp.json()["detail"]
+
+    def test_revoke_config_sourced_rule_is_refused_4xx(self, tmp_path: Path) -> None:
+        reg = StoreRegistry(
+            stores_dir=tmp_path / "stores",
+            classify_config={"domain_keywords": {"finance": ["cfgword"]}},
+        )
+        app_module._registry = reg
+        try:
+            client = TestClient(create_app())
+            resp = client.delete("/api/v1/classify/rules/tag_keyword/cfgword")
+            assert resp.status_code == 400
+            assert "config.yaml" in resp.json()["detail"]
+        finally:
+            reg.close()
+            app_module._registry = None
+
+    def test_non_admin_key_is_403(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token = _mint(registry, [SCOPE_READ])
+        resp = client.delete(
+            "/api/v1/classify/rules/tag_keyword/xyz", headers={"X-API-Key": token}
+        )
+        assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# GET /classify/rules — effective rules, badged by source
+# ---------------------------------------------------------------------------
+
+
+class TestListRules:
+    def test_default_rules_are_badged_default(self, client: TestClient) -> None:
+        resp = client.get("/api/v1/classify/rules")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["count"] > 0
+        assert all(
+            row["source"] in ("default", "config", "overlay") for row in body["rules"]
+        )
+        assert all(row["source"] != "overlay" for row in body["rules"])
+
+    def test_config_sourced_rule_is_badged_config(self, tmp_path: Path) -> None:
+        reg = StoreRegistry(
+            stores_dir=tmp_path / "stores",
+            classify_config={"domain_keywords": {"finance": ["cfgword"]}},
+        )
+        app_module._registry = reg
+        try:
+            client = TestClient(create_app())
+            body = client.get("/api/v1/classify/rules").json()
+            row = _rule_row(body, "tag_keyword", "cfgword")
+            assert row["source"] == "config"
+            assert row["applied_at"] is None
+        finally:
+            reg.close()
+            app_module._registry = None
+
+    def test_overlay_rule_count_increases_after_apply(self, client: TestClient) -> None:
+        before = client.get("/api/v1/classify/rules").json()["count"]
+        client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "xyz",
+                "target": "finance",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+        )
+        after = client.get("/api/v1/classify/rules").json()
+        assert after["count"] == before + 1
+        row = _rule_row(after, "tag_keyword", "xyz")
+        assert row["source"] == "overlay"
+        assert row["applied_at"] is not None

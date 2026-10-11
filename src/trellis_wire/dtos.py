@@ -707,6 +707,134 @@ class SchemaEvolutionListResponse(WireModel):
     candidates: list[SchemaEvolutionCandidate] = Field(default_factory=list)
 
 
+class ClassifyCandidate(WireModel):
+    """One mined ``tag_keyword`` or ``domain_alias`` candidate, latest emission only.
+
+    ``kind`` is ``"tag_keyword"`` (``key`` = keyword, ``target`` = domain
+    tag) or ``"domain_alias"`` (``key`` = alias, ``target`` = canonical
+    tag). ``status`` is ``"open"``, ``"applied"`` (an overlay row exists
+    for this ``(kind, key)``) or ``"dismissed"`` (a
+    ``CLASSIFY_CANDIDATE_DISMISSED`` event postdates this emission).
+
+    ``metrics`` carries the mined candidate's own kind-specific fields
+    verbatim from its ``to_event_payload()`` -- ``support``/``precision``/
+    ``recall``/``lift``/``has_write_target`` for ``tag_keyword``;
+    ``cooccurrence_rate``/``is_lexical_only``/``documents_gained``/etc. for
+    ``domain_alias``. The two kinds' metric vocabularies differ enough
+    that typing each field individually would force every row of one kind
+    to carry nulls for the other's fields; a passthrough dict keeps the
+    DTO's own fields (above) honest about what every row actually has.
+    """
+
+    candidate_id: str
+    kind: str
+    key: str
+    target: str
+    status: str
+    recurrence_count: int = 0
+    example_count: int = 0
+    notes: list[str] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    emitted_at: str
+    source_event_id: str
+
+
+class ClassifyCandidateListResponse(WireModel):
+    """List of mined classify candidates, deduped to their latest emission."""
+
+    count: int = 0
+    candidates: list[ClassifyCandidate] = Field(default_factory=list)
+
+
+class ClassifyMineRequest(WireRequestModel):
+    """Body for ``POST /api/v1/classify/candidates/mine``.
+
+    ``use_recommended_defaults`` (default ``True``) mirrors ``trellis
+    classify tag-candidates``/``domain-candidates``'s own
+    ``_tag_evolution_registry``/``_domain_normalization_registry``: when
+    the real, persistent ``ParameterRegistry`` is missing a required
+    threshold for a component, mine with that component's shipped
+    ``RECOMMENDED_SEED_VALUES`` instead of hard-failing -- never silent,
+    since the response's ``used_recommended_defaults`` names exactly
+    which component(s) this happened for and a ``structlog`` WARN is
+    emitted for each. Pin it ``False`` to require every threshold
+    pre-seeded (``trellis admin settings`` has no seeding command for
+    these yet -- seed via a governed write directly) and get a 400
+    naming the missing keys and their recommended values instead of a
+    mined set of candidates run against unreviewed defaults.
+    """
+
+    kinds: list[str] = Field(default_factory=lambda: ["tag_keyword", "domain_alias"])
+    scan_limit: int | None = None
+    use_recommended_defaults: bool = True
+
+
+class ClassifyMineResponse(WireModel):
+    """Outcome of one mining run, plus the candidates it just emitted."""
+
+    status: str = "ok"
+    tag_keyword_count: int = 0
+    domain_alias_count: int = 0
+    used_recommended_defaults: list[str] = Field(default_factory=list)
+    candidates: list[ClassifyCandidate] = Field(default_factory=list)
+
+
+class ClassifyRuleRow(WireModel):
+    """One effective tag/domain rule, with the source that wins it.
+
+    ``source`` is ``"default"`` (built-in), ``"config"``
+    (``config.yaml``) or ``"overlay"`` (applied through the governed
+    write path) -- the precedence documented in
+    ``trellis.classify.factory``. ``applied_at``/``applied_by``/
+    ``source_event_id`` are set only for an ``"overlay"`` row.
+    """
+
+    kind: str
+    key: str
+    target: str
+    source: str
+    applied_at: str | None = None
+    applied_by: str | None = None
+    source_event_id: str | None = None
+
+
+class ClassifyRuleListResponse(WireModel):
+    """Effective tag/domain rules, defaults and config.yaml included."""
+
+    count: int = 0
+    rules: list[ClassifyRuleRow] = Field(default_factory=list)
+
+
+class ClassifyRuleApplyRequest(WireRequestModel):
+    """Body for ``POST /api/v1/classify/rules``.
+
+    ``source_event_id`` must name the ``TAG_KEYWORD_CANDIDATE`` /
+    ``DOMAIN_ALIAS_CANDIDATE`` event this rule was mined from, so the
+    applied overlay row -- and its audit event -- stay traceable back to
+    the evidence that justified it. ``support``/``precision``/``lift``
+    are copied onto the ``CLASSIFY_RULE_APPLIED`` audit event verbatim;
+    they are optional only because a caller applying a rule with no
+    mined candidate behind it (hand-typed) has none to carry.
+    """
+
+    kind: str
+    key: str
+    target: str
+    source_event_id: str
+    support: int | None = None
+    precision: float | None = None
+    lift: float | None = None
+
+
+class ClassifyCandidateDismissResponse(WireModel):
+    """Outcome of dismissing one open candidate."""
+
+    status: str = "ok"
+    candidate_id: str
+    kind: str | None = None
+    message: str | None = None
+
+
 class DraftAdrResponse(WireModel):
     """Rendered promotion-ADR markdown for a schema-evolution candidate."""
 

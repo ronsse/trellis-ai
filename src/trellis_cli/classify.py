@@ -61,6 +61,7 @@ from trellis.classify.factory import (
     DOMAIN_ALIASES_KEY,
     DOMAIN_ASPECTS_KEY,
     DOMAIN_KEYWORDS_KEY,
+    effective_classify_rule_rows,
 )
 from trellis.classify.refresh import DEFAULT_PAGE_SIZE, reclassify_stale
 from trellis.classify.shadow import compare_shadow_to_live, shadow_classify_stale
@@ -78,11 +79,21 @@ from trellis.learning.tag_evolution import (
     analyze_tag_keyword_candidates,
     apply_promotion,
 )
+from trellis.mutate import (
+    Command,
+    CommandStatus,
+    Operation,
+    build_classify_rules_executor,
+)
 from trellis.ops import ParameterRegistry
 from trellis.schemas.parameters import ParameterScope, ParameterSet
+from trellis.stores.classify_overrides_store import (
+    ClassifyOverridesStore,
+    resolve_classify_overrides_path,
+)
 from trellis_cli.analyze import _InMemoryParameterStore
 from trellis_cli.config import get_config_dir
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, refusal_exit_code
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
 
@@ -899,3 +910,203 @@ def _render_domain_candidates(
         f"aspect, not a subject: list it under {CLASSIFY_CONFIG_KEY}."
         f"{DOMAIN_ASPECTS_KEY} and it stops attracting merges.[/dim]"
     )
+
+
+# ---------------------------------------------------------------------------
+# apply-rule / revoke-rule / effective-rules — CLI parity for the governed
+# Apply/Revoke review flow (REST: trellis_api/routes/classify_rules.py).
+# ---------------------------------------------------------------------------
+
+
+def _execute_classify_command(cmd: Command, output_format: str) -> None:
+    """Submit *cmd*, render the result, and exit non-zero on refusal/failure.
+
+    Mirrors ``trellis_cli.admin_settings._execute`` exactly: both formats
+    are rendered first, the exit decided below that branch
+    (``tests/unit/test_format_exit_parity_rule.py``).
+    """
+    registry = _get_registry()
+    result = build_classify_rules_executor(registry).execute(cmd)
+
+    if output_format == "json":
+        emit_json(
+            {
+                "status": result.status.value,
+                "command_id": result.command_id,
+                "operation": result.operation,
+                "message": result.message,
+                "created_id": result.created_id,
+                "warnings": list(result.warnings),
+            }
+        )
+    else:
+        if result.status == CommandStatus.SUCCESS:
+            console.print(f"[green]✓ Command executed[/green]: {result.operation}")
+        else:
+            console.print(
+                f"[red]✗ Command {result.status}[/red]: {result.operation}",
+                soft_wrap=True,
+            )
+        console.print(f"  ID: {escape(result.command_id)}")
+        console.print(
+            f"  Message: {result.message}",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+
+    if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        raise typer.Exit(code=refusal_exit_code(result))
+
+
+@classify_app.command("apply-rule")
+def apply_rule(
+    kind: str = typer.Argument(..., help="'tag_keyword' or 'domain_alias'."),
+    key: str = typer.Argument(
+        ..., help="Keyword (tag_keyword) or alias (domain_alias) to apply."
+    ),
+    target: str = typer.Argument(
+        ..., help="Domain (tag_keyword) or canonical tag (domain_alias)."
+    ),
+    source_event_id: str = typer.Option(
+        ...,
+        "--source-event-id",
+        help=(
+            "The TAG_KEYWORD_CANDIDATE/DOMAIN_ALIAS_CANDIDATE event this "
+            "rule was mined from (see 'trellis classify tag-candidates' / "
+            "'domain-candidates', or GET /api/v1/classify/candidates)."
+        ),
+    ),
+    support: int | None = typer.Option(
+        None, "--support", help="Carried onto the audit event."
+    ),
+    precision: float | None = typer.Option(
+        None, "--precision", help="Carried onto the audit event."
+    ),
+    lift: float | None = typer.Option(
+        None, "--lift", help="Carried onto the audit event."
+    ),
+    requested_by: str = typer.Option(
+        "cli:classify-apply-rule",
+        "--by",
+        help="Audit trail: who/what requested this write.",
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json."
+    ),
+) -> None:
+    """Apply one mined candidate into the operator overlay (governed write).
+
+    Routes through ``Operation.CLASSIFY_RULE_APPLY`` -- the same governed
+    path the admin-scoped REST route (``POST /api/v1/classify/rules``)
+    uses -- so a denying policy, a degraded store, or a malformed
+    candidate is refused identically on both surfaces.
+    """
+    cmd = Command(
+        operation=Operation.CLASSIFY_RULE_APPLY,
+        args={
+            "kind": kind,
+            "key": key,
+            "target": target,
+            "source_event_id": source_event_id,
+            "support": support,
+            "precision": precision,
+            "lift": lift,
+        },
+        target_id=f"{kind}:{key}",
+        target_type="classify_rule",
+        requested_by=requested_by,
+    )
+    _execute_classify_command(cmd, output_format)
+
+
+@classify_app.command("revoke-rule")
+def revoke_rule(
+    kind: str = typer.Argument(..., help="'tag_keyword' or 'domain_alias'."),
+    key: str = typer.Argument(
+        ..., help="Keyword (tag_keyword) or alias (domain_alias)."
+    ),
+    requested_by: str = typer.Option(
+        "cli:classify-revoke-rule",
+        "--by",
+        help="Audit trail: who/what requested this write.",
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json."
+    ),
+) -> None:
+    """Revoke one applied rule from the operator overlay.
+
+    Refused -- not a no-op -- when ``(kind, key)`` has no overlay row,
+    including when the rule instead comes from ``config.yaml``: that one
+    was never written by this store and cannot be un-applied through it
+    (see ``ClassifyRuleRevokeHandler``'s docstring for the two distinct
+    refusal messages).
+    """
+    cmd = Command(
+        operation=Operation.CLASSIFY_RULE_REVOKE,
+        args={"kind": kind, "key": key},
+        target_id=f"{kind}:{key}",
+        target_type="classify_rule",
+        requested_by=requested_by,
+    )
+    _execute_classify_command(cmd, output_format)
+
+
+@classify_app.command("effective-rules")
+def effective_rules(
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text or json."
+    ),
+) -> None:
+    """Every effective tag-keyword / domain-alias rule, badged by source.
+
+    Read-only parity for ``GET /api/v1/classify/rules``: both call
+    :func:`~trellis.classify.factory.effective_classify_rule_rows`, so the
+    precedence badging (``default`` / ``config`` / ``overlay``) can never
+    disagree between the two surfaces.
+    """
+    registry = _get_registry()
+    path = resolve_classify_overrides_path(registry.stores_dir)
+    overlay_rows: dict[tuple[str, str], object] = {}
+    if path is not None:
+        store = ClassifyOverridesStore(path)
+        overlay_rows = {(row.kind, row.key): row for row in store.list()}
+
+    rows = effective_classify_rule_rows(
+        classify_config=registry.classify_config,
+        domain_keyword_map=registry.domain_keyword_map(),
+        domain_alias_map=registry.domain_alias_map(),
+        overlay_rows=overlay_rows,
+    )
+
+    if output_format == "json":
+        emit_json(
+            {
+                "count": len(rows),
+                "rules": [
+                    {
+                        **row,
+                        "applied_at": row["applied_at"].isoformat()
+                        if row["applied_at"] is not None
+                        else None,
+                    }
+                    for row in rows
+                ],
+            }
+        )
+        raise typer.Exit(code=EXIT_OK)
+
+    if not rows:
+        console.print("[green]Effective classify rules:[/green] none.")
+        raise typer.Exit(code=EXIT_OK)
+
+    console.print(f"[green]Effective classify rules:[/green] {len(rows)}")
+    badges = {"default": "dim", "config": "cyan", "overlay": "bold green"}
+    for row in rows:
+        badge = badges[row["source"]]
+        console.print(
+            f"  [{badge}]{row['source']:>8}[/{badge}] "
+            f"{escape(row['kind'])}: {escape(row['key'])} -> {escape(row['target'])}"
+        )
+    raise typer.Exit(code=EXIT_OK)

@@ -428,6 +428,318 @@ components:
       - status
       title: BulkItemResult
       type: object
+    ClassifyCandidate:
+      additionalProperties: false
+      description: 'One mined ``tag_keyword`` or ``domain_alias`` candidate, latest emission only.
+
+
+        ``kind`` is ``"tag_keyword"`` (``key`` = keyword, ``target`` = domain
+
+        tag) or ``"domain_alias"`` (``key`` = alias, ``target`` = canonical
+
+        tag). ``status`` is ``"open"``, ``"applied"`` (an overlay row exists
+
+        for this ``(kind, key)``) or ``"dismissed"`` (a
+
+        ``CLASSIFY_CANDIDATE_DISMISSED`` event postdates this emission).
+
+
+        ``metrics`` carries the mined candidate''s own kind-specific fields
+
+        verbatim from its ``to_event_payload()`` -- ``support``/``precision``/
+
+        ``recall``/``lift``/``has_write_target`` for ``tag_keyword``;
+
+        ``cooccurrence_rate``/``is_lexical_only``/``documents_gained``/etc. for
+
+        ``domain_alias``. The two kinds'' metric vocabularies differ enough
+
+        that typing each field individually would force every row of one kind
+
+        to carry nulls for the other''s fields; a passthrough dict keeps the
+
+        DTO''s own fields (above) honest about what every row actually has.'
+      properties:
+        candidate_id:
+          title: Candidate Id
+          type: string
+        emitted_at:
+          title: Emitted At
+          type: string
+        example_count:
+          default: 0
+          title: Example Count
+          type: integer
+        key:
+          title: Key
+          type: string
+        kind:
+          title: Kind
+          type: string
+        metrics:
+          additionalProperties: true
+          title: Metrics
+          type: object
+        notes:
+          items:
+            type: string
+          title: Notes
+          type: array
+        recurrence_count:
+          default: 0
+          title: Recurrence Count
+          type: integer
+        source_event_id:
+          title: Source Event Id
+          type: string
+        status:
+          title: Status
+          type: string
+        target:
+          title: Target
+          type: string
+      required:
+      - candidate_id
+      - kind
+      - key
+      - target
+      - status
+      - emitted_at
+      - source_event_id
+      title: ClassifyCandidate
+      type: object
+    ClassifyCandidateDismissResponse:
+      additionalProperties: false
+      description: Outcome of dismissing one open candidate.
+      properties:
+        candidate_id:
+          title: Candidate Id
+          type: string
+        kind:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Kind
+        message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Message
+        status:
+          default: ok
+          title: Status
+          type: string
+      required:
+      - candidate_id
+      title: ClassifyCandidateDismissResponse
+      type: object
+    ClassifyCandidateListResponse:
+      additionalProperties: false
+      description: List of mined classify candidates, deduped to their latest emission.
+      properties:
+        candidates:
+          items:
+            $ref: '#/components/schemas/ClassifyCandidate'
+          title: Candidates
+          type: array
+        count:
+          default: 0
+          title: Count
+          type: integer
+      title: ClassifyCandidateListResponse
+      type: object
+    ClassifyMineRequest:
+      additionalProperties: false
+      description: 'Body for ``POST /api/v1/classify/candidates/mine``.
+
+
+        ``use_recommended_defaults`` (default ``True``) mirrors ``trellis
+
+        classify tag-candidates``/``domain-candidates``''s own
+
+        ``_tag_evolution_registry``/``_domain_normalization_registry``: when
+
+        the real, persistent ``ParameterRegistry`` is missing a required
+
+        threshold for a component, mine with that component''s shipped
+
+        ``RECOMMENDED_SEED_VALUES`` instead of hard-failing -- never silent,
+
+        since the response''s ``used_recommended_defaults`` names exactly
+
+        which component(s) this happened for and a ``structlog`` WARN is
+
+        emitted for each. Pin it ``False`` to require every threshold
+
+        pre-seeded (``trellis admin settings`` has no seeding command for
+
+        these yet -- seed via a governed write directly) and get a 400
+
+        naming the missing keys and their recommended values instead of a
+
+        mined set of candidates run against unreviewed defaults.'
+      properties:
+        kinds:
+          items:
+            type: string
+          title: Kinds
+          type: array
+        scan_limit:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Scan Limit
+        use_recommended_defaults:
+          default: true
+          title: Use Recommended Defaults
+          type: boolean
+      title: ClassifyMineRequest
+      type: object
+    ClassifyMineResponse:
+      additionalProperties: false
+      description: Outcome of one mining run, plus the candidates it just emitted.
+      properties:
+        candidates:
+          items:
+            $ref: '#/components/schemas/ClassifyCandidate'
+          title: Candidates
+          type: array
+        domain_alias_count:
+          default: 0
+          title: Domain Alias Count
+          type: integer
+        status:
+          default: ok
+          title: Status
+          type: string
+        tag_keyword_count:
+          default: 0
+          title: Tag Keyword Count
+          type: integer
+        used_recommended_defaults:
+          items:
+            type: string
+          title: Used Recommended Defaults
+          type: array
+      title: ClassifyMineResponse
+      type: object
+    ClassifyRuleApplyRequest:
+      additionalProperties: false
+      description: 'Body for ``POST /api/v1/classify/rules``.
+
+
+        ``source_event_id`` must name the ``TAG_KEYWORD_CANDIDATE`` /
+
+        ``DOMAIN_ALIAS_CANDIDATE`` event this rule was mined from, so the
+
+        applied overlay row -- and its audit event -- stay traceable back to
+
+        the evidence that justified it. ``support``/``precision``/``lift``
+
+        are copied onto the ``CLASSIFY_RULE_APPLIED`` audit event verbatim;
+
+        they are optional only because a caller applying a rule with no
+
+        mined candidate behind it (hand-typed) has none to carry.'
+      properties:
+        key:
+          title: Key
+          type: string
+        kind:
+          title: Kind
+          type: string
+        lift:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Lift
+        precision:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Precision
+        source_event_id:
+          title: Source Event Id
+          type: string
+        support:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Support
+        target:
+          title: Target
+          type: string
+      required:
+      - kind
+      - key
+      - target
+      - source_event_id
+      title: ClassifyRuleApplyRequest
+      type: object
+    ClassifyRuleListResponse:
+      additionalProperties: false
+      description: Effective tag/domain rules, defaults and config.yaml included.
+      properties:
+        count:
+          default: 0
+          title: Count
+          type: integer
+        rules:
+          items:
+            $ref: '#/components/schemas/ClassifyRuleRow'
+          title: Rules
+          type: array
+      title: ClassifyRuleListResponse
+      type: object
+    ClassifyRuleRow:
+      additionalProperties: false
+      description: 'One effective tag/domain rule, with the source that wins it.
+
+
+        ``source`` is ``"default"`` (built-in), ``"config"``
+
+        (``config.yaml``) or ``"overlay"`` (applied through the governed
+
+        write path) -- the precedence documented in
+
+        ``trellis.classify.factory``. ``applied_at``/``applied_by``/
+
+        ``source_event_id`` are set only for an ``"overlay"`` row.'
+      properties:
+        applied_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Applied At
+        applied_by:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Applied By
+        key:
+          title: Key
+          type: string
+        kind:
+          title: Kind
+          type: string
+        source:
+          title: Source
+          type: string
+        source_event_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Event Id
+        target:
+          title: Target
+          type: string
+      required:
+      - kind
+      - key
+      - target
+      - source
+      title: ClassifyRuleRow
+      type: object
     CodeProposalListResponse:
       additionalProperties: false
       description: List of code-authoring proposals (read-only).
@@ -2342,6 +2654,263 @@ paths:
       summary: Generate Advisories
       tags:
       - admin
+  /api/v1/classify/candidates:
+    get:
+      description: 'Recent tag/domain candidates, deduped to each one''s latest emission.
+
+
+        Never invokes a miner — see ``POST /classify/candidates/mine`` for
+
+        that. A candidate already present in the overlay reads ``applied``;
+
+        one with a more recent ``CLASSIFY_CANDIDATE_DISMISSED`` than its
+
+        latest surfacing reads ``dismissed``; otherwise ``open``.'
+      operationId: list_classify_candidates_api_v1_classify_candidates_get
+      parameters:
+      - description: Max candidate events to scan per kind. Never triggers mining.
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 500
+          description: Max candidate events to scan per kind. Never triggers mining.
+          maximum: 5000
+          minimum: 1
+          title: Limit
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassifyCandidateListResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: List Classify Candidates
+      tags:
+      - classify
+  /api/v1/classify/candidates/mine:
+    post:
+      description: 'Run the tag-keyword / domain-alias miners and emit candidate events.
+
+
+        Reuses :func:`trellis.learning.tag_evolution.analyze_tag_keyword_candidates`
+
+        and :func:`trellis.learning.domain_normalization.analyze_domain_alias_candidates`
+
+        directly — the same functions ``trellis classify tag-candidates`` /
+
+        ``domain-candidates`` call — rather than re-implementing the mining
+
+        logic here. Admin-scoped: unlike the read-only listing, this touches
+
+        the corpus scan and, on a missing threshold with
+
+        ``use_recommended_defaults=true``, mines under un-reviewed defaults.'
+      operationId: mine_classify_candidates_api_v1_classify_candidates_mine_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassifyMineRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassifyMineResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Mine Classify Candidates
+      tags:
+      - classify
+  /api/v1/classify/candidates/{candidate_id}/dismiss:
+    post:
+      description: 'Mark a candidate dismissed — no store write, audit trail only.
+
+
+        ``CLASSIFY_CANDIDATE_DISMISSED`` carries no dedicated ``Operation``:
+
+        a dismiss changes no state ``MutationExecutor`` governs, only this
+
+        event stream (see the ``EventType`` member''s own docstring), the same
+
+        posture :attr:`~trellis.stores.base.event_log.EventType.JOB_RUN_STARTED`
+
+        has. ``GET /classify/candidates`` excludes a dismissed candidate from
+
+        its "open" listing unless it resurfaces with a newer emission.'
+      operationId: dismiss_classify_candidate_api_v1_classify_candidates__candidate_id__dismiss_post
+      parameters:
+      - in: path
+        name: candidate_id
+        required: true
+        schema:
+          title: Candidate Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassifyCandidateDismissResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Dismiss Classify Candidate
+      tags:
+      - classify
+  /api/v1/classify/rules:
+    get:
+      description: 'Every effective tag-keyword / domain-alias rule, badged by source.
+
+
+        ``source`` is ``"overlay"`` when the exact ``(kind, key) -> target``
+
+        triple is an applied row in ``classify_overrides.json``, ``"config"``
+
+        when it instead comes from ``config.yaml``, and ``"default"`` for the
+
+        shipped built-ins otherwise (no built-in alias defaults exist today,
+
+        so that branch is defensive for aliases). The badging itself is
+
+        :func:`~trellis.classify.factory.effective_classify_rule_rows`,
+
+        shared with ``trellis classify effective-rules`` so the precedence
+
+        logic lives in one place.
+
+        ``registry.domain_keyword_map()`` / ``domain_alias_map()`` already
+
+        resolve the full precedence (defaults < config.yaml < overlay,
+
+        overlay merged additively per domain) — this route only re-derives
+
+        *which* layer won, never a second merge.'
+      operationId: list_classify_rules_api_v1_classify_rules_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassifyRuleListResponse'
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: List Classify Rules
+      tags:
+      - classify
+    post:
+      description: 'Apply one mined candidate into the operator overlay.
+
+
+        Routes through ``Operation.CLASSIFY_RULE_APPLY`` — the same governed
+
+        path ``trellis classify apply-rule`` uses — so a denying policy blocks
+
+        both surfaces identically (Stage 2 always runs, CLAUDE.md). The
+
+        candidate''s own metrics (``support``/``precision``/``lift``) are
+
+        carried through onto the audit event so a reviewer never has to join
+
+        back to the original ``TAG_KEYWORD_CANDIDATE`` / ``DOMAIN_ALIAS_CANDIDATE``
+
+        event to see what was approved.'
+      operationId: apply_classify_rule_api_v1_classify_rules_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassifyRuleApplyRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                title: Response Apply Classify Rule Api V1 Classify Rules Post
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Apply Classify Rule
+      tags:
+      - classify
+  /api/v1/classify/rules/{kind}/{key}:
+    delete:
+      description: 'Revoke one applied rule from the operator overlay.
+
+
+        Refused (400) when ``(kind, key)`` has no overlay row — including
+
+        when the rule comes from ``config.yaml`` instead, which this was
+
+        never written by and cannot un-apply; see
+
+        ``ClassifyRuleRevokeHandler``''s own docstring for the two distinct
+
+        refusal messages.'
+      operationId: revoke_classify_rule_api_v1_classify_rules__kind___key__delete
+      parameters:
+      - in: path
+        name: kind
+        required: true
+        schema:
+          title: Kind
+          type: string
+      - in: path
+        name: key
+        required: true
+        schema:
+          title: Key
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                title: Response Revoke Classify Rule Api V1 Classify Rules  Kind   Key  Delete
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Revoke Classify Rule
+      tags:
+      - classify
   /api/v1/code-proposals:
     get:
       description: 'List recent ``PROPOSAL_DRAFTED`` events with their markdown preview.

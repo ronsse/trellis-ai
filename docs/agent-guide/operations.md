@@ -684,6 +684,84 @@ Two properties of `KeywordDomainClassifier` shape the safety story. It matches k
 {"status": "ok", "facet": "domain", "emitted": true, "candidates": [{"candidate_id": "3f2a...", "facet": "domain", "keyword": "todoist", "tag": "task-management", "support": 40, "keyword_documents": 41, "tag_documents": 44, "corpus_documents": 964, "precision": 0.976, "recall": 0.909, "lift": 21.4, "has_write_target": true, "example_item_ids": ["doc-1"], "recurrence_count": 0, "notes": ["gated on agreement with the LLM, not on retrieval outcome — this shows the rule imitates the model, not that either helped", "domain hard-excludes on mismatch: a wrong keyword hides documents from domain-scoped queries rather than re-ranking them — human approval required"]}], "domain_keywords_fragment": {"task-management": ["todoist"]}}
 ```
 
+### Classify rule review — Apply / Revoke (#e181, gap G10)
+
+`tag-candidates` / `domain-candidates` (above) only *propose*: the paste-ready
+block in their text output is the only way to promote one, by hand, into
+`config.yaml`, with no audit trail. This section is the governed "approve"
+step that sits on top of mining — an **operator overlay**, not a third
+mining command.
+
+**Precedence.** `trellis.classify.factory.effective_domain_keywords()` /
+`effective_domain_aliases()` merge three layers, lowest to highest: built-in
+defaults < `config.yaml` < `classify_overrides.json` (`<data_dir>/stores/`,
+a `DegradableJsonStore` subclass — reads degrade row-by-row, writes refuse
+whole, same posture as `PolicyStore` / `AdvisoryStore`). An applied row
+always wins over the same key in `config.yaml`: an operator approving a
+mined candidate through this path is a more specific, more recent decision
+than whatever is sitting in a host-local file Trellis never writes to
+itself.
+
+**Governed, not a direct write.** Apply and revoke route through
+`Operation.CLASSIFY_RULE_APPLY` / `CLASSIFY_RULE_REVOKE`, via a dedicated
+admin-only executor (`build_classify_rules_executor`) rather than the
+general curate executor — this changes what the classifier does to every
+future document, not one piece of content. Both the CLI and the admin-scoped
+REST route submit the same `Command`, so a denying policy, a degraded
+overlay store, or a malformed candidate is refused identically on either
+surface (Stage 2 always runs, CLAUDE.md).
+
+```bash
+trellis classify apply-rule <kind> <key> <target> --source-event-id <id> \
+    [--support <n>] [--precision <f>] [--lift <f>] [--by <who>] [--format text|json]
+trellis classify revoke-rule <kind> <key> [--by <who>] [--format text|json]
+trellis classify effective-rules [--format text|json]
+```
+
+| Argument / option | Description |
+|---|---|
+| `kind` | `tag_keyword` or `domain_alias`. |
+| `key` | Keyword (`tag_keyword`) or alias (`domain_alias`) to apply/revoke. |
+| `target` (apply only) | Domain (`tag_keyword`) or canonical tag (`domain_alias`). |
+| `--source-event-id` (apply, required) | The `TAG_KEYWORD_CANDIDATE` / `DOMAIN_ALIAS_CANDIDATE` event this rule was mined from (see `tag-candidates` / `domain-candidates`, or `GET /api/v1/classify/candidates`) — kept so the applied row traces back to the event that proposed it, without a reviewer having to join back to it by hand. |
+| `--support` / `--precision` / `--lift` (apply) | The candidate's own mining metrics, carried onto the audit event. |
+
+`revoke-rule` is **refused, not a no-op**, when `(kind, key)` has no overlay
+row — including when the effective rule instead comes from `config.yaml`:
+that row was never written by this store and cannot be un-applied through
+it. `effective-rules` is read-only parity for `GET /api/v1/classify/rules`
+(see below): both call `effective_classify_rule_rows()`, badging every
+effective keyword/alias row by `source` (`default`, `config`, `overlay`).
+
+**REST** (`src/trellis_api/routes/classify_rules.py`; admin scope
+(`SCOPE_ADMIN`) on every write, read scope on the two `GET`s, mirroring
+`policies.py`'s mixed-scope mounting):
+
+| Method & path | Scope | Description |
+|---|---|---|
+| `GET /classify/candidates` | read | List mined candidates (`?limit=`). No `status` filter server-side — filter client-side on `status == "open"`. |
+| `POST /classify/candidates/mine` | admin | Run the tag-keyword / domain-alias miners inline and emit candidate events — reuses the same analyzer functions `tag-candidates` / `domain-candidates` call, not a reimplementation. Body: `{"kinds": ["tag_keyword", "domain_alias"], "scan_limit": null, "use_recommended_defaults": true}`. |
+| `POST /classify/candidates/{candidate_id}/dismiss` | admin | Mark one candidate dismissed (no body). `404` if no such candidate. |
+| `POST /classify/rules` | admin | Apply one candidate. Body is `ClassifyRuleApplyRequest`: `kind`, `key`, `target`, `source_event_id` (required — the candidate's `source_event_id`, **not** its `candidate_id`), optional `support`/`precision`/`lift`. |
+| `DELETE /classify/rules/{kind}/{key}` | admin | Revoke one applied (overlay-sourced) rule. |
+| `GET /classify/rules` | read | Every effective rule, badged by `source`. |
+
+**JSON shapes:**
+
+```json
+{"status": "ok", "tag_keyword_count": 2, "domain_alias_count": 0, "used_recommended_defaults": [], "candidates": [{"candidate_id": "3f2a...", "kind": "tag_keyword", "key": "todoist", "target": "task-management", "status": "open", "recurrence_count": 0, "example_count": 3, "notes": [], "metrics": {"support": 40, "precision": 0.976, "lift": 21.4}, "emitted_at": "2026-10-11T00:00:00Z", "source_event_id": "evt-9c1..."}]}
+```
+
+```json
+{"count": 2, "rules": [{"kind": "tag_keyword", "key": "todoist", "target": "task-management", "source": "overlay", "applied_at": "2026-10-11T00:00:00Z", "applied_by": "cli:classify-apply-rule", "source_event_id": "evt-9c1..."}]}
+```
+
+**UI:** the "Tag rules" tab (`src/trellis_api/static/index.html`) lists open
+candidates with Apply/Dismiss actions and the effective-rule table with
+Revoke restricted to `source === "overlay"` rows — the same refusal the
+`DELETE` route enforces, surfaced before the request rather than only after
+it fails.
+
 ### `trellis ingest evidence`
 
 Ingest evidence from a JSON file.

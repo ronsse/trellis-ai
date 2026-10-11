@@ -130,6 +130,7 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     from trellis_api.routes import (  # noqa: PLC0415
         admin,
+        classify_rules,
         curate,
         explore,
         extract,
@@ -205,6 +206,10 @@ def create_app() -> FastAPI:
     #                                   (route-level deps in
     #                                   routes/policies.py)
     #   settings                     -> admin (both GET and PUT/POST)
+    #   classify_rules               -> read on the two GET routes, plus
+    #                                   admin on mine/apply/revoke/dismiss
+    #                                   (route-level deps in
+    #                                   routes/classify_rules.py)
     #
     # ``admin`` implies every other scope; the legacy ``TRELLIS_API_KEY``
     # shared secret is granted all scopes for backwards compatibility.
@@ -246,6 +251,12 @@ def create_app() -> FastAPI:
         observations.router,
         prefix="/api/v1",
         tags=["observations"],
+        dependencies=read_auth,
+    )
+    app.include_router(
+        classify_rules.router,
+        prefix="/api/v1",
+        tags=["classify"],
         dependencies=read_auth,
     )
 
