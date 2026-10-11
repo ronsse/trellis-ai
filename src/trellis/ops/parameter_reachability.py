@@ -207,6 +207,11 @@ READ_POINTS: Mapping[str, ReadPoint] = {
             reader_module="trellis.learning.tag_evolution",
             resolvable_axes=frozenset(),
         ),
+        ReadPoint(
+            component_id="classify.mine_threshold_seed",
+            reader_module="trellis_api.routes.classify_rules",
+            resolvable_axes=frozenset(),
+        ),
     )
 }
 

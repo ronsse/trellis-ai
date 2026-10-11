@@ -81,6 +81,11 @@ UNCLASSIFIED_WRITE_EXEMPTIONS: dict[tuple[str, str], str] = {
         "These receivers are ParameterStore implementations, outside the "
         "document and vector planes."
     ),
+    ("trellis_api/routes/classify_rules.py", "put"): (
+        "_SeededParameterStore().put(...) is a ParameterStore implementation "
+        "used to seed recommended-default thresholds for mining, outside the "
+        "document and vector planes policed by issue #360."
+    ),
     ("trellis_api/routes/settings.py", "put"): (
         "This is @router.put(...), a FastAPI route decorator, not a store "
         "write -- possibly_a_store's marker check below guards `delete` "
@@ -438,10 +443,12 @@ def test_unknown_receivers_are_explicitly_classified_as_other_stores() -> None:
         if len(reason.split()) < 4
     ]
     assert not thin, f"unclassified write exemptions need prose reasons: {thin}"
-    assert len(sites) == 10, (
-        f"found {len(sites)} unclassified calls, expected 10 hand-read "
-        "ParameterStore/AdvisoryStore calls plus the one @router.put(...) "
-        "decorator false positive (trellis_api/routes/settings.py)"
+    assert len(sites) == 11, (
+        f"found {len(sites)} unclassified calls, expected 11 hand-read "
+        "ParameterStore/AdvisoryStore calls (including "
+        "_SeededParameterStore in trellis_api/routes/classify_rules.py, "
+        "#e181) plus the one @router.put(...) decorator false positive "
+        "(trellis_api/routes/settings.py)"
     )
 
 
