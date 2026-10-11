@@ -294,6 +294,20 @@
             padding: 2rem 0;
             text-align: center;
         }
+        /* The EventLog read behind a chart hit its scan cap (P1-8): recent
+           buckets may be missing data rather than genuinely showing none.
+           Distinct from .chart-empty (no data at all) and .degraded-banner
+           (a store read partly failed) -- this is neither, just a window
+           that is wider than what one bounded read could cover. */
+        .metric-chart .chart-scan-warning {
+            margin-top: 0.6rem;
+            padding: 0.4rem 0.6rem;
+            background: rgba(245, 158, 11, 0.1);
+            border: 1px solid var(--warn);
+            border-radius: 6px;
+            font-size: 0.72rem;
+            color: var(--warn);
+        }
         .metric-legend {
             display: flex;
             flex-wrap: wrap;
@@ -1545,7 +1559,12 @@
             <div class="status-section" id="evo-noise-section" style="display:none">
                 <h2>Usage-Rule Proposals</h2>
                 <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Items a usage-rate rule proposes for demotion because they appear often but are rarely used. These are proposals, not demotions &mdash; an evidence gate screens each one, and only a write (<code style="font-family:var(--font-mono)">trellis analyze apply-noise-tags</code>, or the scheduled curation cycle) actually tags anything.</p>
+                <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">Demotion requires evidence of unhelpfulness, never absence of evidence of helpfulness (see <code style="font-family:var(--font-mono)">classify/demotion_gate.py</code>) &mdash; the evidence gate below may admit fewer items than the usage rule proposed, and that is the gate working as intended, not under-performing.</p>
                 <div id="evo-noise"></div>
+                <div id="evo-noise-apply" style="margin-top:0.75rem">
+                    <button class="btn btn-sm" onclick="showApplyNoiseTagsConfirm()">Apply noise tags&hellip;</button>
+                </div>
+                <div id="evo-noise-apply-result"></div>
             </div>
         </div>
 
@@ -2186,7 +2205,7 @@
             { metric: 'reference_rate', title: 'Reference rate',
               sub: 'items_referenced / items_served (best "are packs improving" proxy)', pct: true },
             { metric: 'advisory_fitness', title: 'Advisory fitness',
-              sub: 'mean advisory confidence (point); suppressed count in tooltip', pct: false },
+              sub: 'mean advisory confidence (point); the point tooltip already shows n, this bucket\'s suppressed count', pct: false },
             { metric: 'noise_tag_volume', title: 'Noise-tag volume',
               sub: 'items flipped to signal_quality="noise" per day', pct: false }
         ];
@@ -2233,6 +2252,21 @@
             return card;
         }
 
+        // compute_timeseries has reported ScanCoverage (whether the
+        // underlying EventLog read hit its cap) since #374, but the route
+        // used to build MetricsTimeseriesResponse without ever reading
+        // result.scan -- a truncated window went flat at its recent end
+        // with nothing anywhere saying so (P1-8). A no-op when `data` is
+        // absent (the result.err branch) or the scan was not truncated.
+        function appendScanWarning(card, data) {
+            if (!data || !data.scan_truncated) return;
+            const warn = document.createElement('div');
+            warn.className = 'chart-scan-warning';
+            const scanned = data.scanned_events != null ? data.scanned_events : '?';
+            warn.textContent = `Scan capped at ${scanned} event(s) — this window may be missing older history.`;
+            card.appendChild(warn);
+        }
+
         function renderLegend(series) {
             const legend = document.createElement('div');
             legend.className = 'metric-legend';
@@ -2250,6 +2284,7 @@
         function renderTrendChart(meta, result) {
             const card = chartCard(meta.title, meta.sub);
             if (result.err) return chartEmpty(card, 'Could not load: ' + result.err.message);
+            appendScanWarning(card, result.data);
             const series = (result.data.series || []).filter(s => s.points.length > 0);
             if (series.length === 0) return chartEmpty(card, 'No data in this window yet.');
 
@@ -2340,6 +2375,7 @@
             const card = chartCard('Parameter promotions',
                 'governance events per day — promote / created / rejected / degraded counts');
             if (result.err) return chartEmpty(card, 'Could not load: ' + result.err.message);
+            appendScanWarning(card, result.data);
             const series = (result.data.series || []).filter(s => s.points.length > 0);
             if (series.length === 0) return chartEmpty(card, 'No governance events in this window yet.');
 
@@ -2775,8 +2811,6 @@
             const days = document.getElementById('evo-days').value;
             const summary = document.getElementById('evo-summary');
             const items = document.getElementById('evo-items');
-            const noiseSection = document.getElementById('evo-noise-section');
-            const noise = document.getElementById('evo-noise');
 
             summary.innerHTML = loadingHtml('Loading effectiveness data...');
             items.innerHTML = '';
@@ -2816,38 +2850,88 @@
                     items.innerHTML = '<div class="empty-state"><div class="icon">&#x2191;</div><p>No item scores yet. Assemble context packs and provide feedback to see effectiveness data.</p></div>';
                 }
 
-                if (data.noise_candidates && data.noise_candidates.length > 0) {
-                    noiseSection.style.display = 'block';
-                    // noise_candidates is the usage-rule's proposal, not a demotion
-                    // list: demotion_screen.admitted is what the evidence gate
-                    // actually cleared, and this read-only view never calls the
-                    // write path, so it cannot say whether admitted ids were
-                    // tagged by a separate apply-noise-tags run.
-                    const screen = data.demotion_screen;
-                    const admittedIds = screen ? screen.admitted : [];
-                    const admittedSet = new Set(admittedIds);
-                    let summaryLine = `${data.noise_candidates.length} proposed by the usage rule`;
-                    if (screen) {
-                        summaryLine += `; ${admittedIds.length} admitted by the evidence gate`;
-                        if (screen.suppressed) {
-                            summaryLine += ' (batch suppressed on thin corpus coverage)';
-                        }
-                    } else {
-                        summaryLine += '; no evidence gate ran over this batch';
-                    }
-                    summaryLine += '. This view does not write tags &mdash; admitted does not mean tagged.';
-                    noise.innerHTML = `<p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:0.75rem;">${summaryLine}</p>` +
-                        data.noise_candidates.map(id => {
-                            const admitted = admittedSet.has(id);
-                            const cls = admitted ? 'badge-warn' : 'badge-info';
-                            const label = admitted ? 'admitted' : 'proposed';
-                            return `<div class="status-row"><span class="mono truncate" title="${escHtml(id)}">${escHtml(id)}</span><span class="badge ${cls}" title="usage-rule proposal, not an applied demotion">${label}</span></div>`;
-                        }).join('');
-                } else {
-                    noiseSection.style.display = 'none';
-                }
+                renderNoiseSection(data);
+                cancelApplyNoiseTags();
+                document.getElementById('evo-noise-apply-result').innerHTML = '';
             } catch (err) {
                 summary.innerHTML = `<div class="empty-state"><div class="icon">&#x2191;</div><p>Could not load effectiveness data: ${escHtml(err.message)}</p></div>`;
+            }
+        }
+
+        // Shared by loadEvolution (GET /effectiveness, noise_tags_written
+        // always null) and runApplyNoiseTags (POST
+        // /effectiveness/apply-noise-tags, same report-shaped fields but
+        // with noise_tags_written populated) -- one renderer so the two
+        // can never drift into describing the same fields differently.
+        function renderNoiseSection(data) {
+            const noiseSection = document.getElementById('evo-noise-section');
+            const noise = document.getElementById('evo-noise');
+            if (data.noise_candidates && data.noise_candidates.length > 0) {
+                noiseSection.style.display = 'block';
+                // noise_candidates is the usage-rule's proposal, not a demotion
+                // list: demotion_screen.admitted is what the evidence gate
+                // actually cleared, and noise_tags_written is what a write
+                // pass (apply-noise-tags) actually tagged -- distinct from
+                // both, and null whenever no write was attempted.
+                const screen = data.demotion_screen;
+                const admittedIds = screen ? screen.admitted : [];
+                const admittedSet = new Set(admittedIds);
+                let summaryLine = `${data.noise_candidates.length} proposed by the usage rule`;
+                if (screen) {
+                    summaryLine += `; ${admittedIds.length} admitted by the evidence gate`;
+                    if (screen.suppressed) {
+                        summaryLine += ' (batch suppressed on thin corpus coverage)';
+                    }
+                } else {
+                    summaryLine += '; no evidence gate ran over this batch';
+                }
+                summaryLine += data.noise_tags_written != null
+                    ? `; ${data.noise_tags_written} noise tags written`
+                    : '; 0 noise tags written so far (read-only view)';
+                noise.innerHTML = `<p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:0.75rem;">${summaryLine}</p>` +
+                    data.noise_candidates.map(id => {
+                        const admitted = admittedSet.has(id);
+                        const cls = admitted ? 'badge-warn' : 'badge-info';
+                        const label = admitted ? 'admitted' : 'proposed';
+                        return `<div class="status-row"><span class="mono truncate" title="${escHtml(id)}">${escHtml(id)}</span><span class="badge ${cls}" title="usage-rule proposal, not an applied demotion">${label}</span></div>`;
+                    }).join('');
+            } else {
+                noiseSection.style.display = 'none';
+            }
+        }
+
+        function showApplyNoiseTagsConfirm() {
+            const el = document.getElementById('evo-noise-apply');
+            if (!el) return;
+            el.innerHTML =
+                '<p style="font-size:0.8rem; color:var(--warn); margin-bottom:0.4rem;">This tags every item the evidence gate admits with signal_quality="noise" (PackBuilder excludes those by default). Demotion requires evidence of unhelpfulness, not absence of evidence of helpfulness, so this can admit fewer items than were proposed. Confirm?</p>' +
+                '<button class="btn btn-sm btn-danger" onclick="runApplyNoiseTags()">Confirm: apply noise tags</button> ' +
+                '<button class="btn btn-ghost btn-sm" onclick="cancelApplyNoiseTags()">Cancel</button>';
+        }
+
+        function cancelApplyNoiseTags() {
+            const el = document.getElementById('evo-noise-apply');
+            if (!el) return;
+            el.innerHTML = '<button class="btn btn-sm" onclick="showApplyNoiseTagsConfirm()">Apply noise tags&hellip;</button>';
+        }
+
+        async function runApplyNoiseTags() {
+            const days = document.getElementById('evo-days').value;
+            const resultEl = document.getElementById('evo-noise-apply-result');
+            const applyEl = document.getElementById('evo-noise-apply');
+            if (applyEl) applyEl.innerHTML = loadingHtml('Applying noise tags...');
+            try {
+                const data = await postJSON(`/effectiveness/apply-noise-tags?days=${days}`, {});
+                cancelApplyNoiseTags();
+                // Re-render straight from the POST response: it carries the
+                // same report-shaped fields as GET /effectiveness, just
+                // with noise_tags_written populated, so re-fetching the GET
+                // route here would only revert that field back to null.
+                renderNoiseSection(data);
+                resultEl.innerHTML = `<p style="color:var(--success)">Wrote noise tags to ${escHtml(String(data.noise_candidates_tagged ?? 0))} item(s) of ${escHtml(String(data.noise_candidates_proposed ?? 0))} proposed; ${escHtml(String(data.noise_candidates_refused_not_document ?? 0))} refused (not a document).</p>`;
+            } catch (err) {
+                cancelApplyNoiseTags();
+                resultEl.innerHTML = `<p style="color:var(--error)">Apply failed: ${escHtml(err.message)}</p>`;
             }
         }
 
@@ -4191,12 +4275,22 @@
                 const rejected = payload.rejected_items || [];
                 const budgetTrace = payload.budget_trace || [];
                 const feedback = data.feedback || [];
+                // feedback.length is this route's displayed slice, capped
+                // at 50 -- always <=50 and silently read as "that's all of
+                // it" even when far more exists. feedback_total/
+                // feedback_truncated (P1-9) say when the card is showing a
+                // capped view rather than the whole count.
+                const feedbackTotal = data.feedback_total != null ? data.feedback_total : feedback.length;
+                const feedbackValueText = data.feedback_truncated
+                    ? `${feedback.length} of ${feedbackTotal}` : String(feedbackTotal);
+                const feedbackSubText = data.feedback_truncated
+                    ? 'signals recorded (capped list)' : 'signals recorded';
 
                 let metaHtml = '<div class="cards" style="margin:0 0 1rem 0">';
                 metaHtml += `<div class="card"><h3>Items</h3><div class="value">${payload.items_count != null ? payload.items_count : '-'}</div><div class="sub">of ${payload.candidates_found != null ? payload.candidates_found : '?'} candidates</div></div>`;
                 metaHtml += `<div class="card"><h3>Budget</h3><div class="value" style="font-size:1.1rem">${payload.budget_max_items || '-'} items</div><div class="sub">${payload.budget_max_tokens || '-'} tokens max</div></div>`;
                 metaHtml += `<div class="card"><h3>Strategies</h3><div class="value" style="font-size:0.95rem">${(payload.strategies_used || []).map(escHtml).join(', ') || '-'}</div>${payload.reranker ? `<div class="sub">reranker: ${escHtml(payload.reranker)}</div>` : ''}</div>`;
-                metaHtml += `<div class="card"><h3>Feedback</h3><div class="value">${feedback.length}</div><div class="sub">signals recorded</div></div>`;
+                metaHtml += `<div class="card"><h3>Feedback</h3><div class="value">${escHtml(feedbackValueText)}</div><div class="sub">${feedbackSubText}</div></div>`;
                 metaHtml += '</div>';
 
                 let injectedHtml = '<p style="color:var(--text-dim); font-size:0.85rem">No items injected</p>';

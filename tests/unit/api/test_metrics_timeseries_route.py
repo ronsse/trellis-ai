@@ -16,9 +16,11 @@ from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
 from trellis.auth import SCOPE_ADMIN, SCOPE_READ, generate_api_key
-from trellis.stores.base.event_log import Event, EventType
+from trellis.retrieve.metrics_timeseries import TimeseriesResult
+from trellis.stores.base.event_log import Event, EventType, ScanCoverage
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
+from trellis_api.routes import admin
 
 
 @pytest.fixture(autouse=True)
@@ -195,3 +197,62 @@ class TestResponseShape:
         assert resp.status_code == 200
         # 1 referenced / 2 served = 0.5
         assert resp.json()["series"][0]["points"][0]["value"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Scan coverage (P1-8) — compute_timeseries already attaches a
+# ScanCoverage to its result; the route used to build the response
+# without ever reading result.scan, so a truncated scan (an EventLog
+# read that hit its cap) was silently invisible to every caller. These
+# tests drive compute_timeseries through a monkeypatched stand-in
+# rather than seeding DEFAULT_SCAN_LIMIT (5000) real events, which
+# would pin the same wiring at a cost of thousands of DB writes per run.
+# ---------------------------------------------------------------------------
+
+
+class TestScanCoverageWiring:
+    def test_untruncated_scan_reports_false_and_scanned_count(
+        self, client, monkeypatch
+    ):
+        def fake_compute_timeseries(event_log, *, metric, days, group_by):
+            return TimeseriesResult(
+                metric=metric,
+                bucket="day",
+                group_by=group_by,
+                days=days,
+                series=[],
+                scan=ScanCoverage(limit=5000, scanned=12, truncated=False),
+            )
+
+        monkeypatch.setattr(admin, "compute_timeseries", fake_compute_timeseries)
+        resp = client.get("/api/v1/metrics/timeseries?metric=pack_success_rate")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["scan_truncated"] is False
+        assert data["scanned_events"] == 12
+
+    def test_truncated_scan_surfaces_on_the_response(self, client, monkeypatch):
+        def fake_compute_timeseries(event_log, *, metric, days, group_by):
+            return TimeseriesResult(
+                metric=metric,
+                bucket="day",
+                group_by=group_by,
+                days=days,
+                series=[],
+                scan=ScanCoverage(
+                    limit=5000,
+                    scanned=5000,
+                    matched=5230,
+                    dropped=230,
+                    truncated=True,
+                    covered_since="2026-09-15T00:00:00+00:00",
+                    note="scan capped at 5000 events",
+                ),
+            )
+
+        monkeypatch.setattr(admin, "compute_timeseries", fake_compute_timeseries)
+        resp = client.get("/api/v1/metrics/timeseries?metric=advisory_fitness")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["scan_truncated"] is True
+        assert data["scanned_events"] == 5000
