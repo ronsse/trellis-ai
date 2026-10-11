@@ -1043,6 +1043,67 @@ and no `warnings` key, because nothing was submitted.
 
 ---
 
+## Settings Store
+
+`<data_dir>/stores/settings.json` holds per-deployment overrides for the
+write-behaviour knobs reported by `trellis admin write-config` and
+`GET /api/version`, plus `graph_seeding` — 13 tunables total
+(`src/trellis/core/settings_registry.py`'s `SETTINGS_REGISTRY`: the 12
+`WriteBehaviourConfig` fields plus `graph_seeding`, explicitly **not**
+`learning.auto_promote.*`, which stays out by owner decision). **This PR
+ships the store and the read path only.** `trellis admin write-config` and
+`GET /api/version` report whatever the file holds, but nothing in this repo
+writes to it yet — a CLI/REST surface (`trellis admin settings`, a
+`MutationExecutor` op) is deferred to a follow-up PR. The recovery command
+named below is that future command, named now so the error text does not
+need to change again when it ships.
+
+### Precedence: env > settings > default
+
+Each knob resolves through `WriteBehaviourConfig.from_env_and_settings()` in
+that order: a real (non-blank) environment variable always wins; a settings
+override applies only where the environment is unset or blank; the shipped
+default applies when neither is set. `resolve_overridden_by()` answers the
+same question per field independently, as `"env"` / `"settings"` /
+`"default"` — `describe(overridden_by=...)` carries it into
+`trellis admin write-config --format json`'s `knobs[].overridden_by` and
+into `GET /api/version`'s `write_behaviour_settings[].overridden_by`.
+Callers that omit `overridden_by` keep the older two-valued behaviour
+(`describe()` falls back to `"env"` / `"default"` from the `overridden`
+flag), so this is additive, not a breaking change to `describe()`'s shape.
+
+**`settings_live` tells you whether an override does anything yet.** The
+registry catalogs every tunable `write_config.py` knows about; it is not a
+claim that each one has a settings-aware enforcement site. Today only
+`pack_holdout_rate` does — `src/trellis/retrieve/builder_factory.py` reads
+through the settings store on the pack-assembly path. Every other row is
+still reported truthfully (`overridden_by` says `"settings"` the moment you
+set one), but a `graph_seeding` or `memory_extraction` override has no
+runtime effect until its own call site is wired the same way;
+`SettingSpec.settings_live` is `False` for all twelve of them.
+
+### Failure posture: degrades, never raises
+
+Unlike `policies.json` below, a damaged `settings.json` **does not fail a
+read.** `SettingsStore` (`src/trellis/stores/settings_store.py`, built on
+the shared `DegradableJsonStore`) degrades per row: rows that parsed are
+served, a row that didn't parse is simply absent from the override set,
+which makes that one knob fall back through the same
+`env > settings > default` chain as if it had never been overridden — not a
+`ConfigError`. A corrupt settings file silently reverting one tunable to its
+environment value or default is no worse than that tunable never having
+been overridden, so nothing here needs to fail closed the way a damaged
+`policies.json` does. The degradation is still visible, not silent: a
+`settings_load_degraded` **error**-level log line names the path and reason,
+because a reverted override an operator can't see is still a surprise, just
+not an access-control one. Every write (once a write surface ships) is
+refused while degraded or stale, for the same whole-file-rewrite reason
+`policies.json` refuses writes: replacing the file from a partial view would
+make the damaged file *valid* and erase whatever didn't parse, for good.
+Recovery: `trellis admin settings list`.
+
+---
+
 ## Policy Commands
 
 Stage 2 of the [governed mutation pipeline](#python-only-mutation-api) evaluates
@@ -1682,7 +1743,7 @@ Three properties worth knowing:
 - **Counts and reasons only — never ids, never excerpts.** Naming the ids would invite a re-fetch of exactly what a gate decided not to serve. The ids stay in `PACK_ASSEMBLED.payload["withholding"]["withheld_item_ids"]`, which is an operator surface with a different access path.
 - **Graduated disclosure (#359) contributes nothing here.** A pointer is a *served* item — ranked, cited, fetchable via `get_items` — and calling it withheld would blur the distinction that change was careful to make.
 
-**One deliberate exception: the pack holdout.** `TRELLIS_PACK_HOLDOUT_RATE` (default `0`, off) withholds a whole built pack, items and advisories, from a random share of retrieval calls, so pack effect can be measured against a control arm. A pack is held out when a SHA-256 draw on its `pack_id` falls below the rate, so its arm is fixed by the id and is the same in every process. The caller receives an ordinary empty pack with its `pack_id` and no `Withheld:` line, because an agent that can tell it is in the control arm is no longer a control; a held-out pack reads exactly like a greenfield one. The record is complete on the operator path: see the `holdout` keys in the [`PACK_ASSEMBLED` payload table](#pack_assembled-event-payload). `GET /api/v1/events` and `GET /api/v1/packs/{pack_id}` return the would-be pack to `admin` callers only; any other key reads `holdout` and `holdout_rate` without it. The aggregate readers of `PACK_ASSEMBLED` (promotion, effectiveness and advisory fitness, advisory generation, pack telemetry and sections, serve attribution) drop held-out packs and the feedback naming them, so they report the served arm. While the rate is above `0`, `get_context` (full and `index=True`) and `search` render every empty pack with its `pack_id` header instead of the bare `No context found for: …` (or `No results found for: …`) line, so the capture join reads both kinds of empty pack alike. Each serving process reads the rate from its own environment on every build, so set it where the MCP server and the API run. `trellis admin write-config --format json` and `GET /api/version` report it, and an unparseable or out-of-range value means `0` with a warning (`pack_holdout_rate_unparseable` / `pack_holdout_rate_out_of_range`). Why the exception: [`claude-md-rationale.md`](../design/claude-md-rationale.md).
+**One deliberate exception: the pack holdout.** `TRELLIS_PACK_HOLDOUT_RATE` (default `0`, off) withholds a whole built pack, items and advisories, from a random share of retrieval calls, so pack effect can be measured against a control arm. A pack is held out when a SHA-256 draw on its `pack_id` falls below the rate, so its arm is fixed by the id and is the same in every process. The caller receives an ordinary empty pack with its `pack_id` and no `Withheld:` line, because an agent that can tell it is in the control arm is no longer a control; a held-out pack reads exactly like a greenfield one. The record is complete on the operator path: see the `holdout` keys in the [`PACK_ASSEMBLED` payload table](#pack_assembled-event-payload). `GET /api/v1/events` and `GET /api/v1/packs/{pack_id}` return the would-be pack to `admin` callers only; any other key reads `holdout` and `holdout_rate` without it. The aggregate readers of `PACK_ASSEMBLED` (promotion, effectiveness and advisory fitness, advisory generation, pack telemetry and sections, serve attribution) drop held-out packs and the feedback naming them, so they report the served arm. While the rate is above `0`, `get_context` (full and `index=True`) and `search` render every empty pack with its `pack_id` header instead of the bare `No context found for: …` (or `No results found for: …`) line, so the capture join reads both kinds of empty pack alike. Each serving process reads the rate from its own environment on every build, so set it where the MCP server and the API run. `trellis admin write-config --format json` and `GET /api/version` report it, and an unparseable or out-of-range value means `0` with a warning (`pack_holdout_rate_unparseable` / `pack_holdout_rate_out_of_range`). It is the one knob a [settings-store](#settings-store) override already reaches at runtime (`SettingSpec.settings_live`); both surfaces' `overridden_by` names whether `env`, `settings` or `default` is in force. Why the exception: [`claude-md-rationale.md`](../design/claude-md-rationale.md).
 
 `PACK_ASSEMBLED.payload["withholding"]` is emitted on both pack kinds **even when nothing was withheld** (`{"total": 0, "by_reason": {}, ...}`), so an analyzer can tell "the summary ran and found nothing" from "the summary never ran". The two collect-seam gates — `signal_quality="noise"` and `Lifecycle.state="archived"` — now write `rejected_items` rows (reasons `noise` and `archived`) where previously their only observable was a `logger.debug` line that fires under **no shipped default** (`configure_stderr_logging` pins INFO, the CLI pins WARNING). `trellis -vv` or `TRELLIS_LOG_LEVEL=DEBUG` does enable it — which is precisely the point: the signal existed only for someone who already suspected the problem and went looking.
 

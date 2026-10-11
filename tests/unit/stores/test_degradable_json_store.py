@@ -45,6 +45,7 @@ from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.schemas.settings import SettingRow
 from trellis.stores import degradable_json_store
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.degradable_json_store import (
@@ -52,6 +53,7 @@ from trellis.stores.degradable_json_store import (
     UnknownFileIdentity,
 )
 from trellis.stores.policy_store import PolicyStore
+from trellis.stores.settings_store import SettingsStore
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,10 @@ def _policy() -> Policy:
         rules=[PolicyRule(operation="entity.create", action="deny")],
         enforcement=Enforcement.ENFORCE,
     )
+
+
+def _setting() -> SettingRow:
+    return SettingRow(name="pack_holdout_rate", value=0.1)
 
 
 def _advisory() -> Advisory:
@@ -144,6 +150,22 @@ CASES = [
             )
         ),
     ),
+    StoreCase(
+        label="settings",
+        cls=SettingsStore,
+        envelope_key="settings",
+        write=lambda store: store.set("pack_holdout_rate", 0.1),
+        row=lambda: _setting().model_dump(mode="json"),
+        row_id=lambda row: row["name"],
+        attempts=lambda store, seeded: {
+            "set": lambda: store.set("pack_holdout_rate", 0.1),
+            "remove": lambda: store.remove(seeded),
+        },
+        # ``SettingRow.value`` *is* the unconstrained-enough field here —
+        # unlike ``policy``/``advisory``, no nested ``metadata``/``evidence``
+        # detour is needed: a non-finite ``value`` is the direct write.
+        write_with_score=lambda store, value: store.set("pack_holdout_rate", value),
+    ),
 ]
 CASE_IDS = [c.label for c in CASES]
 
@@ -155,23 +177,27 @@ SHAPE_PARAMS = [
     for shape_id, text, reason in degenerate_files(case.envelope_key)
 ]
 
-#: ``(case, non-finite value)``, filtered to ``advisory`` only.
-#: ``AdvisoryEvidence.effect_size`` is plainly ``float``, so a non-finite
-#: value survives ``model_dump(mode="json")`` as a live float and reaches
-#: ``_save``'s ``json.dumps``. ``policy``'s float-capable fields,
-#: ``metadata`` and ``PolicyRule.params``, are both ``dict[str, Any]``,
-#: and Pydantic's own JSON-mode dump nulls a non-finite float nested
-#: under an ``Any``-typed value *before* ``_save`` ever calls
-#: ``json.dumps`` — measured directly, not assumed:
+#: ``(case, non-finite value)``, filtered to ``advisory`` and ``settings``.
+#: ``AdvisoryEvidence.effect_size`` and ``SettingRow.value`` are both
+#: plainly ``float``-compatible (the latter a ``float | int | str | bool``
+#: union, which Pydantic resolves a Python ``float`` against), so a
+#: non-finite value survives ``model_dump(mode="json")`` as a live float
+#: and reaches ``_save``'s ``json.dumps`` for either — measured directly:
+#: ``SettingRow(name="x", value=float("nan")).model_dump(mode="json")["value"]``
+#: is ``nan``, not ``None``. ``policy``'s float-capable fields, ``metadata``
+#: and ``PolicyRule.params``, are both ``dict[str, Any]``, and Pydantic's
+#: own JSON-mode dump nulls a non-finite float nested under an
+#: ``Any``-typed value *before* ``_save`` ever calls ``json.dumps`` — also
+#: measured directly:
 #: ``Policy(...).model_copy(update={"metadata": {"score": float("nan")}})
 #: .model_dump(mode="json")["metadata"]`` is ``{"score": None}``. So no
 #: live NaN can reach the write guard through ``Policy``'s public schema
 #: today; ``test_save_dumps_with_allow_nan_false`` below pins that the
-#: guard is wired on the shared base regardless, for both stores.
+#: guard is wired on the shared base regardless, for every store.
 NON_FINITE_PARAMS = [
     pytest.param(case, value, id=f"{case.label}-{value_id}")
     for case in CASES
-    if case.label == "advisory"
+    if case.label in {"advisory", "settings"}
     for value, value_id in (
         (float("nan"), "nan"),
         (float("inf"), "inf"),
@@ -401,6 +427,8 @@ class TestNonFiniteFloatsAreRefusedOnEveryStore:
         row = case.row()
         if case.label == "policy":
             row["metadata"] = {"score": float("nan")}
+        elif case.label == "settings":
+            row["value"] = float("nan")
         else:
             row["evidence"]["effect_size"] = float("nan")
         path = tmp_path / "store.json"

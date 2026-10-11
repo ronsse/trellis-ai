@@ -362,21 +362,66 @@ class WriteBehaviourConfig:
             reconcile_timeout_s=_reconcile_timeout(src),
         )
 
+    @classmethod
+    def from_env_and_settings(
+        cls,
+        *,
+        settings: Mapping[str, bool | int | float | str] | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> WriteBehaviourConfig:
+        """Resolve with **env > settings > default** precedence.
+
+        ``settings`` is a plain ``field name -> value`` mapping — typically
+        :meth:`trellis.stores.settings_store.SettingsStore.as_values`,
+        read by the caller so this function stays decoupled from the
+        store: a caller that already has the values in hand pays no
+        second file read, and this module never imports the store layer.
+
+        Implemented as a layer under :meth:`from_env` rather than a
+        parallel set of per-field branches: a real, non-blank environment
+        variable is left untouched, a settings override is rendered into
+        the same raw-string shape that variable would have held and used
+        only where the environment is blank, and the merged mapping is
+        then parsed by the exact same per-field helpers (``_truthy``,
+        ``_min_confidence``, the clamps) that :meth:`from_env` uses. A
+        typo'd or out-of-range *settings* value therefore degrades exactly
+        as a typo'd or out-of-range *environment* value already does,
+        rather than gaining a second, divergent validation rule.
+        """
+        src: Mapping[str, str] = os.environ if env is None else env
+        merged = dict(src)
+        for flag, rendered in _settings_as_env_strings(settings or {}).items():
+            if not merged.get(flag, "").strip():
+                merged[flag] = rendered
+        return cls.from_env(merged)
+
     def as_dict(self) -> dict[str, Any]:
         """JSON-safe mapping, field name → effective value."""
         return asdict(self)
 
-    def describe(self) -> list[dict[str, Any]]:
+    def describe(
+        self, *, overridden_by: Mapping[str, str] | None = None
+    ) -> list[dict[str, Any]]:
         """Per-knob report rows for the operator surface.
 
         Each row carries the field name, the environment variable that
-        drives it, the effective value, the shipped default, and whether
-        the effective value differs from that default — which is the one
-        column an operator comparing two hosts actually reads.
+        drives it, the effective value, the shipped default, whether the
+        effective value differs from that default — which is the one
+        column an operator comparing two hosts actually reads — and
+        ``overridden_by``: ``"env"``, ``"settings"`` or ``"default"``.
+
+        ``overridden_by`` (the parameter) is this config's provenance map,
+        from :func:`resolve_overridden_by` against the same ``env`` /
+        ``settings`` this config was resolved from — pass it whenever this
+        config came from :meth:`from_env_and_settings`. Omitted, every row
+        falls back to ``"env"`` or ``"default"`` from the ``overridden``
+        boolean: a caller that still only calls :meth:`from_env` never put
+        a settings file in the picture, so any override can only be env.
         """
         defaults = WriteBehaviourConfig()
         effective = self.as_dict()
         default_values = defaults.as_dict()
+        provenance = overridden_by or {}
         return [
             {
                 "name": name,
@@ -384,9 +429,71 @@ class WriteBehaviourConfig:
                 "value": effective[name],
                 "default": default_values[name],
                 "overridden": effective[name] != default_values[name],
+                "overridden_by": provenance.get(
+                    name,
+                    "env" if effective[name] != default_values[name] else "default",
+                ),
             }
             for name in effective
         ]
+
+
+def _settings_as_env_strings(
+    settings: Mapping[str, bool | int | float | str],
+) -> dict[str, str]:
+    """Render settings-store values as the raw strings ``from_env`` parses.
+
+    Only fields :data:`ENV_VAR_BY_FIELD` knows about are rendered — a
+    settings row for a tunable this module does not govern (``graph_seeding``
+    lives in :mod:`trellis.retrieve.builder_factory` on purpose; see that
+    module's own ``GRAPH_SEEDING_ENV`` comment) is silently skipped here
+    rather than raising, so a caller can pass a whole
+    :meth:`~trellis.stores.settings_store.SettingsStore.as_values` read to
+    every precedence resolver without filtering it first.
+    """
+    rendered: dict[str, str] = {}
+    for field, flag in ENV_VAR_BY_FIELD.items():
+        if field not in settings:
+            continue
+        value = settings[field]
+        if isinstance(value, bool):
+            rendered[flag] = "true" if value else "false"
+        elif isinstance(value, float) and value.is_integer():
+            # "500.0" would defeat ``int("500.0")`` for an int-typed field
+            # if a caller stored the override as a Python float; every
+            # ``from_env`` parser accepts the plain-integer spelling.
+            rendered[flag] = str(int(value))
+        else:
+            rendered[flag] = str(value)
+    return rendered
+
+
+def resolve_overridden_by(
+    *,
+    settings: Mapping[str, bool | int | float | str] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Per-field ``"env" | "settings" | "default"``, for an operator report.
+
+    Mirrors the precedence :meth:`WriteBehaviourConfig.from_env_and_settings`
+    applies, as a separate function rather than folded into
+    :meth:`~WriteBehaviourConfig.describe`: ``describe`` only has the
+    *resolved* value in scope, never the environment or settings that
+    produced it, so the "which" question has to be answered here, by the
+    same two inputs, before the config is built.
+    """
+    src: Mapping[str, str] = os.environ if env is None else env
+    settings_map = settings or {}
+    return {
+        field: (
+            "env"
+            if src.get(flag, "").strip()
+            else "settings"
+            if field in settings_map
+            else "default"
+        )
+        for field, flag in ENV_VAR_BY_FIELD.items()
+    }
 
 
 #: Field name → the environment variable that drives it.  Declared after
@@ -427,4 +534,5 @@ __all__ = [
     "TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG",
     "TRUTHY",
     "WriteBehaviourConfig",
+    "resolve_overridden_by",
 ]

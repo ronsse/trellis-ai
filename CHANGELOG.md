@@ -57,6 +57,30 @@ All notable changes to Trellis will be documented in this file.
   policy create form submits exactly one rule per policy, matching
   `trellis policy add`'s own shape; each field carries a one-line
   description, including the deny-wins resolution order.
+- **Settings store and env > settings > default precedence for write-behaviour
+  knobs.** `SettingsStore` (`<data_dir>/stores/settings.json`, built on the
+  shared `DegradableJsonStore`) and a 13-entry catalog
+  (`src/trellis/core/settings_registry.py`'s `SETTINGS_REGISTRY`: the 12
+  `WriteBehaviourConfig` fields plus `graph_seeding`) let an operator override
+  a write-behaviour knob without an env var — once a write surface exists; this
+  change ships the store and the read path only, no CLI/REST write route and no
+  `MutationExecutor` op yet (deferred to a follow-up). Every knob now resolves
+  `env > settings > default`: `WriteBehaviourConfig.from_env_and_settings()`
+  overlays a settings value only where the real environment is blank, and
+  `resolve_overridden_by()` reports which of the three won, per field, as a new
+  `overridden_by` column on `trellis admin write-config --format json`'s
+  `knobs[]` and on `GET /api/version`'s `write_behaviour_settings[]`.
+  `describe()` stays backward compatible: a caller that omits
+  `overridden_by=` keeps the old `"env"`/`"default"` two-valued read. A damaged
+  `settings.json` degrades per row (never raises) and falls back through the
+  same precedence chain, logging `settings_load_degraded` at `error` so the
+  reversion is visible; every write is refused while degraded or stale, same
+  posture as `PolicyStore`/`AdvisoryStore`. Only `pack_holdout_rate`
+  (`SettingSpec.settings_live`) has a settings-aware enforcement site today
+  (`builder_factory.py`); the other twelve registry entries report truthfully
+  but have no runtime effect from a settings override yet. See
+  [`docs/agent-guide/operations.md` § Settings
+  Store](docs/agent-guide/operations.md#settings-store).
 - **Promotion-ready-candidate digest and readable fallback names (#845).**
   Prod had scored 796 learning candidates with 0 ever promoted, and 13 of the
   top 15 `promote_guidance` candidates carried an ugly bare-item-id

@@ -62,6 +62,14 @@ class VersionResponse(WireModel):
     by :mod:`trellis.core.write_provenance`, not by the wire contract.
     ``None`` means the server withheld it — it is ops detail, gated like
     the ``/readyz`` breakdown — not that the server cannot report it.
+
+    ``write_behaviour_settings`` is gated identically (``None`` under the
+    same withholding) but, unlike ``write_provenance``, is read fresh on
+    every call rather than cached once per process: a settings-store
+    override can change between two calls with no restart in between.
+    Each row is one :meth:`trellis.core.write_config.WriteBehaviourConfig.describe`
+    entry — ``name``, ``env_var``, ``value``, ``default``, ``overridden``,
+    and ``overridden_by`` (``"env"`` / ``"settings"`` / ``"default"``).
     """
 
     api_major: int
@@ -72,6 +80,7 @@ class VersionResponse(WireModel):
     package_version: str
     mcp_tools_version: int = 1
     write_provenance: dict[str, Any] | None = None
+    write_behaviour_settings: list[dict[str, Any]] | None = None
 
 
 # -- Ingest --
@@ -756,6 +765,16 @@ class MetricsTimeseriesResponse(WireModel):
     them, and carries one series per resolved group key. An empty store
     (or a metric with no events in the window) yields an empty
     ``series`` list.
+
+    ``scan_truncated`` / ``scanned_events`` flatten
+    :class:`trellis.stores.base.event_log.ScanCoverage` (``truncated`` /
+    ``scanned``) into plain scalars rather than nesting that core model
+    directly: ``trellis_wire`` has zero dependency on ``trellis`` core by
+    design (see ``trellis_wire.base``), so only the two fields the UI
+    needs cross the boundary. ``scan_truncated`` is true when the
+    underlying EventLog read(s) hit their cap, meaning buckets near the
+    recent end of the window may be missing data rather than genuinely
+    showing none (P1-8).
     """
 
     metric: str
@@ -763,6 +782,8 @@ class MetricsTimeseriesResponse(WireModel):
     group_by: str = "none"
     days: int = 30
     series: list[TimeseriesSeriesResponse] = Field(default_factory=list)
+    scan_truncated: bool = False
+    scanned_events: int | None = None
 
 
 # -- Loop health (e167) --
