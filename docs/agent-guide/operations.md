@@ -684,7 +684,7 @@ Two properties of `KeywordDomainClassifier` shape the safety story. It matches k
 {"status": "ok", "facet": "domain", "emitted": true, "candidates": [{"candidate_id": "3f2a...", "facet": "domain", "keyword": "todoist", "tag": "task-management", "support": 40, "keyword_documents": 41, "tag_documents": 44, "corpus_documents": 964, "precision": 0.976, "recall": 0.909, "lift": 21.4, "has_write_target": true, "example_item_ids": ["doc-1"], "recurrence_count": 0, "notes": ["gated on agreement with the LLM, not on retrieval outcome — this shows the rule imitates the model, not that either helped", "domain hard-excludes on mismatch: a wrong keyword hides documents from domain-scoped queries rather than re-ranking them — human approval required"]}], "domain_keywords_fragment": {"task-management": ["todoist"]}}
 ```
 
-### Classify rule review — Apply / Revoke (#e181, gap G10)
+### Classify rule review — Apply / Revoke 
 
 `tag-candidates` / `domain-candidates` (above) only *propose*: the paste-ready
 block in their text output is the only way to promote one, by hand, into

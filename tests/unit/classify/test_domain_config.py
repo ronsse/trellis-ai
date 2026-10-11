@@ -151,7 +151,7 @@ class TestEffectiveDomainAliases:
             effective_domain_aliases({"domain_aliases": {"a": "b", "b": "c"}})
 
     def test_overlay_alias_merges_in_alongside_config(self) -> None:
-        """A brand-new overlay alias (#e181) reaches the merged map."""
+        """A brand-new overlay alias reaches the merged map."""
         merged = effective_domain_aliases(
             {"domain_aliases": {"budget-hunting": "hunting"}},
             overlay_aliases={"finances": "finance"},
@@ -159,8 +159,8 @@ class TestEffectiveDomainAliases:
         assert merged == {"budget-hunting": "hunting", "finances": "finance"}
 
     def test_overlay_alias_wins_on_collision_with_config(self) -> None:
-        """Precedence is default < ``config.yaml`` < operator overlay
-        (#e181, gap G10): an overlay entry for a key ``config.yaml`` already
+        """Precedence is default < ``config.yaml`` < operator overlay:
+        an overlay entry for a key ``config.yaml`` already
         maps must win, not merely coexist. A merge that only *adds* the
         overlay (e.g. ``dict.setdefault``) would leave this on the
         ``config.yaml`` value instead."""

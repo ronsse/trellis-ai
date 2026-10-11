@@ -6,8 +6,8 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
-- **Governed tag/domain candidate review — Apply and Revoke (#e181, gap
-  G10).** `trellis classify tag-candidates` / `domain-candidates` have
+- **Governed tag/domain candidate review — Apply and
+  Revoke.** `trellis classify tag-candidates` / `domain-candidates` have
   always *mined* keyword and alias rules (`TAG_KEYWORD_CANDIDATE` /
   `DOMAIN_ALIAS_CANDIDATE` events) but never written anywhere — approving
   one meant hand-pasting YAML into `config.yaml`, with no audit trail.

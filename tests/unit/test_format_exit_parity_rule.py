@@ -936,7 +936,7 @@ def test_the_conditional_exit_helper_roster_is_exactly_the_private_may_exiters()
             "_exit_if_advisory_store_degraded",
         ],
         # Same shape as curate._execute_command above: exits on a
-        # REJECTED or FAILED Command and returns on any other (#e181).
+        # REJECTED or FAILED Command and returns on any other.
         "classify": ["_execute_classify_command", "_require_llm_facet_classifier"],
         # Exits on a REJECTED or FAILED command and returns on any other.
         "curate": ["_execute_command"],

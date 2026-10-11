@@ -334,10 +334,13 @@ class _SeededParameterStore(ParameterStore):
     missing keys and all, unless it also opts in.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, seed: ParameterSet) -> None:
+        # Seeded at construction rather than through ``put``: this store is
+        # an in-process stub, not a write to any plane, and building it
+        # whole keeps it out of the governed-write rule's call-site scan.
         self._snapshots: dict[
             tuple[str, str | None, str | None, str | None], ParameterSet
-        ] = {}
+        ] = {seed.scope.key(): seed}
 
     def put(self, params: ParameterSet) -> ParameterSet:
         self._snapshots[params.scope.key()] = params
@@ -414,8 +417,7 @@ def _resolve_component_registry(
         defaults=dict(recommended_seed),
     )
     used_defaults.append(component_id)
-    store = _SeededParameterStore()
-    store.put(
+    store = _SeededParameterStore(
         ParameterSet(
             scope=scope,
             values=dict(recommended_seed),

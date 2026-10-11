@@ -1,4 +1,4 @@
-"""The Tag rules tab renders mined candidates and effective rules correctly (e181).
+"""The Tag rules tab renders mined candidates and effective rules correctly.
 
 Static assertions on ``index.html``'s own markup/script, mirroring the
 pattern in ``test_loop_health_ui.py``: no browser, no JS engine -- pin the

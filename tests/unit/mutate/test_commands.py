@@ -30,7 +30,7 @@ class TestOperation:
         # + SETTINGS_UPDATE (governed settings-store write; null value
         # means "remove the override" rather than a separate RESET verb)
         # + CLASSIFY_RULE_APPLY + CLASSIFY_RULE_REVOKE (governed tag/domain
-        # candidate review — #e181, gap G10)
+        # candidate review)
         assert len(Operation) == 24
 
 
