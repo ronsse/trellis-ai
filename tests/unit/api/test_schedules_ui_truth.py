@@ -23,19 +23,19 @@ source itself, following the same source-regex convention as
    what the EventLog actually shows, and renders nothing at all once a
    run is seen.
 
-Gate #860b, follow-up 4, adds two more defects of the same kind:
+Gate #860b, follow-ups 7 and 8 add two more defects of the same kind:
 
-4a. The Edit button had no ``disabledAttr`` guard, unlike the checkbox
-    and "Run now" button on the same row, so clicking Edit then Save on
-    an unstored row silently enrolled it — the same bug blocker-pattern
-    already fixed for "Run now", just on a control that was missed.
-4b. The timeout field is pre-filled with the row's *effective* timeout
-    (the catalog default when no override is stored), not its raw
-    stored value, so an unchanged Save always re-sent that number as
-    an explicit override — pinning a null override to the shown
-    default. ``confirmEditJob`` now compares the field's current value
-    against the value it was pre-filled with and omits
-    ``timeout_seconds`` from the PATCH body entirely when they match.
+7. The Edit button had no ``disabledAttr`` guard, unlike the checkbox
+   and "Run now" button on the same row, so clicking Edit then Save on
+   an unstored row silently enrolled it — the same bug blocker-pattern
+   already fixed for "Run now", just on a control that was missed.
+8. The timeout field is pre-filled with the row's *effective* timeout
+   (the catalog default when no override is stored), not its raw
+   stored value, so an unchanged Save always re-sent that number as
+   an explicit override — pinning a null override to the shown
+   default. ``confirmEditJob`` now compares the field's current value
+   against the value it was pre-filled with and omits
+   ``timeout_seconds`` from the PATCH body entirely when they match.
 """
 
 from __future__ import annotations
@@ -157,7 +157,7 @@ def test_dispatcher_banner_renders_nothing_once_a_run_is_seen() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Gate #860b, follow-up 4a: Edit is gated the same way Run now already is.
+# Gate #860b, follow-up 7: Edit is gated the same way Run now already is.
 # ---------------------------------------------------------------------------
 
 
@@ -167,7 +167,7 @@ def test_edit_button_is_disabled_on_an_unstored_or_degraded_row() -> None:
     run_now_button = _between(body, 'data-action="confirmRunJob"', "</button>")
     # Both controls gate on the same computed attribute as the checkbox --
     # Edit+Save on an unstored row must not silently enroll it, exactly
-    # like Run now already refuses one (gate #860b, follow-up 4a).
+    # like Run now already refuses one (gate #860b, follow-up 7).
     edit_prefix = body[: body.index('data-action="showEditJobForm"')]
     run_now_prefix = body[: body.index('data-action="confirmRunJob"')]
     assert "${disabledAttr}" in edit_prefix.splitlines()[-1]
@@ -176,7 +176,7 @@ def test_edit_button_is_disabled_on_an_unstored_or_degraded_row() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Gate #860b, follow-up 4b: an unchanged Save never pins timeout_seconds.
+# Gate #860b, follow-up 8: an unchanged Save never pins timeout_seconds.
 # ---------------------------------------------------------------------------
 
 
