@@ -12,6 +12,7 @@ from trellis.mutate import (
     Operation,
     build_curate_executor,
     build_evidence_ingest_command_from_args,
+    redirect_unreachable_settings_update,
 )
 from trellis_api.app import get_registry
 from trellis_api.routes._results import command_response
@@ -80,5 +81,11 @@ def execute_batch(req: BatchCommandRequest) -> BatchCommandResponse:
         failed=sum(1 for r in results if r.status == CommandStatus.FAILED),
         rejected=sum(1 for r in results if r.status == CommandStatus.REJECTED),
         duplicates=sum(1 for r in results if r.status == CommandStatus.DUPLICATE),
-        results=[command_response(r) for r in results],
+        # Counts above are computed before this redirect: it only ever
+        # rewrites a FAILED message, never the status, so it cannot move a
+        # result between buckets. See its docstring for why status stays
+        # FAILED rather than becoming REJECTED.
+        results=[
+            command_response(redirect_unreachable_settings_update(r)) for r in results
+        ],
     )
