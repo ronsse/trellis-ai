@@ -85,7 +85,8 @@ class TestArcadeDBVectorContract(VectorStoreContractTests):
         )
         with graph._driver.session(database=graph._database) as session:
             session.run(
-                "MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim DETACH DELETE n"
+                "MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim "
+                "OR n:EdgeClaim DETACH DELETE n"
             )
         self._graph = graph
 
