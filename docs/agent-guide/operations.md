@@ -87,6 +87,59 @@ two keys are returned by `GET /api/v1/stats`, field for field.
 > that wants that number reads `document_rows`. Nothing errors on the change —
 > a reader that is not updated silently reports a different population.
 
+### `GET /api/v1/loops` (e167)
+
+Is each curation / learning loop actually doing anything? Admin scope,
+REST-only — no CLI wrapper. Reads existing events only
+(`trellis.ops.loop_health.summarize_loop_health`), plus one documented
+live read of `TunerStateStore.list_proposals(status="pending")` for the
+tuner row's backlog size.
+
+Seven rows, in nightly-cycle order: `noise_demotion`,
+`advisory_generation`, `advisory_fitness`, `learning_candidate_scoring`,
+`precedent_promotion`, `tuner`, `feedback_intake`. Each carries
+`actuates: bool` and a one-line `what_it_changes`, so a caller can tell
+"writes automatically" apart from "sensing only, a human still approves
+every change" without reading source.
+
+**Never-run vs ran-and-counted-zero**, the one load-bearing distinction:
+a loop with no visible event reports `last_run_at` / `last_status` /
+`counters` all `null` — "never run (or ran before this build)". A loop
+that ran and found nothing to do reports a real `last_run_at` and a
+`counters` dict whose values are legitimately `0`. The two must never
+render the same; collapsing them is exactly the failure CLAUDE.md's
+health-signal rule exists to prevent.
+
+```json
+{
+  "generated_at": "2026-10-10T23:00:00+00:00",
+  "loops": [
+    {
+      "name": "tuner",
+      "description": "Runs a RuleTuner pass over outcomes and, when learning.auto_promote.enabled is set, auto-promotes qualifying parameter proposals.",
+      "actuates": true,
+      "what_it_changes": "Auto-promotes a parameter proposal ONLY when learning.auto_promote.enabled is set (off by default); otherwise every proposal stays pending for a human to run `trellis metrics promote --commit`.",
+      "last_run_at": null,
+      "last_status": null,
+      "counters": {"pending_count": 3, "auto_promoted_total": 0}
+    }
+  ]
+}
+```
+
+The nightly cycle makes this durable by emitting `CURATE_CYCLE_COMPLETED`
+(end of every live `trellis worker curate` run) and `TUNE_CYCLE_COMPLETED`
+(end of every live `trellis worker tune` run) — never on a `--dry-run`
+pass, which must still write nothing to the EventLog. Both emits are
+wrapped whole (CLAUDE.md's advisory-step rule): a broken EventLog write
+logs a warning but never fails the cycle it is reporting on.
+
+The operator UI's **Loops** tab (`src/trellis_api/static/index.html`)
+renders this report: `last_run_at` labelled UTC with relative age, a row
+flagged `stale` when that age exceeds 36h regardless of its own
+`last_status`, `null` rendered as "Not measured", and a fetch failure
+rendered as a visible error rather than a silent empty list.
+
 ### `trellis admin serve`
 
 Start the REST API server.

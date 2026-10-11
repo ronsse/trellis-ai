@@ -501,6 +501,48 @@ class TestWorkerCurate:
         assert Path(data["decisions_path"]).exists()
         assert data["skipped_stages"] == []
 
+    def test_full_cycle_emits_curate_cycle_completed_event(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """A live cycle leaves a durable, API-readable health record (e167).
+
+        Before this, the cycle's only record was a structlog line a cron
+        wrapper piped to a host-only log file the API container cannot
+        read. ``GET /admin/loops`` and every other API-side reader can
+        only see what the EventLog carries.
+        """
+        _seed_promote_signal(temp_stores)
+        result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--output-dir",
+                str(tmp_path / "review"),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+
+        events = temp_stores.operational.event_log.get_events(
+            event_type=EventType.CURATE_CYCLE_COMPLETED, limit=10
+        )
+        assert len(events) == 1, "exactly one cycle ran, so exactly one event"
+        payload = events[0].payload
+        assert payload["status"] == data["status"]
+        assert payload["learning_candidates"] == data["learning_candidates"]
+        assert payload["noise_tagged"] == data["noise_tagged"]
+        assert payload["advisories_generated"] == data["advisories_generated"]
+        assert payload["skipped_stages"] == data["skipped_stages"]
+        assert isinstance(payload["duration_seconds"], float)
+        assert payload["duration_seconds"] >= 0
+        # emit() stamps write_provenance on every event; the brief names
+        # it explicitly as one of the counters a reader should get for
+        # free rather than this test re-deriving it.
+        assert "write_provenance" in events[0].metadata
+
     def test_text_surface_singular_candidate_wording(
         self, tmp_path: Path, temp_stores: StoreRegistry
     ) -> None:

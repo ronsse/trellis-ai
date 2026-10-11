@@ -46,6 +46,7 @@ from trellis.learning.tuners import (
     reject_proposal,
 )
 from trellis.mutate import build_curate_executor
+from trellis.ops.loop_health import summarize_loop_health
 from trellis.ops.parameter_reachability import (
     READ_POINTS,
     reachability_reasons,
@@ -72,6 +73,8 @@ from trellis_wire.dtos import (
     LearningPromotionRequest,
     LearningPromotionResponse,
     LearningPromotionResultRow,
+    LoopHealthResponse,
+    LoopHealthRowResponse,
     MetricsTimeseriesResponse,
     ProposalDecisionResponse,
     ProposalPreviewResponse,
@@ -151,6 +154,38 @@ def stats() -> StatsResponse:
         nodes=registry.knowledge.graph_store.count_nodes(),
         edges=registry.knowledge.graph_store.count_edges(),
         events=registry.operational.event_log.count(),
+    )
+
+
+@router.get("/loops", response_model=LoopHealthResponse)
+def loop_health() -> LoopHealthResponse:
+    """Is each curation / learning loop actually doing anything? (e167)
+
+    Reads existing events only (``trellis.ops.loop_health``), plus one
+    documented live store read for the tuner's pending-proposal count.
+    A loop with no event yet reports ``last_run_at``/``last_status`` as
+    ``null`` — "never run (or ran before this build)" — which is a
+    different fact from a real run that counted zero, so the two must
+    never render the same.
+    """
+    registry = get_registry()
+    report = summarize_loop_health(
+        registry.operational.event_log, registry.operational.tuner_state_store
+    )
+    return LoopHealthResponse(
+        generated_at=report.generated_at.isoformat(),
+        loops=[
+            LoopHealthRowResponse(
+                name=row.name,
+                description=row.description,
+                actuates=row.actuates,
+                what_it_changes=row.what_it_changes,
+                last_run_at=row.last_run_at.isoformat() if row.last_run_at else None,
+                last_status=row.last_status,
+                counters=row.counters,
+            )
+            for row in report.loops
+        ],
     )
 
 
