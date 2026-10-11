@@ -135,5 +135,9 @@ def test_loops_view_is_wired_into_nav_and_switch_view() -> None:
     page = _page()
     assert 'data-view="loops" data-label="Loops"' in page
     assert 'id="view-loops"' in page
-    assert re.search(r"views\s*=\s*\[[^\]]*'loops'[^\]]*\]", page)
+    # `views` is derived from the nav's own DOM order (see
+    # test_ui_keyboard_shortcuts.py), not a hand-maintained literal, so the
+    # nav tag asserted above is what puts "loops" in the derived list --
+    # pin the derivation mechanism itself rather than a stale array shape.
+    assert "const views = navLinks.map(a => a.dataset.view);" in page
     assert re.search(r"if\s*\(name === 'loops'\)\s*loadLoops\(\);", page)
