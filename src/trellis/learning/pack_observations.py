@@ -273,6 +273,16 @@ def _join_one(
             or pack_payload.get("run_id")
             or "unknown-run"
         ),
+        # Real conversation identity, not a run or pack id. ``PackFeedback``
+        # (``feedback/models.py``) carries no ``session_id`` field — only
+        # ``run_id``, set from the trace or pack id — so this reads
+        # ``PACK_ASSEMBLED.session_id`` alone (stamped by ``PackBuilder``
+        # from the caller's ``session_id`` argument) rather than falling
+        # back to ``run_id``/``pack_id``, which would silently relabel a
+        # pack identity as a session one. ``None`` when the pack was built
+        # without a session id — callers must treat that as "unknown
+        # session", never as its own one-element session.
+        "session_id": (str(pack_payload.get("session_id") or "").strip() or None),
         "intent_family": (
             feedback_payload.get("intent_family")
             or pack_payload.get("intent_family")

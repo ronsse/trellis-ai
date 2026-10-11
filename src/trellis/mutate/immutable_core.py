@@ -188,7 +188,6 @@ NON_DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         Operation.EVIDENCE_INGEST,
         Operation.EVIDENCE_ATTACH,
         Operation.PRECEDENT_PROMOTE,
-        Operation.PRECEDENT_UPDATE,
         Operation.ENTITY_CREATE,
         Operation.ENTITY_UPDATE,
         Operation.LINK_CREATE,

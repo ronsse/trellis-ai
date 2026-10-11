@@ -161,14 +161,22 @@ def _accumulate_item(
             "selection_efficiency_count": 0,
             "helpful_citations": 0,
             "unhelpful_citations": 0,
-            # Distinct run ids that cited this item helpful at least once —
-            # narrower than ``supporting_run_ids`` (every run the item was
-            # *served* in, regardless of verdict). This is the "distinct
-            # sessions" a helpful-citation count alone cannot answer: two
-            # helpful citations in one run is weaker evidence than one each
-            # in two runs, and ``helpful_citations`` does not distinguish
-            # them (see ``LearningCandidateAutoPromotePolicy``).
-            "helpful_run_ids": set(),
+            # Distinct real ``session_id``s (``observation["session_id"]``,
+            # sourced from ``PACK_ASSEMBLED`` — see ``pack_observations``)
+            # that cited this item helpful at least once. Deliberately not
+            # ``run_id``/pack id: a run or pack id names one serving, so
+            # counting those would let a single conversation that asks
+            # repeatedly and grades its own packs helpful read as several
+            # independent sessions. This is the "distinct sessions" a
+            # helpful-citation count alone cannot answer: two helpful
+            # citations in one session is weaker evidence than one each in
+            # two sessions (see ``LearningCandidateAutoPromotePolicy``).
+            "helpful_session_ids": set(),
+            # Helpful citations whose observation carried no session id at
+            # all — reported separately rather than folded into one
+            # pseudo-session, so a reviewer can tell "several sessions" from
+            # "no session identity was ever captured".
+            "sessionless_helpful_count": 0,
             "source_strategies": {},
         },
     )
@@ -228,9 +236,11 @@ def _accumulate_item(
     # repeated judgement rather than about one bad pack.
     if bool(item.get("cited_helpful")):
         metrics["helpful_citations"] += 1
-        metrics["helpful_run_ids"].add(
-            str(observation.get("run_id", "")).strip() or "unknown-run"
-        )
+        session_id = str(observation.get("session_id") or "").strip()
+        if session_id:
+            metrics["helpful_session_ids"].add(session_id)
+        else:
+            metrics["sessionless_helpful_count"] += 1
     if bool(item.get("cited_unhelpful")):
         metrics["unhelpful_citations"] += 1
 
@@ -417,11 +427,20 @@ def analyze_learning_observations(
                 "appearances": times_served,
                 "helpful_count": int(metrics["helpful_citations"]),
                 "unhelpful_count": int(metrics["unhelpful_citations"]),
-                # Distinct runs with >=1 helpful citation — see
-                # ``_accumulate_item``'s ``helpful_run_ids`` comment. Always
-                # <= helpful_count: one run can serve this item in more
-                # than one pack and cite it helpful each time.
-                "distinct_helpful_sessions": len(metrics["helpful_run_ids"]),
+                # Distinct real ``session_id``s with >=1 helpful citation —
+                # see ``_accumulate_item``'s ``helpful_session_ids`` comment.
+                # Always <= helpful_count: one session can cite this item
+                # helpful in more than one pack. Excludes sessionless
+                # citations entirely — see ``sessionless_citations`` below —
+                # so this never overstates independent corroboration.
+                "distinct_helpful_sessions": len(metrics["helpful_session_ids"]),
+                # Helpful citations whose observation had no real
+                # ``session_id`` to attribute (see ``pack_observations``).
+                # These count toward ``helpful_count`` but never toward
+                # ``distinct_helpful_sessions``, so a reviewer can see when
+                # the session floor is being starved by missing identity
+                # rather than by a genuine lack of corroboration.
+                "sessionless_citations": int(metrics["sessionless_helpful_count"]),
             },
             "evidence_refs": sorted(set(metrics["evidence_refs"]))[:10],
             "precedent_name": f"Learning: {intent_family} :: {title[:96]}".strip(),
@@ -742,6 +761,20 @@ def prepare_learning_promotions(
     }
 
 
+def precedent_entity_id_for_candidate(candidate_id: str) -> str:
+    """Deterministic ``entity_id`` a promoted ``candidate_id`` lands on.
+
+    One pure function so both the promotion path
+    (:func:`build_learning_promotion_payloads`) and any caller that needs
+    to check *whether* a candidate has already been promoted — without
+    promoting it — derive the same id. Review-queue approval, the CLI
+    ``promote-learning`` path and ``candidate_auto_promote``'s idempotency
+    check (``already_promoted``) all resolve the same candidate to the same
+    precedent this way; there is no second id scheme to drift from it.
+    """
+    return f"precedent://learning/{_slugify(candidate_id)}"
+
+
 def build_learning_promotion_payloads(
     *,
     candidate: Mapping[str, Any],
@@ -749,7 +782,7 @@ def build_learning_promotion_payloads(
     rationale: str,
 ) -> dict[str, Any]:
     candidate_id = str(candidate.get("candidate_id", "")).strip()
-    entity_id = f"precedent://learning/{_slugify(candidate_id)}"
+    entity_id = precedent_entity_id_for_candidate(candidate_id)
     entity_name = (
         promotion_name or str(candidate.get("precedent_name", "")).strip() or entity_id
     )
@@ -1070,6 +1103,7 @@ __all__ = [
     "analyze_learning_observations",
     "build_learning_promotion_payloads",
     "normalize_intent_family",
+    "precedent_entity_id_for_candidate",
     "prepare_learning_promotions",
     "submit_learning_promotion",
     "write_learning_review_artifacts",

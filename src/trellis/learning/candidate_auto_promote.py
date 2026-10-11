@@ -1,35 +1,49 @@
-"""Automatic promotion for learning candidates — report-only first (Tier 1).
+"""Automatic promotion for learning candidates — report-only (Tier 1).
 
-Plan p1 PR 7. Owner's stated intent is "eventually we want automatic
-promotion"; every switch here is tunable (see the
-``learning.candidate_auto_promote.*`` entries in
-:data:`trellis.core.settings_registry.SETTINGS_REGISTRY`) and ships
-``enabled=False`` with ``mode="report_only"`` as the default, so this PR
-produces evidence for picking thresholds rather than promoting anything on
-its own.
+Owner's stated intent is "eventually we want automatic promotion"; every
+switch here is tunable (see the ``learning.candidate_auto_promote.*``
+entries in :data:`trellis.core.settings_registry.SETTINGS_REGISTRY`) and
+ships ``enabled=False`` with ``mode="report_only"`` as the default, so this
+module produces evidence for picking thresholds rather than promoting
+anything unattended.
+
+**Scope: evaluation only.** This module never commits a promotion and
+never demotes anything. ``mode="commit"`` is refused at construction
+(:meth:`LearningCandidateAutoPromotePolicy.__post_init__` raises
+:class:`~trellis.errors.ConfigError`) on every path that builds the policy
+— unattended commit, and the auto-demotion rollback a safe commit mode
+would depend on, are a follow-up. ``report_only`` is the only mode that
+can run today.
 
 Mirrors the shape of :mod:`trellis.learning.tuners.auto_promote` (the
 tuner's Tier-1 autonomy gate for *parameter* promotion) without reusing its
 code — the domain here is *learning-candidate* promotion to a precedent,
 a different write path
 (:func:`trellis.learning.scoring.submit_learning_promotion` vs.
-:func:`trellis.learning.tuners.promotion.promote_proposal`) with a
-different rollback primitive
-(:data:`~trellis.mutate.commands.Operation.PRECEDENT_UPDATE` vs. a
-parameter-set rollback). Tier-1 autonomy invariants, mapped onto this
-policy exactly as ``auto_promote.py`` maps them onto parameter promotion:
+:func:`trellis.learning.tuners.promotion.promote_proposal`). Tier-1
+autonomy invariants this module satisfies today:
 
-(a) reversible through existing versioned state — demotion rewrites the
-    promoted node via SCD-2 (``PrecedentUpdateHandler``), never a delete;
-(b) post-change monitoring armed — :func:`sweep_auto_demotions` is that
-    monitor, intended to run on the same schedule as promotion;
 (c) dedicated audit events — :attr:`EventType.LEARNING_AUTO_PROMOTE_EVALUATED`
-    self-identifies every run, autonomous or report-only;
+    self-identifies every run;
 (d) per-scope opt-in / global default OFF — ``enabled=False`` by default,
     and a disabled policy always behaves as ``report_only`` regardless of
     its configured ``mode`` (:attr:`LearningCandidateAutoPromotePolicy.effective_mode`).
 
-Two data gaps are reported honestly here rather than silently assumed away:
+Invariants (a) reversible rollback and (b) post-change monitoring are what
+a safe commit mode needs and do not exist yet — that is exactly why commit
+mode is refused rather than shipped half-built.
+
+**Idempotency.** :func:`run_candidate_auto_promotion` never proposes a
+candidate that already has a precedent, promoted by a human or by an
+earlier automatic run: it scans ``MUTATION_EXECUTED`` for every successful
+``precedent.promote`` and matches on the deterministic id from
+:func:`trellis.learning.scoring.precedent_entity_id_for_candidate`. A match
+is reported as ``already_promoted`` and excluded from
+``would_promote_count`` and from the per-run cap, so an existing precedent
+(human or automatic) is never double-counted or crowded out by its own
+re-evaluation.
+
+Three data gaps are reported honestly here rather than silently assumed away:
 
 **Holdout-arm coverage.** The brief asks for "a holdout arm present for
 its intent family *if the data carries one*". It doesn't:
@@ -38,6 +52,15 @@ rate — there is no per-intent-family holdout marker anywhere in the
 pipeline. :func:`_holdout_arm_status` always returns ``"unknown"`` rather
 than fabricate ``True``/``False``, and nothing in :func:`_evaluate_candidate`
 gates on it — it is reported, never enforced.
+
+**Session identity.** ``citation_evidence.distinct_helpful_sessions``
+(:mod:`trellis.learning.scoring`) counts real ``PACK_ASSEMBLED.session_id``
+values only — never a run or pack id, and never a feedback row with no
+session id folded into one shared pseudo-session. A single conversation
+that asks repeatedly and grades its own packs helpful cannot read as
+several independent sessions, and a helpful citation with no captured
+session id is reported separately (``sessionless_citations``) rather than
+silently discounted or silently counted.
 
 **The agreement metric's disagree count.** :func:`compute_agreement_metric`
 compares this policy's ``would_promote`` dispositions against later human
@@ -50,7 +73,11 @@ candidate for this surface — only ``action="promote"`` exists, and its
 ``candidate_ids`` can only ever contain approved ids. ``disagree`` is
 therefore always ``0`` today: a fact about what the system currently
 records, not a shortcut taken here. ``AgreementMetric.rate`` is ``None``
-(never a divide-by-zero) when ``agree + disagree == 0``.
+(never a divide-by-zero) when ``agree + disagree == 0``, and is otherwise
+always exactly ``1.0`` for the same reason — :func:`agreement_metric_to_dict`
+carries the raw ``agree``/``disagree``/``undecided`` counts and an explicit
+note alongside ``rate`` so a reader never mistakes a structural ceiling for
+a measured agreement rate.
 """
 
 from __future__ import annotations
@@ -58,26 +85,29 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any, Literal
 
 import structlog
 
 from trellis.core.write_config import TRUTHY
+from trellis.errors import ConfigError
 from trellis.learning.scoring import (
     PROMOTE_RECOMMENDATIONS,
     build_learning_promotion_payloads,
+    precedent_entity_id_for_candidate,
     submit_learning_promotion,
 )
-from trellis.mutate import Command, CommandStatus, MutationExecutor, Operation
+from trellis.mutate import MutationExecutor, Operation
 from trellis.stores.base.event_log import EventLog, EventType
 
 logger = structlog.get_logger(__name__)
 
 #: Requester identity stamped on every governed command this policy
-#: submits — both the promotion (``ENTITY_CREATE`` / ``LINK_CREATE`` /
-#: ``PRECEDENT_PROMOTE``, via :func:`submit_learning_promotion`) and the
-#: demotion (``PRECEDENT_UPDATE``, via :func:`sweep_auto_demotions`). The
+#: submits — the promotion (``ENTITY_CREATE`` / ``LINK_CREATE`` /
+#: ``PRECEDENT_PROMOTE``, via :func:`submit_learning_promotion`). Demotion
+#: is not implemented here yet (see the module docstring's "Scope:
+#: evaluation only"); when it ships it should stamp the same identity. The
 #: ``auto:`` prefix mirrors no existing convention exactly (CLI/API/MCP/
 #: worker surfaces use ``<surface>:<verb>``) on purpose: an audit reader
 #: filtering by ``requested_by`` should be able to tell "a human" from
@@ -142,13 +172,11 @@ DEFAULT_MIN_DISTINCT_SESSIONS = 3
 DEFAULT_REQUIRE_ZERO_UNHELPFUL = True
 DEFAULT_MAX_PROMOTIONS_PER_RUN = 3
 
-#: Bounds on how far back :func:`sweep_auto_demotions` looks for this
-#: policy's own promotions when the caller gives no explicit ``since`` —
-#: mirrors :func:`trellis.learning.tuners.auto_promote._sweep_prior_promotions`'s
-#: 30-day default window.
-_DEFAULT_DEMOTION_SWEEP_WINDOW = timedelta(days=30)
-_MUTATION_SCAN_LIMIT = 500
-_FEEDBACK_SCAN_LIMIT = 2000
+#: Scan limit for the already-promoted check in
+#: :func:`run_candidate_auto_promotion` — read newest-first (``order="desc"``)
+#: so a truncated scan on a busy log drops the oldest promotions, never the
+#: most recent ones (see ``EventLog.scan_events``'s newest-first idiom).
+_PROMOTION_SCAN_LIMIT = 500
 _AGREEMENT_SCAN_LIMIT = 500
 
 
@@ -161,11 +189,13 @@ class LearningCandidateAutoPromotePolicy:
             per tier-1 invariant (d). When ``False``,
             :attr:`effective_mode` is always ``"report_only"`` regardless
             of ``mode``, so a run never writes.
-        mode: ``"report_only"`` (default) records what *would* be
-            promoted without writing anything; ``"commit"`` actually
-            submits qualifying candidates through
-            :func:`trellis.learning.scoring.submit_learning_promotion`.
-            Only takes effect when ``enabled`` is ``True``.
+        mode: ``"report_only"`` (default, and the only mode that can
+            construct) records what *would* be promoted without writing
+            anything. ``"commit"`` is reserved for a follow-up that adds
+            auto-demotion as commit mode's rollback; constructing this
+            policy with ``mode="commit"`` always raises
+            :class:`~trellis.errors.ConfigError`, regardless of
+            ``enabled``.
         min_helpful_count: Minimum helpful-citation count
             (``citation_evidence.helpful_count``) for auto-promotion.
             There is no manual-review equivalent floor to match (a human
@@ -192,6 +222,8 @@ class LearningCandidateAutoPromotePolicy:
     Raises:
         ValueError: If ``mode`` is not ``"report_only"``/``"commit"``, or
             if any int knob is looser than its floor.
+        ConfigError: If ``mode="commit"`` — commit mode is not available
+            until auto-demotion ships.
     """
 
     enabled: bool = False
@@ -208,6 +240,16 @@ class LearningCandidateAutoPromotePolicy:
                 'be "report_only" or "commit".'
             )
             raise ValueError(msg)
+        if self.mode == "commit":
+            # Refused unconditionally — regardless of ``enabled`` — because
+            # this is the only place a policy comes into existence
+            # (``trellis_cli.curate._build_candidate_auto_promote_policy``
+            # today). Commit mode needs a reversible rollback (Tier-1
+            # invariant (a)) and post-change monitoring (invariant (b));
+            # neither exists yet, so there is no safe way to let this
+            # resolve. See the module docstring's "Scope: evaluation only".
+            msg = "commit mode is not available until auto-demotion ships"
+            raise ConfigError(msg, setting=CANDIDATE_AUTO_PROMOTE_MODE_SETTING)
         if self.min_helpful_count < MIN_HELPFUL_COUNT_FLOOR:
             msg = (
                 f"LearningCandidateAutoPromotePolicy.min_helpful_count="
@@ -345,23 +387,35 @@ def _holdout_arm_status(candidate: Mapping[str, Any]) -> str:  # noqa: ARG001
 
 
 def _evaluate_candidate(
-    candidate: Mapping[str, Any], *, policy: LearningCandidateAutoPromotePolicy
+    candidate: Mapping[str, Any],
+    *,
+    policy: LearningCandidateAutoPromotePolicy,
+    already_promoted: bool = False,
 ) -> tuple[bool, str]:
     """Qualify one candidate against the policy's floors.
 
-    Returns ``(True, "qualifies")`` or ``(False, "ineligible:<reason>")``.
-    Checked in this order, so a report reader scanning
+    Returns ``(True, "qualifies")`` or ``(False, "<disposition>")``. Checked
+    in this order, so a report reader scanning
     ``"ineligible:not_promotable"`` never also has to wonder whether the
     citation evidence was fine:
 
-    1. ``not_promotable`` — ``recommendation_type`` not in
+    0. ``already_promoted`` — a precedent already exists for this
+       candidate's deterministic entity id (human-approved or from an
+       earlier automatic run). Its own disposition, not nested under
+       ``"ineligible:*"``, so it is never counted against the per-run cap
+       — see :func:`run_candidate_auto_promotion`.
+    1. ``ineligible:not_promotable`` — ``recommendation_type`` not in
        :data:`~trellis.learning.scoring.PROMOTE_RECOMMENDATIONS`.
-    2. ``unhelpful_citations`` — ``require_zero_unhelpful`` and
+    2. ``ineligible:unhelpful_citations`` — ``require_zero_unhelpful`` and
        ``unhelpful_count > 0``.
-    3. ``insufficient_helpful_count`` — below ``min_helpful_count``.
-    4. ``insufficient_distinct_sessions`` — below ``min_distinct_sessions``
-       (this is the check that refuses a single-session n=1 candidate).
+    3. ``ineligible:insufficient_helpful_count`` — below ``min_helpful_count``.
+    4. ``ineligible:insufficient_distinct_sessions`` — below
+       ``min_distinct_sessions`` (this is the check that refuses a
+       single-session n=1 candidate).
     """
+    if already_promoted:
+        return False, "already_promoted"
+
     recommendation_type = str(candidate.get("recommendation_type", "")).strip()
     if recommendation_type not in PROMOTE_RECOMMENDATIONS:
         return False, "ineligible:not_promotable"
@@ -389,11 +443,12 @@ class CandidateAutoPromoteOutcome:
 
     candidate_id: str
     #: ``"would_promote"`` — qualified, run was report-only (or disabled);
-    #: ``"promoted"`` — qualified and committed this run;
+    #: ``"promoted"`` — qualified and committed this run (unreachable today
+    #: — see the module docstring's "Scope: evaluation only");
+    #: ``"already_promoted"`` — a precedent already exists for this
+    #: candidate, human-approved or from an earlier automatic run;
     #: ``"ineligible:<reason>"`` — did not clear the gate (see
-    #: :func:`_evaluate_candidate` and the run cap check);
-    #: ``"demoted"`` — (from :func:`sweep_auto_demotions`) a prior
-    #: auto-promotion was rolled back on its first unhelpful citation.
+    #: :func:`_evaluate_candidate` and the run cap check).
     disposition: str
     reason: str = ""
     entity_id: str | None = None
@@ -425,6 +480,10 @@ class CandidateAutoPromoteReport:
         return sum(1 for o in self.outcomes if o.disposition == "promoted")
 
     @property
+    def already_promoted_count(self) -> int:
+        return sum(1 for o in self.outcomes if o.disposition == "already_promoted")
+
+    @property
     def ineligible_count(self) -> int:
         return sum(1 for o in self.outcomes if o.disposition.startswith("ineligible:"))
 
@@ -441,6 +500,7 @@ def _emit_evaluated_event(
     """Emit the single ``LEARNING_AUTO_PROMOTE_EVALUATED`` event for a run."""
     would_promote = sum(1 for o in outcomes if o.disposition == "would_promote")
     promoted = sum(1 for o in outcomes if o.disposition == "promoted")
+    already_promoted = sum(1 for o in outcomes if o.disposition == "already_promoted")
     ineligible = sum(1 for o in outcomes if o.disposition.startswith("ineligible:"))
     payload: dict[str, Any] = {
         "mode": effective_mode,
@@ -459,6 +519,7 @@ def _emit_evaluated_event(
             "total": len(outcomes),
             "would_promote": would_promote,
             "promoted": promoted,
+            "already_promoted": already_promoted,
             "ineligible": ineligible,
         },
         "policy_snapshot": {
@@ -478,6 +539,36 @@ def _emit_evaluated_event(
     return event.event_id
 
 
+def _scan_already_promoted_entity_ids(
+    event_log: EventLog, *, limit: int = _PROMOTION_SCAN_LIMIT
+) -> set[str]:
+    """Entity ids with >=1 successful ``precedent.promote``, human or auto.
+
+    Newest-first (``order="desc"``) so a truncated scan on a busy log
+    drops the oldest promotions rather than the most recent ones — the
+    hazard documented on ``EventLog.get_events``'s ``order`` parameter and
+    the reason :func:`~trellis.stores.base.event_log.EventLog.scan_events`
+    exists. This reads with ``payload_filters``, which ``scan_events``
+    does not accept, so it calls ``get_events`` directly with an explicit
+    ``order`` rather than using that helper.
+
+    No ``requested_by`` filter: a precedent a human approved and one this
+    policy promoted earlier are both reasons to never re-propose the same
+    candidate (see :func:`run_candidate_auto_promotion` and the module
+    docstring's "Idempotency" section).
+    """
+    events = event_log.get_events(
+        event_type=EventType.MUTATION_EXECUTED,
+        order="desc",
+        payload_filters={
+            "operation": Operation.PRECEDENT_PROMOTE.value,
+            "status": "success",
+        },
+        limit=limit,
+    )
+    return {event.entity_id for event in events if event.entity_id}
+
+
 def run_candidate_auto_promotion(
     *,
     candidates: Sequence[Mapping[str, Any]],
@@ -488,7 +579,16 @@ def run_candidate_auto_promotion(
     source: str = "candidate_auto_promote",
     force_report_only: bool = False,
 ) -> CandidateAutoPromoteReport:
-    """Evaluate every candidate and, in commit mode, promote the qualifying ones.
+    """Evaluate every candidate and report what would be promoted.
+
+    ``policy.mode`` can only ever be ``"report_only"`` — constructing a
+    ``mode="commit"`` policy already raised
+    :class:`~trellis.errors.ConfigError` (see
+    :meth:`LearningCandidateAutoPromotePolicy.__post_init__`) — so
+    ``effective_mode`` can never resolve to ``"commit"`` here, and the
+    commit-execution branch below is unreachable until a follow-up lifts
+    that gate. It is left in place deliberately, unexercised, rather than
+    removed, so that follow-up is a smaller diff.
 
     ``force_report_only=True`` is how ``trellis curate
     auto-promote-candidates --dry-run`` overrides the configured
@@ -496,6 +596,13 @@ def run_candidate_auto_promotion(
     checked ahead of :attr:`LearningCandidateAutoPromotePolicy.effective_mode`,
     never mixed into the policy object itself, so a dry-run can never be
     mistaken for a persisted configuration change.
+
+    Before evaluating any candidate, scans for every entity id that
+    already has a successful ``precedent.promote``
+    (:func:`_scan_already_promoted_entity_ids`) — human-approved or from
+    an earlier automatic run — and reports a match as ``"already_promoted"``
+    rather than re-proposing it (see the module docstring's
+    "Idempotency" section).
 
     Each candidate gets exactly one :class:`CandidateAutoPromoteOutcome`.
     Exactly one :attr:`EventType.LEARNING_AUTO_PROMOTE_EVALUATED` event is
@@ -505,7 +612,7 @@ def run_candidate_auto_promotion(
 
     Raises:
         ValueError: If the effective mode is ``"commit"`` but no
-            ``executor`` was given.
+            ``executor`` was given. Unreachable today — see above.
     """
     configured_mode = policy.mode
     effective_mode: CandidateAutoPromoteMode = (
@@ -518,6 +625,8 @@ def run_candidate_auto_promotion(
         )
         raise ValueError(msg)
 
+    already_promoted_entity_ids = _scan_already_promoted_entity_ids(event_log)
+
     outcomes: list[CandidateAutoPromoteOutcome] = []
     promotions_committed = 0
 
@@ -526,13 +635,18 @@ def run_candidate_auto_promotion(
         if not candidate_id:
             continue
         holdout_arm = _holdout_arm_status(candidate)
-        qualifies, reason = _evaluate_candidate(candidate, policy=policy)
+        candidate_entity_id = precedent_entity_id_for_candidate(candidate_id)
+        already_promoted = candidate_entity_id in already_promoted_entity_ids
+        qualifies, reason = _evaluate_candidate(
+            candidate, policy=policy, already_promoted=already_promoted
+        )
 
         if not qualifies:
             outcomes.append(
                 CandidateAutoPromoteOutcome(
                     candidate_id=candidate_id,
                     disposition=reason,
+                    entity_id=candidate_entity_id if already_promoted else None,
                     holdout_arm=holdout_arm,
                 )
             )
@@ -620,131 +734,20 @@ def run_candidate_auto_promotion(
     )
 
 
-def sweep_auto_demotions(
-    *,
-    event_log: EventLog,
-    executor: MutationExecutor,
-    requested_by: str = AUTO_PROMOTE_REQUESTED_BY,
-    now: datetime | None = None,
-    since: datetime | None = None,
-    limit: int = _MUTATION_SCAN_LIMIT,
-) -> list[CandidateAutoPromoteOutcome]:
-    """Demote, through the governed path, every auto-promotion with an
-    unhelpful citation.
-
-    Tier-1 invariant (b): post-change monitoring armed. Nothing in
-    :func:`run_candidate_auto_promotion`'s write path watches for a bad
-    outcome after the fact — this sweep is that watch. Run it on the same
-    schedule as promotion (or more often) and a precedent this policy
-    promoted gets rolled back, governed, on its first unhelpful signal.
-
-    **Identifying "this policy's own promotions" without a new store.**
-    Reads ``MUTATION_EXECUTED`` events for
-    ``operation="precedent.promote"``, ``requested_by=<requested_by>``,
-    ``status="success"`` — :class:`~trellis.mutate.executor.MutationExecutor`'s
-    own audit event already carries exactly this (``command.target_id``,
-    stamped onto the event as ``entity_id``, is the precedent's durable
-    graph id, since :class:`~trellis.mutate.handlers.PrecedentPromoteHandler`
-    sets ``entity_id=command.target_id``) — no new tracking state is
-    needed, and this function only *reads* events and *writes* only
-    through a governed :data:`~trellis.mutate.commands.Operation.PRECEDENT_UPDATE`
-    command — never the EventLog directly.
-
-    **Detecting "an unhelpful citation" — documented gap.** Scans
-    ``FEEDBACK_RECORDED`` events globally for
-    ``entity_id in payload["unhelpful_item_ids"]``. No dedicated
-    "precedent citation" tracking exists; this is the best signal
-    available today (confirmed against
-    :func:`trellis.feedback.attribution.stray_citations`, which shows
-    feedback can legitimately cite an id outside any
-    ``PackBuilder``-assembled pack, e.g. one served by ``get_lessons``),
-    not a joined, audited citation record.
-
-    Already-demoted precedents (an existing ``PRECEDENT_UPDATED`` event
-    with ``payload["demoted"]`` true for that ``entity_id``) are skipped,
-    so a second sweep never re-submits a demotion for the same precedent.
-    """
-    effective_since = (
-        since or (now or datetime.now(UTC)) - _DEFAULT_DEMOTION_SWEEP_WINDOW
-    )
-
-    own_promotions = event_log.get_events(
-        event_type=EventType.MUTATION_EXECUTED,
-        since=effective_since,
-        payload_filters={
-            "operation": Operation.PRECEDENT_PROMOTE.value,
-            "requested_by": requested_by,
-            "status": "success",
-        },
-        limit=limit,
-    )
-    promoted_ids = {event.entity_id for event in own_promotions if event.entity_id}
-    if not promoted_ids:
-        return []
-
-    demoted_events = event_log.get_events(
-        event_type=EventType.PRECEDENT_UPDATED,
-        since=effective_since,
-        limit=limit,
-    )
-    already_demoted = {
-        event.entity_id
-        for event in demoted_events
-        if event.entity_id and bool((event.payload or {}).get("demoted"))
-    }
-    pending = promoted_ids - already_demoted
-    if not pending:
-        return []
-
-    feedback_events = event_log.get_events(
-        event_type=EventType.FEEDBACK_RECORDED,
-        since=effective_since,
-        limit=_FEEDBACK_SCAN_LIMIT,
-    )
-    unhelpful_ids: set[str] = set()
-    for event in feedback_events:
-        unhelpful_ids.update(
-            str(item_id)
-            for item_id in (event.payload or {}).get("unhelpful_item_ids") or []
-        )
-
-    outcomes: list[CandidateAutoPromoteOutcome] = []
-    for entity_id in sorted(pending & unhelpful_ids):
-        command = Command(
-            operation=Operation.PRECEDENT_UPDATE,
-            args={
-                "precedent_id": entity_id,
-                "reason": (
-                    "auto-demoted: first unhelpful citation after an auto-promotion"
-                ),
-            },
-            target_id=entity_id,
-            target_type="entity",
-            requested_by=requested_by,
-        )
-        result = executor.execute(command)
-        if result.status == CommandStatus.SUCCESS:
-            outcomes.append(
-                CandidateAutoPromoteOutcome(
-                    candidate_id=entity_id,
-                    disposition="demoted",
-                    entity_id=entity_id,
-                )
-            )
-        else:
-            outcomes.append(
-                CandidateAutoPromoteOutcome(
-                    candidate_id=entity_id,
-                    disposition=f"ineligible:demotion_{result.status.value}",
-                    entity_id=entity_id,
-                )
-            )
-            logger.warning(
-                "candidate_auto_promote.demotion_failed",
-                entity_id=entity_id,
-                status=result.status.value,
-            )
-    return outcomes
+#: Why :attr:`AgreementMetric.rate` structurally cannot be anything but
+#: ``None`` or ``1.0`` today: no event records a human *rejecting* a
+#: learning-promotion candidate (see :func:`compute_agreement_metric`), so
+#: ``disagree`` is always ``0`` and ``rate = agree / (agree + disagree)``
+#: collapses to ``agree / agree`` whenever there is any data at all.
+#: Carried verbatim in every :class:`AgreementMetric` so a reader of the
+#: serialised payload (:func:`agreement_metric_to_dict`) sees the
+#: constraint next to the number, not only in this module's prose.
+_AGREEMENT_RATE_NOTE = (
+    "rate can only be None (no would_promote candidates reviewed by a "
+    "human yet) or 1.0 (no event today records a human rejecting a "
+    "learning-promotion candidate, so disagree is always 0) — never a "
+    "value in between."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -752,16 +755,21 @@ class AgreementMetric:
     """Agreement between this policy's ``would_promote`` calls and later
     human Review-queue decisions on the same candidate.
 
-    ``disagree`` is, as of today's data, structurally always ``0`` — see
-    the module docstring's "agreement metric's disagree count" section.
-    ``rate`` is ``None`` (never a divide-by-zero) when
-    ``agree + disagree == 0``.
+    ``agree``, ``disagree`` and ``undecided`` are the raw counts ``rate``
+    is derived from — read them directly rather than reconstructing them
+    from ``rate``, which loses the denominator. ``disagree`` is, as of
+    today's data, structurally always ``0`` — see the module docstring's
+    "agreement metric's disagree count" section. ``rate`` is ``None``
+    (never a divide-by-zero) when ``agree + disagree == 0``. ``note``
+    states that structural constraint in plain language; see
+    :data:`_AGREEMENT_RATE_NOTE`.
     """
 
     agree: int
     disagree: int
     undecided: int
     rate: float | None
+    note: str = _AGREEMENT_RATE_NOTE
 
 
 def compute_agreement_metric(
@@ -840,6 +848,7 @@ def report_to_dict(report: CandidateAutoPromoteReport) -> dict[str, Any]:
         "mode": report.mode,
         "configured_mode": report.configured_mode,
         "would_promote_count": report.would_promote_count,
+        "already_promoted_count": report.already_promoted_count,
         "promoted_count": report.promoted_count,
         "ineligible_count": report.ineligible_count,
         "event_id": report.event_id,
@@ -854,4 +863,5 @@ def agreement_metric_to_dict(metric: AgreementMetric) -> dict[str, Any]:
         "disagree": metric.disagree,
         "undecided": metric.undecided,
         "rate": metric.rate,
+        "note": metric.note,
     }

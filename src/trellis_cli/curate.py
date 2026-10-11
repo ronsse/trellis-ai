@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +23,6 @@ from trellis.learning.candidate_auto_promote import (
     report_to_dict,
     resolve_candidate_auto_promote_overrides,
     run_candidate_auto_promotion,
-    sweep_auto_demotions,
 )
 from trellis.mutate import (
     Command,
@@ -794,7 +792,7 @@ def promote_learning(
 
 
 # ---------------------------------------------------------------------------
-# auto-promote-candidates (plan p1 PR 7 — report-only first)
+# auto-promote-candidates — report-only evaluation of learning candidates
 # ---------------------------------------------------------------------------
 
 
@@ -838,31 +836,25 @@ def auto_promote_candidates(
         False,
         "--dry-run",
         help=(
-            "Force report_only regardless of the configured mode, so a "
-            "one-off check can never commit by accident."
+            "Force report_only for this run. Redundant today — "
+            "learning.candidate_auto_promote.mode can only ever resolve to "
+            "report_only, so every run already behaves this way — but kept "
+            "so a script that always passes --dry-run keeps working "
+            "unchanged if a later release adds a working commit mode."
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
 ) -> None:
-    """Evaluate learning candidates for automatic promotion (plan p1 PR 7).
+    """Evaluate learning candidates for automatic promotion — report-only.
 
-    Ships report-only by default
-    (``learning.candidate_auto_promote.enabled=False``): every run emits
-    one ``LEARNING_AUTO_PROMOTE_EVALUATED`` event naming what *would* be
-    promoted and writes nothing else. Flipping ``enabled`` and ``mode`` to
-    ``commit`` (both via ``SETTINGS_REGISTRY``) lets a qualifying
-    candidate promote through the identical governed path a human
-    review-queue approval uses
-    (:func:`trellis.learning.scoring.submit_learning_promotion`).
-
-    Also sweeps for auto-demotions on every run (same cadence as
-    promotion, mirroring
-    :func:`trellis.learning.tuners.auto_promote.run_auto_promotion`'s
-    ``monitor_prior`` pass): any precedent this policy promoted that has
-    since drawn an unhelpful citation is rolled back through the governed
-    ``precedent.update`` path, regardless of ``--dry-run`` — a prior
-    *commit* is real regardless of how this particular invocation was
-    run, so monitoring it is not something a dry run should skip.
+    Every run emits one ``LEARNING_AUTO_PROMOTE_EVALUATED`` event naming
+    each candidate's disposition — ``would_promote``, ``already_promoted``
+    (a precedent already exists for it, human-approved or from an earlier
+    automatic run), or ``ineligible:<reason>`` — and writes nothing else.
+    ``learning.candidate_auto_promote.mode`` cannot be set to ``commit``:
+    constructing the policy with that mode raises
+    :class:`~trellis.errors.ConfigError`. Unattended commit is a follow-up
+    once an auto-demotion rollback exists to monitor it.
     """
     registry = _get_registry()
     if candidates_path is None:
@@ -876,7 +868,16 @@ def auto_promote_candidates(
             raise typer.BadParameter(msg, param_hint="'--candidates'")
         candidates_path = resolved_dir / LEARNING_CANDIDATES_FILENAME
 
-    payload = json.loads(candidates_path.read_text(encoding="utf-8"))
+    try:
+        raw_text = candidates_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        msg = f"cannot read candidates file {candidates_path}: {exc}"
+        raise typer.BadParameter(msg, param_hint="'--candidates'") from exc
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        msg = f"candidates file {candidates_path} is not valid JSON: {exc}"
+        raise typer.BadParameter(msg, param_hint="'--candidates'") from exc
     candidates = payload.get("candidates", [])
     if not isinstance(candidates, list):
         candidates = []
@@ -892,12 +893,9 @@ def auto_promote_candidates(
         executor=executor,
         force_report_only=dry_run,
     )
-    demotions = sweep_auto_demotions(event_log=event_log, executor=executor)
 
     if output_format == "json":
-        payload_out = report_to_dict(report)
-        payload_out["demotions"] = [asdict(outcome) for outcome in demotions]
-        emit_json(payload_out)
+        emit_json(report_to_dict(report))
         return
 
     console.print(
@@ -905,11 +903,8 @@ def auto_promote_candidates(
         f"(configured={report.configured_mode})"
     )
     console.print(f"  would_promote: {report.would_promote_count}")
+    console.print(f"  already_promoted: {report.already_promoted_count}")
     console.print(f"  promoted: {report.promoted_count}")
     console.print(f"  ineligible: {report.ineligible_count}")
     for outcome in report.outcomes:
         console.print(f"  - {escape(outcome.candidate_id)}: {outcome.disposition}")
-    if demotions:
-        console.print(f"  demoted: {len(demotions)}")
-        for outcome in demotions:
-            console.print(f"  - {escape(outcome.candidate_id)}: {outcome.disposition}")
