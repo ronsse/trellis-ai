@@ -72,6 +72,19 @@ def _mint(registry: StoreRegistry, scopes: list[str], name: str = "test-key") ->
     return token
 
 
+def _mint_with_key_id(
+    registry: StoreRegistry, scopes: list[str], name: str = "test-key"
+) -> tuple[str, str]:
+    """Like :func:`_mint`, but also returns the minted ``key_id``.
+
+    Needed wherever a test must predict ``changed_by`` (``f"api:settings:
+    {key_id}"``), which ``_mint`` alone discards.
+    """
+    token, record = generate_api_key(name, scopes)
+    registry.operational.api_key_store.create(record)
+    return token, record.key_id
+
+
 def _store(registry: StoreRegistry) -> SettingsStore:
     path = resolve_settings_path(registry.stores_dir)
     assert path is not None
@@ -200,6 +213,47 @@ class TestUpdateSetting:
         assert resp.status_code == 200, resp.text
         assert _store(registry).get("pack_holdout_rate").value == 0.25
 
+    def test_changed_by_is_the_authenticated_principal_not_requested_by(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """M9 (re-gate #857): ``changed_by`` must come from ``ctx``, never
+        from the client-controlled ``req.requested_by`` body field.
+
+        A client could otherwise write ``requested_by: "someone-else"``
+        and have the audit trail record the write as made by whoever it
+        names. The route's docstring says ``changed_by`` is
+        ``f"api:settings:{principal}"`` where ``principal`` is the
+        authenticated key id -- this proves it on the live route, not
+        just at the handler layer (``test_settings_update_handler.py``'s
+        ``test_requested_by_claim_is_carried_on_the_event_when_present``
+        constructs the ``Command`` directly and so cannot catch a route
+        that wires the wrong field into it). Auth mode must be forced to
+        ``required`` -- the fixture default (``off``) ignores credentials
+        entirely and would leave ``ctx.key_id`` ``None`` regardless.
+        """
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
+        token, key_id = _mint_with_key_id(registry, [SCOPE_ADMIN])
+        resp = client.put(
+            "/api/v1/settings/pack_holdout_rate",
+            json={"value": 0.3, "requested_by": "someone-else"},
+            headers={"X-API-Key": token},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.SETTINGS_UPDATED,
+            order="asc",
+            limit=100,
+        )
+        payload = events[-1].payload
+        assert payload["changed_by"] == f"api:settings:{key_id}"
+        assert payload["changed_by"] != "someone-else"
+        assert payload["changed_by"] != "api:settings:someone-else"
+        assert payload["requested_by_claim"] == "someone-else"
+
     def test_unknown_name_is_400(self, client: TestClient) -> None:
         resp = client.put("/api/v1/settings/not_a_real_setting", json={"value": 1})
         assert resp.status_code == 400
@@ -301,8 +355,14 @@ class TestUpdateSetting:
         The store file on disk is unharmed and the fix is an operator
         action (``trellis admin settings list``/inspect the file), not a
         different request body -- so this is shaped like
-        ``routes/policies.py``'s precedent for the same error class, with
-        the recovery text kept in ``detail["message"]``.
+        ``routes/policies.py``'s precedent for the same error class.
+
+        The recovery command is asserted from its own ``detail["recovery"]``
+        field, not out of ``detail["message"]`` -- that string goes through
+        ``sanitize_error_message``'s 512-char cap (re-gate #857 item 2),
+        which can truncate a long ``stores_dir`` path's ``mv ... .corrupt``
+        command away. ``store_degradation`` must be the real object too,
+        not the hard-coded ``None`` the pre-fix branch returned.
         """
         path = resolve_settings_path(registry.stores_dir)
         assert path is not None
@@ -314,6 +374,12 @@ class TestUpdateSetting:
         detail = resp.json()["detail"]
         assert detail["code"] == "degraded_store_write"
         assert "degrad" in detail["message"].lower()
+        assert detail["recovery"].startswith("mv ")
+        assert detail["recovery"].endswith(".corrupt")
+        assert str(path) in detail["recovery"]
+        assert detail["store_degradation"] is not None
+        assert detail["store_degradation"]["path"] == str(path)
+        assert detail["store_degradation"]["recovery"] == detail["recovery"]
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +408,32 @@ class TestEnvPinnedWrite:
 
         # The write still landed -- ready the moment the env var is unset.
         assert _store(registry).get("pack_holdout_rate").value == 0.3
+
+    def test_env_pinned_write_reports_the_stored_value_not_the_raw_request(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """M13 (re-gate #857): ``stored_value`` must echo what the handler
+        actually parsed and stored, never ``req.value`` verbatim.
+
+        The existing env-pinned test above sends a float (``0.3``), which
+        can't distinguish the two -- a float round-trips identically
+        either way. Sending the numeric string ``"0.10"`` can: the stored
+        (and coerced) value is the float ``0.1``, while the raw request
+        value is the string ``"0.10"``. A mutant that swaps
+        ``stored_value`` for ``req.value`` passes the float-sending test
+        but fails this one on both type and value.
+        """
+        monkeypatch.setenv(PACK_HOLDOUT_RATE_ENV, "0.9")
+
+        resp = client.put("/api/v1/settings/pack_holdout_rate", json={"value": "0.10"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["stored_value"] == 0.1
+        assert isinstance(body["stored_value"], float)
+        assert _store(registry).get("pack_holdout_rate").value == 0.1
 
     def test_env_pinned_write_not_shaped_as_a_command_response(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch

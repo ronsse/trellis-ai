@@ -1,14 +1,21 @@
-"""``settings.update`` is unreachable from the generic batch route (B1).
+"""``settings.update`` is unreachable from the generic batch route.
 
 ``POST /commands/batch`` builds :func:`~trellis.mutate.build_curate_executor`
 (``trellis_api/routes/mutations.py``), the same factory MCP's
 ``execute_mutation`` builds. Neither registers
-:data:`~trellis.mutate.commands.Operation.SETTINGS_UPDATE` any more (gate
-report on #857, B1): a caller who knows the operation name and schema
+:data:`~trellis.mutate.commands.Operation.SETTINGS_UPDATE`: a caller who
+knows the operation name and schema
 (``{"name": ..., "value": ...}``) and is willing to supply a
 ``target_type="setting"``/``target_id=<name>`` pair that would satisfy the
 handler's own defence-in-depth check still cannot reach the settings store
 through this surface, because the handler is never registered here at all.
+
+``status`` stays ``"failed"``, not ``"rejected"``: nothing was evaluated
+and no ``MUTATION_REJECTED`` event exists to name a reason
+(:func:`~trellis.mutate.redirect_unreachable_settings_update`'s own
+docstring). The route applies that function to every result it gets
+back, so the *message* names where the write is reachable instead of a
+bare "no handler registered".
 """
 
 from __future__ import annotations
@@ -72,7 +79,12 @@ def test_settings_update_on_batch_is_refused_not_executed(
     (result,) = body["results"]
     assert result["status"] == "failed"
     assert "No handler registered" in result["message"]
+    assert "PUT" in result["message"]
+    assert "/api/v1/settings/{name}" in result["message"]
+    assert "trellis admin settings set" in result["message"]
     assert body["succeeded"] == 0
+    assert body["failed"] == 1
+    assert body["rejected"] == 0
 
     # And the write really did not happen: either no settings file exists
     # at all (the stronger guarantee), or one exists but has no override.

@@ -9,8 +9,9 @@ identically on these two surfaces (Stage 2 always runs, CLAUDE.md).
 ``build_settings_executor`` wires ``Operation.SETTINGS_UPDATE`` into
 *no other* executor: MCP's generic ``execute_mutation`` and REST's
 generic ``POST /commands/batch`` build :func:`~trellis.mutate.build_curate_executor`
-instead, which does not register this operation at all, so neither has a
-settings surface to be consistent with (gate report on #857, B1/B2).
+instead, which does not register this operation at all -- those two
+surfaces have no admin-scope gate of their own, so neither has a
+settings surface to be consistent with.
 ``unset`` is not a second operation: it submits ``value=None``, which the
 handler treats as "remove the override" (see ``SettingsUpdateHandler``'s
 own docstring).
@@ -81,19 +82,31 @@ def _env_effective_value(spec: SettingSpec, settings_values: dict[str, Any]) -> 
 
 
 def _truthfulness_note(
-    spec: SettingSpec, settings_values: dict[str, Any]
+    spec: SettingSpec, settings_values: dict[str, Any], *, reset: bool
 ) -> str | None:
     """What a caller would otherwise not learn from the success message alone.
 
-    An env pin (gate report Q3, probe2) or a ``restart_required`` knob
-    both report a plain "set to X" success with nothing to say the write
-    has no, or not yet any, runtime effect -- this fills in that gap
-    rather than letting the caller believe the printed value is already
-    in force.
+    An env pin or a ``restart_required`` knob both report a plain "set to
+    X" success with nothing to say the write has no, or not yet any,
+    runtime effect -- this fills in that gap rather than letting the
+    caller believe the printed value is already in force.
+
+    ``reset`` (the submitted value was ``None``, i.e. ``unset``) branches
+    the env-pinned wording the same way ``trellis_api.routes.settings``'s
+    ``update_setting`` does: a reset leaves nothing stored behind the
+    pin, so saying "the stored value takes effect once that variable is
+    unset" would be false.
     """
     source = resolve_source(spec, settings_values)
     if source == "env":
         effective = _env_effective_value(spec, settings_values)
+        if reset:
+            return (
+                f"{spec.env_var} is set, so it governs {spec.name!r} right "
+                f"now (effective value: {effective!r}); the override was "
+                "removed, and nothing is stored behind it -- the "
+                "environment variable keeps winning once it stays set."
+            )
         return (
             f"{spec.env_var} is set, so it governs {spec.name!r} right now "
             f"(effective value: {effective!r}); the stored value takes "
@@ -117,7 +130,9 @@ def _execute(cmd: Command, output_format: str) -> None:
     if cmd.target_id is not None:
         spec = get_setting(cmd.target_id)
     if result.status == CommandStatus.SUCCESS and spec is not None:
-        note = _truthfulness_note(spec, _settings_values(registry))
+        note = _truthfulness_note(
+            spec, _settings_values(registry), reset=cmd.args.get("value") is None
+        )
 
     if output_format == "json":
         payload: dict[str, Any] = {

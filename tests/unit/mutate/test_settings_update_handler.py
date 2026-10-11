@@ -52,7 +52,7 @@ def _store(registry: StoreRegistry) -> SettingsStore:
 
 def _cmd(name: str, value: object, **kwargs: object) -> Command:
     """A correctly-targeted settings.update Command, the shape every real
-    surface (admin route, ``trellis admin settings``) sends -- see B2's
+    surface (admin route, ``trellis admin settings``) sends -- see the
     defence-in-depth check in ``SettingsUpdateHandler.handle``.
     """
     return Command(
@@ -114,9 +114,8 @@ class TestSetsAnOverride:
         assert second.payload["old_value"] == 0.3
         assert second.payload["new_value"] == 0.5
         assert second.payload["changed_by"] == "cli:settings-set"
-        # Kills mutant M5 (gate report on #857): a constant "settings"
-        # satisfies a bare "key present" check, so this asserts the real
-        # resolved value, not just presence.
+        # A constant "settings" satisfies a bare "key present" check,
+        # so this asserts the real resolved value, not just presence.
         assert second.payload["overridden_by_at_write"] == "settings"
         assert second.payload["settings_live"] is True
         assert second.payload["restart_required"] is False
@@ -221,11 +220,12 @@ class TestRefusesRatherThanClamps:
             handler.handle(cmd)
 
     def test_untargeted_command_is_refused(self, registry: StoreRegistry) -> None:
-        """B2 defence-in-depth: even a well-formed args dict is refused
-        when the Command itself is not targeted at the setting it names
-        -- the shape a generic, untargeted batch/MCP command would have
-        if ``Operation.SETTINGS_UPDATE`` ever reached this handler at all
-        (it cannot, per B1 -- this is the second layer).
+        """Defence in depth: even a well-formed args dict is refused when
+        the Command itself is not targeted at the setting it names -- the
+        shape a generic, untargeted batch/MCP command would have if
+        ``Operation.SETTINGS_UPDATE`` ever reached this handler at all
+        (it cannot, since it is never registered on the generic executor
+        those surfaces build -- this is the second layer).
         """
         handler = SettingsUpdateHandler(registry)
         cmd = Command(
@@ -256,8 +256,8 @@ class TestRefusesRatherThanClamps:
     def test_overflowing_float_is_a_governed_rejection_not_a_panic(
         self, registry: StoreRegistry
     ) -> None:
-        """Q5 (gate report on #857): ``10**400`` overflows plain
-        ``float()`` with ``OverflowError``, a class ``validate_value``'s
+        """``10**400`` overflows plain ``float()`` with ``OverflowError``,
+        a class ``validate_value``'s
         ``except ValueError`` would not catch on its own --
         ``parse_finite_float`` normalizes it first. Asserting the specific
         ``code`` (not just "some ValidationError") is what tells apart a
@@ -298,7 +298,7 @@ class TestWiredIntoCurateHandlers:
     def test_create_curate_handlers_does_not_register_settings_update(
         self, registry: StoreRegistry
     ) -> None:
-        """B1: the generic curate handler set backs REST's
+        """The generic curate handler set backs REST's
         ``POST /commands/batch`` and MCP's ``execute_mutation`` both, so
         ``Operation.SETTINGS_UPDATE`` must be absent from it -- otherwise
         either generic surface could write a setting with no admin scope
@@ -324,7 +324,7 @@ class TestStage2GateIsInvoked:
     ever touches the file — the same "Stage 2 always runs" contract every
     other curate operation gets (CLAUDE.md, ``test_policy_wiring.py``).
     Built through :func:`build_settings_executor`, the narrow factory the
-    admin route and CLI call (B1/B2 — ``Operation.SETTINGS_UPDATE`` is not
+    admin route and CLI call (``Operation.SETTINGS_UPDATE`` is not
     reachable through :func:`build_curate_executor` at all), rather than a
     bespoke executor, so this proves the production wiring and not just
     the handler in isolation.

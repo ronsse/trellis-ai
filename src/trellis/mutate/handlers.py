@@ -534,9 +534,9 @@ class SettingsUpdateHandler:
         name = command.args["name"]
         raw_value = command.args.get("value")
 
-        # Defence in depth (B2, gate report on #857): this handler is only
-        # ever registered via create_settings_handlers, reachable only
-        # through the admin route/CLI, which both stamp target_type and
+        # Defence in depth: this handler is only ever registered via
+        # create_settings_handlers, reachable only through the admin
+        # route/CLI, which both stamp target_type and
         # target_id correctly -- but an untargeted or mistargeted Command
         # reaching here by some future wiring mistake must still refuse
         # rather than write, exactly as an entity_type="setting" policy
@@ -1881,8 +1881,10 @@ def create_settings_handlers(registry: StoreRegistry) -> dict[str, Any]:
     dict backs every generic mutation surface — REST ``POST
     /commands/batch`` and MCP ``execute_mutation`` — which route any
     ``mutate``-scoped key straight past the admin-only ``GET``/``PUT``
-    gate on ``/api/v1/settings`` (CLAUDE.md B1/B2; gate report on #857).
-    Only :func:`trellis.mutate.build_settings_executor` builds an executor
+    gate on ``/api/v1/settings``, so registering this handler there would
+    let any ``mutate``-scoped key reach a write that is meant to require
+    the admin scope. Only :func:`trellis.mutate.build_settings_executor`
+    builds an executor
     from this dict, and only the admin REST route and
     ``trellis admin settings`` call that builder — so
     ``Operation.SETTINGS_UPDATE`` is unreachable from the generic surfaces

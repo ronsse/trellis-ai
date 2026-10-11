@@ -142,15 +142,29 @@ def _execute_command(cmd: Command) -> CommandResponse:
             # 409, matching routes/policies.py's precedent for the same
             # error class: the write did not happen and the file on disk
             # is unharmed, but "fix your input" (400) is the wrong
-            # instruction -- the recovery command is what the caller
-            # needs, and it is already folded into `message` by
-            # StoreWriteRefusedError (trellis.errors).
+            # instruction. The recovery command IS folded into `message`
+            # by StoreWriteRefusedError (trellis.errors) -- but
+            # sanitize_error_message's 512-char cap can truncate it away
+            # on a long stores_dir path, so `recovery` and (for a
+            # degraded load) the real `store_degradation` are read fresh
+            # from the store here and carried as their own fields,
+            # uncapped, the way routes/policies.py's refusal does.
+            store = _get_settings_store(get_registry())
+            degradation = store.degradation
+            recovery = (
+                degradation.recovery
+                if degradation is not None
+                else store.stale_recovery
+            )
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": reason,
                     "message": sanitize_error_message(result.message),
-                    "store_degradation": None,
+                    "recovery": recovery,
+                    "store_degradation": (
+                        degradation.to_dict() if degradation is not None else None
+                    ),
                 },
             )
         raise HTTPException(
@@ -246,8 +260,8 @@ def update_setting(
     source = resolve_source(spec, settings_values)
 
     # The normalized, parsed value the handler actually stored -- never
-    # the raw request body (Q5/Truthfulness). A reset (`req.value is
-    # None`) leaves nothing stored, so this reads back `None` too.
+    # the raw request body. A reset (`req.value is None`) leaves nothing
+    # stored, so this reads back `None` too.
     stored_row = store.get(name)
     stored_value = stored_row.value if stored_row is not None else None
 

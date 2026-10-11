@@ -536,7 +536,8 @@ def _coerce_str(name: str, raw: Any) -> str:
         msg = f"{name} must be a string, got {raw!r}"
         # ValueError (not TypeError): same contract as _coerce_int above.
         raise ValueError(msg)  # noqa: TRY004
-    if not raw.strip():
+    stripped = raw.strip()
+    if not stripped:
         # Blank/whitespace-only is refused, not stored: every str-typed
         # knob's own env reader treats an empty value as absent and
         # falls back to the default (see e.g. reconcile_model's
@@ -544,7 +545,13 @@ def _coerce_str(name: str, raw: Any) -> str:
         # never actually takes effect.
         msg = f"{name} must not be blank, got {raw!r}"
         raise ValueError(msg)
-    return raw
+    # Stored must equal effective: from_env_and_settings
+    # renders this value back into an env-string and re-parses it through
+    # the same from_env reader that strips surrounding whitespace off
+    # reconcile_model before using it -- stripping here too, rather than
+    # storing the raw ' x ', is what keeps those two readings the same
+    # value instead of one stripped and one not.
+    return stripped
 
 
 def _check_bounds(spec: SettingSpec, value: bool | int | float | str) -> None:

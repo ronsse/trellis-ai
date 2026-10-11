@@ -26,7 +26,7 @@ from trellis.mutate.policy_source import POLICY_FILENAME
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
-from trellis_cli.exit_codes import EXIT_OK, EXIT_POLICY, EXIT_VALIDATION
+from trellis_cli.exit_codes import EXIT_OK, EXIT_POLICY, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.main import app as root_app
 
 runner = CliRunner()
@@ -153,6 +153,30 @@ class TestSet:
         payload = json.loads(result.stdout)
         assert payload["status"] == "rejected"
         assert _store(tmp_path).get("pack_holdout_rate") is None
+
+    def test_degraded_store_exits_store_not_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """M11 (re-gate #857): a degraded settings file must exit
+        :data:`EXIT_STORE` (5) -- "backend down, don't retry with
+        different input" -- never :data:`EXIT_VALIDATION` (2), which
+        would tell an operator to fix their arguments. The route's own
+        test of the same refusal is ``test_settings_routes.py``'s
+        ``test_degraded_store_refuses_the_write``; this is the CLI half,
+        through :func:`~trellis_cli.exit_codes.refusal_exit_code`.
+        """
+        _init_stores(tmp_path, monkeypatch)
+        path = resolve_settings_path(tmp_path / "data" / "stores")
+        assert path is not None
+        path.write_text("{not valid json", encoding="utf-8")
+
+        result = _invoke(["set", "pack_holdout_rate", "0.3", "--format", "json"])
+
+        assert result.exit_code == EXIT_STORE, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+        assert "mv " in payload["message"]
+        assert ".corrupt" in payload["message"]
 
 
 # ---------------------------------------------------------------------------

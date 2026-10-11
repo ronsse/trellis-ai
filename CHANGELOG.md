@@ -140,46 +140,57 @@ All notable changes to Trellis will be documented in this file.
   `trellis admin settings set|unset` and admin-scoped
   `PUT`/`POST /api/v1/settings/{name}` — unknown name, wrong type and
   out-of-range are refused, never clamped, through the real `MutationExecutor`
-  Stage 2 policy gate on both surfaces. A gate review on the original PR found
-  two authorization gaps, both closed before merge:
-  - **B1/B2.** The handler is registered only on a new, narrow
+  Stage 2 policy gate on both surfaces.
+  - The handler is registered only on a new, narrow
     `create_settings_handlers` / `build_settings_executor`, built by the admin
     route and the CLI alone — `create_curate_handlers` (and so the generic
     `POST /commands/batch` route and MCP's `execute_mutation`, both built on
-    `build_curate_executor`) no longer registers it at all, so a
-    `settings.update` submitted there fails "No handler registered" rather
-    than being reachable at all. The handler also refuses any `Command` whose
-    `target_type` isn't `"setting"` or whose `target_id` doesn't match the
-    setting name, as defence in depth. An `entity_type=setting` deny policy
-    now refuses the write on every path that can reach it.
-  - **Truthfulness.** `changed_by` on the audit event comes from the
-    authenticated principal, never the client-supplied `requested_by` (kept
-    only as a separate `requested_by_claim`); `stored_value` is the
-    normalized, parsed value, never the raw request body; a write behind a
-    currently-set env var still stores the override and says so, including
-    on reset ("the environment variable keeps winning"); the response and
-    event both carry `settings_live`/`restart_required` from the registry,
-    with an explicit note that a `restart_required` change applies after a
-    restart; `GET /settings` carries a `read_by: "trellis-api"` label so a
-    multi-container deployment can tell a per-process read from a
-    fleet-wide one. A degraded or stale `SettingsStore` answers REST `409`
-    / CLI exit `5` (`EXIT_STORE`), with the store's own recovery text
-    intact, rather than a generic `400`/validation exit.
-  - **Q5.** `validate_value` now refuses every value
-    `WriteBehaviourConfig.from_env` would otherwise silently replace with
-    the shipped default instead of applying — `reconcile_timeout_s <= 0`
-    (including `-0.0`) and a blank/whitespace `reconcile_model` are
-    rejected, not stored as a no-op override. Both sides of each affected
-    knob share one parser (`parse_finite_float`), so an `int` too large for
-    `float()` (e.g. `10**400`) raises `ValueError` — a governed
-    `invalid_value` rejection — on both the env read and the settings write,
-    never an uncaught `OverflowError` that would otherwise surface as the
-    executor's generic `FAILED`.
+    `build_curate_executor`) does not register it at all, so a
+    `settings.update` submitted there answers `FAILED`, with a message
+    naming where it *is* reachable, rather than being reachable itself. The
+    handler also refuses any `Command` whose `target_type` isn't `"setting"`
+    or whose `target_id` doesn't match the setting name, as defence in
+    depth. An `entity_type=setting` deny policy refuses the write on every
+    path that can reach it.
+  - `changed_by` on the audit event comes from the authenticated principal,
+    never the client-supplied `requested_by` (kept only as a separate
+    `requested_by_claim`); `stored_value` is the normalized, parsed value,
+    never the raw request body — surrounding whitespace included, so a
+    string setting written as `" x "` stores `"x"`, matching the effective
+    value `WriteBehaviourConfig.from_env_and_settings` resolves. A write
+    behind a currently-set env var still stores the override and says so,
+    identically on the CLI and REST and on a plain set and a reset alike (a
+    reset leaves nothing stored, and the note says exactly that rather than
+    claiming a stored value "takes effect" once the variable is unset). The
+    response and event both carry `settings_live`/`restart_required` from
+    the registry, with an explicit note that a `restart_required` change
+    applies after a restart; `GET /settings` carries a `read_by:
+    "trellis-api"` label so a multi-container deployment can tell a
+    per-process read from a fleet-wide one. A degraded or stale
+    `SettingsStore` answers REST `409` / CLI exit `5` (`EXIT_STORE`); the
+    409 body carries `recovery` and the real `store_degradation` as their
+    own fields (mirroring `routes/policies.py`), so the recovery command
+    survives `sanitize_error_message`'s 512-character cap on `message`
+    instead of being truncated away on a long `stores_dir` path.
+  - `validate_value` refuses every value `WriteBehaviourConfig.from_env`
+    would otherwise silently replace with the shipped default instead of
+    applying — `reconcile_timeout_s <= 0` (including `-0.0`) and a
+    blank/whitespace `reconcile_model` are rejected, not stored as a no-op
+    override. Both sides of each affected knob share one parser
+    (`parse_finite_float`), so an `int` too large for `float()` (e.g.
+    `10**400`) raises `ValueError` — a governed `invalid_value` rejection —
+    on both the env read and the settings write, never an uncaught
+    `OverflowError` that would otherwise surface as the executor's generic
+    `FAILED`.
 
-  Proven with a mutation-testing pass covering both the original six
-  surviving-mutant findings and two new mutants targeting the B1/B2 fixes
-  themselves (settings.update re-registered on the generic handler dict;
-  the target-type/target-id check removed) — all eight killed.
+  Each claim above is pinned by a regression test, not asserted on faith:
+  `tests/unit/api/test_settings_routes.py`,
+  `tests/unit/api/test_settings_update_not_reachable_via_batch.py`,
+  `tests/unit/cli/test_admin_settings.py`,
+  `tests/unit/core/test_settings_value_validation.py`,
+  `tests/unit/mcp/test_execute_mutation.py` and
+  `tests/unit/mutate/test_settings_update_handler.py` — rerun those (or
+  `make test`) to reverify rather than trusting this entry.
 - **Promotion-ready-candidate digest and readable fallback names (#845).**
   Prod had scored 796 learning candidates with 0 ever promoted, and 13 of the
   top 15 `promote_guidance` candidates carried an ugly bare-item-id

@@ -139,6 +139,34 @@ class TestStr:
         with pytest.raises(ValueError, match="one of"):
             validate_value(spec, "c")
 
+    def test_surrounding_whitespace_is_stripped_so_stored_equals_effective(
+        self,
+    ) -> None:
+        """``reconcile_model``'s own ``from_env`` reader (``write_config.py``)
+        strips whitespace before using the env spelling of this value
+        (``src.get(RECONCILE_MODEL_ENV, "").strip() or DEFAULT``). A stored
+        value must get the same treatment, or the settings-store row and
+        ``WriteBehaviourConfig.from_env_and_settings``'s reported effective
+        value disagree on the exact same input -- so ``_coerce_str`` strips
+        too, and a stored string is never surrounded by whitespace the
+        effective reader would have removed.
+        """
+        spec = get_setting("reconcile_model")
+        assert spec is not None
+
+        assert validate_value(spec, " x ") == "x"
+        assert validate_value(spec, "\tqwen2.5:14b\n") == "qwen2.5:14b"
+
+    def test_blank_after_stripping_is_still_refused(self) -> None:
+        """Whitespace-only input must not survive stripping into an
+        accepted empty string -- it hits the existing blank check either
+        way, before or after this fix.
+        """
+        spec = get_setting("reconcile_model")
+        assert spec is not None
+        with pytest.raises(ValueError, match="blank"):
+            validate_value(spec, "   ")
+
 
 class TestEveryRegistryEntryValidatesItsOwnDefaultOrDocumentedSentinel:
     @pytest.mark.parametrize("name", list(SETTINGS_REGISTRY))
@@ -153,7 +181,7 @@ class TestEveryRegistryEntryValidatesItsOwnDefaultOrDocumentedSentinel:
 
 
 class TestRefusesWhatFromEnvWouldSilentlyDegrade:
-    """Q5 (gate report on #857): ``validate_value`` must refuse every value
+    """``validate_value`` must refuse every value
     ``WriteBehaviourConfig.from_env`` would silently replace with the
     shipped default, rather than storing something that later turns out to
     have no effect. See ``validate_value``'s own docstring and

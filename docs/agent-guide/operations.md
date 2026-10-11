@@ -1185,9 +1185,15 @@ is silently clamped. These two are the *only* surfaces that can reach
 this operation at all: the generic `POST /commands/batch` route and
 MCP's `execute_mutation` build `build_curate_executor` instead, which
 never registers `Operation.SETTINGS_UPDATE`, so a `settings.update`
-command submitted there fails as "No handler registered" rather than
-being evaluated and refused by policy (gate report on #857, B1/B2) —
+command submitted there fails — `status: "failed"`, not `"rejected"`,
+because nothing was evaluated and no `MUTATION_REJECTED` event exists
+to name a reason — rather than being evaluated and refused by policy;
 there is no shared refusal path to be "identical" to from those two.
+Both surfaces rewrite the message (not the status) through
+`redirect_unreachable_settings_update`, so the failure names where the
+write *is* reachable (`PUT`/`POST /api/v1/settings/{name}`, or
+`trellis admin settings set`/`unset`) instead of a bare "no handler
+registered for: settings.update".
 `value: null` (CLI: `settings unset`) removes the
 override; there is no separate reset operation. A write for a setting
 whose environment variable is currently set still stores the override —
