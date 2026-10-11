@@ -127,6 +127,22 @@ class TestSet:
         result = _invoke(["set", "pack_holdout_rate", "5.0", "--format", "json"])
         assert result.exit_code == EXIT_VALIDATION, result.output
 
+    def test_env_only_setting_refuses_a_write_on_the_cli_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """B3 (re-gate #867): ``graph_max_subgraph_depth`` ships
+        ``settings_writable=False`` -- the same ``SettingsUpdateHandler``
+        the REST route uses refuses this write here too, with the env
+        var named in the message rather than a bare validation error.
+        """
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["set", "graph_max_subgraph_depth", "10", "--format", "json"])
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+        assert "TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH" in payload["message"]
+        assert _store(tmp_path).get("graph_max_subgraph_depth") is None
+
     def test_entity_type_setting_deny_policy_refuses_the_write(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

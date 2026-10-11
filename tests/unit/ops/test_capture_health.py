@@ -112,6 +112,20 @@ class TestResolveCaptureThresholds:
 
         assert threshold == DEFAULT_THRESHOLD
 
+    def test_a_negative_env_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-gate #867 M10: the env side of ``_resolve_int_knob`` must
+        reject a negative value exactly as the stored side does above --
+        both go through the same ``validate_value`` bounds check, but
+        only the stored side had a test pinning it before this PR.
+        """
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_THRESHOLD", "-1")
+
+        threshold, _window_hours = resolve_capture_thresholds(None)
+
+        assert threshold == DEFAULT_THRESHOLD
+
     def test_zero_is_a_valid_settings_override(self) -> None:
         """0 disables the check entirely -- it must not be treated as
         falsy and degraded to the default.

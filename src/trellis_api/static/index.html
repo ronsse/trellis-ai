@@ -6402,11 +6402,22 @@
             const el = document.getElementById('runtime-auth-banner');
             if (!el) return;
             if (!data || !data.auth_mode_permissive) { el.innerHTML = ''; return; }
+            const mode = data.auth_mode;
+            // Exactly what each mode grants (trellis_api/auth.py::authenticate):
+            // 'off' grants every request every scope no matter what credential
+            // (if any) it presents. 'optional' grants every scope ONLY to a
+            // request that presents no credential at all -- one with an
+            // invalid credential still gets 401, and one with a valid scoped
+            // key gets that key's own scopes, not necessarily every scope.
+            const claim = mode === 'optional'
+                ? 'a request without an API key is granted every scope'
+                : 'every request is granted every scope';
+            const detail = mode === 'optional'
+                ? 'A caller that omits its API key right now is granted every scope. Set <code>TRELLIS_AUTH_MODE=required</code> (and an API key) before exposing this process beyond a trusted, single-operator machine.'
+                : 'No API key is required right now. Any caller that can reach this server can read and change everything an admin key could. Set <code>TRELLIS_AUTH_MODE=required</code> (and an API key) before exposing this process beyond a trusted, single-operator machine.';
             el.innerHTML = `<div class="degraded-banner">
-                <span class="degraded-title">AUTH MODE: ${escHtml(data.auth_mode.toUpperCase())} &mdash; every request is granted every scope</span>
-                <span class="degraded-detail">No API key is required right now. Any caller that can reach this server can read and change
-                    everything an admin key could. Set <code>TRELLIS_AUTH_MODE=required</code> (and an API key) before exposing this
-                    process beyond a trusted, single-operator machine.</span>
+                <span class="degraded-title">AUTH MODE: ${escHtml(mode.toUpperCase())} &mdash; ${claim}</span>
+                <span class="degraded-detail">${detail}</span>
             </div>`;
         }
 
@@ -6551,6 +6562,18 @@
         // route's own fields (overridden_by, env_var, stored_value) -- never
         // inferred from, say, whether the env var merely exists.
         function settingEnvPinNote(s) {
+            if (s.settings_writable === false) {
+                // Not "pinned" by a currently-set env var -- this knob
+                // reads ONLY the environment, always, so there is no
+                // settings-store path to be pinned out of (B3).
+                let note = `Read from <code>${escHtml(s.env_var)}</code> only, once at process start. ` +
+                    'The settings store is never consulted -- writing a value here is refused.';
+                if (s.stored_value !== null && s.stored_value !== undefined) {
+                    note += ` A value saved before this was enforced (<code>${escHtml(String(s.stored_value))}</code>) ` +
+                        'has no effect and is never read.';
+                }
+                return note;
+            }
             if (s.overridden_by !== 'env') return '';
             let note = `Pinned by <code>${escHtml(s.env_var)}</code> &mdash; the environment variable governs right now.`;
             if (s.stored_value !== null && s.stored_value !== undefined) {
@@ -6655,9 +6678,12 @@
             // never folded into this class (brief e179 rework, step 2).
             const riskClass = s.risk === 'high' ? 'risk-high' : (s.risk === 'caution' ? 'risk-caution' : '');
             const pinNote = settingEnvPinNote(s);
-            const liveHtml = s.restart_required
-                ? '<span class="badge badge-warn">Restart required</span>'
-                : '<span class="badge badge-ok">Live &mdash; next request</span>';
+            const notWritable = s.settings_writable === false;
+            const liveHtml = notWritable
+                ? '<span class="badge badge-warn">Env only &mdash; read-only here</span>'
+                : (s.restart_required
+                    ? '<span class="badge badge-warn">Restart required</span>'
+                    : '<span class="badge badge-ok">Live &mdash; next request</span>');
             const riskNoteHtml = s.risk_note
                 ? `<div class="field-hint" style="margin-top:0.3rem">${escHtml(s.risk_note)}</div>`
                 : '';
@@ -6677,7 +6703,7 @@
                 <td>${(s.stored_value === null || s.stored_value === undefined) ? '<span class="field-hint">(none)</span>' : `<code>${escHtml(String(s.stored_value))}</code>`}</td>
                 <td>${liveHtml}</td>
                 <td>${s.updated_at ? fmtTimeCell(s.updated_at) : '<span class="field-hint">never</span>'}</td>
-                <td id="setting-actions-${escHtml(s.name)}">${renderSettingActions(s, degraded)}</td>
+                <td id="setting-actions-${escHtml(s.name)}">${notWritable ? '<span class="field-hint">Read-only &mdash; set the env var</span>' : renderSettingActions(s, degraded)}</td>
             </tr>`;
         }
 

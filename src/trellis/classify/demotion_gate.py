@@ -80,6 +80,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.core.settings_registry import get_setting, validate_value
 
 logger = structlog.get_logger(__name__)
 
@@ -122,17 +123,41 @@ def _resolve_int_threshold(
     default: int,
     settings: Mapping[str, Any] | None,
 ) -> int:
+    """Coerce and bounds-check through the registry's own ``validate_value``.
+
+    Routing both the env and the stored value through the same coercion the
+    governed ``PUT /settings`` path already uses closes three gaps at once:
+    a non-finite value (``nan``/``inf``) is rejected instead of crashing
+    later with ``OverflowError`` (``int(float("inf"))`` raises that, which a
+    bare ``except ValueError`` does not catch), a value below the setting's
+    registered ``minimum`` is rejected instead of silently honoured, and a
+    malformed stored value is logged exactly as loudly as a malformed env
+    one instead of failing (and falling back) in silence.
+    """
+    spec = get_setting(setting_name)
     raw_env = os.environ.get(env_var, "").strip()
     if raw_env:
         try:
-            return int(raw_env)
-        except ValueError:
+            return (
+                int(validate_value(spec, raw_env)) if spec is not None else int(raw_env)
+            )
+        except (TypeError, ValueError):
             logger.warning("demotion_gate.bad_env_int", var=env_var, value=raw_env)
             return default
     if settings is not None and setting_name in settings:
+        raw_setting = settings[setting_name]
         try:
-            return int(settings[setting_name])
+            return (
+                int(validate_value(spec, raw_setting))
+                if spec is not None
+                else int(raw_setting)
+            )
         except (TypeError, ValueError):
+            logger.warning(
+                "demotion_gate.bad_settings_int",
+                setting=setting_name,
+                value=raw_setting,
+            )
             return default
     return default
 

@@ -1683,19 +1683,21 @@ components:
         what a real request gets.
 
 
-        Deliberately excludes anything secret-shaped: ``stores`` and
+        Deliberately excludes anything secret-shaped: ``stores`` is class
 
-        ``embedder`` are class names only, ``llm_routes`` carries tier names
+        names only, ``embedder`` names only the configuration knob in play
 
-        only (never a provider base URL, credential source, or API-key env
+        (never a key or URL), ``llm_routes`` carries tier names only (never a
 
-        name), and the two directory fields are plain filesystem paths with
+        provider base URL, credential source, or API-key env name), and the
 
-        no embedded credentials. See
+        two directory fields are plain filesystem paths with no embedded
 
-        ``tests/unit/api/test_runtime_route.py``''s secret-leakage test for the
+        credentials. See ``tests/unit/api/test_runtime_route.py``''s
 
-        seeded-secret assertion backing that claim.'
+        secret-leakage test for the seeded-secret assertion backing that
+
+        claim.'
       properties:
         auth_mode:
           title: Auth Mode
@@ -1715,7 +1717,9 @@ components:
           anyOf:
           - type: string
           - type: 'null'
-          description: Embedder backend class name, or null when no embedder is configured.
+          description: Which knob registry.embedding_fn resolved from (TRELLIS_EMBEDDING_FN or embeddings.provider), the same
+            resolver every retrieval surface calls; null when neither is set. 'unknown (...)' when the knob is set but failed
+            to resolve -- never a key or URL.
           title: Embedder
         host_jobs_dir:
           anyOf:
@@ -4357,25 +4361,37 @@ paths:
 
         uses — ``resolve_auth_mode``, ``resolve_ops_detail``,
 
-        ``resolve_metrics_public``, ``get_bind_info`` — so this view cannot
+        ``resolve_metrics_public``, ``get_bind_info``, and for ``embedder``,
 
-        drift from how the server actually behaves. Deliberately excludes
+        ``registry.embedding_fn`` itself (the resolver every retrieval
 
-        anything secret-shaped: ``stores``/``embedder`` are class names only,
+        surface actually calls, not the separate ``llm.embedding:`` block
 
-        ``llm_routes`` carries tier names only (an ``LLMRoute``''s ``block`` —
+        nothing else reads) — so this view cannot drift from how the server
 
-        which can hold a literal API key — is never touched), and the two
+        actually behaves. Deliberately excludes anything secret-shaped:
 
-        directory fields are plain paths. Building the embedder is wrapped
+        ``stores`` is class names only, ``embedder`` names only the
 
-        whole rather than guarded by exception type: an unconfigured or
+        configuration knob in play (``TRELLIS_EMBEDDING_FN`` or
 
-        misconfigured ``llm.embedding:`` block must read as "none configured"
+        ``embeddings.provider``, never a key or URL), ``llm_routes`` carries
 
-        here, never 500 a panel that exists to show configuration, not
+        tier names only (an ``LLMRoute``''s ``block`` — which can hold a
 
-        enforce it.'
+        literal API key — is never touched, and a malformed route is
+
+        reported by its setting path, never the value that failed to
+
+        validate), and the two directory fields are plain paths. Resolving
+
+        the embedder is wrapped whole rather than guarded by exception type:
+
+        an unconfigured or misconfigured embedding knob must read as "none
+
+        configured" or "unknown" here, never 500 a panel that exists to show
+
+        configuration, not enforce it.'
       operationId: runtime_api_v1_runtime_get
       responses:
         '200':

@@ -144,7 +144,16 @@ class TestBuildJudgeClient:
         with pytest.raises(capture_sweep.CaptureJudgeUnavailableError) as exc:
             capture_sweep.build_judge_client(registry)
         assert isinstance(exc.value.__cause__, LLMRoutingError)
-        assert "llm.routes.session_capture names tier 'deep'" in str(exc.value)
+        # Names the setting, never the route's value: ``_validate_route``
+        # (routing.py) treats a route's tier as potentially a secret pasted
+        # in by mistake (a short password, a bare API key), so the message
+        # here -- which reaches the admin API's runtime panel verbatim as
+        # ``llm_routes_error`` -- must not echo "deep" back.
+        message = str(exc.value)
+        assert "llm.routes.session_capture names a tier llm.tiers does not define" in (
+            message
+        )
+        assert "deep" not in message
 
 
 class TestJudgeUnavailableSessions:

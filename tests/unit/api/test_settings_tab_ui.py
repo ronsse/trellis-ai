@@ -130,3 +130,42 @@ def test_the_value_input_never_puts_the_literal_null_in_its_value_attribute() ->
     # not currentValue directly, inside escHtml().
     assert "escHtml(rawValue)" in body
     assert "escHtml(String(currentValue))" not in body
+
+
+# ---------------------------------------------------------------------------
+# 4. settings_writable === false renders the row read-only, never a live
+#    Save/Reset form the write would just refuse (B3, re-gate #867)
+# ---------------------------------------------------------------------------
+
+
+def test_a_non_writable_row_never_renders_save_or_reset_actions() -> None:
+    """``graph_max_subgraph_depth`` ships ``settings_writable: false`` --
+    its row must not render ``renderSettingActions`` (the Save/Reset
+    form), which a click would only have sent into a write the handler
+    refuses. Degraded-store disabling is a *different* mechanism (grey
+    buttons that stay in the DOM); this one removes them outright.
+    """
+    page = _page()
+    body = _function_body(
+        page,
+        "function renderSettingRow(s, groups, degraded) {",
+        "function coerceSettingValue(",
+    )
+    assert "s.settings_writable === false" in body
+    assert "notWritable ?" in body
+    assert "renderSettingActions(s, degraded)" in body  # still the writable branch
+
+
+def test_a_non_writable_row_names_env_only_instead_of_restart_or_live() -> None:
+    """The "Live"/"Restart required" badge is also a claim about what a
+    write would do -- a non-writable row must not show either, since a
+    write is refused outright, not merely delayed to the next restart.
+    """
+    page = _page()
+    body = _function_body(
+        page,
+        "function renderSettingRow(s, groups, degraded) {",
+        "function coerceSettingValue(",
+    )
+    live_html_stmt = _between(body, "const liveHtml = ", ";\n")
+    assert "notWritable" in live_html_stmt

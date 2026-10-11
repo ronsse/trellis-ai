@@ -74,6 +74,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.core.pack_holdout import drop_holdout
+from trellis.core.settings_registry import get_setting, validate_value
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.retrieve.effectiveness import lift_vs_baseline
 from trellis.schemas.advisory import (
@@ -140,12 +141,27 @@ def resolve_advisory_thresholds(
     caller that already received an explicit per-call override (a CLI
     flag, a query parameter) should use that instead of calling this at
     all; this is for the common case where nothing was explicitly passed.
+
+    Both values are coerced and bounds-checked through the registry's own
+    ``validate_value`` (the same coercion the governed ``PUT /settings``
+    path uses) — a non-finite or out-of-range value (``nan``, ``inf``, a
+    negative sample size, an effect size outside ``0..1``) falls back to
+    the module default with a warning instead of reaching the generator,
+    which would otherwise either crash (``int(float("inf"))`` raises
+    ``OverflowError``, which a bare ``except ValueError`` does not catch)
+    or silently fail open (a ``nan``/negative effect floor compares false
+    against everything, admitting advisories a real floor would refuse).
     """
+    sample_spec = get_setting(MIN_SAMPLE_SIZE_SETTING)
     sample_raw = os.environ.get(MIN_SAMPLE_SIZE_ENV, "").strip()
     if sample_raw:
         try:
-            min_sample_size = int(sample_raw)
-        except ValueError:
+            min_sample_size = (
+                int(validate_value(sample_spec, sample_raw))
+                if sample_spec is not None
+                else int(sample_raw)
+            )
+        except (TypeError, ValueError):
             logger.warning(
                 "advisory_generator.bad_env_int",
                 var=MIN_SAMPLE_SIZE_ENV,
@@ -153,18 +169,33 @@ def resolve_advisory_thresholds(
             )
             min_sample_size = _MIN_SAMPLE_SIZE
     elif settings is not None and MIN_SAMPLE_SIZE_SETTING in settings:
+        sample_stored = settings[MIN_SAMPLE_SIZE_SETTING]
         try:
-            min_sample_size = int(settings[MIN_SAMPLE_SIZE_SETTING])
+            min_sample_size = (
+                int(validate_value(sample_spec, sample_stored))
+                if sample_spec is not None
+                else int(sample_stored)
+            )
         except (TypeError, ValueError):
+            logger.warning(
+                "advisory_generator.bad_settings_int",
+                setting=MIN_SAMPLE_SIZE_SETTING,
+                value=sample_stored,
+            )
             min_sample_size = _MIN_SAMPLE_SIZE
     else:
         min_sample_size = _MIN_SAMPLE_SIZE
 
+    effect_spec = get_setting(MIN_EFFECT_SIZE_SETTING)
     effect_raw = os.environ.get(MIN_EFFECT_SIZE_ENV, "").strip()
     if effect_raw:
         try:
-            min_effect_size = float(effect_raw)
-        except ValueError:
+            min_effect_size = (
+                float(validate_value(effect_spec, effect_raw))
+                if effect_spec is not None
+                else float(effect_raw)
+            )
+        except (TypeError, ValueError):
             logger.warning(
                 "advisory_generator.bad_env_float",
                 var=MIN_EFFECT_SIZE_ENV,
@@ -172,9 +203,19 @@ def resolve_advisory_thresholds(
             )
             min_effect_size = _MIN_EFFECT_SIZE
     elif settings is not None and MIN_EFFECT_SIZE_SETTING in settings:
+        effect_stored = settings[MIN_EFFECT_SIZE_SETTING]
         try:
-            min_effect_size = float(settings[MIN_EFFECT_SIZE_SETTING])
+            min_effect_size = (
+                float(validate_value(effect_spec, effect_stored))
+                if effect_spec is not None
+                else float(effect_stored)
+            )
         except (TypeError, ValueError):
+            logger.warning(
+                "advisory_generator.bad_settings_float",
+                setting=MIN_EFFECT_SIZE_SETTING,
+                value=effect_stored,
+            )
             min_effect_size = _MIN_EFFECT_SIZE
     else:
         min_effect_size = _MIN_EFFECT_SIZE

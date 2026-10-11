@@ -178,6 +178,17 @@ class SettingSpec:
     #: non-low risk badge. Must be checked against the knob's actual
     #: reading site, not carried over from an old description.
     risk_note: str | None = None
+    #: ``False`` means :class:`~trellis.mutate.handlers.SettingsUpdateHandler`
+    #: refuses a write that sets a value (clearing one, ``value=None``, is
+    #: still allowed, so a stray legacy row can be removed). Reserved for
+    #: a knob whose enforcement site never reads the settings store at
+    #: all, at *any* point in its process -- not merely one that is slow
+    #: to pick up a change (that is ``restart_required``, which stays
+    #: writable: a restart's first read still sees the stored value).
+    #: ``graph_max_subgraph_depth`` is the only such entry today: storing
+    #: a value there would be accepted and echoed back by
+    #: ``GET /settings`` with no code path that could ever make it real.
+    settings_writable: bool = True
 
 
 _SPECS: tuple[SettingSpec, ...] = (
@@ -549,8 +560,11 @@ _SPECS: tuple[SettingSpec, ...] = (
             "follow out from its starting node. A request for a deeper "
             "traversal than this is refused outright rather than served "
             "a slow, truncated result. The default is 6. This is read "
-            "once when the process starts, so changing it only takes "
-            "effect after a restart."
+            "only from the environment variable below, once when the "
+            "process starts — a restart does not help a stored value "
+            "take effect, because enforcement never reads the settings "
+            "store at all. Set the environment variable instead; a "
+            "write here is refused."
         ),
         surfaces=("mcp", "api"),
         restart_required=True,
@@ -566,6 +580,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         env_var="TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH",
         minimum=1,
         maximum=1000,
+        settings_writable=False,
     ),
     SettingSpec(
         name="noise_demotion_min_attributed_packs",

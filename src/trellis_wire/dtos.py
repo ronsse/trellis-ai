@@ -548,13 +548,14 @@ class RuntimeResponse(WireModel):
     ``trellis_api.app.get_bind_info``) so this view can never drift from
     what a real request gets.
 
-    Deliberately excludes anything secret-shaped: ``stores`` and
-    ``embedder`` are class names only, ``llm_routes`` carries tier names
-    only (never a provider base URL, credential source, or API-key env
-    name), and the two directory fields are plain filesystem paths with
-    no embedded credentials. See
-    ``tests/unit/api/test_runtime_route.py``'s secret-leakage test for the
-    seeded-secret assertion backing that claim.
+    Deliberately excludes anything secret-shaped: ``stores`` is class
+    names only, ``embedder`` names only the configuration knob in play
+    (never a key or URL), ``llm_routes`` carries tier names only (never a
+    provider base URL, credential source, or API-key env name), and the
+    two directory fields are plain filesystem paths with no embedded
+    credentials. See ``tests/unit/api/test_runtime_route.py``'s
+    secret-leakage test for the seeded-secret assertion backing that
+    claim.
     """
 
     auth_mode: str
@@ -576,7 +577,11 @@ class RuntimeResponse(WireModel):
     embedder: str | None = Field(
         default=None,
         description=(
-            "Embedder backend class name, or null when no embedder is configured."
+            "Which knob registry.embedding_fn resolved from"
+            " (TRELLIS_EMBEDDING_FN or embeddings.provider), the same"
+            " resolver every retrieval surface calls; null when neither"
+            " is set. 'unknown (...)' when the knob is set but failed to"
+            " resolve -- never a key or URL."
         ),
     )
     llm_routes: dict[str, str | None] = Field(

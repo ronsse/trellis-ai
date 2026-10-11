@@ -267,17 +267,28 @@ def _validate_route(
         )
         raise LLMRoutingError(msg, setting=setting)
     if not isinstance(tier, str) or not tier:
+        # Name the value's *type*, never its repr: a route value can be
+        # whatever an operator pasted in by mistake -- a credential
+        # mapping, a list holding one -- and this message reaches the
+        # admin API's runtime panel verbatim as ``llm_routes_error``.
+        shape = "null" if tier is None else type(tier).__name__
         msg = (
-            f"llm.routes.{consumer} must name a tier, got"
-            f" {'null' if tier is None else repr(tier)}. Delete the route to"
-            " use the parent 'llm:' block."
+            f"llm.routes.{consumer} must name a tier as a non-empty string,"
+            f" got a {shape} value. Delete the route to use the parent"
+            " 'llm:' block."
         )
         raise LLMRoutingError(msg, setting=setting)
     if tier not in tiers:
+        # Likewise: ``tier`` is already known to be a non-empty string here,
+        # but it can still be a secret pasted in place of a tier name (a
+        # short password, a bare API key). Report the defined tier names
+        # (the operator's own labels, never secret-shaped) instead of the
+        # value that failed to match one of them.
         defined = sorted(tiers) or "none"
         msg = (
-            f"llm.routes.{consumer} names tier {tier!r}, which llm.tiers does"
-            f" not define (defined: {defined})."
+            f"llm.routes.{consumer} names a tier llm.tiers does not define"
+            f" (defined: {defined}). Check the route for a typo, or a"
+            " credential pasted in place of a tier name."
         )
         raise LLMRoutingError(msg, setting=setting)
 

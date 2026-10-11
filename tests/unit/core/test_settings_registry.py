@@ -259,6 +259,62 @@ class TestSettingsLive:
         assert SETTINGS_REGISTRY["filter_legacy_advisories"].settings_live is True
 
 
+class TestSettingsWritable:
+    """``settings_writable`` (B3, re-gate #867) is narrower than
+    ``settings_live``: ``minhash_seed_max_docs`` is also not
+    ``settings_live`` today, but its stored value *is* read -- at the
+    process's first subsequent use after a restart, via
+    ``WriteBehaviourConfig.from_env_and_settings`` -- so storing one is
+    still meaningful and stays writable. ``graph_max_subgraph_depth`` is
+    the one entry with no code path that ever reads a stored value, at
+    any time, which is why it alone is not writable.
+    """
+
+    def test_graph_max_subgraph_depth_is_the_only_non_writable_entry(self) -> None:
+        not_writable = {
+            name
+            for name, spec in SETTINGS_REGISTRY.items()
+            if not spec.settings_writable
+        }
+        assert not_writable == {"graph_max_subgraph_depth"}
+
+    def test_minhash_seed_max_docs_stays_writable(self) -> None:
+        """Also ``restart_required`` and not ``settings_live``, but its
+        stored value IS read after a restart -- the two "not live today"
+        entries from :class:`TestSettingsLive` must not collapse into one
+        "not writable" treatment.
+        """
+        assert SETTINGS_REGISTRY["minhash_seed_max_docs"].settings_writable is True
+
+    def test_every_entry_defaults_writable_unless_stated(self) -> None:
+        """``settings_writable`` defaults to ``True`` on the dataclass --
+        this is the field a new entry gets for free, so adding a knob
+        never silently makes it refuse writes.
+        """
+        assert SettingSpec.__dataclass_fields__["settings_writable"].default is True
+
+    def test_mutant_a_second_non_writable_entry_is_caught(self) -> None:
+        """A deliberately defective registry: a second entry flipped to
+        ``settings_writable=False``. Proven against a mutant, not just
+        the real registry, so this cannot pass merely because today's
+        catalog happens to have exactly one.
+        """
+        base = next(
+            spec
+            for spec in SETTINGS_REGISTRY.values()
+            if spec.name != "graph_max_subgraph_depth"
+        )
+        mutant = replace(base, settings_writable=False)
+        defective_registry = {**SETTINGS_REGISTRY, mutant.name: mutant}
+
+        not_writable = {
+            name
+            for name, spec in defective_registry.items()
+            if not spec.settings_writable
+        }
+        assert not_writable == {"graph_max_subgraph_depth", mutant.name}
+
+
 class TestEveryEntryIsLiveOrExplainsWhyNot:
     """Every :class:`SettingSpec` must be ``settings_live`` or
     ``restart_required`` (with the reason stated in its own description) —

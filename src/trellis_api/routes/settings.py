@@ -33,6 +33,7 @@ from trellis.core.settings_registry import (
     SettingSpec,
     get_setting,
     resolve_source,
+    validate_value,
 )
 from trellis.core.write_config import WriteBehaviourConfig
 from trellis.mutate import Command, CommandStatus, Operation, build_settings_executor
@@ -109,10 +110,13 @@ def _effective_values(settings_values: dict[str, Any]) -> dict[str, Any]:
 
     ``graph_max_subgraph_depth`` is the one entry in this second group
     that is *not* settings-live: :data:`trellis.stores.base.graph.MAX_SUBGRAPH_DEPTH`
-    is resolved once at import, from the environment only, so a stored
-    override cannot take effect without a restart. It gets the same
-    optimistic-preview treatment as ``graph_seeding`` above rather than
-    a live call, for that reason.
+    is resolved once at import, from the environment only -- the
+    settings store is never consulted, so, unlike every env-pinned knob
+    above, a restart does not make a stored override take effect either.
+    ``SettingsUpdateHandler`` refuses a write that would set one
+    (``settings_writable=False``); this function still never echoes a
+    stray legacy row as if it were effective, always calling the real
+    resolver below regardless of what ``settings_values`` holds.
     """
     effective = WriteBehaviourConfig.from_env_and_settings(
         settings=settings_values
@@ -155,23 +159,16 @@ def _effective_values(settings_values: dict[str, Any]) -> dict[str, Any]:
     ) = resolve_capture_thresholds(settings_values)
     effective["capture_strict"] = strict_mode(settings_values)
 
-    depth_spec = SETTINGS_REGISTRY["graph_max_subgraph_depth"]
-    depth_source = resolve_source(depth_spec, settings_values)
-    if depth_source == "env":
-        from trellis.stores.base.graph import (  # noqa: PLC0415
-            _resolve_max_subgraph_depth,
-        )
+    # Always the real resolver, regardless of what settings_values holds:
+    # no code path reads a stored override for this knob (B3), so echoing
+    # one back here as "effective" would be exactly the lie this route
+    # exists to avoid. _resolve_max_subgraph_depth() already falls back
+    # to the spec default (6) on an unset or invalid env var.
+    from trellis.stores.base.graph import (  # noqa: PLC0415
+        _resolve_max_subgraph_depth,
+    )
 
-        effective["graph_max_subgraph_depth"] = _resolve_max_subgraph_depth()
-    elif depth_source == "settings":
-        try:
-            effective["graph_max_subgraph_depth"] = int(
-                settings_values["graph_max_subgraph_depth"]
-            )
-        except (TypeError, ValueError):
-            effective["graph_max_subgraph_depth"] = depth_spec.default
-    else:
-        effective["graph_max_subgraph_depth"] = depth_spec.default
+    effective["graph_max_subgraph_depth"] = _resolve_max_subgraph_depth()
 
     return effective
 
@@ -203,14 +200,46 @@ def _entry(
         "risk": spec.risk,
         "group": spec.group,
         "settings_live": spec.settings_live,
+        "settings_writable": spec.settings_writable,
         "env_var": spec.env_var,
         "effective_value": effective[spec.name],
-        "overridden_by": resolve_source(spec, settings_values),
+        # For a non-writable knob, ``resolve_source`` would still answer
+        # "settings" off a stray row on disk even though effective_value
+        # (above) never reads it -- the two fields would then name
+        # different sources for the same row. Collapse that one case to
+        # "default" so the two agree: a non-writable knob's effective
+        # value only ever comes from its environment variable or the
+        # shipped default, never a stored row.
+        "overridden_by": (
+            "default"
+            if not spec.settings_writable
+            and resolve_source(spec, settings_values) == "settings"
+            else resolve_source(spec, settings_values)
+        ),
         # The raw override on disk, if any -- distinct from
         # effective_value, which may instead be the env or default value
         # while a stored override sits inert underneath it (brief e179
         # step 2's env-pin truthfulness).
         "stored_value": stored_row.value if stored_row is not None else None,
+        # Re-gate #867 B4: a malformed stored row (``1e999``, ``nan``, a
+        # string where an int belongs) makes every resolver above fall
+        # back to the default silently -- correct for the knob's own
+        # behaviour, but invisible here, where ``overridden_by`` would
+        # still read "settings" off the row's mere presence
+        # (``resolve_source`` checks presence, not validity) while
+        # ``effective_value`` quietly differs from ``stored_value``. This
+        # re-runs the same ``validate_value`` the governed write path
+        # already enforces, against the row already on disk, so a value
+        # that predates a tightened bound or was written outside the
+        # governed path (direct settings.json edit) surfaces as a fact
+        # the UI can show next to the mismatched pair above, not
+        # something a caller has to notice by diffing two fields
+        # themselves. ``False`` when there is no stored row, or it is
+        # valid -- never ``None``, so a caller can treat this as a plain
+        # boolean rather than a tri-state.
+        "stored_value_invalid": (
+            stored_row is not None and _stored_value_rejected(spec, stored_row.value)
+        ),
         # "Last changed ... when" (brief e179 step 1). The store never
         # records who changed a setting -- SettingRow carries no
         # changed_by field, and SettingsUpdateHandler's changed_by is
@@ -220,6 +249,23 @@ def _entry(
             stored_row.updated_at.isoformat() if stored_row is not None else None
         ),
     }
+
+
+def _stored_value_rejected(spec: SettingSpec, raw: Any) -> bool:
+    """Whether the registry's own coercion would refuse ``raw``.
+
+    Mirrors the ``except (TypeError, ValueError)`` every dedicated
+    resolver in this PR uses around the same ``validate_value`` call
+    (``demotion_gate``, ``advisory_generator``, ``capture_health``) --
+    ``validate_value`` itself never raises ``OverflowError`` (its
+    ``_coerce_int``/``_coerce_float`` check finiteness before casting),
+    so that is not a gap here either.
+    """
+    try:
+        validate_value(spec, raw)
+    except (TypeError, ValueError):
+        return True
+    return False
 
 
 def _execute_command(cmd: Command) -> CommandResponse:

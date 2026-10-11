@@ -54,12 +54,11 @@ ENV_MODEL = "TRELLIS_DISTILL_MODEL"
 ENV_STRICT = "TRELLIS_CAPTURE_STRICT"
 
 #: Settings-registry wiring for :func:`strict_mode` — env wins over a
-#: stored override, which wins over the default (``True``). Only the
-#: ``trellis worker capture-sessions`` front door resolves a setting (it
-#: has a :class:`StoreRegistry` to read one from); the standalone
-#: ``python -m trellis_workers.session_capture`` entry point has none and
-#: stays env-only. See ``trellis.core.settings_registry``'s
-#: ``capture_strict`` entry.
+#: stored override, which wins over the default (``True``). Both the
+#: ``trellis worker capture-sessions`` front door and the standalone
+#: ``python -m trellis_workers.session_capture`` / ``trellis-session-capture``
+#: entry point build a :class:`StoreRegistry` and resolve a setting from it.
+#: See ``trellis.core.settings_registry``'s ``capture_strict`` entry.
 STRICT_SETTING = "capture_strict"
 
 #: Actionable remediation appended to every judge-unavailable message.
@@ -118,14 +117,20 @@ def strict_mode(settings: Mapping[str, Any] | None = None) -> bool:
     ``settings`` is an optional settings-store snapshot
     (:func:`trellis.stores.settings_store.load_settings_values`); the env
     var wins when set, then the stored override, then the ``True``
-    default. ``None`` (the standalone entry point's case, which has no
-    registry to read a store from) skips straight to env-then-default.
+    default. ``None`` (no settings-store snapshot at all, rather than one
+    that merely omits ``capture_strict``) skips straight to env-then-default.
     """
     raw = os.environ.get(ENV_STRICT, "").strip().lower()
     if raw:
         return raw not in _OPT_OUT_TOKENS
     if settings is not None and STRICT_SETTING in settings:
         stored = settings[STRICT_SETTING]
+        # A stored ``null`` means "no override" every other knob in this
+        # codebase reads as "fall back to the default" -- not as Python's
+        # own ``bool(None) is False``, which would silently flip the
+        # fail-closed default to permissive.
+        if stored is None:
+            return True
         if isinstance(stored, str):
             return stored.strip().lower() not in _OPT_OUT_TOKENS
         return bool(stored)

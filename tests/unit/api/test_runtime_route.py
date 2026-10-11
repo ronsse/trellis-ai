@@ -129,6 +129,82 @@ def test_embedder_is_none_when_unconfigured(client, registry) -> None:
     assert body["embedder"] is None
 
 
+def test_embedder_reports_the_env_var_source_when_set(
+    client, registry, monkeypatch
+) -> None:
+    """``embedder`` must derive from ``registry.embedding_fn`` -- the
+    resolver PackBuilder, the MCP server and the trace-embed worker all
+    actually call -- not from the separate, nothing-else-reads
+    ``llm.embedding:`` block ``build_embedder_client()`` builds from.
+    ``TRELLIS_EMBEDDING_FN`` outranks ``embeddings.provider``, exactly
+    like ``embedding_fn`` itself.
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "json.dumps")
+    body = client.get("/api/v1/runtime").json()
+    assert body["embedder"] == "json.dumps (TRELLIS_EMBEDDING_FN)"
+
+
+def test_embedder_reports_the_config_provider_source_when_set(tmp_path) -> None:
+    reg = StoreRegistry(
+        stores_dir=tmp_path / "stores",
+        embedding_config={"provider": "custom.module.embed"},
+    )
+    app_module._registry = reg
+    try:
+
+        @asynccontextmanager
+        async def noop_lifespan(app):
+            yield
+
+        app = FastAPI(lifespan=noop_lifespan)
+        app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
+        with TestClient(app) as c:
+            body = c.get("/api/v1/runtime").json()
+    finally:
+        reg.close()
+        app_module._registry = None
+    # custom.module.embed cannot import (module does not exist), so
+    # embedding_fn raises -- the panel must degrade to "unknown" with the
+    # source and the exception type, never a 500 and never raw exception
+    # text (which could echo an import path a caller does not own).
+    assert body["embedder"] is not None
+    assert body["embedder"].startswith(
+        "unknown (custom.module.embed (embeddings.provider) failed:"
+    )
+
+
+def test_embedder_degrades_to_unknown_with_a_reason_on_failure(
+    tmp_path, monkeypatch
+) -> None:
+    """A configured-but-broken embedder must never 500 the panel, and the
+    degraded value must still name *which* knob failed -- not just that
+    something, somewhere, did.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    reg = StoreRegistry(
+        stores_dir=tmp_path / "stores",
+        embedding_config={"provider": "openai"},
+    )
+    app_module._registry = reg
+    try:
+
+        @asynccontextmanager
+        async def noop_lifespan(app):
+            yield
+
+        app = FastAPI(lifespan=noop_lifespan)
+        app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
+        with TestClient(app) as c:
+            resp = c.get("/api/v1/runtime")
+    finally:
+        reg.close()
+        app_module._registry = None
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["embedder"] is not None
+    assert body["embedder"].startswith("unknown (openai (embeddings.provider) failed:")
+
+
 def test_llm_routes_cover_every_consumer_and_are_unrouted_by_default(
     client, registry
 ) -> None:
@@ -265,3 +341,75 @@ class TestNoSecretLeakage:
         assert body["llm_routes"] == {
             consumer.value: None for consumer in LLMConsumer
         } | {"session_capture": "default"}
+
+
+class TestNoSecretLeakageInMalformedRoutes:
+    """The four route-value shapes the adversarial gate probed for #867.
+
+    ``_validate_route`` (``trellis/llm/routing.py``) used to interpolate
+    the raw, malformed ``llm.routes.<consumer>`` value into its raised
+    ``LLMRoutingError`` message via ``repr()``, and the runtime route used
+    to surface that message verbatim as ``llm_routes_error`` — so a route
+    value that is actually a mistyped credential (a mapping holding an
+    ``api_key``, a list holding one, the bare key itself, or a short
+    password standing in for a tier name) reached the REST body in full.
+    Both are fixed now: ``_validate_route`` names only the value's type or
+    the defined tier names, and the route reports only ``exc.setting`` (a
+    YAML key path) plus fixed text.
+    """
+
+    @pytest.fixture
+    def client_factory(self, tmp_path):
+        def _build(route_value):
+            reg = StoreRegistry(
+                stores_dir=tmp_path / "stores",
+                llm_config={
+                    "provider": "openai",
+                    "api_key_env": "OPENAI_API_KEY",
+                    "routes": {"session_capture": route_value},
+                },
+            )
+            app_module._registry = reg
+
+            @asynccontextmanager
+            async def noop_lifespan(app):
+                yield
+
+            app = FastAPI(lifespan=noop_lifespan)
+            app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
+            return reg, TestClient(app)
+
+        return _build
+
+    @pytest.mark.parametrize(
+        "route_value",
+        [
+            pytest.param(
+                {"provider": "openai", "api_key": _FAKE_API_KEY},
+                id="mapping_with_api_key",
+            ),
+            pytest.param([_FAKE_API_KEY], id="list"),
+            pytest.param(_FAKE_API_KEY, id="bare_key_string"),
+            pytest.param("p@ssw0rd-Sh0rt1", id="short_password_as_tier_name"),
+        ],
+    )
+    def test_the_secret_never_reaches_the_response(
+        self, client_factory, route_value
+    ) -> None:
+        reg, client = client_factory(route_value)
+        try:
+            resp = client.get("/api/v1/runtime")
+            assert resp.status_code == 200, resp.text
+            raw = resp.text
+            assert _FAKE_API_KEY not in raw, f"leaked secret-shaped value in: {raw}"
+            assert "p@ssw0rd-Sh0rt1" not in raw
+
+            body = json.loads(raw)
+            assert body["llm_routes"] == {}
+            assert body["llm_routes_error"] is not None
+            assert body["llm_routes_error"].startswith("llm.routes.session_capture")
+            assert _FAKE_API_KEY not in body["llm_routes_error"]
+            assert "p@ssw0rd-Sh0rt1" not in body["llm_routes_error"]
+        finally:
+            reg.close()
+            app_module._registry = None

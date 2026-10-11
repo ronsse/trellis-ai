@@ -1777,6 +1777,28 @@ class StoreRegistry:
         self._embedding_fn_cache = resolved
         return resolved
 
+    def embedding_source_label(self) -> str | None:
+        """Which knob :attr:`embedding_fn` would read from, for display only.
+
+        Mirrors that property's own precedence (``TRELLIS_EMBEDDING_FN``
+        wins over ``embeddings.provider``) but never builds a client and
+        never raises — it names only the *source*, which is always safe
+        to show: a dotted import path or a provider string is an
+        identifier the operator chose, never a credential. Returns
+        ``None`` when neither knob is set (nothing configured). Pair with
+        an actual :attr:`embedding_fn` read to know whether that source
+        resolved or raised.
+        """
+        import os  # noqa: PLC0415
+
+        custom_path = os.environ.get("TRELLIS_EMBEDDING_FN")
+        if custom_path:
+            return f"{custom_path} (TRELLIS_EMBEDDING_FN)"
+        provider = self._embedding_config.get("provider")
+        if isinstance(provider, str) and provider:
+            return f"{provider} (embeddings.provider)"
+        return None
+
     @property
     def budget_config(self) -> Any:
         """Return the :class:`BudgetConfig` resolved from ``retrieval.budgets``.

@@ -119,6 +119,119 @@ class TestResolveAdvisoryThresholds:
 
         assert sample_size == 5
 
+    def test_an_unparseable_settings_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stored side has its own ``except`` block, independent of
+        the env side above -- a malformed *stored* sample size must fall
+        back to the default too.
+        """
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: "not-a-number"}
+
+        sample_size, _effect_size = resolve_advisory_thresholds(settings)
+
+        assert sample_size == 5
+
+    def test_a_non_finite_env_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``int(float("inf"))`` raises ``OverflowError``, not
+        ``ValueError`` -- routing through ``validate_value`` (which
+        checks ``math.isfinite`` first) means the bare
+        ``except (TypeError, ValueError)`` here never needs to see one.
+        """
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "inf")
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 5
+
+    def test_a_non_finite_settings_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: float("nan")}
+
+        sample_size, _effect_size = resolve_advisory_thresholds(settings)
+
+        assert sample_size == 5
+
+    def test_a_negative_env_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "-1")
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 5
+
+    def test_a_negative_settings_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: -1}
+
+        sample_size, _effect_size = resolve_advisory_thresholds(settings)
+
+        assert sample_size == 5
+
+    def test_a_nan_env_effect_size_never_fails_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """B4: a ``nan`` effect floor must never fail open. ``effect <
+        nan`` is always ``False``, so an unguarded ``nan`` floor would
+        skip nothing it should skip -- this must resolve to the module
+        default (0.15) instead.
+        """
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.setenv(MIN_EFFECT_SIZE_ENV, "nan")
+
+        _sample_size, effect_size = resolve_advisory_thresholds(None)
+
+        assert effect_size == 0.15
+
+    def test_a_nan_settings_effect_size_never_fails_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_EFFECT_SIZE_SETTING: float("nan")}
+
+        _sample_size, effect_size = resolve_advisory_thresholds(settings)
+
+        assert effect_size == 0.15
+
+    def test_a_negative_env_effect_size_never_fails_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.setenv(MIN_EFFECT_SIZE_ENV, "-1.0")
+
+        _sample_size, effect_size = resolve_advisory_thresholds(None)
+
+        assert effect_size == 0.15
+
+    def test_an_out_of_range_settings_effect_size_never_fails_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """5.5 is outside the registered ``0..1`` bound -- it must be
+        rejected by ``validate_value``'s bounds check, not passed
+        straight through as a floor nothing can cross.
+        """
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_EFFECT_SIZE_SETTING: 5.5}
+
+        _sample_size, effect_size = resolve_advisory_thresholds(settings)
+
+        assert effect_size == 0.15
+
 
 class TestAdvisoryGeneratorEmpty:
     """Generator produces empty report with no data."""

@@ -74,6 +74,7 @@ import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.core.settings_registry import get_setting, validate_value
 from trellis.stores.base.event_log import EventLog, EventType, scan_events
 
 logger = structlog.get_logger(__name__)
@@ -99,20 +100,40 @@ def _resolve_int_knob(
     default: int,
     settings: Mapping[str, Any] | None,
 ) -> int:
+    """Coerce and bounds-check through the registry's own ``validate_value``.
+
+    Both the env and the stored value go through the same coercion the
+    governed ``PUT /settings`` path uses, so a non-finite value (``nan``,
+    ``inf``) is rejected instead of crashing later with ``OverflowError``
+    (uncaught by a bare ``except ValueError``), and a negative value is
+    rejected by the setting's registered ``minimum`` rather than by a
+    second, easy-to-miss floor check duplicated on every return.
+    """
+    spec = get_setting(setting_name)
     raw_env = os.environ.get(env_var, "").strip()
     if raw_env:
         try:
-            value = int(raw_env)
-        except ValueError:
+            return (
+                int(validate_value(spec, raw_env)) if spec is not None else int(raw_env)
+            )
+        except (TypeError, ValueError):
             logger.warning("capture_health.bad_env_int", var=env_var, value=raw_env)
             return default
-        return value if value >= 0 else default
     if settings is not None and setting_name in settings:
+        raw_setting = settings[setting_name]
         try:
-            value = int(settings[setting_name])
+            return (
+                int(validate_value(spec, raw_setting))
+                if spec is not None
+                else int(raw_setting)
+            )
         except (TypeError, ValueError):
+            logger.warning(
+                "capture_health.bad_settings_int",
+                setting=setting_name,
+                value=raw_setting,
+            )
             return default
-        return value if value >= 0 else default
     return default
 
 

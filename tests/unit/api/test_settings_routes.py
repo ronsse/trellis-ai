@@ -36,6 +36,7 @@ from trellis_api.app import create_app
 PACK_HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
 MEMORY_EXTRACTION_ENV = "TRELLIS_ENABLE_MEMORY_EXTRACTION"
 GRAPH_SEEDING_ENV = "TRELLIS_GRAPH_SEEDING"
+GRAPH_MAX_SUBGRAPH_DEPTH_ENV = "TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH"
 
 
 @pytest.fixture
@@ -170,11 +171,49 @@ class TestListSettings:
             "effective_value": 0.0,
             "overridden_by": "default",
             "stored_value": None,
+            "stored_value_invalid": False,
             "updated_at": None,
+            "settings_writable": True,
         }
         assert row["label"]
         assert row["description"]
         assert row["risk_note"]
+
+    def test_a_malformed_stored_row_is_flagged_not_silently_swallowed(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Re-gate #867 B4: a stored value the registry's own bounds check
+        would refuse (here, 1.5 for a 0..1 rate) makes the resolver fall
+        back to the default -- correct -- but ``overridden_by`` still
+        reads "settings" off the row's mere presence, and the only way to
+        notice the fallback was to diff ``effective_value`` against
+        ``stored_value`` by hand. ``stored_value_invalid`` makes that an
+        explicit, visible fact instead.
+        """
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("pack_holdout_rate", 1.5)
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "pack_holdout_rate")
+
+        assert row["stored_value"] == 1.5
+        assert row["effective_value"] == 0.0  # the module default
+        assert row["stored_value_invalid"] is True
+
+    def test_a_valid_stored_row_is_not_flagged(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("pack_holdout_rate", 0.2)
+
+        resp = client.get("/api/v1/settings")
+        row = _entry(resp.json(), "pack_holdout_rate")
+
+        assert row["effective_value"] == 0.2
+        assert row["stored_value_invalid"] is False
 
     def test_group_labels_cover_every_entrys_group(self, client: TestClient) -> None:
         """brief e179 step 8: the UI's filter box reads display labels from
@@ -550,7 +589,12 @@ _RESOLVER_BACKED_KNOBS = (
         48,
         12,
     ),
-    ("graph_max_subgraph_depth", "TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH", 6, "10", 10, 8),
+    # graph_max_subgraph_depth is deliberately absent from this list (see
+    # TestGraphMaxSubgraphDepthIsEnvOnly below): unlike every other entry
+    # here, its settings-store override is never consulted by anything,
+    # so "a stored override is previewed" is false for this one knob --
+    # that was the B3 bug, not a case this generic table should still
+    # assert.
 )
 
 
@@ -624,6 +668,68 @@ class TestResolverBackedEffectiveValues:
         row = _entry(body, name)
         assert row["effective_value"] == settings_value
         assert row["overridden_by"] == "settings"
+
+
+class TestGraphMaxSubgraphDepthIsEnvOnly:
+    """B3 (re-gate #867): nothing ever reads a stored override for this
+    knob -- not ``trellis.stores.base.graph``'s three backends, which all
+    resolve :data:`MAX_SUBGRAPH_DEPTH` once at import from the
+    environment only, and (unlike ``minhash_seed_max_docs``) not even
+    after a restart. ``settings_writable=False`` makes the write path
+    refuse rather than accept a value that would silently never matter.
+    """
+
+    def test_default_when_nothing_is_set(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(GRAPH_MAX_SUBGRAPH_DEPTH_ENV, raising=False)
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, "graph_max_subgraph_depth")
+        assert row["effective_value"] == 6
+        assert row["overridden_by"] == "default"
+        assert row["settings_writable"] is False
+
+    def test_env_still_overrides_the_default(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(GRAPH_MAX_SUBGRAPH_DEPTH_ENV, "10")
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, "graph_max_subgraph_depth")
+        assert row["effective_value"] == 10
+        assert row["overridden_by"] == "env"
+
+    def test_a_stored_value_is_never_previewed_as_effective(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """This is the exact B3 bug: a stray stored row used to be echoed
+        back as ``effective_value`` even though no code path ever reads
+        it. ``overridden_by`` must agree with ``effective_value`` here --
+        reporting "settings" while serving the default would be its own,
+        subtler version of the same lie.
+        """
+        _store(registry).set("graph_max_subgraph_depth", 8)
+        body = client.get("/api/v1/settings").json()
+        row = _entry(body, "graph_max_subgraph_depth")
+        assert row["effective_value"] == 6
+        assert row["overridden_by"] == "default"
+        assert row["stored_value"] == 8  # still reported, just inert
+
+    def test_put_a_value_is_refused(self, client: TestClient) -> None:
+        resp = client.put(
+            "/api/v1/settings/graph_max_subgraph_depth", json={"value": 10}
+        )
+        assert resp.status_code == 400, resp.text
+        assert "TRELLIS_GRAPH_MAX_SUBGRAPH_DEPTH" in resp.text
+
+    def test_clearing_a_stray_stored_value_is_still_allowed(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        _store(registry).set("graph_max_subgraph_depth", 8)
+        resp = client.put(
+            "/api/v1/settings/graph_max_subgraph_depth", json={"value": None}
+        )
+        assert resp.status_code == 200, resp.text
+        assert _store(registry).get("graph_max_subgraph_depth") is None
 
 
 class TestCaptureStrictEffectiveValue:

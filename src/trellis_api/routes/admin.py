@@ -182,16 +182,22 @@ def runtime() -> RuntimeResponse:
 
     Every field is read straight from the resolver the real enforcement
     uses — ``resolve_auth_mode``, ``resolve_ops_detail``,
-    ``resolve_metrics_public``, ``get_bind_info`` — so this view cannot
-    drift from how the server actually behaves. Deliberately excludes
-    anything secret-shaped: ``stores``/``embedder`` are class names only,
-    ``llm_routes`` carries tier names only (an ``LLMRoute``'s ``block`` —
-    which can hold a literal API key — is never touched), and the two
-    directory fields are plain paths. Building the embedder is wrapped
-    whole rather than guarded by exception type: an unconfigured or
-    misconfigured ``llm.embedding:`` block must read as "none configured"
-    here, never 500 a panel that exists to show configuration, not
-    enforce it.
+    ``resolve_metrics_public``, ``get_bind_info``, and for ``embedder``,
+    ``registry.embedding_fn`` itself (the resolver every retrieval
+    surface actually calls, not the separate ``llm.embedding:`` block
+    nothing else reads) — so this view cannot drift from how the server
+    actually behaves. Deliberately excludes anything secret-shaped:
+    ``stores`` is class names only, ``embedder`` names only the
+    configuration knob in play (``TRELLIS_EMBEDDING_FN`` or
+    ``embeddings.provider``, never a key or URL), ``llm_routes`` carries
+    tier names only (an ``LLMRoute``'s ``block`` — which can hold a
+    literal API key — is never touched, and a malformed route is
+    reported by its setting path, never the value that failed to
+    validate), and the two directory fields are plain paths. Resolving
+    the embedder is wrapped whole rather than guarded by exception type:
+    an unconfigured or misconfigured embedding knob must read as "none
+    configured" or "unknown" here, never 500 a panel that exists to show
+    configuration, not enforce it.
     """
     registry = get_registry()
     host, port = get_bind_info()
@@ -205,13 +211,36 @@ def runtime() -> RuntimeResponse:
         "trace_store": type(registry.operational.trace_store).__name__,
     }
 
+    # Derived from registry.embedding_fn -- the resolver every retrieval
+    # surface (PackBuilder, the MCP server, the trace-embed worker, ...)
+    # actually calls -- never from build_embedder_client(), which builds
+    # an unrelated, unused-in-production EmbedderClient from a separate
+    # 'llm.embedding:' block nothing else reads. Wrapped whole, like the
+    # embedder's own degrade-to-keyword+graph callers, so a misconfigured
+    # 'embeddings:' block or TRELLIS_EMBEDDING_FN reads as "unknown" here
+    # rather than 500-ing a panel that exists to show configuration, not
+    # enforce it.
     embedder_name: str | None = None
     try:
-        embedder = registry.build_embedder_client()
+        resolved_embedding_fn = registry.embedding_fn
     except Exception as exc:  # GRACEFUL-DEGRADATION: a panel, not a gate
-        logger.warning("runtime_embedder_probe_failed", error=str(exc))
+        source = registry.embedding_source_label()
+        logger.warning(
+            "runtime_embedder_probe_failed",
+            source=source,
+            error_type=type(exc).__name__,
+        )
+        embedder_name = (
+            f"unknown ({source} failed: {type(exc).__name__})"
+            if source
+            else f"unknown ({type(exc).__name__})"
+        )
     else:
-        embedder_name = type(embedder).__name__ if embedder is not None else None
+        embedder_name = (
+            registry.embedding_source_label()
+            if resolved_embedding_fn is not None
+            else None
+        )
 
     llm_routes: dict[str, str | None] = {}
     llm_routes_error: str | None = None
@@ -219,7 +248,21 @@ def runtime() -> RuntimeResponse:
         for consumer in LLMConsumer:
             llm_routes[consumer.value] = registry.llm_route(consumer).tier
     except LLMRoutingError as exc:
-        llm_routes_error = exc.message
+        # Never surface exc.message verbatim. trellis.llm.routing composes
+        # that text from the raw llm.routes / llm.tiers value an operator
+        # can mistype a credential into (a mapping holding an api_key, a
+        # bare key string standing in for a tier name) -- routing.py now
+        # avoids repr-ing that value itself, but this is the one place the
+        # message leaves the process into a REST body, so it stays a
+        # second, independent gate. Report only exc.setting -- a YAML key
+        # path, never a config value -- plus fixed text; the full message
+        # still reaches the operator via the log.
+        logger.warning("runtime_llm_routes_invalid", setting=exc.setting)
+        llm_routes_error = (
+            f"{exc.setting} is invalid; see the server log."
+            if exc.setting
+            else "llm.routes/llm.tiers is invalid; see the server log."
+        )
 
     learning_dir = resolve_learning_artifacts_dir(registry.stores_dir)
     mode = resolve_auth_mode()

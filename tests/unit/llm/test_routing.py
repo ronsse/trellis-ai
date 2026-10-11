@@ -231,7 +231,7 @@ class TestValidation:
             (
                 {"tiers": {"deep": _DEEP}, "routes": {"reconcile": None}},
                 "llm.routes.reconcile",
-                "got null",
+                "got a null value",
             ),
             (
                 {"tiers": {"deep": _DEEP}, "routes": {"reconcile": ""}},

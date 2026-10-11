@@ -61,6 +61,22 @@ def test_banner_names_the_fix_not_just_the_problem() -> None:
     assert "TRELLIS_AUTH_MODE=required" in body
 
 
+def test_banner_claim_is_exact_per_auth_mode() -> None:
+    """``optional`` grants every scope only to a credential-less request --
+    a request bearing an *invalid* key still gets 401, and a valid scoped
+    key gets only its own scopes (see ``trellis_api/auth.py::authenticate``).
+    The blanket "every request is granted every scope" claim is true only
+    for ``off``; ``optional`` needs its own, narrower wording.
+    """
+    page = _page()
+    body = _between(
+        page, "function renderAuthBanner(data) {", "function formatRuntimeDir("
+    )
+    assert "mode === 'optional'" in body
+    assert "a request without an API key is granted every scope" in body
+    assert "every request is granted every scope" in body
+
+
 def test_runtime_panel_reads_fields_from_the_response_not_a_copy() -> None:
     page = _page()
     body = _between(
