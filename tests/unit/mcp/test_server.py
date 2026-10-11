@@ -3108,6 +3108,35 @@ class TestStructuredErrorContract:
 
         assert "minhash_index_seed_empty" not in recorded
 
+    def test_minhash_seed_respects_a_settings_only_override(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``minhash_seed_max_docs`` is read through ``resolve_write_behaviour``
+        (see its ``SettingSpec.restart_required`` in
+        ``trellis.core.settings_registry``, which still calls it live within
+        one process) — proven here with a settings row and no env var at
+        all, bounding the seed to exactly the configured count on a store
+        that holds more than that.
+        """
+        from trellis.stores.settings_store import SettingsStore
+
+        monkeypatch.setattr(server_mod, "_minhash_index", None)
+        monkeypatch.delenv(MINHASH_SEED_MAX_DOCS_ENV, raising=False)
+        assert temp_registry.stores_dir is not None
+        SettingsStore(temp_registry.stores_dir / "settings.json").set(
+            "minhash_seed_max_docs", 2
+        )
+        document_store = temp_registry.knowledge.document_store
+        document_store.put("doc_1", "first prior memory content")
+        document_store.put("doc_2", "second prior memory content")
+        document_store.put("doc_3", "third prior memory content")
+
+        index = server_mod._get_minhash_index(temp_registry)
+
+        assert index.size == 2
+
     def test_record_feedback_missing_ids_data_lists_both_fields(self) -> None:
         """The ``data`` payload lists every field involved in the
         validation rule (one-of), not just the singular ``field`` key.

@@ -23,6 +23,7 @@ from trellis.core.write_config import (
     TRUTHY,
     WriteBehaviourConfig,
     resolve_overridden_by,
+    resolve_write_behaviour,
 )
 from trellis.extract.memory_ingest_hook import memory_extraction_env_enabled
 from trellis.extract.trace_ingest_hook import (
@@ -35,6 +36,8 @@ from trellis.mcp.reconcile import (
     reconcile_timeout_seconds,
 )
 from trellis.retrieve.embed_ingest_hook import embed_on_ingest_enabled
+from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore
 
 #: Every environment variable this module owns.
 ALL_ENV_VARS = sorted(ENV_VAR_BY_FIELD.values())
@@ -610,3 +613,111 @@ class TestLegacyReadersStillWork:
         assert embed_on_ingest_enabled() is False
         monkeypatch.setenv(ENV_VAR_BY_FIELD["embed_on_ingest"], "yes")
         assert embed_on_ingest_enabled() is True
+
+
+class TestResolveWriteBehaviourSeam:
+    """:func:`resolve_write_behaviour` is the one call every reader above
+    delegates to (see its own docstring for the full module list) — the
+    per-field env > settings > default math is already proven at the pure
+    dict level by ``TestEnvSettingsDefaultPrecedence``, so what is pinned
+    here is the plumbing that logic was never exercised through: a real
+    ``StoreRegistry``'s ``stores_dir`` reaching a real on-disk
+    ``settings.json`` via :func:`~trellis.stores.settings_store.load_settings_values`,
+    and the never-raises fallback this function's docstring promises.
+    """
+
+    def test_registry_none_resolves_env_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for env_var in ALL_ENV_VARS:
+            monkeypatch.delenv(env_var, raising=False)
+        assert resolve_write_behaviour(None) == WriteBehaviourConfig.from_env()
+
+    def test_registry_with_no_stores_dir_resolves_env_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for env_var in ALL_ENV_VARS:
+            monkeypatch.delenv(env_var, raising=False)
+        registry = StoreRegistry()
+        assert registry.stores_dir is None
+        assert resolve_write_behaviour(registry) == WriteBehaviourConfig.from_env()
+
+    @pytest.mark.parametrize(
+        ("setting_name", "override_value", "expected"),
+        [
+            ("memory_extraction", True, True),
+            ("pack_holdout_rate", 0.4, 0.4),
+            ("reconcile_model", "llama3.2:3b", "llama3.2:3b"),
+        ],
+    )
+    def test_settings_only_override_reaches_the_config_through_a_real_registry(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        setting_name: str,
+        override_value: bool | float | str,
+        expected: bool | float | str,
+    ) -> None:
+        monkeypatch.delenv(ENV_VAR_BY_FIELD[setting_name], raising=False)
+        registry = StoreRegistry(stores_dir=tmp_path)
+        SettingsStore(tmp_path / "settings.json").set(setting_name, override_value)
+
+        config = resolve_write_behaviour(registry)
+
+        assert getattr(config, setting_name) == expected
+
+    def test_env_still_beats_settings_through_a_real_registry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry = StoreRegistry(stores_dir=tmp_path)
+        SettingsStore(tmp_path / "settings.json").set("pack_holdout_rate", 0.9)
+        monkeypatch.setenv(ENV_VAR_BY_FIELD["pack_holdout_rate"], "0.1")
+
+        config = resolve_write_behaviour(registry)
+
+        assert config.pack_holdout_rate == 0.1
+
+    def test_a_corrupt_settings_file_degrades_to_env_default_without_raising(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for env_var in ALL_ENV_VARS:
+            monkeypatch.delenv(env_var, raising=False)
+        (tmp_path / "settings.json").write_text("{ not json", encoding="utf-8")
+        registry = StoreRegistry(stores_dir=tmp_path)
+
+        config = resolve_write_behaviour(registry)
+
+        assert config == WriteBehaviourConfig.from_env()
+
+        # Falls back to env, not stuck, when an env var is also set.
+        monkeypatch.setenv(ENV_VAR_BY_FIELD["pack_holdout_rate"], "0.2")
+        assert resolve_write_behaviour(registry).pack_holdout_rate == 0.2
+
+    def test_an_exception_reading_settings_is_caught_logged_and_falls_back(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failure that ``load_settings_values`` itself never raises
+        (its own posture) is still wrapped whole here, per this function's
+        own "never raises" docstring promise — not guarded by a list of
+        exception types, same model as ``resolve_stamp_staleness``.
+        """
+
+        def _boom(stores_dir: Path | None) -> dict[str, object]:
+            msg = "settings store exploded"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr("trellis.stores.settings_store.load_settings_values", _boom)
+        monkeypatch.setenv(ENV_VAR_BY_FIELD["pack_holdout_rate"], "0.3")
+        registry = StoreRegistry(stores_dir=tmp_path)
+
+        with structlog.testing.capture_logs() as logs:
+            config = resolve_write_behaviour(registry)
+
+        assert config == WriteBehaviourConfig.from_env()
+        assert config.pack_holdout_rate == 0.3
+        assert any(
+            entry.get("event") == "write_behaviour_settings_read_failed"
+            for entry in logs
+        )

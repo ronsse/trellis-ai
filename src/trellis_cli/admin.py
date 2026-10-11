@@ -426,10 +426,10 @@ def write_config(
     ``<data_dir>/stores/settings.json`` on every call (no caching,
     matching every other reader in this module), so a concurrent
     ``trellis admin settings`` write is visible on the next invocation. A
-    **settings**-sourced row is reported truthfully even where it has no
-    live effect yet (``SettingSpec.settings_live`` in
+    **settings**-sourced row is reported truthfully even for the one knob
+    where it has no live effect yet (``SettingSpec.settings_live`` in
     ``trellis.core.settings_registry`` — today that is every field except
-    ``pack_holdout_rate``).
+    ``minhash_seed_max_docs``, read once at process start).
     """
     stores_dir = get_data_dir() / "stores"
     settings_values = load_settings_values(stores_dir)

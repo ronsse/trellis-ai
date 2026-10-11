@@ -232,17 +232,18 @@ def test_status_error_renders_as_an_error_not_the_empty_state() -> None:
     assert "data.hint" in branch
 
 
-def test_generated_at_utc_goes_through_fmt_utc_not_fmt_date() -> None:
+def test_generated_at_utc_goes_through_fmt_time_not_local() -> None:
     body = _load_review_learning_body(_page())
-    assert "fmtUtc(data.generated_at_utc)" in body
-    assert "fmtDate(data.generated_at_utc)" not in body
+    assert "fmtTime(data.generated_at_utc)" in body
 
 
-def test_fmt_utc_labels_the_zone_instead_of_converting_to_local() -> None:
+def test_fmt_time_labels_the_zone_instead_of_converting_to_local() -> None:
     page = _page()
-    body = _between(page, "function fmtUtc(iso) {", "\n        }\n")
-    # fmtDate's whole defect is toLocaleString() with no zone label; fmtUtc
-    # must not just be an alias for it.
+    body = _between(
+        page, "function fmtTime(iso, { empty = '' } = {}) {", "\n        }\n"
+    )
+    # The old fmtDate()'s whole defect was toLocaleString() with no zone
+    # label; the collapsed fmtTime() must not just be an alias for it.
     assert "toLocaleString" not in body
     assert "UTC" in body
 

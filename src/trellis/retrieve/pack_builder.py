@@ -149,6 +149,12 @@ PackEvaluator = Callable[[Pack], "QualityReport | None"]
 #: change (clearing the rows is a separate, operator-only step).
 FILTER_LEGACY_ADVISORIES_ENV = "TRELLIS_FILTER_LEGACY_ADVISORIES"
 
+#: Settings-store key for the same knob (#settings-store PR 2/2) — see
+#: ``SettingSpec(name="filter_legacy_advisories")`` in
+#: :mod:`trellis.core.settings_registry`. Deliberately the same spelling as
+#: the setting name so a reader never has to map between the two.
+FILTER_LEGACY_ADVISORIES_SETTING = "filter_legacy_advisories"
+
 #: Accepted spellings, matching :mod:`trellis.retrieve.builder_factory`. A
 #: value in neither set is a typo, and a typo'd kill switch that silently
 #: keeps the default is how an operator ends up believing they disabled
@@ -157,26 +163,35 @@ _LEGACY_ADVISORY_TRUTHY = frozenset({"1", "true", "yes", "on"})
 _LEGACY_ADVISORY_FALSEY = frozenset({"0", "false", "no", "off"})
 
 
-def _filter_legacy_advisories_enabled() -> bool:
-    """Read :data:`FILTER_LEGACY_ADVISORIES_ENV`; unset or unrecognised means on.
+def _filter_legacy_advisories_enabled(settings: dict[str, Any] | None = None) -> bool:
+    """Read :data:`FILTER_LEGACY_ADVISORIES_ENV`, env > settings > default.
+
+    ``settings`` is the already-loaded ``name -> value`` mapping (e.g. from
+    :func:`trellis.stores.settings_store.load_settings_values`); a caller
+    with no settings access (or a direct :class:`PackBuilder` construction
+    that passes nothing) gets the env-only behaviour this had before
+    settings existed. Unset/unrecognised in the environment falls through
+    to :data:`FILTER_LEGACY_ADVISORIES_SETTING`; unset or non-bool there
+    means on — the same default either knob shipped with.
 
     Read per build rather than at import, so a long-lived process picks up
     an operator's change between runs — the same posture
     :func:`trellis.retrieve.builder_factory._graph_seeding_enabled` takes.
     """
     raw = os.environ.get(FILTER_LEGACY_ADVISORIES_ENV, "").strip().lower()
-    if not raw:
+    if raw:
+        if raw in _LEGACY_ADVISORY_FALSEY:
+            return False
+        if raw not in _LEGACY_ADVISORY_TRUTHY:
+            logger.warning(
+                "filter_legacy_advisories_env_unrecognised",
+                var=FILTER_LEGACY_ADVISORIES_ENV,
+                value=raw,
+                effective=True,
+            )
         return True
-    if raw in _LEGACY_ADVISORY_FALSEY:
-        return False
-    if raw not in _LEGACY_ADVISORY_TRUTHY:
-        logger.warning(
-            "filter_legacy_advisories_env_unrecognised",
-            var=FILTER_LEGACY_ADVISORIES_ENV,
-            value=raw,
-            effective=True,
-        )
-    return True
+    value = (settings or {}).get(FILTER_LEGACY_ADVISORIES_SETTING)
+    return value if isinstance(value, bool) else True
 
 
 class PackAssemblyError(RuntimeError):
@@ -606,6 +621,7 @@ class PackBuilder:
         holdout_rate: float = 0.0,
         embedder_configured: bool = False,
         embedder_resolve_failure: EmbedderResolveFailure | None = None,
+        filter_legacy_advisories: bool | None = None,
     ) -> None:
         if not 0.0 <= holdout_rate <= 1.0:
             msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
@@ -674,6 +690,13 @@ class PackBuilder:
         #: (:mod:`trellis.core.pack_holdout`). ``0.0`` withholds nothing;
         #: the factory reads it from ``TRELLIS_PACK_HOLDOUT_RATE`` per build.
         self._holdout_rate = holdout_rate
+        #: Resolved env > settings > default outcome for
+        #: :data:`FILTER_LEGACY_ADVISORIES_ENV`, or ``None`` to defer to a
+        #: live, env-only read in :meth:`_select_advisories` — the shape a
+        #: direct ``PackBuilder(...)`` construction (no factory in front of
+        #: it) relies on. :func:`trellis.retrieve.builder_factory.build_pack_builder`
+        #: resolves this once, with settings, and passes the bool in.
+        self._filter_legacy_advisories = filter_legacy_advisories
 
     @property
     def holdout_rate(self) -> float:
@@ -2418,7 +2441,10 @@ class PackBuilder:
         """
         matching = self._get_matching_advisories(domain)
         filtered_legacy = 0
-        if _filter_legacy_advisories_enabled():
+        effective_filter = self._filter_legacy_advisories
+        if effective_filter is None:
+            effective_filter = _filter_legacy_advisories_enabled()
+        if effective_filter:
             before = len(matching)
             matching = [a for a in matching if not self._is_legacy_advisory(a)]
             filtered_legacy = before - len(matching)

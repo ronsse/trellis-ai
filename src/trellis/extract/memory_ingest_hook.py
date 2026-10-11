@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from trellis.core.write_config import MEMORY_EXTRACTION_FLAG, WriteBehaviourConfig
+from trellis.core.write_config import MEMORY_EXTRACTION_FLAG, resolve_write_behaviour
 from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.llm.routing import LLMConsumer, LLMRoutingError
 
@@ -61,9 +61,16 @@ _MAX_LLM_CALLS = 1
 _MAX_EXTRACT_TOKENS = 400
 
 
-def memory_extraction_env_enabled() -> bool:
-    """``True`` iff ``TRELLIS_ENABLE_MEMORY_EXTRACTION`` is set truthy."""
-    return WriteBehaviourConfig.from_env().memory_extraction
+def memory_extraction_env_enabled(registry: StoreRegistry | None = None) -> bool:
+    """``True`` iff memory extraction is on, env > settings > default.
+
+    ``TRELLIS_ENABLE_MEMORY_EXTRACTION`` still wins when set; a
+    ``registry``-scoped settings override takes effect otherwise. The name
+    (kept for the double-gate docstring below and existing call sites)
+    predates settings-awareness; it now also resolves a settings override,
+    not only the environment.
+    """
+    return resolve_write_behaviour(registry).memory_extraction
 
 
 def build_memory_extractor(registry: StoreRegistry, *, opt_in: bool) -> Any | None:
@@ -80,7 +87,7 @@ def build_memory_extractor(registry: StoreRegistry, *, opt_in: bool) -> Any | No
     that conjunction, so ``memory_extraction: true`` on a row means the
     environment permitted extraction, not that this run performed it.
     """
-    if not opt_in or not memory_extraction_env_enabled():
+    if not opt_in or not memory_extraction_env_enabled(registry):
         return None
     try:
         llm_client = registry.build_llm_client(consumer=LLMConsumer.MEMORY_EXTRACTION)

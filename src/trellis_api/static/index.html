@@ -494,6 +494,48 @@
             color: var(--text-dim);
         }
         #error { color: var(--error); text-align: center; padding: 1rem; display: none; }
+        /* Visually hidden but still reachable by screen readers -- used for
+           text alternatives (e.g. the graph canvas) that have no on-screen
+           equivalent worth also rendering for sighted users. */
+        .sr-only {
+            position: absolute;
+            width: 1px; height: 1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+        }
+
+        /* Toast region: a dedicated aria-live="polite" announcer for
+           transient action results (promote/reject/feedback/etc), kept
+           separate from #error -- #error is a static connectivity banner
+           with no live-region semantics, and a toast firing while it was
+           visible used to overwrite it, losing whichever message lost the
+           race. Positioned fixed so it never shifts page layout. */
+        #toast-region {
+            position: fixed;
+            bottom: 1.25rem;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            align-items: center;
+            pointer-events: none;
+        }
+        #toast-region .toast {
+            pointer-events: auto;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--text-dim);
+            border-radius: 6px;
+            padding: 0.6rem 1rem;
+            font-size: 0.85rem;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+            max-width: min(480px, calc(100vw - 2rem));
+        }
+        #toast-region .toast.toast-ok { border-left-color: var(--success); color: var(--success); }
+        #toast-region .toast.toast-err { border-left-color: var(--error); color: var(--error); }
 
         /* Search & input */
         .search-bar {
@@ -739,6 +781,9 @@
             padding: 0.1rem 0.3rem;
             border-radius: 3px;
             transition: color var(--transition), background var(--transition);
+            background: transparent;
+            border: none;
+            font-family: inherit;
         }
         .search-results-panel .srp-close:hover { color: var(--text); background: var(--surface-2); }
         .search-results-panel .srp-item {
@@ -924,6 +969,7 @@
         }
         tr:hover td { background: var(--surface-2); }
         tr.clickable { cursor: pointer; }
+        tr.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
         /* Trace detail */
         .trace-detail {
@@ -1430,7 +1476,7 @@
             <a href="#" class="active" data-view="dashboard" data-label="Dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg><span class="nav-label">Dashboard</span><span class="nav-key">1</span></a>
             <a href="#" data-view="metrics" data-label="Metrics"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16.5A1.5 1.5 0 0 0 4.5 21H21"/><path d="M7 14.5l4-4.5 3 3 5.5-6.5"/></svg><span class="nav-label">Metrics</span><span class="nav-key">2</span></a>
             <a href="#" data-view="review" data-label="Review"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 11.5V19a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/><path d="M8.5 11.5l3 3 9-9.5"/></svg><span class="nav-label">Review</span><span class="nav-key">3</span></a>
-            <a href="#" data-view="evolution" data-label="Evolution"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="18.5" r="2.5"/><circle cx="6" cy="5.5" r="2.5"/><circle cx="18" cy="7.5" r="2.5"/><path d="M6 8v8"/><path d="M15.6 8.9c-1.6 3-4.2 4.6-7.1 5.2"/></svg><span class="nav-label">Evolution</span><span class="nav-key">4</span></a>
+            <a href="#" data-view="evolution" data-label="Effectiveness"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="18.5" r="2.5"/><circle cx="6" cy="5.5" r="2.5"/><circle cx="18" cy="7.5" r="2.5"/><path d="M6 8v8"/><path d="M15.6 8.9c-1.6 3-4.2 4.6-7.1 5.2"/></svg><span class="nav-label">Effectiveness</span><span class="nav-key">4</span></a>
             <a href="#" data-view="graph" data-label="Graph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4.6" r="2.6"/><circle cx="4.6" cy="18" r="2.6"/><circle cx="19.4" cy="18" r="2.6"/><path d="M10.7 6.9L5.9 15.7M13.3 6.9l4.8 8.8M7.2 18h9.6"/></svg><span class="nav-label">Graph</span><span class="nav-key">5</span></a>
             <a href="#" data-view="traces" data-label="Traces"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12.5h4l2.8 6.5L14 4.5l2.6 8h4.9"/></svg><span class="nav-label">Traces</span><span class="nav-key">6</span></a>
             <a href="#" data-view="precedents" data-label="Precedents"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2.5H20v19H6.5A2.5 2.5 0 0 1 4 19V5a2.5 2.5 0 0 1 2.5-2.5z"/><path d="M8.5 7h7"/></svg><span class="nav-label">Precedents</span><span class="nav-key">7</span></a>
@@ -1443,7 +1489,7 @@
             <a href="#" data-view="schedules" data-label="Schedules"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12.5" r="8.5"/><path d="M12 7.5v5l3.5 2"/><path d="M8.5 2.5h7"/></svg><span class="nav-label">Schedules</span></a>
         </nav>
 
-        <div class="sidebar-foot" id="sidebar-foot" title="Backend version">&mdash;</div>
+        <div class="sidebar-foot" id="sidebar-foot" title="API build">&mdash;</div>
     </aside>
 
     <div class="nav-scrim" id="nav-scrim" onclick="closeNavDrawer()"></div>
@@ -1456,13 +1502,13 @@
             <span class="view-title" id="view-title">Dashboard</span>
             <span class="spacer"></span>
             <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>0</kbd> Views &middot; <kbd>\</kbd> Sidebar &middot; <kbd>Esc</kbd> Close</span>
-            <button class="btn-icon" id="api-key-toggle" title="API key" onclick="toggleKeyBanner()">&#x1F511;</button>
+            <button class="btn-icon" id="api-key-toggle" title="API key" aria-label="Show or hide the API key panel" onclick="toggleKeyBanner()">&#x1F511;</button>
         </header>
 
     <!-- API key banner (shown on demand or after a 401) -->
     <div class="key-banner" id="key-banner" style="display:none">
         <span class="key-banner-msg" id="key-banner-msg"></span>
-        <input type="password" id="api-key-input" placeholder="API key (trellis_ak_...)" autocomplete="off"
+        <input type="password" id="api-key-input" placeholder="API key (trellis_ak_...)" aria-label="API key" autocomplete="off"
                onkeydown="if(event.key==='Enter')saveApiKey()">
         <button class="btn btn-sm" onclick="saveApiKey()">Save</button>
         <button class="btn btn-ghost btn-sm" onclick="clearApiKey()">Clear</button>
@@ -1480,6 +1526,7 @@
     <div class="container" id="app">
         <div id="loading" class="loading-state"><span class="spinner"></span> Connecting to API...</div>
         <div id="error"></div>
+        <div id="toast-region" role="status" aria-live="polite"></div>
 
         <!-- ============ Dashboard ============ -->
         <div id="view-dashboard" style="display:none">
@@ -1490,17 +1537,17 @@
             </div>
         </div>
 
-        <!-- ============ Metrics (improvement-metrics dashboard) ============ -->
+        <!-- ============ Metrics ============ -->
         <div id="view-metrics" style="display:none">
             <div class="section-header">
-                <h2>Improvement Metrics</h2>
+                <h2>Metrics</h2>
                 <div class="search-bar" style="margin:0">
-                    <select id="metrics-days">
+                    <select id="metrics-days" aria-label="Metrics time window in days">
                         <option value="7">Last 7 days</option>
                         <option value="30" selected>Last 30 days</option>
                         <option value="90">Last 90 days</option>
                     </select>
-                    <select id="metrics-group-by">
+                    <select id="metrics-group-by" aria-label="Group metrics by">
                         <option value="none" selected>No grouping</option>
                         <option value="domain">By domain</option>
                         <option value="intent_family">By intent family</option>
@@ -1508,6 +1555,10 @@
                     <button onclick="loadMetrics()">Refresh</button>
                 </div>
             </div>
+            <p class="field-hint">
+                Time window picks how far back the scan goes; grouping splits each metric's
+                series by domain or intent family instead of reporting one combined line.
+            </p>
             <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
                 Trends computed from the EventLog on read. Each metric shares its
                 definition with the agent-loop convergence scenario. Buckets with no
@@ -1559,7 +1610,7 @@
             <div class="section-header">
                 <h2>Pack Effectiveness</h2>
                 <div class="search-bar" style="margin:0">
-                    <select id="evo-days">
+                    <select id="evo-days" aria-label="Pack-effectiveness time window in days">
                         <option value="7">Last 7 days</option>
                         <option value="30" selected>Last 30 days</option>
                         <option value="90">Last 90 days</option>
@@ -1588,10 +1639,10 @@
         <!-- ============ Graph Explorer ============ -->
         <div id="view-graph" style="display:none">
             <div class="search-bar">
-                <input type="text" id="graph-search" placeholder="Search entities (e.g. table name, service, domain)..." onkeydown="if(event.key==='Enter')searchGraph()">
+                <input type="text" id="graph-search" placeholder="Search entities (e.g. table name, service, domain)..." aria-label="Search graph entities" onkeydown="if(event.key==='Enter')searchGraph()">
                 <button onclick="searchGraph()">Search</button>
-                <input type="text" id="graph-entity-id" placeholder="Or enter entity ID..." style="max-width:280px" onkeydown="if(event.key==='Enter')loadEntity(this.value)">
-                <select id="graph-depth">
+                <input type="text" id="graph-entity-id" placeholder="Or enter entity ID..." aria-label="Load entity by ID" style="max-width:280px" onkeydown="if(event.key==='Enter')loadEntity(this.value)">
+                <select id="graph-depth" aria-label="Graph traversal depth">
                     <option value="1">Depth 1</option>
                     <option value="2" selected>Depth 2</option>
                     <option value="3">Depth 3</option>
@@ -1603,6 +1654,9 @@
                     <button data-layout="circle" title="Circle">Circle</button>
                 </div>
             </div>
+            <p class="field-hint">Depth controls how many relationship hops to expand from a
+                match; the sort order below controls how entities are listed in the results
+                panel, not how the graph canvas lays them out.</p>
             <div class="search-results-panel" id="graph-search-results">
                 <div class="srp-header">
                     <span id="srp-count"></span>
@@ -1611,13 +1665,13 @@
                             <button class="active" data-view="grouped" onclick="setSearchView('grouped')" title="Group by type">Grouped</button>
                             <button data-view="flat" onclick="setSearchView('flat')" title="Flat list">List</button>
                         </div>
-                        <span class="srp-close" onclick="closeSearchPanel()">&times;</span>
+                        <button type="button" class="srp-close" aria-label="Close search results" onclick="closeSearchPanel()">&times;</button>
                     </div>
                 </div>
                 <div class="srp-controls" id="srp-controls">
                     <div class="type-chips" id="srp-type-chips"></div>
                     <div class="srp-sort">
-                        <select id="srp-sort" onchange="reSearch()">
+                        <select id="srp-sort" onchange="reSearch()" aria-label="Sort search results">
                             <option value="created_at:desc">Newest first</option>
                             <option value="created_at:asc">Oldest first</option>
                             <option value="name:asc">Name A-Z</option>
@@ -1636,31 +1690,35 @@
             <div class="graph-legend" id="graph-legend"></div>
             <div class="graph-breadcrumbs" id="graph-breadcrumbs"></div>
             <div class="graph-wrapper">
-                <div id="cy"></div>
+                <div id="cy" role="img" aria-label="Graph explorer canvas" aria-describedby="cy-text-alt"></div>
                 <div class="graph-toolbar" id="graph-toolbar">
-                    <button onclick="graphZoom(1.3)" title="Zoom in">+</button>
-                    <button onclick="graphZoom(0.7)" title="Zoom out">&minus;</button>
-                    <button onclick="graphFit()" title="Fit to view">&#x26F6;</button>
-                    <button onclick="graphCenter()" title="Center selected">&#x25CE;</button>
-                    <button onclick="graphClear()" title="Clear graph">&#x2715;</button>
+                    <button onclick="graphZoom(1.3)" title="Zoom in" aria-label="Zoom in">+</button>
+                    <button onclick="graphZoom(0.7)" title="Zoom out" aria-label="Zoom out">&minus;</button>
+                    <button onclick="graphFit()" title="Fit to view" aria-label="Fit graph to view">&#x26F6;</button>
+                    <button onclick="graphCenter()" title="Center selected" aria-label="Center on selected node">&#x25CE;</button>
+                    <button onclick="graphClear()" title="Clear graph" aria-label="Clear graph">&#x2715;</button>
                 </div>
             </div>
             <div class="graph-info" id="graph-info"></div>
+            <div id="cy-text-alt" class="sr-only">Graph explorer: an interactive node-and-edge diagram of
+                entities and their relationships. Use the search box above or the entity-ID field to
+                load nodes; results also appear as a list in the panel next to the search box, which is
+                a text-equivalent way to browse the same entities and relationships shown in the canvas.</div>
             <div id="node-detail" class="node-detail" style="display:none"></div>
         </div>
 
         <!-- ============ Traces ============ -->
         <div id="view-traces" style="display:none">
             <div class="search-bar">
-                <select id="trace-domain">
+                <select id="trace-domain" aria-label="Filter traces by domain">
                     <option value="">All domains</option>
                 </select>
-                <select id="trace-limit">
+                <select id="trace-limit" aria-label="Number of traces per page">
                     <option value="20">20 traces</option>
                     <option value="50">50 traces</option>
                     <option value="100">100 traces</option>
                 </select>
-                <button onclick="loadTraces()">Refresh</button>
+                <button onclick="tracesRefresh()">Refresh</button>
             </div>
             <div class="status-section" style="padding:0; overflow:hidden">
                 <table>
@@ -1677,16 +1735,21 @@
                     <tbody id="traces-body"></tbody>
                 </table>
             </div>
+            <div class="srp-pagination" id="trace-pagination" style="display:none">
+                <button id="trace-newer" onclick="tracePage('newer')">&laquo; Newer</button>
+                <span id="trace-page-info"></span>
+                <button id="trace-older" onclick="tracePage('older')">Older &raquo;</button>
+            </div>
             <div id="trace-detail-container"></div>
         </div>
 
         <!-- ============ Precedents ============ -->
         <div id="view-precedents" style="display:none">
             <div class="search-bar">
-                <select id="prec-domain">
+                <select id="prec-domain" aria-label="Filter precedents by domain">
                     <option value="">All domains</option>
                 </select>
-                <select id="prec-limit">
+                <select id="prec-limit" aria-label="Number of precedents per page">
                     <option value="20">20 items</option>
                     <option value="50">50 items</option>
                 </select>
@@ -1698,9 +1761,9 @@
         <!-- ============ Memories ============ -->
         <div id="view-memories" style="display:none">
             <div class="search-bar">
-                <input type="text" id="mem-search" placeholder="Search documents (full-text)..."
+                <input type="text" id="mem-search" placeholder="Search documents (full-text)..." aria-label="Search documents"
                        onkeydown="if(event.key==='Enter'){memOffset=0;loadMemories();}">
-                <select id="mem-limit" onchange="memOffset=0;loadMemories()">
+                <select id="mem-limit" onchange="memOffset=0;loadMemories()" aria-label="Number of documents per page">
                     <option value="25">25 docs</option>
                     <option value="50" selected>50 docs</option>
                     <option value="100">100 docs</option>
@@ -1732,18 +1795,20 @@
         <!-- ============ Events ============ -->
         <div id="view-events" style="display:none">
             <div class="search-bar">
-                <select id="event-type" onchange="loadEvents()">
+                <select id="event-type" onchange="eventsRefresh()" aria-label="Filter by event type">
                     <option value="">All event types</option>
                 </select>
                 <input type="text" id="event-source" placeholder="Source filter..." style="max-width:220px"
-                       onkeydown="if(event.key==='Enter')loadEvents()">
-                <select id="event-limit" onchange="loadEvents()">
+                       aria-label="Filter by emitting source"
+                       onkeydown="if(event.key==='Enter')eventsRefresh()">
+                <select id="event-limit" onchange="eventsRefresh()" aria-label="Number of events per page">
                     <option value="50">50 events</option>
                     <option value="100" selected>100 events</option>
                     <option value="200">200 events</option>
                 </select>
-                <button onclick="loadEvents()">Refresh</button>
+                <button onclick="eventsRefresh()">Refresh</button>
             </div>
+            <p style="font-size:0.8rem; color:var(--text-dim); margin:0.25rem 0 0.75rem">Type and source narrow the audit-log tail; source is an exact match.</p>
             <div class="status-section" style="padding:0; overflow:hidden">
                 <table>
                     <thead>
@@ -1758,18 +1823,23 @@
                     <tbody id="events-body"></tbody>
                 </table>
             </div>
+            <div class="srp-pagination" id="event-pagination" style="display:none">
+                <button id="event-newer" onclick="eventPage('newer')">&laquo; Newer</button>
+                <span id="event-page-info"></span>
+                <button id="event-older" onclick="eventPage('older')">Older &raquo;</button>
+            </div>
             <div id="event-detail-container"></div>
         </div>
 
         <!-- ============ Packs ============ -->
         <div id="view-packs" style="display:none">
             <div class="search-bar">
-                <select id="pack-limit" onchange="loadPacks()">
+                <select id="pack-limit" onchange="packsRefresh()" aria-label="Number of packs per page">
                     <option value="25">25 packs</option>
                     <option value="50" selected>50 packs</option>
                     <option value="100">100 packs</option>
                 </select>
-                <button onclick="loadPacks()">Refresh</button>
+                <button onclick="packsRefresh()">Refresh</button>
             </div>
             <div class="status-section" style="padding:0; overflow:hidden">
                 <table>
@@ -1786,6 +1856,11 @@
                     </thead>
                     <tbody id="packs-body"></tbody>
                 </table>
+            </div>
+            <div class="srp-pagination" id="pack-pagination" style="display:none">
+                <button id="pack-newer" onclick="packPage('newer')">&laquo; Newer</button>
+                <span id="pack-page-info"></span>
+                <button id="pack-older" onclick="packPage('older')">Older &raquo;</button>
             </div>
             <div id="pack-detail-container"></div>
         </div>
@@ -1810,8 +1885,8 @@
         <div id="view-advisories" style="display:none">
             <div id="advisories-banner"></div>
             <div class="search-bar">
-                <input type="text" id="adv-scope" placeholder="Filter by scope (exact match)">
-                <input type="number" id="adv-min-confidence" placeholder="Min confidence" min="0" max="1" step="0.05" style="max-width:140px">
+                <input type="text" id="adv-scope" placeholder="Filter by scope (exact match)" aria-label="Filter advisories by scope">
+                <input type="number" id="adv-min-confidence" placeholder="Min confidence" aria-label="Minimum confidence" min="0" max="1" step="0.05" style="max-width:140px">
                 <button onclick="loadAdvisories()">Refresh</button>
                 <button onclick="showGenerateAdvisoriesForm()">Generate advisories&hellip;</button>
             </div>
@@ -2078,34 +2153,29 @@
             return `${Math.floor(diff / 86400)}d ago`;
         }
 
-        function fmtDate(iso) {
-            if (!iso) return '';
-            return new Date(iso).toLocaleString();
-        }
-
-        // fmtDate() converts to the browser's local zone with no label --
-        // fine for a timestamp whose zone is otherwise obvious, but an
-        // artifact field that is explicitly named "_utc" would silently
-        // read as local time instead. Round-trips through Date so any
-        // offset in the source string still lands on the right UTC instant,
-        // then labels it rather than converting it away.
-        function fmtUtc(iso) {
-            if (!iso) return '';
+        // One UTC-labelled renderer family for every absolute timestamp.
+        // Previously three renderers disagreed on zone: the old local-zone
+        // formatter converted to the browser's zone with no label, and two
+        // separate UTC-labelled formatters duplicated the formatting and
+        // used different fallbacks. A reader could not tell which zone a
+        // given cell was in without reading this file. Now every absolute
+        // rendering goes through fmtTime(), which always says "UTC", and
+        // every tooltip over a relative time (timeAgo()) carries the raw
+        // ISO instant in its title -- already zone-explicit (a "Z" or
+        // offset suffix) and exact, rather than a second, re-formatted copy.
+        function fmtTime(iso, { empty = '' } = {}) {
+            if (!iso) return empty;
             const d = new Date(iso);
             if (Number.isNaN(d.getTime())) return String(iso);
             return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC').replace(/Z$/, ' UTC');
         }
 
-        // Same UTC labelling as fmtUtc(), but for the Advisories/Policies
-        // tabs' own convention of rendering an absent or unparseable
-        // timestamp as the explicit string "not measured" rather than a
-        // blank cell or the raw source value -- a null confidence/date on
-        // those tabs must never read like a silently-zeroed field.
-        function fmtDateUtc(iso) {
-            if (!iso) return 'not measured';
-            const d = new Date(iso);
-            if (isNaN(d.getTime())) return 'not measured';
-            return d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+        // A relative-time cell: visible "3h ago" (zone-agnostic, so it needs
+        // no label) with the exact ISO instant in `title` for a reader who
+        // hovers. Returns escaped, ready-to-interpolate HTML.
+        function fmtTimeCell(iso) {
+            if (!iso) return '';
+            return `<span title="${escHtml(iso)}">${escHtml(timeAgo(iso))}</span>`;
         }
 
         // Encodes & < > and both quotes: between tags the text stays text, and
@@ -2136,6 +2206,19 @@
         document.addEventListener('click', e => {
             const el = e.target instanceof Element && e.target.closest('[data-action]');
             if (el && ID_ACTIONS.hasOwnProperty(el.dataset.action)) {
+                ID_ACTIONS[el.dataset.action](el.dataset.id);
+            }
+        });
+        // Clickable table rows (tabindex="0" role="button") have no native
+        // Enter/Space activation the way a real <button> does, so a
+        // keyboard-only reader could see them but never open one. Buttons
+        // and links already handle their own Enter/Space; this is scoped to
+        // tr.clickable to avoid double-firing on those.
+        document.addEventListener('keydown', e => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            const el = e.target instanceof Element && e.target.closest('tr.clickable[data-action]');
+            if (el && ID_ACTIONS.hasOwnProperty(el.dataset.action)) {
+                e.preventDefault();
                 ID_ACTIONS[el.dataset.action](el.dataset.id);
             }
         });
@@ -2688,12 +2771,41 @@
             loadReviewProposals();
         }
 
+        // A dedicated aria-live="polite" region, never #error (#error is a
+        // static connectivity banner with no live-region semantics, and the
+        // two used to collide when a toast fired while it was visible).
+        // Terminal-action results (promote/reject/promotion counts) get
+        // longer, length-scaled on-screen time and pause while hovered or
+        // focused, so a reader is never racing the timeout; dismissing early
+        // is also always available via the close button.
         function toastReview(msg, ok) {
-            const error = document.getElementById('error');
-            error.style.display = 'block';
-            error.style.color = ok ? 'var(--success)' : 'var(--error)';
-            error.textContent = msg;
-            setTimeout(() => { error.style.display = 'none'; error.style.color = ''; }, 4000);
+            const region = document.getElementById('toast-region');
+            if (!region) return;
+            const toast = document.createElement('div');
+            toast.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
+            toast.tabIndex = -1;
+            const text = document.createElement('span');
+            text.textContent = msg;
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'btn btn-sm';
+            close.style.marginLeft = '0.75rem';
+            close.setAttribute('aria-label', 'Dismiss notification');
+            close.textContent = '×';
+            let timer = null;
+            const dismiss = () => { if (timer) clearTimeout(timer); toast.remove(); };
+            close.addEventListener('click', dismiss);
+            toast.appendChild(text);
+            toast.appendChild(close);
+            region.appendChild(toast);
+            const ms = Math.max(5000, Math.min(12000, msg.length * 80));
+            const arm = () => { timer = setTimeout(dismiss, ms); };
+            const disarm = () => { if (timer) clearTimeout(timer); };
+            toast.addEventListener('mouseenter', disarm);
+            toast.addEventListener('mouseleave', arm);
+            toast.addEventListener('focusin', disarm);
+            toast.addEventListener('focusout', arm);
+            arm();
         }
 
         // -- Section 2: Learning-promotion candidates --
@@ -2719,12 +2831,12 @@
                 // The artifact is a point-in-time snapshot a worker wrote;
                 // without its age an operator cannot tell a current run from
                 // one regenerated weeks ago. `generated_at_utc` is already
-                // UTC (scoring.py's `_utc_now`), so it is labelled rather
-                // than passed through `fmtDate`, which would silently
-                // relabel it as the browser's local zone (P1-6).
+                // UTC (scoring.py's `_utc_now`); fmtTime() labels it rather
+                // than silently relabelling it as the browser's local zone
+                // (P1-6).
                 const header = `<p style="font-size:0.78rem; color:var(--text-dim); margin-bottom:0.75rem;">` +
                     `${escHtml(items.length)} candidate(s)` +
-                    (data.generated_at_utc ? ` &middot; generated ${escHtml(fmtUtc(data.generated_at_utc))}` : '') +
+                    (data.generated_at_utc ? ` &middot; generated ${escHtml(fmtTime(data.generated_at_utc))}` : '') +
                     (data.artifacts_dir ? ` &middot; ${escHtml(data.artifacts_dir)}` : '') +
                     `</p>`;
                 if (items.length === 0) {
@@ -2753,7 +2865,12 @@
                         : `<div class="review-actions">
                             <span class="badge badge-warn">report-only — not promotable</span>
                             <span class="review-tooltip" title="recommendation_type '${escHtml(c.recommendation_type || '')}' is not in PROMOTE_RECOMMENDATIONS, so prepare_learning_promotions would skip it as skipped_non_promotable. There is deliberately no Approve control here.">Why no approve?</span>
-                        </div>`;
+                        </div>
+                        <p style="color:var(--text-dim); font-size:0.78rem; margin:0.25rem 0 0">
+                            recommendation_type '${escHtml(c.recommendation_type || '')}' is not in PROMOTE_RECOMMENDATIONS,
+                            so prepare_learning_promotions would skip it as skipped_non_promotable.
+                            There is deliberately no Approve control here.
+                        </p>`;
                     return `
                     <div class="review-card fade-in" data-candidate="${escHtml(cid)}">
                         <h4>${escHtml(c.precedent_name || c.title || cid)}</h4>
@@ -2817,6 +2934,7 @@
                             <button class="btn btn-sm" data-action="draftAdr" data-id="${escHtml(c.candidate_id)}">Draft ADR</button>
                             <span class="review-tooltip" title="Promotion is a one-way ADR commitment: edit well_known.py by hand after the ADR is reviewed. There is deliberately no approve button here.">Why no approve?</span>
                         </div>
+                        <p style="color:var(--text-dim); font-size:0.78rem; margin:0.25rem 0 0">Promotion is a one-way ADR commitment: edit well_known.py by hand after the ADR is reviewed. There is deliberately no approve button here.</p>
                         <div class="adr-panel" id="adr-${escHtml(c.candidate_id)}" style="display:none"></div>
                     </div>`).join('');
             } catch (err) {
@@ -2875,7 +2993,7 @@
                         <div class="review-meta">
                             <span class="mono" style="font-size:0.7rem">${escHtml(p.proposal_id)}</span>
                             <span>events: ${escHtml(p.source_event_count)}</span>
-                            <span title="${escHtml(fmtDate(p.generated_at))}">${timeAgo(p.generated_at)}</span>
+                            ${fmtTimeCell(p.generated_at)}
                         </div>
                         ${p.markdown_preview ? `<div class="adr-panel">${escHtml(p.markdown_preview)}</div>` : ''}
                     </div>`).join('');
@@ -3858,39 +3976,111 @@
         }
 
         // ============================================================
+        //  Shared cursor pager (Traces / Events / Packs)
+        //  EventLog and TraceStore both page older history via `until`
+        //  (no offset by design), so "Newer" cannot re-run the same query
+        //  with a different offset -- it pops back to the `until` cursor
+        //  that produced the previous page, re-fetching from there. An
+        //  empty stack means "already at the live/newest page".
+        // ============================================================
+        function makeCursorPager() {
+            return { stack: [], current: undefined };
+        }
+
+        function cursorPagerOlder(pager, oldestStamp) {
+            pager.stack.push(pager.current);
+            pager.current = oldestStamp;
+        }
+
+        function cursorPagerNewer(pager) {
+            pager.current = pager.stack.pop();
+        }
+
+        function renderCursorPagerFooter(prefix, pager, shownCount, total) {
+            const pag = document.getElementById(`${prefix}-pagination`);
+            const info = document.getElementById(`${prefix}-page-info`);
+            const newerBtn = document.getElementById(`${prefix}-newer`);
+            const olderBtn = document.getElementById(`${prefix}-older`);
+            if (!pag || !info || !newerBtn || !olderBtn) return;
+            if (total <= shownCount && pager.stack.length === 0) {
+                pag.style.display = 'none';
+                return;
+            }
+            pag.style.display = 'flex';
+            info.textContent = `${shownCount} of ${total}`;
+            newerBtn.disabled = pager.stack.length === 0;
+            olderBtn.disabled = shownCount >= total;
+        }
+
+        // ============================================================
         //  TRACES
         // ============================================================
+        const tracePager = makeCursorPager();
+        let traceDomainsLoaded = false;
+
+        async function loadTraceDomains() {
+            const domainSelect = document.getElementById('trace-domain');
+            if (!domainSelect) return;
+            try {
+                // Server-side counts across the WHOLE store, not just the
+                // current page -- a page can easily miss a real domain, or
+                // offer one with zero traces left once a filter is applied.
+                const data = await fetchJSON('/traces/domains');
+                const currentVal = domainSelect.value;
+                domainSelect.innerHTML = '<option value="">All domains</option>';
+                for (const d of data.domains || []) {
+                    domainSelect.innerHTML += `<option value="${escHtml(d.domain)}" ${d.domain === currentVal ? 'selected' : ''}>${escHtml(d.domain)} (${d.count})</option>`;
+                }
+                traceDomainsLoaded = true;
+            } catch {
+                /* filter options are a convenience, never a load blocker */
+            }
+        }
+
+        // A filter change (domain/limit) always starts back at the live
+        // page; only the Newer/Older buttons carry the cursor forward.
+        function tracesRefresh() {
+            tracePager.stack = [];
+            tracePager.current = undefined;
+            loadTraces();
+        }
+
+        function tracePage(dir) {
+            if (dir === 'older') {
+                const rows = document.querySelectorAll('#traces-body tr[data-oldest-stamp]');
+                const last = rows[rows.length - 1];
+                if (!last) return;
+                cursorPagerOlder(tracePager, last.dataset.oldestStamp);
+            } else {
+                cursorPagerNewer(tracePager);
+            }
+            loadTraces();
+        }
+
         async function loadTraces() {
             const domain = document.getElementById('trace-domain').value;
             const limit = document.getElementById('trace-limit').value;
             const body = document.getElementById('traces-body');
             body.innerHTML = `<tr><td colspan="6">${loadingHtml('Loading traces...')}</td></tr>`;
             document.getElementById('trace-detail-container').innerHTML = '';
+            if (!traceDomainsLoaded) loadTraceDomains();
 
             try {
                 let url = `/traces?limit=${limit}`;
                 if (domain) url += `&domain=${encodeURIComponent(domain)}`;
+                if (tracePager.current) url += `&until=${encodeURIComponent(tracePager.current)}`;
                 const data = await fetchJSON(url);
                 const traces = data.traces || [];
 
                 if (traces.length === 0) {
                     body.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="icon">&#x1F4CB;</div><p>No traces found</p></div></td></tr>';
+                    renderCursorPagerFooter('trace', tracePager, 0, data.total || 0);
                     return;
                 }
 
-                // Collect domains for filter
-                const domains = new Set();
-                traces.forEach(t => { if (t.domain) domains.add(t.domain); });
-                const domainSelect = document.getElementById('trace-domain');
-                const currentVal = domainSelect.value;
-                domainSelect.innerHTML = '<option value="">All domains</option>';
-                for (const d of [...domains].sort()) {
-                    domainSelect.innerHTML += `<option value="${escHtml(d)}" ${d === currentVal ? 'selected' : ''}>${escHtml(d)}</option>`;
-                }
-
-                body.innerHTML = traces.map(t => `
-                    <tr class="clickable" data-action="loadTraceDetail" data-id="${escHtml(t.trace_id)}">
-                        <td title="${escHtml(fmtDate(t.created_at))}">${escHtml(timeAgo(t.created_at))}</td>
+                body.innerHTML = traces.map((t, i) => `
+                    <tr class="clickable" tabindex="0" role="button" data-action="loadTraceDetail" data-id="${escHtml(t.trace_id)}"${i === traces.length - 1 ? ` data-oldest-stamp="${escHtml(t.created_at)}"` : ''}>
+                        <td>${fmtTimeCell(t.created_at)}</td>
                         <td class="truncate" style="max-width:350px" title="${escHtml(t.intent)}">${escHtml(t.intent)}</td>
                         <td>${sourceBadge(t.source)}</td>
                         <td>${t.domain ? escHtml(t.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
@@ -3898,6 +4088,7 @@
                         <td>${outcomeBadge(t.outcome)}</td>
                     </tr>
                 `).join('');
+                renderCursorPagerFooter('trace', tracePager, traces.length, data.total || 0);
             } catch (err) {
                 body.innerHTML = `<tr><td colspan="6" style="color:var(--error); text-align:center; padding:2rem">Failed to load traces: ${escHtml(err.message)}</td></tr>`;
             }
@@ -3910,7 +4101,10 @@
             try {
                 const data = await fetchJSON(`/traces/${encodeURIComponent(traceId)}`);
                 const t = data.trace;
-                if (!t) { container.innerHTML = ''; return; }
+                if (!t) {
+                    container.innerHTML = `<div class="trace-detail"><p style="color:var(--text-dim)">Trace <span class="mono">${escHtml(traceId)}</span> was not found.</p></div>`;
+                    return;
+                }
 
                 const steps = t.steps || [];
                 const outcome = t.outcome || {};
@@ -4003,7 +4197,7 @@
                             <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(t.trace_id)}</span>
                         </h3>
                         <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
-                            ${ctx.domain ? `Domain: ${escHtml(ctx.domain)} &middot; ` : ''}${ctx.agent_id ? `Agent: ${escHtml(ctx.agent_id)} &middot; ` : ''}${fmtDate(ctx.started_at)}${ctx.ended_at ? ` &rarr; ${fmtDate(ctx.ended_at)}` : ''}
+                            ${ctx.domain ? `Domain: ${escHtml(ctx.domain)} &middot; ` : ''}${ctx.agent_id ? `Agent: ${escHtml(ctx.agent_id)} &middot; ` : ''}${escHtml(fmtTime(ctx.started_at))}${ctx.ended_at ? ` &rarr; ${escHtml(fmtTime(ctx.ended_at))}` : ''}
                         </div>
                         ${metaHtml}
                         <h4 style="font-size:0.9rem; margin-bottom:0.75rem">Steps</h4>
@@ -4013,7 +4207,11 @@
                     </div>
                 `;
             } catch (err) {
-                container.innerHTML = `<div class="trace-detail"><p style="color:var(--error)">Failed to load trace: ${escHtml(err.message)}</p></div>`;
+                const notFound = /^404\b/.test(err.message);
+                const msg = notFound
+                    ? `Trace ${traceId} was not found.`
+                    : `Failed to load trace ${traceId}: ${err.message}`;
+                container.innerHTML = `<div class="trace-detail"><p style="color:${notFound ? 'var(--text-dim)' : 'var(--error)'}">${escHtml(msg)}</p></div>`;
             }
         }
 
@@ -4057,7 +4255,7 @@
                         <p>${escHtml(p.description || '')}</p>
                         <div class="precedent-meta">
                             ${p.domain ? `<span class="badge badge-accent">${escHtml(p.domain)}</span>` : ''}
-                            <span title="${escHtml(fmtDate(p.occurred_at))}">${timeAgo(p.occurred_at)}</span>
+                            ${fmtTimeCell(p.occurred_at)}
                             ${p.entity_id ? `<span class="mono entity-link" style="font-size:0.7rem" data-action="navigateToEntity" data-id="${escHtml(p.entity_id)}">${escHtml(p.entity_id)}</span>` : ''}
                         </div>
                     </div>
@@ -4113,8 +4311,8 @@
                 }
 
                 body.innerHTML = docs.map(d => `
-                    <tr class="clickable" data-action="loadMemoryDetail" data-id="${escHtml(d.doc_id)}">
-                        <td title="${escHtml(fmtDate(d.created_at))}" style="white-space:nowrap">${escHtml(timeAgo(d.created_at))}</td>
+                    <tr class="clickable" tabindex="0" role="button" data-action="loadMemoryDetail" data-id="${escHtml(d.doc_id)}">
+                        <td style="white-space:nowrap">${fmtTimeCell(d.created_at)}</td>
                         <td class="mono truncate" style="max-width:220px; font-size:0.78rem" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
                         <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
                         <td>${tagChips(d.metadata)}</td>
@@ -4152,7 +4350,10 @@
             try {
                 const data = await fetchJSON(`/documents/${encodeURIComponent(docId)}`);
                 const d = data.document;
-                if (!d) { container.innerHTML = ''; return; }
+                if (!d) {
+                    container.innerHTML = `<div class="trace-detail"><p style="color:var(--text-dim)">Document <span class="mono">${escHtml(docId)}</span> was not found.</p></div>`;
+                    return;
+                }
 
                 let metaHtml = '';
                 const meta = d.metadata || {};
@@ -4172,7 +4373,7 @@
                             <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(d.doc_id)}</span>
                         </h3>
                         <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
-                            Created ${fmtDate(d.created_at)}${d.updated_at && d.updated_at !== d.created_at ? ` &middot; Updated ${fmtDate(d.updated_at)}` : ''}
+                            Created ${escHtml(fmtTime(d.created_at))}${d.updated_at && d.updated_at !== d.created_at ? ` &middot; Updated ${escHtml(fmtTime(d.updated_at))}` : ''}
                             ${d.content_hash ? ` &middot; <span class="mono">${escHtml(String(d.content_hash).slice(0, 16))}…</span>` : ''}
                         </div>
                         ${metaHtml}
@@ -4182,7 +4383,11 @@
                 `;
                 container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             } catch (err) {
-                container.innerHTML = `<div class="trace-detail"><p style="color:var(--error)">Failed to load document: ${escHtml(err.message)}</p></div>`;
+                const notFound = /^404\b/.test(err.message);
+                const msg = notFound
+                    ? `Document ${docId} was not found.`
+                    : `Failed to load document ${docId}: ${err.message}`;
+                container.innerHTML = `<div class="trace-detail"><p style="color:${notFound ? 'var(--text-dim)' : 'var(--error)'}">${escHtml(msg)}</p></div>`;
             }
         }
 
@@ -4210,6 +4415,26 @@
             return parts.join(' &middot; ');
         }
 
+        const eventPager = makeCursorPager();
+
+        function eventsRefresh() {
+            eventPager.stack = [];
+            eventPager.current = undefined;
+            loadEvents();
+        }
+
+        function eventPage(dir) {
+            if (dir === 'older') {
+                const rows = document.querySelectorAll('#events-body tr[data-oldest-stamp]');
+                const last = rows[rows.length - 1];
+                if (!last) return;
+                cursorPagerOlder(eventPager, last.dataset.oldestStamp);
+            } else {
+                cursorPagerNewer(eventPager);
+            }
+            loadEvents();
+        }
+
         async function loadEvents() {
             const type = document.getElementById('event-type').value;
             const source = document.getElementById('event-source').value.trim();
@@ -4222,6 +4447,7 @@
                 let url = `/events?limit=${limit}&order=desc`;
                 if (type) url += `&event_type=${encodeURIComponent(type)}`;
                 if (source) url += `&source=${encodeURIComponent(source)}`;
+                if (eventPager.current) url += `&until=${encodeURIComponent(eventPager.current)}`;
                 const data = await fetchJSON(url);
                 const events = data.events || [];
 
@@ -4236,23 +4462,26 @@
 
                 if (events.length === 0) {
                     body.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="icon">&#x1F4E1;</div><p>No events match</p></div></td></tr>';
+                    renderCursorPagerFooter('event', eventPager, 0, data.total || 0);
                     return;
                 }
 
-                body.innerHTML = events.map(e => {
+                body.innerHTML = events.map((e, i) => {
                     const badge = EVENT_BADGE[e.event_type] || 'badge-info';
                     const entityCell = e.entity_id
                         ? `<span class="mono truncate" style="max-width:200px; display:inline-block; font-size:0.75rem" title="${escHtml(e.entity_id)}">${escHtml(e.entity_id)}</span>`
                         : '<span style="color:var(--text-dim)">-</span>';
+                    const oldestAttr = i === events.length - 1 ? ` data-oldest-stamp="${escHtml(e.occurred_at)}"` : '';
                     return `
-                    <tr class="clickable" data-action="loadEventDetail" data-id="${escHtml(e.event_id)}">
-                        <td title="${escHtml(fmtDate(e.occurred_at))}" style="white-space:nowrap">${escHtml(timeAgo(e.occurred_at))}</td>
+                    <tr class="clickable" tabindex="0" role="button" data-action="loadEventDetail" data-id="${escHtml(e.event_id)}"${oldestAttr}>
+                        <td style="white-space:nowrap">${fmtTimeCell(e.occurred_at)}</td>
                         <td><span class="badge ${badge}">${escHtml(e.event_type)}</span></td>
                         <td style="font-size:0.8rem">${escHtml(e.source)}</td>
                         <td>${entityCell}</td>
                         <td style="font-size:0.8rem">${eventSummary(e)}</td>
                     </tr>`;
                 }).join('');
+                renderCursorPagerFooter('event', eventPager, events.length, data.total || 0);
             } catch (err) {
                 body.innerHTML = `<tr><td colspan="5" style="color:var(--error); text-align:center; padding:2rem">Failed to load events: ${escHtml(err.message)}</td></tr>`;
             }
@@ -4271,9 +4500,20 @@
                 let url = `/events?limit=${limit}&order=desc&include_payload=true`;
                 if (type) url += `&event_type=${encodeURIComponent(type)}`;
                 if (source) url += `&source=${encodeURIComponent(source)}`;
+                if (eventPager.current) url += `&until=${encodeURIComponent(eventPager.current)}`;
                 const data = await fetchJSON(url);
-                const e = (data.events || []).find(ev => ev.event_id === eventId);
-                if (!e) { container.innerHTML = ''; return; }
+                const windowEvents = data.events || [];
+                const e = windowEvents.find(ev => ev.event_id === eventId);
+                if (!e) {
+                    // There is no GET /events/{id} -- this view can only
+                    // search the currently loaded window, so a miss must
+                    // say which window was searched rather than go blank.
+                    const windowDesc = windowEvents.length > 0
+                        ? `the loaded window (${windowEvents.length} of ${data.total || '?'} events, type/source filters as shown)`
+                        : 'the loaded window (empty)';
+                    container.innerHTML = `<div class="trace-detail"><p style="color:var(--text-dim)">Event <span class="mono">${escHtml(eventId)}</span> was not found in ${windowDesc}. Try Older to search further back, or clear filters.</p></div>`;
+                    return;
+                }
 
                 const packLink = e.event_type === 'pack.assembled' && e.entity_id
                     ? `<button class="btn btn-ghost btn-sm" data-action="navigateToPack" data-id="${escHtml(e.entity_id)}">Inspect pack</button>`
@@ -4286,7 +4526,7 @@
                             <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(e.event_id)}</span>
                         </h3>
                         <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
-                            ${fmtDate(e.occurred_at)}${e.entity_id ? ` &middot; Entity: <span class="mono">${escHtml(e.entity_id)}</span>` : ''}${e.entity_type ? ` (${escHtml(e.entity_type)})` : ''}
+                            ${escHtml(fmtTime(e.occurred_at))}${e.entity_id ? ` &middot; Entity: <span class="mono">${escHtml(e.entity_id)}</span>` : ''}${e.entity_type ? ` (${escHtml(e.entity_type)})` : ''}
                             ${packLink}
                         </div>
                         <h4 style="font-size:0.9rem; margin-bottom:0.5rem">Payload</h4>
@@ -4307,6 +4547,26 @@
             setTimeout(() => loadPackDetail(packId), 100);
         }
 
+        const packPager = makeCursorPager();
+
+        function packsRefresh() {
+            packPager.stack = [];
+            packPager.current = undefined;
+            loadPacks();
+        }
+
+        function packPage(dir) {
+            if (dir === 'older') {
+                const rows = document.querySelectorAll('#packs-body tr[data-oldest-stamp]');
+                const last = rows[rows.length - 1];
+                if (!last) return;
+                cursorPagerOlder(packPager, last.dataset.oldestStamp);
+            } else {
+                cursorPagerNewer(packPager);
+            }
+            loadPacks();
+        }
+
         async function loadPacks() {
             const limit = document.getElementById('pack-limit').value;
             const body = document.getElementById('packs-body');
@@ -4314,18 +4574,21 @@
             document.getElementById('pack-detail-container').innerHTML = '';
 
             try {
-                const data = await fetchJSON(`/packs?limit=${limit}`);
+                let url = `/packs?limit=${limit}`;
+                if (packPager.current) url += `&until=${encodeURIComponent(packPager.current)}`;
+                const data = await fetchJSON(url);
                 const packs = data.packs || [];
 
                 if (packs.length === 0) {
                     body.innerHTML = '<tr><td colspan="7"><div class="empty-state"><div class="icon">&#x1F4E6;</div><p>No packs assembled yet</p><p style="font-size:0.8rem; color:var(--text-dim)">Packs appear here when agents call get_context or POST /packs</p></div></td></tr>';
+                    renderCursorPagerFooter('pack', packPager, 0, data.total || 0);
                     return;
                 }
 
-                body.innerHTML = packs.map(p => `
-                    <tr class="clickable" data-action="loadPackDetail" data-id="${escHtml(p.pack_id)}">
-                        <td title="${escHtml(fmtDate(p.created_at))}" style="white-space:nowrap">${escHtml(timeAgo(p.created_at))}</td>
-                        <td class="truncate" style="max-width:320px" title="${escHtml(p.intent)}">${escHtml(p.intent)}</td>
+                body.innerHTML = packs.map((p, i) => `
+                    <tr class="clickable" tabindex="0" role="button" data-action="loadPackDetail" data-id="${escHtml(p.pack_id)}"${i === packs.length - 1 ? ` data-oldest-stamp="${escHtml(p.created_at)}"` : ''}>
+                        <td style="white-space:nowrap">${fmtTimeCell(p.created_at)}</td>
+                        <td class="truncate" style="max-width:320px" title="${escHtml(p.intent)}">${escHtml(p.intent)}${p.sectioned ? ' <span class="badge badge-info" title="Sectioned packs emit no injected_items[], so per-item attribution cannot join to them">unattributable (sectioned)</span>' : ''}</td>
                         <td>${p.domain ? escHtml(p.domain) : '<span style="color:var(--text-dim)">-</span>'}</td>
                         <td class="mono" style="font-size:0.78rem">${p.agent_id ? escHtml(p.agent_id) : '<span style="color:var(--text-dim)">-</span>'}</td>
                         <td>${p.items_count != null ? p.items_count : '-'}</td>
@@ -4333,6 +4596,7 @@
                         <td style="font-size:0.75rem">${(p.strategies_used || []).map(s => `<span class="badge badge-info">${escHtml(s)}</span>`).join(' ')}</td>
                     </tr>
                 `).join('');
+                renderCursorPagerFooter('pack', packPager, packs.length, data.total || 0);
             } catch (err) {
                 body.innerHTML = `<tr><td colspan="7" style="color:var(--error); text-align:center; padding:2rem">Failed to load packs: ${escHtml(err.message)}</td></tr>`;
             }
@@ -4367,9 +4631,23 @@
                 const feedbackSubText = data.feedback_truncated
                     ? 'signals recorded (capped list)' : 'signals recorded';
 
+                // A sectioned pack emits `sections`, never `injected_items[]`,
+                // so per-item feedback attribution cannot join to it -- say so
+                // up front rather than let an empty injected-items table read
+                // as "nothing was served". A holdout-blinded pack is the other
+                // case a reader could mistake for "nothing here": the payload
+                // was withheld for measurement, not because it is empty.
+                let noticeHtml = '';
+                if (pack.sectioned) {
+                    noticeHtml += `<p style="color:var(--text-dim); font-size:0.85rem"><span class="badge badge-info">unattributable (sectioned)</span> This pack emits sections, not injected_items[] -- per-item feedback attribution cannot join to it.</p>`;
+                }
+                if (data.holdout_blinded) {
+                    noticeHtml += `<p style="color:var(--text-dim); font-size:0.85rem"><span class="badge badge-info">holdout</span> This pack is in the measurement holdout; its payload is blinded for your access level.</p>`;
+                }
+
                 let metaHtml = '<div class="cards" style="margin:0 0 1rem 0">';
                 metaHtml += `<div class="card"><h3>Items</h3><div class="value">${payload.items_count != null ? payload.items_count : '-'}</div><div class="sub">of ${payload.candidates_found != null ? payload.candidates_found : '?'} candidates</div></div>`;
-                metaHtml += `<div class="card"><h3>Budget</h3><div class="value" style="font-size:1.1rem">${payload.budget_max_items || '-'} items</div><div class="sub">${payload.budget_max_tokens || '-'} tokens max</div></div>`;
+                metaHtml += `<div class="card"><h3>Budget</h3><div class="value" style="font-size:1.1rem">${payload.budget_max_items ?? '-'} items</div><div class="sub">${payload.budget_max_tokens ?? '-'} tokens max</div></div>`;
                 metaHtml += `<div class="card"><h3>Strategies</h3><div class="value" style="font-size:0.95rem">${(payload.strategies_used || []).map(escHtml).join(', ') || '-'}</div>${payload.reranker ? `<div class="sub">reranker: ${escHtml(payload.reranker)}</div>` : ''}</div>`;
                 metaHtml += `<div class="card"><h3>Feedback</h3><div class="value">${escHtml(feedbackValueText)}</div><div class="sub">${feedbackSubText}</div></div>`;
                 metaHtml += '</div>';
@@ -4388,8 +4666,8 @@
                                 <td style="font-size:0.78rem">${escHtml(it.selection_reason || '')}</td>
                                 <td style="font-size:0.72rem; color:var(--text-dim)">${escHtml(scoreBreakdownStr(it.score_breakdown))}</td>
                                 <td>${it.estimated_tokens != null ? it.estimated_tokens : '-'}</td>
-                                <td style="text-align:center"><input type="checkbox" class="fb-helpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark helpful"></td>
-                                <td style="text-align:center"><input type="checkbox" class="fb-unhelpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark unhelpful"></td>
+                                <td style="text-align:center"><input type="checkbox" class="fb-helpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark helpful" aria-label="Mark item helpful"></td>
+                                <td style="text-align:center"><input type="checkbox" class="fb-unhelpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark unhelpful" aria-label="Mark item unhelpful"></td>
                             </tr>`).join('')}
                         </tbody>
                     </table></div>`;
@@ -4439,8 +4717,12 @@
                     feedbackHtml = '<div style="margin-top:1rem"><h4 style="font-size:0.9rem; margin-bottom:0.5rem">Feedback</h4>';
                     for (const f of feedback) {
                         const fp = f.payload || {};
+                        // fp.success is the backend's own SUCCESS_RATING_THRESHOLD-derived
+                        // verdict (PackFeedback.to_event_payload() always emits it explicitly);
+                        // branching on it instead of recomputing `rating > 0` keeps the badge
+                        // agreeing with the backend for a rating in (0, 0.5).
                         feedbackHtml += `<div class="status-row">
-                            <span>${fp.rating != null ? `<span class="badge ${fp.rating > 0 ? 'badge-ok' : 'badge-err'}">rating: ${escHtml(fp.rating)}</span> ` : ''}${fp.comment ? escHtml(fp.comment) : ''}</span>
+                            <span>${fp.rating != null ? `<span class="badge ${fp.success ? 'badge-ok' : 'badge-err'}">rating: ${escHtml(fp.rating)}</span> ` : ''}${fp.comment ? escHtml(fp.comment) : ''}</span>
                             <span style="font-size:0.75rem; color:var(--text-dim)">${timeAgo(f.occurred_at)}</span>
                         </div>`;
                     }
@@ -4472,8 +4754,9 @@
                             <span class="mono" style="font-size:0.75rem; color:var(--text-dim)">${escHtml(packId)}</span>
                         </h3>
                         <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem">
-                            ${pack.domain ? `Domain: ${escHtml(pack.domain)} &middot; ` : ''}${pack.agent_id ? `Agent: ${escHtml(pack.agent_id)} &middot; ` : ''}${fmtDate(pack.created_at)}
+                            ${pack.domain ? `Domain: ${escHtml(pack.domain)} &middot; ` : ''}${pack.agent_id ? `Agent: ${escHtml(pack.agent_id)} &middot; ` : ''}${escHtml(fmtTime(pack.created_at))}
                         </div>
+                        ${noticeHtml}
                         ${metaHtml}
                         <h4 style="font-size:0.9rem; margin-bottom:0.75rem">Injected items</h4>
                         ${injectedHtml}
@@ -4541,7 +4824,11 @@
                 };
                 container.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', feedbackFormActions[b.dataset.act]));
             } catch (err) {
-                container.innerHTML = `<div class="trace-detail"><p style="color:var(--error)">Failed to load pack: ${escHtml(err.message)}</p></div>`;
+                const notFound = /^404\b/.test(err.message);
+                const msg = notFound
+                    ? `Pack ${packId} was not found.`
+                    : `Failed to load pack ${packId}: ${err.message}`;
+                container.innerHTML = `<div class="trace-detail"><p style="color:${notFound ? 'var(--text-dim)' : 'var(--error)'}">${escHtml(msg)}</p></div>`;
             }
         }
 
@@ -4560,7 +4847,7 @@
                     ${versions.map(v => `
                         <div style="border-left:2px solid ${v.valid_to ? 'var(--border)' : 'var(--accent)'}; padding:0.25rem 0 0.25rem 0.6rem; margin-bottom:0.5rem">
                             <div style="font-size:0.75rem; color:var(--text-dim)">
-                                ${fmtDate(v.valid_from)} &rarr; ${v.valid_to ? fmtDate(v.valid_to) : '<span style="color:var(--accent)">current</span>'}
+                                ${escHtml(fmtTime(v.valid_from))} &rarr; ${v.valid_to ? escHtml(fmtTime(v.valid_to)) : '<span style="color:var(--accent)">current</span>'}
                             </div>
                             <pre style="white-space:pre-wrap; word-break:break-word; font-size:0.72rem; margin:0.25rem 0 0; max-height:120px; overflow:auto">${escHtml(JSON.stringify(v.properties || {}, null, 1))}</pre>
                         </div>`).join('')}
@@ -4577,28 +4864,52 @@
             const loading = document.getElementById('loading');
             const error = document.getElementById('error');
             try {
-                const [stats, health] = await Promise.all([
-                    fetchJSON('/stats'),
-                    fetchJSON('/health')
+                // /readyz sits outside the /api/v1 prefix by design (it's a
+                // deployment-orchestrator probe, not a versioned API route),
+                // so it needs a direct fetch rather than fetchJSON(API + ...).
+                // A failed or unreachable probe reads as "unknown", never as
+                // "ready" -- zero counts alone cannot tell "genuinely empty"
+                // apart from "a store is unreadable", and only /readyz can.
+                // Stats and health are independent probes -- one failing
+                // (a transient 500, a slow backend) must not blank the
+                // other's cards too. A 401/403 is different: it means the
+                // whole dashboard needs a key, so it is rethrown to the
+                // outer catch below rather than rendered as a per-card
+                // failure.
+                const readyKey = getApiKey();
+                const isAuthError = err => /^40[13]\b/.test(err.message);
+                const [statsOutcome, healthOutcome, ready] = await Promise.all([
+                    fetchJSON('/stats').then(value => ({ ok: true, value }))
+                        .catch(err => { if (isAuthError(err)) throw err; return { ok: false, error: err }; }),
+                    fetchJSON('/health').then(value => ({ ok: true, value }))
+                        .catch(err => { if (isAuthError(err)) throw err; return { ok: false, error: err }; }),
+                    fetch('/readyz', { headers: readyKey ? { 'X-API-Key': readyKey } : {} })
+                        .then(r => r.json()).catch(() => ({ status: 'unknown' }))
                 ]);
 
                 const cardsEl = document.getElementById('stats-cards');
-                cardsEl.appendChild(renderCard('Traces', stats.traces, 'agent work records'));
-                // Chunk rows are slices of the documents already counted, so
-                // the headline is the whole-document count and the row total
-                // rides in the subtitle (#412). Before the split this card
-                // showed 1,319 against the Documents view's 579.
-                const docRows = stats.document_rows || 0;
-                const docSub = docRows > stats.documents
-                    ? `${docRows.toLocaleString()} rows incl. chunks`
-                    : 'searchable items';
-                cardsEl.appendChild(renderCard('Documents', stats.documents, docSub));
-                cardsEl.appendChild(renderCard('Graph Nodes', stats.nodes, 'entities'));
-                cardsEl.appendChild(renderCard('Graph Edges', stats.edges, 'relationships'));
-                cardsEl.appendChild(renderCard('Events', stats.events, 'audit log entries'));
+                let stats = null;
+                if (!statsOutcome.ok) {
+                    cardsEl.innerHTML = `<div class="card" style="grid-column:1/-1"><p style="color:var(--error); margin:0">Failed to load stats: ${escHtml(statsOutcome.error.message)}</p></div>`;
+                } else {
+                    stats = statsOutcome.value;
+                    cardsEl.appendChild(renderCard('Traces', stats.traces, 'agent work records'));
+                    // Chunk rows are slices of the documents already counted, so
+                    // the headline is the whole-document count and the row total
+                    // rides in the subtitle (#412). Before the split this card
+                    // showed 1,319 against the Documents view's 579.
+                    const docRows = stats.document_rows || 0;
+                    const docSub = docRows > stats.documents
+                        ? `${docRows.toLocaleString()} rows incl. chunks`
+                        : 'searchable items';
+                    cardsEl.appendChild(renderCard('Documents', stats.documents, docSub));
+                    cardsEl.appendChild(renderCard('Graph Nodes', stats.nodes, 'entities'));
+                    cardsEl.appendChild(renderCard('Graph Edges', stats.edges, 'relationships'));
+                    cardsEl.appendChild(renderCard('Events', stats.events, 'audit log entries'));
+                }
 
-                const total = (stats.traces || 0) + (stats.documents || 0) + (stats.nodes || 0);
-                if (total === 0) {
+                const total = stats ? (stats.traces || 0) + (stats.documents || 0) + (stats.nodes || 0) : -1;
+                if (total === 0 && ready.status === 'ready') {
                     const banner = document.createElement('div');
                     banner.className = 'empty-state';
                     banner.style.cssText = 'margin:1.5rem;padding:2rem;text-align:center;background:var(--surface);border:1px dashed var(--border);border-radius:8px;';
@@ -4621,13 +4932,18 @@
                 }
 
                 const healthEl = document.getElementById('health-rows');
-                const checks = health.checks || {};
-                const healthBackends = health.backends || {};
-                if (Object.keys(checks).length === 0) {
-                    healthEl.innerHTML = '<div style="color:var(--text-dim); padding:0.5rem 0; font-size:0.9rem">No health checks configured</div>';
+                if (!healthOutcome.ok) {
+                    healthEl.innerHTML = `<div style="color:var(--error); padding:0.5rem 0; font-size:0.9rem">Failed to load health checks: ${escHtml(healthOutcome.error.message)}</div>`;
                 } else {
-                    for (const [name, ok] of Object.entries(checks)) {
-                        healthEl.appendChild(renderStatusRow(name, ok, healthBackends[name]));
+                    const health = healthOutcome.value;
+                    const checks = health.checks || {};
+                    const healthBackends = health.backends || {};
+                    if (Object.keys(checks).length === 0) {
+                        healthEl.innerHTML = '<div style="color:var(--text-dim); padding:0.5rem 0; font-size:0.9rem">No health checks configured</div>';
+                    } else {
+                        for (const [name, ok] of Object.entries(checks)) {
+                            healthEl.appendChild(renderStatusRow(name, ok, healthBackends[name]));
+                        }
                     }
                 }
 
@@ -4711,8 +5027,8 @@
             } else {
                 const ageMs = Date.now() - new Date(loop.last_run_at).getTime();
                 const stale = ageMs > LOOP_STALE_HOURS * 3600 * 1000;
-                whenHtml = `<span title="${escHtml(fmtUtc(loop.last_run_at))}">` +
-                    `${escHtml(fmtUtc(loop.last_run_at))} (${escHtml(timeAgo(loop.last_run_at))})</span>`;
+                whenHtml = `<span title="${escHtml(loop.last_run_at)}">` +
+                    `${escHtml(fmtTime(loop.last_run_at))} (${escHtml(timeAgo(loop.last_run_at))})</span>`;
                 if (stale) {
                     whenHtml += ` <span class="badge badge-warn" title="No run seen in over ${escHtml(LOOP_STALE_HOURS)}h">stale</span>`;
                 }
@@ -4791,8 +5107,23 @@
                     const wp = j && j.write_provenance;
                     if (!foot || !wp) return;
                     const sha = (wp.commit || '').slice(0, 7);
-                    foot.textContent = sha || (wp.version || '');
-                    foot.title = 'Backend ' + (wp.version || '?') + (sha ? ' @ ' + sha : '');
+                    // "fallback-version" + commit: null means the image was
+                    // never built with `make docker-build` -- honestly
+                    // unidentifiable rather than falsely identified. A stale
+                    // editable install sets stamp_stale and never overwrites
+                    // commit, so the two warnings are independent.
+                    const unidentified = !wp.commit && wp.version === 'fallback-version';
+                    let label = sha || (wp.version || '');
+                    let title = 'API build ' + (wp.version || '?') + (sha ? ' @ ' + sha : '');
+                    if (unidentified) {
+                        label = 'unidentified build';
+                        title = 'API build: unidentified (fallback-version, no commit -- image built without make docker-build)';
+                    } else if (wp.stamp_stale) {
+                        label = (label || '?') + ' (stale stamp)';
+                        title += ' -- stale stamp: editable install is ahead of this version stamp';
+                    }
+                    foot.textContent = label;
+                    foot.title = title;
                 })
                 .catch(() => { /* version is decoration, never a blocker */ });
         }
@@ -5007,6 +5338,7 @@
                     btn.type = 'button';
                     btn.className = 'dv-copy';
                     btn.title = 'Copy value';
+                    btn.setAttribute('aria-label', 'Copy value');
                     btn.innerHTML = COPY_ICON;
                     btn.addEventListener('click', ev => { ev.stopPropagation(); copyText(payload, btn); });
                     dd.appendChild(btn);
@@ -5066,6 +5398,7 @@
                 btn.type = 'button';
                 btn.className = 'row-x';
                 btn.title = 'Show all fields';
+                btn.setAttribute('aria-label', 'Show all fields');
                 btn.setAttribute('aria-expanded', 'false');
                 btn.innerHTML = CHEVRON;
                 // Rows are already click targets that open a detail panel;
@@ -5256,8 +5589,8 @@
                 <td>${a.confidence == null ? 'not measured' : escHtml(a.confidence.toFixed(2))}</td>
                 <td title="sample_size=${escHtml(String(ev.sample_size ?? ''))}, success_with=${escHtml(String(ev.success_rate_with ?? ''))}, success_without=${escHtml(String(ev.success_rate_without ?? ''))}">evidence_confidence: ${escHtml(evidenceConf)}, effect: ${ev.effect_size == null ? 'not measured' : escHtml(ev.effect_size.toFixed(2))}</td>
                 <td>${statusBadge}</td>
-                <td>${fmtDateUtc(a.created_at)}</td>
-                <td>${a.fitness_scored_at ? fmtDateUtc(a.fitness_scored_at) : 'not yet scored'}</td>
+                <td>${escHtml(fmtTime(a.created_at, { empty: 'not measured' }))}</td>
+                <td>${a.fitness_scored_at ? escHtml(fmtTime(a.fitness_scored_at, { empty: 'not measured' })) : 'not yet scored'}</td>
             </tr>`;
         }
 
@@ -5392,7 +5725,7 @@
                 <td>${escHtml(scopeText)}</td>
                 <td>${escHtml(rulesText)}</td>
                 <td>${escHtml(p.enforcement)}</td>
-                <td>${fmtDateUtc(p.created_at)}</td>
+                <td>${escHtml(fmtTime(p.created_at, { empty: 'not measured' }))}</td>
                 <td id="policy-actions-${escHtml(p.policy_id)}"><button class="btn btn-sm btn-danger" data-action="confirmDeletePolicy" data-id="${escHtml(p.policy_id)}">Delete</button></td>
             </tr>`;
         }
