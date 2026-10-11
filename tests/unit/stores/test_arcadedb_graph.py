@@ -100,8 +100,7 @@ def _rows_left(store, node_id: str) -> dict[str, int]:
         # that silently stopped working would leave a count here even
         # though the properties-based query reads 0.
         counts["EdgeClaim"] = session.run(
-            "MATCH (x:EdgeClaim) WHERE x.claim_key CONTAINS $nid "
-            "RETURN count(x) AS c",
+            "MATCH (x:EdgeClaim) WHERE x.claim_key CONTAINS $nid RETURN count(x) AS c",
             nid=node_id,
         ).single()["c"]
         return counts

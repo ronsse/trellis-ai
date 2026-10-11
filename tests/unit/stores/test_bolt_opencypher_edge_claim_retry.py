@@ -415,10 +415,13 @@ class TestClaimWritePrimitiveIsPinned:
                 r"MERGE \(ec:EdgeClaim \{claim_key: \$edge_claim_key\}\)\s*\n\s*"
                 r"SET ec\.claim_token = \$edge_claim_token\b",
                 cypher,
-            ), "the token write must be an unconditional SET right after the MERGE, not ON CREATE SET"
+            ), (
+                "the token write must be an unconditional SET right after the "
+                "MERGE, not ON CREATE SET"
+            )
             assert "REMOVE ec.claim_token" not in cypher, (
-                "the claim write must not remove the token it just set -- that recreates the "
-                "no-op SET/REMOVE touch this rework replaced"
+                "the claim write must not remove the token it just set -- "
+                "that recreates the no-op SET/REMOVE touch this rework replaced"
             )
             assert "edge_claim_token" in params
             tokens.append(params["edge_claim_token"])
