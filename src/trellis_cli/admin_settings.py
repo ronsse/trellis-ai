@@ -75,12 +75,14 @@ def _env_effective_value(spec: SettingSpec, settings_values: dict[str, Any]) -> 
         return _graph_seeding_enabled()
     if spec.name == "filter_legacy_advisories":
         return _filter_legacy_advisories_enabled()
-    return WriteBehaviourConfig.from_env_and_settings(settings=settings_values).as_dict()[
-        spec.name
-    ]
+    return WriteBehaviourConfig.from_env_and_settings(
+        settings=settings_values
+    ).as_dict()[spec.name]
 
 
-def _truthfulness_note(spec: SettingSpec, settings_values: dict[str, Any]) -> str | None:
+def _truthfulness_note(
+    spec: SettingSpec, settings_values: dict[str, Any]
+) -> str | None:
     """What a caller would otherwise not learn from the success message alone.
 
     An env pin (gate report Q3, probe2) or a ``restart_required`` knob

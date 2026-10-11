@@ -1178,10 +1178,17 @@ write-behaviour knobs reported by `trellis admin write-config` and
 
 **The write surface**: `trellis admin settings set <name> <value>` /
 `settings unset <name>` and `PUT`/`POST /api/v1/settings/{name}` (admin
-scope) both submit `Operation.SETTINGS_UPDATE` through the same
-`MutationExecutor` — a denying policy, a degraded store or an
+scope) both submit `Operation.SETTINGS_UPDATE` through the same narrow
+`build_settings_executor` — a denying policy, a degraded store or an
 out-of-range value is refused identically on either surface, and nothing
-is silently clamped. `value: null` (CLI: `settings unset`) removes the
+is silently clamped. These two are the *only* surfaces that can reach
+this operation at all: the generic `POST /commands/batch` route and
+MCP's `execute_mutation` build `build_curate_executor` instead, which
+never registers `Operation.SETTINGS_UPDATE`, so a `settings.update`
+command submitted there fails as "No handler registered" rather than
+being evaluated and refused by policy (gate report on #857, B1/B2) —
+there is no shared refusal path to be "identical" to from those two.
+`value: null` (CLI: `settings unset`) removes the
 override; there is no separate reset operation. A write for a setting
 whose environment variable is currently set still stores the override —
 the REST response says `accepted: true` plus the env value actually in

@@ -150,3 +150,61 @@ class TestEveryRegistryEntryValidatesItsOwnDefaultOrDocumentedSentinel:
             # handler's null-means-reset path never reaches this function.
             pytest.skip("documented unset sentinel, not a settable value")
         assert validate_value(spec, spec.default) == spec.default
+
+
+class TestRefusesWhatFromEnvWouldSilentlyDegrade:
+    """Q5 (gate report on #857): ``validate_value`` must refuse every value
+    ``WriteBehaviourConfig.from_env`` would silently replace with the
+    shipped default, rather than storing something that later turns out to
+    have no effect. See ``validate_value``'s own docstring and
+    ``reconcile_timeout_s``'s ``minimum``/``minimum_exclusive`` in the
+    registry.
+    """
+
+    @pytest.mark.parametrize("raw", [0, 0.0, -0.0, -1.0, -5])
+    def test_reconcile_timeout_s_non_positive_is_rejected(self, raw: float) -> None:
+        """``_reconcile_timeout`` degrades any ``<= 0`` env value (``-0.0``
+        included, equal to ``0.0`` in Python) to the default rather than
+        hanging or busy-looping on it; a settings write must refuse the
+        same values instead of storing one ``from_env`` would discard.
+        """
+        spec = get_setting("reconcile_timeout_s")
+        assert spec is not None
+        with pytest.raises(ValueError, match="reconcile_timeout_s"):
+            validate_value(spec, raw)
+
+    def test_reconcile_timeout_s_positive_is_accepted(self) -> None:
+        spec = get_setting("reconcile_timeout_s")
+        assert spec is not None
+        assert validate_value(spec, 5.0) == 5.0
+
+    @pytest.mark.parametrize("raw", ["", "   ", "\t\n"])
+    def test_blank_reconcile_model_is_rejected(self, raw: str) -> None:
+        """``WriteBehaviourConfig.from_env`` treats a blank
+        ``TRELLIS_RECONCILE_MODEL`` as absent and falls back to
+        ``DEFAULT_RECONCILE_MODEL``; a settings write of the same blank
+        value must be refused, not stored as a no-op override.
+        """
+        spec = get_setting("reconcile_model")
+        assert spec is not None
+        with pytest.raises(ValueError, match="blank"):
+            validate_value(spec, raw)
+
+    @pytest.mark.parametrize("name", ["pack_holdout_rate", "reconcile_timeout_s"])
+    def test_overflowing_float_raises_value_error_not_overflow_error(
+        self, name: str
+    ) -> None:
+        """``10**400`` is a Python ``int`` too large for ``float()``, which
+        raises ``OverflowError`` -- a different exception class than the
+        ``ValueError`` every other rejection in this module raises.
+        ``validate_value``'s one contract is "always ``ValueError``, never
+        anything else", via the shared ``parse_finite_float`` (see its
+        docstring): this must not escape as an uncaught ``OverflowError``,
+        which the handler's ``except ValueError`` would miss and let
+        surface as an executor-level ``FAILED`` instead of a governed
+        ``invalid_value`` rejection.
+        """
+        spec = get_setting(name)
+        assert spec is not None
+        with pytest.raises(ValueError, match="finite"):
+            validate_value(spec, 10**400)

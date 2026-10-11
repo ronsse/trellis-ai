@@ -189,7 +189,7 @@ def list_settings() -> dict[str, Any]:
 def update_setting(
     name: str,
     req: SettingUpdateRequest,
-    ctx: AuthContext = Depends(authenticate),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> CommandResponse | dict[str, Any]:
     """Write (or, with ``value: null``, remove) one setting's override.
 

@@ -21,7 +21,7 @@ import pytest
 
 from trellis.core.settings_registry import SETTINGS_REGISTRY
 from trellis.errors import ValidationError
-from trellis.mutate import build_curate_executor, build_settings_executor
+from trellis.mutate import build_settings_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.handlers import (
@@ -233,7 +233,7 @@ class TestRefusesRatherThanClamps:
             args={"name": "pack_holdout_rate", "value": 0.9},
         )
 
-        with pytest.raises(ValidationError, match="untargeted_command|target_type"):
+        with pytest.raises(ValidationError, match=r"untargeted_command|target_type"):
             handler.handle(cmd)
         assert _store(registry).get("pack_holdout_rate") is None
 
@@ -251,6 +251,25 @@ class TestRefusesRatherThanClamps:
 
         with pytest.raises(ValidationError):
             handler.handle(cmd)
+        assert _store(registry).get("pack_holdout_rate") is None
+
+    def test_overflowing_float_is_a_governed_rejection_not_a_panic(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Q5 (gate report on #857): ``10**400`` overflows plain
+        ``float()`` with ``OverflowError``, a class ``validate_value``'s
+        ``except ValueError`` would not catch on its own --
+        ``parse_finite_float`` normalizes it first. Asserting the specific
+        ``code`` (not just "some ValidationError") is what tells apart a
+        governed ``invalid_value`` rejection from an uncaught exception
+        that would instead surface as the executor's generic ``FAILED``.
+        """
+        handler = SettingsUpdateHandler(registry)
+        cmd = _cmd("pack_holdout_rate", 10**400)
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+        assert exc_info.value.code == "invalid_value"
         assert _store(registry).get("pack_holdout_rate") is None
 
 

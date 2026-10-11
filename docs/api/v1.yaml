@@ -4334,7 +4334,30 @@ paths:
 
         override (so it is ready once the variable is unset); the response
 
-        says so rather than letting the caller believe it just took effect.'
+        says so rather than letting the caller believe it just took effect.
+
+
+        ``changed_by`` on the audit event is derived from ``ctx``, the
+
+        *authenticated* principal that ``admin_auth`` already resolved for
+
+        this request -- not ``req.requested_by``, which is free text the
+
+        client chose and could set to anyone''s name. ``ctx`` is declared as
+
+        an explicit parameter here (rather than read off the request) so
+
+        FastAPI''s per-request dependency cache reuses the already-resolved
+
+        context from the route''s own scope gate instead of authenticating
+
+        twice. ``req.requested_by`` is still recorded, but only as a
+
+        separate *claimed* field (``args["requested_by_claim"]``), surfaced
+
+        on the event as ``requested_by_claim`` rather than overwriting
+
+        ``changed_by``.'
       operationId: update_setting_api_v1_settings__name__post
       parameters:
       - in: path
@@ -4385,7 +4408,30 @@ paths:
 
         override (so it is ready once the variable is unset); the response
 
-        says so rather than letting the caller believe it just took effect.'
+        says so rather than letting the caller believe it just took effect.
+
+
+        ``changed_by`` on the audit event is derived from ``ctx``, the
+
+        *authenticated* principal that ``admin_auth`` already resolved for
+
+        this request -- not ``req.requested_by``, which is free text the
+
+        client chose and could set to anyone''s name. ``ctx`` is declared as
+
+        an explicit parameter here (rather than read off the request) so
+
+        FastAPI''s per-request dependency cache reuses the already-resolved
+
+        context from the route''s own scope gate instead of authenticating
+
+        twice. ``req.requested_by`` is still recorded, but only as a
+
+        separate *claimed* field (``args["requested_by_claim"]``), surfaced
+
+        on the event as ``requested_by_claim`` rather than overwriting
+
+        ``changed_by``.'
       operationId: update_setting_api_v1_settings__name__put
       parameters:
       - in: path
