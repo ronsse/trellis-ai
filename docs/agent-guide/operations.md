@@ -134,6 +134,12 @@ pass, which must still write nothing to the EventLog. Both emits are
 wrapped whole (CLAUDE.md's advisory-step rule): a broken EventLog write
 logs a warning but never fails the cycle it is reporting on.
 
+The operator UI's **Loops** tab (`src/trellis_api/static/index.html`)
+renders this report: `last_run_at` labelled UTC with relative age, a row
+flagged `stale` when that age exceeds 36h regardless of its own
+`last_status`, `null` rendered as "Not measured", and a fetch failure
+rendered as a visible error rather than a silent empty list.
+
 ### `trellis admin serve`
 
 Start the REST API server.

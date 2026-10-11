@@ -21,7 +21,13 @@ All notable changes to Trellis will be documented in this file.
   `last_run_at`/`last_status`/`counters` all `null` ("never run"), never
   a bare `0` indistinguishable from "ran and found nothing to do". New
   module `trellis.ops.loop_health`; route is admin-scoped, alongside the
-  other Review-queue surfaces in `trellis_api.routes.admin`.
+  other Review-queue surfaces in `trellis_api.routes.admin`. A new Loops
+  tab in the operator UI (`src/trellis_api/static/index.html`) renders
+  the report: timestamps labelled UTC with relative age, a loop whose
+  last run is over 36h old is flagged `stale` independently of its own
+  `last_status`, a never-run loop reads "Not measured" rather than a
+  bare zero, and a fetch failure renders a visible error instead of a
+  silent empty state.
 - **Promotion-ready-candidate digest and readable fallback names (#845).**
   Prod had scored 796 learning candidates with 0 ever promoted, and 13 of the
   top 15 `promote_guidance` candidates carried an ugly bare-item-id
