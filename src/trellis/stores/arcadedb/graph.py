@@ -178,6 +178,52 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
             return True
         return getattr(exc, "code", None) == _GENERIC_ENGINE_ERROR_CODE
 
+    def _is_edge_write_contention(self, exc: Exception) -> bool:
+        """Widen the base ``EdgeClaim`` predicate over the generic error channel.
+
+        ``upsert_edge``'s claim MERGE is a first-creation race the base
+        class's unique-violation identity match already catches
+        (``Neo.ClientError.Transaction.TransactionNotFound`` naming
+        ``EdgeClaim``/``claim_key``) -- measured, six of six overlapping
+        trials against ``arcadedata/arcadedb:26.8.1``.
+
+        The update-race case -- two re-versioners of an already-claimed
+        triplet -- was *speculated* to arrive on this same generic bucket,
+        by analogy with :meth:`_is_alias_write_contention`'s stale-record
+        shape for ``update_node_if_current``'s ``_cas_lock`` touch of an
+        existing node row. That speculation did not hold up: measured
+        directly (six of six trials), the claim's old ``_cas_lock``
+        SET/REMOVE produced **no error of any kind** -- both overlapping
+        transactions committed, because touching a row and leaving its
+        content unchanged is invisible to ArcadeDB's commit-time conflict
+        check, not a replaced-record fault. The claim now writes
+        ``ec.claim_token`` to a fresh value every attempt (a genuine
+        content change), which does conflict, but as
+        ``Neo.TransientError.Transaction.DeadlockDetected`` -- a different,
+        already-retryable channel the Bolt driver's own managed-transaction
+        retry absorbs before it ever reaches this predicate (see the
+        module docstring).
+
+        No live trigger for this generic-bucket widening has been observed
+        for ``EdgeClaim`` specifically. It is kept, narrowly, as a
+        defensive catch-all for an engine-side runtime fault on this
+        package's own fixed Cypher literal (the same affordability argument
+        :meth:`_is_alias_write_contention` makes), bounded by the same
+        3-attempt cap as every other path through
+        :meth:`~trellis.stores.bolt_opencypher.graph.BoltOpenCypherGraphStore._execute_edge_claim_write`,
+        and logged at ``WARNING`` below so a real occurrence is visible
+        rather than silently retried away.
+        """
+        if super()._is_edge_write_contention(exc):
+            return True
+        if getattr(exc, "code", None) == _GENERIC_ENGINE_ERROR_CODE:
+            logger.warning(
+                "arcadedb_edge_claim_generic_bucket_contention",
+                exc_message=str(exc),
+            )
+            return True
+        return False
+
     @classmethod
     def prepare_registry_params(  # noqa: PLR0912, PLR0915
         cls,
