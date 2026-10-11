@@ -564,6 +564,21 @@ def mine_classify_candidates(req: ClassifyMineRequest) -> ClassifyMineResponse:
 # ---------------------------------------------------------------------------
 
 
+def _audit_identity(ctx: AuthContext) -> dict[str, str | None]:
+    """Project the auth context to the identity fields stamped on audits.
+
+    Same idiom ``trellis_api.routes.admin`` uses for
+    ``REVIEW_DECISION_RECORDED``: structured ``key_id``/``key_name``
+    travel on ``Command.metadata`` (handlers read them back for
+    ``applied_by``/``revoked_by``), while ``requested_by`` itself stays a
+    constant label naming the entry point (e.g. ``"api:classify.apply-rule"``)
+    rather than embedding the caller — a label-shaped value is easy to
+    exact-match in a roster such as ``UNATTENDED_WRITERS``; one that
+    varies per caller is not.
+    """
+    return {"key_id": ctx.key_id, "key_name": ctx.name}
+
+
 @router.post(
     "/classify/rules",
     dependencies=[Depends(require_scope(SCOPE_ADMIN))],
@@ -582,7 +597,6 @@ def apply_classify_rule(
     back to the original ``TAG_KEYWORD_CANDIDATE`` / ``DOMAIN_ALIAS_CANDIDATE``
     event to see what was approved.
     """
-    principal = ctx.key_id or ctx.name or "unknown"
     row_id = f"{req.kind}:{req.key}"
     cmd = Command(
         operation=Operation.CLASSIFY_RULE_APPLY,
@@ -597,7 +611,8 @@ def apply_classify_rule(
         },
         target_id=row_id,
         target_type="classify_rule",
-        requested_by=f"api:classify:{principal}",
+        requested_by="api:classify.apply-rule",
+        metadata=_audit_identity(ctx),
     )
     return _execute_classify_command(cmd)
 
@@ -619,14 +634,14 @@ def revoke_classify_rule(
     ``ClassifyRuleRevokeHandler``'s own docstring for the two distinct
     refusal messages.
     """
-    principal = ctx.key_id or ctx.name or "unknown"
     row_id = f"{kind}:{key}"
     cmd = Command(
         operation=Operation.CLASSIFY_RULE_REVOKE,
         args={"kind": kind, "key": key},
         target_id=row_id,
         target_type="classify_rule",
-        requested_by=f"api:classify:{principal}",
+        requested_by="api:classify.revoke-rule",
+        metadata=_audit_identity(ctx),
     )
     return _execute_classify_command(cmd)
 
@@ -677,7 +692,8 @@ def dismiss_classify_candidate(
             status_code=404, detail=f"No such classify candidate: {candidate_id!r}"
         )
     kind, _event = found
-    principal = ctx.key_id or ctx.name or "unknown"
+    identity = _audit_identity(ctx)
+    dismissed_by = identity["key_id"] or identity["key_name"] or "unknown"
     registry.operational.event_log.emit(
         EventType.CLASSIFY_CANDIDATE_DISMISSED,
         source="api:classify:dismiss",
@@ -686,7 +702,8 @@ def dismiss_classify_candidate(
         payload={
             "candidate_id": candidate_id,
             "kind": kind,
-            "dismissed_by": f"api:classify:{principal}",
+            "dismissed_by": dismissed_by,
+            **identity,
         },
     )
     return ClassifyCandidateDismissResponse(

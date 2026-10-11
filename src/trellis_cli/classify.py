@@ -50,7 +50,6 @@ is a real difference and is documented in ``operations.md`` too.
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -96,7 +95,6 @@ from trellis_cli.exit_codes import (
     EXIT_INTERNAL,
     EXIT_OK,
     EXIT_STORE,
-    EXIT_VALIDATION,
     refusal_exit_code,
 )
 from trellis_cli.output import build_console, emit_json
@@ -611,9 +609,11 @@ def tag_candidates(
     high precision for it, so precision alone would surface the whole
     vocabulary as predictive.
 
-    The text output ends with a ready-to-paste ``classify.domain_keywords``
-    block. Paste it into ``config.yaml`` to promote; delete those lines to
-    revoke.
+    The text output ends with a ready ``trellis classify apply-rule
+    tag_keyword <keyword> <tag> --source-event-id <id>`` line per candidate
+    -- never a ``config.yaml`` fragment to hand-paste. Promoting (or
+    undoing) goes through that governed Apply/Revoke command, which is
+    audited; nothing here writes ``config.yaml`` on your behalf.
     """
     registry = _get_registry()
 
@@ -674,7 +674,7 @@ def tag_candidates(
 def _render_tag_candidates(
     candidates: list[TagKeywordCandidate], *, facet: str, emitted: bool
 ) -> None:
-    """Human-readable rendering, ending in a paste-ready config block."""
+    """Human-readable rendering, ending in a ready apply-rule command per row."""
     if not candidates:
         console.print(
             f"[green]Tag candidates ({facet}):[/green] none surfaced.\n"
@@ -844,7 +844,7 @@ def domain_candidates(
 def _render_domain_candidates(
     candidates: list[DomainAliasCandidate], *, total: int, emitted: bool
 ) -> None:
-    """Human-readable rendering, ending in a paste-ready config block."""
+    """Human-readable rendering, ending in a ready apply-rule command per row."""
     if not candidates:
         console.print(
             "[green]Domain alias candidates:[/green] none surfaced.\n"
@@ -909,10 +909,10 @@ def _render_domain_candidates(
             soft_wrap=True,
         )
     console.print(
-        "\n[yellow]Review before merging: 'domain' hard-excludes on mismatch, "
-        "so a wrong merge hides every document carrying the alias from "
-        "domain-scoped queries. Applying it does not retag anything already "
-        "stored. To undo, run "
+        "\n[yellow]Review before merging: this only changes how future "
+        "keyword/alias candidates are mined and how rules are labelled -- "
+        "it does not change the domain on any document already stored. "
+        "To undo, run "
         "'trellis classify revoke-rule domain_alias <alias>'.[/yellow]"
     )
     console.print(
@@ -1052,6 +1052,25 @@ def _print_revoke_rule_risk_warning(kind: str, key: str) -> None:
     err_console.print(f"[yellow]{escape(risk)}[/yellow]", soft_wrap=True)
 
 
+def _audit_identity() -> dict[str, str | None]:
+    """CLI-actor identity stamped on a classify-rule audit event.
+
+    Same idiom as the Schedules CLI: a local invocation carries no
+    authenticated credential, so this stamps the OS user in place of the
+    REST route's ``key_id``/``key_name`` (:func:`_audit_identity` in
+    ``trellis_api.routes.classify_rules``) -- an audit row is
+    attributable either way, and ``--by`` (``requested_by``) stays a
+    free-text override of the constant surface label, untouched by this.
+    """
+    import getpass  # noqa: PLC0415
+
+    try:
+        user: str | None = getpass.getuser()
+    except Exception:  # pragma: no cover - exotic/no-passwd environments
+        user = None
+    return {"key_id": None, "key_name": f"cli:{user}" if user else "cli"}
+
+
 @classify_app.command("apply-rule")
 def apply_rule(
     kind: str = typer.Argument(..., help="'tag_keyword' or 'domain_alias'."),
@@ -1066,8 +1085,10 @@ def apply_rule(
         "--source-event-id",
         help=(
             "The TAG_KEYWORD_CANDIDATE/DOMAIN_ALIAS_CANDIDATE event this "
-            "rule was mined from (see 'trellis classify tag-candidates' / "
-            "'domain-candidates', or GET /api/v1/classify/candidates)."
+            "rule was mined from. 'trellis classify tag-candidates' / "
+            "'domain-candidates' print a candidate_id, not this id -- read "
+            "it from GET /api/v1/classify/candidates's 'source_event_id' "
+            "field for the same candidate."
         ),
     ),
     support: int | None = typer.Option(
@@ -1098,17 +1119,12 @@ def apply_rule(
     # Click's FLOAT type parses via Python's ``float()``, which happily
     # accepts "nan"/"inf"/"-inf" from the command line -- unlike the REST
     # DTO's ``allow_inf_nan=False``, nothing upstream of this command stops
-    # it. Caught here, before a Command is even built, rather than left
-    # solely to ClassifyRuleApplyHandler's own check, so a bad value never
-    # reaches the governed pipeline at all.
-    for option_name, value in (("--precision", precision), ("--lift", lift)):
-        if value is not None and not math.isfinite(value):
-            err_console.print(
-                f"[red]Error:[/red] {option_name} must be a finite number, "
-                f"got {value!r}.",
-                soft_wrap=True,
-            )
-            raise typer.Exit(code=EXIT_VALIDATION)
+    # it. No pre-check here: ``ClassifyRuleApplyHandler``'s own
+    # ``_validate_classify_rule_metrics`` refuses the same value with the
+    # same exit code, and it does so through ``_execute_classify_command``
+    # below, which still renders a parseable ``--format json`` payload --
+    # a pre-check that exits before that point left ``--format json``
+    # callers with an empty stdout for an otherwise-ordinary rejection.
     _print_apply_rule_risk_warning(kind, key, target)
     cmd = Command(
         operation=Operation.CLASSIFY_RULE_APPLY,
@@ -1124,6 +1140,7 @@ def apply_rule(
         target_id=f"{kind}:{key}",
         target_type="classify_rule",
         requested_by=requested_by,
+        metadata=_audit_identity(),
     )
     _execute_classify_command(cmd, output_format)
 
@@ -1158,6 +1175,7 @@ def revoke_rule(
         target_id=f"{kind}:{key}",
         target_type="classify_rule",
         requested_by=requested_by,
+        metadata=_audit_identity(),
     )
     _execute_classify_command(cmd, output_format)
 

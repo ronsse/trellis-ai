@@ -440,7 +440,9 @@ def config_sourced_alias_target(
     return _extract_config_aliases(classify_config).get(alias)
 
 
-def reject_reserved_rule_target(value: str, *, what: str = "target") -> None:
+def reject_reserved_rule_target(
+    value: str, *, what: str = "target", casefold: bool = False
+) -> None:
     """Refuse a classify-rule string that names a reserved policy namespace.
 
     Both overlay kinds feed ``target`` into the deployment's domain
@@ -467,11 +469,20 @@ def reject_reserved_rule_target(value: str, *, what: str = "target") -> None:
     collapses into a domain value the same way a target does once a
     reader merges the map.
 
+    An alias key is folded case-insensitively before the check (pass
+    ``casefold=True``): ``RESERVED_NAMESPACES`` holds lowercase strings,
+    and an alias key is matched against domain values case-sensitively
+    nowhere else in the merged map, so ``Sensitivity``/``SENSITIVITY``
+    would otherwise slip past the exact-match comparison below and
+    collide with the reserved namespace under any reader that
+    lowercases domain names. A ``target`` is never folded here: it is
+    stored and compared verbatim by every other reader.
+
     Raises:
         ValueError: ``value`` collides with a reserved namespace, exact
             or ``namespace:...``-prefixed.
     """
-    reserved = _reserved_name_for(value)
+    reserved = _reserved_name_for(value.casefold() if casefold else value)
     if reserved is not None:
         detail = _format_reservation_error(value, reserved, "domain value")
         msg = f"classify rule {what}: {detail}"

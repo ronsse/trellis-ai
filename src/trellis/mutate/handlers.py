@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -682,6 +683,61 @@ def _validate_classify_rule_metrics(command_args: dict[str, Any]) -> None:
             raise ValidationError(msg, errors=[msg], code="invalid_metric")
 
 
+_MAX_CLASSIFY_RULE_IDENTIFIER_LENGTH = 200
+
+
+def _validate_classify_rule_identifier(value: str, *, field: str) -> None:
+    """Refuse a classify-rule ``key``/``target`` that is not already normal.
+
+    Shared by both :class:`ClassifyRuleApplyHandler` and
+    :class:`ClassifyRuleRevokeHandler`, called before either touches the
+    overlay store, so a refusal here leaves no row and no event -- the
+    same posture as ``_validate_classify_rule_metrics`` above.
+
+    Refuses rather than normalising:
+    :class:`~trellis.schemas.classify_overrides.ClassifyOverrideRow` strips
+    whitespace on assignment (``str_strip_whitespace=True``), so a key or
+    target with leading/trailing whitespace would otherwise be stored
+    stripped while ``row_id``/``entity_id``/the audit payload -- all built
+    from the caller's original string -- stayed un-stripped, splitting one
+    logical identifier across two different strings. A
+    control character (:func:`unicodedata.category` category ``"Cc"``,
+    which includes NUL and ESC) can break a downstream consumer outright --
+    a NUL embedded in a Postgres ``jsonb`` audit payload fails to write at
+    all. A key or target over the length limit risks the same failure on
+    some backends' index-row limits, writing the overlay row and then
+    failing only when the audit event is emitted.
+
+    Raises:
+        ValidationError: ``value`` has leading/trailing whitespace,
+            contains a control character, or exceeds
+            ``_MAX_CLASSIFY_RULE_IDENTIFIER_LENGTH`` characters
+            (``code="invalid_key"``/``"invalid_target"``, matching the
+            type-check code each caller already raises for this field).
+    """
+    code = "invalid_key" if field == "key" else "invalid_target"
+    if value != value.strip():
+        msg = (
+            f"classify_rule: {field} {value!r} has leading or trailing "
+            "whitespace -- refused rather than normalised, since the "
+            "stored row strips whitespace but the audit trail would not"
+        )
+        raise ValidationError(msg, errors=[msg], code=code)
+    if len(value) > _MAX_CLASSIFY_RULE_IDENTIFIER_LENGTH:
+        msg = (
+            f"classify_rule: {field} is {len(value)} characters, over the "
+            f"{_MAX_CLASSIFY_RULE_IDENTIFIER_LENGTH}-character limit"
+        )
+        raise ValidationError(msg, errors=[msg], code=code)
+    for ch in value:
+        if unicodedata.category(ch) == "Cc":
+            msg = (
+                f"classify_rule: {field} {value!r} contains a control "
+                f"character ({unicodedata.category(ch)!r})"
+            )
+            raise ValidationError(msg, errors=[msg], code=code)
+
+
 class ClassifyRuleApplyHandler:
     """Apply one mined tag/domain candidate into the operator overlay.
 
@@ -733,6 +789,7 @@ class ClassifyRuleApplyHandler:
         if not key or not isinstance(key, str):
             msg = "classify_rule.apply requires a non-empty string 'key'"
             raise ValidationError(msg, errors=[msg], code="invalid_key")
+        _validate_classify_rule_identifier(key, field="key")
         if kind == "tag_keyword" and len(key) < MIN_TAG_KEYWORD_LENGTH:
             # The miner itself never proposes a token shorter than this
             # (``_TOKEN_RE`` in tag_evolution.py), because a short keyword
@@ -752,6 +809,7 @@ class ClassifyRuleApplyHandler:
         if not target or not isinstance(target, str):
             msg = "classify_rule.apply requires a non-empty string 'target'"
             raise ValidationError(msg, errors=[msg], code="invalid_target")
+        _validate_classify_rule_identifier(target, field="target")
         if not source_event_id or not isinstance(source_event_id, str):
             msg = (
                 "classify_rule.apply requires a non-empty string "
@@ -788,7 +846,7 @@ class ClassifyRuleApplyHandler:
         try:
             reject_reserved_rule_target(target)
             if kind == "domain_alias":
-                reject_reserved_rule_target(key, what="key")
+                reject_reserved_rule_target(key, what="key", casefold=True)
         except ValueError as exc:
             # reject_reserved_rule_target always raises ValueError(msg) with
             # a single string it composed itself, never a wrapped
@@ -847,7 +905,16 @@ class ClassifyRuleApplyHandler:
             else None
         )
 
-        applied_by = command.requested_by
+        # Structured caller identity, when the surface supplies one
+        # (REST: the authenticated key's id/name; CLI: the OS user),
+        # beats the constant surface label in ``command.requested_by``
+        # (e.g. ``"api:classify.apply-rule"``) for a field meant to
+        # answer "who applied this", not "through what entry point".
+        applied_by = (
+            command.metadata.get("key_id")
+            or command.metadata.get("key_name")
+            or command.requested_by
+        )
         row = ClassifyOverrideRow(
             kind=kind,
             key=key,
@@ -955,6 +1022,7 @@ class ClassifyRuleRevokeHandler:
         if not key or not isinstance(key, str):
             msg = "classify_rule.revoke requires a non-empty string 'key'"
             raise ValidationError(msg, errors=[msg], code="invalid_key")
+        _validate_classify_rule_identifier(key, field="key")
 
         row_id = f"{kind}:{key}"
         if command.target_type != "classify_rule" or command.target_id != row_id:
@@ -1075,6 +1143,8 @@ class ClassifyRuleRevokeHandler:
             "key": key,
             "target": existing.target,
             "revoked_by": command.requested_by,
+            "key_id": command.metadata.get("key_id"),
+            "key_name": command.metadata.get("key_name"),
             "removed_applied_by": existing.applied_by,
             "removed_applied_at": existing.applied_at.isoformat(),
             "removed_source_event_id": existing.source_event_id,

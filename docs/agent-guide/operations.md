@@ -723,7 +723,7 @@ trellis classify effective-rules [--format text|json]
 | `kind` | `tag_keyword` or `domain_alias`. |
 | `key` | Keyword (`tag_keyword`) or alias (`domain_alias`) to apply/revoke. |
 | `target` (apply only) | Domain (`tag_keyword`) or canonical tag (`domain_alias`). |
-| `--source-event-id` (apply, required) | The `TAG_KEYWORD_CANDIDATE` / `DOMAIN_ALIAS_CANDIDATE` event this rule was mined from (see `tag-candidates` / `domain-candidates`, or `GET /api/v1/classify/candidates`) — kept so the applied row traces back to the event that proposed it, without a reviewer having to join back to it by hand. |
+| `--source-event-id` (apply, required) | The `TAG_KEYWORD_CANDIDATE` / `DOMAIN_ALIAS_CANDIDATE` event this rule was mined from. `tag-candidates` / `domain-candidates` print a `candidate_id`, not this id — read it from `GET /api/v1/classify/candidates`'s `source_event_id` field for the same candidate. Kept so the applied row traces back to the event that proposed it, without a reviewer having to join back to it by hand. |
 | `--support` / `--precision` / `--lift` (apply) | The candidate's own mining metrics, carried onto the audit event. |
 
 `revoke-rule` is **refused, not a no-op**, when `(kind, key)` has no overlay
@@ -753,7 +753,7 @@ effective keyword/alias row by `source` (`default`, `config`, `overlay`).
 ```
 
 ```json
-{"count": 2, "rules": [{"kind": "tag_keyword", "key": "todoist", "target": "task-management", "source": "overlay", "applied_at": "2026-10-11T00:00:00Z", "applied_by": "cli:classify-apply-rule", "source_event_id": "evt-9c1..."}]}
+{"count": 2, "rules": [{"kind": "tag_keyword", "key": "todoist", "target": "task-management", "source": "overlay", "applied_at": "2026-10-11T00:00:00Z", "applied_by": "cli:alice", "source_event_id": "evt-9c1..."}]}
 ```
 
 **UI:** the "Tag rules" tab (`src/trellis_api/static/index.html`) lists open

@@ -274,7 +274,7 @@ class TestApplyRule:
             event_type=EventType.CLASSIFY_RULE_APPLIED, order="asc", limit=10
         )
         payload = events[-1].payload
-        assert payload["applied_by"] == f"api:classify:{key_id}"
+        assert payload["applied_by"] == key_id
         assert payload["support"] == 40
         assert payload["precision"] == 0.8
         assert payload["lift"] == 0.3
@@ -445,6 +445,52 @@ class TestApplyRule:
                 b'"lift": Infinity}'
             ),
             headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422, resp.text
+
+        rules = client.get("/api/v1/classify/rules").json()
+        assert not any(
+            r["kind"] == "tag_keyword" and r["key"] == "xyz" for r in rules["rules"]
+        )
+
+    def test_negative_support_is_422_and_writes_no_row(
+        self, client: TestClient
+    ) -> None:
+        """``support`` is a count of matching observations -- negative is
+        meaningless, and the DTO's ``ge=0`` refuses it before the
+        governed pipeline is ever entered."""
+        resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "xyz",
+                "target": "finance",
+                "source_event_id": "01TESTEVENT0000000000000",
+                "support": -1,
+            },
+        )
+        assert resp.status_code == 422, resp.text
+
+        rules = client.get("/api/v1/classify/rules").json()
+        assert not any(
+            r["kind"] == "tag_keyword" and r["key"] == "xyz" for r in rules["rules"]
+        )
+
+    def test_precision_above_one_is_422_and_writes_no_row(
+        self, client: TestClient
+    ) -> None:
+        """``precision`` is a proportion -- over 1.0 is meaningless, and
+        the DTO's ``le=1.0`` refuses it before the governed pipeline is
+        ever entered."""
+        resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "xyz",
+                "target": "finance",
+                "source_event_id": "01TESTEVENT0000000000000",
+                "precision": 1.5,
+            },
         )
         assert resp.status_code == 422, resp.text
 

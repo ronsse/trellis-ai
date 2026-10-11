@@ -23,8 +23,10 @@ from tests.cli_output import plain
 if TYPE_CHECKING:
     import pytest
 
+from trellis.stores.base.event_log import EventType
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.main import app as root_app
+from trellis_cli.stores import _get_registry
 
 runner = CliRunner()
 
@@ -413,6 +415,36 @@ class TestApplyRule:
         )
         assert result.exit_code == EXIT_VALIDATION, result.output
 
+    def test_nan_precision_cli_json_format_still_has_a_parseable_payload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """There used to be a pre-check here, ahead of the handler, that
+        printed to stderr and exited before a ``--format json`` caller
+        ever got a payload -- leaving stdout empty for an otherwise
+        ordinary rejection. The rejection now reaches
+        ``ClassifyRuleApplyHandler``'s own metric validation through the
+        normal command path, so ``--format json`` gets the same
+        ``{"status": "rejected", ...}`` shape every other refusal does."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "zzzkw",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--precision",
+                "nan",
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        assert result.stdout.strip(), "stdout must not be empty under --format json"
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+
     def test_apply_rule_risk_warning_on_stderr_json_stdout_stays_clean(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -463,6 +495,146 @@ class TestApplyRule:
             result.stderr
         )
         assert "Merge" not in result.stdout
+
+    def _applied_event_count(self) -> int:
+        return len(
+            _get_registry().operational.event_log.get_events(
+                event_type=EventType.CLASSIFY_RULE_APPLIED, limit=100
+            )
+        )
+
+    def test_leading_whitespace_key_cli_exits_validation_writes_no_row_no_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A whitespace-padded key is long enough to pass the 3-character
+        tag_keyword floor on its raw, unstripped length -- the floor check
+        never sees the 1-character token that actually gets stored once
+        ``ClassifyOverrideRow`` strips it. The shared identifier validator
+        must refuse the whitespace before the floor check ever runs."""
+        _init_stores(tmp_path, monkeypatch)
+        before = self._applied_event_count()
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "  a",
+                "infrastructure",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [
+            r for r in rules if r["kind"] == "tag_keyword" and r["key"].strip() == "a"
+        ]
+        assert self._applied_event_count() == before
+
+    def test_whitespace_target_cli_exits_validation_writes_no_row_no_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A target padded with whitespace is a different string from the
+        reserved namespace name it stringwise-escapes, bypassing the
+        reserved-target check unless the padding is refused outright."""
+        _init_stores(tmp_path, monkeypatch)
+        before = self._applied_event_count()
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "zzzkw",
+                " retention",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [r for r in rules if r["key"] == "zzzkw"]
+        assert self._applied_event_count() == before
+
+    def test_whitespace_chain_bypass_target_cli_rejected_no_row_no_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With ``finance -> treasury`` already in the overlay, a target of
+        ``" finance"`` (leading space) is a different string from
+        ``"finance"`` and would otherwise slip past the chain check that
+        compares merge destinations by exact string match."""
+        _init_stores(tmp_path, monkeypatch)
+        seed = _invoke(
+            [
+                "apply-rule",
+                "domain_alias",
+                "finance",
+                "treasury",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert seed.exit_code == EXIT_OK, seed.output
+        before = self._applied_event_count()
+
+        result = _invoke(
+            [
+                "apply-rule",
+                "domain_alias",
+                "fin",
+                " finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [
+            r for r in rules if r["kind"] == "domain_alias" and r["key"] == "fin"
+        ]
+        assert self._applied_event_count() == before
+
+    def test_whitespace_reserved_alias_key_cli_exits_validation_writes_no_row_no_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``" sensitivity"`` (leading space) is a different string from
+        the reserved namespace name ``"sensitivity"`` and would otherwise
+        slip past the reserved-key check."""
+        _init_stores(tmp_path, monkeypatch)
+        before = self._applied_event_count()
+        result = _invoke(
+            [
+                "apply-rule",
+                "domain_alias",
+                " sensitivity",
+                "privacy",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [r for r in rules if r["kind"] == "domain_alias"]
+        assert self._applied_event_count() == before
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +869,16 @@ class TestEffectiveRules:
         text_result = _invoke(["effective-rules"])
         assert text_result.exit_code == EXIT_INTERNAL, text_result.output
         assert "Traceback" not in text_result.output
+        # Pins C1: a mutation that re-raises the chain's bare ``ValueError``
+        # instead of composing ``typer.Exit(code=EXIT_INTERNAL)`` would
+        # still exit 2 (``ValueError`` is not caught, so Click's own
+        # unhandled-exception handling could coincidentally produce the
+        # same code) but CliRunner.invoke's ``result.exception`` would be
+        # that ``ValueError``, not a ``SystemExit`` -- and the composed
+        # message carries the chain detail the bare exception never
+        # reaches the CLI's own formatting for.
+        assert isinstance(text_result.exception, SystemExit)
+        assert "appear as both an alias and a merge destination" in text_result.output
 
 
 # ---------------------------------------------------------------------------

@@ -52,6 +52,7 @@ def _apply_cmd(
     *,
     source_event_id: str = _SOURCE_EVENT_ID,
     requested_by: str = "test:classify",
+    metadata: dict[str, object] | None = None,
     **extra_args: object,
 ) -> Command:
     args: dict[str, object] = {
@@ -70,16 +71,24 @@ def _apply_cmd(
         target_id=f"{kind}:{key}",
         target_type="classify_rule",
         requested_by=requested_by,
+        metadata=metadata or {},
     )
 
 
-def _revoke_cmd(kind: str, key: str, *, requested_by: str = "test:classify") -> Command:
+def _revoke_cmd(
+    kind: str,
+    key: str,
+    *,
+    requested_by: str = "test:classify",
+    metadata: dict[str, object] | None = None,
+) -> Command:
     return Command(
         operation=Operation.CLASSIFY_RULE_REVOKE,
         args={"kind": kind, "key": key},
         target_id=f"{kind}:{key}",
         target_type="classify_rule",
         requested_by=requested_by,
+        metadata=metadata or {},
     )
 
 
@@ -87,6 +96,14 @@ def _applied_event_count(registry: StoreRegistry) -> int:
     return len(
         registry.operational.event_log.get_events(
             event_type=EventType.CLASSIFY_RULE_APPLIED, limit=100
+        )
+    )
+
+
+def _revoked_event_count(registry: StoreRegistry) -> int:
+    return len(
+        registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_REVOKED, limit=100
         )
     )
 
@@ -485,3 +502,243 @@ class TestMistargetedCommandGuard:
 
         assert exc_info.value.code == "untargeted_command"
         assert _store(registry).get("tag_keyword", "zzzkw") is not None
+
+
+# ---------------------------------------------------------------------------
+# X1 / X2 — shared key/target normal-form validator, called before any write
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyRuleIdentifierNormalForm:
+    """A key/target that is not already stripped, control-char-free and
+    under the length cap is refused outright, never silently normalised --
+    ``ClassifyOverrideRow`` strips whitespace on assignment, which would
+    otherwise split one logical identifier across the stored row and the
+    (unstripped) audit event. Each case must leave no overlay row and no
+    audit event, on both Apply and Revoke."""
+
+    def test_apply_leading_whitespace_key_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", " an", "finance")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_key"
+        assert _store(registry).get("tag_keyword", "an") is None
+        assert _store(registry).get("tag_keyword", " an") is None
+        assert _applied_event_count(registry) == 0
+
+    def test_apply_trailing_whitespace_target_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "zzzkw", " retention")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_target"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+    def test_apply_nul_key_is_refused(self, registry: StoreRegistry) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "abc\x00def", "finance")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_key"
+        assert _store(registry).get("tag_keyword", "abc\x00def") is None
+        assert _applied_event_count(registry) == 0
+
+    def test_apply_nul_target_is_refused(self, registry: StoreRegistry) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "zzzkw", "fin\x00ance")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_target"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+    def test_apply_overlong_key_is_refused(self, registry: StoreRegistry) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        long_key = "a" * 10_000
+        cmd = _apply_cmd("tag_keyword", long_key, "finance")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_key"
+        assert _store(registry).get("tag_keyword", long_key) is None
+        assert _applied_event_count(registry) == 0
+
+    def test_revoke_whitespace_key_is_refused_as_invalid_key_not_no_such_rule(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Revoke is not exploitable even without this check --
+        ``ClassifyOverridesStore.get`` looks up the raw key, so
+        ``" ann"`` would already be refused as ``no_such_rule``. The
+        validator fires first anyway, so the message names the real
+        problem (a malformed key) rather than a misleading "not found"."""
+        apply_handler = ClassifyRuleApplyHandler(registry)
+        apply_handler.handle(_apply_cmd("tag_keyword", "ann", "finance"))
+
+        revoke_handler = ClassifyRuleRevokeHandler(registry)
+        cmd = _revoke_cmd("tag_keyword", " ann")
+
+        with pytest.raises(ValidationError) as exc_info:
+            revoke_handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_key"
+        # The real row (stored under the stripped key) is untouched.
+        assert _store(registry).get("tag_keyword", "ann") is not None
+        assert _revoked_event_count(registry) == 0
+
+    def test_revoke_nul_key_is_refused(self, registry: StoreRegistry) -> None:
+        revoke_handler = ClassifyRuleRevokeHandler(registry)
+        cmd = _revoke_cmd("tag_keyword", "abc\x00def")
+
+        with pytest.raises(ValidationError) as exc_info:
+            revoke_handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_key"
+        assert _revoked_event_count(registry) == 0
+
+    def test_revoke_overlong_key_is_refused(self, registry: StoreRegistry) -> None:
+        revoke_handler = ClassifyRuleRevokeHandler(registry)
+        long_key = "b" * 10_000
+        cmd = _revoke_cmd("tag_keyword", long_key)
+
+        with pytest.raises(ValidationError) as exc_info:
+            revoke_handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_key"
+        assert _revoked_event_count(registry) == 0
+
+    def test_domain_alias_key_reserved_namespace_check_is_casefolded(
+        self, registry: StoreRegistry
+    ) -> None:
+        """``RESERVED_NAMESPACES`` holds lowercase strings, and nothing
+        else in the merged alias map compares an alias key
+        case-sensitively -- so ``Sensitivity``/``SENSITIVITY`` must be
+        refused exactly like the lowercase spelling, not accepted as a
+        different string."""
+        handler = ClassifyRuleApplyHandler(registry)
+
+        for variant in ("Sensitivity", "SENSITIVITY"):
+            cmd = _apply_cmd("domain_alias", variant, "privacy")
+
+            with pytest.raises(ValidationError) as exc_info:
+                handler.handle(cmd)
+
+            assert exc_info.value.code == "reserved_namespace_target"
+            assert _store(registry).get("domain_alias", variant) is None
+
+    def test_domain_alias_target_reserved_namespace_check_is_not_casefolded_away(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Sanity check for the test above: a target is never folded, so
+        this failure mode is specific to the alias *key* check, not a
+        change to the target check's own behaviour."""
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "secretword", "sensitivity")
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "reserved_namespace_target"
+
+
+# ---------------------------------------------------------------------------
+# N2 mutant pins — H2 (isfinite clause message), H5/H6 (serialisation probe)
+# ---------------------------------------------------------------------------
+
+
+class TestMetricValidationMutantPins:
+    def test_nan_precision_message_names_finite_number(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Pins H2: without the ``math.isfinite`` clause, a NaN still
+        passes every bounds comparison (every comparison with NaN is
+        false) and reaches the serialisation probe below, which also
+        refuses with ``invalid_metric`` -- so the *code* alone cannot
+        distinguish the two layers. The message can: only the
+        ``isfinite`` clause says "must be a finite number"."""
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "zzzkw", "finance", precision=math.nan)
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_metric"
+        assert "must be a finite number" in exc_info.value.message
+
+    def test_huge_support_fails_serialization_not_the_range_check(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Pins H5/H6: ``support=10**5000`` is a non-negative ``int``, so
+        ``_validate_classify_rule_metrics`` accepts it outright -- the
+        only thing that refuses it is the ``json.dumps(..., allow_nan=False)``
+        probe run before ``store.put``, because Python's own integer string
+        conversion limit (4,300 digits by default) makes a 5,001-digit int
+        unserialisable. Moving or deleting that probe must be caught here,
+        since no shipped surface can otherwise reach it (REST/CLI integers
+        this large fail earlier, at JSON parse / Click's own int parsing)."""
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd("tag_keyword", "zzzkw", "finance", support=10**5000)
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(cmd)
+
+        assert exc_info.value.code == "invalid_metric"
+        assert _store(registry).get("tag_keyword", "zzzkw") is None
+        assert _applied_event_count(registry) == 0
+
+
+# ---------------------------------------------------------------------------
+# D16 — structured caller identity (Command.metadata) on the applied_by field
+# ---------------------------------------------------------------------------
+
+
+class TestAppliedByUsesStructuredIdentity:
+    def test_applied_by_prefers_metadata_key_id_over_requested_by(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd(
+            "tag_keyword",
+            "zzzkw",
+            "finance",
+            requested_by="api:classify.apply-rule",
+            metadata={"key_id": "key_abc123", "key_name": "ci-bot"},
+        )
+
+        handler.handle(cmd)
+
+        row = _store(registry).get("tag_keyword", "zzzkw")
+        assert row is not None
+        assert row.applied_by == "key_abc123"
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_APPLIED, limit=10
+        )
+        assert events[-1].payload["applied_by"] == "key_abc123"
+
+    def test_applied_by_falls_back_to_requested_by_with_no_metadata(
+        self, registry: StoreRegistry
+    ) -> None:
+        handler = ClassifyRuleApplyHandler(registry)
+        cmd = _apply_cmd(
+            "tag_keyword", "zzzkw", "finance", requested_by="api:classify.apply-rule"
+        )
+
+        handler.handle(cmd)
+
+        row = _store(registry).get("tag_keyword", "zzzkw")
+        assert row is not None
+        assert row.applied_by == "api:classify.apply-rule"
