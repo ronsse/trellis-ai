@@ -537,6 +537,22 @@ class StatsResponse(WireModel):
     events: int = 0
 
 
+# -- Settings (PR 3, governed settings write) --
+
+
+class SettingUpdateRequest(WireRequestModel):
+    """Body for ``PUT``/``POST /api/v1/settings/{name}``.
+
+    ``value`` is required but nullable: an explicit ``null`` means "remove
+    the override" (``Operation.SETTINGS_UPDATE``'s own contract — there is
+    no separate reset verb), while an *absent* field is an ordinary 422,
+    so a client cannot reset a setting by typo'ing the field name.
+    """
+
+    value: bool | int | float | str | None
+    requested_by: str = "api:settings"
+
+
 # -- Review queue (WP10) --
 #
 # DTOs backing the admin Review view (human-decision inbox). The four

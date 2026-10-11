@@ -1832,6 +1832,35 @@ components:
       - sections
       title: SectionedPackResponse
       type: object
+    SettingUpdateRequest:
+      additionalProperties: false
+      description: 'Body for ``PUT``/``POST /api/v1/settings/{name}``.
+
+
+        ``value`` is required but nullable: an explicit ``null`` means "remove
+
+        the override" (``Operation.SETTINGS_UPDATE``''s own contract — there is
+
+        no separate reset verb), while an *absent* field is an ordinary 422,
+
+        so a client cannot reset a setting by typo''ing the field name.'
+      properties:
+        requested_by:
+          default: api:settings
+          title: Requested By
+          type: string
+        value:
+          anyOf:
+          - type: boolean
+          - type: integer
+          - type: number
+          - type: string
+          - type: 'null'
+          title: Value
+      required:
+      - value
+      title: SettingUpdateRequest
+      type: object
     StatsResponse:
       additionalProperties: false
       description: 'Store statistics response.
@@ -4283,6 +4312,173 @@ paths:
       summary: Search
       tags:
       - retrieve
+  /api/v1/settings:
+    get:
+      description: Every registered setting's metadata, resolved value and provenance.
+      operationId: list_settings_api_v1_settings_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Settings Api V1 Settings Get
+                type: object
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: List Settings
+      tags:
+      - settings
+  /api/v1/settings/{name}:
+    post:
+      description: 'Write (or, with ``value: null``, remove) one setting''s override.
+
+
+        Routes through ``Operation.SETTINGS_UPDATE`` -- unknown name, wrong
+
+        type and out-of-range are all refused there, never clamped, and
+
+        Stage 2 runs before the handler ever touches the file. A write for a
+
+        setting whose environment variable is currently set still stores the
+
+        override (so it is ready once the variable is unset); the response
+
+        says so rather than letting the caller believe it just took effect.
+
+
+        ``changed_by`` on the audit event is derived from ``ctx``, the
+
+        *authenticated* principal that ``admin_auth`` already resolved for
+
+        this request -- not ``req.requested_by``, which is free text the
+
+        client chose and could set to anyone''s name. ``ctx`` is declared as
+
+        an explicit parameter here (rather than read off the request) so
+
+        FastAPI''s per-request dependency cache reuses the already-resolved
+
+        context from the route''s own scope gate instead of authenticating
+
+        twice. ``req.requested_by`` is still recorded, but only as a
+
+        separate *claimed* field (``args["requested_by_claim"]``), surfaced
+
+        on the event as ``requested_by_claim`` rather than overwriting
+
+        ``changed_by``.'
+      operationId: update_setting_api_v1_settings__name__post
+      parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          title: Name
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettingUpdateRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/CommandResponse'
+                - additionalProperties: true
+                  type: object
+                title: Response Update Setting Api V1 Settings  Name  Post
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Update Setting
+      tags:
+      - settings
+    put:
+      description: 'Write (or, with ``value: null``, remove) one setting''s override.
+
+
+        Routes through ``Operation.SETTINGS_UPDATE`` -- unknown name, wrong
+
+        type and out-of-range are all refused there, never clamped, and
+
+        Stage 2 runs before the handler ever touches the file. A write for a
+
+        setting whose environment variable is currently set still stores the
+
+        override (so it is ready once the variable is unset); the response
+
+        says so rather than letting the caller believe it just took effect.
+
+
+        ``changed_by`` on the audit event is derived from ``ctx``, the
+
+        *authenticated* principal that ``admin_auth`` already resolved for
+
+        this request -- not ``req.requested_by``, which is free text the
+
+        client chose and could set to anyone''s name. ``ctx`` is declared as
+
+        an explicit parameter here (rather than read off the request) so
+
+        FastAPI''s per-request dependency cache reuses the already-resolved
+
+        context from the route''s own scope gate instead of authenticating
+
+        twice. ``req.requested_by`` is still recorded, but only as a
+
+        separate *claimed* field (``args["requested_by_claim"]``), surfaced
+
+        on the event as ``requested_by_claim`` rather than overwriting
+
+        ``changed_by``.'
+      operationId: update_setting_api_v1_settings__name__put
+      parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          title: Name
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettingUpdateRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/CommandResponse'
+                - additionalProperties: true
+                  type: object
+                title: Response Update Setting Api V1 Settings  Name  Put
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Update Setting
+      tags:
+      - settings
   /api/v1/stats:
     get:
       description: 'Get store statistics.
