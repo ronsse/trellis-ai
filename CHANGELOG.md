@@ -75,6 +75,15 @@ All notable changes to Trellis will be documented in this file.
     default, each with a plain-English UI description; a disabled policy
     always behaves as `report_only` regardless of its configured `mode`
     (`effective_mode`).
+  - The pre-existing tuner-side `trellis.learning.tuners.auto_promote.AutoPromotePolicy`
+    (`enabled`, `min_sample_size`, `min_effect_size`) is now also a
+    `SETTINGS_REGISTRY` family (`learning.auto_promote.*`), resolved by
+    the same `resolve_auto_promote_overrides` every caller already used —
+    registering it adds a UI-tunable surface, not a second resolution
+    path. Both families' effective values now appear in
+    `GET /api/v1/settings` (#857), computed by calling each resolver
+    directly rather than reimplementing env/settings/default precedence a
+    third time.
   - `run_candidate_auto_promotion` evaluates candidates in order —
     not-promotable recommendation type, then unhelpful citations (if
     `require_zero_unhelpful`), then the helpful-count and distinct-session
