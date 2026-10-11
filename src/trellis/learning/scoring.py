@@ -161,6 +161,14 @@ def _accumulate_item(
             "selection_efficiency_count": 0,
             "helpful_citations": 0,
             "unhelpful_citations": 0,
+            # Distinct run ids that cited this item helpful at least once —
+            # narrower than ``supporting_run_ids`` (every run the item was
+            # *served* in, regardless of verdict). This is the "distinct
+            # sessions" a helpful-citation count alone cannot answer: two
+            # helpful citations in one run is weaker evidence than one each
+            # in two runs, and ``helpful_citations`` does not distinguish
+            # them (see ``LearningCandidateAutoPromotePolicy``).
+            "helpful_run_ids": set(),
             "source_strategies": {},
         },
     )
@@ -220,6 +228,9 @@ def _accumulate_item(
     # repeated judgement rather than about one bad pack.
     if bool(item.get("cited_helpful")):
         metrics["helpful_citations"] += 1
+        metrics["helpful_run_ids"].add(
+            str(observation.get("run_id", "")).strip() or "unknown-run"
+        )
     if bool(item.get("cited_unhelpful")):
         metrics["unhelpful_citations"] += 1
 
@@ -406,6 +417,11 @@ def analyze_learning_observations(
                 "appearances": times_served,
                 "helpful_count": int(metrics["helpful_citations"]),
                 "unhelpful_count": int(metrics["unhelpful_citations"]),
+                # Distinct runs with >=1 helpful citation — see
+                # ``_accumulate_item``'s ``helpful_run_ids`` comment. Always
+                # <= helpful_count: one run can serve this item in more
+                # than one pack and cite it helpful each time.
+                "distinct_helpful_sessions": len(metrics["helpful_run_ids"]),
             },
             "evidence_refs": sorted(set(metrics["evidence_refs"]))[:10],
             "precedent_name": f"Learning: {intent_family} :: {title[:96]}".strip(),

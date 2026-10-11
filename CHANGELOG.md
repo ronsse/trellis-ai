@@ -60,6 +60,54 @@ All notable changes to Trellis will be documented in this file.
   project directories / `flock`-serialized worker invocation that a
   container does not have, matching `backup-nightly` and
   `roadmap-nightly`.
+- **Automatic promotion for learning candidates — tunable, report-only
+  first (e177, plan p1 PR 7).** Owner's stated intent is "eventually we
+  want automatic promotion"; this PR ships the machinery at
+  `enabled=False` / `mode="report_only"` so it produces evidence for
+  picking thresholds rather than promoting anything on its own.
+  - `trellis.learning.candidate_auto_promote.LearningCandidateAutoPromotePolicy`:
+    `enabled` (default `False`), `mode` (`report_only` default | `commit`),
+    `min_helpful_count` (≥1, default 5), `min_distinct_sessions` (≥2,
+    default 3 — an n=1 single-session candidate can never qualify),
+    `require_zero_unhelpful` (default `True`), `max_promotions_per_run`
+    (≥1, default 3). All six are `SETTINGS_REGISTRY` entries
+    (`learning.candidate_auto_promote.*`) resolved env > settings >
+    default, each with a plain-English UI description; a disabled policy
+    always behaves as `report_only` regardless of its configured `mode`
+    (`effective_mode`).
+  - `run_candidate_auto_promotion` evaluates candidates in order —
+    not-promotable recommendation type, then unhelpful citations (if
+    `require_zero_unhelpful`), then the helpful-count and distinct-session
+    floors — and, only in commit mode, promotes through the same governed
+    path a human review-queue approval uses
+    (`submit_learning_promotion` → `ENTITY_CREATE` / `LINK_CREATE` /
+    `PRECEDENT_PROMOTE`, `requested_by="auto:learning_candidate"`). Never
+    writes the EventLog directly. `sweep_auto_demotions` is the paired
+    monitor: on a promoted candidate's first post-promotion unhelpful
+    citation it submits a governed `PRECEDENT_UPDATE` that demotes the
+    node via SCD-2, never a delete.
+  - Exactly one `LEARNING_AUTO_PROMOTE_EVALUATED` event per run, carrying
+    a per-candidate disposition, the would-promote/promoted/ineligible
+    counts, and the policy snapshot that produced them.
+    `compute_agreement_metric` compares this policy's `would_promote`
+    dispositions against later human Review-queue decisions
+    (agree/disagree/undecided; `rate=None` rather than a divide-by-zero
+    on no data). The `loop_health` panel gains an eighth row,
+    `learning_candidate_auto_promote`.
+  - `trellis curate auto-promote-candidates` (job catalog:
+    `auto-promote-candidates`, nightly). `--dry-run` forces
+    `report_only` regardless of configured `mode`.
+  - **Two data gaps reported honestly, not assumed away** (see the
+    module docstring): there is no per-intent-family holdout marker
+    anywhere in the pipeline — `_holdout_arm_status` always reports
+    `"unknown"` and nothing gates on it — and no event records a human
+    *rejecting* a candidate for this surface (only `action="promote"`
+    exists), so `AgreementMetric.disagree` is structurally always `0`
+    today.
+  - The Precedents tab's empty state now names the real promotion path
+    (`trellis curate promote-learning`, and that the nightly job reports
+    but, by default, only reports) instead of implying nothing schedules
+    promotion.
 - **Loop health panel (e167): `GET /api/v1/loops`.** Answers "is each
   curation / learning loop actually doing anything?" for all seven loops
   (noise demotion, advisory generation, advisory fitness,

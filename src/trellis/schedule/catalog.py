@@ -213,6 +213,22 @@ JOB_CATALOG: Mapping[str, JobSpec] = _build_catalog(
                 "and rollbacks without applying them until a human reviews."
             ),
         ),
+        JobSpec(
+            name="auto-promote-candidates",
+            argv=("trellis", "curate", "auto-promote-candidates", "--format", "json"),
+            default_cadence="0 6 * * *",
+            description=(
+                "Evaluates learning candidates against "
+                "trellis.learning.candidate_auto_promote's policy and, in "
+                "commit mode, promotes the qualifying ones through the "
+                "same governed path a human review-queue approval uses. "
+                "Deterministic — no LLM calls, no spend. Ships with "
+                "learning.candidate_auto_promote.enabled=False (report-only "
+                "disposition always), so this job's default effect is "
+                "purely evidence-gathering: one LEARNING_AUTO_PROMOTE_EVALUATED "
+                "event per run naming what it would have promoted."
+            ),
+        ),
         # -- Trellis-native manual-only jobs: cadence=None by default, --
         # -- triggered only via ScheduledJob.run_requested_at. --
         JobSpec(

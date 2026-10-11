@@ -10,7 +10,11 @@ silently inert for a month" had to SSH in and tail a file.
 :func:`summarize_loop_health` answers that from the EventLog alone (plus
 one documented exception below), reading ``CURATE_CYCLE_COMPLETED`` /
 ``TUNE_CYCLE_COMPLETED`` (:mod:`trellis_cli.worker`), ``PRECEDENT_PROMOTED``,
-``PARAMS_AUTO_PROMOTED`` and ``FEEDBACK_RECORDED``. It adds no new probe.
+``PARAMS_AUTO_PROMOTED``, ``FEEDBACK_RECORDED``,
+``LEARNING_AUTO_PROMOTE_EVALUATED`` and ``PRECEDENT_UPDATED`` (the last two
+for e177's ``learning_candidate_auto_promote`` row, which also folds in
+:func:`trellis.learning.candidate_auto_promote.compute_agreement_metric`'s
+read of ``REVIEW_DECISION_RECORDED``). It adds no new probe.
 
 **Never-run vs ran-and-counted-zero.** ``LoopHealthRow.last_run_at`` /
 ``last_status`` are ``None`` together exactly when the loop has produced
@@ -40,6 +44,7 @@ from typing import Any
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.learning.candidate_auto_promote import compute_agreement_metric
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventLog,
@@ -93,6 +98,80 @@ def _scan(event_log: EventLog, event_type: EventType, *, limit: int) -> EventSca
     return scan_events(event_log, event_type=event_type, limit=limit)
 
 
+def _build_candidate_auto_promote_row(
+    event_log: EventLog, *, now: datetime, limit: int
+) -> tuple[LoopHealthRow, ScanCoverage]:
+    """Build the e177 ``learning_candidate_auto_promote`` row.
+
+    Factored out of :func:`summarize_loop_health` to keep that function's
+    statement count under the lint threshold; the row itself follows the
+    same ``_scan`` + latest-event pattern as every other row there.
+    """
+    candidate_scan = _scan(
+        event_log, EventType.LEARNING_AUTO_PROMOTE_EVALUATED, limit=limit
+    )
+    latest = candidate_scan.events[-1] if candidate_scan.events else None
+
+    demoted_scan = _scan(event_log, EventType.PRECEDENT_UPDATED, limit=limit)
+    demoted_events = [
+        e for e in demoted_scan.events if bool((e.payload or {}).get("demoted"))
+    ]
+
+    # compute_agreement_metric reads REVIEW_DECISION_RECORDED / its own
+    # event type directly (not via scan_events), matching the tuner row's
+    # documented live-read exception rather than this file's
+    # scan_events + ScanCoverage pattern.
+    agreement = compute_agreement_metric(event_log, limit=limit)
+
+    counters: dict[str, Any] | None = None
+    if latest is not None:
+        counts = latest.payload.get("counts") or {}
+        snapshot = latest.payload.get("policy_snapshot") or {}
+        counters = {
+            "last_run_mode": latest.payload.get("mode"),
+            "last_run_would_promote": counts.get("would_promote"),
+            "last_run_promoted": counts.get("promoted"),
+            "last_run_ineligible": counts.get("ineligible"),
+            "configured_enabled": snapshot.get("enabled"),
+            "configured_mode": snapshot.get("mode"),
+            "demoted_last_7d": sum(
+                1 for e in demoted_events if e.occurred_at >= now - timedelta(days=7)
+            ),
+            "demoted_last_30d": sum(
+                1 for e in demoted_events if e.occurred_at >= now - timedelta(days=30)
+            ),
+            "agreement_agree": agreement.agree,
+            "agreement_disagree": agreement.disagree,
+            "agreement_undecided": agreement.undecided,
+            "agreement_rate": agreement.rate,
+        }
+
+    row = LoopHealthRow(
+        name="learning_candidate_auto_promote",
+        description=(
+            "Evaluates learning candidates for automatic promotion to a "
+            "precedent (plan p1 PR 7) via `trellis curate "
+            "auto-promote-candidates`, and monitors its own prior "
+            "promotions for a post-promotion unhelpful citation."
+        ),
+        actuates=True,
+        what_it_changes=(
+            "Promotes a qualifying candidate through the same governed "
+            "precedent.promote path a human Review-tab approval uses, "
+            "ONLY when learning.candidate_auto_promote.enabled and "
+            "mode=commit are both set (disabled, report-only by "
+            "default); every other run only reports what it would have "
+            "promoted. Demotes, through a governed precedent.update, any "
+            "of its own prior promotions that have since drawn an "
+            "unhelpful citation."
+        ),
+        last_run_at=latest.occurred_at if latest else None,
+        last_status="ok" if latest else None,
+        counters=counters,
+    )
+    return row, merge_coverage(candidate_scan.coverage, demoted_scan.coverage)
+
+
 def summarize_loop_health(
     event_log: EventLog,
     tuner_state: TunerStateStore,
@@ -102,9 +181,10 @@ def summarize_loop_health(
 ) -> LoopHealthReport:
     """Build the ``GET /api/v1/loops`` report from existing events (+ one live read).
 
-    Seven rows, in the order the nightly cycle runs them: noise
+    Eight rows, in the order the nightly cycle runs them: noise
     demotion, advisory generation, advisory fitness, learning-candidate
-    scoring, precedent promotion, tuner, feedback intake.
+    scoring, precedent promotion, learning-candidate auto-promotion
+    (e177), tuner, feedback intake.
     """
     now = now or datetime.now(UTC)
 
@@ -214,10 +294,12 @@ def summarize_loop_health(
         ),
         actuates=False,
         what_it_changes=(
-            "Nothing schedules a promotion: a human approves one (Review "
-            "tab or `trellis curate promote-learning`). This row counts "
-            "every PRECEDENT_PROMOTED event, which also includes any "
-            "manual run of the unscheduled PrecedentMiner."
+            "A human approves most promotions (Review tab or `trellis "
+            "curate promote-learning`); the scheduled, opt-in "
+            "learning_candidate_auto_promote loop below can also commit "
+            "one unattended when enabled. This row counts every "
+            "PRECEDENT_PROMOTED event, which also includes any manual "
+            "run of the unscheduled PrecedentMiner."
         ),
         last_run_at=precedent_latest.occurred_at if precedent_latest else None,
         last_status="ok" if precedent_latest else None,
@@ -237,6 +319,10 @@ def summarize_loop_health(
             if precedent_latest
             else None
         ),
+    )
+
+    candidate_auto_promote_row, candidate_auto_promote_coverage = (
+        _build_candidate_auto_promote_row(event_log, now=now, limit=limit)
     )
 
     tune_scan = _scan(event_log, EventType.TUNE_CYCLE_COMPLETED, limit=limit)
@@ -310,6 +396,7 @@ def summarize_loop_health(
     scan_coverage = merge_coverage(
         curate_scan.coverage,
         precedent_scan.coverage,
+        candidate_auto_promote_coverage,
         tune_scan.coverage,
         auto_promoted_scan.coverage,
         feedback_scan.coverage,
@@ -323,6 +410,7 @@ def summarize_loop_health(
             advisory_fitness_row,
             learning_row,
             precedent_row,
+            candidate_auto_promote_row,
             tuner_row,
             feedback_row,
         ],

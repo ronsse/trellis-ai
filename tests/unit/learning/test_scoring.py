@@ -1167,6 +1167,7 @@ class TestNoiseEvidenceScreen:
             "appearances": 2,
             "helpful_count": 0,
             "unhelpful_count": 2,
+            "distinct_helpful_sessions": 0,
         }
         screen = report["noise_screen"]
         assert screen["proposed"] == 1
@@ -1419,5 +1420,6 @@ class TestNoiseEvidenceScreen:
             "appearances": 2,
             "helpful_count": 0,
             "unhelpful_count": 1,
+            "distinct_helpful_sessions": 0,
         }
         assert candidate["evidence_verdict"] == "insufficient_unhelpful_citations"

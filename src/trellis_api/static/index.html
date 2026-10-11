@@ -4154,7 +4154,9 @@
                         '<p>No precedents yet. A precedent is created only when a learning candidate ' +
                         'is approved &mdash; Review &rarr; Learning promotion candidates, or ' +
                         '<code style="font-family:var(--font-mono)">trellis curate promote-learning</code>. ' +
-                        'Nothing schedules that promotion automatically today.</p></div>';
+                        'The scheduled <code style="font-family:var(--font-mono)">auto-promote-candidates</code> ' +
+                        'job reports on this nightly but, by default, only reports &mdash; it ships ' +
+                        'report-only and promotes nothing until an operator opts it into commit mode.</p></div>';
                     return;
                 }
 

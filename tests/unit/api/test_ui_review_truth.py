@@ -265,7 +265,14 @@ def test_precedents_empty_state_names_the_real_promotion_path() -> None:
         body, "if (items.length === 0) {", "return;\n                }"
     )
     assert "trellis curate promote-learning" in empty_branch
-    assert "Nothing schedules that promotion automatically today" in empty_branch
+    # Names the scheduled job instead of claiming nothing schedules
+    # promotion at all (e177): the job exists, runs nightly, and — by
+    # default — only reports, so the copy must not overclaim automation.
+    assert "auto-promote-candidates" in empty_branch
+    assert (
+        "report-only and promotes nothing until an operator opts it into "
+        "commit mode" in empty_branch
+    )
     # The old claim ("Promote traces to create precedents") implied any
     # trace promotion was sufficient; it must actually be gone, not merely
     # supplemented.

@@ -62,7 +62,7 @@ class TestLoopHealthRoute:
         resp = client.get("/api/v1/loops")
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data["loops"]) == 7
+        assert len(data["loops"]) == 8
         for row in data["loops"]:
             if row["name"] == "tuner":
                 # Documented exception: pending_count/auto_promoted_total are

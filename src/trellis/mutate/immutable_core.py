@@ -76,8 +76,25 @@ from trellis.mutate.commands import Command, Operation
 #: ``mutate`` imports ``learning``) and this module is not worth
 #: inverting that for. The duplication is bounded two ways, both in
 #: ``tests/unit/test_immutable_core_rule.py``: an equality test that
-#: imports the four live constants, and an AST scan of ``src/`` that
-#: fails on a fifth governing constant nobody added here.
+#: imports the four live constants (a subset check, since the roster also
+#: carries the settings-registry keys below), and an AST scan of ``src/``
+#: that fails on a sixth governing constant nobody added here.
+#:
+#: Two shapes share this one set on purpose. The first four are whole-loop
+#: ``ParameterScope.component_id`` values — moving them moves another
+#: loop's gate. The remaining entries are ``SETTINGS_REGISTRY`` leaf keys
+#: for ``LearningCandidateAutoPromotePolicy`` and ``AutoPromotePolicy``
+#: (e177, e177's own predecessor): no ``rule_tuner`` proposal can ever
+#: name one as a ``component_id`` — they are env/settings/config knobs,
+#: not tuner scopes — but the AST scan in
+#: ``tests/unit/test_immutable_core_rule.py`` collects every
+#: ``learning.``-prefixed module-level string under ``src/trellis/learning``
+#: on purpose, by shape rather than by role, because *that* is what caught
+#: the three-against-four roster the scan replaced. Denying a
+#: ``component_id`` no proposal will ever name costs nothing; leaving one
+#: off the roster because it "doesn't really count" is the failure mode
+#: this module exists to close off. If a future knob trips the scan,
+#: add it here rather than narrowing the scan.
 GOVERNING_KEYS: frozenset[str] = frozenset(
     {
         # schema_evolution's thresholds gate the pass that auto-mutates
@@ -92,6 +109,20 @@ GOVERNING_KEYS: frozenset[str] = frozenset(
         # scoring's promote/noise thresholds gate which precedents reach
         # get_lessons at all.
         "learning.scoring",
+        # AutoPromotePolicy's SETTINGS_REGISTRY keys
+        # (trellis.learning.tuners.auto_promote) — not a component_id any
+        # proposal can name, but shaped like one and swept up by the scan.
+        "learning.auto_promote.enabled",
+        "learning.auto_promote.min_sample_size",
+        "learning.auto_promote.min_effect_size",
+        # LearningCandidateAutoPromotePolicy's SETTINGS_REGISTRY keys
+        # (trellis.learning.candidate_auto_promote) — same reasoning.
+        "learning.candidate_auto_promote.enabled",
+        "learning.candidate_auto_promote.mode",
+        "learning.candidate_auto_promote.min_helpful_count",
+        "learning.candidate_auto_promote.min_distinct_sessions",
+        "learning.candidate_auto_promote.require_zero_unhelpful",
+        "learning.candidate_auto_promote.max_promotions_per_run",
     }
 )
 

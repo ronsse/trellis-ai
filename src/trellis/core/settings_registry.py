@@ -18,14 +18,18 @@ fields are meant to gate a write). Today the registry is read by:
 Scope, stated once rather than per entry
 -----------------------------------------
 Registered: the 12 :class:`~trellis.core.write_config.WriteBehaviourConfig`
-fields, plus ``graph_seeding``
+fields; ``graph_seeding``
 (:data:`trellis.retrieve.builder_factory.GRAPH_SEEDING_ENV`) and
 ``filter_legacy_advisories``
 (:data:`trellis.retrieve.pack_builder.FILTER_LEGACY_ADVISORIES_ENV`) as
-catalog entries outside ``WriteBehaviourConfig``. Deliberately **not**
-registered: ``learning.auto_promote.*`` (the tuner's own config,
-`config.yaml`-sourced, not `StoreRegistry`-backed — pending an owner
-decision per the plan this PR implements) and anything
+catalog entries outside ``WriteBehaviourConfig``; the tuner's three
+``learning.auto_promote.*`` knobs
+(:func:`trellis.learning.tuners.auto_promote.resolve_auto_promote_overrides`,
+env > settings > ``config.yaml`` > default); and the six
+``learning.candidate_auto_promote.*`` knobs for
+:class:`~trellis.learning.candidate_auto_promote.LearningCandidateAutoPromotePolicy`
+(env > settings > default — no ``config.yaml`` layer, since this policy has
+no legacy file-based config to shadow). Not registered: anything
 `StoreRegistry`-construction-time (backend choice, DSN, blob bucket,
 auth mode) — those are process-start parameters, never read live by any
 of the stores or readers this registry's siblings touch, so a settings
@@ -38,8 +42,11 @@ knob's real enforcement today, not merely what ``trellis admin
 write-config`` / ``GET /api/version`` report about it. Every real
 enforcement call site (``trace_ingest_hook.py``, ``memory_ingest_hook.py``,
 ``embed_ingest_hook.py``, ``classify/ingest.py``, ``mcp/reconcile.py``,
-``mcp/server.py``, ``builder_factory.py``, ``pack_builder.py``) now
-resolves env > settings > default via
+``mcp/server.py``, ``builder_factory.py``, ``pack_builder.py``,
+``trellis_cli.worker._build_auto_promote_policy``,
+``trellis.learning.candidate_auto_promote``) now resolves env > settings
+> default (the two auto-promote families add a ``config.yaml`` and/or
+default-only layer beneath that — see their own entries above) via
 :func:`trellis.core.write_config.resolve_write_behaviour` or an
 equivalent per-knob settings-aware read, so ``settings_live`` is ``True``
 for every entry except ``minhash_seed_max_docs`` — read once at process
@@ -54,6 +61,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
+
+from trellis.learning.tuners.auto_promote import (
+    DEFAULT_AUTO_MIN_EFFECT_SIZE,
+    DEFAULT_AUTO_MIN_SAMPLE_SIZE,
+)
+from trellis.learning.tuners.promotion import (
+    DEFAULT_MIN_EFFECT_SIZE,
+    DEFAULT_MIN_SAMPLE_SIZE,
+)
 
 #: Mirrors the plan's own vocabulary (`docs/design` plan p1, §(a)) rather
 #: than a tier invented for this module: ``"safe"`` (no meaningful
@@ -362,6 +378,183 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+    ),
+    SettingSpec(
+        name="learning.auto_promote.enabled",
+        type="bool",
+        default=False,
+        description=(
+            "Let `trellis worker tune` auto-promote a tuner proposal "
+            "through the same governed pipeline `trellis metrics promote "
+            "--commit` uses, with no human looking at it first. Off "
+            "(default): the tuner still runs and still writes `pending` "
+            "proposals, it just never promotes one itself. Flagged unsafe "
+            "to expose bare: turning this on changes what agents are "
+            "served, unattended, on a schedule — pair it with the "
+            "min_sample_size / min_effect_size floors below, never ship "
+            "it alone."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="unsafe",
+        settings_live=True,
+    ),
+    SettingSpec(
+        name="learning.auto_promote.min_sample_size",
+        type="int",
+        default=DEFAULT_AUTO_MIN_SAMPLE_SIZE,
+        description=(
+            "Minimum `ParameterProposal.sample_size` an auto-promotion "
+            "will accept. Shipped default (30) is 6x the manual-review "
+            "floor (5) a human-eyeballed promotion accepts — an "
+            "unattended promotion has no reviewer to catch a thin sample, "
+            "so it demands more evidence going in. Refused below the "
+            "manual floor: `AutoPromotePolicy.__post_init__` rejects any "
+            "value under 5, the exact check this setting cannot loosen "
+            "past, by settings or by env."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="safe",
+        settings_live=True,
+        minimum=DEFAULT_MIN_SAMPLE_SIZE,
+    ),
+    SettingSpec(
+        name="learning.auto_promote.min_effect_size",
+        type="float",
+        default=DEFAULT_AUTO_MIN_EFFECT_SIZE,
+        description=(
+            "Minimum measured relative effect against the live baseline "
+            "an auto-promotion will accept, in [0, 1]. Shipped default "
+            "(0.25) is stricter than the manual-review floor (0.15) for "
+            "the same reason as min_sample_size: no reviewer, so a larger "
+            "margin is required before noise becomes an implausible "
+            "explanation. Refused below the manual floor by "
+            "`AutoPromotePolicy.__post_init__`, by settings or by env."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="safe",
+        settings_live=True,
+        minimum=DEFAULT_MIN_EFFECT_SIZE,
+        maximum=1.0,
+    ),
+    SettingSpec(
+        name="learning.candidate_auto_promote.enabled",
+        type="bool",
+        default=False,
+        description=(
+            "Let `trellis curate auto-promote-candidates` act on a "
+            "learning candidate instead of only reporting on it. Off "
+            "(default): the job always runs in report-only disposition "
+            "— it emits LEARNING_AUTO_PROMOTE_EVALUATED with what it "
+            "would have done, same as with this on but `mode=report_only` "
+            "below. This is the master switch the owner asked be shipped "
+            "off, so the first live runs produce the agreement evidence "
+            "needed to pick the thresholds below before anything commits."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="unsafe",
+        settings_live=True,
+    ),
+    SettingSpec(
+        name="learning.candidate_auto_promote.mode",
+        type="str",
+        default="report_only",
+        description=(
+            "`report_only` (default) evaluates every candidate and emits "
+            "the disposition event but never writes. `commit` promotes "
+            "each qualifying candidate through `submit_learning_promotion` "
+            "— the identical governed path a human review-queue approval "
+            "uses — and auto-demotes it on its first post-promotion "
+            "unhelpful citation. Risk caption: commit mode writes "
+            "precedents agents will be served without a human review; "
+            "`--dry-run` on the CLI always forces report_only regardless "
+            "of this setting, so a one-off check can never commit by "
+            "accident."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="unsafe",
+        settings_live=True,
+        enum=("report_only", "commit"),
+    ),
+    SettingSpec(
+        name="learning.candidate_auto_promote.min_helpful_count",
+        type="int",
+        default=5,
+        description=(
+            "Minimum helpful-citation count a learning candidate needs "
+            "before auto-promote will even consider it. Conservative "
+            "default (5): the manual review queue has no equivalent "
+            "floor today, so this number has no human-reviewed precedent "
+            "to match — set deliberately high until the agreement metric "
+            "(would_promote vs. a later human decision) gives the owner "
+            "real evidence to lower it."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="safe",
+        settings_live=True,
+        minimum=1,
+    ),
+    SettingSpec(
+        name="learning.candidate_auto_promote.min_distinct_sessions",
+        type="int",
+        default=3,
+        description=(
+            "Minimum number of distinct sessions (`run_id`s) whose "
+            "helpful citations count toward min_helpful_count. Floored "
+            "at 2 and defaulted to 3: a single session repeatedly citing "
+            "the same candidate is one data point wearing several counts "
+            "as a disguise, not corroboration — a single-session "
+            "candidate can never qualify no matter how high its raw "
+            "helpful count climbs."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="safe",
+        settings_live=True,
+        minimum=2,
+    ),
+    SettingSpec(
+        name="learning.candidate_auto_promote.require_zero_unhelpful",
+        type="bool",
+        default=True,
+        description=(
+            "Require zero unhelpful citations for a candidate to qualify, "
+            "on top of the helpful-count/session floors. On by default. "
+            "Flagged unsafe to expose: turning this off lets auto-promote "
+            "commit a candidate with a documented unhelpful citation "
+            "already against it, which is the exact evidence the manual "
+            "review queue would use to reject it — this is the one knob "
+            "that can make auto-promote disagree with a human on purpose, "
+            "not by threshold miscalibration."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="unsafe",
+        settings_live=True,
+    ),
+    SettingSpec(
+        name="learning.candidate_auto_promote.max_promotions_per_run",
+        type="int",
+        default=3,
+        description=(
+            "Ceiling on how many candidates one `commit`-mode run may "
+            "promote, regardless of how many qualify. Conservative "
+            "default (3): bounds the blast radius of a single scheduled "
+            "run — a bug that makes every candidate qualify still only "
+            "promotes 3 before the job stops, leaving the rest reported "
+            "as `would_promote` for the next run rather than all landing "
+            "unattended in one pass."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="safe",
+        settings_live=True,
+        minimum=1,
     ),
 )
 

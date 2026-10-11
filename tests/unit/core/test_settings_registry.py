@@ -6,6 +6,11 @@ names exactly the tunables this PR's precedence layer governs, every spec
 is well-formed, and ``settings_live`` tells the truth about which knobs a
 settings override actually reaches today (all of them except
 ``minhash_seed_max_docs``, which instead carries ``restart_required``).
+
+A later PR (auto-promote-report-only) registered the tuner's three
+``learning.auto_promote.*`` knobs and the six ``learning.candidate_auto_promote.*``
+knobs for the new candidate-promotion policy — nine entries on top of the
+fourteen above, pinned by :data:`_AUTO_PROMOTE_NAMES` below.
 """
 
 from __future__ import annotations
@@ -27,6 +32,22 @@ from trellis.core.write_config import ENV_VAR_BY_FIELD
 _VALID_RISKS: frozenset[Risk] = frozenset({"safe", "restart", "unsafe"})
 _VALID_TYPES: frozenset[SettingType] = frozenset({"bool", "int", "float", "str"})
 
+#: The tuner's three knobs plus the six for the new candidate-promotion
+#: policy — registered together by the auto-promote-report-only PR.
+_AUTO_PROMOTE_NAMES: frozenset[str] = frozenset(
+    {
+        "learning.auto_promote.enabled",
+        "learning.auto_promote.min_sample_size",
+        "learning.auto_promote.min_effect_size",
+        "learning.candidate_auto_promote.enabled",
+        "learning.candidate_auto_promote.mode",
+        "learning.candidate_auto_promote.min_helpful_count",
+        "learning.candidate_auto_promote.min_distinct_sessions",
+        "learning.candidate_auto_promote.require_zero_unhelpful",
+        "learning.candidate_auto_promote.max_promotions_per_run",
+    }
+)
+
 
 class TestCatalogMembership:
     def test_every_write_behaviour_field_is_registered(self) -> None:
@@ -36,22 +57,30 @@ class TestCatalogMembership:
         """
         assert set(ENV_VAR_BY_FIELD) <= set(SETTINGS_REGISTRY)
 
-    def test_registry_is_exactly_those_twelve_plus_two_catalog_only_entries(
+    def test_registry_is_exactly_those_twelve_plus_the_documented_extras(
         self,
     ) -> None:
-        assert set(SETTINGS_REGISTRY) == set(ENV_VAR_BY_FIELD) | {
-            "graph_seeding",
-            "filter_legacy_advisories",
-        }
+        assert (
+            set(SETTINGS_REGISTRY)
+            == set(ENV_VAR_BY_FIELD)
+            | {
+                "graph_seeding",
+                "filter_legacy_advisories",
+            }
+            | _AUTO_PROMOTE_NAMES
+        )
 
-    def test_fourteen_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 14
+    def test_twentythree_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 23
 
-    def test_auto_promote_is_explicitly_not_registered(self) -> None:
-        """Excluded per owner decision, deferred to a later PR (plan p1)."""
-        names = SETTINGS_REGISTRY
-        assert not any(name.startswith("learning.auto_promote") for name in names)
-        assert not any("auto_promote" in name for name in SETTINGS_REGISTRY)
+    def test_auto_promote_families_are_registered(self) -> None:
+        """Both knob families are now registered (plan p1 PR 7) — the
+        opposite of the pre-this-PR state, where they were explicitly
+        excluded pending this owner decision.
+        """
+        assert set(SETTINGS_REGISTRY) >= _AUTO_PROMOTE_NAMES
+        prefixes = ("learning.auto_promote", "learning.candidate_auto_promote")
+        assert all(name.startswith(prefixes) for name in _AUTO_PROMOTE_NAMES)
 
 
 class TestEverySpecIsWellFormed:
@@ -79,8 +108,8 @@ class TestEverySpecIsWellFormed:
 
     def test_exactly_one_entry_needs_a_restart(self) -> None:
         """``minhash_seed_max_docs`` is read once at process start (its own
-        description says why); every other of the 14 registered knobs is
-        re-read live, so it carries ``settings_live=True`` instead.
+        description says why); every other registered knob is re-read
+        live, so it carries ``settings_live=True`` instead.
         """
         restarters = [
             name for name, spec in SETTINGS_REGISTRY.items() if spec.restart_required
@@ -96,6 +125,13 @@ class TestUnsafeKnobsMatchThePlanPlusOneDocumentedExtension:
     deviation (see its description's own "~46% more" measurement) — not
     an oversight, so pin it rather than let it silently drift back to
     three or grow to six unnoticed.
+
+    The auto-promote-report-only PR adds four more, each with its own
+    unsafe-risk justification in its description: both master switches
+    (``learning.auto_promote.enabled``,
+    ``learning.candidate_auto_promote.enabled``), the report_only/commit
+    mode toggle, and ``require_zero_unhelpful`` (the one knob that can
+    make auto-promote disagree with a human reviewer on purpose).
     """
 
     def test_unsafe_tier_is_exactly_this_set(self) -> None:
@@ -107,6 +143,10 @@ class TestUnsafeKnobsMatchThePlanPlusOneDocumentedExtension:
             "reconcile_on_write",
             "pack_holdout_rate",
             "require_bodied_attribution",
+            "learning.auto_promote.enabled",
+            "learning.candidate_auto_promote.enabled",
+            "learning.candidate_auto_promote.mode",
+            "learning.candidate_auto_promote.require_zero_unhelpful",
         }
 
     def test_minhash_seed_max_docs_is_restart_not_unsafe(self) -> None:

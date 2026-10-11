@@ -373,6 +373,62 @@ class PrecedentPromoteHandler:
         return event.event_id, f"Precedent promoted: {args['title']}"
 
 
+class PrecedentUpdateHandler:
+    """Demote (or otherwise amend) a promoted precedent — ``PRECEDENT_UPDATED``.
+
+    Wires :data:`Operation.PRECEDENT_UPDATE` into the governed pipeline.
+    Both the enum verb and its ``{"precedent_id"}`` arg schema shipped with
+    no handler — a ``precedent.update`` command was rejected the same way
+    ``entity.update`` was before :class:`EntityUpdateHandler` closed that
+    gap for entities. Today's only caller is
+    :mod:`trellis.learning.candidate_auto_promote`'s auto-demote path: a
+    precedent that policy promoted, on its first post-promotion unhelpful
+    citation.
+
+    ``precedent_id`` is the promoted entity's id (``PRECEDENT_PROMOTED``'s
+    own ``entity_id`` — ``precedent://learning/<slug>`` for a
+    learning-candidate promotion), so
+    :func:`trellis.retrieve.precedents.list_precedents` can join a later
+    demotion back onto the promotion it amends.
+
+    **SCD-2 discipline**, following :class:`EntityUpdateHandler`: the
+    ``demoted`` flag is merged into the node's existing properties via
+    ``_rewrite_current_node``, never an in-place edit, and a node missing
+    at write time (never existed, or purged mid-command) is refused —
+    ``ValidationError`` / ``target_not_found`` — rather than silently
+    no-opping into a phantom success.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        precedent_id = command.args["precedent_id"]
+        reason = str(command.args.get("reason") or "").strip() or "unspecified"
+        store = self._registry.knowledge.graph_store
+
+        def demote(existing: dict[str, Any]) -> dict[str, Any]:
+            props = dict(existing["properties"])
+            props["demoted"] = True
+            props["demoted_at"] = datetime.now(UTC).isoformat()
+            props["demoted_reason"] = reason
+            return {"properties": props}
+
+        written = _rewrite_current_node(store, precedent_id, demote)
+        if written is None:
+            msg = f"Node not found: {precedent_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
+
+        self._registry.operational.event_log.emit(
+            EventType.PRECEDENT_UPDATED,
+            source="mutation_executor",
+            entity_id=precedent_id,
+            entity_type=written["node_type"],
+            payload={"demoted": True, "reason": reason},
+        )
+        return precedent_id, f"Precedent demoted: {precedent_id}"
+
+
 class LabelAddHandler:
     """Read node from graph store, add label to properties, write a new version."""
 
@@ -1735,6 +1791,7 @@ def create_curate_handlers(
         ),
         Operation.TRACE_INGEST: TraceIngestHandler(registry),
         Operation.PRECEDENT_PROMOTE: PrecedentPromoteHandler(registry),
+        Operation.PRECEDENT_UPDATE: PrecedentUpdateHandler(registry),
         Operation.LABEL_ADD: LabelAddHandler(registry),
         Operation.LABEL_REMOVE: LabelRemoveHandler(registry),
         Operation.FEEDBACK_RECORD: FeedbackRecordHandler(registry),

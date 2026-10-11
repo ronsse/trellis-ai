@@ -254,7 +254,7 @@ class TestRowMetadata:
 
         report = summarize_loop_health(event_log, tuner_state)
 
-        assert len(report.loops) == 7
+        assert len(report.loops) == 8
         names = {row.name for row in report.loops}
         assert names == {
             "noise_demotion",
@@ -262,6 +262,7 @@ class TestRowMetadata:
             "advisory_fitness",
             "learning_candidate_scoring",
             "precedent_promotion",
+            "learning_candidate_auto_promote",
             "tuner",
             "feedback_intake",
         }

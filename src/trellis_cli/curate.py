@@ -3,26 +3,43 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import structlog
 import typer
 from rich.markup import escape
 from rich.table import Table
 
-from trellis.learning import prepare_learning_promotions, submit_learning_promotion
+from trellis.learning import (
+    LEARNING_ARTIFACTS_DIR_ENV,
+    LEARNING_CANDIDATES_FILENAME,
+    prepare_learning_promotions,
+    resolve_learning_artifacts_dir,
+    submit_learning_promotion,
+)
+from trellis.learning.candidate_auto_promote import (
+    LearningCandidateAutoPromotePolicy,
+    report_to_dict,
+    resolve_candidate_auto_promote_overrides,
+    run_candidate_auto_promotion,
+    sweep_auto_demotions,
+)
 from trellis.mutate import (
     Command,
     CommandStatus,
     Operation,
     build_curate_executor,
 )
+from trellis.stores.settings_store import load_settings_values
 from trellis_cli.exit_codes import EXIT_VALIDATION, refusal_exit_code
 from trellis_cli.output import build_console, emit_json
-from trellis_cli.stores import _get_registry
+from trellis_cli.stores import _get_registry, get_event_log
 
 curate_app = typer.Typer(no_args_is_help=True)
 console = build_console()
+logger = structlog.get_logger(__name__)
 
 
 def _print_warnings(warnings: list[str]) -> None:
@@ -774,3 +791,125 @@ def promote_learning(
             escape(edge_summary),
         )
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# auto-promote-candidates (plan p1 PR 7 — report-only first)
+# ---------------------------------------------------------------------------
+
+
+def _build_candidate_auto_promote_policy(
+    stores_dir: Path | None,
+) -> LearningCandidateAutoPromotePolicy:
+    """env > settings > default, per :func:`resolve_candidate_auto_promote_overrides`.
+
+    A settings-store read failure degrades to the defaults alone —
+    advisory, like every other settings-aware read in this CLI — never
+    fails the job over a catalog/settings-file problem.
+    """
+    try:
+        settings = load_settings_values(stores_dir)
+    except Exception:
+        logger.warning("candidate_auto_promote_settings_read_failed", exc_info=True)
+        settings = {}
+    overrides = resolve_candidate_auto_promote_overrides(settings=settings)
+    return LearningCandidateAutoPromotePolicy(
+        enabled=bool(overrides["enabled"]),
+        mode=overrides["mode"],  # type: ignore[arg-type]
+        min_helpful_count=int(overrides["min_helpful_count"]),
+        min_distinct_sessions=int(overrides["min_distinct_sessions"]),
+        require_zero_unhelpful=bool(overrides["require_zero_unhelpful"]),
+        max_promotions_per_run=int(overrides["max_promotions_per_run"]),
+    )
+
+
+@curate_app.command("auto-promote-candidates")
+def auto_promote_candidates(
+    candidates_path: Path | None = typer.Option(  # noqa: B008 - typer option default
+        None,
+        "--candidates",
+        help=(
+            "Path to intent_learning_candidates.json. Defaults to "
+            "resolve_learning_artifacts_dir() over the registry's "
+            "stores_dir — the same directory the Review queue reads."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Force report_only regardless of the configured mode, so a "
+            "one-off check can never commit by accident."
+        ),
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Evaluate learning candidates for automatic promotion (plan p1 PR 7).
+
+    Ships report-only by default
+    (``learning.candidate_auto_promote.enabled=False``): every run emits
+    one ``LEARNING_AUTO_PROMOTE_EVALUATED`` event naming what *would* be
+    promoted and writes nothing else. Flipping ``enabled`` and ``mode`` to
+    ``commit`` (both via ``SETTINGS_REGISTRY``) lets a qualifying
+    candidate promote through the identical governed path a human
+    review-queue approval uses
+    (:func:`trellis.learning.scoring.submit_learning_promotion`).
+
+    Also sweeps for auto-demotions on every run (same cadence as
+    promotion, mirroring
+    :func:`trellis.learning.tuners.auto_promote.run_auto_promotion`'s
+    ``monitor_prior`` pass): any precedent this policy promoted that has
+    since drawn an unhelpful citation is rolled back through the governed
+    ``precedent.update`` path, regardless of ``--dry-run`` — a prior
+    *commit* is real regardless of how this particular invocation was
+    run, so monitoring it is not something a dry run should skip.
+    """
+    registry = _get_registry()
+    if candidates_path is None:
+        resolved_dir = resolve_learning_artifacts_dir(registry.stores_dir)
+        if resolved_dir is None:
+            msg = (
+                "no learning-artifacts directory: the store registry has "
+                f"no stores_dir and {LEARNING_ARTIFACTS_DIR_ENV} is unset; "
+                "pass --candidates"
+            )
+            raise typer.BadParameter(msg, param_hint="'--candidates'")
+        candidates_path = resolved_dir / LEARNING_CANDIDATES_FILENAME
+
+    payload = json.loads(candidates_path.read_text(encoding="utf-8"))
+    candidates = payload.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
+
+    policy = _build_candidate_auto_promote_policy(registry.stores_dir)
+    event_log = get_event_log()
+    executor = build_curate_executor(registry)
+
+    report = run_candidate_auto_promotion(
+        candidates=candidates,
+        policy=policy,
+        event_log=event_log,
+        executor=executor,
+        force_report_only=dry_run,
+    )
+    demotions = sweep_auto_demotions(event_log=event_log, executor=executor)
+
+    if output_format == "json":
+        payload_out = report_to_dict(report)
+        payload_out["demotions"] = [asdict(outcome) for outcome in demotions]
+        emit_json(payload_out)
+        return
+
+    console.print(
+        f"[bold]Auto-Promote Candidates[/bold] — mode={report.mode} "
+        f"(configured={report.configured_mode})"
+    )
+    console.print(f"  would_promote: {report.would_promote_count}")
+    console.print(f"  promoted: {report.promoted_count}")
+    console.print(f"  ineligible: {report.ineligible_count}")
+    for outcome in report.outcomes:
+        console.print(f"  - {escape(outcome.candidate_id)}: {outcome.disposition}")
+    if demotions:
+        console.print(f"  demoted: {len(demotions)}")
+        for outcome in demotions:
+            console.print(f"  - {escape(outcome.candidate_id)}: {outcome.disposition}")

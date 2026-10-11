@@ -516,6 +516,21 @@ class EventType(StrEnum):
     PARAMS_AUTO_PROMOTED = "parameters.auto_promoted"
     PARAMS_AUTO_ROLLED_BACK = "parameters.auto_rolled_back"
 
+    #: Emitted once per ``trellis curate auto-promote-candidates`` run (see
+    #: ``trellis.learning.candidate_auto_promote``). Tier-1 autonomy event
+    #: (c) for the learning-candidate promotion policy, mirroring
+    #: :attr:`PARAMS_AUTO_PROMOTED`: a report-only run emits this with
+    #: every candidate's disposition set to ``would_promote`` /
+    #: ``ineligible:<reason>`` and writes nothing else; a commit-mode run
+    #: additionally submits a governed ``precedent.promote`` command per
+    #: qualifying candidate (same ``PRECEDENT_PROMOTED`` path a human
+    #: approval takes) and records ``promoted`` instead of
+    #: ``would_promote``. Payload carries ``mode``, ``dispositions``
+    #: (per-candidate), ``counts``, and a ``policy_snapshot`` of the
+    #: knobs that produced this run, so a later audit does not have to
+    #: reconstruct settings state from elsewhere.
+    LEARNING_AUTO_PROMOTE_EVALUATED = "learning.auto_promote_evaluated"
+
     #: Emitted by ``trellis admin record-job-run`` at the start and end of
     #: one dispatcher-driven job execution (see
     #: ``trellis.stores.schedule_store.ScheduleStore``;
