@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Trellis</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg width='32' height='32' viewBox='0 0 192 192' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cline x1='96' y1='152' x2='48' y2='112' stroke='%236366f1' stroke-width='10' stroke-linecap='round' opacity='0.6'/%3E%3Cline x1='96' y1='152' x2='144' y2='112' stroke='%236366f1' stroke-width='10' stroke-linecap='round' opacity='0.6'/%3E%3Cline x1='48' y1='112' x2='96' y2='96' stroke='%23818cf8' stroke-width='10' stroke-linecap='round' opacity='0.7'/%3E%3Cline x1='144' y1='112' x2='96' y2='96' stroke='%23818cf8' stroke-width='10' stroke-linecap='round' opacity='0.7'/%3E%3Cline x1='96' y1='96' x2='96' y2='40' stroke='%23a5b4fc' stroke-width='10' stroke-linecap='round' opacity='0.8'/%3E%3Ccircle cx='96' cy='152' r='18' fill='%236366f1'/%3E%3Ccircle cx='48' cy='112' r='16' fill='%23818cf8'/%3E%3Ccircle cx='144' cy='112' r='16' fill='%23818cf8'/%3E%3Ccircle cx='96' cy='96' r='18' fill='%23818cf8'/%3E%3Ccircle cx='96' cy='40' r='20' fill='%23c7d2fe'/%3E%3C/svg%3E">
-    <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+    <script src="vendor/cytoscape/cytoscape.min.js" onerror="window.__cytoscapeLoadFailed = true;"></script>
     <style>
         :root {
             --bg: #0f1117;
@@ -116,6 +116,22 @@
             opacity: 0.45;
             transition: opacity var(--transition);
         }
+        /* Shown only once a 403 has proven the stored key lacks admin scope
+           (see markKeyNonAdmin); names the gap rather than letting the tab
+           fail silently on click. */
+        .sidebar-nav a .nav-scope-badge {
+            flex: none;
+            font-size: 0.6rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            color: var(--warn);
+            border: 1px solid var(--warn);
+            border-radius: 4px;
+            padding: 0.05rem 0.3rem;
+            opacity: 0.85;
+        }
+        body.nav-collapsed .sidebar-nav a .nav-scope-badge { display: none; }
         .sidebar-nav a:hover { color: var(--text); background: var(--surface-2); }
         .sidebar-nav a:hover > svg { opacity: 1; }
         .sidebar-nav a.active { color: var(--text); background: var(--accent-glow); }
@@ -1531,7 +1547,7 @@
             <span class="view-title" id="view-title">Dashboard</span>
             <span class="readiness-pill is-unknown" id="readiness-pill" title="Readiness: checking&hellip;"></span>
             <span class="spacer"></span>
-            <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>0</kbd> Views &middot; <kbd>\</kbd> Sidebar &middot; <kbd>Esc</kbd> Close</span>
+            <span class="shortcuts-hint"><kbd>/</kbd> Search &middot; <kbd>1</kbd>-<kbd>0</kbd> Views &middot; <kbd>Alt</kbd>+<kbd>1</kbd>-<kbd>5</kbd> More views &middot; <kbd>\</kbd> Sidebar &middot; <kbd>Esc</kbd> Close</span>
             <button class="btn-icon" id="api-key-toggle" title="API key" aria-label="Show or hide the API key panel" onclick="toggleKeyBanner()">&#x1F511;</button>
         </header>
 
@@ -1721,6 +1737,12 @@
             <div class="graph-breadcrumbs" id="graph-breadcrumbs"></div>
             <div class="graph-wrapper">
                 <div id="cy" role="img" aria-label="Graph explorer canvas" aria-describedby="cy-text-alt"></div>
+                <div id="cy-load-error" class="degraded-banner" style="display:none">
+                    <span class="degraded-title">Graph library failed to load</span>
+                    <span class="degraded-detail">The graph-rendering script did not load, so this tab
+                        cannot draw the canvas. Reload the page; if this keeps happening, the server may
+                        be missing a static asset it should be serving.</span>
+                </div>
                 <div class="graph-toolbar" id="graph-toolbar">
                     <button onclick="graphZoom(1.3)" title="Zoom in" aria-label="Zoom in">+</button>
                     <button onclick="graphZoom(0.7)" title="Zoom out" aria-label="Zoom out">&minus;</button>
@@ -2112,8 +2134,15 @@
             if (res.status === 403) {
                 let detail = '';
                 try { const j = await res.json(); if (j && j.detail) detail = j.detail; } catch { /* non-JSON */ }
+                // require_scope() is the only source of a 403 here, and it
+                // only ever fires when the key lacks admin scope (admin
+                // satisfies every other scope check) -- so this is proof,
+                // not a guess, and is the one place that can catch a 403
+                // from a tab the nav badges don't cover yet.
+                markKeyNonAdmin();
                 showKeyBanner('Key accepted but not permitted: ' + (detail || 'insufficient scope')
-                              + '. This UI needs an admin-scoped key.');
+                              + '. Other tabs may still work with this key — see the sidebar for which '
+                              + 'ones are marked "admin".');
                 throw new Error('403 Forbidden (' + (detail || 'insufficient scope') + ')');
             }
         }
@@ -2221,6 +2250,33 @@
             return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
+        // Shared formatter for any score/ratio/effect-size value that reaches
+        // the UI through arithmetic this page does not control. `.toFixed()`
+        // does not throw on a non-finite number -- it silently stringifies
+        // it, so a bare `x.toFixed(2)` can render the literal text "Infinity"
+        // or "NaN". This is not hypothetical here: a tuner gate has shipped
+        // `effect_size: Infinity` from an empty baseline (divide-by-zero in a
+        // ratio with no prior data). fmtNum/fmtPct route every such value
+        // through Number.isFinite() first and only ever return a normal
+        // bounded numeral or one of three named states -- never a raw
+        // non-finite token. Output is always plain digits/punctuation, so
+        // callers do not need to wrap the result in escHtml().
+        function fmtNum(value, digits = 2) {
+            if (value == null) return 'not measured';
+            const n = Number(value);
+            if (Number.isNaN(n)) return '—';
+            if (!Number.isFinite(n)) return (n > 0 ? '∞' : '-∞') + ' (no baseline)';
+            return n.toFixed(digits);
+        }
+
+        function fmtPct(value, digits = 1) {
+            if (value == null) return 'not measured';
+            const n = Number(value);
+            if (Number.isNaN(n)) return '—';
+            if (!Number.isFinite(n)) return (n > 0 ? '∞' : '-∞') + ' (no baseline)';
+            return (n * 100).toFixed(digits) + '%';
+        }
+
         // An id can be agent-written (entity, document and trace ids are), so
         // none reaches a handler through inline JavaScript: the browser decodes
         // escHtml's entities before it runs an onclick, and a quote in the id
@@ -2270,17 +2326,67 @@
         }
 
         // -- View switching --
-        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs', 'advisories', 'policies', 'loops', 'settings', 'reports'];
+        // Nav DOM order is the single source of truth for the view list, the
+        // digit/Alt+digit shortcuts below, and their on-screen key hints --
+        // this used to be a hand-maintained array that had drifted from the
+        // nav's actual order past the 10th entry.
+        const navLinks = Array.from(document.querySelectorAll('nav a[data-view]'));
+        const views = navLinks.map(a => a.dataset.view);
         const viewLoaded = {};
         // init() reveals the dashboard when its fetches resolve. Track where the
         // user actually is, so a click made while the API is still answering is
         // not overwritten by the dashboard landing on top of it.
         let currentView = 'dashboard';
-        document.querySelectorAll('nav a[data-view]').forEach(link => {
+
+        // Tabs backed by admin-scoped routes (see app.py's router->scope
+        // map: admin.py, settings.py). A key without admin scope 403s on
+        // every one of these; rather than let each tab discover that on its
+        // own click, the first 403 any fetch sees (throwIfAuthRefused)
+        // flips keyIsNonAdmin and this badges them instead of staying quiet
+        // until the click happens.
+        const ADMIN_ONLY_VIEWS = ['dashboard', 'metrics', 'review', 'evolution', 'loops', 'advisories', 'settings'];
+        let keyIsNonAdmin = false;
+
+        function applyScopeBadges() {
+            navLinks.forEach(link => {
+                let badge = link.querySelector('.nav-scope-badge');
+                if (keyIsNonAdmin && ADMIN_ONLY_VIEWS.includes(link.dataset.view)) {
+                    if (!badge) {
+                        badge = document.createElement('span');
+                        badge.className = 'nav-scope-badge';
+                        badge.textContent = 'admin';
+                        badge.title = 'Calls admin-scoped routes; the stored key does not have admin scope.';
+                        link.appendChild(badge);
+                    }
+                } else if (badge) {
+                    badge.remove();
+                }
+            });
+        }
+
+        function markKeyNonAdmin() {
+            if (keyIsNonAdmin) return;
+            keyIsNonAdmin = true;
+            applyScopeBadges();
+        }
+
+        navLinks.forEach((link, idx) => {
             link.addEventListener('click', e => {
                 e.preventDefault();
                 switchView(link.dataset.view);
             });
+            // Key hint: 1-9, then 0, then Alt+1.. for anything past the
+            // tenth tab -- derived from the same idx the keydown handler
+            // below uses, so the hint shown can never diverge from the key
+            // that actually fires.
+            const hint = idx < 9 ? String(idx + 1) : idx === 9 ? '0' : 'Alt+' + (idx - 9);
+            let keyEl = link.querySelector('.nav-key');
+            if (!keyEl) {
+                keyEl = document.createElement('span');
+                keyEl.className = 'nav-key';
+                link.appendChild(keyEl);
+            }
+            keyEl.textContent = hint;
         });
 
         function switchView(name) {
@@ -2340,6 +2446,12 @@
                 toggleSidebar();
                 return;
             }
+            if (e.altKey && e.key >= '1' && e.key <= '9') {
+                // Tabs past the tenth (see the nav-key hint generated above).
+                const idx = 9 + parseInt(e.key, 10);
+                if (views[idx]) { e.preventDefault(); switchView(views[idx]); }
+                return;
+            }
             if (e.key >= '1' && e.key <= '9') {
                 switchView(views[parseInt(e.key) - 1]);
             }
@@ -2373,7 +2485,7 @@
             // failed probe must show the reason, not just a red badge.
             let extra = '';
             if (detail && typeof detail.latency_ms === 'number') {
-                extra += ` <span style="color:var(--text-dim); font-size:0.8rem">${detail.latency_ms.toFixed(1)}ms</span>`;
+                extra += ` <span style="color:var(--text-dim); font-size:0.8rem">${fmtNum(detail.latency_ms, 1)}ms</span>`;
             }
             if (detail && detail.error) {
                 extra += ` <span style="color:var(--error); font-size:0.8rem">${escHtml(detail.error)}</span>`;
@@ -2554,7 +2666,7 @@
                     c.setAttribute('cx', coords[j][0]); c.setAttribute('cy', coords[j][1]);
                     c.setAttribute('r', '2.5'); c.setAttribute('fill', color);
                     const title = document.createElementNS(ns, 'title');
-                    const shown = meta.pct ? (p.value * 100).toFixed(1) + '%' : p.value;
+                    const shown = meta.pct ? fmtPct(p.value, 1) : p.value;
                     title.textContent = `${s.group_key} · ${p.bucket_start}: ${shown} (n=${p.sample_count})`;
                     c.appendChild(title);
                     svg.appendChild(c);
@@ -2713,7 +2825,7 @@
                             ${p.domain ? `<span>domain: ${escHtml(p.domain)}</span>` : ''}
                             ${p.intent_family ? `<span>intent: ${escHtml(p.intent_family)}</span>` : ''}
                             <span>sample_size: ${escHtml(p.sample_size)}</span>
-                            <span>effect_size: ${p.effect_size == null ? '—' : escHtml(Number(p.effect_size).toFixed(4))}</span>
+                            <span>effect_size: ${fmtNum(p.effect_size, 4)}</span>
                         </div>
                         ${reachabilityHtml(p)}
                         <div class="review-kv">proposed: ${escHtml(JSON.stringify(p.proposed_values))}</div>
@@ -2751,7 +2863,7 @@
                 predict.innerHTML =
                     `<strong style="color:${ok ? 'var(--success)' : 'var(--error)'}">` +
                     `Predicted: ${escHtml(pv.predicted_status)}</strong> — ${escHtml(pv.reason)}` +
-                    (pv.effect_size == null ? '' : ` (effect_size ${escHtml(Number(pv.effect_size).toFixed(4))})`) +
+                    (pv.effect_size == null ? '' : ` (effect_size ${fmtNum(pv.effect_size, 4)})`) +
                     (isNoBaseline
                         ? '<br><span style="color:var(--text-dim)">First promotion for this scope: use ' +
                           '<code style="font-family:var(--font-mono)">trellis metrics promote --allow-no-baseline</code>.</span>'
@@ -3057,7 +3169,7 @@
                 // 0/0 dressed up as 0.0% — say so instead of reporting a number
                 // that implies the packs in this window were all failures.
                 const successRateText = data.total_feedback === 0
-                    ? 'not measured' : (data.success_rate * 100).toFixed(1) + '%';
+                    ? 'not measured' : fmtPct(data.success_rate, 1);
                 const successRateSub = data.total_feedback === 0
                     ? '0 feedback in this window' : 'overall effectiveness';
                 summary.appendChild(renderCard('Success Rate', successRateText, successRateSub));
@@ -3066,14 +3178,19 @@
                 if (data.item_scores && data.item_scores.length > 0) {
                     let html = '<table><thead><tr><th>Item ID</th><th>Appearances</th><th>Successes</th><th>Failures</th><th style="width:30%">Success Rate</th></tr></thead><tbody>';
                     for (const item of data.item_scores) {
-                        const pct = (item.success_rate * 100).toFixed(1);
+                        // A CSS width needs a bounded number even when the rate itself
+                        // isn't one (0 appearances can leave success_rate as 0/0); the
+                        // visible label goes through fmtPct so it never shows that raw.
+                        const barWidth = Number.isFinite(item.success_rate)
+                            ? Math.max(0, Math.min(100, item.success_rate * 100)) : 0;
+                        const pctLabel = fmtPct(item.success_rate, 1);
                         const cls = item.success_rate >= 0.7 ? 'good' : item.success_rate >= 0.4 ? 'mid' : 'bad';
                         html += `<tr>
                             <td class="mono truncate" title="${escHtml(item.item_id)}">${escHtml(item.item_id)}</td>
                             <td>${item.appearances}</td>
                             <td>${item.successes}</td>
                             <td>${item.failures}</td>
-                            <td><div class="bar-container"><div class="bar-bg"><div class="bar-fill ${cls}" style="width:${pct}%"></div></div><span class="bar-label">${pct}%</span></div></td>
+                            <td><div class="bar-container"><div class="bar-bg"><div class="bar-fill ${cls}" style="width:${barWidth}%"></div></div><span class="bar-label">${pctLabel}</span></div></td>
                         </tr>`;
                     }
                     html += '</tbody></table>';
@@ -3242,6 +3359,16 @@
         function initGraph() {
             if (graphInitialized) return;
             graphInitialized = true;
+
+            if (typeof cytoscape === 'undefined') {
+                const errEl = document.getElementById('cy-load-error');
+                const cyEl = document.getElementById('cy');
+                const toolbarEl = document.getElementById('graph-toolbar');
+                if (errEl) errEl.style.display = 'flex';
+                if (cyEl) cyEl.style.display = 'none';
+                if (toolbarEl) toolbarEl.style.display = 'none';
+                return;
+            }
 
             // Layout selector
             document.querySelectorAll('#layout-selector button').forEach(btn => {
@@ -4349,7 +4476,7 @@
                         <td class="mono truncate" style="max-width:220px; font-size:0.78rem" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
                         <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
                         <td>${tagChips(d.metadata)}</td>
-                        <td style="white-space:nowrap">${(d.content_length / 1000).toFixed(1)}k</td>
+                        <td style="white-space:nowrap">${fmtNum(d.content_length / 1000, 1)}k</td>
                     </tr>
                 `).join('');
 
@@ -4638,7 +4765,7 @@
         function scoreBreakdownStr(sb) {
             if (!sb || typeof sb !== 'object') return '';
             return Object.entries(sb).map(([k, v]) =>
-                `${k}: ${typeof v === 'number' ? v.toFixed(3) : v}`).join(', ');
+                `${k}: ${typeof v === 'number' ? fmtNum(v, 3) : v}`).join(', ');
         }
 
         async function loadPackDetail(packId) {
@@ -4718,7 +4845,7 @@
                                     <td class="mono truncate" style="max-width:240px; font-size:0.75rem" title="${escHtml(r.item_id)}">${escHtml(r.item_id)}</td>
                                     <td style="font-size:0.78rem">${escHtml(r.item_type || '')}</td>
                                     <td style="font-size:0.78rem">${escHtml(r.strategy_source || '')}</td>
-                                    <td>${r.relevance_score != null ? Number(r.relevance_score).toFixed(3) : '-'}</td>
+                                    <td>${r.relevance_score != null ? fmtNum(r.relevance_score, 3) : '-'}</td>
                                     <td style="font-size:0.78rem">${escHtml(r.reason || '')}</td>
                                 </tr>`).join('')}
                             </tbody>
@@ -5032,8 +5159,11 @@
                 // sits a few pixels above this message.
                 if (/^40[13]\b/.test(err.message)) {
                     error.textContent = /^403/.test(err.message)
-                        ? 'Signed in, but this key lacks the scope this dashboard needs. '
-                          + 'Enter an admin-scoped key in the banner above.'
+                        ? 'Signed in, but this key lacks the admin scope this dashboard needs. '
+                          + 'Enter an admin-scoped key in the banner above, or use the sidebar — '
+                          + 'Traces, Memories, Events, Packs, Graph, Precedents, Reports and Policies '
+                          + '(view only) work with a read-scoped key; tabs needing admin are now '
+                          + 'marked "admin" in the sidebar.'
                         : 'This Trellis API requires an API key. Enter one in the banner above '
                           + '(or click the key icon in the header) to load the dashboard.';
                 } else {
@@ -5212,7 +5342,7 @@
             try {
                 const data = await fetchJSON(`/analyze/${encodeURIComponent(name)}${qs ? '?' + qs : ''}`);
                 lastReportPayload = data;
-                metaEl.innerHTML = `computed_at: ${escHtml(data.computed_at || 'unknown')}` +
+                metaEl.innerHTML = `computed_at: ${escHtml(fmtTime(data.computed_at, { empty: 'unknown' }))}` +
                     (data.cached ? ' <span class="badge badge-info">cached</span>' : '');
                 renderReportOutput();
             } catch (err) {
@@ -5804,14 +5934,14 @@
             const statusBadge = a.status === 'suppressed'
                 ? `<span class="badge badge-warn" title="${escHtml(a.suppression_reason || 'suppressed')}">suppressed</span>`
                 : `<span class="badge badge-ok">active</span>`;
-            const evidenceConf = ev.evidence_confidence == null ? 'not measured' : ev.evidence_confidence.toFixed(2);
+            const evidenceConf = fmtNum(ev.evidence_confidence, 2);
             const scopeCell = a.scope + (a.entity_id ? ` (entity: ${a.entity_id})` : '');
             return `<tr>
                 <td title="${escHtml(a.advisory_id)}"><code>${escHtml(String(a.advisory_id).substring(0, 12))}</code></td>
                 <td>${escHtml(a.category)}</td>
                 <td>${escHtml(scopeCell)}</td>
-                <td>${a.confidence == null ? 'not measured' : escHtml(a.confidence.toFixed(2))}</td>
-                <td title="sample_size=${escHtml(String(ev.sample_size ?? ''))}, success_with=${escHtml(String(ev.success_rate_with ?? ''))}, success_without=${escHtml(String(ev.success_rate_without ?? ''))}">evidence_confidence: ${escHtml(evidenceConf)}, effect: ${ev.effect_size == null ? 'not measured' : escHtml(ev.effect_size.toFixed(2))}</td>
+                <td>${fmtNum(a.confidence, 2)}</td>
+                <td title="sample_size=${escHtml(String(ev.sample_size ?? ''))}, success_with=${escHtml(String(ev.success_rate_with ?? ''))}, success_without=${escHtml(String(ev.success_rate_without ?? ''))}">evidence_confidence: ${evidenceConf}, effect: ${fmtNum(ev.effect_size, 2)}</td>
                 <td>${statusBadge}</td>
                 <td>${escHtml(fmtTime(a.created_at, { empty: 'not measured' }))}</td>
                 <td>${a.fitness_scored_at ? escHtml(fmtTime(a.fitness_scored_at, { empty: 'not measured' })) : 'not yet scored'}</td>
