@@ -40,12 +40,12 @@ class TestNeverRunVsZero:
 
         for row in report.loops:
             if row.name == "tuner":
-                # Documented exception: pending_count/promoted_total are
+                # Documented exception: pending_count/auto_promoted_total are
                 # live reads, not event-derived, so they stay populated
                 # even when the automated tuner pass has never run.
                 assert row.last_run_at is None
                 assert row.last_status is None
-                assert row.counters == {"pending_count": 0, "promoted_total": 0}
+                assert row.counters == {"pending_count": 0, "auto_promoted_total": 0}
                 continue
             assert row.last_run_at is None, row.name
             assert row.last_status is None, row.name

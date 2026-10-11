@@ -121,7 +121,7 @@ health-signal rule exists to prevent.
       "what_it_changes": "Auto-promotes a parameter proposal ONLY when learning.auto_promote.enabled is set (off by default); otherwise every proposal stays pending for a human to run `trellis metrics promote --commit`.",
       "last_run_at": null,
       "last_status": null,
-      "counters": {"pending_count": 3, "promoted_total": 0}
+      "counters": {"pending_count": 3, "auto_promoted_total": 0}
     }
   ]
 }

@@ -210,13 +210,14 @@ def summarize_loop_health(
         name="precedent_promotion",
         description=(
             "Turns a reviewed, promotion-ready learning candidate into a "
-            "durable precedent in the knowledge graph."
+            "precedent that get_lessons and the Precedents tab serve."
         ),
         actuates=False,
         what_it_changes=(
-            "A human runs the promotion command; nothing here promotes a "
-            "candidate on its own (sensing only — this row counts the "
-            "manual promotions that have happened)."
+            "Nothing schedules a promotion: a human approves one (Review "
+            "tab or `trellis curate promote-learning`). This row counts "
+            "every PRECEDENT_PROMOTED event, which also includes any "
+            "manual run of the unscheduled PrecedentMiner."
         ),
         last_run_at=precedent_latest.occurred_at if precedent_latest else None,
         last_status="ok" if precedent_latest else None,
@@ -247,7 +248,7 @@ def summarize_loop_health(
     tuner_counters: dict[str, Any] = {
         # Live store state, not event-derived — see module docstring.
         "pending_count": pending_count,
-        "promoted_total": len(auto_promoted_scan.events),
+        "auto_promoted_total": len(auto_promoted_scan.events),
     }
     if tune_latest is not None:
         tune_payload = tune_latest.payload

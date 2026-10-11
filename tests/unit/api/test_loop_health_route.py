@@ -65,10 +65,10 @@ class TestLoopHealthRoute:
         assert len(data["loops"]) == 7
         for row in data["loops"]:
             if row["name"] == "tuner":
-                # Documented exception: pending_count/promoted_total are
+                # Documented exception: pending_count/auto_promoted_total are
                 # live reads and stay populated at a real 0.
                 assert row["last_run_at"] is None
-                assert row["counters"] == {"pending_count": 0, "promoted_total": 0}
+                assert row["counters"] == {"pending_count": 0, "auto_promoted_total": 0}
                 continue
             assert row["last_run_at"] is None, row["name"]
             assert row["last_status"] is None, row["name"]
