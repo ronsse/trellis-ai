@@ -148,6 +148,25 @@ class EventType(StrEnum):
     # them so operators can review before the smoothing absorbs them.
     ADVISORY_DRIFT_DETECTED = "advisory.drift_detected"
 
+    #: One per ``run_curation_cycle`` call (the nightly ``worker curate``
+    #: cron and every ``--interval`` tick), carrying the same counters
+    #: ``--format json`` reports. Before this, the cycle's only durable
+    #: record was a structlog line a cron wrapper piped to a host-only
+    #: log file the API container cannot read — invisible to
+    #: ``GET /api/v1/loops`` and to any operator not tailing that file
+    #: (e167). Emitted fail-soft: a broken EventLog must never fail the
+    #: cycle whose health it is reporting.
+    CURATE_CYCLE_COMPLETED = "curate.cycle_completed"
+
+    #: One per ``worker tune`` invocation (live runs only — see
+    #: :data:`CURATE_CYCLE_COMPLETED`'s dry-run rule, which this mirrors),
+    #: carrying the same :func:`report_to_dict` counters ``--format json``
+    #: reports. A pass that promotes nothing already emits zero
+    #: proposal-level events, so without this ``GET /api/v1/loops`` cannot
+    #: tell "the tuner ran and found nothing to do" from "the tuner has
+    #: never run" (e167).
+    TUNE_CYCLE_COMPLETED = "tune.cycle_completed"
+
     # Classification refresh (stale-tag reclassification — see Gap 1.1)
     TAGS_REFRESHED = "tags.refreshed"
     #: Emitted by a classifier when its upstream signal source fails and

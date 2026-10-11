@@ -66,6 +66,7 @@ $ trellis admin version --format json | jq '{api_version, mcp_tools_version}'
 | Bulk ingest | `POST /api/v1/ingest/bulk` | — | — |
 | Policy CRUD | `/api/v1/policies[/...]` | — | — |
 | Stats / effectiveness | `/api/v1/stats`, `/api/v1/effectiveness`, `/api/v1/metrics/timeseries` | — | — |
+| Per-loop health (noise demotion, advisory generation/fitness, learning-candidate scoring, precedent promotion, tuner, feedback intake) | `GET /api/v1/loops` (admin scope) | — | — |
 
 [^chunks]: The three are not interchangeable on chunk rows, and the
     difference is deliberate. `GET /api/v1/search` and `client.search`
