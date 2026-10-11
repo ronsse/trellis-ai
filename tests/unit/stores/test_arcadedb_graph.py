@@ -89,10 +89,18 @@ def _rows_left(store, node_id: str) -> dict[str, int]:
                 ("AliasClaim", "entity_id"),
             )
         }
-        # EdgeClaim keys on either side of the triplet (F1), not a single
-        # node-named property, so it needs its own OR query.
+        # Match by `claim_key` membership, not by the `source_id`/
+        # `target_id` properties the purge itself deletes by: those two
+        # oracles would agree even if the claim write stopped setting
+        # those properties, since neither side would find anything to
+        # count. `claim_key` is the JSON-encoded `[source_id, target_id,
+        # edge_type]` triplet the MERGE keys on (`_edge_claim_key`), so
+        # it names the node regardless of whether the row also carries
+        # the separate properties the purge matches against -- a purge
+        # that silently stopped working would leave a count here even
+        # though the properties-based query reads 0.
         counts["EdgeClaim"] = session.run(
-            "MATCH (x:EdgeClaim) WHERE x.source_id = $nid OR x.target_id = $nid "
+            "MATCH (x:EdgeClaim) WHERE x.claim_key CONTAINS $nid "
             "RETURN count(x) AS c",
             nid=node_id,
         ).single()["c"]
@@ -275,7 +283,7 @@ def test_upsert_edge_missing_endpoints_raises(graph_store, source_id, target_id)
     with pytest.raises(ValueError, match="no current version"):
         graph_store.upsert_edge(source_id, target_id, "links_to")
     assert graph_store.count_edges() == 0
-    # F2: a missing endpoint must not leave an orphan EdgeClaim row for a
+    # A missing endpoint must not leave an orphan EdgeClaim row for a
     # future real writer of this triplet to contend with for no reason.
     assert _rows_left(graph_store, source_id)["EdgeClaim"] == 0
     assert _rows_left(graph_store, target_id)["EdgeClaim"] == 0

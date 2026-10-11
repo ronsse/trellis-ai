@@ -1605,7 +1605,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         // not after: the claim must not be written for a triplet whose
         // edge can never be created, or every future real writer of this
         // triplet inherits an orphan claim row to contend with for no
-        // reason (F2).
+        // reason.
         WHERE s IS NOT NULL AND t IS NOT NULL
         // Claim the (source_id, target_id, edge_type) triplet before
         // resolving `old`, for the same reason the endpoint locks run
@@ -1620,7 +1620,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         // SET/REMOVE touch of an existing row, which ArcadeDB 26.8.1's
         // commit check does not see as a conflict at all (measured: see
         // the module docstring). `source_id`/`target_id` are written so
-        // ``delete_node`` can find and purge this row (F1); they are
+        // ``delete_node`` can find and purge this row; they are
         // stable for a given `claim_key`, so re-asserting them on a
         // retry is not itself a race.
         MERGE (ec:EdgeClaim {{claim_key: $edge_claim_key}})

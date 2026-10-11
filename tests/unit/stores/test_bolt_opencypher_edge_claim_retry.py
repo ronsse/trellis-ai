@@ -22,6 +22,7 @@ docstring).
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -232,7 +233,7 @@ class TestUpsertEdgeRetries:
 
 
 class TestArcadeDBWidensEdgeClaimOverItsGenericErrorChannel:
-    """The per-backend seam, kept narrow and logged (F3).
+    """The per-backend seam, kept narrow and logged.
 
     ArcadeDB's generic ``Neo.DatabaseError.General.UnknownError`` bucket is
     where a runtime fault on this package's fixed Cypher literal would
@@ -285,7 +286,7 @@ class TestArcadeDBWidensEdgeClaimOverItsGenericErrorChannel:
         assert execute_write.call_count == 2
 
     def test_the_generic_bucket_match_logs_the_message_at_warning(self) -> None:
-        """F3: a real occurrence must be visible, not silently retried away."""
+        """A real occurrence must be visible, not silently retried away."""
         store = _make_arcadedb_store()
         with capture_logs() as logs:
             assert store._is_edge_write_contention(_stale_record()) is True
@@ -325,7 +326,7 @@ class _RecordingTx:
     ``upsert_edge``'s Cypher survive every test in this file), this fake
     actually calls the closure and captures the Cypher text and bound
     parameters it sends — the only way to pin the claim write's content
-    (F4, gate mutant M1).
+    against a mutant that deletes the whole prelude.
     """
 
     def __init__(self) -> None:
@@ -380,15 +381,20 @@ def _make_recording_store(session: _RecordingSession) -> BoltOpenCypherGraphStor
 
 
 class TestClaimWritePrimitiveIsPinned:
-    """F4: a test that fails when the claim prelude is deleted.
+    """A test that fails when the claim prelude is deleted, or when its
+    write stops being unconditional.
 
-    Verified against an e176 mutation run that deletes the ``MERGE
-    (ec:EdgeClaim ...) SET ec.claim_token = ...`` block from the Cypher
-    literal (the mutant M1 in ``$ON/probes/gate856/mutate.py`` targets,
-    textually updated for this rework's claim prelude): with the prelude
-    gone, ``"MERGE (ec:EdgeClaim" not in cypher`` and this test fails,
-    where the mock-only tests above keep passing because they never look
-    at the Cypher text at all.
+    A mutant that deletes the ``MERGE (ec:EdgeClaim ...) SET
+    ec.claim_token = ...`` block entirely fails this test (the mock-only
+    tests above keep passing because they never look at the Cypher text
+    at all). So does a mutant that moves the token write onto
+    ``ON CREATE SET`` (making it fire only when the claim is first
+    created, not on every upsert of an already-claimed triplet) or that
+    follows it with ``REMOVE ec.claim_token`` (recreating the no-op
+    touch this rework replaced). Both of those changes read as
+    reasonable optimizations and are invisible to every other test in
+    this file; live, both measurably reopen the race this claim exists
+    to close.
     """
 
     def test_claim_prelude_is_sent_with_a_fresh_token_each_call(self) -> None:
@@ -405,6 +411,15 @@ class TestClaimWritePrimitiveIsPinned:
         for cypher, params in tx.calls:
             assert "MERGE (ec:EdgeClaim {claim_key: $edge_claim_key})" in cypher
             assert "ec.claim_token = $edge_claim_token" in cypher
+            assert re.search(
+                r"MERGE \(ec:EdgeClaim \{claim_key: \$edge_claim_key\}\)\s*\n\s*"
+                r"SET ec\.claim_token = \$edge_claim_token\b",
+                cypher,
+            ), "the token write must be an unconditional SET right after the MERGE, not ON CREATE SET"
+            assert "REMOVE ec.claim_token" not in cypher, (
+                "the claim write must not remove the token it just set -- that recreates the "
+                "no-op SET/REMOVE touch this rework replaced"
+            )
             assert "edge_claim_token" in params
             tokens.append(params["edge_claim_token"])
         assert tokens[0] != tokens[1]
