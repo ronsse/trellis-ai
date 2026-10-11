@@ -608,6 +608,10 @@ _SPECS: tuple[SettingSpec, ...] = (
         settings_live=True,
         env_var="TRELLIS_NOISE_DEMOTION_MIN_ATTRIBUTED_PACKS",
         minimum=1,
+        # A sanity cap against a typo or an overflow-class value (e.g.
+        # 10**400), not an operational ceiling — see
+        # minhash_seed_max_docs above for the same posture.
+        maximum=1_000_000,
     ),
     SettingSpec(
         name="noise_demotion_min_unhelpful_citations",
@@ -633,6 +637,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         settings_live=True,
         env_var="TRELLIS_NOISE_DEMOTION_MIN_UNHELPFUL_CITATIONS",
         minimum=1,
+        maximum=1_000_000,
     ),
     SettingSpec(
         name="advisory_min_sample_size",
@@ -658,6 +663,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         settings_live=True,
         env_var="TRELLIS_ADVISORY_MIN_SAMPLE_SIZE",
         minimum=1,
+        maximum=1_000_000,
     ),
     SettingSpec(
         name="advisory_min_effect_size",
@@ -703,6 +709,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         settings_live=True,
         env_var="TRELLIS_CAPTURE_WARN_THRESHOLD",
         minimum=0,
+        maximum=1_000_000,
     ),
     SettingSpec(
         name="capture_warn_window_hours",
@@ -723,6 +730,14 @@ _SPECS: tuple[SettingSpec, ...] = (
         settings_live=True,
         env_var="TRELLIS_CAPTURE_WARN_WINDOW_HOURS",
         minimum=0,
+        # 87600 hours = 10 years. The real failure mode this bounds is
+        # not an operational need past a year or two, it's
+        # ``datetime.now() - timedelta(hours=stored)`` landing before
+        # year 1 (or overflowing timedelta's own range for a much larger
+        # typo) inside capture_health.check_capture_health — see that
+        # module for the OverflowError/ValueError fallback kept as
+        # defense in depth even with this cap in place.
+        maximum=87_600,
     ),
     SettingSpec(
         name="capture_strict",

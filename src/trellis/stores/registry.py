@@ -1788,6 +1788,14 @@ class StoreRegistry:
         ``None`` when neither knob is set (nothing configured). Pair with
         an actual :attr:`embedding_fn` read to know whether that source
         resolved or raised.
+
+        Only safe to show once :attr:`embedding_fn` has actually
+        resolved: the "value" half of this label (the dotted path or
+        provider string) is operator-chosen text that is safe on the
+        *success* path, but a caller displaying a *failure* must use
+        :meth:`embedding_source_knob` instead, which never includes it —
+        a provider string a user mistyped a secret into would otherwise
+        echo verbatim in the one place a raise is reported.
         """
         import os  # noqa: PLC0415
 
@@ -1797,6 +1805,28 @@ class StoreRegistry:
         provider = self._embedding_config.get("provider")
         if isinstance(provider, str) and provider:
             return f"{provider} (embeddings.provider)"
+        return None
+
+    def embedding_source_knob(self) -> str | None:
+        """Which knob *name* governs :attr:`embedding_fn`, with no value.
+
+        Same precedence as :meth:`embedding_source_label` (env wins over
+        config), but reports only ``"TRELLIS_EMBEDDING_FN"`` or
+        ``"embeddings.provider"`` — never the dotted path or provider
+        string a caller supplied. Use this on a *failure* path, where the
+        configured value is exactly the attacker- or typo-controlled text
+        that must never reach a response body or a log line: unlike the
+        label, the value half here could be anything an operator pasted
+        into the knob, including a credential. Returns ``None`` when
+        neither knob is set.
+        """
+        import os  # noqa: PLC0415
+
+        if os.environ.get("TRELLIS_EMBEDDING_FN"):
+            return "TRELLIS_EMBEDDING_FN"
+        provider = self._embedding_config.get("provider")
+        if isinstance(provider, str) and provider:
+            return "embeddings.provider"
         return None
 
     @property

@@ -224,15 +224,19 @@ def runtime() -> RuntimeResponse:
     try:
         resolved_embedding_fn = registry.embedding_fn
     except Exception as exc:  # GRACEFUL-DEGRADATION: a panel, not a gate
-        source = registry.embedding_source_label()
+        # Never the knob's *value* here (embedding_source_label()) -- on
+        # the failure path the configured string is exactly the
+        # typo/attacker-controlled text that must not reach the response
+        # body or the log. Only the knob name and the exception type.
+        knob = registry.embedding_source_knob()
         logger.warning(
             "runtime_embedder_probe_failed",
-            source=source,
+            knob=knob,
             error_type=type(exc).__name__,
         )
         embedder_name = (
-            f"unknown ({source} failed: {type(exc).__name__})"
-            if source
+            f"unknown ({knob} failed: {type(exc).__name__})"
+            if knob
             else f"unknown ({type(exc).__name__})"
         )
     else:
@@ -263,6 +267,21 @@ def runtime() -> RuntimeResponse:
             if exc.setting
             else "llm.routes/llm.tiers is invalid; see the server log."
         )
+    except Exception as exc:  # GRACEFUL-DEGRADATION: a panel, not a gate
+        # S1 (re-gate #867): routing.py now raises LLMRoutingError for a
+        # non-Mapping 'llm:' block too, but this is the second,
+        # independent gate the embedder block above already uses --
+        # whatever reaches here next (a resolver bug, a future shape
+        # validate_llm_routing doesn't anticipate) degrades to a reported
+        # field rather than a 500 that blanks the whole panel, auth
+        # banner included. Fixed text only, never str(exc), which could
+        # echo a pasted credential.
+        logger.warning(
+            "runtime_llm_routes_invalid",
+            setting=None,
+            error_type=type(exc).__name__,
+        )
+        llm_routes_error = "llm.routes/llm.tiers is invalid; see the server log."
 
     learning_dir = resolve_learning_artifacts_dir(registry.stores_dir)
     mode = resolve_auth_mode()

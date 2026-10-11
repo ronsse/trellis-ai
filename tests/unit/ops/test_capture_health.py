@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.ops import capture_health
 from trellis.ops.capture_health import (
@@ -136,11 +137,64 @@ class TestResolveCaptureThresholds:
 
         assert threshold == 0
 
+    def test_an_overflow_class_settings_window_falls_back_to_the_default(
+        self,
+    ) -> None:
+        """B4a: 18,000,000 hours (~2054 years) is syntactically a valid
+        int, but subtracting it from ``datetime.now()`` underflows
+        ``datetime``'s year-1 floor -- it used to reach
+        ``check_capture_health`` unbounded and raise ``OverflowError``
+        on every ``get_context`` call. The registry's own ``maximum`` on
+        ``capture_warn_window_hours`` must refuse it here, before
+        ``check_capture_health`` ever sees it.
+        """
+        settings = {WINDOW_HOURS_SETTING: 18_000_000}
+
+        _threshold, window_hours = resolve_capture_thresholds(settings)
+
+        assert window_hours == DEFAULT_WINDOW_HOURS
+
+    def test_an_overflow_class_env_window_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_WARN_WINDOW_HOURS", "18000000")
+
+        _threshold, window_hours = resolve_capture_thresholds(None)
+
+        assert window_hours == DEFAULT_WINDOW_HOURS
+
 
 class TestCheckCaptureHealth:
     def test_empty_log_is_healthy(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")
         assert check_capture_health(event_log) is None
+
+    def test_an_overflow_class_explicit_window_hours_degrades_not_crashes(
+        self, tmp_path: Path
+    ) -> None:
+        """B4a defense in depth: an explicit ``window_hours`` kwarg
+        bypasses the registry's bounded resolver entirely (the
+        docstring's "explicit kwargs win over the env knobs" --
+        ``resolve_capture_thresholds`` is never consulted), so a caller
+        passing an overflow-class value directly must still not crash
+        the ``datetime.now() - timedelta(...)`` arithmetic. Every
+        ``get_context`` call runs this, so an unhandled ``OverflowError``
+        here is a traceback on every retrieval, not a banner failing to
+        clear.
+        """
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        with capture_logs() as logs:
+            result = check_capture_health(
+                event_log, threshold=DEFAULT_THRESHOLD, window_hours=18_000_000
+            )
+        assert result is None  # nothing seeded, so still healthy
+        overflow_logs = [
+            log
+            for log in logs
+            if log.get("event") == "capture_health.window_hours_overflow"
+        ]
+        assert len(overflow_logs) == 1, logs
+        assert overflow_logs[0]["window_hours"] == 18_000_000
 
     def test_below_threshold_is_healthy(self, tmp_path: Path) -> None:
         event_log = SQLiteEventLog(tmp_path / "events.db")

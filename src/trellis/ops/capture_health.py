@@ -529,7 +529,25 @@ def check_capture_health(
         if window_hours is not None
         else _env_int(_WINDOW_ENV, DEFAULT_WINDOW_HOURS)
     )
-    since = datetime.now(tz=UTC) - timedelta(hours=resolved_window)
+    try:
+        since = datetime.now(tz=UTC) - timedelta(hours=resolved_window)
+    except OverflowError:
+        # Defense in depth: the registry spec now caps
+        # TRELLIS_CAPTURE_WARN_WINDOW_HOURS / the stored override at
+        # 87600 (10 years), so a value reaching this function through
+        # ``resolve_capture_thresholds`` is already bounded. This guards
+        # the *other* path in — an explicit ``window_hours`` kwarg, or a
+        # future caller that reads the env var directly with
+        # ``_env_int`` (unbounded) rather than the capped resolver —
+        # from turning a huge-but-syntactically-valid hour count into an
+        # unhandled crash on every retrieval call instead of a banner
+        # that just can't clear.
+        logger.warning(
+            "capture_health.window_hours_overflow",
+            window_hours=resolved_window,
+        )
+        resolved_window = DEFAULT_WINDOW_HOURS
+        since = datetime.now(tz=UTC) - timedelta(hours=resolved_window)
 
     total_rejected = event_log.count(
         event_type=EventType.WRITE_REJECTED, since=since

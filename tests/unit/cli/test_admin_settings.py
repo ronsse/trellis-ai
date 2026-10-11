@@ -12,16 +12,18 @@ exit-code parity between them (``tests/unit/test_format_exit_parity_rule.py``).
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
-
-if TYPE_CHECKING:
-    import pytest
-
+from trellis.core.settings_registry import (
+    SETTINGS_REGISTRY,
+    SettingSpec,
+    validate_value,
+)
 from trellis.mutate.policy_source import POLICY_FILENAME
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
@@ -228,3 +230,180 @@ class TestUnset:
         _init_stores(tmp_path, monkeypatch)
         result = _invoke(["unset", "not_a_real_setting", "--format", "json"])
         assert result.exit_code == EXIT_VALIDATION, result.output
+
+
+# ---------------------------------------------------------------------------
+# B6 (re-gate #867): every registry entry, not just the twelve original
+# WriteBehaviourConfig fields, must be settable/unsettable without a crash
+# ---------------------------------------------------------------------------
+
+
+def _literal_for(spec: SettingSpec) -> str:
+    """A value *spec*'s own ``validate_value`` accepts, as a plain string --
+    used for both the CLI argument and the env-var override, so this test
+    needs no hand-maintained per-knob table (which is exactly the kind of
+    table that went stale and caused B6 in the first place).
+
+    Every entry ships a valid, in-range ``default`` except
+    ``trace_extraction_min_confidence`` (``None`` means "no gate"), which
+    falls back to its declared ``minimum``.
+    """
+    if spec.default is not None:
+        if spec.type == "bool":
+            return "true" if spec.default else "false"
+        return str(spec.default)
+    if spec.enum:
+        return spec.enum[0]
+    if spec.minimum is not None:
+        return str(spec.minimum)
+    return "0"
+
+
+def _b6_cases() -> list[tuple[str, str, bool, str]]:
+    cases: list[tuple[str, str, bool, str]] = []
+    for spec in SETTINGS_REGISTRY.values():
+        actions = ("set", "unset") if spec.settings_writable else ("unset",)
+        cases.extend(
+            (spec.name, action, env_set, output_format)
+            for action in actions
+            for env_set in (True, False)
+            for output_format in ("json", "text")
+        )
+    return cases
+
+
+_B6_CASES = _b6_cases()
+_B6_IDS = [
+    f"{name}-{action}-env{'On' if env_set else 'Off'}-{fmt}"
+    for name, action, env_set, fmt in _B6_CASES
+]
+
+
+class TestEffectiveValueAcrossRegistry:
+    """Re-gate #867 B6: ``set``/``unset`` used to resolve the "env wins"
+    success note by indexing
+    ``WriteBehaviourConfig.from_env_and_settings().as_dict()[spec.name]``
+    directly -- a mapping that only ever held the twelve original fields.
+    Every knob a later PR added to :data:`SETTINGS_REGISTRY` then raised
+    ``KeyError`` here whenever its env var was set, turning what the
+    governed executor had already recorded as a successful write (row
+    and event both persisted) into an uncaught exception and exit code 1.
+
+    ``_env_effective_value`` (``trellis_cli/admin_settings.py``) now
+    delegates to :func:`trellis_api.routes.settings._effective_values`,
+    the one resolver ``GET /settings`` already uses and which already
+    covers every entry. This proves that across the *whole* registry --
+    every entry, both actions it supports, the env var set and unset,
+    both output formats -- not just the fields the old mapping knew
+    about.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "action", "env_set", "output_format"), _B6_CASES, ids=_B6_IDS
+    )
+    def test_exits_ok_with_well_formed_output(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        action: str,
+        env_set: bool,
+        output_format: str,
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        spec = SETTINGS_REGISTRY[name]
+        literal = _literal_for(spec)
+
+        if env_set:
+            monkeypatch.setenv(spec.env_var, literal)
+        else:
+            monkeypatch.delenv(spec.env_var, raising=False)
+
+        fmt_args = ["--format", output_format] if output_format == "json" else []
+        args = (
+            ["set", name, literal, *fmt_args]
+            if action == "set"
+            else [
+                "unset",
+                name,
+                *fmt_args,
+            ]
+        )
+
+        result = _invoke(args)
+
+        assert result.exception is None, result.output
+        assert result.exit_code == EXIT_OK, result.output
+        assert "Traceback" not in result.output
+
+        if output_format == "json":
+            payload = json.loads(result.stdout)
+            assert payload["status"] == "success"
+            assert isinstance(payload["command_id"], str)
+            assert payload["command_id"]
+        else:
+            assert "settings.update" in plain(result.output)
+
+
+def _env_pinned_cases() -> list[tuple[str, str]]:
+    """``(name, action)`` with the env var always set -- the one branch
+    ``_truthfulness_note`` prints an "effective value" for.
+    """
+    cases: list[tuple[str, str]] = []
+    for spec in SETTINGS_REGISTRY.values():
+        actions = ("set", "unset") if spec.settings_writable else ("unset",)
+        cases.extend((spec.name, action) for action in actions)
+    return cases
+
+
+_ENV_PINNED_CASES = _env_pinned_cases()
+_ENV_PINNED_IDS = [f"{name}-{action}" for name, action in _ENV_PINNED_CASES]
+
+
+class TestEffectiveValueNoteContent:
+    """Re-gate #867 M30: ``TestEffectiveValueAcrossRegistry`` above proves
+    every registry entry exits 0 under ``--format json``/``text`` with
+    the env var both set and unset -- it never reads ``payload["note"]``,
+    so a mutant that hard-codes ``_truthfulness_note``'s ``effective``
+    local to ``None`` (dropping the real
+    ``_env_effective_value(spec, settings_values)`` call entirely) still
+    passes every one of those cases: exit 0 and a well-formed envelope
+    say nothing about whether the printed value is the *real* one.
+
+    This computes the expected value independently, via
+    :func:`validate_value`'s own coercion of the same literal used as the
+    env var -- not via ``_env_effective_value``/``_effective_values``, so
+    a defect in either of those is still visible here -- and asserts the
+    note's ``(effective value: ...)`` text matches it exactly, for both
+    the ``set`` (not-reset) and ``unset`` (reset) wordings.
+    """
+
+    @pytest.mark.parametrize(("name", "action"), _ENV_PINNED_CASES, ids=_ENV_PINNED_IDS)
+    def test_note_echoes_the_real_env_resolved_value(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        name: str,
+        action: str,
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        spec = SETTINGS_REGISTRY[name]
+        literal = _literal_for(spec)
+        monkeypatch.setenv(spec.env_var, literal)
+        expected = validate_value(spec, literal)
+
+        args = (
+            ["set", name, literal, "--format", "json"]
+            if action == "set"
+            else ["unset", name, "--format", "json"]
+        )
+        result = _invoke(args)
+
+        assert result.exit_code == EXIT_OK, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "success"
+        note = payload["note"]
+        assert note is not None, payload
+        match = re.search(r"\(effective value: (.*?)\)", note)
+        assert match is not None, note
+        assert match.group(1) == repr(expected), note

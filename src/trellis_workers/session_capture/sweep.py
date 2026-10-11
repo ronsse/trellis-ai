@@ -133,7 +133,13 @@ def strict_mode(settings: Mapping[str, Any] | None = None) -> bool:
             return True
         if isinstance(stored, str):
             return stored.strip().lower() not in _OPT_OUT_TOKENS
-        return bool(stored)
+        # Only a real bool is trusted as-is. ``bool(stored)`` here would
+        # read a stored 0 / 0.0 as non-strict -- a type the governed
+        # write path should refuse for a bool-typed setting, but a stray
+        # non-bool that reaches this far (a hand-edited settings.json,
+        # a future relaxation of the write path) must fail closed to
+        # the strict default rather than silently flip it.
+        return stored if isinstance(stored, bool) else True
     return True
 
 

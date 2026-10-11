@@ -177,6 +177,17 @@ def validate_llm_routing(llm_config: Mapping[str, Any] | None) -> None:
     is an error, because routing to it would silently build the parent.
     """
     parent = llm_config or {}
+    if not isinstance(parent, Mapping):
+        # A truthy non-Mapping (a string, a list, ``True``, an int --
+        # ``None``/``{}``/``""``/``[]`` are already coerced to ``{}`` above)
+        # used to reach ``_section``'s own ``.get`` call as an
+        # AttributeError, which is not an ``LLMRoutingError`` and so was
+        # never caught by any of this module's three callers (S1, re-gate
+        # #867): an operator's ``llm: <scalar-or-list>`` typo 500'd the
+        # admin API's Runtime panel instead of degrading to a reported
+        # error like every other malformed shape in this block.
+        msg = f"llm: must be a mapping, got {type(parent).__name__}."
+        raise LLMRoutingError(msg, setting="llm")
     tiers = _tiers(parent)
     routes = _routes(parent)
     parent_endpoint = {key: parent.get(key) for key in ENDPOINT_KEYS}

@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 import trellis_api.app as app_module
 from trellis.llm.routing import LLMConsumer
@@ -31,6 +32,11 @@ from trellis_api.routes import admin
 _FAKE_DSN = "postgresql://trellis:sUp3rSecr3t@db.internal:5432/trellis"
 _FAKE_API_KEY = "sk-live-RuntimeRouteTestSecretValue000111"
 _FAKE_BEARER = "Bearer rt-test-shared-secret-abc123xyz"
+#: Shaped like a secret pasted into TRELLIS_EMBEDDING_FN by mistake --
+#: has a dot so it passes _import_callable's syntax check and reaches
+#: (and fails) the real import, the path that used to echo the raw knob
+#: value into both the response and the warning log on failure.
+_FAKE_EMBEDDING_FN_SECRET = "sk-live-RuntimeEmbedderSecretValue000111.not_callable"  # noqa: S105
 
 
 @pytest.fixture
@@ -164,13 +170,47 @@ def test_embedder_reports_the_config_provider_source_when_set(tmp_path) -> None:
         reg.close()
         app_module._registry = None
     # custom.module.embed cannot import (module does not exist), so
-    # embedding_fn raises -- the panel must degrade to "unknown" with the
-    # source and the exception type, never a 500 and never raw exception
-    # text (which could echo an import path a caller does not own).
+    # embedding_fn raises -- the panel must degrade to "unknown" naming
+    # only the KNOB (never the configured value, which is exactly the
+    # typo/attacker-controlled text an operator pasted in) and the
+    # exception type, never a 500.
     assert body["embedder"] is not None
-    assert body["embedder"].startswith(
-        "unknown (custom.module.embed (embeddings.provider) failed:"
+    assert body["embedder"].startswith("unknown (embeddings.provider failed:")
+    assert "custom.module.embed" not in body["embedder"]
+
+
+def test_embedder_env_wins_over_config_provider_when_both_set(
+    tmp_path, monkeypatch
+) -> None:
+    """Re-gate #867 M21: the two tests above each set exactly one of the
+    two knobs, so a mutant that swaps
+    :meth:`StoreRegistry.embedding_source_label`'s check order (config
+    read before the ``TRELLIS_EMBEDDING_FN`` env lookup, rather than
+    after) still passes both -- each test's untouched knob is simply
+    absent, so there is nothing for the swapped order to disagree about.
+    Setting both at once is the only way to observe which one actually
+    wins.
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "json.dumps")
+    reg = StoreRegistry(
+        stores_dir=tmp_path / "stores",
+        embedding_config={"provider": "custom.module.embed"},
     )
+    app_module._registry = reg
+    try:
+
+        @asynccontextmanager
+        async def noop_lifespan(app):
+            yield
+
+        app = FastAPI(lifespan=noop_lifespan)
+        app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
+        with TestClient(app) as c:
+            body = c.get("/api/v1/runtime").json()
+    finally:
+        reg.close()
+        app_module._registry = None
+    assert body["embedder"] == "json.dumps (TRELLIS_EMBEDDING_FN)"
 
 
 def test_embedder_degrades_to_unknown_with_a_reason_on_failure(
@@ -202,7 +242,52 @@ def test_embedder_degrades_to_unknown_with_a_reason_on_failure(
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["embedder"] is not None
-    assert body["embedder"].startswith("unknown (openai (embeddings.provider) failed:")
+    assert body["embedder"].startswith("unknown (embeddings.provider failed:")
+    assert "openai" not in body["embedder"]
+
+
+def test_embedder_failure_never_echoes_the_knob_value_in_the_response(
+    client, registry, monkeypatch
+) -> None:
+    """B1': a secret pasted into ``TRELLIS_EMBEDDING_FN`` that fails to
+    import must not reach the response body -- only the knob NAME
+    (``TRELLIS_EMBEDDING_FN``) and the exception type are safe to show;
+    the value is operator-supplied text with no safety guarantee.
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _FAKE_EMBEDDING_FN_SECRET)
+    resp = client.get("/api/v1/runtime")
+    assert resp.status_code == 200, resp.text
+    raw = resp.text
+    assert _FAKE_EMBEDDING_FN_SECRET not in raw
+    assert "sk-live-RuntimeEmbedderSecretValue000111" not in raw
+    body = json.loads(raw)
+    assert body["embedder"] == "unknown (TRELLIS_EMBEDDING_FN failed: ConfigError)"
+
+
+def test_embedder_failure_never_echoes_the_knob_value_in_the_log(
+    client, registry, monkeypatch
+) -> None:
+    """Same defect, the log layer: ``runtime_embedder_probe_failed`` must
+    carry ``knob=`` only, never the raw value that failed to import --
+    proven against real captured structlog records, not just the
+    response.
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _FAKE_EMBEDDING_FN_SECRET)
+    with capture_logs() as logs:
+        resp = client.get("/api/v1/runtime")
+    assert resp.status_code == 200, resp.text
+
+    failures = [
+        log for log in logs if log.get("event") == "runtime_embedder_probe_failed"
+    ]
+    assert len(failures) == 1, logs
+    record = failures[0]
+    assert record["knob"] == "TRELLIS_EMBEDDING_FN"
+    assert record["error_type"] == "ConfigError"
+    assert "source" not in record
+    for value in record.values():
+        assert _FAKE_EMBEDDING_FN_SECRET not in str(value)
+        assert "sk-live-RuntimeEmbedderSecretValue000111" not in str(value)
 
 
 def test_llm_routes_cover_every_consumer_and_are_unrouted_by_default(
@@ -247,6 +332,98 @@ def test_a_malformed_route_is_reported_as_an_error_not_a_500(tmp_path) -> None:
     finally:
         reg.close()
         app_module._registry = None
+
+
+@pytest.mark.parametrize(
+    "llm_config",
+    [
+        pytest.param("sk-live-NonMappingLlmConfigSecret000111", id="str"),
+        pytest.param([1, 2, 3], id="list"),
+        pytest.param(True, id="bool"),
+        pytest.param(42, id="int"),
+    ],
+)
+def test_a_non_mapping_llm_config_is_reported_as_an_error_not_a_500(
+    tmp_path, llm_config
+) -> None:
+    """S1 (re-gate #867): a truthy non-Mapping ``llm:`` block -- a string,
+    a list, ``True``, or a bare int -- used to reach ``_section``'s own
+    ``.get`` call inside :func:`trellis.llm.routing.validate_llm_routing`
+    as an uncaught ``AttributeError``, which is not an ``LLMRoutingError``
+    and so was never caught by this route's ``except LLMRoutingError``
+    clause: an operator's ``llm: <scalar-or-list>`` typo 500'd the whole
+    Runtime panel, auth banner included, instead of degrading to a
+    reported field like every other malformed ``llm:`` shape.
+
+    ``validate_llm_routing`` now raises ``LLMRoutingError(setting="llm")``
+    for any non-Mapping parent, so this is caught the same way a bad
+    ``llm.routes`` entry already was -- proven end to end through the real
+    route, not just at the ``routing.py`` unit level.
+    """
+    reg = StoreRegistry(stores_dir=tmp_path / "stores", llm_config=llm_config)
+    app_module._registry = reg
+    try:
+
+        @asynccontextmanager
+        async def noop_lifespan(app):
+            yield
+
+        app = FastAPI(lifespan=noop_lifespan)
+        app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
+        with TestClient(app) as c:
+            resp = c.get("/api/v1/runtime")
+        assert resp.status_code == 200, resp.text
+        raw = resp.text
+        assert "sk-live-NonMappingLlmConfigSecret000111" not in raw
+
+        body = json.loads(raw)
+        assert body["llm_routes"] == {}
+        assert body["llm_routes_error"] == "llm is invalid; see the server log."
+    finally:
+        reg.close()
+        app_module._registry = None
+
+
+def test_a_non_routing_exception_in_llm_routes_is_reported_not_500(
+    client, registry, monkeypatch
+) -> None:
+    """S1 (re-gate #867), the second independent gate: the route's
+    ``except LLMRoutingError`` clause only catches what
+    ``trellis.llm.routing`` actually raises. ``admin.py``'s ``runtime()``
+    also wraps the whole ``llm_routes`` block in a generic ``except
+    Exception`` -- mirroring the embedder block's existing
+    graceful-degradation pattern -- so a *different* failure (a resolver
+    bug, a future shape ``validate_llm_routing`` doesn't anticipate; the
+    gate's own probe used a synthetic exception for exactly this reason)
+    also degrades to a reported field instead of a 500. Proven
+    independently of the ``routing.py`` fix by making
+    ``StoreRegistry.llm_route`` itself raise something that is not an
+    ``LLMRoutingError``.
+    """
+
+    def _boom(consumer):
+        msg = "synthetic failure unrelated to llm.routes/llm.tiers shape"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(registry, "llm_route", _boom)
+
+    with capture_logs() as logs:
+        resp = client.get("/api/v1/runtime")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["llm_routes"] == {}
+    assert (
+        body["llm_routes_error"]
+        == "llm.routes/llm.tiers is invalid; see the server log."
+    )
+
+    warnings = [log for log in logs if log.get("event") == "runtime_llm_routes_invalid"]
+    assert len(warnings) == 1
+    assert warnings[0]["setting"] is None
+    assert warnings[0]["error_type"] == "RuntimeError"
+    for log in logs:
+        for value in log.values():
+            assert "synthetic failure" not in str(value)
 
 
 def test_learning_artifacts_dir_matches_the_resolver(client, registry) -> None:

@@ -171,7 +171,7 @@ class TestListSettings:
             "effective_value": 0.0,
             "overridden_by": "default",
             "stored_value": None,
-            "stored_value_invalid": False,
+            "parse_error": None,
             "updated_at": None,
             "settings_writable": True,
         }
@@ -188,7 +188,9 @@ class TestListSettings:
         reads "settings" off the row's mere presence, and the only way to
         notice the fallback was to diff ``effective_value`` against
         ``stored_value`` by hand. ``stored_value_invalid`` makes that an
-        explicit, visible fact instead.
+        explicit, visible fact instead. Renamed to ``parse_error`` (a fixed,
+        value-free reason string, never a bool) so the raw out-of-range
+        value can never leak back out through this field either.
         """
         settings_path = resolve_settings_path(registry.stores_dir)
         assert settings_path is not None
@@ -200,7 +202,10 @@ class TestListSettings:
 
         assert row["stored_value"] == 1.5
         assert row["effective_value"] == 0.0  # the module default
-        assert row["stored_value_invalid"] is True
+        assert row["parse_error"] == (
+            "stored value is not a finite number in range; using the default"
+        )
+        assert "1.5" not in row["parse_error"]
 
     def test_a_valid_stored_row_is_not_flagged(
         self, client: TestClient, registry: StoreRegistry
@@ -213,7 +218,7 @@ class TestListSettings:
         row = _entry(resp.json(), "pack_holdout_rate")
 
         assert row["effective_value"] == 0.2
-        assert row["stored_value_invalid"] is False
+        assert row["parse_error"] is None
 
     def test_group_labels_cover_every_entrys_group(self, client: TestClient) -> None:
         """brief e179 step 8: the UI's filter box reads display labels from

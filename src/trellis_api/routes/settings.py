@@ -221,8 +221,8 @@ def _entry(
         # while a stored override sits inert underneath it (brief e179
         # step 2's env-pin truthfulness).
         "stored_value": stored_row.value if stored_row is not None else None,
-        # Re-gate #867 B4: a malformed stored row (``1e999``, ``nan``, a
-        # string where an int belongs) makes every resolver above fall
+        # Re-gate #867 B4/B6: a malformed stored row (``1e999``, ``nan``,
+        # a string where an int belongs) makes every resolver above fall
         # back to the default silently -- correct for the knob's own
         # behaviour, but invisible here, where ``overridden_by`` would
         # still read "settings" off the row's mere presence
@@ -234,11 +234,14 @@ def _entry(
         # governed path (direct settings.json edit) surfaces as a fact
         # the UI can show next to the mismatched pair above, not
         # something a caller has to notice by diffing two fields
-        # themselves. ``False`` when there is no stored row, or it is
-        # valid -- never ``None``, so a caller can treat this as a plain
-        # boolean rather than a tri-state.
-        "stored_value_invalid": (
-            stored_row is not None and _stored_value_rejected(spec, stored_row.value)
+        # themselves. ``None`` when there is no stored row, or it is
+        # valid. A FIXED reason string otherwise -- never the raw
+        # ``stored_value`` above, which this field exists to flag as
+        # untrustworthy, not re-echo under a new name.
+        "parse_error": (
+            _stored_value_parse_error(spec, stored_row.value)
+            if stored_row is not None
+            else None
         ),
         # "Last changed ... when" (brief e179 step 1). The store never
         # records who changed a setting -- SettingRow carries no
@@ -251,8 +254,9 @@ def _entry(
     }
 
 
-def _stored_value_rejected(spec: SettingSpec, raw: Any) -> bool:
-    """Whether the registry's own coercion would refuse ``raw``.
+def _stored_value_parse_error(spec: SettingSpec, raw: Any) -> str | None:
+    """``None`` if the registry's own coercion accepts ``raw``, else a
+    FIXED reason string -- never the value itself.
 
     Mirrors the ``except (TypeError, ValueError)`` every dedicated
     resolver in this PR uses around the same ``validate_value`` call
@@ -260,12 +264,29 @@ def _stored_value_rejected(spec: SettingSpec, raw: Any) -> bool:
     ``validate_value`` itself never raises ``OverflowError`` (its
     ``_coerce_int``/``_coerce_float`` check finiteness before casting),
     so that is not a gap here either.
+
+    The reason text is keyed only on ``spec.type``/``spec.enum`` -- never
+    on ``raw`` -- so a stored secret-shaped string that fails validation
+    (a mistyped knob holding a credential, say) cannot resurface through
+    this field the way the old ``stored_value_invalid`` bool's sibling
+    fields never did either.
     """
     try:
         validate_value(spec, raw)
     except (TypeError, ValueError):
-        return True
-    return False
+        return _parse_error_reason(spec)
+    return None
+
+
+def _parse_error_reason(spec: SettingSpec) -> str:
+    """The fixed, value-free reason text for ``spec``'s type."""
+    if spec.type == "bool":
+        return "stored value is not a recognized boolean; using the default"
+    if spec.type in ("int", "float"):
+        return "stored value is not a finite number in range; using the default"
+    if spec.enum is not None:
+        return "stored value is not one of the allowed options; using the default"
+    return "stored value failed validation; using the default"
 
 
 def _execute_command(cmd: Command) -> CommandResponse:

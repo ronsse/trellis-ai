@@ -77,6 +77,39 @@ def test_banner_claim_is_exact_per_auth_mode() -> None:
     assert "every request is granted every scope" in body
 
 
+def test_banner_claim_and_detail_ternaries_are_each_keyed_on_optional() -> None:
+    """Pins the *structure* of the ``claim``/``detail`` ternaries, not just
+    substring presence (re-gate #867 S2): the substring-only test above
+    passes even if a mutant swaps which text goes with which mode (M22),
+    or keys ``detail`` on ``mode === 'off'`` instead of ``mode ===
+    'optional'`` (M23) -- both mutants still contain every substring
+    *somewhere* in the function body. Extracting each ternary's condition
+    and both branches by name catches either change directly.
+    """
+    page = _page()
+    body = _between(
+        page, "function renderAuthBanner(data) {", "function formatRuntimeDir("
+    )
+
+    claim_match = re.search(
+        r"const claim = mode === 'optional'\s*\?\s*'([^']*)'\s*:\s*'([^']*)';",
+        body,
+    )
+    assert claim_match is not None, body
+    assert claim_match.group(1) == "a request without an API key is granted every scope"
+    assert claim_match.group(2) == "every request is granted every scope"
+
+    detail_match = re.search(
+        r"const detail = mode === 'optional'\s*\?\s*'([^']*)'\s*:\s*'([^']*)';",
+        body,
+    )
+    assert detail_match is not None, body
+    assert detail_match.group(1).startswith(
+        "A caller that omits its API key right now is granted every scope."
+    )
+    assert detail_match.group(2).startswith("No API key is required right now.")
+
+
 def test_runtime_panel_reads_fields_from_the_response_not_a_copy() -> None:
     page = _page()
     body = _between(

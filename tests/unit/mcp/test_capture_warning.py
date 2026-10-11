@@ -119,6 +119,7 @@ class TestCaptureWarningBanner:
         _accept(temp_registry, "cli:ingest")
         result = get_context("something entirely obscure")
         assert result.startswith(_BANNER)
+        assert "mcp:save_experience" in result
 
     def test_a_stored_threshold_override_is_actually_read(
         self, temp_registry: StoreRegistry

@@ -169,3 +169,40 @@ def test_a_non_writable_row_names_env_only_instead_of_restart_or_live() -> None:
     )
     live_html_stmt = _between(body, "const liveHtml = ", ";\n")
     assert "notWritable" in live_html_stmt
+
+
+# ---------------------------------------------------------------------------
+# 5. settingEnvPinNote has its OWN env-only branch, separate from
+#    renderSettingRow's notWritable badge (B3, re-gate #867 M34)
+# ---------------------------------------------------------------------------
+
+
+def test_env_only_rows_get_a_dedicated_pin_note_not_the_generic_one() -> None:
+    """``settingEnvPinNote`` has two independent branches: one for a knob
+    that is *always* env-only (``settings_writable === false``, B3 --
+    read only once at process start, the settings store never consulted)
+    and one for a knob that merely happens to be pinned by the env right
+    now (``overridden_by === 'env'``, which a non-writable knob can never
+    even reach since it has no settings-store path to pin). A mutant that
+    replaces the first branch's own guard with a bare ``false`` collapses
+    it into dead code: every env-only row would fall through to the
+    second branch (or to the empty-string default), silently losing the
+    "read from ``ENV_VAR`` only ... never consulted" wording this knob
+    depends on being told apart from an ordinary env override. This is
+    a separate guard from ``renderSettingRow``'s ``notWritable`` (pinned
+    above), which only gates the Save/Reset form and the Live/Restart
+    badge -- not this note's text.
+    """
+    page = _page()
+    body = _function_body(
+        page,
+        "function settingEnvPinNote(s) {",
+        "function settingSourceBadge(",
+    )
+    assert "s.settings_writable === false" in body
+    assert "Read from <code>${escHtml(s.env_var)}</code> only" in body
+    assert "settings store is never consulted" in body
+    # The second branch must still exist and stay reachable only when the
+    # first one's guard does not fire.
+    assert "s.overridden_by !== 'env'" in body
+    assert "Pinned by <code>${escHtml(s.env_var)}</code>" in body

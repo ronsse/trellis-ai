@@ -1581,6 +1581,111 @@ class TestWorkerCurateSettingsWiring:
         assert noisy is not None
         assert noisy["metadata"]["content_tags"]["signal_quality"] == "noise"
 
+    def test_a_stored_coverage_floor_override_is_honoured_in_dry_run_too(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """Re-gate #867 M14b: ``--dry-run`` reads the noise-tag stage
+        through the read-only :func:`analyze_effectiveness`
+        (``_curate_stage_noise_tags``'s ``if dry_run:`` arm), a second,
+        independent call site from the live arm the test above pins —
+        a mutant that drops that call's ``demotion_settings=settings``
+        argument (passing ``None`` instead) is invisible to that test,
+        since dry-run never reaches ``run_effectiveness_feedback``. Same
+        thin-coverage shape (2 packs, below the module default floor of
+        5) and the same stored override of 2, but asserting the
+        dry-run report and the complete absence of a write — ``--dry-run``
+        touches nothing.
+        """
+        event_log = temp_stores.operational.event_log
+        doc_id = "wc:doc:thin-cli-dry"
+        for i in range(2):
+            pack_id = f"wc-thin-dry-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "wc-thin-dry",
+                    "domain": "wc-test",
+                    "injected_item_ids": [doc_id],
+                    "injected_items": [
+                        {
+                            "item_id": doc_id,
+                            "item_type": "document",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"wc-thin-dry-run-{i}",
+                    "intent_family": "wc-thin-dry",
+                    "outcome": "failure",
+                    "success": False,
+                    "helpful_item_ids": [],
+                    "unhelpful_item_ids": [doc_id],
+                },
+            )
+        temp_stores.knowledge.document_store.put(
+            doc_id,
+            "thin coverage cli dry-run test content",
+            {"content_tags": {"signal_quality": "standard"}},
+        )
+
+        default_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--dry-run",
+                "--output-dir",
+                str(tmp_path / "review-dry"),
+                "--format",
+                "json",
+                "--skip-advisories",
+                "--skip-learning",
+            ],
+        )
+        assert default_result.exit_code == 0, default_result.output
+        default_data = json.loads(default_result.stdout.strip())
+        assert default_data["noise_tagged"] == 0
+
+        settings_path = resolve_settings_path(temp_stores.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("noise_demotion_min_attributed_packs", 2)
+
+        overridden_result = runner.invoke(
+            app,
+            [
+                "worker",
+                "curate",
+                "--dry-run",
+                "--output-dir",
+                str(tmp_path / "review-dry2"),
+                "--format",
+                "json",
+                "--skip-advisories",
+                "--skip-learning",
+            ],
+        )
+        assert overridden_result.exit_code == 0, overridden_result.output
+        overridden_data = json.loads(overridden_result.stdout.strip())
+        assert overridden_data["noise_tagged"] == 1
+
+        # --dry-run touches nothing, override or not.
+        untouched = temp_stores.knowledge.document_store.get(doc_id)
+        assert untouched is not None
+        assert untouched["metadata"]["content_tags"]["signal_quality"] == "standard"
+
 
 class TestWorkerCurateLoop:
     def test_loop_runs_n_cycles_then_stops(
