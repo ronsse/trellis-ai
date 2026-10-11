@@ -27,6 +27,8 @@ import structlog
 
 from trellis.errors import TrellisError
 from trellis.logging import configure_stderr_logging
+from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import load_settings_values
 from trellis_workers.session_capture.sweep import (
     CaptureJudgeUnavailableError,
     judge_unavailable_sessions,
@@ -67,7 +69,13 @@ def main(argv: list[str] | None = None) -> int:
     configure_stderr_logging()
 
     try:
-        report = run_sweep(dry_run=args.dry_run)
+        # Built here (not left to run_sweep's own default) so this entry
+        # point can also read the stored `capture_strict` override below —
+        # the registry run_sweep would otherwise build internally and
+        # never hand back. Same StoreRegistry.from_config_dir() resolution
+        # either way; this just keeps the handle.
+        registry = StoreRegistry.from_config_dir()
+        report = run_sweep(dry_run=args.dry_run, registry=registry)
     except CaptureJudgeUnavailableError as exc:
         # A misconfigured `llm:` block is an operator error, not a crash: the
         # message already names the fix, and a stack trace would bury it.
@@ -99,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             "raised mid-sweep. They stay un-watermarked for retry; see "
             "capture_session_failed in the log.\n"
         )
-    if strict_mode():
+    if strict_mode(load_settings_values(registry.stores_dir)):
         if unjudged:
             return EXIT_JUDGE_UNAVAILABLE
         if report.sessions_errored:

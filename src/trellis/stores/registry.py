@@ -1698,8 +1698,13 @@ class StoreRegistry:
         the config block is never consulted, so a path that fails to resolve
         raises rather than falling back to it.
 
-        Returns ``None`` only when no embedding is configured at all
-        (no env var, ``embeddings.provider`` absent, ``null``, or ``""``).
+        Returns ``None`` when no embedding is configured at all (no env
+        var, ``embeddings.provider`` absent, ``null``, or ``""``), and
+        also when the whole ``embeddings:`` block is not a mapping (a
+        bare string, bool, int, or list) — that shape is logged at
+        ``WARNING`` (the key and the value's type only, never the value)
+        and treated as unconfigured rather than raised, since it has no
+        ``provider`` field for the checks below to inspect.
         Raises :class:`BackendNotInstalledError` when ``provider: openai`` is
         configured but the ``llm-openai`` extra is missing, and
         :class:`ConfigError` when ``provider: openai`` finds no API key, or
@@ -1731,7 +1736,26 @@ class StoreRegistry:
                 logger.info("embedding_fn_loaded", source="env", path=custom_path)
         else:
             # 2. Check config
-            provider = self._embedding_config.get("provider")
+            if isinstance(self._embedding_config, Mapping):
+                provider = self._embedding_config.get("provider")
+            else:
+                # A non-Mapping 'embeddings:' block (a bare string, bool,
+                # int, or list -- YAML allows all of these at that key)
+                # has no 'provider' field to read at all. Logged at
+                # WARNING so the misconfiguration is discoverable, naming
+                # only the key and the type: the value itself could be a
+                # pasted credential. Treated the same as "not configured"
+                # rather than raised, matching every other shape this
+                # property already treats that way -- a caller wrapping
+                # this property (trellis_api.routes.admin.runtime, every
+                # retrieve/strategies.py degrade-to-keyword+graph site)
+                # must see "no embedder" here, never an AttributeError.
+                logger.warning(
+                    "embedding_config_not_mapping",
+                    key="embeddings",
+                    type=type(self._embedding_config).__name__,
+                )
+                provider = None
             # None and "" mean "not configured" (the pre-existing posture).
             # Any other non-string (bool, int, list, mapping, ...) is an
             # operator error rather than a second way to spell "off": YAML
@@ -1776,6 +1800,74 @@ class StoreRegistry:
         # Assigned only after resolution returns, so a raise leaves _UNSET.
         self._embedding_fn_cache = resolved
         return resolved
+
+    def embedding_source_label(self) -> str | None:
+        """Which knob :attr:`embedding_fn` would read from, for display only.
+
+        Mirrors that property's own precedence (``TRELLIS_EMBEDDING_FN``
+        wins over ``embeddings.provider``) but never builds a client and
+        never raises — it names only the *source*, which is always safe
+        to show: a dotted import path or a provider string is an
+        identifier the operator chose, never a credential. Returns
+        ``None`` when neither knob is set (nothing configured). Pair with
+        an actual :attr:`embedding_fn` read to know whether that source
+        resolved or raised.
+
+        Only safe to show once :attr:`embedding_fn` has actually
+        resolved: the "value" half of this label (the dotted path or
+        provider string) is operator-chosen text that is safe on the
+        *success* path, but a caller displaying a *failure* must use
+        :meth:`embedding_source_knob` instead, which never includes it —
+        a provider string a user mistyped a secret into would otherwise
+        echo verbatim in the one place a raise is reported.
+        """
+        import os  # noqa: PLC0415
+
+        custom_path = os.environ.get("TRELLIS_EMBEDDING_FN")
+        if custom_path:
+            return f"{custom_path} (TRELLIS_EMBEDDING_FN)"
+        # A non-Mapping 'embeddings:' block has no 'provider' field to
+        # read -- guarded the same way :attr:`embedding_fn` is, so this
+        # never raises. :meth:`embedding_fn` already treats that shape as
+        # unconfigured, so there is no resolved value to show here either.
+        if not isinstance(self._embedding_config, Mapping):
+            return None
+        provider = self._embedding_config.get("provider")
+        if isinstance(provider, str) and provider:
+            return f"{provider} (embeddings.provider)"
+        return None
+
+    def embedding_source_knob(self) -> str | None:
+        """Which knob *name* governs :attr:`embedding_fn`, with no value.
+
+        Same precedence as :meth:`embedding_source_label` (env wins over
+        config), but reports only ``"TRELLIS_EMBEDDING_FN"``,
+        ``"embeddings.provider"``, or ``"embeddings"`` (when the whole
+        block is a non-empty, non-Mapping value, so there is no
+        ``provider`` field to name) — never the dotted path or provider
+        string a caller supplied. Use this on a *failure* path, where the
+        configured value is exactly the attacker- or typo-controlled text
+        that must never reach a response body or a log line: unlike the
+        label, the value half here could be anything an operator pasted
+        into the knob, including a credential. Returns ``None`` when
+        neither knob is set.
+        """
+        import os  # noqa: PLC0415
+
+        if os.environ.get("TRELLIS_EMBEDDING_FN"):
+            return "TRELLIS_EMBEDDING_FN"
+        if not isinstance(self._embedding_config, Mapping):
+            # Guarded the same way :attr:`embedding_fn` is -- a non-empty
+            # scalar/list block is a knob the operator did set, just not
+            # in a shape that has a 'provider' field; an empty/falsy one
+            # normalises to ``{}`` before it ever reaches this attribute
+            # (see the constructor), so this branch only sees a truthy,
+            # malformed value.
+            return "embeddings" if self._embedding_config else None
+        provider = self._embedding_config.get("provider")
+        if isinstance(provider, str) and provider:
+            return "embeddings.provider"
+        return None
 
     @property
     def budget_config(self) -> Any:

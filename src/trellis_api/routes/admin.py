@@ -15,6 +15,7 @@ proposals are read-only here.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -45,13 +46,17 @@ from trellis.learning.tuners import (
     promote_proposal,
     reject_proposal,
 )
+from trellis.llm.routing import LLMConsumer, LLMRoutingError
 from trellis.mutate import build_curate_executor
 from trellis.ops.loop_health import summarize_loop_health
 from trellis.ops.parameter_reachability import (
     READ_POINTS,
     reachability_reasons,
 )
-from trellis.retrieve.advisory_generator import AdvisoryGenerator
+from trellis.retrieve.advisory_generator import (
+    AdvisoryGenerator,
+    resolve_advisory_thresholds,
+)
 from trellis.retrieve.effectiveness import (
     analyze_effectiveness,
     run_effectiveness_feedback,
@@ -60,9 +65,16 @@ from trellis.retrieve.metrics_timeseries import compute_timeseries
 from trellis.stores.advisory_source import load_advisory_store
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.vector import VectorStore
-from trellis_api.app import get_registry
-from trellis_api.auth import AuthContext, authenticate
-from trellis_api.routes.health import probe_backends
+from trellis.stores.settings_store import load_settings_values
+from trellis_api.app import get_bind_info, get_registry
+from trellis_api.auth import (
+    AUTH_MODE_REQUIRED,
+    AuthContext,
+    authenticate,
+    resolve_auth_mode,
+)
+from trellis_api.observability import resolve_metrics_public
+from trellis_api.routes.health import probe_backends, resolve_ops_detail
 from trellis_wire.dtos import (
     BackendHealth,
     CodeProposalListResponse,
@@ -79,6 +91,7 @@ from trellis_wire.dtos import (
     ProposalDecisionResponse,
     ProposalPreviewResponse,
     ProposalRejectRequest,
+    RuntimeResponse,
     SchemaEvolutionCandidate,
     SchemaEvolutionListResponse,
     StatsResponse,
@@ -91,6 +104,12 @@ from trellis_wire.dtos import (
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+#: Read by the HOST job dispatcher (``docs/ops/job-dispatcher.sh.example``),
+#: never by this process — ``GET /api/v1/runtime`` echoes it unvalidated,
+#: purely so the admin UI can show what a host-only nightly job would
+#: resolve against, without claiming this process consults it itself.
+_HOST_JOBS_DIR_ENV = "TRELLIS_HOST_JOBS_DIR"
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -157,6 +176,153 @@ def stats() -> StatsResponse:
     )
 
 
+@router.get("/runtime", response_model=RuntimeResponse)
+def runtime() -> RuntimeResponse:
+    """Report this process's effective configuration for the admin UI.
+
+    Every field is read straight from the resolver the real enforcement
+    uses — ``resolve_auth_mode``, ``resolve_ops_detail``,
+    ``resolve_metrics_public``, ``get_bind_info``, and for ``embedder``,
+    ``registry.embedding_fn`` itself (the resolver every retrieval
+    surface actually calls, not the separate ``llm.embedding:`` block
+    nothing else reads) — so this view cannot drift from how the server
+    actually behaves. Deliberately excludes anything secret-shaped:
+    ``stores`` is class names only, ``embedder`` is the resolved
+    embedder's dotted path or provider name followed by the configuration
+    knob in play (``TRELLIS_EMBEDDING_FN``, ``embeddings.provider``, or
+    ``embeddings`` when the whole block is malformed), never a key or
+    URL, ``llm_routes`` carries tier names
+    only (an ``LLMRoute``'s ``block`` — which can hold a literal API key
+    — is never touched, and a malformed route is reported by its
+    setting path, never the value that failed to validate), and the two
+    directory fields are plain paths. Resolving the embedder is wrapped
+    whole, and the knob lookup used on both the raise and the
+    resolved-to-nothing paths is itself guarded against raising, so an
+    unconfigured or misconfigured embedding knob — including a
+    non-mapping ``embeddings:`` block — reads as "none configured" or
+    "unknown" here, never 500s a panel that exists to show
+    configuration, not enforce it.
+    """
+    registry = get_registry()
+    host, port = get_bind_info()
+
+    stores = {
+        "graph_store": type(registry.knowledge.graph_store).__name__,
+        "vector_store": type(registry.knowledge.vector_store).__name__,
+        "document_store": type(registry.knowledge.document_store).__name__,
+        "blob_store": type(registry.knowledge.blob_store).__name__,
+        "event_log": type(registry.operational.event_log).__name__,
+        "trace_store": type(registry.operational.trace_store).__name__,
+    }
+
+    # Derived from registry.embedding_fn -- the resolver every retrieval
+    # surface (PackBuilder, the MCP server, the trace-embed worker, ...)
+    # actually calls -- never from build_embedder_client(), which builds
+    # an unrelated, unused-in-production EmbedderClient from a separate
+    # 'llm.embedding:' block nothing else reads. Wrapped whole, like the
+    # embedder's own degrade-to-keyword+graph callers, so a misconfigured
+    # 'embeddings:' block or TRELLIS_EMBEDDING_FN reads as "unknown" here
+    # rather than 500-ing a panel that exists to show configuration, not
+    # enforce it. A non-mapping 'embeddings:' block (a bare string, bool,
+    # int, or list) no longer raises inside this try -- embedding_fn
+    # itself degrades that shape to "unconfigured" -- so it is reported
+    # as "unknown" below, in the resolved-to-nothing branch, not here.
+    embedder_name: str | None = None
+    try:
+        resolved_embedding_fn = registry.embedding_fn
+    except Exception as exc:  # GRACEFUL-DEGRADATION: a panel, not a gate
+        # Never the knob's *value* here (embedding_source_label()) -- on
+        # the failure path the configured string is exactly the
+        # typo/attacker-controlled text that must not reach the response
+        # body or the log. Only the knob name and the exception type.
+        # The knob lookup itself is wrapped too: it is guarded against
+        # this same failure shape (see StoreRegistry.embedding_source_knob),
+        # but a second, independent try/except here means a future bug in
+        # that guard degrades this field instead of 500-ing the panel.
+        try:
+            knob = registry.embedding_source_knob()
+        except Exception:  # GRACEFUL-DEGRADATION: a panel, not a gate
+            knob = None
+        logger.warning(
+            "runtime_embedder_probe_failed",
+            knob=knob,
+            error_type=type(exc).__name__,
+        )
+        embedder_name = (
+            f"unknown ({knob} failed: {type(exc).__name__})"
+            if knob
+            else f"unknown ({type(exc).__name__})"
+        )
+    else:
+        if resolved_embedding_fn is not None:
+            embedder_name = registry.embedding_source_label()
+        else:
+            # embedding_fn returns None both when nothing is configured
+            # and when the 'embeddings:' block is a non-mapping value it
+            # degrades rather than raises on (see its docstring) -- the
+            # two must not render identically, or a malformed block reads
+            # as a quiet, intentional "no embedder" instead of a
+            # misconfiguration the operator should fix. embedding_source_knob
+            # reports "embeddings" for exactly that second case and None
+            # for the first.
+            knob = registry.embedding_source_knob()
+            embedder_name = f"unknown ({knob})" if knob else None
+
+    llm_routes: dict[str, str | None] = {}
+    llm_routes_error: str | None = None
+    try:
+        for consumer in LLMConsumer:
+            llm_routes[consumer.value] = registry.llm_route(consumer).tier
+    except LLMRoutingError as exc:
+        # Never surface exc.message verbatim. trellis.llm.routing composes
+        # that text from the raw llm.routes / llm.tiers value an operator
+        # can mistype a credential into (a mapping holding an api_key, a
+        # bare key string standing in for a tier name) -- routing.py now
+        # avoids repr-ing that value itself, but this is the one place the
+        # message leaves the process into a REST body, so it stays a
+        # second, independent gate. Report only exc.setting -- a YAML key
+        # path, never a config value -- plus fixed text; the full message
+        # still reaches the operator via the log.
+        logger.warning("runtime_llm_routes_invalid", setting=exc.setting)
+        llm_routes_error = (
+            f"{exc.setting} is invalid; see the server log."
+            if exc.setting
+            else "llm.routes/llm.tiers is invalid; see the server log."
+        )
+    except Exception as exc:  # GRACEFUL-DEGRADATION: a panel, not a gate
+        # routing.py raises LLMRoutingError for a non-Mapping 'llm:' block,
+        # caught above; this is the second, independent gate the embedder
+        # block earlier in this function also uses -- whatever reaches
+        # here next (a resolver bug, a future shape validate_llm_routing
+        # doesn't anticipate) degrades to a reported field rather than a
+        # 500 that blanks the whole panel, auth banner included. Fixed
+        # text only, never str(exc), which could echo a pasted credential.
+        logger.warning(
+            "runtime_llm_routes_invalid",
+            setting=None,
+            error_type=type(exc).__name__,
+        )
+        llm_routes_error = "llm.routes/llm.tiers is invalid; see the server log."
+
+    learning_dir = resolve_learning_artifacts_dir(registry.stores_dir)
+    mode = resolve_auth_mode()
+
+    return RuntimeResponse(
+        auth_mode=mode,
+        auth_mode_permissive=mode != AUTH_MODE_REQUIRED,
+        ops_detail=resolve_ops_detail(),
+        metrics_public=resolve_metrics_public(),
+        bind_host=host,
+        bind_port=port,
+        stores=stores,
+        embedder=embedder_name,
+        llm_routes=llm_routes,
+        llm_routes_error=llm_routes_error,
+        learning_artifacts_dir=str(learning_dir) if learning_dir else None,
+        host_jobs_dir=os.environ.get(_HOST_JOBS_DIR_ENV) or None,
+    )
+
+
 @router.get("/loops", response_model=LoopHealthResponse)
 def loop_health() -> LoopHealthResponse:
     """Is each curation / learning loop actually doing anything? (e167)
@@ -196,10 +362,12 @@ def effectiveness(
 ) -> dict[str, Any]:
     """Analyze context pack effectiveness."""
     registry = get_registry()
+    settings_values = load_settings_values(registry.stores_dir)
     report = analyze_effectiveness(
         registry.operational.event_log,
         days=days,
         min_appearances=min_appearances,
+        demotion_settings=settings_values,
     )
     return {"status": "ok", **report.model_dump()}
 
@@ -215,6 +383,7 @@ def apply_noise_tags(
     signal_quality="noise" so PackBuilder excludes them by default.
     """
     registry = get_registry()
+    settings_values = load_settings_values(registry.stores_dir)
     report = run_effectiveness_feedback(
         registry.operational.event_log,
         registry.knowledge.document_store,
@@ -223,6 +392,7 @@ def apply_noise_tags(
         # #338: mirror the demotion onto the vector row, or the semantic
         # axis keeps serving the pre-demotion snapshot.
         vector_store=resolve_vector_store(registry),
+        demotion_settings=settings_values,
     )
     # What apply_noise_tags actually wrote, not what the evidence gate
     # admitted (#336) and not the usage-rate rule's proposal — the key
@@ -347,8 +517,12 @@ _ADVISORY_REFUSED_STATUS = 409
 def generate_advisories(
     response: Response,
     days: int = Query(30, description="Days of history to analyze"),
-    min_sample: int = Query(5, description="Min sample size"),
-    min_effect: float = Query(0.15, description="Min effect size"),
+    min_sample: int | None = Query(
+        None, description="Min sample size; defaults to the configured setting"
+    ),
+    min_effect: float | None = Query(
+        None, description="Min effect size; defaults to the configured setting"
+    ),
 ) -> dict[str, Any]:
     """Generate advisories from outcome data.
 
@@ -373,6 +547,12 @@ def generate_advisories(
     # put them, so the only thing that changes on the wire is the status
     # line that was lying.
     registry = get_registry()
+    settings_values = load_settings_values(registry.stores_dir)
+    default_min_sample, default_min_effect = resolve_advisory_thresholds(
+        settings_values
+    )
+    effective_min_sample = min_sample if min_sample is not None else default_min_sample
+    effective_min_effect = min_effect if min_effect is not None else default_min_effect
     store = load_advisory_store(registry.stores_dir, surface="api.admin.generate")
     if store is None:
         # The third asymmetric arm, fixed with the same reasoning as the
@@ -391,8 +571,8 @@ def generate_advisories(
     generator = AdvisoryGenerator(
         registry.operational.event_log,
         store,
-        min_sample_size=min_sample,
-        min_effect_size=min_effect,
+        min_sample_size=effective_min_sample,
+        min_effect_size=effective_min_effect,
     )
     try:
         report = generator.generate(days=days)

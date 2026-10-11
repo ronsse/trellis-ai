@@ -11,6 +11,7 @@ from trellis.ops.capture_health import (
     CaptureHealthWarning,
     check_capture_health,
     format_capture_warning,
+    resolve_capture_thresholds,
 )
 from trellis.ops.recording import record_outcome
 from trellis.ops.registry import ParameterRegistry
@@ -38,6 +39,7 @@ __all__ = [
     "hints_for_trace_rejections",
     "record_outcome",
     "record_write_rejection",
+    "resolve_capture_thresholds",
     "summarize_backend_health",
     "summarize_serve_attribution",
     "summarize_write_health",

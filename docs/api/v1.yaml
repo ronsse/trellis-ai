@@ -1663,6 +1663,113 @@ components:
           type: string
       title: ProposalRejectRequest
       type: object
+    RuntimeResponse:
+      additionalProperties: false
+      description: 'Response body for ``GET /api/v1/runtime`` — the admin Runtime panel.
+
+
+        A read-only snapshot of this process''s effective configuration,
+
+        sourced from the same resolvers the behaviour itself consults
+
+        (``trellis_api.auth.resolve_auth_mode``,
+
+        ``trellis_api.routes.health.resolve_ops_detail``,
+
+        ``trellis_api.observability.resolve_metrics_public``,
+
+        ``trellis_api.app.get_bind_info``) so this view can never drift from
+
+        what a real request gets.
+
+
+        Deliberately excludes anything secret-shaped: ``stores`` is class
+
+        names only, ``embedder`` names only the configuration knob in play
+
+        (never a key or URL), ``llm_routes`` carries tier names only (never a
+
+        provider base URL, credential source, or API-key env name), and the
+
+        two directory fields are plain filesystem paths with no embedded
+
+        credentials. See ``tests/unit/api/test_runtime_route.py``''s
+
+        secret-leakage test for the seeded-secret assertion backing that
+
+        claim.'
+      properties:
+        auth_mode:
+          title: Auth Mode
+          type: string
+        auth_mode_permissive:
+          description: True when a request presenting no credential is granted every scope (auth mode 'off' or 'optional')
+            — the exact condition the UI's warning banner fires on.
+          title: Auth Mode Permissive
+          type: boolean
+        bind_host:
+          title: Bind Host
+          type: string
+        bind_port:
+          title: Bind Port
+          type: integer
+        embedder:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Which knob registry.embedding_fn resolved from (TRELLIS_EMBEDDING_FN or embeddings.provider), the same
+            resolver every retrieval surface calls; null when neither is set. 'unknown (...)' when the knob is set but failed
+            to resolve -- never a key or URL.
+          title: Embedder
+        host_jobs_dir:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: TRELLIS_HOST_JOBS_DIR as seen by this process. Only the host job dispatcher (docs/ops/job-dispatcher.sh.example)
+            resolves an executable path under it — this process never reads the directory itself, so a null here means the
+            variable is unset in this process's environment, not that host-only jobs are unconfigured.
+          title: Host Jobs Dir
+        learning_artifacts_dir:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Learning Artifacts Dir
+        llm_routes:
+          additionalProperties:
+            anyOf:
+            - type: string
+            - type: 'null'
+          description: 'Tier name each LLM consumer routes to, keyed by consumer name; null means the consumer is unrouted
+            (falls back to the parent llm: block).'
+          title: Llm Routes
+          type: object
+        llm_routes_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Set instead of llm_routes when llm.routes is malformed.
+          title: Llm Routes Error
+        metrics_public:
+          title: Metrics Public
+          type: boolean
+        ops_detail:
+          title: Ops Detail
+          type: string
+        stores:
+          additionalProperties:
+            type: string
+          description: Backend class name per store, keyed by store name.
+          title: Stores
+          type: object
+      required:
+      - auth_mode
+      - auth_mode_permissive
+      - ops_detail
+      - metrics_public
+      - bind_host
+      - bind_port
+      title: RuntimeResponse
+      type: object
     SchemaEvolutionCandidate:
       additionalProperties: false
       description: One WELL_KNOWN_CANDIDATE event as surfaced in the Review queue.
@@ -2299,24 +2406,26 @@ paths:
           description: Days of history to analyze
           title: Days
           type: integer
-      - description: Min sample size
+      - description: Min sample size; defaults to the configured setting
         in: query
         name: min_sample
         required: false
         schema:
-          default: 5
-          description: Min sample size
+          anyOf:
+          - type: integer
+          - type: 'null'
+          description: Min sample size; defaults to the configured setting
           title: Min Sample
-          type: integer
-      - description: Min effect size
+      - description: Min effect size; defaults to the configured setting
         in: query
         name: min_effect
         required: false
         schema:
-          default: 0.15
-          description: Min effect size
+          anyOf:
+          - type: number
+          - type: 'null'
+          description: Min effect size; defaults to the configured setting
           title: Min Effect
-          type: number
       responses:
         '200':
           content:
@@ -4241,6 +4350,67 @@ paths:
       security:
       - APIKeyHeader: []
       summary: Reject Proposal Route
+      tags:
+      - admin
+  /api/v1/runtime:
+    get:
+      description: 'Report this process''s effective configuration for the admin UI.
+
+
+        Every field is read straight from the resolver the real enforcement
+
+        uses — ``resolve_auth_mode``, ``resolve_ops_detail``,
+
+        ``resolve_metrics_public``, ``get_bind_info``, and for ``embedder``,
+
+        ``registry.embedding_fn`` itself (the resolver every retrieval
+
+        surface actually calls, not the separate ``llm.embedding:`` block
+
+        nothing else reads) — so this view cannot drift from how the server
+
+        actually behaves. Deliberately excludes anything secret-shaped:
+
+        ``stores`` is class names only, ``embedder`` is the resolved
+
+        embedder''s dotted path or provider name followed by the configuration
+
+        knob in play (``TRELLIS_EMBEDDING_FN``, ``embeddings.provider``, or
+
+        ``embeddings`` when the whole block is malformed), never a key or
+
+        URL, ``llm_routes`` carries tier names
+
+        only (an ``LLMRoute``''s ``block`` — which can hold a literal API key
+
+        — is never touched, and a malformed route is reported by its
+
+        setting path, never the value that failed to validate), and the two
+
+        directory fields are plain paths. Resolving the embedder is wrapped
+
+        whole, and the knob lookup used on both the raise and the
+
+        resolved-to-nothing paths is itself guarded against raising, so an
+
+        unconfigured or misconfigured embedding knob — including a
+
+        non-mapping ``embeddings:`` block — reads as "none configured" or
+
+        "unknown" here, never 500s a panel that exists to show
+
+        configuration, not enforce it.'
+      operationId: runtime_api_v1_runtime_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeResponse'
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: Runtime
       tags:
       - admin
   /api/v1/schema-evolution/candidates:

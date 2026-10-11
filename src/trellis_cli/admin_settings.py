@@ -34,10 +34,7 @@ import typer
 from rich.markup import escape
 
 from trellis.core.settings_registry import SettingSpec, get_setting, resolve_source
-from trellis.core.write_config import WriteBehaviourConfig
 from trellis.mutate import Command, CommandStatus, Operation, build_settings_executor
-from trellis.retrieve.builder_factory import _graph_seeding_enabled
-from trellis.retrieve.pack_builder import _filter_legacy_advisories_enabled
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_cli.exit_codes import refusal_exit_code
@@ -64,21 +61,26 @@ def _settings_values(registry: StoreRegistry) -> dict[str, Any]:
 
 
 def _env_effective_value(spec: SettingSpec, settings_values: dict[str, Any]) -> Any:
-    """The real environment-governed value for *spec*, env-only knobs included.
+    """The real environment-governed value for *spec*, every registry
+    entry included -- not just the twelve :class:`WriteBehaviourConfig`
+    fields.
 
-    ``graph_seeding``/``filter_legacy_advisories`` have their own
-    asymmetric env semantics (see ``trellis_api.routes.settings``'s
-    ``_effective_values`` docstring, which this mirrors rather than
-    reimplements independently); every other knob is a
-    :class:`WriteBehaviourConfig` field.
+    Delegates to :func:`trellis_api.routes.settings._effective_values`,
+    the one resolver that already covers every entry (the twelve
+    ``WriteBehaviourConfig`` fields, the two asymmetric-env booleans, and
+    the dedicated per-knob resolvers this PR added for the rest), so the
+    CLI and ``GET /settings`` cannot answer this differently for the
+    same stored state (re-gate #867 B6: this used to index
+    ``WriteBehaviourConfig...as_dict()[spec.name]`` directly, which
+    ``KeyError``-ed for every knob added after that mapping was written,
+    *after* the governed write itself had already succeeded). Imported
+    lazily -- ``fastapi`` is a base dependency either way, but there is
+    no reason for every CLI invocation to import the REST app module at
+    startup.
     """
-    if spec.name == "graph_seeding":
-        return _graph_seeding_enabled()
-    if spec.name == "filter_legacy_advisories":
-        return _filter_legacy_advisories_enabled()
-    return WriteBehaviourConfig.from_env_and_settings(
-        settings=settings_values
-    ).as_dict()[spec.name]
+    from trellis_api.routes.settings import _effective_values  # noqa: PLC0415
+
+    return _effective_values(settings_values)[spec.name]
 
 
 def _truthfulness_note(

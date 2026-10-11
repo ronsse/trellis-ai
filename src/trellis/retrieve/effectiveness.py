@@ -15,6 +15,7 @@ Provides four entry points:
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -25,6 +26,7 @@ from pydantic import Field
 from trellis.classify.demotion_gate import (
     DemotionEvidence,
     NoiseDemotionScreen,
+    resolve_demotion_thresholds,
     screen_noise_candidates,
 )
 from trellis.core.base import TrellisModel
@@ -285,6 +287,7 @@ def analyze_effectiveness(
     days: int = 30,
     min_appearances: int = 2,
     registry: ParameterRegistry | None = None,
+    demotion_settings: Mapping[str, Any] | None = None,
 ) -> EffectivenessReport:
     """Analyze which injected context items correlate with task success.
 
@@ -319,6 +322,12 @@ def analyze_effectiveness(
         registry: Optional parameter registry. When provided, overrides
             the success-rating and noise-rate thresholds from the active
             parameter snapshot.
+        demotion_settings: Optional settings-store mapping resolved by the
+            caller (``trellis.stores.settings_store.load_settings_values``).
+            Supplies the noise-demotion gate's ``min_attributed_packs`` and
+            ``min_unhelpful_citations`` floors; see
+            :func:`trellis.classify.demotion_gate.resolve_demotion_thresholds`
+            for the env/settings/default resolution order.
 
     Returns:
         :class:`EffectivenessReport` with per-item ``success_rate``,
@@ -401,6 +410,10 @@ def analyze_effectiveness(
     total_successes = sum(1 for v in pack_feedback.values() if v)
     overall_rate = total_successes / total_feedback if total_feedback > 0 else 0.0
 
+    min_attributed_packs, min_unhelpful_citations = resolve_demotion_thresholds(
+        demotion_settings
+    )
+
     return EffectivenessReport(
         total_packs=pack_event_count,
         total_feedback=total_feedback,
@@ -412,6 +425,8 @@ def analyze_effectiveness(
             noise_candidates,
             [DemotionEvidence.from_score_row(row) for row in item_scores],
             attributed_packs=attributed_packs,
+            min_attributed_packs=min_attributed_packs,
+            min_unhelpful_citations=min_unhelpful_citations,
         ),
     )
 
@@ -424,6 +439,7 @@ def run_effectiveness_feedback(
     min_appearances: int = 2,
     registry: ParameterRegistry | None = None,
     vector_store: VectorStore | None = None,
+    demotion_settings: Mapping[str, Any] | None = None,
 ) -> EffectivenessReport:
     """Analyse effectiveness **and** apply noise tags in one call.
 
@@ -450,6 +466,7 @@ def run_effectiveness_feedback(
         days=days,
         min_appearances=min_appearances,
         registry=registry,
+        demotion_settings=demotion_settings,
     )
 
     screen = report.demotion_screen

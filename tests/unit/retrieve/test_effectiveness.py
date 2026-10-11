@@ -445,6 +445,41 @@ class TestRunEffectivenessFeedback:
         assert report.noise_tags_written == 0
         assert report.noise_refused_not_document == []
 
+    def test_a_stored_coverage_floor_override_actually_changes_the_outcome(
+        self, event_log, doc_store
+    ):
+        """Re-gate #867 M5: ``analyze_effectiveness``/``run_effectiveness_feedback``
+        must thread a caller-supplied ``demotion_settings`` mapping through
+        to :func:`resolve_demotion_thresholds`, not just accept the
+        parameter and drop it. Two attributed packs sit below the module
+        default coverage floor (5) -- refused as too thin -- until a
+        stored override of ``noise_demotion_min_attributed_packs=2`` lowers
+        the floor enough to admit the same evidence, end to end through
+        the real demotion screen rather than the resolver in isolation.
+        """
+        doc_id = doc_store.put(
+            "item-thin-coverage",
+            "noisy content with thin coverage",
+            {"content_tags": {"signal_quality": "standard"}},
+        )
+        self._serve_and_grade(event_log, doc_id, packs=2, unhelpful=True)
+
+        default_report = run_effectiveness_feedback(
+            event_log, doc_store, days=30, min_appearances=2
+        )
+        assert default_report.demotion_screen is not None
+        assert default_report.demotion_screen.admitted == []
+
+        overridden_report = run_effectiveness_feedback(
+            event_log,
+            doc_store,
+            days=30,
+            min_appearances=2,
+            demotion_settings={"noise_demotion_min_attributed_packs": 2},
+        )
+        assert overridden_report.demotion_screen is not None
+        assert overridden_report.demotion_screen.admitted == [doc_id]
+
     def test_noop_when_no_noise(self, event_log, doc_store):
         """When there are no noise candidates, no docs are modified."""
         doc_id = doc_store.put(
