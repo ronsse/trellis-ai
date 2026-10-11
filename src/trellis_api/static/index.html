@@ -1225,8 +1225,8 @@
            consequential than an ordinary one at a glance, not just via a
            badge a reader could miss. */
         .settings-table td { vertical-align: top; }
-        tr.risk-unsafe td:first-child { border-left: 3px solid var(--error); }
-        tr.risk-restart td:first-child { border-left: 3px solid var(--warn); }
+        tr.risk-high td:first-child { border-left: 3px solid var(--error); }
+        tr.risk-caution td:first-child { border-left: 3px solid var(--warn); }
         .settings-table select, .settings-table input[type="number"], .settings-table input[type="text"] {
             width: 100%;
             max-width: 220px;
@@ -5924,10 +5924,14 @@
             return `<span class="badge ${cls}">${escHtml(source)}</span>`;
         }
 
+        // Risk wording intentionally avoids "unsafe" as a control label
+        // (brief e179 rework: a tier name, not a verdict on the operator
+        // for using the control) -- low/caution/high, independent of the
+        // separate "Restart required" badge below.
         function settingRiskBadge(risk) {
-            if (risk === 'unsafe') return '<span class="badge badge-err">UNSAFE</span>';
-            if (risk === 'restart') return '<span class="badge badge-warn">RESTART</span>';
-            return '<span class="badge badge-ok">safe</span>';
+            if (risk === 'high') return '<span class="badge badge-err">High risk</span>';
+            if (risk === 'caution') return '<span class="badge badge-warn">Caution</span>';
+            return '<span class="badge badge-ok">Low risk</span>';
         }
 
         function renderSettingsTable() {
@@ -5996,18 +6000,24 @@
 
         function renderSettingRow(s, groups, degraded) {
             const groupLabel = groups[s.group] || s.group;
-            const riskClass = s.risk === 'unsafe' ? 'risk-unsafe' : (s.risk === 'restart' ? 'risk-restart' : '');
+            // Border colour follows risk tier only -- restart cost is its
+            // own flag (s.restart_required) and gets its own badge below,
+            // never folded into this class (brief e179 rework, step 2).
+            const riskClass = s.risk === 'high' ? 'risk-high' : (s.risk === 'caution' ? 'risk-caution' : '');
             const pinNote = settingEnvPinNote(s);
             const liveHtml = s.restart_required
                 ? '<span class="badge badge-warn">Restart required</span>'
                 : '<span class="badge badge-ok">Live &mdash; next request</span>';
+            const riskNoteHtml = s.risk_note
+                ? `<div class="field-hint" style="margin-top:0.3rem">${escHtml(s.risk_note)}</div>`
+                : '';
             return `<tr id="setting-row-${escHtml(s.name)}" class="${riskClass}">
                 <td>
-                    <div>${escHtml(humanizeSettingName(s.name))}</div>
+                    <div>${escHtml(s.label || humanizeSettingName(s.name))}</div>
                     <code>${escHtml(s.name)}</code>
                     <div style="margin-top:0.3rem">${settingRiskBadge(s.risk)} <span class="badge badge-accent">${escHtml(groupLabel)}</span></div>
                 </td>
-                <td style="max-width:360px; white-space:normal">${escHtml(s.description)}</td>
+                <td style="max-width:360px; white-space:normal">${escHtml(s.description)}${riskNoteHtml}</td>
                 <td>${escHtml(s.type)}<div class="field-hint">${escHtml(formatSettingBounds(s))}</div></td>
                 <td>
                     <div><code>${escHtml(String(s.effective_value))}</code> ${settingSourceBadge(s.overridden_by)}</div>

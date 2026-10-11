@@ -116,12 +116,14 @@ def _entry(
     stored_row = stored_rows.get(spec.name)
     return {
         "name": spec.name,
+        "label": spec.label,
         "type": spec.type,
         "default": spec.default,
         "minimum": spec.minimum,
         "maximum": spec.maximum,
         "enum": list(spec.enum) if spec.enum is not None else None,
         "description": spec.description,
+        "risk_note": spec.risk_note,
         "surfaces": list(spec.surfaces),
         "restart_required": spec.restart_required,
         "risk": spec.risk,

@@ -152,15 +152,17 @@ class TestListSettings:
         row = _entry(body, "pack_holdout_rate")
         assert row == {
             "name": "pack_holdout_rate",
+            "label": row["label"],  # non-empty, checked below
             "type": "float",
             "default": 0.0,
             "minimum": 0.0,
             "maximum": 1.0,
             "enum": None,
             "description": row["description"],  # non-empty, checked below
+            "risk_note": row["risk_note"],  # non-empty, checked below (risk=high)
             "surfaces": list(row["surfaces"]),
             "restart_required": False,
-            "risk": "unsafe",
+            "risk": "high",
             "group": "retrieval",
             "settings_live": True,
             "env_var": PACK_HOLDOUT_RATE_ENV,
@@ -169,7 +171,9 @@ class TestListSettings:
             "stored_value": None,
             "updated_at": None,
         }
+        assert row["label"]
         assert row["description"]
+        assert row["risk_note"]
 
     def test_group_labels_cover_every_entrys_group(self, client: TestClient) -> None:
         """brief e179 step 8: the UI's filter box reads display labels from
