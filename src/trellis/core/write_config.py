@@ -191,6 +191,39 @@ def _truthy(env: Mapping[str, str], name: str) -> bool:
     return env.get(name, "").strip().lower() in TRUTHY
 
 
+def parse_finite_float(raw: Any) -> float:
+    """Parse *raw* (a string, int or float) to a ``float``, or raise.
+
+    The one shared conversion step behind both float-typed sides of a
+    write-behaviour knob: this module's own environment parsers
+    (:func:`_parse_min_confidence`, :func:`_parse_pack_holdout_rate`,
+    :func:`_reconcile_timeout`) and
+    :func:`trellis.core.settings_registry.validate_value`'s settings-store
+    coercion. A value neither side can make sense of fails the same way
+    through either entry point, as ``ValueError`` — including a value
+    plain ``float()`` cannot even raise ``ValueError`` for: an int (or a
+    numeric string parsing to one) outside float range, such as
+    ``10**400``, raises ``OverflowError`` instead, which is not a
+    ``ValueError`` and so would otherwise pass an ``except ValueError``
+    uncaught.
+
+    Deliberately does **not** reject a non-finite result (``inf``,
+    ``nan``): ``float("nan")``/``float("inf")`` succeed, and each caller
+    already has its own policy for what to do with one — the two
+    ``[0, 1]``-bounded knobs fold it into their existing out-of-range
+    warning via a plain range comparison (``nan`` compares ``False``
+    against any bound), and :mod:`trellis.core.settings_registry` checks
+    ``math.isfinite`` explicitly where a raw value may be a bare Python
+    ``int``/``float`` rather than a string. Collapsing that here would
+    have turned an "out of range" warning into an "unparseable" one.
+    """
+    try:
+        return float(raw)
+    except (ValueError, OverflowError) as exc:
+        msg = f"not a number: {raw!r}"
+        raise ValueError(msg) from exc
+
+
 @functools.lru_cache(maxsize=8)
 def _parse_min_confidence(raw: str) -> float | None:
     """Parse one confidence-floor spelling, warning at most once for it.
@@ -203,7 +236,7 @@ def _parse_min_confidence(raw: str) -> float | None:
     would fire on flag reads that have nothing to do with this knob.
     """
     try:
-        value = float(raw)
+        value = parse_finite_float(raw)
     except ValueError:
         logger.warning(
             "trace_extraction_min_confidence_unparseable",
@@ -285,7 +318,7 @@ def _parse_pack_holdout_rate(raw: str) -> float:
     withholding packs from agents.
     """
     try:
-        value = float(raw)
+        value = parse_finite_float(raw)
     except ValueError:
         logger.warning(
             "pack_holdout_rate_unparseable",
@@ -317,7 +350,7 @@ def _reconcile_timeout(env: Mapping[str, str]) -> float:
     if not raw:
         return DEFAULT_RECONCILE_TIMEOUT_S
     try:
-        value = float(raw)
+        value = parse_finite_float(raw)
     except ValueError:
         return DEFAULT_RECONCILE_TIMEOUT_S
     return value if value > 0 else DEFAULT_RECONCILE_TIMEOUT_S
@@ -578,6 +611,7 @@ __all__ = [
     "TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG",
     "TRUTHY",
     "WriteBehaviourConfig",
+    "parse_finite_float",
     "resolve_overridden_by",
     "resolve_write_behaviour",
 ]

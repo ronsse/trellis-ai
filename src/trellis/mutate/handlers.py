@@ -534,6 +534,21 @@ class SettingsUpdateHandler:
         name = command.args["name"]
         raw_value = command.args.get("value")
 
+        # Defence in depth (B2, gate report on #857): this handler is only
+        # ever registered via create_settings_handlers, reachable only
+        # through the admin route/CLI, which both stamp target_type and
+        # target_id correctly -- but an untargeted or mistargeted Command
+        # reaching here by some future wiring mistake must still refuse
+        # rather than write, exactly as an entity_type="setting" policy
+        # expects to be able to gate this operation on those two fields.
+        if command.target_type != "setting" or command.target_id != name:
+            msg = (
+                "settings.update requires target_type='setting' and "
+                f"target_id={name!r}; got target_type={command.target_type!r}, "
+                f"target_id={command.target_id!r}"
+            )
+            raise ValidationError(msg, errors=[msg], code="untargeted_command")
+
         spec = get_setting(name)
         if spec is None:
             msg = f"Unknown setting: {name!r}"
@@ -561,9 +576,7 @@ class SettingsUpdateHandler:
                     exc.message, errors=[exc.message], code=exc.code.lower()
                 ) from exc
             new_value: bool | int | float | str | None = None
-            action = (
-                f"reset to default/env ({removed=})" if removed else "already unset"
-            )
+            action = "reset to default/env" if removed else "already unset"
         else:
             try:
                 new_value = validate_value(spec, raw_value)
@@ -585,17 +598,23 @@ class SettingsUpdateHandler:
 
         overridden_by = resolve_source(spec, store.as_values())
 
+        payload: dict[str, Any] = {
+            "name": name,
+            "old_value": old_value,
+            "new_value": new_value,
+            "overridden_by_at_write": overridden_by,
+            "changed_by": command.requested_by,
+            "settings_live": spec.settings_live,
+            "restart_required": spec.restart_required,
+        }
+        requested_by_claim = command.args.get("requested_by_claim")
+        if requested_by_claim is not None:
+            payload["requested_by_claim"] = requested_by_claim
         self._registry.operational.event_log.emit(
             EventType.SETTINGS_UPDATED,
             source="mutation_executor",
             entity_id=name,
-            payload={
-                "name": name,
-                "old_value": old_value,
-                "new_value": new_value,
-                "overridden_by_at_write": overridden_by,
-                "changed_by": command.requested_by,
-            },
+            payload=payload,
         )
         return name, f"Setting {name!r} {action}"
 
@@ -1852,5 +1871,27 @@ def create_curate_handlers(
         Operation.REDACTION_APPLY: RedactionApplyHandler(registry),
         Operation.RETENTION_PRUNE: RetentionPruneHandler(registry),
         Operation.RETENTION_RESTORE: RetentionRestoreHandler(registry),
+    }
+
+
+def create_settings_handlers(registry: StoreRegistry) -> dict[str, Any]:
+    """Handlers for the admin-only settings write path.
+
+    Deliberately **not** folded into :func:`create_curate_handlers`. That
+    dict backs every generic mutation surface — REST ``POST
+    /commands/batch`` and MCP ``execute_mutation`` — which route any
+    ``mutate``-scoped key straight past the admin-only ``GET``/``PUT``
+    gate on ``/api/v1/settings`` (CLAUDE.md B1/B2; gate report on #857).
+    Only :func:`trellis.mutate.build_settings_executor` builds an executor
+    from this dict, and only the admin REST route and
+    ``trellis admin settings`` call that builder — so
+    ``Operation.SETTINGS_UPDATE`` is unreachable from the generic surfaces
+    by construction, not by a policy that could be misconfigured away.
+    Stage 2 still always runs: this flows through
+    ``MutationExecutor(..., policy_gate=build_policy_gate(registry), ...)``
+    exactly like ``create_curate_handlers``, satisfying
+    ``tests/unit/test_policy_gate_rule.py``.
+    """
+    return {
         Operation.SETTINGS_UPDATE: SettingsUpdateHandler(registry),
     }

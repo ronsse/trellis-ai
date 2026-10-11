@@ -2,12 +2,18 @@
 settings write (PR 3, ``Operation.SETTINGS_UPDATE``).
 
 Both commands submit the same :class:`~trellis.mutate.commands.Command`
-the REST route (``trellis_api/routes/settings.py``) and the MCP surface
-do, through :func:`~trellis.mutate.build_curate_executor` — so a denying
-policy, a degraded store, or an out-of-range value is refused identically
-on every surface (Stage 2 always runs, CLAUDE.md). ``unset`` is not a
-second operation: it submits ``value=None``, which the handler treats as
-"remove the override" (see ``SettingsUpdateHandler``'s own docstring).
+shape the admin-scoped REST route (``trellis_api/routes/settings.py``)
+does, through :func:`~trellis.mutate.build_settings_executor` — so a
+denying policy, a degraded store, or an out-of-range value is refused
+identically on these two surfaces (Stage 2 always runs, CLAUDE.md).
+``build_settings_executor`` wires ``Operation.SETTINGS_UPDATE`` into
+*no other* executor: MCP's generic ``execute_mutation`` and REST's
+generic ``POST /commands/batch`` build :func:`~trellis.mutate.build_curate_executor`
+instead, which does not register this operation at all, so neither has a
+settings surface to be consistent with (gate report on #857, B1/B2).
+``unset`` is not a second operation: it submits ``value=None``, which the
+handler treats as "remove the override" (see ``SettingsUpdateHandler``'s
+own docstring).
 
 Exit codes follow :mod:`trellis_cli.exit_codes`, computed the same way
 regardless of ``--format`` (``tests/unit/test_format_exit_parity_rule.py``):
@@ -21,10 +27,18 @@ regardless of ``--format`` (``tests/unit/test_format_exit_parity_rule.py``):
 
 from __future__ import annotations
 
+from typing import Any
+
 import typer
 from rich.markup import escape
 
-from trellis.mutate import Command, CommandStatus, Operation, build_curate_executor
+from trellis.core.settings_registry import SettingSpec, get_setting, resolve_source
+from trellis.core.write_config import WriteBehaviourConfig
+from trellis.mutate import Command, CommandStatus, Operation, build_settings_executor
+from trellis.retrieve.builder_factory import _graph_seeding_enabled
+from trellis.retrieve.pack_builder import _filter_legacy_advisories_enabled
+from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_cli.exit_codes import refusal_exit_code
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
@@ -41,21 +55,83 @@ console = build_console()
 # ---------------------------------------------------------------------------
 
 
+def _settings_values(registry: StoreRegistry) -> dict[str, Any]:
+    path = resolve_settings_path(registry.stores_dir)
+    if path is None:
+        return {}
+    return SettingsStore(path).as_values()
+
+
+def _env_effective_value(spec: SettingSpec, settings_values: dict[str, Any]) -> Any:
+    """The real environment-governed value for *spec*, env-only knobs included.
+
+    ``graph_seeding``/``filter_legacy_advisories`` have their own
+    asymmetric env semantics (see ``trellis_api.routes.settings``'s
+    ``_effective_values`` docstring, which this mirrors rather than
+    reimplements independently); every other knob is a
+    :class:`WriteBehaviourConfig` field.
+    """
+    if spec.name == "graph_seeding":
+        return _graph_seeding_enabled()
+    if spec.name == "filter_legacy_advisories":
+        return _filter_legacy_advisories_enabled()
+    return WriteBehaviourConfig.from_env_and_settings(settings=settings_values).as_dict()[
+        spec.name
+    ]
+
+
+def _truthfulness_note(spec: SettingSpec, settings_values: dict[str, Any]) -> str | None:
+    """What a caller would otherwise not learn from the success message alone.
+
+    An env pin (gate report Q3, probe2) or a ``restart_required`` knob
+    both report a plain "set to X" success with nothing to say the write
+    has no, or not yet any, runtime effect -- this fills in that gap
+    rather than letting the caller believe the printed value is already
+    in force.
+    """
+    source = resolve_source(spec, settings_values)
+    if source == "env":
+        effective = _env_effective_value(spec, settings_values)
+        return (
+            f"{spec.env_var} is set, so it governs {spec.name!r} right now "
+            f"(effective value: {effective!r}); the stored value takes "
+            "effect once that variable is unset."
+        )
+    if spec.restart_required:
+        return (
+            f"{spec.name!r} is restart_required: this change applies after "
+            "a restart, not to the current process."
+        )
+    return None
+
+
 def _execute(cmd: Command, output_format: str) -> None:
     """Submit *cmd*, render the result, and exit non-zero on refusal/failure."""
-    result = build_curate_executor(_get_registry()).execute(cmd)
+    registry = _get_registry()
+    result = build_settings_executor(registry).execute(cmd)
+
+    note: str | None = None
+    spec: SettingSpec | None = None
+    if cmd.target_id is not None:
+        spec = get_setting(cmd.target_id)
+    if result.status == CommandStatus.SUCCESS and spec is not None:
+        note = _truthfulness_note(spec, _settings_values(registry))
 
     if output_format == "json":
-        emit_json(
-            {
-                "status": result.status.value,
-                "command_id": result.command_id,
-                "operation": result.operation,
-                "message": result.message,
-                "created_id": result.created_id,
-                "warnings": list(result.warnings),
-            }
-        )
+        payload: dict[str, Any] = {
+            "status": result.status.value,
+            "command_id": result.command_id,
+            "operation": result.operation,
+            "message": result.message,
+            "created_id": result.created_id,
+            "warnings": list(result.warnings),
+        }
+        if spec is not None:
+            payload["settings_live"] = spec.settings_live
+            payload["restart_required"] = spec.restart_required
+        if note is not None:
+            payload["note"] = note
+        emit_json(payload)
     else:
         if result.status == CommandStatus.SUCCESS:
             console.print(f"[green]✓ Command executed[/green]: {result.operation}")
@@ -71,6 +147,10 @@ def _execute(cmd: Command, output_format: str) -> None:
             highlight=False,
             soft_wrap=True,
         )
+        if note is not None:
+            console.print(
+                f"  Note: {note}", markup=False, highlight=False, soft_wrap=True
+            )
 
     # Below the format branch, so both formats exit alike.
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):

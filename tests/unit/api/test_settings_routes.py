@@ -16,6 +16,7 @@ route rather than merely a passthrough of the handler already tested in
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,9 @@ from fastapi.testclient import TestClient
 import trellis_api.app as app_module
 from trellis.auth import SCOPE_ADMIN, SCOPE_READ, generate_api_key
 from trellis.core.settings_registry import SETTINGS_REGISTRY
+from trellis.mutate.policy_source import POLICY_FILENAME
+from trellis.schemas.enums import Enforcement, PolicyType
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
@@ -243,6 +247,35 @@ class TestUpdateSetting:
         resp = client.put("/api/v1/settings/pack_holdout_rate", json={})
         assert resp.status_code == 422
 
+    def test_entity_type_setting_deny_policy_refuses_the_route(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Required item 1's third check: a deny policy scoped to
+        ``entity_type=setting`` (the scope ``trellis policy add
+        --entity-type setting`` produces) blocks this route too -- not
+        just an operation-name or wildcard rule. Stage 2 always runs
+        through :func:`build_settings_executor`
+        (``trellis_api.routes.settings._execute_command``), so this is
+        the same gate every other curate operation gets.
+        """
+        policy = Policy(
+            policy_type=PolicyType.MUTATION,
+            scope=PolicyScope(level="entity_type", value="setting"),
+            rules=[PolicyRule(operation="settings.update", action="deny")],
+            enforcement=Enforcement.ENFORCE,
+        )
+        assert registry.stores_dir is not None
+        registry.stores_dir.mkdir(parents=True, exist_ok=True)
+        (registry.stores_dir / POLICY_FILENAME).write_text(
+            json.dumps({"policies": [policy.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+
+        resp = client.put("/api/v1/settings/pack_holdout_rate", json={"value": 0.9})
+
+        assert resp.status_code == 400, resp.text
+        assert _store(registry).get("pack_holdout_rate") is None
+
     def test_null_value_resets_the_override(
         self, client: TestClient, registry: StoreRegistry
     ) -> None:
@@ -263,14 +296,24 @@ class TestUpdateSetting:
     def test_degraded_store_refuses_the_write(
         self, client: TestClient, registry: StoreRegistry
     ) -> None:
+        """409, not 400 (F1): a degraded store is not a bad request.
+
+        The store file on disk is unharmed and the fix is an operator
+        action (``trellis admin settings list``/inspect the file), not a
+        different request body -- so this is shaped like
+        ``routes/policies.py``'s precedent for the same error class, with
+        the recovery text kept in ``detail["message"]``.
+        """
         path = resolve_settings_path(registry.stores_dir)
         assert path is not None
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{not valid json", encoding="utf-8")
 
         resp = client.put("/api/v1/settings/pack_holdout_rate", json={"value": 0.1})
-        assert resp.status_code == 400
-        assert "degrad" in resp.json()["detail"].lower()
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "degraded_store_write"
+        assert "degrad" in detail["message"].lower()
 
 
 # ---------------------------------------------------------------------------

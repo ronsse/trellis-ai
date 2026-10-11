@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.settings_registry import (
@@ -34,11 +34,13 @@ from trellis.core.settings_registry import (
     resolve_source,
 )
 from trellis.core.write_config import WriteBehaviourConfig
-from trellis.mutate import Command, CommandStatus, Operation, build_curate_executor
+from trellis.mutate import Command, CommandStatus, Operation, build_settings_executor
 from trellis.retrieve.builder_factory import _graph_seeding_enabled
+from trellis.retrieve.pack_builder import _filter_legacy_advisories_enabled
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_api.app import get_registry
+from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes._results import command_response
 from trellis_wire.dtos import CommandResponse, SettingUpdateRequest
 
@@ -71,29 +73,35 @@ def _effective_values(settings_values: dict[str, Any]) -> dict[str, Any]:
     already report, so this route stays in sync with those two surfaces
     rather than adding a third, independently-drifting computation.
 
-    ``graph_seeding`` is not a ``WriteBehaviourConfig`` field (see
-    ``settings_registry``'s module docstring), and its real environment
-    semantics are asymmetric with every other boolean here -- unset *or
+    ``graph_seeding`` and ``filter_legacy_advisories`` are not
+    :class:`WriteBehaviourConfig` fields (see ``settings_registry``'s
+    module docstring), and each has its own real environment semantics
+    that are asymmetric with every other boolean here -- unset *or
     unrecognised* means on, only an explicit falsey token turns it off
-    (:func:`trellis.retrieve.builder_factory._graph_seeding_enabled`).
+    (:func:`trellis.retrieve.builder_factory._graph_seeding_enabled`,
+    :func:`trellis.retrieve.pack_builder._filter_legacy_advisories_enabled`).
     Reimplementing that asymmetry here would risk drifting from the one
-    real implementation, so this calls it directly when the environment
+    real implementation, so this calls each directly when the environment
     is what governs; when it is not, the stored/default value is reported
-    the same way the twelve other fields are (an optimistic preview --
-    see ``settings_live``, which is ``False`` for this entry precisely
+    the same way the other fields are (an optimistic preview -- see
+    ``settings_live``, which is ``False`` for ``graph_seeding`` precisely
     because that preview is not yet wired to any real call site).
     """
     effective = WriteBehaviourConfig.from_env_and_settings(
         settings=settings_values
     ).as_dict()
-    spec = SETTINGS_REGISTRY["graph_seeding"]
-    source = resolve_source(spec, settings_values)
-    if source == "env":
-        effective["graph_seeding"] = _graph_seeding_enabled()
-    elif source == "settings":
-        effective["graph_seeding"] = bool(settings_values["graph_seeding"])
-    else:
-        effective["graph_seeding"] = spec.default
+    for name, env_fn in (
+        ("graph_seeding", _graph_seeding_enabled),
+        ("filter_legacy_advisories", _filter_legacy_advisories_enabled),
+    ):
+        spec = SETTINGS_REGISTRY[name]
+        source = resolve_source(spec, settings_values)
+        if source == "env":
+            effective[name] = env_fn()
+        elif source == "settings":
+            effective[name] = bool(settings_values[name])
+        else:
+            effective[name] = spec.default
     return effective
 
 
@@ -127,8 +135,24 @@ def _execute_command(cmd: Command) -> CommandResponse:
     onto the wire through ``command_response``, the one allowed
     construction site (``tests/unit/api/test_command_response_rule.py``).
     """
-    result = build_curate_executor(get_registry()).execute(cmd)
+    result = build_settings_executor(get_registry()).execute(cmd)
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
+        reason = result.metadata.get("rejection_reason")
+        if reason in ("degraded_store_write", "stale_store_write"):
+            # 409, matching routes/policies.py's precedent for the same
+            # error class: the write did not happen and the file on disk
+            # is unharmed, but "fix your input" (400) is the wrong
+            # instruction -- the recovery command is what the caller
+            # needs, and it is already folded into `message` by
+            # StoreWriteRefusedError (trellis.errors).
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": reason,
+                    "message": sanitize_error_message(result.message),
+                    "store_degradation": None,
+                },
+            )
         raise HTTPException(
             status_code=400, detail=sanitize_error_message(result.message)
         )
@@ -151,13 +175,21 @@ def list_settings() -> dict[str, Any]:
         "store_degradation": (
             degradation.to_dict() if degradation is not None else None
         ),
+        # This process's own read, not a fleet-wide value (plan
+        # p1-ui-control-plane.md's PR 3/4 acceptance check): a
+        # multi-container deployment has one settings.json per container
+        # unless it is bind-mounted, and nothing about this route lets a
+        # caller tell the two cases apart without this label.
+        "read_by": "trellis-api",
     }
 
 
 @router.put("/settings/{name}")
 @router.post("/settings/{name}")
 def update_setting(
-    name: str, req: SettingUpdateRequest
+    name: str,
+    req: SettingUpdateRequest,
+    ctx: AuthContext = Depends(authenticate),
 ) -> CommandResponse | dict[str, Any]:
     """Write (or, with ``value: null``, remove) one setting's override.
 
@@ -167,19 +199,37 @@ def update_setting(
     setting whose environment variable is currently set still stores the
     override (so it is ready once the variable is unset); the response
     says so rather than letting the caller believe it just took effect.
+
+    ``changed_by`` on the audit event is derived from ``ctx``, the
+    *authenticated* principal that ``admin_auth`` already resolved for
+    this request -- not ``req.requested_by``, which is free text the
+    client chose and could set to anyone's name. ``ctx`` is declared as
+    an explicit parameter here (rather than read off the request) so
+    FastAPI's per-request dependency cache reuses the already-resolved
+    context from the route's own scope gate instead of authenticating
+    twice. ``req.requested_by`` is still recorded, but only as a
+    separate *claimed* field (``args["requested_by_claim"]``), surfaced
+    on the event as ``requested_by_claim`` rather than overwriting
+    ``changed_by``.
     """
+    principal = ctx.key_id or ctx.name or "unknown"
     cmd = Command(
         operation=Operation.SETTINGS_UPDATE,
-        args={"name": name, "value": req.value},
+        args={
+            "name": name,
+            "value": req.value,
+            "requested_by_claim": req.requested_by,
+        },
         target_id=name,
         target_type="setting",
-        requested_by=req.requested_by,
+        requested_by=f"api:settings:{principal}",
     )
     # Unknown name is NOT pre-checked here: it goes through the same
     # governed path as every other refusal reason (wrong type,
     # out-of-range, degraded store), so Stage 2 and the audit event cover
     # it too -- the handler raises ValidationError, which _execute_command
-    # below turns into this 400, not a different code path.
+    # below turns into this 400 (or 409 for a degraded/stale store), not
+    # a different code path.
     response = _execute_command(cmd)
 
     # A non-raising response above proves the handler accepted `name` as
@@ -191,22 +241,54 @@ def update_setting(
         raise HTTPException(status_code=500, detail=msg)
 
     registry = get_registry()
-    settings_values = _get_settings_store(registry).as_values()
+    store = _get_settings_store(registry)
+    settings_values = store.as_values()
     source = resolve_source(spec, settings_values)
+
+    # The normalized, parsed value the handler actually stored -- never
+    # the raw request body (Q5/Truthfulness). A reset (`req.value is
+    # None`) leaves nothing stored, so this reads back `None` too.
+    stored_row = store.get(name)
+    stored_value = stored_row.value if stored_row is not None else None
+
+    restart_note = (
+        f"{name!r} is restart_required: this change applies after a "
+        "restart, not to the current process."
+        if spec.restart_required
+        else None
+    )
+
     if source != "env":
-        return response
+        return {
+            **response.model_dump(),
+            "settings_live": spec.settings_live,
+            "restart_required": spec.restart_required,
+            "note": restart_note,
+        }
 
     effective_value = _effective_values(settings_values)[name]
+    if req.value is None:
+        note = (
+            f"{spec.env_var} is set, so it governs {name!r} right now; "
+            "the override was removed, and nothing is stored behind it "
+            "-- the environment variable keeps winning once it stays set."
+        )
+    else:
+        note = (
+            f"{spec.env_var} is set, so it governs {name!r} right now; "
+            "the stored value takes effect once that variable is unset."
+        )
+    if spec.restart_required:
+        note = f"{note} {restart_note}"
     return {
         "status": response.status,
         "command_id": response.command_id,
         "name": name,
         "accepted": True,
-        "stored_value": req.value,
+        "stored_value": stored_value,
         "effective_value": effective_value,
         "overridden_by": "env",
-        "note": (
-            f"{spec.env_var} is set, so it governs {name!r} right now; "
-            "the stored value takes effect once that variable is unset."
-        ),
+        "settings_live": spec.settings_live,
+        "restart_required": spec.restart_required,
+        "note": note,
     }

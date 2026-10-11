@@ -90,6 +90,36 @@ def build_curate_executor(
     )
 
 
+def build_settings_executor(registry: StoreRegistry) -> MutationExecutor:
+    """Build a :class:`MutationExecutor` wired with ONLY the settings handler.
+
+    ``Operation.SETTINGS_UPDATE`` is deliberately absent from
+    :func:`build_curate_executor`'s handler dict (see
+    ``create_settings_handlers``'s docstring) because that executor backs
+    the generic mutation surfaces -- REST ``POST /commands/batch`` and MCP
+    ``execute_mutation`` -- which have no admin-scope gate of their own
+    (gate report on #857, B1/B2). Only the admin-scoped REST route
+    (``trellis_api/routes/settings.py``) and ``trellis admin settings``
+    call this builder, so settings.update stays reachable from exactly
+    those two surfaces.
+
+    Stage 2 still always runs here, same as ``build_curate_executor``:
+    the policy gate is built from the deployment's declared policies
+    unconditionally, never only when policies exist
+    (``tests/unit/test_policy_gate_rule.py``). A deployment can therefore
+    add an ``entity_type: setting`` deny policy and have it enforced on
+    this path exactly as on any other governed write.
+    """
+    from trellis.mutate.handlers import create_settings_handlers  # noqa: PLC0415
+    from trellis.mutate.policy_source import build_policy_gate  # noqa: PLC0415
+
+    return MutationExecutor(
+        event_log=registry.operational.event_log,
+        handlers=create_settings_handlers(registry),
+        policy_gate=build_policy_gate(registry),
+    )
+
+
 __all__ = [
     "DESTRUCTIVE_OPERATIONS",
     "GOVERNING_KEYS",
@@ -111,6 +141,7 @@ __all__ = [
     "build_evidence_ingest_command",
     "build_evidence_ingest_command_from_args",
     "build_policy_gate",
+    "build_settings_executor",
     "ensure_evidence_document",
     "governing_key_refusal",
     "load_policies",

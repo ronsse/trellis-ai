@@ -22,8 +22,11 @@ from tests.cli_output import plain
 if TYPE_CHECKING:
     import pytest
 
+from trellis.mutate.policy_source import POLICY_FILENAME
+from trellis.schemas.enums import Enforcement, PolicyType
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
-from trellis_cli.exit_codes import EXIT_OK, EXIT_VALIDATION
+from trellis_cli.exit_codes import EXIT_OK, EXIT_POLICY, EXIT_VALIDATION
 from trellis_cli.main import app as root_app
 
 runner = CliRunner()
@@ -123,6 +126,33 @@ class TestSet:
         _init_stores(tmp_path, monkeypatch)
         result = _invoke(["set", "pack_holdout_rate", "5.0", "--format", "json"])
         assert result.exit_code == EXIT_VALIDATION, result.output
+
+    def test_entity_type_setting_deny_policy_refuses_the_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Required item 1's third check, CLI half: a deny policy scoped
+        to ``entity_type=setting`` blocks ``settings set`` too, through
+        the real :func:`build_settings_executor` Stage 2 gate -- the same
+        proof as ``test_settings_routes.py``'s route-level test.
+        """
+        _init_stores(tmp_path, monkeypatch)
+        policy = Policy(
+            policy_type=PolicyType.MUTATION,
+            scope=PolicyScope(level="entity_type", value="setting"),
+            rules=[PolicyRule(operation="settings.update", action="deny")],
+            enforcement=Enforcement.ENFORCE,
+        )
+        (tmp_path / "data" / "stores" / POLICY_FILENAME).write_text(
+            json.dumps({"policies": [policy.model_dump(mode="json")]}),
+            encoding="utf-8",
+        )
+
+        result = _invoke(["set", "pack_holdout_rate", "0.9", "--format", "json"])
+
+        assert result.exit_code == EXIT_POLICY, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+        assert _store(tmp_path).get("pack_holdout_rate") is None
 
 
 # ---------------------------------------------------------------------------
