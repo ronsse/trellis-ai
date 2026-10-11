@@ -24,13 +24,17 @@ exactly as the old ``None`` did.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import structlog
 
 from trellis.core.write_config import WriteBehaviourConfig
 from trellis.ops import ParameterRegistry
-from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
+from trellis.retrieve.pack_builder import (
+    PackBuilder,
+    SemanticDedupConfig,
+    _filter_legacy_advisories_enabled,
+)
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import NamespaceSeedExtractor, build_strategies
 from trellis.stores.advisory_source import load_advisory_store
@@ -78,6 +82,12 @@ SEMANTIC_AXIS = "semantic"
 #: — and only produces data once the branch actually runs.
 GRAPH_SEEDING_ENV = "TRELLIS_GRAPH_SEEDING"
 
+#: Settings-store key for the same knob (#settings-store PR 2/2) — see
+#: ``SettingSpec(name="graph_seeding")`` in :mod:`trellis.core.settings_registry`.
+#: Deliberately the same spelling as the setting name so a reader never has
+#: to map between the two.
+GRAPH_SEEDING_SETTING = "graph_seeding"
+
 #: Accepted spellings, matching :mod:`trellis.stores.registry`. A value in
 #: neither set is a typo, and a typo'd kill switch that silently keeps the
 #: default is how an operator ends up believing they disabled something
@@ -118,10 +128,14 @@ def build_pack_builder(
             with, or ``None``.
     """
     param_registry = ParameterRegistry(registry.operational.parameter_store)
+    # One read, shared by every settings-aware knob resolved below —
+    # ``load_settings_values`` degrades to ``{}`` rather than raising, so
+    # no caller here needs its own try/except around this read.
+    settings = load_settings_values(registry.stores_dir)
     strategies_result = build_strategies(
         registry,
         parameter_registry=param_registry,
-        graph_seed_extractor=_build_seed_extractor(registry),
+        graph_seed_extractor=_build_seed_extractor(registry, settings=settings),
     )
     return PackBuilder(
         strategies=strategies_result.strategies,
@@ -140,19 +154,24 @@ def build_pack_builder(
         # The pack-effect holdout (``TRELLIS_PACK_HOLDOUT_RATE``), read per
         # build like every surface's builder, so no surface escapes it.
         # ``env > settings > default`` (#settings-store PR 1/2): this is
-        # the one ``WriteBehaviourConfig`` field a *settings*-store
-        # override actually changes at its real enforcement site today —
-        # see ``SettingSpec(name="pack_holdout_rate").settings_live`` in
-        # ``trellis.core.settings_registry``. Reading the settings file
-        # here costs the same one extra file read ``load_advisory_store``
-        # already pays per pack build, immediately above.
+        # a ``WriteBehaviourConfig`` field, so it goes through
+        # ``from_env_and_settings`` rather than the hand-rolled resolution
+        # ``graph_seeding`` / ``filter_legacy_advisories`` need below —
+        # those two are deliberately kept out of ``WriteBehaviourConfig``
+        # (see ``GRAPH_SEEDING_SETTING``'s docstring).
         holdout_rate=WriteBehaviourConfig.from_env_and_settings(
-            settings=load_settings_values(registry.stores_dir)
+            settings=settings
         ).pack_holdout_rate,
+        # Same env > settings > default resolution as above, for the
+        # advisory-serving kill switch (#settings-store PR 2/2) — see
+        # ``SettingSpec(name="filter_legacy_advisories")``.
+        filter_legacy_advisories=_filter_legacy_advisories_enabled(settings=settings),
     )
 
 
-def _build_seed_extractor(registry: StoreRegistry) -> GraphSeedExtractor | None:
+def _build_seed_extractor(
+    registry: StoreRegistry, *, settings: dict[str, Any] | None = None
+) -> GraphSeedExtractor | None:
     """The graph axis's seed extractor, or ``None`` when disabled.
 
     This is the wiring #375 asks for, and it is the *only* one: the
@@ -168,14 +187,22 @@ def _build_seed_extractor(registry: StoreRegistry) -> GraphSeedExtractor | None:
     has nothing to be silently unsatisfied by — its read of the store is
     indexed and its miss case is the recency window that ran before.
     """
-    if not _graph_seeding_enabled():
+    if not _graph_seeding_enabled(settings):
         logger.info("graph_seeding_disabled", env=GRAPH_SEEDING_ENV)
         return None
     return NamespaceSeedExtractor(registry.knowledge.graph_store)
 
 
-def _graph_seeding_enabled() -> bool:
-    """Read :data:`GRAPH_SEEDING_ENV`; unset or unrecognised means on.
+def _graph_seeding_enabled(settings: dict[str, Any] | None = None) -> bool:
+    """Read :data:`GRAPH_SEEDING_ENV`, env > settings > default.
+
+    ``settings`` is the already-loaded ``name -> value`` mapping (e.g. from
+    :func:`trellis.stores.settings_store.load_settings_values`); ``None``
+    (the default, for any caller with no settings access) keeps the
+    env-only behaviour this had before settings existed. Unset/unrecognised
+    in the environment falls through to :data:`GRAPH_SEEDING_SETTING`;
+    unset or non-bool there means on — the same default either knob
+    shipped with.
 
     Read per build rather than at import, so a long-lived process picks up
     an operator's change between runs — the same posture
@@ -183,7 +210,8 @@ def _graph_seeding_enabled() -> bool:
     """
     raw = os.environ.get(GRAPH_SEEDING_ENV, "").strip().lower()
     if not raw:
-        return True
+        value = (settings or {}).get(GRAPH_SEEDING_SETTING)
+        return value if isinstance(value, bool) else True
     if raw in _FALSEY:
         return False
     if raw not in _TRUTHY:

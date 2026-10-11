@@ -19,10 +19,13 @@ Scope, stated once rather than per entry
 -----------------------------------------
 Registered: the 12 :class:`~trellis.core.write_config.WriteBehaviourConfig`
 fields, plus ``graph_seeding``
-(:data:`trellis.retrieve.builder_factory.GRAPH_SEEDING_ENV`) as a catalog
-entry. Deliberately **not** registered: ``learning.auto_promote.*``
-(the tuner's own config, `config.yaml`-sourced, not `StoreRegistry`-backed —
-pending an owner decision per the plan this PR implements) and anything
+(:data:`trellis.retrieve.builder_factory.GRAPH_SEEDING_ENV`) and
+``filter_legacy_advisories``
+(:data:`trellis.retrieve.pack_builder.FILTER_LEGACY_ADVISORIES_ENV`) as
+catalog entries outside ``WriteBehaviourConfig``. Deliberately **not**
+registered: ``learning.auto_promote.*`` (the tuner's own config,
+`config.yaml`-sourced, not `StoreRegistry`-backed — pending an owner
+decision per the plan this PR implements) and anything
 `StoreRegistry`-construction-time (backend choice, DSN, blob bucket,
 auth mode) — those are process-start parameters, never read live by any
 of the stores or readers this registry's siblings touch, so a settings
@@ -32,21 +35,19 @@ override could never take effect and would be a lie to list.
 --------------------------------------------------------
 Whether a *settings* override (as opposed to env) actually changes this
 knob's real enforcement today, not merely what ``trellis admin
-write-config`` / ``GET /api/version`` report about it. As of this PR that
-is true for exactly **one** entry, ``pack_holdout_rate`` — wired into
-:func:`trellis.retrieve.builder_factory.build_pack_builder`. The other
-twelve are resolved through the settings-aware path only at the two
-reporting surfaces; their real enforcement call sites
-(``trace_ingest_hook.py``, ``memory_ingest_hook.py``,
+write-config`` / ``GET /api/version`` report about it. Every real
+enforcement call site (``trace_ingest_hook.py``, ``memory_ingest_hook.py``,
 ``embed_ingest_hook.py``, ``classify/ingest.py``, ``mcp/reconcile.py``,
-``mcp/server.py``) still call ``WriteBehaviourConfig.from_env()`` directly
-and so only ever see an *environment* override — a settings-only row for
-one of those twelve is stored, reported as in force, and has **no runtime
-effect** until a follow-up wires its call site. That gap is deliberate
-(the brief's own escape valve: wiring every hot ingest call site to read
-an extra file risked exactly the per-document cost this module exists to
-avoid) and ``settings_live`` is what makes it machine-checkable rather
-than a claim nothing can catch drifting.
+``mcp/server.py``, ``builder_factory.py``, ``pack_builder.py``) now
+resolves env > settings > default via
+:func:`trellis.core.write_config.resolve_write_behaviour` or an
+equivalent per-knob settings-aware read, so ``settings_live`` is ``True``
+for every entry except ``minhash_seed_max_docs`` — read once at process
+start (see its own entry) — which instead carries
+``restart_required=True`` and states why in its description.
+:mod:`tests.unit.core.test_settings_registry` proves every entry is one
+or the other, against a deliberately defective mutant entry that is
+neither.
 """
 
 from __future__ import annotations
@@ -104,7 +105,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="safe",
-        settings_live=False,
+        settings_live=True,
     ),
     SettingSpec(
         name="embed_on_ingest",
@@ -121,7 +122,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="safe",
-        settings_live=False,
+        settings_live=True,
     ),
     SettingSpec(
         name="memory_extraction",
@@ -139,7 +140,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="unsafe",
-        settings_live=False,
+        settings_live=True,
     ),
     SettingSpec(
         name="reconcile_on_write",
@@ -159,7 +160,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp",),
         restart_required=False,
         risk="unsafe",
-        settings_live=False,
+        settings_live=True,
     ),
     SettingSpec(
         name="trace_extraction",
@@ -175,7 +176,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="safe",
-        settings_live=False,
+        settings_live=True,
     ),
     SettingSpec(
         name="trace_extraction_min_confidence",
@@ -191,7 +192,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="safe",
-        settings_live=False,
+        settings_live=True,
         minimum=0.0,
         maximum=1.0,
     ),
@@ -211,7 +212,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api"),
         restart_required=False,
         risk="safe",
-        settings_live=False,
+        settings_live=True,
     ),
     SettingSpec(
         name="require_bodied_attribution",
@@ -232,7 +233,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api"),
         restart_required=False,
         risk="unsafe",
-        settings_live=False,
+        settings_live=True,
     ),
     SettingSpec(
         name="minhash_seed_max_docs",
@@ -240,17 +241,22 @@ _SPECS: tuple[SettingSpec, ...] = (
         default=0,
         description=(
             "How many stored documents to load into the MCP fuzzy-dedup "
-            "index at first use. 0 (default) seeds nothing. Flagged "
-            "'restart' risk: the cost lands at the *next* process's first "
-            "save_memory call, not when this is changed — measured at "
-            "~32ms per document (128 MinHash permutations), so a corpus "
-            "of 735 whole documents costs ~24s of blocking CPU on that "
-            "first call, scaling linearly with corpus size. Present as "
-            "'takes effect on next session start; will block for ~Ns', "
-            "never a bare slider."
+            "index at first use. 0 (default) seeds nothing. Not "
+            "settings-live and cannot become so without a process restart: "
+            "``_get_minhash_index`` reads this once, lazily, on an MCP "
+            "server process's first ``save_memory`` call, then caches the "
+            "built index for that process's lifetime — a settings write "
+            "after that first call has no effect until the next process "
+            "starts. Flagged 'restart' risk on top of that: the cost lands "
+            "at that *next* process's first save_memory call — measured at "
+            "~32ms per document (128 MinHash permutations), so a corpus of "
+            "735 whole documents costs ~24s of blocking CPU on that first "
+            "call, scaling linearly with corpus size. Present as 'takes "
+            "effect on next session start; will block for ~Ns', never a "
+            "bare slider."
         ),
         surfaces=("mcp",),
-        restart_required=False,
+        restart_required=True,
         risk="restart",
         settings_live=False,
         minimum=0,
@@ -267,11 +273,9 @@ _SPECS: tuple[SettingSpec, ...] = (
             "pack reaches the caller as an ordinary empty one with no "
             "visible symptom beyond measurement, so a fat-fingered value "
             "silently degrades retrieval quality fleet-wide until someone "
-            "runs `trellis analyze replay`. This is the one setting a "
-            "settings-store override actually changes today (see "
-            "`settings_live`) — it is read per pack build in "
-            "`build_pack_builder`, env > settings > default, same as the "
-            "other two surfaces."
+            "runs `trellis analyze replay`. Settings-live: read per pack "
+            "build in `build_pack_builder`, env > settings > default, "
+            "same as the other two surfaces."
         ),
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
@@ -297,7 +301,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp",),
         restart_required=False,
         risk="safe",
-        settings_live=False,
+        settings_live=True,
     ),
     SettingSpec(
         name="reconcile_timeout_s",
@@ -312,7 +316,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp",),
         restart_required=False,
         risk="safe",
-        settings_live=False,
+        settings_live=True,
         minimum=0.0,
     ),
     SettingSpec(
@@ -322,20 +326,42 @@ _SPECS: tuple[SettingSpec, ...] = (
         description=(
             "Seed the graph retrieval axis from the pack's intent "
             "(TRELLIS_GRAPH_SEEDING) instead of falling back to an "
-            "intent-blind recency window. Defaults on. Catalog entry "
-            "only in this PR: builder_factory.py deliberately keeps this "
-            "flag's own env read out of write_config.py (mixing a "
-            "retrieval toggle into the write-behaviour module would make "
-            "`trellis admin write-config` report something it does not "
-            "govern), and this PR does not add a second, settings-aware "
-            "read next to it — a settings override stored under this "
-            "name has no runtime effect until a follow-up wires "
-            "builder_factory.py's own read of it."
+            "intent-blind recency window. Defaults on. Kept out of "
+            "`write_config.py`/`WriteBehaviourConfig` on purpose — mixing "
+            "a retrieval toggle into the write-behaviour module would "
+            "make `trellis admin write-config` report something it does "
+            "not govern — but settings-live via its own env > settings > "
+            "default read in `builder_factory._graph_seeding_enabled`, "
+            "called once per `build_pack_builder`."
         ),
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="safe",
-        settings_live=False,
+        settings_live=True,
+    ),
+    SettingSpec(
+        name="filter_legacy_advisories",
+        type="bool",
+        default=True,
+        description=(
+            "Drop pre-#848 advisories (ones with no scoped-success "
+            "history, so a learning-loop effectiveness check has nothing "
+            "to grade them on) from what a pack serves. Defaults on, "
+            "matching the shipped behaviour before this setting existed. "
+            "Kept out of `write_config.py`/`WriteBehaviourConfig` for the "
+            "same reason as `graph_seeding`: it governs what retrieval "
+            "serves, not how a write behaves. Settings-live via its own "
+            "env > settings > default read in "
+            "`pack_builder._filter_legacy_advisories_enabled`, called "
+            "once per `build_pack_builder` and threaded through as a "
+            "resolved bool — a `PackBuilder` constructed directly (no "
+            "factory in front of it, as several tests do) instead falls "
+            "back to a live, env-only read with the same default."
+        ),
+        surfaces=("mcp", "api", "cli"),
+        restart_required=False,
+        risk="safe",
+        settings_live=True,
     ),
 )
 

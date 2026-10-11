@@ -52,7 +52,7 @@ from trellis.core.base import TrellisModel
 from trellis.core.document_write import put_document
 from trellis.core.hashing import content_hash
 from trellis.core.memory_op_judged import emit_memory_op_judged
-from trellis.core.write_config import WriteBehaviourConfig
+from trellis.core.write_config import resolve_write_behaviour
 from trellis.llm.json_response import (
     JSONParseOutcome,
     coerce_finite_float,
@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
     from trellis.stores.base.vector import VectorStore
+    from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
 
@@ -216,19 +217,23 @@ class ReconcileOutcome(TrellisModel):
 # ---------------------------------------------------------------------------
 
 
-def reconcile_on_write_enabled() -> bool:
-    """Return whether the model-judged verdict tier is enabled."""
-    return WriteBehaviourConfig.from_env().reconcile_on_write
+def reconcile_on_write_enabled(registry: StoreRegistry | None = None) -> bool:
+    """Return whether the model-judged verdict tier is enabled.
+
+    Env > settings > default; see
+    :func:`trellis.core.write_config.resolve_write_behaviour`.
+    """
+    return resolve_write_behaviour(registry).reconcile_on_write
 
 
-def reconcile_timeout_seconds() -> float:
+def reconcile_timeout_seconds(registry: StoreRegistry | None = None) -> float:
     """Return the per-verdict timeout, defaulting on absent/invalid config."""
-    return WriteBehaviourConfig.from_env().reconcile_timeout_s
+    return resolve_write_behaviour(registry).reconcile_timeout_s
 
 
-def configured_model_id() -> str:
+def configured_model_id(registry: StoreRegistry | None = None) -> str:
     """Return the fallback model identifier label for emitted events."""
-    return WriteBehaviourConfig.from_env().reconcile_model
+    return resolve_write_behaviour(registry).reconcile_model
 
 
 # ---------------------------------------------------------------------------

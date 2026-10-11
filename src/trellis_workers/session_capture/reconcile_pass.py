@@ -124,8 +124,8 @@ def adjudicate(
     """
     doc_store = registry.knowledge.document_store
     event_log = registry.operational.event_log
-    model_id = configured_model_id()
-    timeout = reconcile_timeout_seconds()
+    model_id = configured_model_id(registry)
+    timeout = reconcile_timeout_seconds(registry)
 
     existing = _load_existing(registry, id_prefix)
     index = MinHashIndex()
