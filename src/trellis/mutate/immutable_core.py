@@ -160,7 +160,11 @@ def governing_key_refusal(component_id: str) -> str | None:
 #: ``entity.update`` is *not* here: the graph is SCD-2, so an update adds
 #: a version and ``get_node_history`` still returns the prior one.
 #: ``alias.upsert`` *is*, because a rebind detaches the alias from its
-#: previous owner and nothing retains that binding.
+#: previous owner and nothing retains that binding. ``settings.update``
+#: *is* too, for the same reason: ``SettingsStore`` has no SCD-2 or
+#: history read — a write (including a null-value reset) overwrites or
+#: removes the prior override in place, and only the audit event, not the
+#: store, still has it.
 DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
     {
         Operation.ENTITY_MERGE,
@@ -169,6 +173,7 @@ DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         Operation.LABEL_REMOVE,
         Operation.REDACTION_APPLY,
         Operation.RETENTION_PRUNE,
+        Operation.SETTINGS_UPDATE,
     }
 )
 

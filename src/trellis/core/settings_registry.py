@@ -1,13 +1,20 @@
 """Settings registry — the catalog of tunables an operator may override.
 
-A :class:`SettingSpec` is metadata only: name, type, bounds, a shipped
-default, an operator-facing description, which surfaces read it, and a
-risk tier. **It does not validate anything in this PR** — no write route,
-no CLI write command and no :class:`~trellis.mutate.executor.MutationExecutor`
-operation exist yet for settings (tracked for a follow-up PR, which is
-exactly where this registry's ``type``/``minimum``/``maximum``/``enum``
-fields are meant to gate a write). Today the registry is read by:
+A :class:`SettingSpec` is metadata: name, type, bounds, env var, a
+shipped default, an operator-facing description, which surfaces read it,
+and a risk tier. :func:`validate_value` is the one piece of behaviour
+this module owns — it coerces and bounds-checks a raw value against a
+spec's declared ``type``/``minimum``/``maximum``/``enum``, raising
+``ValueError`` rather than clamping, for
+:class:`~trellis.mutate.handlers.SettingsUpdateHandler` (the governed
+write route this registry's fields were always meant to gate) to
+translate into a rejection. Beyond that this module still does not read
+or write ``settings.json`` itself — that is
+:class:`~trellis.stores.settings_store.SettingsStore`'s job. Today the
+registry is read by:
 
+* :class:`~trellis.mutate.handlers.SettingsUpdateHandler`, via
+  :func:`validate_value` and :func:`get_setting`;
 * an operator or test skimming :data:`SETTINGS_REGISTRY` directly;
 * :func:`trellis.core.write_config.WriteBehaviourConfig.from_env_and_settings`
   and :func:`~trellis.core.write_config.resolve_overridden_by` **not at
@@ -59,10 +66,24 @@ neither.
 
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
+from trellis.core.write_config import ENV_VAR_BY_FIELD, parse_finite_float
+from trellis.learning.candidate_auto_promote import (
+    CANDIDATE_AUTO_PROMOTE_ENABLED_ENV,
+    CANDIDATE_AUTO_PROMOTE_MAX_PROMOTIONS_PER_RUN_ENV,
+    CANDIDATE_AUTO_PROMOTE_MIN_DISTINCT_SESSIONS_ENV,
+    CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV,
+    CANDIDATE_AUTO_PROMOTE_MODE_ENV,
+    CANDIDATE_AUTO_PROMOTE_REQUIRE_ZERO_UNHELPFUL_ENV,
+)
 from trellis.learning.tuners.auto_promote import (
+    AUTO_PROMOTE_ENABLED_ENV,
+    AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV,
+    AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV,
     DEFAULT_AUTO_MIN_EFFECT_SIZE,
     DEFAULT_AUTO_MIN_SAMPLE_SIZE,
 )
@@ -99,9 +120,25 @@ class SettingSpec:
     #: always see settings (``trellis admin write-config``, ``GET
     #: /api/version``).
     settings_live: bool
+    #: The environment variable whose presence outranks a settings-store
+    #: override for this knob (env > settings > default). For the 12
+    #: :class:`~trellis.core.write_config.WriteBehaviourConfig` fields this
+    #: is literally ``ENV_VAR_BY_FIELD[name]``; ``graph_seeding`` is the one
+    #: entry outside that module (``trellis.retrieve.builder_factory``'s
+    #: own ``GRAPH_SEEDING_ENV``, spelled here as a literal rather than
+    #: imported — ``trellis.core`` does not depend on ``trellis.retrieve``).
+    env_var: str
     minimum: float | None = None
     maximum: float | None = None
     enum: tuple[str, ...] | None = None
+    #: ``True`` makes ``minimum`` a strict lower bound (``value > minimum``
+    #: required) rather than the default inclusive one. Exists for
+    #: ``reconcile_timeout_s``: ``0`` (or ``-0.0``, equal to ``0.0`` in
+    #: Python) is a number its own *env* reader (``_reconcile_timeout``)
+    #: silently degrades to the shipped default rather than honouring, so
+    #: ``validate_value`` must refuse it too rather than store a value the
+    #: env path would never actually apply.
+    minimum_exclusive: bool = False
 
 
 _SPECS: tuple[SettingSpec, ...] = (
@@ -122,6 +159,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["classify_on_ingest"],
     ),
     SettingSpec(
         name="embed_on_ingest",
@@ -139,6 +177,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["embed_on_ingest"],
     ),
     SettingSpec(
         name="memory_extraction",
@@ -157,6 +196,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["memory_extraction"],
     ),
     SettingSpec(
         name="reconcile_on_write",
@@ -177,6 +217,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["reconcile_on_write"],
     ),
     SettingSpec(
         name="trace_extraction",
@@ -193,6 +234,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["trace_extraction"],
     ),
     SettingSpec(
         name="trace_extraction_min_confidence",
@@ -209,6 +251,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["trace_extraction_min_confidence"],
         minimum=0.0,
         maximum=1.0,
     ),
@@ -229,6 +272,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["require_pack_attribution"],
     ),
     SettingSpec(
         name="require_bodied_attribution",
@@ -250,6 +294,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["require_bodied_attribution"],
     ),
     SettingSpec(
         name="minhash_seed_max_docs",
@@ -269,13 +314,17 @@ _SPECS: tuple[SettingSpec, ...] = (
             "735 whole documents costs ~24s of blocking CPU on that first "
             "call, scaling linearly with corpus size. Present as 'takes "
             "effect on next session start; will block for ~Ns', never a "
-            "bare slider."
+            "bare slider. Capped well above any plausible corpus (not an "
+            "operational ceiling, just a sanity bound against a typo or "
+            "an overflow-class value such as 10**400)."
         ),
         surfaces=("mcp",),
         restart_required=True,
         risk="restart",
         settings_live=False,
+        env_var=ENV_VAR_BY_FIELD["minhash_seed_max_docs"],
         minimum=0,
+        maximum=100_000_000,
     ),
     SettingSpec(
         name="pack_holdout_rate",
@@ -297,6 +346,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["pack_holdout_rate"],
         minimum=0.0,
         maximum=1.0,
     ),
@@ -310,6 +360,10 @@ _SPECS: tuple[SettingSpec, ...] = (
             "Free text — no enum is enforced today, by this store or by "
             "anything that reads it — so a typo is not rejected, it "
             "silently changes verdict quality with no error anywhere. "
+            "Blank or whitespace-only is refused rather than stored: the "
+            "env reader for this knob treats an empty value as absent "
+            "and falls back to the shipped default, so storing '' would "
+            "claim an override that never actually applies. "
             "A future governed write should validate this against the "
             "deployment's actually-configured routing targets before "
             "accepting it."
@@ -318,6 +372,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["reconcile_model"],
     ),
     SettingSpec(
         name="reconcile_timeout_s",
@@ -325,15 +380,21 @@ _SPECS: tuple[SettingSpec, ...] = (
         default=20.0,
         description=(
             "Per-verdict timeout, in seconds, for the reconcile tier. "
-            "Non-positive or unparseable values degrade to the shipped "
-            "default (20.0) rather than to 0 or an unbounded wait, so a "
-            "typo cannot hang or instantly time out every verdict."
+            "Non-positive or unparseable *env* values degrade to the "
+            "shipped default (20.0) rather than to 0 or an unbounded "
+            "wait, so a typo there cannot hang or instantly time out "
+            "every verdict. A *settings* write holds itself to the same "
+            "standard instead of storing a value its own env reader "
+            "would silently discard: 0, a negative number and -0.0 "
+            "(equal to 0.0 in Python) are all refused here, not clamped."
         ),
         surfaces=("mcp",),
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["reconcile_timeout_s"],
         minimum=0.0,
+        minimum_exclusive=True,
     ),
     SettingSpec(
         name="graph_seeding",
@@ -354,6 +415,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var="TRELLIS_GRAPH_SEEDING",
     ),
     SettingSpec(
         name="filter_legacy_advisories",
@@ -378,6 +440,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var="TRELLIS_FILTER_LEGACY_ADVISORIES",
     ),
     SettingSpec(
         name="learning.auto_promote.enabled",
@@ -398,6 +461,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=True,
+        env_var=AUTO_PROMOTE_ENABLED_ENV,
     ),
     SettingSpec(
         name="learning.auto_promote.min_sample_size",
@@ -417,6 +481,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV,
         minimum=DEFAULT_MIN_SAMPLE_SIZE,
     ),
     SettingSpec(
@@ -436,6 +501,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV,
         minimum=DEFAULT_MIN_EFFECT_SIZE,
         maximum=1.0,
     ),
@@ -457,6 +523,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=True,
+        env_var=CANDIDATE_AUTO_PROMOTE_ENABLED_ENV,
     ),
     SettingSpec(
         name="learning.candidate_auto_promote.mode",
@@ -478,6 +545,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=True,
+        env_var=CANDIDATE_AUTO_PROMOTE_MODE_ENV,
         enum=("report_only", "commit"),
     ),
     SettingSpec(
@@ -497,6 +565,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV,
         minimum=1,
     ),
     SettingSpec(
@@ -516,6 +585,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=CANDIDATE_AUTO_PROMOTE_MIN_DISTINCT_SESSIONS_ENV,
         minimum=2,
     ),
     SettingSpec(
@@ -536,6 +606,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="unsafe",
         settings_live=True,
+        env_var=CANDIDATE_AUTO_PROMOTE_REQUIRE_ZERO_UNHELPFUL_ENV,
     ),
     SettingSpec(
         name="learning.candidate_auto_promote.max_promotions_per_run",
@@ -554,6 +625,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="safe",
         settings_live=True,
+        env_var=CANDIDATE_AUTO_PROMOTE_MAX_PROMOTIONS_PER_RUN_ENV,
         minimum=1,
     ),
 )
@@ -582,6 +654,180 @@ def list_settings() -> list[SettingSpec]:
     return list(SETTINGS_REGISTRY.values())
 
 
+def resolve_source(spec: SettingSpec, settings_values: dict[str, Any]) -> str:
+    """Which layer is in force for *spec* right now.
+
+    ``"env"``, ``"settings"`` or ``"default"``.
+
+    Env beats a stored override beats the shipped default — the same
+    precedence :func:`trellis.core.write_config.resolve_overridden_by`
+    reports for its own twelve fields, generalised to every registered
+    spec (``graph_seeding`` included, which that function's
+    ``ENV_VAR_BY_FIELD`` does not cover) by reading ``spec.env_var``
+    directly rather than through a second lookup table.
+
+    Shared by two callers that must agree: ``SettingsUpdateHandler``
+    stamps this on every ``SETTINGS_UPDATED`` event's
+    ``overridden_by_at_write``, and ``GET /api/v1/settings`` reports it
+    for every entry, not just the one most recently written.
+    """
+    if os.environ.get(spec.env_var, "").strip():
+        return "env"
+    return "settings" if spec.name in settings_values else "default"
+
+
+#: Case-insensitive spellings ``validate_value`` accepts for a boolean,
+#: mirroring the forgiving vocabulary ``WriteBehaviourConfig.from_env``
+#: already accepts for the *environment* spelling of the same knobs — a
+#: settings-store override and an env override should not disagree about
+#: what ``"yes"`` means.
+_BOOL_TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
+_BOOL_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def _coerce_bool(name: str, raw: Any) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in _BOOL_TRUE_TOKENS:
+            return True
+        if token in _BOOL_FALSE_TOKENS:
+            return False
+    msg = f"{name} must be a boolean (true/false), got {raw!r}"
+    raise ValueError(msg)
+
+
+def _coerce_int(name: str, raw: Any) -> int:
+    if isinstance(raw, bool):
+        msg = f"{name} must be an integer, got a boolean ({raw!r})"
+        # ValueError (not TypeError): validate_value's contract is "always
+        # raises ValueError", so the handler's one `except ValueError` catches
+        # every rejection reason uniformly.
+        raise ValueError(msg)  # noqa: TRY004
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float) and raw.is_integer():
+        return int(raw)
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError:
+            pass
+    msg = f"{name} must be an integer, got {raw!r}"
+    raise ValueError(msg)
+
+
+def _coerce_float(name: str, raw: Any) -> float:
+    if isinstance(raw, bool):
+        msg = f"{name} must be a number, got a boolean ({raw!r})"
+        # ValueError (not TypeError): same contract as _coerce_int above.
+        raise ValueError(msg)  # noqa: TRY004
+    if isinstance(raw, int | float | str):
+        source = raw.strip() if isinstance(raw, str) else raw
+        try:
+            # Shared with write_config.py's own float-typed env parsers
+            # (see parse_finite_float's docstring) — it is also what
+            # turns an int or numeric string outside float range
+            # (``10**400``) into a clean ``ValueError`` instead of the
+            # ``OverflowError`` plain ``float()`` raises for that case,
+            # which this function's one ``except ValueError`` could not
+            # otherwise catch.
+            value = parse_finite_float(source)
+        except ValueError:
+            pass
+        else:
+            if math.isfinite(value):
+                return value
+    msg = f"{name} must be a finite number, got {raw!r}"
+    raise ValueError(msg)
+
+
+def _coerce_str(name: str, raw: Any) -> str:
+    if not isinstance(raw, str):
+        msg = f"{name} must be a string, got {raw!r}"
+        # ValueError (not TypeError): same contract as _coerce_int above.
+        raise ValueError(msg)  # noqa: TRY004
+    stripped = raw.strip()
+    if not stripped:
+        # Blank/whitespace-only is refused, not stored: every str-typed
+        # knob's own env reader treats an empty value as absent and
+        # falls back to the default (see e.g. reconcile_model's
+        # description), so a stored blank would claim an override that
+        # never actually takes effect.
+        msg = f"{name} must not be blank, got {raw!r}"
+        raise ValueError(msg)
+    # Stored must equal effective: from_env_and_settings
+    # renders this value back into an env-string and re-parses it through
+    # the same from_env reader that strips surrounding whitespace off
+    # reconcile_model before using it -- stripping here too, rather than
+    # storing the raw ' x ', is what keeps those two readings the same
+    # value instead of one stripped and one not.
+    return stripped
+
+
+def _check_bounds(spec: SettingSpec, value: bool | int | float | str) -> None:
+    """Enum wins outright; otherwise a numeric min/max, bools exempt."""
+    if spec.enum is not None:
+        if not isinstance(value, str) or value not in spec.enum:
+            msg = f"{spec.name} must be one of {list(spec.enum)!r}, got {value!r}"
+            raise ValueError(msg)
+        return
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return
+    if spec.minimum is not None:
+        if spec.minimum_exclusive:
+            if value <= spec.minimum:
+                msg = f"{spec.name} must be > {spec.minimum!r}, got {value!r}"
+                raise ValueError(msg)
+        elif value < spec.minimum:
+            msg = f"{spec.name} must be >= {spec.minimum!r}, got {value!r}"
+            raise ValueError(msg)
+    if spec.maximum is not None and value > spec.maximum:
+        msg = f"{spec.name} must be <= {spec.maximum!r}, got {value!r}"
+        raise ValueError(msg)
+
+
+def validate_value(spec: SettingSpec, raw: Any) -> bool | int | float | str:
+    """Coerce ``raw`` to ``spec.type`` and bounds-check it, or raise.
+
+    Always raises :class:`ValueError` on any failure — never clamps, never
+    silently substitutes the default. That guarantee used to hold only for
+    *this* function's own notion of "invalid": a value it accepted could
+    still be silently replaced one layer down, at the knob's real
+    enforcement site, by ``WriteBehaviourConfig.from_env``'s degrade-to-
+    default handling (``reconcile_timeout_s <= 0``, a blank
+    ``reconcile_model``). Bounds here are now kept at least as strict as
+    that env-side degrade — see ``minimum_exclusive`` and the blank-string
+    check in ``_coerce_str`` — specifically so a value stored here is
+    never later overridden by a from_env degrade it should have refused
+    instead. The caller
+    (:class:`~trellis.mutate.handlers.SettingsUpdateHandler`) is the one
+    place this is meant to be called from; it translates the
+    ``ValueError`` into a governed rejection so the real reason reaches
+    both the ``CommandResult`` and the audit event.
+
+    A string is accepted for every type (not just ``"str"``) because every
+    wire caller — CLI argv, a JSON body's string field, an MCP tool
+    argument — may hand this a string even for a boolean or numeric
+    setting; coercion here is what ``WriteBehaviourConfig.from_env``
+    already does for the environment spelling of the same values, applied
+    to the settings-store spelling instead. ``raw is None`` is never
+    passed here — the handler treats it as "remove the override" before
+    this function is reached.
+    """
+    if spec.type == "bool":
+        value: bool | int | float | str = _coerce_bool(spec.name, raw)
+    elif spec.type == "int":
+        value = _coerce_int(spec.name, raw)
+    elif spec.type == "float":
+        value = _coerce_float(spec.name, raw)
+    else:
+        value = _coerce_str(spec.name, raw)
+    _check_bounds(spec, value)
+    return value
+
+
 __all__ = [
     "SETTINGS_REGISTRY",
     "Risk",
@@ -589,4 +835,6 @@ __all__ = [
     "SettingType",
     "get_setting",
     "list_settings",
+    "resolve_source",
+    "validate_value",
 ]

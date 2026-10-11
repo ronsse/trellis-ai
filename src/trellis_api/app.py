@@ -139,6 +139,7 @@ def create_app() -> FastAPI:
         observations,
         policies,
         retrieve,
+        settings,
         version,
     )
 
@@ -203,6 +204,7 @@ def create_app() -> FastAPI:
     #   policies                     -> read, plus admin on POST/DELETE
     #                                   (route-level deps in
     #                                   routes/policies.py)
+    #   settings                     -> admin (both GET and PUT/POST)
     #
     # ``admin`` implies every other scope; the legacy ``TRELLIS_API_KEY``
     # shared secret is granted all scopes for backwards compatibility.
@@ -212,6 +214,9 @@ def create_app() -> FastAPI:
     admin_auth = [Depends(require_scope(SCOPE_ADMIN))]
     app.include_router(
         admin.router, prefix="/api/v1", tags=["admin"], dependencies=admin_auth
+    )
+    app.include_router(
+        settings.router, prefix="/api/v1", tags=["settings"], dependencies=admin_auth
     )
     app.include_router(
         ingest.router, prefix="/api/v1", tags=["ingest"], dependencies=ingest_auth

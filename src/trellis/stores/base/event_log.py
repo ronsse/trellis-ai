@@ -531,6 +531,15 @@ class EventType(StrEnum):
     #: reconstruct settings state from elsewhere.
     LEARNING_AUTO_PROMOTE_EVALUATED = "learning.auto_promote_evaluated"
 
+    #: Emitted by the governed settings write path
+    #: (``SettingsUpdateHandler`` / ``Operation.SETTINGS_UPDATE``) on every
+    #: successful set or reset of one ``settings.json`` override. Payload:
+    #: ``{name, old_value, new_value, overridden_by_at_write, changed_by}``.
+    #: ``new_value`` is ``None`` for a reset — ``args["value"] is None``
+    #: means "remove the override", not a separate ``SETTINGS_RESET``
+    #: operation (see the handler's own docstring for why).
+    SETTINGS_UPDATED = "settings.updated"
+
     #: Emitted by ``trellis admin record-job-run`` at the start and end of
     #: one dispatcher-driven job execution (see
     #: ``trellis.stores.schedule_store.ScheduleStore``;

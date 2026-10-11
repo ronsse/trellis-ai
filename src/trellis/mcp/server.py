@@ -116,6 +116,7 @@ from trellis.mutate import (
     build_evidence_ingest_command,
     build_evidence_ingest_command_from_args,
     ensure_evidence_document,
+    redirect_unreachable_settings_update,
 )
 from trellis.ops import (
     check_capture_health,
@@ -3883,6 +3884,11 @@ def execute_mutation(
                 "error_class": type(exc).__name__,
             },
         )
+
+    # A no-op for every operation but settings.update, which this
+    # executor never registers a handler for; see the function's own
+    # docstring for why it rewrites the message, not the status.
+    result = redirect_unreachable_settings_update(result)
 
     response: dict[str, Any] = {
         "status": result.status.value,
