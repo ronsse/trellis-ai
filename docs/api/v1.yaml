@@ -3591,6 +3591,17 @@ paths:
       description: List assembled context packs (newest first), summary fields only.
       operationId: list_packs_api_v1_packs_get
       parameters:
+      - description: Upper bound (inclusive) on assembly time. Page older history by passing the oldest created_at you have.
+        in: query
+        name: until
+        required: false
+        schema:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: Upper bound (inclusive) on assembly time. Page older history by passing the oldest created_at you have.
+          title: Until
       - description: Max results
         in: query
         name: limit
@@ -4495,7 +4506,12 @@ paths:
       - admin
   /api/v1/traces:
     get:
-      description: List recent traces.
+      description: 'List recent traces.
+
+
+        ``TraceStore.query`` has no offset — page older history with
+
+        ``until``, mirroring ``GET /events``.'
       operationId: list_traces_api_v1_traces_get
       parameters:
       - in: query
@@ -4514,6 +4530,19 @@ paths:
           - type: string
           - type: 'null'
           title: Agent Id
+      - description: Upper bound (inclusive). Page older history by passing the oldest created_at you have, same convention
+          as GET /events.
+        in: query
+        name: until
+        required: false
+        schema:
+          anyOf:
+          - format: date-time
+            type: string
+          - type: 'null'
+          description: Upper bound (inclusive). Page older history by passing the oldest created_at you have, same convention
+            as GET /events.
+          title: Until
       - in: query
         name: limit
         required: false
@@ -4570,6 +4599,31 @@ paths:
       summary: Ingest Trace
       tags:
       - ingest
+  /api/v1/traces/domains:
+    get:
+      description: 'Count all stored traces per ``domain``, for a domain filter''s options.
+
+
+        Unlike the ``domain`` dropdown built from one fetched page, this counts
+
+        the whole store, so it lists a domain that exists but isn''t on the
+
+        current page, and never offers one that has zero traces.'
+      operationId: list_trace_domains_api_v1_traces_domains_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Trace Domains Api V1 Traces Domains Get
+                type: object
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: Count traces per domain
+      tags:
+      - retrieve
   /api/v1/traces/{trace_id}:
     get:
       description: 'Get a trace and what can show each of its evidence refs.

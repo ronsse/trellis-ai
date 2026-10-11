@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -314,17 +315,44 @@ def get_entity(
 def list_traces(
     domain: str | None = Query(None),
     agent: str | None = Query(None, alias="agent_id"),
+    until: datetime | None = Query(  # noqa: B008 — FastAPI DI idiom
+        None,
+        description=(
+            "Upper bound (inclusive). Page older history by passing the"
+            " oldest created_at you have, same convention as GET /events."
+        ),
+    ),
     limit: int = Query(20),
 ) -> dict[str, Any]:
-    """List recent traces."""
+    """List recent traces.
+
+    ``TraceStore.query`` has no offset — page older history with
+    ``until``, mirroring ``GET /events``.
+    """
     registry = get_registry()
     traces = registry.operational.trace_store.query(
-        domain=domain, agent_id=agent, limit=limit
+        domain=domain, agent_id=agent, until=until, limit=limit
     )
     total = registry.operational.trace_store.count(domain=domain)
 
     items = [t.to_summary_dict() for t in traces]
     return {"status": "ok", "total": total, "count": len(items), "traces": items}
+
+
+@router.get("/traces/domains", summary="Count traces per domain")
+def list_trace_domains() -> dict[str, Any]:
+    """Count all stored traces per ``domain``, for a domain filter's options.
+
+    Unlike the ``domain`` dropdown built from one fetched page, this counts
+    the whole store, so it lists a domain that exists but isn't on the
+    current page, and never offers one that has zero traces.
+    """
+    counts = get_registry().operational.trace_store.count_by_domain()
+    domains = [
+        {"domain": domain, "count": count}
+        for domain, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    return {"status": "ok", "total": sum(counts.values()), "domains": domains}
 
 
 @router.get("/traces/{trace_id}")
