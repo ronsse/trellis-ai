@@ -34,9 +34,12 @@ import functools
 import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
 
@@ -496,6 +499,47 @@ def resolve_overridden_by(
     }
 
 
+def resolve_write_behaviour(
+    registry: StoreRegistry | None = None,
+) -> WriteBehaviourConfig:
+    """The effective write-behaviour config for ``registry`` — env > settings > default.
+
+    The one call every per-knob reader in :mod:`trellis.classify.ingest`,
+    :mod:`trellis.extract.memory_ingest_hook`, :mod:`trellis.extract.trace_ingest_hook`,
+    :mod:`trellis.mcp.reconcile`, :mod:`trellis.mcp.server` and
+    :mod:`trellis.retrieve.embed_ingest_hook` delegates to, so a settings
+    override for any of those knobs takes effect at the knob's real
+    enforcement site rather than only in a reporting surface.
+
+    ``registry is None`` (a caller with no store context, such as a
+    process that never built one) resolves with no settings file in the
+    picture — :meth:`WriteBehaviourConfig.from_env` alone, not a hard
+    failure.  A ``registry`` whose ``stores_dir`` is also ``None`` (an
+    in-memory deployment) takes the same path, since
+    :func:`~trellis.stores.settings_store.load_settings_values` already
+    answers ``{}`` for that.
+
+    **Never raises.**  This sits on every memory/trace/document write's
+    read path (classify-on-ingest, embed-on-ingest, reconcile-on-write,
+    attribution gates, ...), so an unreadable or corrupt
+    ``settings.json`` must degrade to the environment/default answer
+    exactly as :func:`trellis.core.version.resolve_stamp_staleness`
+    degrades an unreadable git tree — wrapped whole, not guarded by an
+    enumerated exception list, because the settings store's own
+    degrade-on-read contract (:mod:`trellis.stores.degradable_json_store`)
+    is advisory, not a guarantee against every exotic I/O or JSON failure.
+    """
+    try:
+        from trellis.stores.settings_store import load_settings_values  # noqa: PLC0415
+
+        stores_dir = registry.stores_dir if registry is not None else None
+        settings = load_settings_values(stores_dir)
+        return WriteBehaviourConfig.from_env_and_settings(settings=settings)
+    except Exception:  # advisory read; never fail a write
+        logger.warning("write_behaviour_settings_read_failed", exc_info=True)
+        return WriteBehaviourConfig.from_env()
+
+
 #: Field name → the environment variable that drives it.  Declared after
 #: the dataclass so :meth:`WriteBehaviourConfig.describe` can annotate its
 #: rows, and so a new field without an env var fails loudly on first use
@@ -535,4 +579,5 @@ __all__ = [
     "TRUTHY",
     "WriteBehaviourConfig",
     "resolve_overridden_by",
+    "resolve_write_behaviour",
 ]

@@ -45,7 +45,7 @@ import structlog
 from trellis.core.write_config import (
     TRACE_EXTRACTION_FLAG,
     TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG,
-    WriteBehaviourConfig,
+    resolve_write_behaviour,
 )
 from trellis.extract.commands import (
     batch_draft_counts,
@@ -86,9 +86,13 @@ _UNSUCCESSFUL = frozenset({CommandStatus.FAILED, CommandStatus.REJECTED})
 _MAX_LOGGED_FAILURES = 5
 
 
-def trace_extraction_enabled() -> bool:
-    """``True`` iff ``TRELLIS_ENABLE_TRACE_EXTRACTION`` is set truthy."""
-    return WriteBehaviourConfig.from_env().trace_extraction
+def trace_extraction_enabled(registry: StoreRegistry | None = None) -> bool:
+    """``True`` iff trace extraction is on, env > settings > default.
+
+    ``TRELLIS_ENABLE_TRACE_EXTRACTION`` still wins when set; a
+    ``registry``-scoped settings override takes effect otherwise.
+    """
+    return resolve_write_behaviour(registry).trace_extraction
 
 
 def trace_already_ingested(registry: StoreRegistry, trace_id: str) -> bool:
@@ -121,24 +125,28 @@ def trace_already_ingested(registry: StoreRegistry, trace_id: str) -> bool:
         return False
 
 
-def trace_extraction_min_confidence() -> float | None:
-    """Confidence floor from the environment, or ``None`` for no gate.
+def trace_extraction_min_confidence(
+    registry: StoreRegistry | None = None,
+) -> float | None:
+    """Confidence floor, env > settings > default, or ``None`` for no gate.
 
-    Unset / blank means **off**: every draft the extractor produced is
-    submitted, which is what an existing deployment already gets.  A
-    gate that silently drops extraction output has to be asked for.
+    Unset / blank (in both env and settings) means **off**: every draft
+    the extractor produced is submitted, which is what an existing
+    deployment already gets.  A gate that silently drops extraction
+    output has to be asked for.
 
     An unparseable or out-of-range value is treated as unset (with a
     warning) rather than as ``0.0`` — misreading "0.85" as "drop
     nothing" is recoverable, misreading it as "drop everything" is not.
     """
-    return WriteBehaviourConfig.from_env().trace_extraction_min_confidence
+    return resolve_write_behaviour(registry).trace_extraction_min_confidence
 
 
 def extract_trace_batch(
     trace: Trace,
     *,
     requested_by: str,
+    registry: StoreRegistry | None = None,
 ) -> tuple[ExtractionResult, CommandBatch | None]:
     """Extract one stored trace and build its governed batch.
 
@@ -170,7 +178,7 @@ def extract_trace_batch(
     return result, result_to_batch(
         result,
         requested_by=requested_by,
-        min_confidence=trace_extraction_min_confidence(),
+        min_confidence=trace_extraction_min_confidence(registry),
     )
 
 
@@ -200,13 +208,15 @@ def run_trace_extraction(
         "failed": 0, "executed": False, "error": "..."}`` — it never
         propagates.
     """
-    if not trace_extraction_enabled():
+    if not trace_extraction_enabled(registry):
         return None
 
     from trellis.mutate import build_curate_executor  # noqa: PLC0415
 
     try:
-        _result, batch = extract_trace_batch(trace, requested_by=requested_by)
+        _result, batch = extract_trace_batch(
+            trace, requested_by=requested_by, registry=registry
+        )
         if batch is None:
             return {"entities": 0, "edges": 0, "failed": 0, "executed": False}
 
