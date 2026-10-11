@@ -482,3 +482,20 @@ class TestOnlyAdminReadsTheWouldBePack:
             payload = response.json()["pack"]["payload"]
             assert payload == _as_seen(raw, admin=_CALLERS[caller]), (caller, pack_id)
             assert payload["holdout"] is (pack_id in scoped.held)
+
+    @pytest.mark.parametrize("caller", sorted(_CALLERS))
+    def test_pack_detail_names_whether_it_blinded_the_would_be_pack(
+        self, caller: str, scoped: _Scoped
+    ) -> None:
+        """``holdout_blinded`` says *why* a held-out pack's payload reads
+        short to a non-admin caller: it is not "nothing was withheld",
+        it is "something was and this caller can't see it". True only
+        when both hold: the pack was withheld, and this caller is blind."""
+        for pack_id in scoped.raw:
+            response = scoped.client.get(
+                f"/api/v1/packs/{pack_id}", headers=scoped.headers[caller]
+            )
+            assert response.status_code == 200, response.text
+            data = response.json()
+            expected = (pack_id in scoped.held) and not _CALLERS[caller]
+            assert data["holdout_blinded"] is expected, (caller, pack_id)
