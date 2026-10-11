@@ -1219,6 +1219,34 @@
             font-family: var(--font-mono);
         }
         .field-hint { color: var(--text-dim); font-size: 0.78rem; margin: 0.15rem 0 0.6rem; }
+
+        /* Settings tab (e179): a long description column needs top
+           alignment, and an unsafe/restart row needs to look more
+           consequential than an ordinary one at a glance, not just via a
+           badge a reader could miss. */
+        .settings-table td { vertical-align: top; }
+        tr.risk-high td:first-child { border-left: 3px solid var(--error); }
+        tr.risk-caution td:first-child { border-left: 3px solid var(--warn); }
+        .settings-table select, .settings-table input[type="number"], .settings-table input[type="text"] {
+            width: 100%;
+            max-width: 220px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.35rem 0.55rem;
+            border-radius: 6px;
+            font-size: 0.82rem;
+        }
+        .settings-table input[type="password"] {
+            width: 100%;
+            max-width: 240px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.35rem 0.55rem;
+            border-radius: 6px;
+            font-size: 0.82rem;
+        }
         .form-row { margin-bottom: 0.9rem; }
         .form-row label { display: block; font-size: 0.85rem; margin-bottom: 0.3rem; }
         .form-row input, .form-row select {
@@ -1470,6 +1498,7 @@
             <a href="#" data-view="loops" data-label="Loops"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4M5.6 5.6l2.6 2.6M18.4 5.6l-2.6 2.6M5.6 18.4l2.6-2.6M18.4 18.4l-2.6-2.6"/></svg><span class="nav-label">Loops</span></a>
             <a href="#" data-view="advisories" data-label="Advisories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l8.5 4.9v9.2L12 21.5l-8.5-4.9V7.4z"/><path d="M12 8.2v5"/><circle cx="12" cy="16" r="0.9" fill="currentColor" stroke="none"/></svg><span class="nav-label">Advisories</span></a>
             <a href="#" data-view="policies" data-label="Policies"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l7.5 3v6.2c0 4.3-3.1 7.4-7.5 9.3-4.4-1.9-7.5-5-7.5-9.3V5.5z"/><path d="M9 12l2.2 2.2L15.5 9.5"/></svg><span class="nav-label">Policies</span></a>
+            <a href="#" data-view="settings" data-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.7 7.7 0 0 0 0-2l2-1.5-2-3.4-2.3.9a7.6 7.6 0 0 0-1.7-1l-.3-2.5h-4l-.3 2.5a7.6 7.6 0 0 0-1.7 1l-2.3-.9-2 3.4L6.6 11a7.7 7.7 0 0 0 0 2l-2 1.5 2 3.4 2.3-.9c.5.4 1.1.75 1.7 1l.3 2.5h4l.3-2.5c.6-.25 1.2-.6 1.7-1l2.3.9 2-3.4z"/></svg><span class="nav-label">Settings</span></a>
         </nav>
 
         <div class="sidebar-foot" id="sidebar-foot" title="API build">&mdash;</div>
@@ -1936,6 +1965,41 @@
             </div>
             <p class="field-hint" id="policies-total"></p>
         </div>
+
+        <div id="view-settings" style="display:none">
+            <div id="settings-banner"></div>
+            <p class="field-hint">
+                <strong>As read by: trellis-api.</strong> Settings are per-process &mdash; this
+                page shows what this API process resolves right now. The MCP server, a worker, or
+                the host CLI read the same stored overrides but may apply a different environment,
+                so one of them can show a different effective value for the same setting.
+            </p>
+            <div class="search-bar">
+                <button onclick="loadSettings()">Refresh</button>
+                <input type="search" id="settings-filter" placeholder="Filter by name or description&hellip;" aria-label="Filter settings by name or description" oninput="renderSettingsTable()">
+                <select id="settings-group-filter" aria-label="Filter settings by group" onchange="renderSettingsTable()">
+                    <option value="">All groups</option>
+                </select>
+            </div>
+            <div class="status-section" style="padding:0; overflow:hidden">
+                <table class="settings-table">
+                    <thead>
+                        <tr>
+                            <th>Setting</th>
+                            <th>Description</th>
+                            <th>Type / bounds</th>
+                            <th>Effective value</th>
+                            <th>Stored value</th>
+                            <th>Takes effect</th>
+                            <th>Updated</th>
+                            <th>Change</th>
+                        </tr>
+                    </thead>
+                    <tbody id="settings-body"></tbody>
+                </table>
+            </div>
+            <p class="field-hint" id="settings-total"></p>
+        </div>
     </div>
     </div>
     </div>
@@ -2122,6 +2186,8 @@
             loadTraceDetail, navigateToEntity, navigateToDocument,
             loadMemoryDetail, loadEventDetail, navigateToPack, loadPackDetail,
             confirmDeletePolicy, deletePolicy,
+            beginSaveSetting, beginResetSetting, confirmSaveSetting, confirmResetSetting,
+            cancelSettingWrite,
         };
         document.addEventListener('click', e => {
             const el = e.target instanceof Element && e.target.closest('[data-action]');
@@ -2158,7 +2224,7 @@
         }
 
         // -- View switching --
-        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs', 'advisories', 'policies', 'loops'];
+        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs', 'advisories', 'policies', 'loops', 'settings'];
         const viewLoaded = {};
         // init() reveals the dashboard when its fetches resolve. Track where the
         // user actually is, so a click made while the API is still answering is
@@ -2196,6 +2262,7 @@
                 if (name === 'loops') loadLoops();
                 if (name === 'advisories') loadAdvisories();
                 if (name === 'policies') loadPolicies();
+                if (name === 'settings') loadSettings();
             }
             // Focus search when switching to graph
             if (name === 'graph' && graphInitialized) {
@@ -4154,9 +4221,9 @@
                         '<p>No precedents yet. A precedent is created only when a learning candidate ' +
                         'is approved &mdash; Review &rarr; Learning promotion candidates, or ' +
                         '<code style="font-family:var(--font-mono)">trellis curate promote-learning</code>. ' +
-                        'The scheduled <code style="font-family:var(--font-mono)">auto-promote-candidates</code> ' +
-                        'job reports on this nightly but, by default, only reports &mdash; it ships ' +
-                        'report-only and promotes nothing until an operator opts it into commit mode.</p></div>';
+                        'If the <code style="font-family:var(--font-mono)">auto-promote-candidates</code> ' +
+                        'job is scheduled, it reports nightly on what it would promote &mdash; it never ' +
+                        'promotes anything itself.</p></div>';
                     return;
                 }
 
@@ -5790,6 +5857,310 @@
                     actions.innerHTML =
                         '<button class="btn btn-sm btn-danger" onclick="runCreatePolicy()">Confirm create</button> ' +
                         '<button class="btn btn-ghost btn-sm" onclick="cancelCreatePolicyForm()">Cancel</button>';
+                }
+            }
+        }
+
+        // === Settings (e179) ===
+        // Driven entirely by GET /api/v1/settings -- this file hardcodes no
+        // knob list, no risk-caption strings and no group display names; a
+        // spec added to the registry later appears here with no UI change.
+        // `settingsData` caches the last GET response so the filter box can
+        // re-render without a round trip, and so a write's error handler can
+        // patch `store_degradation` into it without a full reload.
+        let settingsData = null;
+
+        async function loadSettings() {
+            const tbody = document.getElementById('settings-body');
+            const totalEl = document.getElementById('settings-total');
+            tbody.innerHTML = `<tr><td colspan="8">${loadingHtml('Loading settings...')}</td></tr>`;
+            renderDegradedBanner('settings-banner', null);
+            totalEl.textContent = '';
+            try {
+                const data = await fetchJSON('/settings');
+                settingsData = data;
+                renderDegradedBanner('settings-banner', data.store_degradation);
+                populateSettingsGroupFilter(data);
+                renderSettingsTable();
+            } catch (err) {
+                tbody.innerHTML = `<tr><td colspan="8" style="color:var(--error)">Failed to load settings: ${escHtml(err.message)}</td></tr>`;
+            }
+        }
+
+        function populateSettingsGroupFilter(data) {
+            const sel = document.getElementById('settings-group-filter');
+            const current = sel.value;
+            const groups = data.groups || {};
+            sel.innerHTML = '<option value="">All groups</option>' +
+                Object.keys(groups).map(g => `<option value="${escHtml(g)}">${escHtml(groups[g])}</option>`).join('');
+            sel.value = current;
+        }
+
+        function humanizeSettingName(name) {
+            return String(name).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        }
+
+        function formatSettingBounds(s) {
+            if (s.enum) return `enum: ${s.enum.join(', ')}`;
+            const parts = [];
+            if (s.minimum !== null && s.minimum !== undefined) parts.push(`min ${s.minimum}`);
+            if (s.maximum !== null && s.maximum !== undefined) parts.push(`max ${s.maximum}`);
+            return parts.length ? parts.join(', ') : 'no bounds';
+        }
+
+        // Env-pin truthfulness (brief e179 step 2): built only from the
+        // route's own fields (overridden_by, env_var, stored_value) -- never
+        // inferred from, say, whether the env var merely exists.
+        function settingEnvPinNote(s) {
+            if (s.overridden_by !== 'env') return '';
+            let note = `Pinned by <code>${escHtml(s.env_var)}</code> &mdash; the environment variable governs right now.`;
+            if (s.stored_value !== null && s.stored_value !== undefined) {
+                note += ` A value is saved here (<code>${escHtml(String(s.stored_value))}</code>) but has ` +
+                    `no effect until <code>${escHtml(s.env_var)}</code> is removed.`;
+            }
+            return note;
+        }
+
+        function settingSourceBadge(source) {
+            const cls = source === 'env' ? 'badge-warn' : (source === 'settings' ? 'badge-accent' : 'badge-info');
+            return `<span class="badge ${cls}">${escHtml(source)}</span>`;
+        }
+
+        // Risk wording intentionally avoids "unsafe" as a control label
+        // (brief e179 rework: a tier name, not a verdict on the operator
+        // for using the control) -- low/caution/high, independent of the
+        // separate "Restart required" badge below.
+        function settingRiskBadge(risk) {
+            if (risk === 'high') return '<span class="badge badge-err">High risk</span>';
+            if (risk === 'caution') return '<span class="badge badge-warn">Caution</span>';
+            return '<span class="badge badge-ok">Low risk</span>';
+        }
+
+        function renderSettingsTable() {
+            if (!settingsData) return;
+            const tbody = document.getElementById('settings-body');
+            const totalEl = document.getElementById('settings-total');
+            const filterText = document.getElementById('settings-filter').value.trim().toLowerCase();
+            const groupFilter = document.getElementById('settings-group-filter').value;
+            const degraded = !!settingsData.store_degradation;
+            const groups = settingsData.groups || {};
+            let rows = settingsData.settings || [];
+            if (groupFilter) rows = rows.filter(r => r.group === groupFilter);
+            if (filterText) {
+                rows = rows.filter(r =>
+                    r.name.toLowerCase().includes(filterText) ||
+                    (r.description || '').toLowerCase().includes(filterText));
+            }
+            if (rows.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">No settings match this filter.</div></td></tr>`;
+            } else {
+                tbody.innerHTML = rows.map(s => renderSettingRow(s, groups, degraded)).join('');
+            }
+            const allCount = (settingsData.settings || []).length;
+            totalEl.textContent = `${rows.length} of ${allCount} setting(s)`;
+        }
+
+        function renderValueInput(s, inputId, currentValue, disabled) {
+            const disabledAttr = disabled ? 'disabled' : '';
+            const ariaLabel = `New value for ${s.name}`;
+            if (s.enum) {
+                const options = s.enum.map(v =>
+                    `<option value="${escHtml(v)}" ${String(currentValue) === v ? 'selected' : ''}>${escHtml(v)}</option>`
+                ).join('');
+                return `<select id="${escHtml(inputId)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>${options}</select>`;
+            }
+            if (s.type === 'bool') {
+                const boolVal = currentValue === true || currentValue === 'true';
+                return `<select id="${escHtml(inputId)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>
+                    <option value="true" ${boolVal ? 'selected' : ''}>true</option>
+                    <option value="false" ${!boolVal ? 'selected' : ''}>false</option>
+                </select>`;
+            }
+            if (s.type === 'int' || s.type === 'float') {
+                const step = s.type === 'int' ? '1' : 'any';
+                const minAttr = s.minimum !== null && s.minimum !== undefined ? `min="${escHtml(String(s.minimum))}"` : '';
+                const maxAttr = s.maximum !== null && s.maximum !== undefined ? `max="${escHtml(String(s.maximum))}"` : '';
+                return `<input type="number" id="${escHtml(inputId)}" step="${escHtml(step)}" ${minAttr} ${maxAttr} value="${escHtml(String(currentValue))}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>`;
+            }
+            return `<input type="text" id="${escHtml(inputId)}" value="${escHtml(String(currentValue))}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>`;
+        }
+
+        function renderSettingActions(s, disabled) {
+            const inputId = `setting-value-${s.name}`;
+            const currentValue = (s.stored_value !== null && s.stored_value !== undefined) ? s.stored_value : s.default;
+            const disabledAttr = disabled ? 'disabled' : '';
+            return `
+                <div class="form-row" style="margin-bottom:0.4rem">
+                    <label for="${escHtml(inputId)}" class="sr-only">New value for ${escHtml(s.name)}</label>
+                    ${renderValueInput(s, inputId, currentValue, disabled)}
+                </div>
+                <button class="btn btn-sm" data-action="beginSaveSetting" data-id="${escHtml(s.name)}" ${disabledAttr}>Save</button>
+                <button class="btn btn-ghost btn-sm" data-action="beginResetSetting" data-id="${escHtml(s.name)}" ${disabledAttr}>Reset to default</button>
+                <div id="setting-error-${escHtml(s.name)}"></div>
+            `;
+        }
+
+        function renderSettingRow(s, groups, degraded) {
+            const groupLabel = groups[s.group] || s.group;
+            // Border colour follows risk tier only -- restart cost is its
+            // own flag (s.restart_required) and gets its own badge below,
+            // never folded into this class (brief e179 rework, step 2).
+            const riskClass = s.risk === 'high' ? 'risk-high' : (s.risk === 'caution' ? 'risk-caution' : '');
+            const pinNote = settingEnvPinNote(s);
+            const liveHtml = s.restart_required
+                ? '<span class="badge badge-warn">Restart required</span>'
+                : '<span class="badge badge-ok">Live &mdash; next request</span>';
+            const riskNoteHtml = s.risk_note
+                ? `<div class="field-hint" style="margin-top:0.3rem">${escHtml(s.risk_note)}</div>`
+                : '';
+            return `<tr id="setting-row-${escHtml(s.name)}" class="${riskClass}">
+                <td>
+                    <div>${escHtml(s.label || humanizeSettingName(s.name))}</div>
+                    <code>${escHtml(s.name)}</code>
+                    <div style="margin-top:0.3rem">${settingRiskBadge(s.risk)} <span class="badge badge-accent">${escHtml(groupLabel)}</span></div>
+                </td>
+                <td style="max-width:360px; white-space:normal">${escHtml(s.description)}${riskNoteHtml}</td>
+                <td>${escHtml(s.type)}<div class="field-hint">${escHtml(formatSettingBounds(s))}</div></td>
+                <td>
+                    <div><code>${escHtml(String(s.effective_value))}</code> ${settingSourceBadge(s.overridden_by)}</div>
+                    ${pinNote ? `<div class="field-hint">${pinNote}</div>` : ''}
+                </td>
+                <td>${(s.stored_value === null || s.stored_value === undefined) ? '<span class="field-hint">(none)</span>' : `<code>${escHtml(String(s.stored_value))}</code>`}</td>
+                <td>${liveHtml}</td>
+                <td>${s.updated_at ? fmtTimeCell(s.updated_at) : '<span class="field-hint">never</span>'}</td>
+                <td id="setting-actions-${escHtml(s.name)}">${renderSettingActions(s, degraded)}</td>
+            </tr>`;
+        }
+
+        function coerceSettingValue(spec, raw) {
+            if (spec.enum) return raw;
+            if (spec.type === 'bool') return raw === 'true' || raw === true;
+            if (spec.type === 'int') return parseInt(raw, 10);
+            if (spec.type === 'float') return parseFloat(raw);
+            return raw;
+        }
+
+        function beginSaveSetting(name) { showSettingKeyPrompt(name, 'save'); }
+        function beginResetSetting(name) { showSettingKeyPrompt(name, 'reset'); }
+
+        // Every write re-asks for the admin key, inline (brief e179 step 5):
+        // these writes change what the system does next, so the ambient key
+        // already stored for reads is deliberately not reused here.
+        function showSettingKeyPrompt(name, mode) {
+            const cell = document.getElementById('setting-error-' + name);
+            if (!cell) return;
+            const keyPromptHtml = `
+                <div class="form-row" style="margin-top:0.4rem; margin-bottom:0.4rem">
+                    <label for="setting-adminkey-${escHtml(name)}">Admin key (re-enter to confirm this write)</label>
+                    <input type="password" id="setting-adminkey-${escHtml(name)}" autocomplete="off" aria-label="Admin key to confirm this write">
+                </div>
+            `;
+            // Two full literal branches, not one template with the action
+            // name interpolated in: data-action must be a literal the
+            // ID_ACTIONS scan can read statically (test_ui_inline_handlers).
+            if (mode === 'reset') {
+                cell.innerHTML = keyPromptHtml +
+                    `<button class="btn btn-sm" data-action="confirmResetSetting" data-id="${escHtml(name)}">Confirm reset to default</button>` +
+                    `<button class="btn btn-ghost btn-sm" data-action="cancelSettingWrite" data-id="${escHtml(name)}">Cancel</button>`;
+            } else {
+                cell.innerHTML = keyPromptHtml +
+                    `<button class="btn btn-sm" data-action="confirmSaveSetting" data-id="${escHtml(name)}">Confirm save</button>` +
+                    `<button class="btn btn-ghost btn-sm" data-action="cancelSettingWrite" data-id="${escHtml(name)}">Cancel</button>`;
+            }
+            const input = document.getElementById('setting-adminkey-' + name);
+            if (input) input.focus();
+        }
+
+        function cancelSettingWrite(name) {
+            const cell = document.getElementById('setting-error-' + name);
+            if (cell) cell.innerHTML = '';
+        }
+
+        async function confirmSaveSetting(name) {
+            const spec = (settingsData && settingsData.settings || []).find(s => s.name === name);
+            const cell = document.getElementById('setting-error-' + name);
+            if (!spec) return;
+            const keyInput = document.getElementById('setting-adminkey-' + name);
+            const adminKey = keyInput ? keyInput.value.trim() : '';
+            if (!adminKey) {
+                if (cell) cell.innerHTML = '<span style="color:var(--error)">Admin key is required to save.</span>';
+                return;
+            }
+            const valueInput = document.getElementById('setting-value-' + name);
+            const rawValue = valueInput ? valueInput.value : '';
+            const value = coerceSettingValue(spec, rawValue);
+            if (value === null || (typeof value === 'number' && Number.isNaN(value))) {
+                if (cell) cell.innerHTML = `<span style="color:var(--error)">Enter a valid ${escHtml(spec.type)} value (or use "Reset to default" to clear it).</span>`;
+                return;
+            }
+            await runSettingWrite(name, value, adminKey, cell);
+        }
+
+        async function confirmResetSetting(name) {
+            const cell = document.getElementById('setting-error-' + name);
+            const keyInput = document.getElementById('setting-adminkey-' + name);
+            const adminKey = keyInput ? keyInput.value.trim() : '';
+            if (!adminKey) {
+                if (cell) cell.innerHTML = '<span style="color:var(--error)">Admin key is required to reset.</span>';
+                return;
+            }
+            // A "Reset to default" sends value:null -- SETTINGS_UPDATE's own
+            // reset verb (brief e179 step 5), never a client-guessed default.
+            await runSettingWrite(name, null, adminKey, cell);
+        }
+
+        // PUT /api/v1/settings/{name} directly (not postJSON, which is
+        // POST-only and reads the ambient stored key): this write carries
+        // its own just-typed admin key instead.
+        async function writeSettingJSON(name, value, adminKey) {
+            const headers = { 'Content-Type': 'application/json' };
+            if (adminKey) headers['X-API-Key'] = adminKey;
+            const res = await fetch(API + '/settings/' + encodeURIComponent(name), {
+                method: 'PUT',
+                headers,
+                body: JSON.stringify({ value }),
+            });
+            if (!res.ok) {
+                let detail = `${res.status} ${res.statusText}`;
+                let payload = null;
+                try {
+                    payload = await res.json();
+                    const d = payload && payload.detail;
+                    if (typeof d === 'string') detail = d;
+                    else if (Array.isArray(d)) detail = d.map(e => e.msg || JSON.stringify(e)).join('; ');
+                    else if (d && typeof d.message === 'string') detail = d.message;
+                    else if (d) detail = JSON.stringify(d);
+                } catch { /* non-JSON */ }
+                const err = new Error(detail);
+                err.status = res.status;
+                err.payload = payload;
+                throw err;
+            }
+            return res.json();
+        }
+
+        async function runSettingWrite(name, value, adminKey, cell) {
+            if (cell) cell.innerHTML = loadingHtml('Saving...');
+            try {
+                await writeSettingJSON(name, value, adminKey);
+                // Never assume the outcome of a write -- re-read GET and
+                // re-render the whole table from it (brief e179 step 5).
+                await loadSettings();
+            } catch (err) {
+                if (cell) {
+                    cell.innerHTML =
+                        `<span style="color:var(--error)">${escHtml(err.message)}</span> ` +
+                        `<button class="btn btn-ghost btn-sm" data-action="cancelSettingWrite" data-id="${escHtml(name)}">Dismiss</button>`;
+                }
+                // A 409 (degraded/stale store) carries store_degradation in
+                // its own body -- patch it into the cached response and
+                // re-render the banner + disable every write control,
+                // without discarding the inline error this just showed.
+                const degradation = err.payload && err.payload.detail && err.payload.detail.store_degradation;
+                if (degradation && settingsData) {
+                    settingsData.store_degradation = degradation;
+                    renderDegradedBanner('settings-banner', degradation);
+                    renderSettingsTable();
                 }
             }
         }

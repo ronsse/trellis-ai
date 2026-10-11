@@ -142,6 +142,7 @@ def _make_observation(
     seed_entity_ids: list | None = None,
     selection_efficiency: float | None = None,
     citation_attributed: bool = False,
+    session_id: str | None = None,
 ) -> dict:
     obs: dict = {
         "run_id": run_id,
@@ -157,6 +158,12 @@ def _make_observation(
         obs["selection_efficiency"] = selection_efficiency
     if citation_attributed:
         obs["citation_attributed"] = True
+    # No default: a real PACK_ASSEMBLED.session_id (never a run/pack id —
+    # see scoring.py's _accumulate_item). Omitted entirely when None, the
+    # same shape a feedback row with no captured session id actually has,
+    # so a test must opt in rather than get one for free.
+    if session_id is not None:
+        obs["session_id"] = session_id
     return obs
 
 
@@ -338,6 +345,110 @@ class TestAnalyzeLearningObservations:
         )
         run_ids = result["candidates"][0]["supporting_run_ids"]
         assert sorted(run_ids) == ["run-alpha", "run-beta", "run-gamma"]
+
+
+class TestDistinctHelpfulSessions:
+    """B3: distinct sessions come from a real ``session_id``, never a
+    run or pack id — one conversation grading five packs helpful must
+    read as one session, not five (see ``_accumulate_item``'s
+    ``helpful_session_ids`` comment).
+    """
+
+    def test_one_session_over_five_packs_counts_as_one(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        item = _make_item(cited_helpful=True)
+        observations = [
+            _make_observation(
+                run_id=f"run-{n}",
+                outcome="success",
+                session_id="sess-1",
+                items=[item],
+            )
+            for n in range(5)
+        ]
+        result = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=1,
+        )
+        candidate = result["candidates"][0]
+        assert candidate["citation_evidence"]["helpful_count"] == 5
+        assert candidate["citation_evidence"]["distinct_helpful_sessions"] == 1
+        assert candidate["citation_evidence"]["sessionless_citations"] == 0
+
+    def test_five_distinct_sessions_counts_as_five(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        item = _make_item(cited_helpful=True)
+        observations = [
+            _make_observation(
+                run_id=f"run-{n}",
+                outcome="success",
+                session_id=f"sess-{n}",
+                items=[item],
+            )
+            for n in range(5)
+        ]
+        result = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=1,
+        )
+        candidate = result["candidates"][0]
+        assert candidate["citation_evidence"]["distinct_helpful_sessions"] == 5
+        assert candidate["citation_evidence"]["sessionless_citations"] == 0
+
+    def test_no_session_id_reports_sessionless_not_zero_sessions_silently(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        """A helpful citation with no captured session id must be visible
+        as ``sessionless_citations``, not just collapse into
+        ``distinct_helpful_sessions == 0`` with no explanation.
+        """
+        item = _make_item(cited_helpful=True)
+        observations = [
+            _make_observation(run_id=f"run-{n}", outcome="success", items=[item])
+            for n in range(3)
+        ]
+        result = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=1,
+        )
+        candidate = result["candidates"][0]
+        assert candidate["citation_evidence"]["helpful_count"] == 3
+        assert candidate["citation_evidence"]["distinct_helpful_sessions"] == 0
+        assert candidate["citation_evidence"]["sessionless_citations"] == 3
+
+    def test_mixed_session_and_sessionless_citations_both_counted(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        item = _make_item(cited_helpful=True)
+        observations = [
+            _make_observation(run_id="run-a", outcome="success", items=[item]),
+            _make_observation(
+                run_id="run-b",
+                outcome="success",
+                session_id="sess-1",
+                items=[item],
+            ),
+            _make_observation(
+                run_id="run-c",
+                outcome="success",
+                session_id="sess-2",
+                items=[item],
+            ),
+        ]
+        result = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=1,
+        )
+        candidate = result["candidates"][0]
+        assert candidate["citation_evidence"]["helpful_count"] == 3
+        assert candidate["citation_evidence"]["distinct_helpful_sessions"] == 2
+        assert candidate["citation_evidence"]["sessionless_citations"] == 1
 
 
 class TestRegistryContract:
@@ -1168,6 +1279,7 @@ class TestNoiseEvidenceScreen:
             "helpful_count": 0,
             "unhelpful_count": 2,
             "distinct_helpful_sessions": 0,
+            "sessionless_citations": 0,
         }
         screen = report["noise_screen"]
         assert screen["proposed"] == 1
@@ -1421,5 +1533,6 @@ class TestNoiseEvidenceScreen:
             "helpful_count": 0,
             "unhelpful_count": 1,
             "distinct_helpful_sessions": 0,
+            "sessionless_citations": 0,
         }
         assert candidate["evidence_verdict"] == "insufficient_unhelpful_citations"

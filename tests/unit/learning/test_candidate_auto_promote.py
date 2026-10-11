@@ -1,11 +1,15 @@
-"""Tests for :mod:`trellis.learning.candidate_auto_promote` (plan p1 PR 7, e177).
+"""Tests for :mod:`trellis.learning.candidate_auto_promote` (e177).
 
-Report-only first: ``enabled=False`` / ``mode="report_only"`` ship as the
-default, and the load-bearing claims under test are (1) a single-session
-(n=1) candidate can never qualify no matter how it is configured, (2)
-report-only truly never writes, (3) commit mode writes only through the
-governed ``MutationExecutor``, never the ``EventLog`` directly, and (4) the
-auto-demote sweep fires on a promoted candidate's first unhelpful citation.
+Report-only, evaluation-only: ``enabled=False`` / ``mode="report_only"``
+ship as the default, and the load-bearing claims under test are (1) a
+single-session (n=1) candidate can never qualify no matter how it is
+configured, (2) report-only truly never writes, (3) ``mode="commit"`` is
+refused with a :class:`~trellis.errors.ConfigError` at construction on
+every path, unconditionally, and (4) a candidate that already has any
+successful ``precedent.promote`` — human or automatic — is excluded from
+``would_promote`` and reported as ``already_promoted``. Auto-demotion and
+a working commit mode are deferred to a follow-up PR; this module never
+demotes anything (there is no ``sweep_auto_demotions`` here to test).
 
 ``TestFloorRefusalOnConstruction`` mirrors
 ``tests/unit/learning/tuners/test_resolve_auto_promote_overrides.py``'s
@@ -15,6 +19,13 @@ only real enforcement point is
 ``LearningCandidateAutoPromotePolicy.__post_init__``, exercised here by
 constructing the policy from a resolved dict, for both an env-sourced and a
 settings-sourced override.
+
+``_force_commit_policy`` bypasses that same ``__post_init__`` gate via
+``object.__setattr__`` (the dataclass is frozen) to exercise the
+commit-execution branch the module docstring says is kept in
+``run_candidate_auto_promotion`` "unreachable ... deliberately" rather than
+deleted — nothing in production can reach it this way either, but the
+branch still needs to stay correct for the follow-up that lifts the gate.
 """
 
 from __future__ import annotations
@@ -25,6 +36,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.errors import ConfigError
 from trellis.learning.candidate_auto_promote import (
     AUTO_PROMOTE_REQUESTED_BY,
     CANDIDATE_AUTO_PROMOTE_ENABLED_ENV,
@@ -36,6 +48,7 @@ from trellis.learning.candidate_auto_promote import (
     CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV,
     CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_SETTING,
     CANDIDATE_AUTO_PROMOTE_MODE_ENV,
+    CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
     CANDIDATE_AUTO_PROMOTE_REQUIRE_ZERO_UNHELPFUL_SETTING,
     DEFAULT_MAX_PROMOTIONS_PER_RUN,
     DEFAULT_MIN_DISTINCT_SESSIONS,
@@ -49,10 +62,10 @@ from trellis.learning.candidate_auto_promote import (
     _holdout_arm_status,
     agreement_metric_to_dict,
     compute_agreement_metric,
+    precedent_entity_id_for_candidate,
     report_to_dict,
     resolve_candidate_auto_promote_overrides,
     run_candidate_auto_promotion,
-    sweep_auto_demotions,
 )
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Operation
@@ -82,6 +95,14 @@ def _candidate(
         },
         "target_entity_ids": target_entity_ids or [],
     }
+
+
+def _force_commit_policy(**kwargs: Any) -> LearningCandidateAutoPromotePolicy:
+    """Build a policy with ``mode="commit"`` by bypassing
+    ``__post_init__`` — see the module docstring above."""
+    policy = LearningCandidateAutoPromotePolicy(mode="report_only", **kwargs)
+    object.__setattr__(policy, "mode", "commit")
+    return policy
 
 
 @pytest.fixture
@@ -119,18 +140,66 @@ class TestPolicyFloors:
         assert policy.max_promotions_per_run == 1
 
 
-class TestEffectiveMode:
-    def test_disabled_is_always_report_only_even_when_configured_commit(self) -> None:
-        policy = LearningCandidateAutoPromotePolicy(enabled=False, mode="commit")
-        assert policy.effective_mode == "report_only"
+class TestCommitModeConstructionRefused:
+    """Item 2: commit mode must refuse to run on every resolution path.
 
-    def test_enabled_commit_stays_commit(self) -> None:
-        policy = LearningCandidateAutoPromotePolicy(enabled=True, mode="commit")
-        assert policy.effective_mode == "commit"
+    ``mode="commit"`` raises :class:`~trellis.errors.ConfigError` at
+    construction, unconditionally — regardless of ``enabled`` — so there
+    is no way to produce a policy whose configured ``mode`` is ``"commit"``
+    through the public API today."""
+
+    def test_mode_commit_raises_configerror(self) -> None:
+        with pytest.raises(
+            ConfigError, match="commit mode is not available until auto-demotion ships"
+        ):
+            LearningCandidateAutoPromotePolicy(mode="commit")
+
+    def test_mode_commit_raises_even_when_disabled(self) -> None:
+        with pytest.raises(ConfigError):
+            LearningCandidateAutoPromotePolicy(enabled=False, mode="commit")
+
+    def test_mode_commit_raises_even_when_enabled(self) -> None:
+        with pytest.raises(ConfigError):
+            LearningCandidateAutoPromotePolicy(enabled=True, mode="commit")
+
+    def test_configerror_names_the_mode_setting(self) -> None:
+        with pytest.raises(ConfigError) as exc_info:
+            LearningCandidateAutoPromotePolicy(mode="commit")
+        assert exc_info.value.setting == CANDIDATE_AUTO_PROMOTE_MODE_SETTING
+
+    def test_configerror_via_resolved_overrides_dict(self) -> None:
+        """The resolver itself never validates (``TestFloorRefusalOnConstruction``
+        below exercises the same pattern for the int floors); the same
+        refusal must still hold once the resolved dict reaches
+        construction, for a mode value sourced from env."""
+        resolved = resolve_candidate_auto_promote_overrides(
+            env={CANDIDATE_AUTO_PROMOTE_MODE_ENV: "commit"}
+        )
+        assert resolved["mode"] == "commit"
+        with pytest.raises(ConfigError):
+            LearningCandidateAutoPromotePolicy(**resolved)
+
+
+class TestEffectiveMode:
+    def test_disabled_report_only_stays_report_only(self) -> None:
+        policy = LearningCandidateAutoPromotePolicy(enabled=False, mode="report_only")
+        assert policy.effective_mode == "report_only"
 
     def test_enabled_report_only_stays_report_only(self) -> None:
         policy = LearningCandidateAutoPromotePolicy(enabled=True, mode="report_only")
         assert policy.effective_mode == "report_only"
+
+    def test_disabled_is_always_report_only_even_when_mode_is_commit(self) -> None:
+        """``mode="commit"`` cannot be constructed normally (see
+        ``TestCommitModeConstructionRefused``); this exercises
+        ``effective_mode``'s enabled-gates-mode behavior via the same
+        bypass the module docstring describes."""
+        policy = _force_commit_policy(enabled=False)
+        assert policy.effective_mode == "report_only"
+
+    def test_enabled_commit_stays_commit(self) -> None:
+        policy = _force_commit_policy(enabled=True)
+        assert policy.effective_mode == "commit"
 
 
 class TestResolveOverridesPrecedence:
@@ -290,6 +359,19 @@ class TestEvaluateCandidate:
         _qualifies, reason = _evaluate_candidate(candidate, policy=policy)
         assert reason == "ineligible:not_promotable"
 
+    def test_already_promoted_takes_priority_over_every_other_check(self) -> None:
+        """B2: ``already_promoted`` is checked before ``not_promotable`` and
+        ``unhelpful_citations`` — a candidate that would otherwise fail
+        every other check still reports ``already_promoted``, never an
+        ``ineligible:*`` reason, once a precedent already exists for it."""
+        policy = LearningCandidateAutoPromotePolicy()
+        candidate = _candidate(recommendation_type="demote_noise", unhelpful_count=5)
+        qualifies, reason = _evaluate_candidate(
+            candidate, policy=policy, already_promoted=True
+        )
+        assert qualifies is False
+        assert reason == "already_promoted"
+
 
 class TestHoldoutArmStatus:
     def test_always_unknown(self) -> None:
@@ -299,7 +381,7 @@ class TestHoldoutArmStatus:
 
 class TestRunCandidateAutoPromotionReportOnly:
     def test_disabled_policy_never_calls_executor(self, event_log: EventLog) -> None:
-        policy = LearningCandidateAutoPromotePolicy(enabled=False, mode="commit")
+        policy = _force_commit_policy(enabled=False)
         executor = MagicMock(spec=MutationExecutor)
 
         report = run_candidate_auto_promotion(
@@ -335,7 +417,7 @@ class TestRunCandidateAutoPromotionReportOnly:
     ) -> None:
         """``--dry-run``'s override: force_report_only=True wins even with
         enabled=True and mode="commit" both configured."""
-        policy = LearningCandidateAutoPromotePolicy(enabled=True, mode="commit")
+        policy = _force_commit_policy(enabled=True)
         executor = MagicMock(spec=MutationExecutor)
 
         report = run_candidate_auto_promotion(
@@ -360,7 +442,11 @@ class TestRunCandidateAutoPromotionReportOnly:
         assert report.would_promote_count == 1
 
     def test_commit_mode_without_executor_raises(self, event_log: EventLog) -> None:
-        policy = LearningCandidateAutoPromotePolicy(enabled=True, mode="commit")
+        """Unreachable through normal construction today (see
+        ``TestCommitModeConstructionRefused``) — exercised via the bypass
+        so the follow-up that lifts the ``ConfigError`` gate inherits a
+        working guard rather than dead, untested code."""
+        policy = _force_commit_policy(enabled=True)
         with pytest.raises(ValueError, match="no executor"):
             run_candidate_auto_promotion(
                 candidates=[_candidate()],
@@ -393,6 +479,7 @@ class TestRunCandidateAutoPromotionReportOnly:
             "total": 2,
             "would_promote": 1,
             "promoted": 0,
+            "already_promoted": 0,
             "ineligible": 1,
         }
         assert payload["policy_snapshot"]["enabled"] is False
@@ -404,7 +491,12 @@ class TestRunCandidateAutoPromotionReportOnly:
 
 class TestRunCandidateAutoPromotionCommit:
     """Real ``StoreRegistry`` + ``build_curate_executor`` — commit mode must
-    write only through the governed executor."""
+    write only through the governed executor. ``mode="commit"`` cannot be
+    constructed through the normal API today
+    (``TestCommitModeConstructionRefused``); these use ``_force_commit_policy``
+    to exercise the branch the module docstring says is kept "unreachable
+    ... deliberately" rather than deleted, so it stays correct for the
+    follow-up that lifts the gate."""
 
     def test_writes_entity_link_and_promote_through_executor(
         self, tmp_path: Path
@@ -412,7 +504,7 @@ class TestRunCandidateAutoPromotionCommit:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
             executor = build_curate_executor(registry)
-            policy = LearningCandidateAutoPromotePolicy(enabled=True, mode="commit")
+            policy = _force_commit_policy(enabled=True)
             candidate = _candidate("cand-1")
 
             report = run_candidate_auto_promotion(
@@ -447,7 +539,7 @@ class TestRunCandidateAutoPromotionCommit:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
             executor = build_curate_executor(registry)
-            policy = LearningCandidateAutoPromotePolicy(enabled=True, mode="commit")
+            policy = _force_commit_policy(enabled=True)
             custom_requested_by = "auto:learning_candidate"
 
             run_candidate_auto_promotion(
@@ -475,9 +567,7 @@ class TestRunCandidateAutoPromotionCommit:
         registry = StoreRegistry(stores_dir=tmp_path / "stores")
         try:
             executor = build_curate_executor(registry)
-            policy = LearningCandidateAutoPromotePolicy(
-                enabled=True, mode="commit", max_promotions_per_run=2
-            )
+            policy = _force_commit_policy(enabled=True, max_promotions_per_run=2)
             candidates = [_candidate(f"cand-{i}") for i in range(4)]
 
             report = run_candidate_auto_promotion(
@@ -498,135 +588,115 @@ class TestRunCandidateAutoPromotionCommit:
         finally:
             registry.close()
 
+    def test_already_promoted_excluded_before_the_cap_is_consulted(
+        self, tmp_path: Path
+    ) -> None:
+        """B2 + the cap: an already-promoted candidate is excluded
+        entirely, never counted against ``max_promotions_per_run`` — a
+        genuinely new candidate behind it in the batch still gets
+        promoted even with a cap of 1."""
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            policy = _force_commit_policy(enabled=True, max_promotions_per_run=1)
+            run_candidate_auto_promotion(
+                candidates=[_candidate("cand-already")],
+                policy=policy,
+                event_log=registry.operational.event_log,
+                executor=executor,
+            )
 
-class TestSweepAutoDemotions:
+            report = run_candidate_auto_promotion(
+                candidates=[_candidate("cand-already"), _candidate("cand-new")],
+                policy=policy,
+                event_log=registry.operational.event_log,
+                executor=executor,
+            )
+
+            dispositions = {o.candidate_id: o.disposition for o in report.outcomes}
+            assert dispositions["cand-already"] == "already_promoted"
+            assert dispositions["cand-new"] == "promoted"
+            assert report.promoted_count == 1
+        finally:
+            registry.close()
+
+
+class TestAlreadyPromotedExclusion:
+    """B2: a candidate that already has any successful ``precedent.promote``
+    — human or automatic — is excluded from ``would_promote`` and reported
+    as ``already_promoted``. The scan has no ``requested_by`` filter (see
+    ``_scan_already_promoted_entity_ids``'s docstring), so a human-approved
+    promotion and an earlier automatic one are both reasons never to
+    re-propose the same candidate."""
+
     @staticmethod
-    def _promote_one(
-        registry: StoreRegistry,
-        executor: MutationExecutor,
-        candidate_id: str = "cand-1",
+    def _emit_promoted(
+        event_log: EventLog, candidate_id: str, *, requested_by: str
     ) -> str:
-        policy = LearningCandidateAutoPromotePolicy(enabled=True, mode="commit")
-        report = run_candidate_auto_promotion(
-            candidates=[_candidate(candidate_id)],
-            policy=policy,
-            event_log=registry.operational.event_log,
-            executor=executor,
+        entity_id = precedent_entity_id_for_candidate(candidate_id)
+        event_log.emit(
+            EventType.MUTATION_EXECUTED,
+            source="test",
+            entity_id=entity_id,
+            payload={
+                "operation": Operation.PRECEDENT_PROMOTE.value,
+                "status": "success",
+                "requested_by": requested_by,
+            },
         )
-        entity_id = report.outcomes[0].entity_id
-        assert entity_id is not None
         return entity_id
 
-    def test_no_prior_promotions_returns_empty(self, tmp_path: Path) -> None:
-        registry = StoreRegistry(stores_dir=tmp_path / "stores")
-        try:
-            executor = build_curate_executor(registry)
-            outcomes = sweep_auto_demotions(
-                event_log=registry.operational.event_log, executor=executor
-            )
-            assert outcomes == []
-        finally:
-            registry.close()
-
-    def test_demotes_on_first_unhelpful_citation(self, tmp_path: Path) -> None:
-        registry = StoreRegistry(stores_dir=tmp_path / "stores")
-        try:
-            executor = build_curate_executor(registry)
-            entity_id = self._promote_one(registry, executor)
-
-            registry.operational.event_log.emit(
-                EventType.FEEDBACK_RECORDED,
-                source="mcp:record_feedback",
-                payload={"unhelpful_item_ids": [entity_id]},
-            )
-
-            outcomes = sweep_auto_demotions(
-                event_log=registry.operational.event_log, executor=executor
-            )
-
-            assert len(outcomes) == 1
-            assert outcomes[0].disposition == "demoted"
-            assert outcomes[0].entity_id == entity_id
-
-            node = registry.knowledge.graph_store.get_node(entity_id)
-            assert node is not None
-            assert node["properties"]["demoted"] is True
-        finally:
-            registry.close()
-
-    def test_already_demoted_entries_skipped_on_second_sweep(
-        self, tmp_path: Path
+    def test_automatic_prior_promotion_excluded_from_would_promote(
+        self, event_log: EventLog
     ) -> None:
-        registry = StoreRegistry(stores_dir=tmp_path / "stores")
-        try:
-            executor = build_curate_executor(registry)
-            entity_id = self._promote_one(registry, executor)
-            registry.operational.event_log.emit(
-                EventType.FEEDBACK_RECORDED,
-                source="mcp:record_feedback",
-                payload={"unhelpful_item_ids": [entity_id]},
-            )
+        entity_id = self._emit_promoted(
+            event_log, "cand-1", requested_by=AUTO_PROMOTE_REQUESTED_BY
+        )
+        policy = LearningCandidateAutoPromotePolicy(enabled=False)
 
-            first = sweep_auto_demotions(
-                event_log=registry.operational.event_log, executor=executor
-            )
-            assert len(first) == 1
+        report = run_candidate_auto_promotion(
+            candidates=[_candidate("cand-1")], policy=policy, event_log=event_log
+        )
 
-            second = sweep_auto_demotions(
-                event_log=registry.operational.event_log, executor=executor
-            )
-            assert second == []
-        finally:
-            registry.close()
+        assert report.would_promote_count == 0
+        assert report.already_promoted_count == 1
+        outcome = report.outcomes[0]
+        assert outcome.disposition == "already_promoted"
+        assert outcome.entity_id == entity_id
 
-    def test_helpful_only_citation_does_not_trigger_demotion(
-        self, tmp_path: Path
+    def test_human_approved_prior_promotion_excluded_from_would_promote(
+        self, event_log: EventLog
     ) -> None:
-        registry = StoreRegistry(stores_dir=tmp_path / "stores")
-        try:
-            executor = build_curate_executor(registry)
-            entity_id = self._promote_one(registry, executor)
-            registry.operational.event_log.emit(
-                EventType.FEEDBACK_RECORDED,
-                source="mcp:record_feedback",
-                payload={"helpful_item_ids": [entity_id]},
-            )
+        self._emit_promoted(event_log, "cand-1", requested_by="cli:promote-learning")
+        policy = LearningCandidateAutoPromotePolicy(enabled=False)
 
-            outcomes = sweep_auto_demotions(
-                event_log=registry.operational.event_log, executor=executor
-            )
-            assert outcomes == []
-        finally:
-            registry.close()
+        report = run_candidate_auto_promotion(
+            candidates=[_candidate("cand-1")], policy=policy, event_log=event_log
+        )
 
-    def test_writes_only_through_executor_never_event_log_directly(
-        self, tmp_path: Path
+        assert report.would_promote_count == 0
+        assert report.already_promoted_count == 1
+        assert report.outcomes[0].disposition == "already_promoted"
+
+    def test_unpromoted_candidate_in_same_batch_still_reports_would_promote(
+        self, event_log: EventLog
     ) -> None:
-        """The policy must never copy ``PrecedentMiner``'s direct-emit
-        bypass: the demotion event comes only from ``PrecedentUpdateHandler``
-        invoked through the executor, never from this module calling
-        ``event_log.emit``/``append`` itself. Wrapping the real event log in
-        a spy proves the only calls this function makes on its own
-        ``event_log`` argument are reads."""
-        registry = StoreRegistry(stores_dir=tmp_path / "stores")
-        try:
-            executor = build_curate_executor(registry)
-            entity_id = self._promote_one(registry, executor)
-            registry.operational.event_log.emit(
-                EventType.FEEDBACK_RECORDED,
-                source="mcp:record_feedback",
-                payload={"unhelpful_item_ids": [entity_id]},
-            )
+        """The already-promoted scan must not swallow a genuinely new
+        candidate evaluated in the same run."""
+        self._emit_promoted(event_log, "cand-old", requested_by="cli:promote-learning")
+        policy = LearningCandidateAutoPromotePolicy(enabled=False)
 
-            spy_log = MagicMock(wraps=registry.operational.event_log, spec=EventLog)
-            outcomes = sweep_auto_demotions(event_log=spy_log, executor=executor)
+        report = run_candidate_auto_promotion(
+            candidates=[_candidate("cand-old"), _candidate("cand-new")],
+            policy=policy,
+            event_log=event_log,
+        )
 
-            assert len(outcomes) == 1
-            assert outcomes[0].disposition == "demoted"
-            spy_log.emit.assert_not_called()
-            spy_log.append.assert_not_called()
-        finally:
-            registry.close()
+        dispositions = {o.candidate_id: o.disposition for o in report.outcomes}
+        assert dispositions["cand-old"] == "already_promoted"
+        assert dispositions["cand-new"] == "would_promote"
+        assert report.would_promote_count == 1
+        assert report.already_promoted_count == 1
 
 
 class TestComputeAgreementMetric:
@@ -706,6 +776,7 @@ class TestSerializationHelpers:
         data = report_to_dict(report)
         assert data["would_promote_count"] == 1
         assert data["promoted_count"] == 0
+        assert data["already_promoted_count"] == 0
         assert data["ineligible_count"] == 0
         assert data["event_id"] == "evt-1"
         assert data["outcomes"][0] == {
@@ -717,10 +788,24 @@ class TestSerializationHelpers:
         }
 
     def test_agreement_metric_to_dict_shape(self) -> None:
+        """F1: the serialised payload carries the raw ``agree``/``disagree``/
+        ``undecided`` counts *and* ``note`` — a reader must never mistake
+        the structural ``rate`` ceiling (``None`` or exactly ``1.0``) for a
+        measured agreement rate."""
         metric = AgreementMetric(agree=1, disagree=0, undecided=2, rate=1.0)
-        assert agreement_metric_to_dict(metric) == {
+        data = agreement_metric_to_dict(metric)
+        assert data == {
             "agree": 1,
             "disagree": 0,
             "undecided": 2,
             "rate": 1.0,
+            "note": metric.note,
         }
+        assert "disagree is always 0" in data["note"]
+
+    def test_agreement_metric_note_has_a_default(self) -> None:
+        """F1: a caller that builds ``AgreementMetric`` without naming
+        ``note`` still gets the explanatory text, not an empty string."""
+        metric = AgreementMetric(agree=0, disagree=0, undecided=0, rate=None)
+        assert metric.note
+        assert "None" in metric.note

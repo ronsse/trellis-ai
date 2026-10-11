@@ -15,13 +15,16 @@ fourteen above, pinned by :data:`_AUTO_PROMOTE_NAMES` below.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 import pytest
 
 from trellis.core.settings_registry import (
+    GROUP_LABELS,
     SETTINGS_REGISTRY,
     Risk,
+    SettingGroup,
     SettingSpec,
     SettingType,
     get_setting,
@@ -29,8 +32,11 @@ from trellis.core.settings_registry import (
 )
 from trellis.core.write_config import ENV_VAR_BY_FIELD
 
-_VALID_RISKS: frozenset[Risk] = frozenset({"safe", "restart", "unsafe"})
+_VALID_RISKS: frozenset[Risk] = frozenset({"low", "caution", "high"})
 _VALID_TYPES: frozenset[SettingType] = frozenset({"bool", "int", "float", "str"})
+_VALID_GROUPS: frozenset[SettingGroup] = frozenset(
+    {"retrieval", "ingest_tagging", "learning_loops", "feedback_attribution", "ops"}
+)
 
 #: The tuner's three knobs plus the six for the new candidate-promotion
 #: policy — registered together by the auto-promote-report-only PR.
@@ -106,6 +112,10 @@ class TestEverySpecIsWellFormed:
     def test_name_field_matches_its_own_registry_key(self, name: str) -> None:
         assert SETTINGS_REGISTRY[name].name == name
 
+    @pytest.mark.parametrize("name", list(SETTINGS_REGISTRY))
+    def test_group_is_a_declared_group(self, name: str) -> None:
+        assert SETTINGS_REGISTRY[name].group in _VALID_GROUPS
+
     def test_exactly_one_entry_needs_a_restart(self) -> None:
         """``minhash_seed_max_docs`` is read once at process start (its own
         description says why); every other registered knob is re-read
@@ -117,40 +127,114 @@ class TestEverySpecIsWellFormed:
         assert restarters == ["minhash_seed_max_docs"]
 
 
-class TestUnsafeKnobsMatchThePlanPlusOneDocumentedExtension:
-    """The plan's own "Unsafe to expose" list names four knobs:
-    ``memory_extraction``, ``reconcile_on_write``, ``minhash_seed_max_docs``
-    (restart risk, not unsafe) and ``pack_holdout_rate``. This PR adds a
-    fifth, ``require_bodied_attribution``, as a deliberate, documented
-    deviation (see its description's own "~46% more" measurement) — not
-    an oversight, so pin it rather than let it silently drift back to
-    three or grow to six unnoticed.
+#: Catches an issue/PR reference such as "#862" or "#848" leaking into
+#: operator-facing text -- the UI renders ``description``/``risk_note``
+#: verbatim, and a tracker number means nothing to an operator deciding
+#: whether to flip a switch (brief e179 rework: "no issue numbers, no PR
+#: numbers").
+_TRACKER_REFERENCE = re.compile(r"#\d+")
 
-    The auto-promote-report-only PR adds four more, each with its own
-    unsafe-risk justification in its description: both master switches
-    (``learning.auto_promote.enabled``,
-    ``learning.candidate_auto_promote.enabled``), the report_only/commit
-    mode toggle, and ``require_zero_unhelpful`` (the one knob that can
-    make auto-promote disagree with a human reviewer on purpose).
+
+class TestLabelDescriptionAndRiskNoteShape:
+    """The UI renders ``label``, ``description`` and ``risk_note``
+    separately (brief e179 rework, step 1) -- every entry needs a usable
+    ``label`` and ``description``, every non-``"low"`` entry needs a
+    ``risk_note`` the UI can show beside its risk badge, and none of that
+    operator-facing text may carry a tracker reference that only means
+    something to a maintainer reading this file, not an operator reading
+    the Settings tab.
     """
 
-    def test_unsafe_tier_is_exactly_this_set(self) -> None:
-        unsafe = {
-            name for name, spec in SETTINGS_REGISTRY.items() if spec.risk == "unsafe"
-        }
-        assert unsafe == {
+    @pytest.mark.parametrize("name", list(SETTINGS_REGISTRY))
+    def test_label_is_non_empty(self, name: str) -> None:
+        label = SETTINGS_REGISTRY[name].label
+        assert label is not None
+        assert label.strip() != "", name
+
+    @pytest.mark.parametrize("name", list(SETTINGS_REGISTRY))
+    def test_non_low_risk_entry_has_a_non_empty_risk_note(self, name: str) -> None:
+        spec = SETTINGS_REGISTRY[name]
+        if spec.risk == "low":
+            pytest.skip("risk_note is only required above the low tier")
+        assert spec.risk_note is not None, name
+        assert spec.risk_note.strip() != "", name
+
+    @pytest.mark.parametrize("name", list(SETTINGS_REGISTRY))
+    def test_description_has_no_tracker_reference(self, name: str) -> None:
+        description = SETTINGS_REGISTRY[name].description
+        assert _TRACKER_REFERENCE.search(description) is None, (name, description)
+
+    @pytest.mark.parametrize("name", list(SETTINGS_REGISTRY))
+    def test_risk_note_has_no_tracker_reference(self, name: str) -> None:
+        risk_note = SETTINGS_REGISTRY[name].risk_note
+        if risk_note is None:
+            return
+        assert _TRACKER_REFERENCE.search(risk_note) is None, (name, risk_note)
+
+    def test_mutant_tracker_reference_in_description_is_caught(self) -> None:
+        """A deliberately defective entry: a description that leaks an
+        issue number, exactly the shape this rule exists to catch. Proven
+        against a mutant, not just the real registry, so this test cannot
+        pass merely because every *current* description happens to be
+        clean.
+        """
+        base = next(iter(SETTINGS_REGISTRY.values()))
+        mutant = replace(
+            base,
+            description="Shipped behaviour since #848, see also #862. " + "x" * 20,
+        )
+
+        assert _TRACKER_REFERENCE.search(mutant.description) is not None
+
+    def test_mutant_missing_risk_note_on_a_high_risk_entry_is_caught(self) -> None:
+        """A second defective shape: ``risk="high"`` with no ``risk_note``
+        — the UI would show a High badge with nothing beside it to say
+        why.
+        """
+        base = SETTINGS_REGISTRY["memory_extraction"]
+        mutant = replace(base, risk_note=None)
+
+        assert mutant.risk != "low"
+        assert mutant.risk_note is None
+
+
+class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
+    """The plan's own "Unsafe to expose" list names four knobs:
+    ``memory_extraction``, ``reconcile_on_write``, ``minhash_seed_max_docs``
+    (a restart cost, not a correctness/cost risk) and ``pack_holdout_rate``.
+    Those three (minus the restart-only one) are this registry's ``"high"``
+    tier. This PR adds a fifth knob as a deliberate, documented deviation —
+    ``require_bodied_attribution``, at the lighter ``"caution"`` tier (see
+    its own code comment's "~46% more" measurement) — not an oversight, so
+    pin both tiers rather than let them silently drift.
+    """
+
+    def test_high_tier_is_exactly_this_set(self) -> None:
+        high = {name for name, spec in SETTINGS_REGISTRY.items() if spec.risk == "high"}
+        assert high == {
             "memory_extraction",
             "reconcile_on_write",
             "pack_holdout_rate",
-            "require_bodied_attribution",
             "learning.auto_promote.enabled",
-            "learning.candidate_auto_promote.enabled",
+        }
+
+    def test_caution_tier_is_exactly_this_set(self) -> None:
+        caution = {
+            name for name, spec in SETTINGS_REGISTRY.items() if spec.risk == "caution"
+        }
+        assert caution == {
+            "require_bodied_attribution",
             "learning.candidate_auto_promote.mode",
             "learning.candidate_auto_promote.require_zero_unhelpful",
         }
 
-    def test_minhash_seed_max_docs_is_restart_not_unsafe(self) -> None:
-        assert SETTINGS_REGISTRY["minhash_seed_max_docs"].risk == "restart"
+    def test_minhash_seed_max_docs_is_low_risk_but_restart_required(self) -> None:
+        """Restart cost and risk tier are independent flags now — a knob
+        can need a restart at any risk tier, or none at all.
+        """
+        spec = SETTINGS_REGISTRY["minhash_seed_max_docs"]
+        assert spec.risk == "low"
+        assert spec.restart_required is True
 
 
 class TestSettingsLive:
@@ -233,6 +317,34 @@ class TestEveryEntryIsLiveOrExplainsWhyNot:
         )
 
         assert "restart" not in mutant.description.lower()
+
+
+class TestEveryEntryHasAValidGroup:
+    """Grouping drives the UI's filter box (brief step 8, e179) — a value
+    outside the five declared areas would silently vanish from every
+    filter the UI builds from :data:`GROUP_LABELS`, with nothing to catch
+    the gap. ``GROUP_LABELS`` is the one place a human-facing group name
+    lives, so the UI never hardcodes one.
+    """
+
+    def test_every_group_has_a_display_label(self) -> None:
+        assert set(GROUP_LABELS) == _VALID_GROUPS
+
+    def test_mutant_unknown_group_is_caught(self) -> None:
+        """A deliberately defective entry: a group outside the declared
+        five. Dataclasses do not enforce ``Literal`` at runtime, so only
+        this membership check catches it.
+        """
+        base = next(iter(SETTINGS_REGISTRY.values()))
+        mutant = replace(base, group="not_a_real_group")  # type: ignore[arg-type]
+        defective_registry = {**SETTINGS_REGISTRY, mutant.name: mutant}
+
+        violations = [
+            name
+            for name, spec in defective_registry.items()
+            if spec.group not in _VALID_GROUPS
+        ]
+        assert violations == [mutant.name]
 
 
 class TestLookupHelpers:

@@ -10,9 +10,9 @@ silently inert for a month" had to SSH in and tail a file.
 :func:`summarize_loop_health` answers that from the EventLog alone (plus
 one documented exception below), reading ``CURATE_CYCLE_COMPLETED`` /
 ``TUNE_CYCLE_COMPLETED`` (:mod:`trellis_cli.worker`), ``PRECEDENT_PROMOTED``,
-``PARAMS_AUTO_PROMOTED``, ``FEEDBACK_RECORDED``,
-``LEARNING_AUTO_PROMOTE_EVALUATED`` and ``PRECEDENT_UPDATED`` (the last two
-for e177's ``learning_candidate_auto_promote`` row, which also folds in
+``PARAMS_AUTO_PROMOTED``, ``FEEDBACK_RECORDED`` and
+``LEARNING_AUTO_PROMOTE_EVALUATED`` (the last one for the
+``learning_candidate_auto_promote`` row, which also folds in
 :func:`trellis.learning.candidate_auto_promote.compute_agreement_metric`'s
 read of ``REVIEW_DECISION_RECORDED``). It adds no new probe.
 
@@ -101,7 +101,7 @@ def _scan(event_log: EventLog, event_type: EventType, *, limit: int) -> EventSca
 def _build_candidate_auto_promote_row(
     event_log: EventLog, *, now: datetime, limit: int
 ) -> tuple[LoopHealthRow, ScanCoverage]:
-    """Build the e177 ``learning_candidate_auto_promote`` row.
+    """Build the ``learning_candidate_auto_promote`` row.
 
     Factored out of :func:`summarize_loop_health` to keep that function's
     statement count under the lint threshold; the row itself follows the
@@ -111,11 +111,7 @@ def _build_candidate_auto_promote_row(
         event_log, EventType.LEARNING_AUTO_PROMOTE_EVALUATED, limit=limit
     )
     latest = candidate_scan.events[-1] if candidate_scan.events else None
-
-    demoted_scan = _scan(event_log, EventType.PRECEDENT_UPDATED, limit=limit)
-    demoted_events = [
-        e for e in demoted_scan.events if bool((e.payload or {}).get("demoted"))
-    ]
+    _ = now  # kept for signature symmetry with the other _build_* rows
 
     # compute_agreement_metric reads REVIEW_DECISION_RECORDED / its own
     # event type directly (not via scan_events), matching the tuner row's
@@ -130,16 +126,11 @@ def _build_candidate_auto_promote_row(
         counters = {
             "last_run_mode": latest.payload.get("mode"),
             "last_run_would_promote": counts.get("would_promote"),
+            "last_run_already_promoted": counts.get("already_promoted"),
             "last_run_promoted": counts.get("promoted"),
             "last_run_ineligible": counts.get("ineligible"),
             "configured_enabled": snapshot.get("enabled"),
             "configured_mode": snapshot.get("mode"),
-            "demoted_last_7d": sum(
-                1 for e in demoted_events if e.occurred_at >= now - timedelta(days=7)
-            ),
-            "demoted_last_30d": sum(
-                1 for e in demoted_events if e.occurred_at >= now - timedelta(days=30)
-            ),
             "agreement_agree": agreement.agree,
             "agreement_disagree": agreement.disagree,
             "agreement_undecided": agreement.undecided,
@@ -149,27 +140,23 @@ def _build_candidate_auto_promote_row(
     row = LoopHealthRow(
         name="learning_candidate_auto_promote",
         description=(
-            "Evaluates learning candidates for automatic promotion to a "
-            "precedent (plan p1 PR 7) via `trellis curate "
-            "auto-promote-candidates`, and monitors its own prior "
-            "promotions for a post-promotion unhelpful citation."
+            "Evaluates learning candidates and reports what it would "
+            "promote to a precedent, via `trellis curate "
+            "auto-promote-candidates`."
         ),
-        actuates=True,
+        actuates=False,
         what_it_changes=(
-            "Promotes a qualifying candidate through the same governed "
-            "precedent.promote path a human Review-tab approval uses, "
-            "ONLY when learning.candidate_auto_promote.enabled and "
-            "mode=commit are both set (disabled, report-only by "
-            "default); every other run only reports what it would have "
-            "promoted. Demotes, through a governed precedent.update, any "
-            "of its own prior promotions that have since drawn an "
-            "unhelpful citation."
+            "Nothing yet: `mode=commit` is refused with a configuration "
+            "error until a follow-up ships auto-demotion, so every run "
+            "today only reports a disposition per candidate "
+            "(would_promote / already_promoted / ineligible) — it never "
+            "writes a precedent."
         ),
         last_run_at=latest.occurred_at if latest else None,
         last_status="ok" if latest else None,
         counters=counters,
     )
-    return row, merge_coverage(candidate_scan.coverage, demoted_scan.coverage)
+    return row, candidate_scan.coverage
 
 
 def summarize_loop_health(
