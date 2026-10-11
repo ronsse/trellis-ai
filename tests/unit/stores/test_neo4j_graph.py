@@ -285,6 +285,10 @@ def test_upsert_edge_missing_endpoints_raises(graph_store, source_id, target_id)
     with pytest.raises(ValueError, match="no current version"):
         graph_store.upsert_edge(source_id, target_id, "links_to")
     assert graph_store.count_edges() == 0
+    # F2: a missing endpoint must not leave an orphan EdgeClaim row for a
+    # future real writer of this triplet to contend with for no reason.
+    assert _rows_left(graph_store, source_id)["EdgeClaim"] == 0
+    assert _rows_left(graph_store, target_id)["EdgeClaim"] == 0
 
 
 def _purge_after_endpoint_check(store, monkeypatch, gone: str) -> None:
@@ -529,7 +533,7 @@ def _wait_for_blocked_purge(store) -> bool:
 def _rows_left(store, node_id: str) -> dict[str, int]:
     """Count the rows, any version, each label still holds for a node."""
     with store._driver.session(database=store._database) as session:
-        return {
+        counts = {
             label: session.run(
                 f"MATCH (x:{label}) WHERE x.{key} = $nid RETURN count(x) AS c",
                 nid=node_id,
@@ -540,6 +544,14 @@ def _rows_left(store, node_id: str) -> dict[str, int]:
                 ("AliasClaim", "entity_id"),
             )
         }
+        # EdgeClaim keys on either side of the triplet (F1), not a single
+        # node-named property, so it needs its own OR query.
+        counts["EdgeClaim"] = session.run(
+            "MATCH (x:EdgeClaim) WHERE x.source_id = $nid OR x.target_id = $nid "
+            "RETURN count(x) AS c",
+            nid=node_id,
+        ).single()["c"]
+        return counts
 
 
 @pytest.mark.parametrize(
@@ -596,7 +608,12 @@ def test_delete_node_removes_a_version_written_while_it_waited(
     assert state["waited"], "the purge never blocked on the write's lock"
     assert not state["purge"].is_alive()
     assert state["deleted"] is True
-    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+    assert _rows_left(store, "n1") == {
+        "Node": 0,
+        "Alias": 0,
+        "AliasClaim": 0,
+        "EdgeClaim": 0,
+    }
 
 
 def test_delete_node_removes_a_version_written_after_it_took_its_locks(
@@ -668,7 +685,12 @@ def test_delete_node_removes_a_version_written_after_it_took_its_locks(
     assert state["deleting"], "the Node delete never blocked on the second write"
     assert not state["purge"].is_alive()
     assert state["deleted"] is True
-    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+    assert _rows_left(store, "n1") == {
+        "Node": 0,
+        "Alias": 0,
+        "AliasClaim": 0,
+        "EdgeClaim": 0,
+    }
 
 
 def _seed_purge_target(store, node_id: str) -> None:
@@ -759,7 +781,12 @@ def test_a_purge_that_waited_on_a_concurrent_purge_reports_no_removal(
     assert state["waited"], "the second purge never blocked on the first's lock"
     assert not state["purge"].is_alive()
     assert outcome == {"first": True, "second": False}
-    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+    assert _rows_left(store, "n1") == {
+        "Node": 0,
+        "Alias": 0,
+        "AliasClaim": 0,
+        "EdgeClaim": 0,
+    }
 
 
 def test_a_redaction_that_lost_a_concurrent_purge_emits_no_audit_event(
@@ -814,7 +841,12 @@ def test_a_redaction_that_lost_a_concurrent_purge_emits_no_audit_event(
         CommandStatus.SUCCESS,
         CommandStatus.FAILED,
     )
-    assert _rows_left(graph_store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+    assert _rows_left(graph_store, "n1") == {
+        "Node": 0,
+        "Alias": 0,
+        "AliasClaim": 0,
+        "EdgeClaim": 0,
+    }
 
 
 def _lose_the_purge_commit(monkeypatch, *, committed: bool) -> list[Exception]:
@@ -854,7 +886,12 @@ def test_a_lost_commit_the_purge_made_is_the_purge(graph_store, monkeypatch):
 
     assert store.delete_node("n1") is True
     assert len(lost) == 1
-    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+    assert _rows_left(store, "n1") == {
+        "Node": 0,
+        "Alias": 0,
+        "AliasClaim": 0,
+        "EdgeClaim": 0,
+    }
 
 
 def test_a_lost_commit_the_purge_did_not_make_is_a_failed_purge(

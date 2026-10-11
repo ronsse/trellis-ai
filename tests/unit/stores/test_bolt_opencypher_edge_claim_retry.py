@@ -26,6 +26,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 pytest.importorskip("neo4j")
 
@@ -231,14 +232,19 @@ class TestUpsertEdgeRetries:
 
 
 class TestArcadeDBWidensEdgeClaimOverItsGenericErrorChannel:
-    """The per-backend seam, mirroring the alias one for the same reason.
+    """The per-backend seam, kept narrow and logged (F3).
 
-    ArcadeDB reports a record the winning transaction already replaced —
-    the shape the claim's ``_cas_lock`` touch of an *existing* row hits —
-    on the generic ``Neo.DatabaseError.General.UnknownError`` bucket, not
-    the unique-violation channel the base predicate matches. Widening the
-    shared predicate itself would make a Neo4j deployment retry a genuine
-    engine fault, which is fatal there and will never clear.
+    ArcadeDB's generic ``Neo.DatabaseError.General.UnknownError`` bucket is
+    where a runtime fault on this package's fixed Cypher literal would
+    surface (the affordability argument :meth:`_is_alias_write_contention`
+    makes). No live trigger has been observed for ``EdgeClaim``
+    specifically: the update-race shape this widening was once thought to
+    cover (the claim's old ``_cas_lock`` touch of an *existing* row)
+    measured as a plain no-op with no error at all, and the fix's real
+    content write (``ec.claim_token``) conflicts on a different,
+    already-retryable channel (``DeadlockDetected``) instead. Widening the
+    shared predicate itself would still make a Neo4j deployment retry a
+    genuine engine fault, which is fatal there and will never clear.
     """
 
     def test_recognizes_the_generic_bucket_a_stale_record_arrives_on(self) -> None:
@@ -278,6 +284,16 @@ class TestArcadeDBWidensEdgeClaimOverItsGenericErrorChannel:
         assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_01"
         assert execute_write.call_count == 2
 
+    def test_the_generic_bucket_match_logs_the_message_at_warning(self) -> None:
+        """F3: a real occurrence must be visible, not silently retried away."""
+        store = _make_arcadedb_store()
+        with capture_logs() as logs:
+            assert store._is_edge_write_contention(_stale_record()) is True
+        warnings = [log for log in logs if log["log_level"] == "warning"]
+        assert len(warnings) == 1
+        assert warnings[0]["event"] == "arcadedb_edge_claim_generic_bucket_contention"
+        assert ARCADEDB_GENERIC_BUCKET_MESSAGE in warnings[0]["exc_message"]
+
     def test_the_two_claim_predicates_are_independent_overrides(self) -> None:
         """Widening the edge channel must not widen the alias channel's.
 
@@ -298,3 +314,116 @@ class TestArcadeDBWidensEdgeClaimOverItsGenericErrorChannel:
             ArcadeDBGraphStore._is_edge_write_contention
             is not ArcadeDBGraphStore._is_alias_write_contention
         )
+
+
+class _RecordingTx:
+    """Stand-in for ``ManagedTransaction`` that records every ``.run()``.
+
+    Unlike ``_arm_execute_write`` above (which replaces
+    ``session.execute_write`` wholesale and never invokes the real ``_tx``
+    closure, letting a mutant that deletes the whole claim prelude from
+    ``upsert_edge``'s Cypher survive every test in this file), this fake
+    actually calls the closure and captures the Cypher text and bound
+    parameters it sends — the only way to pin the claim write's content
+    (F4, gate mutant M1).
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def run(self, cypher: str, **params: Any) -> Any:
+        self.calls.append((cypher, params))
+        return _SingleResult({"edge_id": "edge_01"})
+
+
+class _SingleResult:
+    def __init__(self, record: dict[str, Any]) -> None:
+        self._record = record
+
+    def single(self) -> dict[str, Any]:
+        return self._record
+
+
+class _RecordingSession:
+    """Runs ``execute_write``'s function against one ``_RecordingTx``.
+
+    ``fail_times`` simulates a commit-time conflict discovered *after*
+    the transaction function already ran (as a real lost claim race
+    would): the Cypher is still sent and recorded, but the attempt as a
+    whole is reported as failed, so ``_execute_edge_claim_write`` retries
+    by calling the closure again.
+    """
+
+    def __init__(self, tx: _RecordingTx, fail_times: int = 0) -> None:
+        self._tx = tx
+        self._fail_times = fail_times
+        self._attempts = 0
+
+    def execute_write(self, fn: Any) -> Any:
+        self._attempts += 1
+        result = fn(self._tx)
+        if self._attempts <= self._fail_times:
+            raise _contention()
+        return result
+
+    def __enter__(self) -> _RecordingSession:
+        return self
+
+    def __exit__(self, *exc_info: Any) -> bool:
+        return False
+
+
+def _make_recording_store(session: _RecordingSession) -> BoltOpenCypherGraphStore:
+    store = _make_store()
+    store._driver.session.return_value = session  # type: ignore[attr-defined]
+    return store
+
+
+class TestClaimWritePrimitiveIsPinned:
+    """F4: a test that fails when the claim prelude is deleted.
+
+    Verified against an e176 mutation run that deletes the ``MERGE
+    (ec:EdgeClaim ...) SET ec.claim_token = ...`` block from the Cypher
+    literal (the mutant M1 in ``$ON/probes/gate856/mutate.py`` targets,
+    textually updated for this rework's claim prelude): with the prelude
+    gone, ``"MERGE (ec:EdgeClaim" not in cypher`` and this test fails,
+    where the mock-only tests above keep passing because they never look
+    at the Cypher text at all.
+    """
+
+    def test_claim_prelude_is_sent_with_a_fresh_token_each_call(self) -> None:
+        tx = _RecordingTx()
+        store = _make_recording_store(_RecordingSession(tx))
+
+        first = store.upsert_edge("src", "tgt", "race-rel", {})
+        second = store.upsert_edge("src", "tgt", "race-rel", {})
+
+        assert first == "edge_01"
+        assert second == "edge_01"
+        assert len(tx.calls) == 2
+        tokens = []
+        for cypher, params in tx.calls:
+            assert "MERGE (ec:EdgeClaim {claim_key: $edge_claim_key})" in cypher
+            assert "ec.claim_token = $edge_claim_token" in cypher
+            assert "edge_claim_token" in params
+            tokens.append(params["edge_claim_token"])
+        assert tokens[0] != tokens[1]
+
+    def test_a_driver_level_retry_of_one_call_also_gets_a_fresh_token(self) -> None:
+        """The token is generated inside ``_tx``, not once per call.
+
+        A driver-level retry of ``DeadlockDetected`` re-invokes the
+        ``_tx`` closure directly (module docstring); this simulates that
+        by failing the first attempt of a single ``upsert_edge`` call
+        after its Cypher already ran, and checking the second attempt's
+        recorded token differs from the first's.
+        """
+        tx = _RecordingTx()
+        store = _make_recording_store(_RecordingSession(tx, fail_times=1))
+
+        result = store.upsert_edge("src", "tgt", "race-rel", {})
+
+        assert result == "edge_01"
+        assert len(tx.calls) == 2
+        tokens = [params["edge_claim_token"] for _, params in tx.calls]
+        assert tokens[0] != tokens[1]

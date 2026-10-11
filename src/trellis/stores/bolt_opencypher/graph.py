@@ -73,24 +73,55 @@ directed ``(source_id, target_id, edge_type)`` triplet under its own
 uniqueness constraint (mirroring the existing ``AliasClaim`` mechanism
 used by :meth:`upsert_alias` / :meth:`bind_alias_if_absent`) — the same
 genuine serialization point the node path lacked. Every ``upsert_edge``
-call ``MERGE``s and then touches (``_cas_lock`` SET/REMOVE) this claim
-row, in the same transaction, before resolving the existing edge: the
-``MERGE`` makes two writers racing to create the claim for the first
-time (the create-edge race) conflict under the unique constraint; the
-``_cas_lock`` touch makes two writers racing to re-version an
-*already-claimed* triplet (the update-edge race, and the shape the
-bug report reproduced) conflict as a write on that same existing row —
-exactly as ``update_node_if_current``'s own ``_cas_lock`` touch of ``cur``
-does for nodes. The write is executed through
-:meth:`_execute_edge_claim_write`, which re-runs the whole transaction
-on a lost claim race (:func:`_is_edge_claim_contention`, widened on
-ArcadeDB the same way :func:`_is_alias_claim_contention` is), so a
-retry always re-reads committed state rather than papering over a
-conflict that was never detected. Only single-row writers take the
-claim: ``upsert_edges_bulk`` does not (it would need a sorted per-row
-claim order across every row it writes, like Postgres's bulk edge
-path), so a bulk write racing another writer of the same edge can still
-leave two current rows.
+call ``MERGE``s this claim row, in the same transaction, before
+resolving the existing edge: two writers racing to create the claim for
+the first time (the create-edge race) conflict under the unique
+constraint — measured, six overlapping-transaction trials out of six,
+against ``arcadedata/arcadedb:26.8.1``.
+
+The update-edge race — two writers racing to re-version an
+*already-claimed* triplet, the shape the bug report reproduced — is
+**not** closed by touching the claim row the way
+``update_node_if_current`` touches ``cur`` (``SET ec._cas_lock = true
+REMOVE ec._cas_lock``): that pair is a net no-op, and measured against
+``arcadedata/arcadedb:26.8.1``, its commit check does not see it as a
+conflict at all — two overlapping transactions both committed in six of
+six trials, and with the touch in place the live failing-scenario check
+(``bolt_edge_create_race.check_concurrent_edge_update_leaves_one_current_row``)
+still failed 34 of 80 calls over 800 reps against one database, no
+better than the 28 of 80 the same harness measured on the code before
+this claim existed at all (2026-10-11 gate review). What does close it
+is a genuine content change on the claim row: ``SET ec.claim_token =
+$edge_claim_token`` with a token freshly generated in Python on every
+attempt. ArcadeDB's commit check does see that as a conflict
+(``Neo.TransientError.Transaction.DeadlockDetected``), which the Bolt
+driver's own managed-transaction retry (``max_transaction_retry_time``,
+:class:`BoltDriverConfig`) already retries with backoff, transparently
+to :meth:`_execute_edge_claim_write`'s own retry loop below — measured
+0 of 80 calls failed over 800 reps on the same harness, with the driver
+retrying 800 ``DeadlockDetected`` conflicts along the way. The claim row
+also carries ``source_id``/``target_id`` (stable for a given
+``claim_key``, so re-asserting them is not itself a race) so
+:meth:`delete_node` can find and purge it, and the claim is written only
+once both endpoints are confirmed to have a current row, so a vanished
+endpoint cannot leave an orphan claim.
+
+The write is executed through :meth:`_execute_edge_claim_write`, which
+re-runs the whole transaction on a lost claim race
+(:func:`_is_edge_claim_contention`, widened on ArcadeDB the same way
+:func:`_is_alias_claim_contention` is), so a retry always re-reads
+committed state rather than papering over a conflict that was never
+detected. Only single-row writers take the claim: ``upsert_edges_bulk``
+does not (it would need a sorted per-row claim order across every row
+it writes, like Postgres's bulk edge path), so a bulk write racing
+another writer of the same edge can still leave two current rows.
+
+ArcadeDB 26.10.1 ships the upstream page-slot fix (ArcadeDB PR #9270)
+and closes the underlying race on its own, measured 0 of 40 calls
+failed over 400 reps for both this fix and for the code before it, on
+the same harness. ``live-infra.yml`` stays pinned to 26.8.1 on purpose
+so the race — and this fix — remain testable in CI; a deployment
+already on 26.10.1 gets the fix from the engine, not from this claim.
 
 Per-backend subclasses override the **seams**:
 
@@ -1557,7 +1588,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         // the row this writes `_cas_lock` to, so the endpoint MATCHes
         // below see the state after it commits. `WITH count(...)` yields
         // one row even when nothing matched, so a missing endpoint still
-        // reaches `WHERE s IS NOT NULL`.
+        // reaches the `WHERE s IS NOT NULL AND t IS NOT NULL` gate below.
         MATCH (lo_cand:Node {{node_id: $lo_id}}) WHERE lo_cand.valid_to IS NULL
         SET lo_cand._cas_lock = true
         REMOVE lo_cand._cas_lock
@@ -1566,27 +1597,37 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         SET hi_cand._cas_lock = true
         REMOVE hi_cand._cas_lock
         WITH count(hi_cand) AS _locked_hi
-        // Claim the (source_id, target_id, edge_type) triplet before
-        // resolving `old`, for the same reason the endpoint locks run
-        // first: a concurrent re-versioner of this exact triplet must be
-        // forced to conflict here, not matched into silently. `MERGE`
-        // alone catches two writers racing to CREATE this claim for the
-        // first time (the EdgeClaim unique constraint); the `_cas_lock`
-        // SET/REMOVE additionally forces a real write conflict when the
-        // claim row already exists and two writers race to re-version
-        // the edge (the module docstring's open race) -- the endpoint
-        // touches above cannot do this, because the record two
-        // concurrent edge writers actually contend over is the edge row
-        // itself, not an endpoint node.
-        MERGE (ec:EdgeClaim {{claim_key: $edge_claim_key}})
-        SET ec._cas_lock = true
-        REMOVE ec._cas_lock
-        WITH count(ec) AS _claimed
         MATCH (s:Node {{node_id: $source_id}}) WHERE s.valid_to IS NULL
         MATCH (t:Node {{node_id: $target_id}}) WHERE t.valid_to IS NULL
         WITH collect(DISTINCT s) AS source_rows, collect(DISTINCT t) AS target_rows
         WITH {_shown_row("source_rows")} AS s, {_shown_row("target_rows")} AS t
-        WHERE s IS NOT NULL
+        // A missing endpoint is gated out *before* the claim write below,
+        // not after: the claim must not be written for a triplet whose
+        // edge can never be created, or every future real writer of this
+        // triplet inherits an orphan claim row to contend with for no
+        // reason (F2).
+        WHERE s IS NOT NULL AND t IS NOT NULL
+        // Claim the (source_id, target_id, edge_type) triplet before
+        // resolving `old`, for the same reason the endpoint locks run
+        // first: a concurrent re-versioner of this exact triplet must be
+        // forced to conflict here, not matched into silently. `MERGE`
+        // catches two writers racing to CREATE this claim for the first
+        // time (the EdgeClaim unique constraint). The `SET` below writes
+        // a fresh, per-attempt token: a genuine content change on the
+        // claim row, so two writers racing to re-version an
+        // *already-claimed* triplet (the module docstring's open race)
+        // commit a real conflicting write -- unlike a `_cas_lock`
+        // SET/REMOVE touch of an existing row, which ArcadeDB 26.8.1's
+        // commit check does not see as a conflict at all (measured: see
+        // the module docstring). `source_id`/`target_id` are written so
+        // ``delete_node`` can find and purge this row (F1); they are
+        // stable for a given `claim_key`, so re-asserting them on a
+        // retry is not itself a race.
+        MERGE (ec:EdgeClaim {{claim_key: $edge_claim_key}})
+        SET ec.claim_token = $edge_claim_token,
+            ec.source_id = $source_id,
+            ec.target_id = $target_id
+        WITH s, t
         // Each endpoint on any row, not only `s`/`t`: an edge stays on
         // the row it was written to (module docstring).
         OPTIONAL MATCH (:Node {{node_id: $source_id}})
@@ -1607,6 +1648,17 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         """
 
         def _tx(tx: ManagedTransaction) -> Any:
+            # Generated per attempt, inside the retried function, not once
+            # per ``upsert_edge`` call: a driver-level retry (the
+            # DeadlockDetected a real content write on an existing claim
+            # row provokes, see the module docstring) re-invokes this
+            # closure directly, bypassing ``_execute_edge_claim_write``'s
+            # own loop, so a token generated outside it would be reused
+            # across those attempts too. Reuse is harmless for
+            # correctness (only the attempt that actually commits is
+            # ever observed) but a fresh value per attempt keeps the
+            # claim row's content distinguishable call to call for
+            # debugging.
             return tx.run(
                 cypher,
                 source_id=source_id,
@@ -1618,6 +1670,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 candidate_edge_id=candidate_edge_id,
                 base_props=base_props,
                 edge_claim_key=edge_claim_key,
+                edge_claim_token=generate_ulid(),
             ).single()
 
         record = self._execute_edge_claim_write(_tx)
@@ -2055,6 +2108,22 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             _detach_delete_until_none(
                 tx,
                 "MATCH (c:AliasClaim {entity_id: $nid}) DETACH DELETE c "
+                "RETURN count(c) AS deleted",
+                node_id,
+            )
+            # EdgeClaim rows carry the triplet's source_id/target_id (see
+            # the module docstring), so a purged node's id can be matched
+            # on either side -- the same redaction coverage AliasClaim
+            # already gets, closing the gap the AliasClaim-only purge left.
+            _detach_delete_until_none(
+                tx,
+                "MATCH (c:EdgeClaim {source_id: $nid}) DETACH DELETE c "
+                "RETURN count(c) AS deleted",
+                node_id,
+            )
+            _detach_delete_until_none(
+                tx,
+                "MATCH (c:EdgeClaim {target_id: $nid}) DETACH DELETE c "
                 "RETURN count(c) AS deleted",
                 node_id,
             )

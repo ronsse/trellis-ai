@@ -78,7 +78,7 @@ def graph_store():
 def _rows_left(store, node_id: str) -> dict[str, int]:
     """Count the rows, any version, each label still holds for a node."""
     with store._driver.session(database=store._database) as session:
-        return {
+        counts = {
             label: session.run(
                 f"MATCH (x:{label}) WHERE x.{key} = $nid RETURN count(x) AS c",
                 nid=node_id,
@@ -89,6 +89,14 @@ def _rows_left(store, node_id: str) -> dict[str, int]:
                 ("AliasClaim", "entity_id"),
             )
         }
+        # EdgeClaim keys on either side of the triplet (F1), not a single
+        # node-named property, so it needs its own OR query.
+        counts["EdgeClaim"] = session.run(
+            "MATCH (x:EdgeClaim) WHERE x.source_id = $nid OR x.target_id = $nid "
+            "RETURN count(x) AS c",
+            nid=node_id,
+        ).single()["c"]
+        return counts
 
 
 def test_a_purge_whose_commit_lost_to_a_concurrent_purge_reports_no_removal(
@@ -148,7 +156,12 @@ def test_a_purge_whose_commit_lost_to_a_concurrent_purge_reports_no_removal(
     assert state["second_attempts"] >= 2, "the second purge's commit never conflicted"
     assert not state["purge"].is_alive()
     assert (state["first"], state["second"]) == (True, False)
-    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+    assert _rows_left(store, "n1") == {
+        "Node": 0,
+        "Alias": 0,
+        "AliasClaim": 0,
+        "EdgeClaim": 0,
+    }
 
 
 def test_a_purge_the_server_refuses_is_a_store_error(graph_store):
@@ -226,7 +239,12 @@ def test_a_lost_commit_the_purge_made_is_the_purge(graph_store, monkeypatch):
 
     assert store.delete_node("n1") is True
     assert len(lost) == 1
-    assert _rows_left(store, "n1") == {"Node": 0, "Alias": 0, "AliasClaim": 0}
+    assert _rows_left(store, "n1") == {
+        "Node": 0,
+        "Alias": 0,
+        "AliasClaim": 0,
+        "EdgeClaim": 0,
+    }
 
 
 def test_a_lost_commit_the_purge_did_not_make_is_a_failed_purge(
@@ -257,6 +275,10 @@ def test_upsert_edge_missing_endpoints_raises(graph_store, source_id, target_id)
     with pytest.raises(ValueError, match="no current version"):
         graph_store.upsert_edge(source_id, target_id, "links_to")
     assert graph_store.count_edges() == 0
+    # F2: a missing endpoint must not leave an orphan EdgeClaim row for a
+    # future real writer of this triplet to contend with for no reason.
+    assert _rows_left(graph_store, source_id)["EdgeClaim"] == 0
+    assert _rows_left(graph_store, target_id)["EdgeClaim"] == 0
 
 
 def _second_arcadedb_store():
