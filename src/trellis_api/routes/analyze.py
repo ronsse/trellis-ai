@@ -118,6 +118,12 @@ def _cache_set(
     report: str, registry: StoreRegistry, params_key: str, data: dict[str, Any]
 ) -> str:
     computed_at_iso = datetime.now(UTC).isoformat()
+    # Drop expired entries on every write so the cache holds at most one
+    # TTL window of distinct (report, params) keys rather than every key
+    # ever requested over the process's lifetime.
+    now = time.monotonic()
+    for key in [k for k, v in _CACHE.items() if now - v[0] > _CACHE_TTL_SECONDS]:
+        del _CACHE[key]
     _CACHE[(report, id(registry), params_key)] = (
         time.monotonic(),
         computed_at_iso,
@@ -424,7 +430,8 @@ _REPORTS: dict[str, _ReportEntry] = {
             "statistically significant effect (p below the window's planned "
             "threshold) with a confidence interval that excludes zero and a "
             "clean guardrail section; a bad one shows no measurable "
-            "difference, or an ambiguous window needing --rate. This is the "
+            "difference, or a window spanning more than one holdout rate, which "
+            "needs the rate parameter to pick one. This is the "
             "single strongest answer to whether context packs help at all."
         ),
         params_model=HoldoutParams,
@@ -570,8 +577,13 @@ async def list_analyze_reports() -> dict[str, Any]:
 
 
 @router.get("/analyze/{report}")
-async def get_analyze_report(report: str, request: Request) -> JSONResponse:
+def get_analyze_report(report: str, request: Request) -> JSONResponse:
     """Run one allowlisted ``trellis analyze`` report over HTTP.
+
+    A plain ``def``, not ``async def``: every report is a synchronous scan
+    of the stores, and FastAPI runs a sync handler in its threadpool. As a
+    coroutine, one slow report would block the event loop and stall every
+    other request the process is serving.
 
     Query params are validated against the report's own bounded DTO
     (``extra="forbid"``) rather than FastAPI's automatic pydantic-model

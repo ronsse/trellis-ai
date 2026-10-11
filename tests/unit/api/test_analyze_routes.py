@@ -276,3 +276,22 @@ def test_cache_expiry_recomputes(client, monkeypatch):
     monkeypatch.setattr(analyze, "_CACHE_TTL_SECONDS", -1.0)
     client.get("/api/v1/analyze/token-usage")
     assert calls["n"] == 2
+
+
+def test_expired_entries_are_evicted_on_write(client, monkeypatch):
+    # Distinct params each mint a key; without eviction the cache would
+    # keep every key requested for the life of the process.
+    client.get("/api/v1/analyze/token-usage?days=1")
+    client.get("/api/v1/analyze/token-usage?days=2")
+    assert len(analyze._CACHE) == 2
+    monkeypatch.setattr(analyze, "_CACHE_TTL_SECONDS", -1.0)
+    client.get("/api/v1/analyze/token-usage?days=3")
+    assert len(analyze._CACHE) == 1
+
+
+def test_report_route_is_a_sync_handler():
+    # A coroutine handler would run the synchronous store scan on the
+    # event loop and stall every concurrent request.
+    import inspect
+
+    assert not inspect.iscoroutinefunction(analyze.get_analyze_report)
