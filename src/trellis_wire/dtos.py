@@ -740,10 +740,19 @@ class ClassifyCandidate(WireModel):
 
 
 class ClassifyCandidateListResponse(WireModel):
-    """List of mined classify candidates, deduped to their latest emission."""
+    """List of mined classify candidates, deduped to their latest emission.
+
+    ``store_degradation`` is the overrides store's own
+    ``LoadDegradation.to_dict()`` (``None`` when the file loaded clean) --
+    an applied-row-derived ``"applied"``/``"dismissed"`` status above is
+    read from whatever of that file parsed, so a caller rendering this
+    list needs the same "is what I'm showing the whole picture?" signal
+    ``GET /settings`` and ``GET /policies`` already carry.
+    """
 
     count: int = 0
     candidates: list[ClassifyCandidate] = Field(default_factory=list)
+    store_degradation: dict[str, Any] | None = None
 
 
 class ClassifyMineRequest(WireRequestModel):
@@ -799,10 +808,17 @@ class ClassifyRuleRow(WireModel):
 
 
 class ClassifyRuleListResponse(WireModel):
-    """Effective tag/domain rules, defaults and config.yaml included."""
+    """Effective tag/domain rules, defaults and config.yaml included.
+
+    ``store_degradation`` is the overrides store's own
+    ``LoadDegradation.to_dict()`` (``None`` when the file loaded clean) --
+    a row that failed to parse there is simply missing from ``rules``
+    with no other signal, same reasoning as ``ClassifyCandidateListResponse``.
+    """
 
     count: int = 0
     rules: list[ClassifyRuleRow] = Field(default_factory=list)
+    store_degradation: dict[str, Any] | None = None
 
 
 class ClassifyRuleApplyRequest(WireRequestModel):

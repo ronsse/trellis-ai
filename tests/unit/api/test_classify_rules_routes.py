@@ -108,7 +108,11 @@ class TestListCandidates:
     def test_empty_when_no_events(self, client: TestClient) -> None:
         resp = client.get("/api/v1/classify/candidates")
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"count": 0, "candidates": []}
+        assert resp.json() == {
+            "count": 0,
+            "candidates": [],
+            "store_degradation": None,
+        }
 
     def test_does_not_invoke_a_miner(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
@@ -299,6 +303,165 @@ class TestApplyRule:
         )
         assert resp.status_code == 403
 
+    def test_self_mapping_alias_is_refused_4xx(self, client: TestClient) -> None:
+        """``a -> a`` is a no-op that reads as intent -- refused at apply
+        time, before it ever reaches the overlay file."""
+        resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "domain_alias",
+                "key": "widgets",
+                "target": "widgets",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert "itself" in resp.json()["detail"]
+
+        rules = client.get("/api/v1/classify/rules").json()
+        assert not any(
+            r["kind"] == "domain_alias" and r["key"] == "widgets"
+            for r in rules["rules"]
+        )
+
+    def test_chained_alias_is_refused_4xx(self, client: TestClient) -> None:
+        """Applying ``a -> b`` when ``b -> c`` is already applied would
+        introduce a transitive chain ``normalize_domain_tags`` never
+        performs -- refused, and the first row is left untouched."""
+        first = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "domain_alias",
+                "key": "b-alias",
+                "target": "c-canonical",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+        )
+        assert first.status_code == 200, first.text
+
+        chained = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "domain_alias",
+                "key": "a-alias",
+                "target": "b-alias",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+        )
+        assert chained.status_code == 400, chained.text
+        assert "chain" in chained.json()["detail"].lower() or (
+            "both an alias and a merge destination" in chained.json()["detail"]
+        )
+
+        rules = client.get("/api/v1/classify/rules").json()
+        assert not any(
+            r["kind"] == "domain_alias" and r["key"] == "a-alias"
+            for r in rules["rules"]
+        )
+
+    def test_reserved_namespace_target_is_refused_4xx_for_tag_keyword(
+        self, client: TestClient
+    ) -> None:
+        resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "secretword",
+                "target": "sensitivity",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert "reserved namespace" in resp.json()["detail"]
+
+    def test_reserved_namespace_target_is_refused_4xx_for_domain_alias(
+        self, client: TestClient
+    ) -> None:
+        resp = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "domain_alias",
+                "key": "secretalias",
+                "target": "lifecycle",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert "reserved namespace" in resp.json()["detail"]
+
+    def test_audit_event_records_prior_overlay_value_on_reapply(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Re-applying an already-applied key must record what it
+        replaces, not just what it now is."""
+        first = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "xyz",
+                "target": "finance",
+                "source_event_id": "01TESTEVENT0000000000000",
+            },
+        )
+        assert first.status_code == 200, first.text
+
+        second = client.post(
+            "/api/v1/classify/rules",
+            json={
+                "kind": "tag_keyword",
+                "key": "xyz",
+                "target": "operations",
+                "source_event_id": "01TESTEVENT0000000000001",
+            },
+        )
+        assert second.status_code == 200, second.text
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_APPLIED, order="asc", limit=10
+        )
+        reapply_payload = events[-1].payload
+        assert reapply_payload["target"] == "operations"
+        assert reapply_payload["prior_target"] == "finance"
+        assert reapply_payload["prior_source_event_id"] == "01TESTEVENT0000000000000"
+        assert reapply_payload["prior_applied_at"] is not None
+        assert reapply_payload["prior_applied_by"] is not None
+
+        # The first apply had nothing to replace.
+        first_payload = events[0].payload
+        assert first_payload["prior_target"] is None
+
+    def test_audit_event_records_shadowed_config_value_for_alias(
+        self, tmp_path: Path
+    ) -> None:
+        """Applying an alias whose key also exists in ``config.yaml``
+        shadows that config.yaml value -- the audit event must say what
+        it shadowed, not just what now wins."""
+        reg = StoreRegistry(
+            stores_dir=tmp_path / "stores",
+            classify_config={"domain_aliases": {"legacyname": "config-canonical"}},
+        )
+        app_module._registry = reg
+        try:
+            client = TestClient(create_app())
+            resp = client.post(
+                "/api/v1/classify/rules",
+                json={
+                    "kind": "domain_alias",
+                    "key": "legacyname",
+                    "target": "overlay-canonical",
+                    "source_event_id": "01TESTEVENT0000000000000",
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            events = reg.operational.event_log.get_events(
+                event_type=EventType.CLASSIFY_RULE_APPLIED, order="asc", limit=10
+            )
+            payload = events[-1].payload
+            assert payload["config_target"] == "config-canonical"
+        finally:
+            reg.close()
+            app_module._registry = None
+
 
 # ---------------------------------------------------------------------------
 # DELETE /classify/rules/{kind}/{key} — revoke
@@ -365,6 +528,103 @@ class TestRevokeRule:
             "/api/v1/classify/rules/tag_keyword/xyz", headers={"X-API-Key": token}
         )
         assert resp.status_code == 403
+
+    def test_audit_event_records_removed_fields(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        self._apply(client, key="xyz", target="finance")
+        resp = client.delete("/api/v1/classify/rules/tag_keyword/xyz")
+        assert resp.status_code == 200, resp.text
+
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.CLASSIFY_RULE_REVOKED, order="asc", limit=10
+        )
+        payload = events[-1].payload
+        assert payload["target"] == "finance"
+        assert payload["removed_applied_by"] is not None
+        assert payload["removed_applied_at"] is not None
+        assert payload["removed_source_event_id"] == "01TESTEVENT0000000000000"
+        assert payload["config_target"] is None
+
+
+# ---------------------------------------------------------------------------
+# Degraded overlay store — reads degrade, writes refuse (B4)
+# ---------------------------------------------------------------------------
+
+
+class TestDegradedOverlayStore:
+    def _corrupt_overlay(self, tmp_path: Path) -> StoreRegistry:
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir(parents=True, exist_ok=True)
+        (stores_dir / "classify_overrides.json").write_text(
+            "{not valid json", encoding="utf-8"
+        )
+        return StoreRegistry(stores_dir=stores_dir)
+
+    def test_apply_on_degraded_store_is_409(self, tmp_path: Path) -> None:
+        reg = self._corrupt_overlay(tmp_path)
+        app_module._registry = reg
+        try:
+            client = TestClient(create_app())
+            resp = client.post(
+                "/api/v1/classify/rules",
+                json={
+                    "kind": "tag_keyword",
+                    "key": "xyz",
+                    "target": "finance",
+                    "source_event_id": "01TESTEVENT0000000000000",
+                },
+            )
+            assert resp.status_code == 409, resp.text
+            detail = resp.json()["detail"]
+            assert detail["code"] == "degraded_store_write"
+            assert detail["store_degradation"] is not None
+        finally:
+            reg.close()
+            app_module._registry = None
+
+    def test_revoke_on_degraded_store_is_409_not_400(self, tmp_path: Path) -> None:
+        reg = self._corrupt_overlay(tmp_path)
+        app_module._registry = reg
+        try:
+            client = TestClient(create_app())
+            resp = client.delete("/api/v1/classify/rules/tag_keyword/anything")
+            assert resp.status_code == 409, resp.text
+            detail = resp.json()["detail"]
+            assert detail["code"] == "degraded_store_write"
+            assert "No applied" not in str(detail.get("message", ""))
+        finally:
+            reg.close()
+            app_module._registry = None
+
+    def test_candidates_list_reports_store_degradation(self, tmp_path: Path) -> None:
+        reg = self._corrupt_overlay(tmp_path)
+        app_module._registry = reg
+        try:
+            client = TestClient(create_app())
+            resp = client.get("/api/v1/classify/candidates")
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["store_degradation"] is not None
+        finally:
+            reg.close()
+            app_module._registry = None
+
+    def test_rules_list_reports_store_degradation(self, tmp_path: Path) -> None:
+        reg = self._corrupt_overlay(tmp_path)
+        app_module._registry = reg
+        try:
+            client = TestClient(create_app())
+            resp = client.get("/api/v1/classify/rules")
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["store_degradation"] is not None
+        finally:
+            reg.close()
+            app_module._registry = None
+
+    def test_healthy_store_reports_no_degradation(self, client: TestClient) -> None:
+        resp = client.get("/api/v1/classify/rules")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["store_degradation"] is None
 
 
 # ---------------------------------------------------------------------------

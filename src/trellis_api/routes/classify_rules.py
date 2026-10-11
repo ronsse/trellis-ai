@@ -311,10 +311,16 @@ def list_classify_candidates(
     latest surfacing reads ``dismissed``; otherwise ``open``.
     """
     registry = get_registry()
+    overrides_store = _get_overrides_store(registry)
     rows = _list_candidates(
-        registry.operational.event_log, _get_overrides_store(registry), scan_limit=limit
+        registry.operational.event_log, overrides_store, scan_limit=limit
     )
-    return ClassifyCandidateListResponse(count=len(rows), candidates=rows)
+    degradation = overrides_store.degradation
+    return ClassifyCandidateListResponse(
+        count=len(rows),
+        candidates=rows,
+        store_degradation=degradation.to_dict() if degradation is not None else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -372,14 +378,28 @@ class _SeededParameterStore(ParameterStore):
 
 def _resolve_component_registry(
     registry: StoreRegistry,
+    scope: ParameterScope,
     *,
-    component_id: str,
     required_keys: tuple[str, ...],
     recommended_seed: dict[str, Any],
     use_recommended_defaults: bool,
     used_defaults: list[str],
 ) -> ParameterRegistry:
     """Resolve one component's thresholds, loudly defaulting only when asked.
+
+    ``scope`` is constructed by the caller, inline, from the real component
+    id -- never assembled from a parameter inside this function. That is
+    not a style preference: a ``ParameterScope`` built from a local
+    ``component_id: str`` parameter folds to no literal for
+    ``tests/unit/test_parameter_reachability_rule.py``'s AST scan, which
+    then has nothing to check except "some module constructs a scope",
+    forcing a roster entry under a made-up component id. Built at the call
+    site from the imported ``PARAM_COMPONENT_ID`` constants instead, the
+    scan resolves this read site to the *real* ``learning.tag_evolution`` /
+    ``learning.domain_normalization`` components that already have read
+    points declared for their own direct reads in those modules -- one
+    true roster entry per component, not a second fictitious one per
+    caller.
 
     The persistent ``ParameterRegistry`` (``registry.operational.parameter_store``)
     wins when it carries every key in ``required_keys``. When it does not
@@ -391,8 +411,8 @@ def _resolve_component_registry(
     ``component_id`` to ``used_defaults`` and logs a ``structlog`` WARN —
     never a silent fallback.
     """
+    component_id = scope.component_id
     persistent = ParameterRegistry(registry.operational.parameter_store)
-    scope = ParameterScope(component_id=component_id)
     values = persistent.get_values(scope)
     missing = sorted(k for k in required_keys if k not in values)
     if not missing:
@@ -464,7 +484,7 @@ def mine_classify_candidates(req: ClassifyMineRequest) -> ClassifyMineResponse:
     if "tag_keyword" in kinds:
         tag_registry = _resolve_component_registry(
             registry,
-            component_id=_TAG_PARAM_COMPONENT_ID,
+            ParameterScope(component_id=_TAG_PARAM_COMPONENT_ID),
             required_keys=_TAG_REQUIRED_PARAM_KEYS,
             recommended_seed=_TAG_RECOMMENDED_SEED_VALUES,
             use_recommended_defaults=req.use_recommended_defaults,
@@ -498,7 +518,7 @@ def mine_classify_candidates(req: ClassifyMineRequest) -> ClassifyMineResponse:
     if "domain_alias" in kinds:
         domain_registry = _resolve_component_registry(
             registry,
-            component_id=_DOMAIN_PARAM_COMPONENT_ID,
+            ParameterScope(component_id=_DOMAIN_PARAM_COMPONENT_ID),
             required_keys=_DOMAIN_REQUIRED_PARAM_KEYS,
             recommended_seed=_DOMAIN_RECOMMENDED_SEED_VALUES,
             use_recommended_defaults=req.use_recommended_defaults,
@@ -711,6 +731,7 @@ def list_classify_rules() -> ClassifyRuleListResponse:
         domain_alias_map=registry.domain_alias_map(),
         overlay_rows=overlay_rows,
     )
+    degradation = overrides_store.degradation
     return ClassifyRuleListResponse(
         count=len(rows),
         rules=[
@@ -727,4 +748,5 @@ def list_classify_rules() -> ClassifyRuleListResponse:
             )
             for row in rows
         ],
+        store_degradation=degradation.to_dict() if degradation is not None else None,
     )

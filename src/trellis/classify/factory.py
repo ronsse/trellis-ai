@@ -27,6 +27,7 @@ from trellis.classify.classifiers.keyword import (
 from trellis.classify.classifiers.source_system import SourceSystemClassifier
 from trellis.classify.classifiers.structural import StructuralClassifier
 from trellis.classify.pipeline import ClassifierPipeline
+from trellis.schemas.classification import _format_reservation_error, _reserved_name_for
 
 logger = structlog.get_logger(__name__)
 
@@ -335,7 +336,11 @@ def effective_domain_keywords(
     extra = _expand_overlay_domains(base, overlay_domains)
     if extra is None:
         return base
-    return build_domain_keyword_map(config_domains=config_domains, extra_domains=extra)
+    return build_domain_keyword_map(
+        config_domains=config_domains,
+        extra_domains=extra,
+        extra_domains_source="the operator overlay (classify_overrides.json)",
+    )
 
 
 def build_ingestion_pipeline(
@@ -347,12 +352,13 @@ def build_ingestion_pipeline(
 
     Wires the deterministic classifiers Trellis ships (structural, keyword
     domain, source system) into a :class:`ClassifierPipeline` in ingestion
-    mode. The keyword classifier's domain map is seeded from
-    ``classify_config['domain_keywords']`` merged over the built-in defaults,
-    then ``overlay_domains`` merged additively over that (operator overlay
-    wins on a colliding *keyword*, but an existing domain's other keywords
-    survive — see :func:`_expand_overlay_domains`); reserved-namespace domain
-    names are rejected loudly here, at load time.
+    mode. The keyword classifier's domain map comes from
+    :func:`effective_domain_keywords` — the same three-layer merge (built-in
+    defaults < ``config.yaml`` < operator overlay, overlay additive per
+    domain) that the tag-keyword promotion loop and the domain-alias miner
+    use, so this function cannot drift from theirs by re-deriving the merge
+    independently. Reserved-namespace domain names are rejected loudly at
+    load time (inside :func:`effective_domain_keywords`).
 
     Args:
         classify_config: The ``classify`` section of ``config.yaml`` (or any
@@ -371,11 +377,10 @@ def build_ingestion_pipeline(
             "ingestion_pipeline.config_domains_loaded",
             domains=sorted(config_domains),
         )
-    base = build_domain_keyword_map(config_domains=config_domains)
-    extra = _expand_overlay_domains(base, overlay_domains)
-    keyword = KeywordDomainClassifier(
-        config_domains=config_domains, extra_domains=extra
+    domain_map = effective_domain_keywords(
+        classify_config, overlay_domains=overlay_domains
     )
+    keyword = KeywordDomainClassifier(extra_domains=domain_map)
     return ClassifierPipeline(
         classifiers=[
             StructuralClassifier(),
@@ -410,6 +415,55 @@ def is_config_sourced_alias(
 ) -> bool:
     """Whether ``alias`` comes from ``config.yaml``'s ``domain_aliases``."""
     return alias in _extract_config_aliases(classify_config)
+
+
+def config_sourced_alias_target(
+    classify_config: Mapping[str, Any] | None, alias: str
+) -> str | None:
+    """``config.yaml``'s canonical for ``alias``, or ``None`` if unset there.
+
+    The value an applied overlay row for the same ``alias`` key makes
+    non-effective going forward -- operator overlay wins over
+    ``config.yaml`` on a colliding alias key (see
+    :func:`effective_domain_aliases`), so this is "what reading ``alias``
+    used to resolve to before the overlay row took precedence." Companion
+    to :func:`is_config_sourced_alias`, which answers only whether one
+    exists. Used by ``ClassifyRuleApplyHandler`` / ``ClassifyRuleRevokeHandler``
+    (:mod:`trellis.mutate.handlers`) to record the shadowed ``config.yaml``
+    value on the audit event, when there is one.
+
+    There is no ``tag_keyword`` analogue: the overlay's keyword layer is
+    additive per domain (:func:`_expand_overlay_domains`), so an applied
+    keyword never makes a ``config.yaml``-sourced keyword/domain pairing
+    stop applying -- nothing is shadowed for that kind.
+    """
+    return _extract_config_aliases(classify_config).get(alias)
+
+
+def reject_reserved_rule_target(target: str) -> None:
+    """Refuse a classify-rule ``target`` that names a reserved policy namespace.
+
+    Both overlay kinds feed ``target`` into the deployment's domain
+    vocabulary -- a ``tag_keyword`` row's target is the domain a keyword
+    promotes into, a ``domain_alias`` row's target is the canonical domain
+    an alias normalises to -- so both are checked against the same
+    :data:`~trellis.schemas.classification.RESERVED_NAMESPACES` guard
+    :func:`~trellis.classify.classifiers.keyword.build_domain_keyword_map`
+    already enforces for a ``config.yaml``-sourced domain. Called by
+    ``ClassifyRuleApplyHandler`` (:mod:`trellis.mutate.handlers`) *before*
+    the row reaches the operator overlay file, so a reserved target is
+    refused at apply time -- not discovered only once some later reader
+    tries to build a merged domain map from the file and fails.
+
+    Raises:
+        ValueError: ``target`` collides with a reserved namespace, exact
+            or ``namespace:...``-prefixed.
+    """
+    reserved = _reserved_name_for(target)
+    if reserved is not None:
+        detail = _format_reservation_error(target, reserved, "domain value")
+        msg = f"classify rule target: {detail}"
+        raise ValueError(msg)
 
 
 def effective_classify_rule_rows(
@@ -506,5 +560,7 @@ __all__ = [
     "effective_domain_keywords",
     "effective_classify_rule_rows",
     "config_sourced_tag_keyword_domains",
+    "config_sourced_alias_target",
     "is_config_sourced_alias",
+    "reject_reserved_rule_target",
 ]

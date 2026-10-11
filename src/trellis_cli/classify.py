@@ -50,7 +50,7 @@ is a real difference and is documented in ``operations.md`` too.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 import typer
@@ -93,7 +93,12 @@ from trellis.stores.classify_overrides_store import (
 )
 from trellis_cli.analyze import _InMemoryParameterStore
 from trellis_cli.config import get_config_dir
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, refusal_exit_code
+from trellis_cli.exit_codes import (
+    EXIT_INTERNAL,
+    EXIT_OK,
+    EXIT_STORE,
+    refusal_exit_code,
+)
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
 
@@ -918,6 +923,35 @@ def _render_domain_candidates(
 # ---------------------------------------------------------------------------
 
 
+def _render_classify_overrides_degradation(degraded: dict[str, Any] | None) -> None:
+    """Print the classify-overrides store's degraded state, or nothing at all.
+
+    Mirrors ``trellis_cli.policy._render_degradation`` /
+    ``trellis_cli.admin._render_schedule_degradation`` -- same markup and
+    wrapping hazards (an exception ``detail`` can contain ``[...]``; a long
+    ``mv`` recovery command must survive as one line), same fix.
+    """
+    if not degraded:
+        return
+    console.print(
+        f"  [bold red]CLASSIFY OVERLAY DEGRADED[/bold red] — "
+        f"{escape(str(degraded['reason']))}: {escape(str(degraded['detail']))}",
+        soft_wrap=True,
+    )
+    console.print(
+        f"    file: [cyan]{escape(str(degraded['path']))}[/cyan] "
+        f"({degraded['rows_loaded']} applied rule(s) readable, "
+        f"{escape(str(degraded['rows_skipped_display']))} not)",
+        soft_wrap=True,
+    )
+    console.print(
+        "    Writes are refused so the file is intact. This listing is a "
+        "partial view, not every applied rule.",
+        soft_wrap=True,
+    )
+    console.print(f"    recovery: {escape(degraded['recovery'])}", soft_wrap=True)
+
+
 def _execute_classify_command(cmd: Command, output_format: str) -> None:
     """Submit *cmd*, render the result, and exit non-zero on refusal/failure.
 
@@ -1065,13 +1099,24 @@ def effective_rules(
     :func:`~trellis.classify.factory.effective_classify_rule_rows`, so the
     precedence badging (``default`` / ``config`` / ``overlay``) can never
     disagree between the two surfaces.
+
+    Works on a degraded overlay file -- the applied rules that parsed are
+    still listed -- but says so and exits
+    :data:`~trellis_cli.exit_codes.EXIT_STORE` rather than 0, mirroring
+    ``trellis policy list`` / ``trellis admin due-jobs``: an applied rule
+    that failed to parse is simply missing from this listing with no other
+    signal, so a caller reading the exit code alone must not see a partial
+    answer as a complete one.
     """
     registry = _get_registry()
     path = resolve_classify_overrides_path(registry.stores_dir)
     overlay_rows: dict[tuple[str, str], object] = {}
+    degraded: dict[str, Any] | None = None
     if path is not None:
         store = ClassifyOverridesStore(path)
         overlay_rows = {(row.kind, row.key): row for row in store.list()}
+        degradation = store.degradation
+        degraded = degradation.to_dict() if degradation is not None else None
 
     rows = effective_classify_rule_rows(
         classify_config=registry.classify_config,
@@ -1083,6 +1128,7 @@ def effective_rules(
     if output_format == "json":
         emit_json(
             {
+                "status": "degraded" if degraded else "ok",
                 "count": len(rows),
                 "rules": [
                     {
@@ -1093,13 +1139,16 @@ def effective_rules(
                     }
                     for row in rows
                 ],
+                "store_degradation": degraded,
             }
         )
-        raise typer.Exit(code=EXIT_OK)
+        raise typer.Exit(code=EXIT_STORE if degraded else EXIT_OK)
+
+    _render_classify_overrides_degradation(degraded)
 
     if not rows:
         console.print("[green]Effective classify rules:[/green] none.")
-        raise typer.Exit(code=EXIT_OK)
+        raise typer.Exit(code=EXIT_STORE if degraded else EXIT_OK)
 
     console.print(f"[green]Effective classify rules:[/green] {len(rows)}")
     badges = {"default": "dim", "config": "cyan", "overlay": "bold green"}
@@ -1109,4 +1158,4 @@ def effective_rules(
             f"  [{badge}]{row['source']:>8}[/{badge}] "
             f"{escape(row['kind'])}: {escape(row['key'])} -> {escape(row['target'])}"
         )
-    raise typer.Exit(code=EXIT_OK)
+    raise typer.Exit(code=EXIT_STORE if degraded else EXIT_OK)

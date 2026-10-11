@@ -643,7 +643,12 @@ class ClassifyRuleApplyHandler:
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
 
-    def handle(self, command: Command) -> tuple[str | None, str]:
+    def handle(self, command: Command) -> tuple[str | None, str]:  # noqa: PLR0915
+        from trellis.classify.factory import (  # noqa: PLC0415
+            config_sourced_alias_target,
+            effective_domain_aliases,
+            reject_reserved_rule_target,
+        )
         from trellis.schemas.classify_overrides import (  # noqa: PLC0415
             ClassifyOverrideRow,
         )
@@ -690,6 +695,24 @@ class ClassifyRuleApplyHandler:
             )
             raise ValidationError(msg, errors=[msg], code="untargeted_command")
 
+        # A reserved policy namespace (sensitivity, lifecycle, ...) is never
+        # a legitimate domain value -- checked before the row ever reaches
+        # the overlay file, not discovered only once a later reader tries
+        # to build a merged domain map from it and fails.
+        try:
+            reject_reserved_rule_target(target)
+        except ValueError as exc:
+            # reject_reserved_rule_target always raises ValueError(msg) with
+            # a single string it composed itself, never a wrapped
+            # driver/library exception, so args[0] is exactly that message
+            # -- a structured-field read, not a bare str(exc) stringification
+            # of the caught exception (same convention as validate_value
+            # above).
+            msg = exc.args[0] if exc.args else "reserved namespace target"
+            raise ValidationError(
+                msg, errors=[msg], code="reserved_namespace_target"
+            ) from exc
+
         path = resolve_classify_overrides_path(self._registry.stores_dir)
         if path is None:
             # Same precedent as SettingsUpdateHandler: no stores_dir means
@@ -699,6 +722,42 @@ class ClassifyRuleApplyHandler:
             msg = "stores_dir must be set on registry to use ClassifyOverridesStore"
             raise ValueError(msg)
         store = ClassifyOverridesStore(path)
+
+        classify_config = self._registry.classify_config
+        if kind == "domain_alias":
+            # Validate the *prospective* merged alias map -- this key's
+            # new target folded into every other already-applied alias
+            # row -- before it ever reaches the overlay file. A self-map
+            # (``a -> a``) or a chain this apply would introduce (this
+            # key plus an existing row forming ``a -> b -> c``) must be
+            # refused here; by the time a later reader calls
+            # ``effective_domain_aliases`` on the written file, the bad
+            # row is already live.
+            prospective = dict(store.domain_aliases_map())
+            prospective[key] = target
+            try:
+                effective_domain_aliases(classify_config, overlay_aliases=prospective)
+            except ValueError as exc:
+                # effective_domain_aliases always raises ValueError(msg) with
+                # a single string it composed itself, never a wrapped
+                # driver/library exception, so args[0] is exactly that
+                # message -- a structured-field read, not a bare str(exc)
+                # stringification of the caught exception.
+                msg = exc.args[0] if exc.args else "invalid alias rule"
+                raise ValidationError(
+                    msg, errors=[msg], code="invalid_alias_rule"
+                ) from exc
+
+        # Captured before the write so the audit event can record exactly
+        # what this apply replaces -- both the overlay row it overwrites
+        # (re-applying an already-applied key) and, for a domain_alias,
+        # the config.yaml value this key's overlay precedence now shadows.
+        existing = store.get(kind, key)
+        config_target = (
+            config_sourced_alias_target(classify_config, key)
+            if kind == "domain_alias"
+            else None
+        )
 
         applied_by = command.requested_by
         row = ClassifyOverrideRow(
@@ -725,6 +784,15 @@ class ClassifyRuleApplyHandler:
             "lift": command.args.get("lift"),
             "applied_by": applied_by,
             "source_event_id": source_event_id,
+            "prior_target": existing.target if existing is not None else None,
+            "prior_applied_by": existing.applied_by if existing is not None else None,
+            "prior_applied_at": (
+                existing.applied_at.isoformat() if existing is not None else None
+            ),
+            "prior_source_event_id": (
+                existing.source_event_id if existing is not None else None
+            ),
+            "config_target": config_target,
         }
         requested_by_claim = command.args.get("requested_by_claim")
         if requested_by_claim is not None:
@@ -753,8 +821,9 @@ class ClassifyRuleRevokeHandler:
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
 
-    def handle(self, command: Command) -> tuple[str | None, str]:
+    def handle(self, command: Command) -> tuple[str | None, str]:  # noqa: PLR0915
         from trellis.classify.factory import (  # noqa: PLC0415
+            config_sourced_alias_target,
             config_sourced_tag_keyword_domains,
             is_config_sourced_alias,
         )
@@ -791,6 +860,28 @@ class ClassifyRuleRevokeHandler:
 
         existing = store.get(kind, key)
         if existing is None:
+            if store.is_degraded:
+                # A degraded read cannot tell "never applied" apart from
+                # "the row that WAS applied failed to parse" -- defer to
+                # the write path's own refusal (which answers 409 with
+                # the real ``store_degradation``) rather than guessing a
+                # 400 "no such rule" from a read that might be wrong.
+                try:
+                    store.remove(kind, key)
+                except (DegradedStoreWriteError, StaleStoreWriteError) as exc:
+                    raise ValidationError(
+                        exc.message, errors=[exc.message], code=exc.code.lower()
+                    ) from exc
+                # remove() refuses before ever reaching a return on a
+                # degraded store, so this is unreachable in practice --
+                # kept only so a future change to that refusal order
+                # fails loudly here instead of silently answering 400.
+                msg = (
+                    f"No applied {kind} rule found for key {key!r}, but the "
+                    "classify-overrides store did not refuse the write."
+                )
+                raise ValueError(msg)
+
             classify_config = self._registry.classify_config
             if kind == "tag_keyword":
                 config_domains = config_sourced_tag_keyword_domains(
@@ -823,11 +914,20 @@ class ClassifyRuleRevokeHandler:
                 exc.message, errors=[exc.message], code=exc.code.lower()
             ) from exc
 
+        config_target = (
+            config_sourced_alias_target(self._registry.classify_config, key)
+            if kind == "domain_alias"
+            else None
+        )
         payload: dict[str, Any] = {
             "kind": kind,
             "key": key,
             "target": existing.target,
             "revoked_by": command.requested_by,
+            "removed_applied_by": existing.applied_by,
+            "removed_applied_at": existing.applied_at.isoformat(),
+            "removed_source_event_id": existing.source_event_id,
+            "config_target": config_target,
         }
         requested_by_claim = command.args.get("requested_by_claim")
         if requested_by_claim is not None:

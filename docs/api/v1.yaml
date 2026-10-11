@@ -535,7 +535,20 @@ components:
       type: object
     ClassifyCandidateListResponse:
       additionalProperties: false
-      description: List of mined classify candidates, deduped to their latest emission.
+      description: 'List of mined classify candidates, deduped to their latest emission.
+
+
+        ``store_degradation`` is the overrides store''s own
+
+        ``LoadDegradation.to_dict()`` (``None`` when the file loaded clean) --
+
+        an applied-row-derived ``"applied"``/``"dismissed"`` status above is
+
+        read from whatever of that file parsed, so a caller rendering this
+
+        list needs the same "is what I''m showing the whole picture?" signal
+
+        ``GET /settings`` and ``GET /policies`` already carry.'
       properties:
         candidates:
           items:
@@ -546,6 +559,12 @@ components:
           default: 0
           title: Count
           type: integer
+        store_degradation:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Store Degradation
       title: ClassifyCandidateListResponse
       type: object
     ClassifyMineRequest:
@@ -678,7 +697,16 @@ components:
       type: object
     ClassifyRuleListResponse:
       additionalProperties: false
-      description: Effective tag/domain rules, defaults and config.yaml included.
+      description: 'Effective tag/domain rules, defaults and config.yaml included.
+
+
+        ``store_degradation`` is the overrides store''s own
+
+        ``LoadDegradation.to_dict()`` (``None`` when the file loaded clean) --
+
+        a row that failed to parse there is simply missing from ``rules``
+
+        with no other signal, same reasoning as ``ClassifyCandidateListResponse``.'
       properties:
         count:
           default: 0
@@ -689,6 +717,12 @@ components:
             $ref: '#/components/schemas/ClassifyRuleRow'
           title: Rules
           type: array
+        store_degradation:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Store Degradation
       title: ClassifyRuleListResponse
       type: object
     ClassifyRuleRow:

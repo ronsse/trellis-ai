@@ -23,7 +23,7 @@ from tests.cli_output import plain
 if TYPE_CHECKING:
     import pytest
 
-from trellis_cli.exit_codes import EXIT_OK, EXIT_VALIDATION
+from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.main import app as root_app
 
 runner = CliRunner()
@@ -209,6 +209,92 @@ class TestApplyRule:
         rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
         assert not [r for r in rules if r["key"] == "zzzkw"]
 
+    def test_self_mapping_alias_apply_exits_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "domain_alias",
+                "widgets",
+                "widgets",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+        assert "itself" in payload["message"]
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [
+            r for r in rules if r["kind"] == "domain_alias" and r["key"] == "widgets"
+        ]
+
+    def test_chained_alias_apply_exits_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        first = _invoke(
+            [
+                "apply-rule",
+                "domain_alias",
+                "b-alias",
+                "c-canonical",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert first.exit_code == EXIT_OK, first.output
+
+        chained = _invoke(
+            [
+                "apply-rule",
+                "domain_alias",
+                "a-alias",
+                "b-alias",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert chained.exit_code == EXIT_VALIDATION, chained.output
+        payload = json.loads(chained.stdout)
+        assert payload["status"] == "rejected"
+
+        rules = _effective_rules_json(tmp_path, monkeypatch)["rules"]
+        assert not [
+            r for r in rules if r["kind"] == "domain_alias" and r["key"] == "a-alias"
+        ]
+
+    def test_reserved_namespace_target_apply_exits_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "secretword",
+                "sensitivity",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+        assert "reserved namespace" in payload["message"]
+
 
 # ---------------------------------------------------------------------------
 # revoke-rule
@@ -339,3 +425,84 @@ class TestEffectiveRules:
         _init_stores(tmp_path, monkeypatch)
         assert _invoke(["effective-rules"]).exit_code == EXIT_OK
         assert _invoke(["effective-rules", "--format", "json"]).exit_code == EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Degraded overlay store — reads degrade, writes refuse (B4)
+# ---------------------------------------------------------------------------
+
+
+def _corrupt_overlay(tmp_path: Path) -> None:
+    stores_dir = tmp_path / "data" / "stores"
+    stores_dir.mkdir(parents=True, exist_ok=True)
+    (stores_dir / "classify_overrides.json").write_text(
+        "{not valid json", encoding="utf-8"
+    )
+
+
+class TestDegradedOverlayStore:
+    def test_effective_rules_reports_degraded_store_and_exit_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        _corrupt_overlay(tmp_path)
+
+        json_result = _invoke(["effective-rules", "--format", "json"])
+        assert json_result.exit_code == EXIT_STORE, json_result.output
+        payload = json.loads(json_result.stdout)
+        assert payload["status"] == "degraded"
+        assert payload["store_degradation"] is not None
+
+        text_result = _invoke(["effective-rules"])
+        assert text_result.exit_code == EXIT_STORE, text_result.output
+        assert "DEGRADED" in plain(text_result.output)
+
+    def test_apply_on_degraded_store_exits_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        _corrupt_overlay(tmp_path)
+
+        result = _invoke(
+            [
+                "apply-rule",
+                "tag_keyword",
+                "zzzkw",
+                "finance",
+                "--source-event-id",
+                _SOURCE_EVENT_ID,
+                "--format",
+                "json",
+            ]
+        )
+        assert result.exit_code == EXIT_STORE, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+
+    def test_revoke_on_degraded_store_exits_store_not_validation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        _corrupt_overlay(tmp_path)
+
+        result = _invoke(["revoke-rule", "tag_keyword", "anything", "--format", "json"])
+        assert result.exit_code == EXIT_STORE, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "rejected"
+        assert "No applied" not in payload["message"]
+
+    def test_backfill_on_degraded_overlay_refuses_with_config_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        _corrupt_overlay(tmp_path)
+
+        json_result = _invoke(["backfill", "--format", "json"])
+        assert json_result.exit_code == EXIT_STORE, json_result.output
+        payload = json.loads(json_result.stdout)
+        assert payload["status"] == "error"
+        assert payload["error_type"] == "ConfigError"
+
+        text_result = _invoke(["backfill"])
+        assert text_result.exit_code == EXIT_STORE, text_result.output
+        assert "CONFIG_ERROR" in plain(text_result.output)

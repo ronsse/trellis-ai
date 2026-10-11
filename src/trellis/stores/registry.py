@@ -1850,12 +1850,46 @@ class StoreRegistry:
         names are rejected loudly here. Returns a deterministic-only
         pipeline (no LLM); the enrichment worker wires the LLM fallback
         separately. See :func:`trellis.classify.factory.build_ingestion_pipeline`.
+
+        Raises:
+            ConfigError: the operator overlay loaded degraded. Unlike
+                :meth:`domain_keyword_map` / :meth:`domain_alias_map` --
+                read for *display* (``trellis classify effective-rules``,
+                ``GET /api/v1/classify/rules``), where the caller reports
+                ``store_degradation`` alongside a necessarily partial
+                answer -- this pipeline is handed straight to ``trellis
+                classify backfill``, which *writes* tags back to every
+                scanned document. Building it from a partial overlay view
+                would silently retag documents as though an unparsed rule
+                had never been applied: a previously-approved domain
+                keyword simply stops contributing, and a previously-merged
+                alias stops resolving, with no signal anywhere other than
+                this exception. Failing closed here is cheap (one backfill
+                invocation refused) against that: a batch of documents
+                written with the wrong tags, indistinguishable afterwards
+                from documents the overlay never covered.
         """
         from trellis.classify.factory import (  # noqa: PLC0415
             build_ingestion_pipeline,
         )
 
         overrides = self._classify_overrides_store()
+        degradation = overrides.degradation if overrides is not None else None
+        if degradation is not None:
+            msg = (
+                "Refusing to build the classification pipeline: the "
+                f"operator overlay at {degradation.path} loaded degraded "
+                f"({degradation.reason}: {degradation.detail}). "
+                f"{degradation.rows_loaded} applied rule(s) parsed; "
+                f"{degradation.rows_skipped_display} did not. Backfilling "
+                "now would retag documents using only the rules that "
+                "parsed, silently treating every other applied rule as "
+                "though it had never been approved -- including any "
+                "applied domain keyword, which controls whether a document "
+                "is hard-excluded from a domain-scoped query. Fix the "
+                f"overlay file, then retry: {degradation.recovery}"
+            )
+            raise ConfigError(msg, setting="classify_overrides.json")
         overlay_domains = overrides.domain_keywords_map() if overrides else None
         return build_ingestion_pipeline(
             self._classify_config, overlay_domains=overlay_domains
