@@ -126,6 +126,82 @@ def build_schedule_executor(registry: StoreRegistry) -> MutationExecutor:
     )
 
 
+def build_settings_executor(registry: StoreRegistry) -> MutationExecutor:
+    """Build a :class:`MutationExecutor` wired with ONLY the settings handler.
+
+    ``Operation.SETTINGS_UPDATE`` is deliberately absent from
+    :func:`build_curate_executor`'s handler dict (see
+    ``create_settings_handlers``'s docstring) because that executor backs
+    the generic mutation surfaces -- REST ``POST /commands/batch`` and MCP
+    ``execute_mutation`` -- which have no admin-scope gate of their own.
+    Only the admin-scoped REST route
+    (``trellis_api/routes/settings.py``) and ``trellis admin settings``
+    call this builder, so settings.update stays reachable from exactly
+    those two surfaces.
+
+    Stage 2 still always runs here, same as ``build_curate_executor``:
+    the policy gate is built from the deployment's declared policies
+    unconditionally, never only when policies exist
+    (``tests/unit/test_policy_gate_rule.py``). A deployment can therefore
+    add an ``entity_type: setting`` deny policy and have it enforced on
+    this path exactly as on any other governed write.
+    """
+    from trellis.mutate.handlers import create_settings_handlers  # noqa: PLC0415
+    from trellis.mutate.policy_source import build_policy_gate  # noqa: PLC0415
+
+    return MutationExecutor(
+        event_log=registry.operational.event_log,
+        handlers=create_settings_handlers(registry),
+        policy_gate=build_policy_gate(registry),
+    )
+
+
+def redirect_unreachable_settings_update(result: CommandResult) -> CommandResult:
+    """Point a caller at the real settings write path; ``status`` unchanged.
+
+    ``build_curate_executor`` -- which backs REST ``POST /commands/batch``
+    and MCP ``execute_mutation`` -- never registers
+    ``Operation.SETTINGS_UPDATE`` (see ``build_settings_executor``'s
+    docstring above): those two surfaces have no admin-scope gate of
+    their own. ``MutationExecutor.execute``'s Stage 4 "no handler"
+    fallback is honest about why nothing happened -- FAILED, no handler,
+    nothing evaluated, no ``MUTATION_REJECTED`` event -- so this leaves
+    ``status`` as FAILED rather than relabelling it REJECTED, which this
+    codebase's own convention
+    (``tests/unit/mutate/test_rejection_reason_carrier.py``: "a REJECTED
+    result names why, as its MUTATION_REJECTED event does") reserves for
+    a result whose reason an audit event also carries; Stage 4's
+    no-handler branch returns before Stage 5 and emits no event, so
+    there is no reason here for a fabricated ``rejection_reason`` to
+    name truthfully.
+
+    It only rewrites the message, so a caller who tried
+    ``settings.update`` on one of these two surfaces is told where it
+    *is* reachable -- ``PUT``/``POST /api/v1/settings/{name}`` or
+    ``trellis admin settings set``/``unset`` -- instead of a bare "no
+    handler registered". A no-op for every other operation, and for any
+    other ``settings.update`` outcome, so both call sites apply it to
+    every result they get back rather than threading a settings-only
+    branch through the generic executor itself.
+    """
+    if result.operation is not Operation.SETTINGS_UPDATE:
+        return result
+    if result.status is not CommandStatus.FAILED:
+        return result
+    if not result.message.startswith("No handler registered for:"):
+        return result
+    return result.model_copy(
+        update={
+            "message": (
+                f"{result.message} -- settings.update is reachable only "
+                "through PUT (or POST) /api/v1/settings/{name}, or "
+                "`trellis admin settings set`/`unset`; this generic "
+                "mutation surface does not carry it."
+            )
+        }
+    )
+
+
 __all__ = [
     "DESTRUCTIVE_OPERATIONS",
     "GOVERNING_KEYS",
@@ -148,9 +224,11 @@ __all__ = [
     "build_evidence_ingest_command_from_args",
     "build_policy_gate",
     "build_schedule_executor",
+    "build_settings_executor",
     "ensure_evidence_document",
     "governing_key_refusal",
     "load_policies",
+    "redirect_unreachable_settings_update",
     "resolve_policy_path",
     "unattended_writer_refusal",
 ]

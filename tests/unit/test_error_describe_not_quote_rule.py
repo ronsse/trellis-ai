@@ -51,18 +51,24 @@ from tests.ast_rules import assert_hand_read_floor, iter_modules, name_of
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "trellis"
 
-#: Hand count at HEAD, 2026-10-09: every ``except ... as name:`` handler in
+#: Hand count at HEAD, 2026-10-11: every ``except ... as name:`` handler in
 #: ``src/trellis`` whose body raises a TrellisError-family exception, across
-#: 14 files (``llm/providers/openai.py`` x1, ``mutate/handlers.py`` x3,
-#: ``mutate/policy_source.py`` x3, ``stores/arcadedb/base.py`` x1,
-#: ``stores/bolt_opencypher/base.py`` x1, ``stores/bolt_opencypher/graph.py``
-#: x3, ``stores/pgvector/store.py`` x1, ``stores/postgres/api_key.py`` x1,
-#: ``stores/postgres/event_log.py`` x1, ``stores/postgres/graph.py`` x3,
-#: ``stores/postgres/trace.py`` x1, ``stores/registry.py`` x14,
-#: ``stores/sqlite/api_key.py`` x1, ``stores/sqlite/trace.py`` x1). All 35
-#: are, at HEAD, either a ``describe_*`` call, a static sentence, an
-#: interpolation of the *caller's own* data (a record/trace id, never the
-#: exception), or ``type(exc).__name__`` -- never a bare ``{exc}``.
+#: 14 files (``llm/providers/openai.py`` x1, ``mutate/handlers.py`` x6 --
+#: three pre-existing plus three added by ``SettingsUpdateHandler``, which
+#: read ``exc.message`` off a ``DegradedStoreWriteError``/
+#: ``StaleStoreWriteError`` (both already-composed ``TrellisError`` text)
+#: or ``exc.args[0]`` off a ``validate_value`` ``ValueError`` it raises
+#: itself -- ``mutate/policy_source.py`` x3, ``stores/arcadedb/base.py``
+#: x1, ``stores/bolt_opencypher/base.py`` x1,
+#: ``stores/bolt_opencypher/graph.py`` x3, ``stores/pgvector/store.py``
+#: x1, ``stores/postgres/api_key.py`` x1, ``stores/postgres/event_log.py``
+#: x1, ``stores/postgres/graph.py`` x3, ``stores/postgres/trace.py`` x1,
+#: ``stores/registry.py`` x14, ``stores/sqlite/api_key.py`` x1,
+#: ``stores/sqlite/trace.py`` x1). All 38 are, at HEAD, either a
+#: ``describe_*`` call, a static sentence, an interpolation of the
+#: *caller's own* data (a record/trace id, never the exception), a
+#: structured-field read (``exc.message``, ``exc.args[0]``), or
+#: ``type(exc).__name__`` -- never a bare ``{exc}``.
 _HAND_READ_SITE_COUNT = 35
 
 

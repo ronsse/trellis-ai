@@ -1334,13 +1334,38 @@ write-behaviour knobs reported by `trellis admin write-config` and
 `GET /api/version`, plus `graph_seeding` — 13 tunables total
 (`src/trellis/core/settings_registry.py`'s `SETTINGS_REGISTRY`: the 12
 `WriteBehaviourConfig` fields plus `graph_seeding`, explicitly **not**
-`learning.auto_promote.*`, which stays out by owner decision). **This PR
-ships the store and the read path only.** `trellis admin write-config` and
-`GET /api/version` report whatever the file holds, but nothing in this repo
-writes to it yet — a CLI/REST surface (`trellis admin settings`, a
-`MutationExecutor` op) is deferred to a follow-up PR. The recovery command
-named below is that future command, named now so the error text does not
-need to change again when it ships.
+`learning.auto_promote.*`, which stays out by owner decision).
+
+**The write surface**: `trellis admin settings set <name> <value>` /
+`settings unset <name>` and `PUT`/`POST /api/v1/settings/{name}` (admin
+scope) both submit `Operation.SETTINGS_UPDATE` through the same narrow
+`build_settings_executor` — a denying policy, a degraded store or an
+out-of-range value is refused identically on either surface, and nothing
+is silently clamped. These two are the *only* surfaces that can reach
+this operation at all: the generic `POST /commands/batch` route and
+MCP's `execute_mutation` build `build_curate_executor` instead, which
+never registers `Operation.SETTINGS_UPDATE`, so a `settings.update`
+command submitted there fails — `status: "failed"`, not `"rejected"`,
+because nothing was evaluated and no `MUTATION_REJECTED` event exists
+to name a reason — rather than being evaluated and refused by policy;
+there is no shared refusal path to be "identical" to from those two.
+Both surfaces rewrite the message (not the status) through
+`redirect_unreachable_settings_update`, so the failure names where the
+write *is* reachable (`PUT`/`POST /api/v1/settings/{name}`, or
+`trellis admin settings set`/`unset`) instead of a bare "no handler
+registered for: settings.update".
+`value: null` (CLI: `settings unset`) removes the
+override; there is no separate reset operation. A write for a setting
+whose environment variable is currently set still stores the override —
+the REST response says `accepted: true` plus the env value actually in
+force, rather than claiming the write just took effect. `GET
+/api/v1/settings` lists every registry entry's metadata, resolved value
+and provenance; **no CLI equivalent ships yet** — `trellis admin
+settings list` is not a real subcommand today even though
+`SettingsStore`'s stale-write recovery text below still names it (#854),
+so follow that text's advice with the REST route, or `trellis admin
+write-config` for the twelve `WriteBehaviourConfig` fields, until one is
+added.
 
 ### Precedence: env > settings > default
 

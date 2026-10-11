@@ -22,6 +22,7 @@ from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.trace import Trace
 from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 
 execute_mutation = unwrap_tool(_execute_mutation)
 
@@ -569,3 +570,46 @@ class TestScheduleAdminOperationsAreNotMcpReachable:
 
         assert payload["status"] == "failed"
         assert "no handler registered" in payload["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# settings.update is unreachable here
+# ---------------------------------------------------------------------------
+
+
+class TestSettingsUpdateIsUnreachable:
+    """``execute_mutation`` builds :func:`build_curate_executor`
+    (see the import above and the module docstring's "same five-stage
+    pipeline" line), which no longer registers
+    ``Operation.SETTINGS_UPDATE`` at all. Only the admin-scoped REST route
+    and ``trellis admin settings`` build the narrow
+    :func:`~trellis.mutate.build_settings_executor` that does -- this MCP
+    tool, being a generic surface, must not have a settings write path.
+
+    ``status`` stays ``"failed"`` -- nothing was evaluated and no
+    ``MUTATION_REJECTED`` event exists to name a reason, so relabelling
+    it ``"rejected"`` would claim an audit trail that was not written
+    (:func:`~trellis.mutate.redirect_unreachable_settings_update`'s own
+    docstring). Only the message changes, to name where the write *is*
+    reachable instead of a bare "no handler registered".
+    """
+
+    def test_settings_update_is_refused_as_no_handler_registered(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        raw = execute_mutation(
+            operation="settings.update",
+            args={"name": "pack_holdout_rate", "value": 0.9},
+        )
+        payload = json.loads(raw)
+
+        assert payload["status"] == "failed"
+        assert "No handler registered" in payload["message"]
+        assert "PUT" in payload["message"]
+        assert "/api/v1/settings/{name}" in payload["message"]
+        assert "trellis admin settings set" in payload["message"]
+
+        assert temp_registry.stores_dir is not None
+        path = resolve_settings_path(temp_registry.stores_dir)
+        if path is not None and path.exists():
+            assert SettingsStore(path).get("pack_holdout_rate") is None

@@ -47,6 +47,7 @@ class Operation(StrEnum):
     # ``create_curate_handlers``: see ``mutate/schedule_handlers.py``.
     SCHEDULE_UPDATE = "schedule.update"
     JOB_RUN_REQUEST = "job.run_request"
+    SETTINGS_UPDATE = "settings.update"
 
 
 class CommandStatus(StrEnum):
@@ -189,12 +190,17 @@ class OperationRegistry:
         # ``RETENTION_PRUNED`` payload), and a criteria-driven undo would
         # re-derive the same population that was wrong the first time.
         self._schemas[Operation.RETENTION_RESTORE] = {"item_ids", "reason"}
-        # Both admin operations push their own field allowlist in the
-        # handler (``ScheduleUpdateHandler`` / ``JobRunRequestHandler``):
+        # Both schedule admin operations push their own field allowlist in
+        # the handler (``ScheduleUpdateHandler`` / ``JobRunRequestHandler``):
         # every field but ``target_id`` is optional on an update, and a
         # run-request takes none, so neither has a required-arg set here.
         self._schemas[Operation.SCHEDULE_UPDATE] = set()
         self._schemas[Operation.JOB_RUN_REQUEST] = set()
+        # ``value`` is required as a *key*, not a truthy value: ``None``
+        # means "remove the override" (SettingsUpdateHandler's own
+        # docstring), so the presence check below must not reject a
+        # literal null the way an `if not command.args.get("value")` would.
+        self._schemas[Operation.SETTINGS_UPDATE] = {"name", "value"}
 
     def validate(self, command: Command) -> tuple[bool, list[str]]:
         """Validate a command's args against its operation's schema.

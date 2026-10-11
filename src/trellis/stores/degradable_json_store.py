@@ -401,6 +401,22 @@ class DegradableJsonStore(ABC, Generic[RowT]):
         """Whether this store refuses writes because its load was partial."""
         return self._degradation is not None
 
+    @property
+    def stale_recovery(self) -> str:
+        """The recovery command :meth:`refuse_if_stale` would cite.
+
+        Public for a caller one layer behind the exception itself -- a
+        governed write (e.g. ``trellis_api.routes.settings``) learns of a
+        ``stale_store_write`` refusal only through the mutation result, not
+        the raised :class:`~trellis.errors.StaleStoreWriteError`, and
+        :attr:`degradation` is ``None`` for staleness (the file parsed
+        fine; it just changed underneath this read) so there is nothing
+        there to report a recovery from. This exposes the same per-subclass
+        constant :meth:`refuse_if_stale` uses, rather than that caller
+        duplicating it.
+        """
+        return self._stale_recovery
+
     def refuse_if_degraded(self) -> None:
         """Raise rather than rewrite a file this store could not read.
 

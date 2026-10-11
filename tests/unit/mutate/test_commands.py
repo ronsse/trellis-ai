@@ -31,7 +31,9 @@ class TestOperation:
         # schedule-registry writes, handled only by
         # trellis.mutate.build_schedule_executor, never create_curate_handlers;
         # see trellis/mutate/schedule_handlers.py)
-        assert len(Operation) == 23
+        # + SETTINGS_UPDATE (governed settings-store write; null value
+        # means "remove the override" rather than a separate RESET verb)
+        assert len(Operation) == 24
 
 
 class TestCommand:
