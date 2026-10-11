@@ -685,7 +685,11 @@ class TestScheduleRun:
     def test_never_claims_synchronous_execution(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _env(tmp_path, monkeypatch)
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(
+            stores_dir,
+            [_job(name="tune", cadence="0 4 * * *", enabled=True)],
+        )
         result = runner.invoke(
             app, ["admin", "schedule", "run", "tune", "--format", "json"]
         )
@@ -701,7 +705,7 @@ class TestScheduleRun:
         stores_dir = _env(tmp_path, monkeypatch)
         _seed_jobs(
             stores_dir,
-            [_job(name="tune", cadence="0 4 * * *", enabled=False, timeout_seconds=55)],
+            [_job(name="tune", cadence="0 4 * * *", enabled=True, timeout_seconds=55)],
         )
 
         result = runner.invoke(
@@ -716,7 +720,7 @@ class TestScheduleRun:
         store = ScheduleStore(stores_dir / "schedule.json")
         row = store.get("tune")
         assert row.run_requested_at is not None
-        assert row.enabled is False
+        assert row.enabled is True
         assert row.cadence == "0 4 * * *"
         assert row.timeout_seconds == 55
 
@@ -726,6 +730,46 @@ class TestScheduleRun:
         ]
         assert len(requested) == 1
         assert requested[0]["payload"]["key_name"].startswith("cli:")
+
+    def test_run_on_a_disabled_job_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gate #860, blocker 2: refuse rather than defer-and-maybe-spend."""
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(
+            stores_dir,
+            [_job(name="tune", cadence="0 4 * * *", enabled=False)],
+        )
+
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "json"]
+        )
+
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert "disabled" in payload["message"].lower()
+
+        row = ScheduleStore(stores_dir / "schedule.json").get("tune")
+        assert row is not None
+        assert row.run_requested_at is None
+
+    def test_run_on_a_never_stored_job_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gate #860, blocker 2 / F1: no row means no silent enrollment
+        into the catalog's default cadence."""
+        stores_dir = _env(tmp_path, monkeypatch)
+
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "json"]
+        )
+
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert "init-schedule" in payload["message"].lower()
+        assert ScheduleStore(stores_dir / "schedule.json").get("tune") is None
 
     def test_degraded_store_exits_store_code(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

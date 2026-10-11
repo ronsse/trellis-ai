@@ -859,8 +859,18 @@ class AdminJobSummary(WireModel):
     ``run_requested_at`` are the mutable schedule-registry row —
     materialized with catalog defaults when no row has been written
     yet, so a job always appears here even before ``init-schedule`` or
-    a first ``PATCH``. ``next_due_at`` is a display-only estimate
-    (``None`` for a manual-only job, or when no tick could be found).
+    a first ``PATCH``. ``stored`` is ``False`` for exactly that
+    materialized-default case (including a row that failed to parse
+    out of a degraded store): the catalog default shown is never the
+    operator's own choice, and ``next_due_at`` is always ``None`` for
+    such a row — ``due-jobs`` only ever evaluates a *stored* row, so a
+    catalog default could never actually fire at the time this field
+    would otherwise claim. ``default_cadence`` is the catalog's own
+    default, shown alongside the effective ``cadence`` so an operator
+    can tell "customized" from "still the catalog default" without a
+    second request. ``next_due_at`` is a display-only estimate
+    (``None`` for a manual-only job, a job with no stored row, or when
+    no tick could be found).
     """
 
     name: str
@@ -870,10 +880,12 @@ class AdminJobSummary(WireModel):
     heavy: bool
     enabled: bool
     cadence: str | None = None
+    default_cadence: str | None = None
     timeout_seconds: int
     run_requested_at: str | None = None
     last_run: AdminJobLastRun | None = None
     next_due_at: str | None = None
+    stored: bool = True
 
 
 class AdminJobListResponse(WireModel):
@@ -885,13 +897,20 @@ class AdminJobListResponse(WireModel):
     is the boolean a UI banner reads directly (recently seen within a
     server-chosen window) rather than re-deriving a staleness threshold
     client-side; ``False`` with ``dispatcher_last_seen_at is None`` means
-    no dispatcher has ever reported.
+    no dispatcher has ever reported. ``store_degradation`` is ``None``
+    on a clean read and otherwise the same shape ``GET /api/v1/policies``
+    and ``GET /api/v1/advisories`` already use (``LoadDegradation.
+    to_dict()``, recovery command included) — a caller reading only
+    ``jobs``/``count`` would otherwise see catalog defaults presented as
+    the operator's own stored choices with no signal that the file
+    behind them is damaged.
     """
 
     count: int = 0
     jobs: list[AdminJobSummary] = Field(default_factory=list)
     dispatcher_last_seen_at: str | None = None
     dispatcher_seen: bool = False
+    store_degradation: dict[str, Any] | None = None
 
 
 class AdminJobPatchRequest(WireRequestModel):
@@ -928,11 +947,16 @@ class AdminJobRunResponse(WireModel):
     ``dispatcher_hint`` is the fixed, honest sentence a UI shows beside
     the confirm — a host dispatcher polling ``due-jobs`` on its own
     cadence is what actually executes the job, if one is installed.
+    ``run_requested_at`` is exactly what the re-read row carries —
+    ``None`` on the (expected-unreachable, since a non-success result
+    raises before this is built) chance the handler's own write did not
+    stick — never a timestamp this route or the CLI computed itself,
+    which would report a value the handler never wrote.
     """
 
     status: str = "ok"
     name: str
-    run_requested_at: str
+    run_requested_at: str | None
     dispatcher_hint: str = (
         "Accepted. A host dispatcher polling 'due-jobs' picks this up, "
         "typically within ~5 minutes, if one is installed."

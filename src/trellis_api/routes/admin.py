@@ -15,6 +15,7 @@ proposals are read-only here.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1439,11 +1440,16 @@ def _code_proposal_source_file(preview: str) -> str | None:
 # name outright. See ``trellis.schedule.catalog``'s module docstring for
 # the full boundary argument.
 
-#: A dispatcher that has not started any job within this window reads as
-#: "not reporting" to the UI banner — roughly 3x the ~5 minute poll hint
-#: ``AdminJobRunResponse.dispatcher_hint`` gives, so one missed tick does
-#: not flap the banner.
-_DISPATCHER_STALE_SECONDS = 15 * 60
+#: Floor for the dispatcher-staleness window, in seconds, used when no
+#: enabled+stored job has a cadence to measure against. A dispatcher that
+#: has not started any job within the window reads as "not reporting" to
+#: the UI banner.
+_DISPATCHER_STALE_SECONDS_FLOOR = 15 * 60
+
+#: Slack added on top of the longest enabled cadence's own tick interval
+#: (see ``_dispatcher_stale_seconds``), so a daily job's dispatcher isn't
+#: flagged "not reporting" for the ~23 hours between its ticks.
+_DISPATCHER_STALE_SLACK_SECONDS = 2 * 60 * 60
 
 
 def _get_schedule_store() -> ScheduleStore:
@@ -1576,11 +1582,24 @@ def _job_row_or_default(store: ScheduleStore, spec: JobSpec) -> ScheduledJob:
     writing one of these is not how a job gets created (it is already in
     :data:`trellis.schedule.catalog.JOB_CATALOG`; nothing here ever adds
     to or removes from that catalog).
+
+    On a *degraded* store the default's ``enabled`` is ``False``, not
+    :class:`ScheduledJob`'s own default of ``True``: a missing row here
+    might be a row that failed to parse, whose real value is unknown and
+    may be the operator's own ``enabled=False`` — showing ``True`` would
+    read as a stored, operator-chosen decision it is not (gate #860,
+    blocker 1, probe P5: disable a job, corrupt its row, and the listing
+    must not then show it enabled). A *clean* store with no row at all
+    keeps the schema's own default — that job was simply never seeded,
+    and "would run enabled once initialised" is accurate, matching what
+    ``init-schedule`` would write.
     """
     row = store.get(spec.name)
     if row is not None:
         return row
-    return ScheduledJob(name=spec.name, cadence=spec.default_cadence)
+    return ScheduledJob(
+        name=spec.name, cadence=spec.default_cadence, enabled=not store.is_degraded
+    )
 
 
 def _job_summary(
@@ -1589,15 +1608,25 @@ def _job_summary(
     event_log: EventLog,
     *,
     now: datetime,
+    stored: bool,
 ) -> AdminJobSummary:
-    """Join one catalog entry with its schedule-registry row and run history."""
+    """Join one catalog entry with its schedule-registry row and run history.
+
+    ``stored`` is ``False`` when *row* is a materialized catalog default
+    rather than something ``schedule.json`` actually holds (no row yet,
+    or a row that failed to parse out of a degraded store — see
+    ``_job_row_or_default``). ``next_due_at`` is unconditionally ``None``
+    in that case: ``trellis admin due-jobs`` only ever evaluates a
+    *stored* row, so a catalog default showing a next-due timestamp
+    would promise a run that cannot happen (gate #860, blocker 1).
+    """
     effective_timeout = (
         row.timeout_seconds
         if row.timeout_seconds is not None
         else spec.default_timeout_seconds
     )
     next_due_at: str | None = None
-    if row.enabled and row.cadence is not None:
+    if stored and row.enabled and row.cadence is not None:
         tick = next_tick_after(row.cadence, now)
         if tick is not None:
             next_due_at = tick.isoformat()
@@ -1609,6 +1638,7 @@ def _job_summary(
         heavy=spec.heavy,
         enabled=row.enabled,
         cadence=row.cadence,
+        default_cadence=spec.default_cadence,
         timeout_seconds=effective_timeout,
         run_requested_at=(
             row.run_requested_at.isoformat()
@@ -1617,6 +1647,49 @@ def _job_summary(
         ),
         last_run=_last_job_run(event_log, spec.name),
         next_due_at=next_due_at,
+        stored=stored,
+    )
+
+
+def _longest_enabled_cadence_interval_seconds(
+    jobs: Sequence[AdminJobSummary], now: datetime
+) -> int | None:
+    """Seconds between consecutive ticks of the slowest enabled cadence.
+
+    Only *stored* (``job.stored``), *enabled* jobs with a cadence count —
+    a catalog default or a disabled job never runs, so its cadence says
+    nothing about how often the dispatcher should be heard from. ``None``
+    means no such job exists; the caller falls back to the floor.
+    """
+    longest: int | None = None
+    for job in jobs:
+        if not (job.stored and job.enabled and job.cadence):
+            continue
+        first = next_tick_after(job.cadence, now)
+        if first is None:
+            continue
+        second = next_tick_after(job.cadence, first)
+        if second is None:
+            continue
+        interval = int((second - first).total_seconds())
+        if longest is None or interval > longest:
+            longest = interval
+    return longest
+
+
+def _dispatcher_stale_seconds(jobs: Sequence[AdminJobSummary], now: datetime) -> int:
+    """How long since the last job-run start before the dispatcher reads as silent.
+
+    A fixed 15-minute window false-positives against a daily cadence (gate
+    #860, blocker 5): the window must be at least as long as the slowest
+    enabled cadence's own tick interval, plus slack, never a literal
+    compared against every cadence regardless of period.
+    """
+    longest = _longest_enabled_cadence_interval_seconds(jobs, now)
+    if longest is None:
+        return _DISPATCHER_STALE_SECONDS_FLOOR
+    return max(
+        _DISPATCHER_STALE_SECONDS_FLOOR, longest + _DISPATCHER_STALE_SLACK_SECONDS
     )
 
 
@@ -1629,21 +1702,32 @@ def list_admin_jobs() -> AdminJobListResponse:
     this route never creates one. ``dispatcher_seen``/
     ``dispatcher_last_seen_at`` answer the UI's "no dispatcher reporting"
     banner from the EventLog's own ``JOB_RUN_STARTED`` events, never a
-    hardcoded literal.
+    hardcoded literal. ``store_degradation`` surfaces a degraded schedule
+    store the same way ``routes/policies.py`` does, so the UI can show a
+    banner instead of silently rendering catalog defaults as if they were
+    stored, operator-chosen values (gate #860, blocker 1).
     """
     registry = get_registry()
     event_log = registry.operational.event_log
     store = _get_schedule_store()
     now = utc_now()
     jobs = [
-        _job_summary(spec, _job_row_or_default(store, spec), event_log, now=now)
+        _job_summary(
+            spec,
+            _job_row_or_default(store, spec),
+            event_log,
+            now=now,
+            stored=store.get(spec.name) is not None,
+        )
         for spec in JOB_CATALOG.values()
     ]
     dispatcher_last_seen_at = _dispatcher_last_seen_at(event_log)
+    stale_seconds = _dispatcher_stale_seconds(jobs, now)
     dispatcher_seen = (
         dispatcher_last_seen_at is not None
-        and (now - dispatcher_last_seen_at).total_seconds() <= _DISPATCHER_STALE_SECONDS
+        and (now - dispatcher_last_seen_at).total_seconds() <= stale_seconds
     )
+    degradation = store.degradation
     return AdminJobListResponse(
         count=len(jobs),
         jobs=jobs,
@@ -1653,6 +1737,7 @@ def list_admin_jobs() -> AdminJobListResponse:
             else None
         ),
         dispatcher_seen=dispatcher_seen,
+        store_degradation=(degradation.to_dict() if degradation is not None else None),
     )
 
 
@@ -1689,7 +1774,13 @@ def patch_admin_job(
     fields_set = body.model_fields_set
     if not fields_set:
         return AdminJobPatchResponse(
-            job=_job_summary(spec, current, event_log, now=utc_now())
+            job=_job_summary(
+                spec,
+                current,
+                event_log,
+                now=utc_now(),
+                stored=store.get(spec.name) is not None,
+            )
         )
 
     args: dict[str, Any] = {}
@@ -1714,9 +1805,16 @@ def patch_admin_job(
 
     # Re-read: ``store`` cached its rows at construction, before the
     # handler's own ``ScheduleStore`` instance committed the write.
-    updated = _job_row_or_default(_get_schedule_store(), spec)
+    updated_store = _get_schedule_store()
+    updated = _job_row_or_default(updated_store, spec)
     return AdminJobPatchResponse(
-        job=_job_summary(spec, updated, event_log, now=utc_now())
+        job=_job_summary(
+            spec,
+            updated,
+            event_log,
+            now=utc_now(),
+            stored=updated_store.get(spec.name) is not None,
+        )
     )
 
 
@@ -1757,11 +1855,15 @@ def run_admin_job(
         raise _schedule_result_http_error(result)
 
     # Re-read rather than trust a locally-computed timestamp: the
-    # handler, not this route, is what decided and wrote ``now``.
+    # handler, not this route, is what decided and wrote ``now``. A
+    # successful command always writes ``run_requested_at`` server-side,
+    # but we report exactly what is on the row — never a value fabricated
+    # here — so a future handler change can't make this response lie
+    # (gate #860, F6).
     updated = _job_row_or_default(_get_schedule_store(), spec)
     run_requested_at = (
         updated.run_requested_at.isoformat()
         if updated.run_requested_at is not None
-        else utc_now().isoformat()
+        else None
     )
     return AdminJobRunResponse(name=name, run_requested_at=run_requested_at)

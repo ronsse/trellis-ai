@@ -26,11 +26,24 @@ All notable changes to Trellis will be documented in this file.
   caller's identity. `trellis admin schedule set <name>` / `schedule run
   <name>` give the same two writes from a terminal, `--format json` and an
   exit code independent of format. The web UI's new **Schedules** tab
-  renders cadence as both raw cron and hand-formatted text (labelled "host
-  local time", never UTC — `trellis.core.cron` evaluates on the dispatcher
-  host's own clock), an enable toggle, inline edit with bounds validation, a
-  two-step "Run now" confirm with an extra warning for `spends_llm`/`heavy`
-  jobs, and a "no dispatcher reporting" banner.
+  renders cadence as both raw cron and hand-formatted text (labelled UTC —
+  `trellis.core.cron` evaluates every production caller's `utc_now()`, not
+  the dispatcher host's local clock), an enable toggle, inline edit with
+  bounds validation, a two-step "Run now" confirm with an extra warning for
+  `spends_llm`/`heavy` jobs, and a dispatcher-activity banner that compares
+  against the longest enabled cadence's own tick interval rather than a
+  fixed window.
+  **Gate #860 fixes, same change:** a degraded schedule store is now
+  surfaced on `GET /api/v1/admin/jobs` (`store_degradation`, each row's
+  `stored: bool`) instead of showing catalog defaults as if they were the
+  operator's own stored, enabled choice; "Run now" refuses a disabled or
+  never-stored job (`job_disabled` / `not_scheduled`) instead of silently
+  enrolling it into the catalog's default cadence; `run_requested_at` in
+  the run response is exactly what the handler wrote, or `null`, never a
+  timestamp fabricated by the route or the CLI; and the Edit form reads the
+  current cadence from a data attribute rather than scraping rendered
+  table text, so saving with no changes round-trips instead of clobbering
+  the cadence with whatever the display text happened to contain.
   **Bug found and fixed in the same change:** `admin schedule set`'s
   tri-state option detection compared `ctx.get_parameter_source(name)`
   against `click.ParameterSource.COMMANDLINE` by identity — Typer invokes

@@ -68,7 +68,19 @@ components:
 
         client-side; ``False`` with ``dispatcher_last_seen_at is None`` means
 
-        no dispatcher has ever reported.'
+        no dispatcher has ever reported. ``store_degradation`` is ``None``
+
+        on a clean read and otherwise the same shape ``GET /api/v1/policies``
+
+        and ``GET /api/v1/advisories`` already use (``LoadDegradation.
+
+        to_dict()``, recovery command included) — a caller reading only
+
+        ``jobs``/``count`` would otherwise see catalog defaults presented as
+
+        the operator''s own stored choices with no signal that the file
+
+        behind them is damaged.'
       properties:
         count:
           default: 0
@@ -88,6 +100,12 @@ components:
             $ref: '#/components/schemas/AdminJobSummary'
           title: Jobs
           type: array
+        store_degradation:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Store Degradation
       title: AdminJobListResponse
       type: object
     AdminJobPatchRequest:
@@ -159,7 +177,17 @@ components:
 
         the confirm — a host dispatcher polling ``due-jobs`` on its own
 
-        cadence is what actually executes the job, if one is installed.'
+        cadence is what actually executes the job, if one is installed.
+
+        ``run_requested_at`` is exactly what the re-read row carries —
+
+        ``None`` on the (expected-unreachable, since a non-success result
+
+        raises before this is built) chance the handler''s own write did not
+
+        stick — never a timestamp this route or the CLI computed itself,
+
+        which would report a value the handler never wrote.'
       properties:
         dispatcher_hint:
           default: Accepted. A host dispatcher polling 'due-jobs' picks this up, typically within ~5 minutes, if one is installed.
@@ -169,8 +197,10 @@ components:
           title: Name
           type: string
         run_requested_at:
+          anyOf:
+          - type: string
+          - type: 'null'
           title: Run Requested At
-          type: string
         status:
           default: ok
           title: Status
@@ -197,15 +227,40 @@ components:
 
         yet, so a job always appears here even before ``init-schedule`` or
 
-        a first ``PATCH``. ``next_due_at`` is a display-only estimate
+        a first ``PATCH``. ``stored`` is ``False`` for exactly that
 
-        (``None`` for a manual-only job, or when no tick could be found).'
+        materialized-default case (including a row that failed to parse
+
+        out of a degraded store): the catalog default shown is never the
+
+        operator''s own choice, and ``next_due_at`` is always ``None`` for
+
+        such a row — ``due-jobs`` only ever evaluates a *stored* row, so a
+
+        catalog default could never actually fire at the time this field
+
+        would otherwise claim. ``default_cadence`` is the catalog''s own
+
+        default, shown alongside the effective ``cadence`` so an operator
+
+        can tell "customized" from "still the catalog default" without a
+
+        second request. ``next_due_at`` is a display-only estimate
+
+        (``None`` for a manual-only job, a job with no stored row, or when
+
+        no tick could be found).'
       properties:
         cadence:
           anyOf:
           - type: string
           - type: 'null'
           title: Cadence
+        default_cadence:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Default Cadence
         description:
           title: Description
           type: string
@@ -237,6 +292,10 @@ components:
           title: Run Requested At
         spends_llm:
           title: Spends Llm
+          type: boolean
+        stored:
+          default: true
+          title: Stored
           type: boolean
         timeout_seconds:
           title: Timeout Seconds
@@ -2460,7 +2519,13 @@ paths:
 
         banner from the EventLog''s own ``JOB_RUN_STARTED`` events, never a
 
-        hardcoded literal.'
+        hardcoded literal. ``store_degradation`` surfaces a degraded schedule
+
+        store the same way ``routes/policies.py`` does, so the UI can show a
+
+        banner instead of silently rendering catalog defaults as if they were
+
+        stored, operator-chosen values (gate #860, blocker 1).'
       operationId: list_admin_jobs_api_v1_admin_jobs_get
       responses:
         '200':

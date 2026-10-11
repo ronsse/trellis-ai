@@ -1955,6 +1955,7 @@
         </div>
 
         <div id="view-schedules" style="display:none">
+            <div id="schedules-store-banner"></div>
             <div id="schedules-dispatcher-banner"></div>
             <p class="field-hint">
                 Editing here can only change whether and when a catalog job runs &mdash;
@@ -5882,10 +5883,11 @@
         // choice. It only recognises the shapes the job catalog actually
         // uses (fixed daily/weekly/monthly times, and simple step minutes);
         // anything else falls back to the raw expression rather than
-        // guessing wrong. Cadence fields are evaluated on the HOST's local
-        // clock (trellis.core.cron), never UTC, so this never labels a time
-        // "UTC" -- only last-run timestamps (stamped by utc_now()) earn
-        // that label.
+        // guessing wrong. Cadence fields are evaluated as UTC: every
+        // production caller (due-jobs, these admin routes) passes
+        // trellis.core.cron functions utc_now(), never the host's local
+        // clock (gate #860, blocker 4) -- so this labels every fixed time
+        // "UTC", matching the last-run timestamps below.
         function describeCron(cadence) {
             if (!cadence) return 'Manual only (no cadence; triggered only by "Run now")';
             const parts = cadence.trim().split(/\s+/);
@@ -5894,7 +5896,7 @@
             const pad2 = n => String(n).padStart(2, '0');
             if (dom === '*' && month === '*' && dow === '*') {
                 if (/^\d+$/.test(min) && /^\d+$/.test(hour)) {
-                    return `Daily at ${pad2(hour)}:${pad2(min)} (host local time)`;
+                    return `Daily at ${pad2(hour)}:${pad2(min)} UTC`;
                 }
                 const stepMatch = min.match(/^\*\/(\d+)$/);
                 if (stepMatch && hour === '*') {
@@ -5902,10 +5904,10 @@
                 }
             }
             if (dom === '*' && month === '*' && /^[0-6]$/.test(dow) && /^\d+$/.test(min) && /^\d+$/.test(hour)) {
-                return `Weekly on ${DOW_NAMES[Number(dow)]} at ${pad2(hour)}:${pad2(min)} (host local time)`;
+                return `Weekly on ${DOW_NAMES[Number(dow)]} at ${pad2(hour)}:${pad2(min)} UTC`;
             }
             if (month === '*' && dow === '*' && /^\d+$/.test(dom) && /^\d+$/.test(min) && /^\d+$/.test(hour)) {
-                return `Monthly on day ${dom} at ${pad2(hour)}:${pad2(min)} (host local time)`;
+                return `Monthly on day ${dom} at ${pad2(hour)}:${pad2(min)} UTC`;
             }
             return `Custom schedule (${cadence})`;
         }
@@ -5914,14 +5916,23 @@
             const el = document.getElementById('schedules-dispatcher-banner');
             if (!el) return;
             if (seen) { el.innerHTML = ''; return; }
+            // States only what the EventLog actually shows. A missing poll
+            // record is not evidence of a dead dispatcher -- the server
+            // already widens the staleness window to the slowest enabled
+            // cadence (see docs/agent-guide/operations.md), so a banner here
+            // means that window was exceeded, not merely "one tick late".
+            // Never claims "nothing will pick this up": a dispatcher's own
+            // due-jobs polls leave no record, so their absence proves
+            // nothing either way (gate #860, blocker 5).
             const seenText = lastSeenAt
-                ? `last seen starting a job at ${fmtTime(lastSeenAt)}`
-                : 'never seen starting a job';
+                ? `Last job run recorded starting at ${fmtTime(lastSeenAt)}.`
+                : 'No job run has ever been recorded.';
             el.innerHTML = `<div class="warn-banner">
-                <span class="warn-title">No dispatcher reporting</span>
-                <span class="warn-detail">${escHtml(seenText)}. "Run now" still records the
-                    request; nothing will pick it up until a host dispatcher polling
-                    <code>trellis admin due-jobs</code> is running.</span>
+                <span class="warn-title">No recent job-run activity</span>
+                <span class="warn-detail">${escHtml(seenText)} The dispatcher's own
+                    <code>due-jobs</code> polls leave no record, so this is not proof
+                    no dispatcher is running. "Run now" still records the request
+                    either way.</span>
             </div>`;
         }
 
@@ -5930,13 +5941,16 @@
             const totalEl = document.getElementById('schedules-total');
             tbody.innerHTML = `<tr><td colspan="8">${loadingHtml('Loading schedules...')}</td></tr>`;
             renderDispatcherBanner(true, null);
+            renderDegradedBanner('schedules-store-banner', null);
             totalEl.textContent = '';
             try {
                 const data = await fetchJSON('/admin/jobs');
                 renderDispatcherBanner(data.dispatcher_seen, data.dispatcher_last_seen_at);
+                renderDegradedBanner('schedules-store-banner', data.store_degradation);
+                const degraded = !!data.store_degradation;
                 const rows = data.jobs || [];
                 tbody.innerHTML = rows.length
-                    ? rows.map(renderScheduleRow).join('')
+                    ? rows.map(job => renderScheduleRow(job, degraded)).join('')
                     : `<tr><td colspan="8"><div class="empty-state">No catalog jobs.</div></td></tr>`;
                 totalEl.textContent = `${data.count ?? rows.length} job(s) in the catalog`;
             } catch (err) {
@@ -5955,27 +5969,50 @@
         function lastRunText(lastRun) {
             if (!lastRun) return 'never run';
             if (lastRun.finished_at == null) {
-                return `running since ${fmtTime(lastRun.started_at)}`;
+                return `running since ${escHtml(fmtTime(lastRun.started_at))}`;
             }
             const statusCls = lastRun.exit_code === 0 ? 'badge-ok' : 'badge-err';
             return `<span class="badge ${statusCls}">${escHtml(lastRun.status || 'unknown')}</span> ` +
-                `exit ${escHtml(String(lastRun.exit_code))}, finished ${fmtTime(lastRun.finished_at)}`;
+                `exit ${escHtml(String(lastRun.exit_code))}, finished ${escHtml(fmtTime(lastRun.finished_at))}`;
         }
 
-        function renderScheduleRow(job) {
+        function renderScheduleRow(job, storeDegraded) {
             const name = job.name;
             const enabledAttr = job.enabled ? 'checked' : '';
+            // A catalog default (job.stored === false) is never the
+            // operator's own choice, and due-jobs never evaluates it, so
+            // it must not read as enabled-with-a-next-due-time (gate #860,
+            // blocker 1) -- disable the controls and say so plainly rather
+            // than let an operator edit/run a row that doesn't exist yet.
+            const disabledAttr = (!job.stored || storeDegraded) ? 'disabled' : '';
+            const cadenceText = job.cadence || '(none)';
+            // next_due_at is a display-only estimate of the *next* tick, not
+            // of when due-jobs will actually report the job due: a job that
+            // has never completed a run is always due right now, at the
+            // dispatcher's very first poll, regardless of what this cell
+            // shows (gate #860, F2) -- the tooltip says so only when that
+            // applies, so a job with run history doesn't get a misleading
+            // "due immediately" hint.
+            const neverCompletedHint = !job.last_run
+                ? ' title="This job has never completed a run, so due-jobs reports it due right now, at the dispatcher\'s very first poll -- not only once this estimated time arrives."'
+                : '';
+            const nextDueCell = job.next_due_at
+                ? `<span${neverCompletedHint}>${escHtml(fmtTime(job.next_due_at))}</span>`
+                : (job.stored ? '&mdash;' : '<span class="field-hint" style="margin:0">not scheduled, no stored row</span>');
             return `<tr id="sched-row-${escHtml(name)}">
-                <td><code title="${escHtml(job.description || '')}">${escHtml(name)}</code></td>
-                <td><input type="checkbox" ${enabledAttr} id="sched-enabled-${escHtml(name)}" data-action="toggleJobEnabled" data-id="${escHtml(name)}"></td>
-                <td>${escHtml(job.cadence || '(none)')}<br><span class="field-hint" style="margin:0">${escHtml(describeCron(job.cadence))}</span></td>
+                <td><code title="${escHtml(job.description || '')}">${escHtml(name)}</code>${job.stored ? '' : ' <span class="badge badge-info" title="No row in schedule.json yet -- showing the catalog default, which due-jobs never evaluates">not scheduled, no stored row</span>'}</td>
+                <td>
+                    <label for="sched-enabled-${escHtml(name)}" class="sr-only">Enable ${escHtml(name)}</label>
+                    <input type="checkbox" ${enabledAttr} ${disabledAttr} id="sched-enabled-${escHtml(name)}" aria-label="Enable ${escHtml(name)}" data-action="toggleJobEnabled" data-id="${escHtml(name)}">
+                </td>
+                <td data-cadence="${escHtml(job.cadence || '')}">${escHtml(cadenceText)}<br><span class="field-hint" style="margin:0">${escHtml(describeCron(job.cadence))}</span>${job.default_cadence && job.default_cadence !== job.cadence ? `<br><span class="field-hint" style="margin:0">catalog default: ${escHtml(job.default_cadence)}</span>` : ''}</td>
                 <td>${escHtml(String(job.timeout_seconds))}s</td>
                 <td>${jobFlagBadges(job)}</td>
                 <td>${lastRunText(job.last_run)}</td>
-                <td>${job.next_due_at ? fmtTime(job.next_due_at) : '&mdash;'}</td>
+                <td>${nextDueCell}</td>
                 <td id="sched-actions-${escHtml(name)}">
                     <button class="btn btn-sm" data-action="showEditJobForm" data-id="${escHtml(name)}">Edit</button>
-                    <button class="btn btn-sm" data-action="confirmRunJob" data-id="${escHtml(name)}">Run now</button>
+                    <button class="btn btn-sm" ${disabledAttr} data-action="confirmRunJob" data-id="${escHtml(name)}">Run now</button>
                 </td>
             </tr>`;
         }
@@ -5988,22 +6025,34 @@
             // rather than widening the listener's contract.
             const checkbox = document.getElementById('sched-enabled-' + name);
             const checked = checkbox ? checkbox.checked : undefined;
+            const cell = document.getElementById('sched-actions-' + name);
             try {
                 await patchJSON(`/admin/jobs/${encodeURIComponent(name)}`, { enabled: checked });
                 loadSchedules();
             } catch (err) {
-                alert(`Failed to update ${name}: ${err.message}`);
-                loadSchedules();
+                // Inline, not alert() (gate #860, F5): a modal here would
+                // block the rest of the table and is unreadable by a test.
+                if (cell) {
+                    cell.innerHTML = `<span style="color:var(--error)">Failed to update ${escHtml(name)}: ${escHtml(err.message)}</span> ` +
+                        `<button class="btn btn-sm" data-action="showEditJobForm" data-id="${escHtml(name)}">Edit</button>`;
+                }
+                if (checkbox) checkbox.checked = !checked;
             }
         }
 
         function showEditJobForm(name) {
             // Pull the current row's values back out of the DOM rather than
             // refetching -- the row was just rendered from the same payload.
+            // The raw cadence comes from the cell's own `data-cadence`
+            // attribute, never its rendered textContent (gate #860,
+            // blocker 3): the cell's text also carries the human
+            // description and, for a customized job, a "catalog default:
+            // ..." line, so scraping textContent picked up that second
+            // line and silently changed the cadence on an unchanged Save.
             const row = document.getElementById('sched-row-' + name);
             if (!row) return;
             const cells = row.querySelectorAll('td');
-            const currentCadence = cells[2].textContent.trim().split('\n')[0].trim();
+            const currentCadence = cells[2].dataset.cadence || '';
             const currentTimeout = parseInt(cells[3].textContent, 10);
             const el = document.getElementById('schedule-edit-form');
             el.style.display = 'block';
@@ -6011,8 +6060,8 @@
                 <h4 style="margin-top:0">Edit ${escHtml(name)}</h4>
                 <div class="form-row">
                     <label for="sched-edit-cadence">Cadence (5-field cron, or blank for manual-only)</label>
-                    <input type="text" id="sched-edit-cadence" value="${escHtml(currentCadence === '(none)' ? '' : currentCadence)}" placeholder="e.g. 0 4 * * *">
-                    <p class="field-hint">Evaluated on the host's local clock. Leave blank to clear (manual-only; only "Run now" triggers it).</p>
+                    <input type="text" id="sched-edit-cadence" value="${escHtml(currentCadence)}" placeholder="e.g. 0 4 * * *">
+                    <p class="field-hint">Evaluated in UTC. Leave blank to clear (manual-only; only "Run now" triggers it).</p>
                 </div>
                 <div class="form-row">
                     <label for="sched-edit-timeout">Timeout seconds (1-86400)</label>

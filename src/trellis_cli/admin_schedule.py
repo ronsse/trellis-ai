@@ -35,7 +35,6 @@ from typing import Any
 import typer
 from rich.markup import escape
 
-from trellis.core.base import utc_now
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.mutate import (
     Command,
@@ -261,20 +260,25 @@ def run_job_command(*, name: str, output_format: str) -> None:
         raise typer.Exit(code=exit_code)
 
     # Re-read rather than trust a locally-computed timestamp: the
-    # handler, not this command, is what decided and wrote ``now``.
+    # handler, not this command, is what decided and wrote ``now``. A
+    # successful command always writes ``run_requested_at``, but we
+    # report exactly what is on the row — never a value fabricated here
+    # — so a future handler change can't make this response lie (gate
+    # #860, F6).
     updated = get_schedule_store().get(name) or ScheduledJob(
         name=spec.name, cadence=spec.default_cadence
     )
     run_requested_at = (
         updated.run_requested_at.isoformat()
         if updated.run_requested_at is not None
-        else utc_now().isoformat()
+        else None
     )
 
     hint = (
         "Accepted. A host dispatcher polling 'due-jobs' picks this up, "
         "typically within ~5 minutes, if one is installed."
     )
+    when_text = run_requested_at if run_requested_at is not None else "an unknown time"
     _emit_result(
         output_format,
         {
@@ -283,7 +287,7 @@ def run_job_command(*, name: str, output_format: str) -> None:
             "run_requested_at": run_requested_at,
             "dispatcher_hint": hint,
         },
-        f"[green]Run requested[/green] for {escape(name)} at {run_requested_at}.\n"
+        f"[green]Run requested[/green] for {escape(name)} at {escape(when_text)}.\n"
         f"[dim]{escape(hint)}[/dim]",
     )
     raise typer.Exit(code=EXIT_OK)

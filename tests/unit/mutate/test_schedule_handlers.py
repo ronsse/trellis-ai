@@ -348,7 +348,7 @@ class TestJobRunRequestHandler:
         store = ScheduleStore(_schedule_path(registry))
         store.put(
             ScheduledJob(
-                name=_JOB, cadence="0 4 * * *", enabled=False, timeout_seconds=77
+                name=_JOB, cadence="0 4 * * *", enabled=True, timeout_seconds=77
             )
         )
 
@@ -368,7 +368,7 @@ class TestJobRunRequestHandler:
         reloaded = ScheduleStore(_schedule_path(registry)).get(_JOB)
         assert reloaded is not None
         assert reloaded.run_requested_at is not None
-        assert reloaded.enabled is False  # untouched
+        assert reloaded.enabled is True  # untouched
         assert reloaded.cadence == "0 4 * * *"  # untouched
         assert reloaded.timeout_seconds == 77  # untouched
 
@@ -378,11 +378,76 @@ class TestJobRunRequestHandler:
         assert len(events) == 1
         assert events[0].payload["key_name"] == "api:test-key"
 
+    def test_never_stored_job_is_refused_not_enrolled(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Gate #860, blocker 2 / F1: run-now on a job with no stored row
+        must refuse, never silently write the catalog's default cadence."""
+        path = _schedule_path(registry)
+        assert not path.exists()
+
+        handler = JobRunRequestHandler(registry)
+        with pytest.raises(ValidationError) as excinfo:
+            handler.handle(
+                Command(
+                    operation=Operation.JOB_RUN_REQUEST,
+                    target_type="schedule",
+                    target_id=_JOB,
+                )
+            )
+        assert excinfo.value.code == "not_scheduled"
+        assert not path.exists()  # no row was ever created
+
+    def test_disabled_job_is_refused(self, registry: StoreRegistry) -> None:
+        """Gate #860, blocker 2: a deferred run of a disabled job would be
+        a surprise spend once a dispatcher eventually picks it up."""
+        store = ScheduleStore(_schedule_path(registry))
+        store.put(ScheduledJob(name=_JOB, cadence="0 4 * * *", enabled=False))
+
+        handler = JobRunRequestHandler(registry)
+        with pytest.raises(ValidationError) as excinfo:
+            handler.handle(
+                Command(
+                    operation=Operation.JOB_RUN_REQUEST,
+                    target_type="schedule",
+                    target_id=_JOB,
+                )
+            )
+        assert excinfo.value.code == "job_disabled"
+
+        reloaded = ScheduleStore(_schedule_path(registry)).get(_JOB)
+        assert reloaded is not None
+        assert reloaded.run_requested_at is None  # nothing written
+
     def test_degraded_store_refuses_with_the_stores_own_text(
         self, registry: StoreRegistry
     ) -> None:
         path = _schedule_path(registry)
         path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not json", encoding="utf-8")
+
+        handler = JobRunRequestHandler(registry)
+        with pytest.raises(ValidationError) as excinfo:
+            handler.handle(
+                Command(
+                    operation=Operation.JOB_RUN_REQUEST,
+                    target_type="schedule",
+                    target_id=_JOB,
+                )
+            )
+        assert excinfo.value.code == "degraded_store_write"
+
+    def test_degraded_store_refuses_even_a_disabled_stored_row(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Gate #860 probe P5: an operator disables a job, then its row's
+        JSON goes bad. A degraded load can't distinguish "disabled" from
+        "unreadable", so this must still 409 (degraded_store_write), never
+        422 (not_scheduled) — the latter would wrongly imply the row was
+        cleanly read and simply absent."""
+        path = _schedule_path(registry)
+        store = ScheduleStore(path)
+        store.put(ScheduledJob(name=_JOB, cadence="0 4 * * *", enabled=False))
         path.write_text("not json", encoding="utf-8")
 
         handler = JobRunRequestHandler(registry)
