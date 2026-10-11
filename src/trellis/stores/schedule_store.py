@@ -10,19 +10,24 @@ store that rewrote a partially-read file would silently drop whatever
 didn't parse, which for a schedule registry means a job quietly stops
 being dispatched rather than erroring.
 
-No arbitrary command execution
--------------------------------
-This store never constructs or interprets a shell command. Every
-``command`` it files is validated by :class:`~trellis.schemas.schedule.ScheduledJob`
-as a non-empty list of non-blank argv tokens — there is no string field a
-shell could later interpolate, and no code path in this module (or in
-``trellis admin record-job-run`` / ``due-jobs``, which only read this
-store) execs anything at all. The one thing that *does* exec a job's
-``command`` is the host dispatcher — a script this PR documents
-(``docs/ops/job-dispatcher.sh.example``) but deliberately does not
-install — and even there, an argv list passed to ``subprocess.run`` (or
-``os.execvp``) never passes through a shell, so a job name or description
-containing shell metacharacters cannot do anything but sit there as data.
+The actual command boundary
+----------------------------
+This store never holds a command at all. A
+:class:`~trellis.schemas.schedule.ScheduledJob` row is operator-tunable
+state only (``name``, ``cadence``, ``enabled``,
+``timeout_seconds`` override, ``run_requested_at``); what a job runs
+comes from :data:`trellis.schedule.catalog.JOB_CATALOG`, keyed by the
+row's ``name`` and fixed in source. ``ScheduledJob`` validates ``name``
+against that catalog on every read and write, and ``extra="forbid"``
+rejects a legacy or tampered row still carrying the old ``command``
+field — in both cases :meth:`_parse_row` raises and the row degrades
+(``invalid_rows``) rather than being treated as something to run. So
+this file — shared, read-write-mounted into every container, and
+API-editable once a later PR lands — can change only *whether* and
+*when* a catalog job runs, never *what* runs. The one thing that execs a
+job is the host dispatcher (``docs/ops/job-dispatcher.sh.example``,
+documented but not installed), and it reads the command from
+``trellis admin due-jobs``' catalog-joined output, never from this file.
 """
 
 from __future__ import annotations

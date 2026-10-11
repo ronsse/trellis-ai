@@ -38,6 +38,7 @@ from trellis.core.write_config import (
 from trellis.core.write_provenance import build_write_provenance
 from trellis.errors import BackendNotInstalledError, StoreWriteRefusedError
 from trellis.llm.routing import LLMConsumer, LLMRoute, LLMRoutingError
+from trellis.schedule.catalog import JOB_CATALOG
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.claude_integration import get_skills_target_dir, install_skills
@@ -1902,12 +1903,13 @@ def migrate_graph(
 # ---------------------------------------------------------------------------
 # Schedule registry + job-run records (#e166, plan p1 §(b)). The container
 # never touches crontab; a host-side dispatcher (documented, not installed,
-# at docs/ops/job-dispatcher.sh.example) reads schedule.json, execs each due
-# job's argv directly (never through a shell), and calls record-job-run once
-# per execution. These commands are the whole trust boundary: schedule.json
-# only ever holds argv lists (enforced by ScheduledJob), and neither command
-# below execs anything — see src/trellis/stores/schedule_store.py's module
-# docstring for the full argument.
+# at docs/ops/job-dispatcher.sh.example) calls due-jobs, execs each due job's
+# argv directly (never through a shell) or, for a host-only job, resolves
+# $TRELLIS_HOST_JOBS_DIR/<name> itself, and calls record-job-run once per
+# execution. schedule.json holds no command at all — due-jobs joins each row
+# with trellis.schedule.catalog.JOB_CATALOG by name; see that module and
+# src/trellis/stores/schedule_store.py's module docstring for the full
+# boundary argument.
 # ---------------------------------------------------------------------------
 
 
@@ -2111,6 +2113,14 @@ def due_jobs(
     recent ``JOB_RUN_COMPLETED`` for that job name. A job that has never
     completed is always due.
 
+    Every due row is joined with its
+    :data:`trellis.schedule.catalog.JOB_CATALOG` entry by name — the
+    schedule file never supplies a command. A Trellis-native job reports
+    its catalog ``argv``; a host-only job reports ``command: null`` and
+    ``host_only: true``, a marker the dispatcher turns into
+    ``$TRELLIS_HOST_JOBS_DIR/<name>`` itself, never a path this command
+    emits.
+
     Works on a degraded schedule file — the jobs that parsed are still
     checked — but says so and exits
     :data:`~trellis_cli.exit_codes.EXIT_STORE` rather than 0: a partial
@@ -2143,13 +2153,22 @@ def due_jobs(
             last_completed_at=last_completed_at,
             now=now,
         ):
+            # ScheduledJob.name is validated against JOB_CATALOG on every
+            # load, so this lookup cannot miss for a row store.list()
+            # returned. due-jobs never reads a command from the file —
+            # only this catalog join supplies one.
+            spec = JOB_CATALOG[schedule_job.name]
             due.append(
                 {
                     "name": schedule_job.name,
-                    "command": schedule_job.command,
+                    "command": list(spec.argv) if spec.argv is not None else None,
+                    "host_only": spec.host_only,
                     "cadence": schedule_job.cadence,
-                    "host_only": schedule_job.host_only,
-                    "timeout_seconds": schedule_job.timeout_seconds,
+                    "timeout_seconds": (
+                        schedule_job.timeout_seconds
+                        if schedule_job.timeout_seconds is not None
+                        else spec.default_timeout_seconds
+                    ),
                     "last_completed_at": (
                         last_completed_at.isoformat() if last_completed_at else None
                     ),

@@ -16,36 +16,56 @@
 #      recent JOB_RUN_COMPLETED in the EventLog, and any
 #      `run_requested_at` manual "Run now" trigger — see
 #      src/trellis/core/cron.py's `is_job_due`.)
-#   2. For each due job, exec its argv list directly.
+#   2. For each due job, exec its command — either the argv `due-jobs`
+#      reported, or, for a host-only job, an executable this script
+#      resolves itself (see "The command boundary" below).
 #   3. Record what happened, win or lose:
 #        trellis admin record-job-run --job NAME --duration-ms MS --exit-code N
 #      so the NEXT due-jobs call sees this run and the cadence clock
 #      advances — a job is never run twice for one tick just because
 #      nothing recorded the first attempt.
 #
-# No arbitrary command execution. `schedule.json` only ever holds argv
-# lists — `ScheduledJob.command` is a validated non-empty list[str] of
-# non-blank tokens, never a shell string (src/trellis/schemas/schedule.py).
-# This script never builds a command line as text and never passes one to
-# `sh -c` or `eval`: `cmd` below is a bash ARRAY built element-by-element
-# from the JSON array (`jq -r '.command[]'` + `mapfile`), and `"${cmd[@]}"`
-# execs that array directly. A job name, description, or cron cadence
-# stored in the registry is data to this script, never code — there is no
-# path from an edited schedule.json row to a shell interpreting anything.
-# See src/trellis/stores/schedule_store.py's module docstring for the
-# full argument, of which this script is the other half.
+# The command boundary. `schedule.json` never holds a command — it holds
+# only operator-tunable state (name, cadence, enabled, a timeout
+# override, run_requested_at). A job's actual command lives in source, in
+# `trellis.schedule.catalog.JOB_CATALOG`, keyed by name; `due-jobs` joins
+# each due row with its catalog entry before this script ever sees it.
+# That makes two shapes of due job:
+#   - Trellis-native: `due-jobs` reports `command` as a non-empty argv
+#     list. This script execs that array element-by-element
+#     (`"${cmd[@]}"`, built from the JSON array via `jq -r '.command[]'`
+#     + `mapfile` — never a joined string passed to `sh -c` or `eval`),
+#     so a job name or cadence stored in the registry is data to this
+#     script, never code.
+#   - Host-only (`host_only: true`; `command: null` — a marker, not a
+#     path): this script, not the registry and not `due-jobs`, resolves
+#     `$TRELLIS_HOST_JOBS_DIR/<name>`, and only after checking `name`
+#     against `^[a-z0-9-]+$` (no `/`, no `..` — mirrors
+#     `trellis.schedule.catalog.validate_host_job_name`). If
+#     `TRELLIS_HOST_JOBS_DIR` is unset, or the resolved path is missing
+#     or not executable, the job is reported NOT RUNNABLE and left due
+#     for the next tick — never silently skipped. No absolute path is
+#     ever read from `schedule.json`; the operator places the executable
+#     at `$TRELLIS_HOST_JOBS_DIR/<name>` themselves, outside the shared
+#     data mount.
+# Editing `schedule.json` — by hand, or (once plan p1 PR 6 ships) over an
+# API — can therefore change only *whether* and *when* a catalog job
+# runs, never *what* runs. See `src/trellis/schedule/catalog.py` and
+# `src/trellis/stores/schedule_store.py`'s module docstring for the full
+# argument, of which this script is the other half.
 #
 # Why ONE dispatcher + ONE cron line, not one cron line per job (the shape
 # of the real nightly scripts — capture/curate/backup/roadmap — that this
 # is modeled on): the whole point of the registry is that a job's
-# cadence, command, and enabled flag become editable later (a UI, plan p1
-# PR 6) without ever touching crontab again. A fixed per-job crontab line
+# cadence and enabled flag become editable later (a UI, plan p1 PR 6)
+# without ever touching crontab again. A fixed per-job crontab line
 # is exactly what the registry replaces; this script is what reads it.
 #
-# `host_only` jobs (backup-nightly, roadmap-nightly — they need the
-# docker socket / `gh` auth respectively) are run here like any other: this
-# whole script only exists to run ON the host. The flag is for a FUTURE
-# container-side dispatcher to filter on, not for this one.
+# `host_only` jobs (capture-nightly, curate-nightly, backup-nightly,
+# roadmap-nightly — they need the host's project directories, the docker
+# socket, or `gh` auth) are run here like any other, once resolved as
+# above: this whole script only exists to run ON the host. The flag is
+# for a FUTURE container-side dispatcher to filter on, not for this one.
 #
 # Deploy (operator, skynet-side — NOT done by this PR):
 #   cp job-dispatcher.sh.example ~/projects/skynet-hub/stacks/trellis/job-dispatcher.sh
@@ -80,11 +100,20 @@ TRELLIS="$HOME/projects/trellis-ai/.venv/bin/trellis"
 LOCK="/tmp/trellis-job-dispatcher.lock"
 
 export TRELLIS_CONFIG_DIR="${TRELLIS_CONFIG_DIR:-$HOME/.trellis}"
+# TRELLIS_HOST_JOBS_DIR: where host-only jobs' executables live — e.g.
+# ~/projects/skynet-hub/stacks/trellis, which already holds
+# capture-nightly.sh / curate-nightly.sh / backup-nightly.sh /
+# roadmap-nightly.sh and does its own `op read` before invoking the real
+# binary. Deliberately NOT defaulted to that or any other absolute path
+# here: the operator sets it per deployment, and an unset value makes
+# every host-only job report NOT RUNNABLE rather than silently resolve
+# to nothing.
+# TRELLIS_HOST_JOBS_DIR="$HOME/projects/skynet-hub/stacks/trellis"
+
 # Secrets (Postgres DSNs, etc.) are each JOB's own concern, not this
-# dispatcher's. The real nightly scripts this replaces already do their
-# own `op read` before invoking the real binary (see
-# ~/projects/skynet-hub/stacks/trellis/*-nightly.sh), so their argv in
-# schedule.json is just the wrapper script's path — it resolves its own
+# dispatcher's. The host-only wrapper scripts under TRELLIS_HOST_JOBS_DIR
+# do their own `op read` before invoking the real binary, so their argv
+# here is just the wrapper script's path — it resolves its own
 # environment exactly as it does today, run by hand or by cron. A
 # registry entry that is a bare `trellis ...` subcommand (tune, worker
 # enrich, ...) runs with whatever environment this dispatcher process
@@ -118,11 +147,33 @@ fi
 printf '%s' "$due_json" | jq -c '.due_jobs[]' | while IFS= read -r job_json; do
   name="$(printf '%s' "$job_json" | jq -r '.name')"
   timeout_s="$(printf '%s' "$job_json" | jq -r '.timeout_seconds')"
+  host_only="$(printf '%s' "$job_json" | jq -r '.host_only')"
 
-  # The argv array, built straight from the JSON array — no shell ever
-  # sees these joined into one string, so nothing in `command` (or
-  # `name`/`description`, which never reach this far) is interpreted.
-  mapfile -t cmd < <(printf '%s' "$job_json" | jq -r '.command[]')
+  if [[ "$host_only" == "true" ]]; then
+    # Host-only: due-jobs reports command: null on purpose. This script
+    # resolves the executable itself, and only after checking the name
+    # is safe to use as a path component — never a path read from
+    # schedule.json or from due-jobs' own output.
+    if [[ ! "$name" =~ ^[a-z0-9-]+$ ]]; then
+      echo "NOT RUNNABLE: $name — name does not match ^[a-z0-9-]+\$; refusing to build a host-jobs-dir path from it"
+      continue
+    fi
+    if [[ -z "${TRELLIS_HOST_JOBS_DIR:-}" ]]; then
+      echo "NOT RUNNABLE: $name — TRELLIS_HOST_JOBS_DIR is unset; this host-only job has no resolvable command"
+      continue
+    fi
+    candidate="$TRELLIS_HOST_JOBS_DIR/$name"
+    if [[ ! -x "$candidate" ]]; then
+      echo "NOT RUNNABLE: $name — $candidate is missing or not executable"
+      continue
+    fi
+    cmd=("$candidate")
+  else
+    # The argv array, built straight from the JSON array — no shell ever
+    # sees these joined into one string, so nothing in `command` (or
+    # `name`, which never reaches this far) is interpreted.
+    mapfile -t cmd < <(printf '%s' "$job_json" | jq -r '.command[]')
+  fi
 
   echo "--- running $name: ${cmd[*]}"
   start_ms=$(date +%s%3N)

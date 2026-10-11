@@ -1,22 +1,31 @@
-"""Schedule registry schema — the host dispatcher's source of truth.
+"""Schedule registry schema — operator-tunable state, never a command.
 
 A :class:`ScheduledJob` is one row of ``schedule.json``
-(:class:`~trellis.stores.schedule_store.ScheduleStore`): a name, a command
-to run, and when it should run. ``command`` is an argv list — never a
-shell string — so there is no interpolation step between this file and a
-process exec; see the module docstring on
-:class:`~trellis.stores.schedule_store.ScheduleStore` for the full
-no-arbitrary-execution argument.
+(:class:`~trellis.stores.schedule_store.ScheduleStore`): ``name``,
+``cadence``, ``enabled``, an optional ``timeout_seconds`` override, and
+``run_requested_at``. It carries no command, description or host-only
+flag — those live in :data:`trellis.schedule.catalog.JOB_CATALOG`, the
+only source of what a job runs, keyed by the same ``name``. ``name`` is
+validated against that catalog here, on every read and write
+(:func:`ScheduledJob.model_validate`, called from both
+:meth:`~trellis.stores.schedule_store.ScheduleStore.put` and from loading
+the file), so a row naming an unknown job is a validation failure, not a
+job that runs. ``extra="forbid"`` (:class:`~trellis.core.base.TrellisModel`)
+means a legacy or tampered row still carrying the old ``command`` field
+fails validation the same way — see
+:mod:`trellis.schedule.catalog` for the full boundary argument and
+:class:`~trellis.stores.schedule_store.ScheduleStore`'s module docstring
+for how a row that fails this validation is handled (the row degrades;
+nothing it names ever runs).
 
 ``cadence`` is a 5-field cron expression (:mod:`trellis.core.cron`) or
 ``None`` for a manual-only job — one an operator or the UI's "Run now"
 triggers by setting :attr:`ScheduledJob.run_requested_at`, never on a
-timer. ``host_only`` flags a job that depends on a resource the API
-container will never be given (the docker socket, ``gh`` auth, the
-``/mnt/data`` mount) — see ``docs/design/p1-ui-control-plane.md`` §(b):
-the dispatcher that reads this registry is host-side already, but the
-flag matters once a container-side reader exists (a later PR; out of
-scope here) so it can skip what it could never run.
+timer. ``timeout_seconds``, when set, overrides the catalog's
+``default_timeout_seconds`` for this job only, bounded 1..86400 — this
+schema does not enforce it at runtime; enforcing it is the dispatcher's
+job (the reference script under ``docs/ops/``), which this PR documents
+but does not install.
 """
 
 from __future__ import annotations
@@ -27,38 +36,33 @@ from pydantic import Field, field_validator
 
 from trellis.core.base import TimestampedModel
 from trellis.core.cron import CronSchedule, CronSyntaxError
+from trellis.schedule.catalog import JOB_CATALOG
 
 
 class ScheduledJob(TimestampedModel):
-    """One registry entry: what to run, on what cadence, and its last request.
+    """One registry entry: operator-tunable state for a catalog job.
 
-    ``timeout_seconds`` is advisory — this schema does not enforce it;
-    enforcing it is the dispatcher's job (the reference script under
-    ``docs/ops/``), which this PR documents but does not install.
+    The command, description and host-only flag all come from
+    :data:`trellis.schedule.catalog.JOB_CATALOG` under this row's
+    ``name`` — never from this model. See the module docstring.
     """
 
-    name: str = Field(min_length=1, description="Unique job name; the registry key.")
-    command: list[str] = Field(
+    name: str = Field(
         min_length=1,
-        description=(
-            "Argv list, e.g. ['trellis', 'worker', 'tune', '--dry-run']. "
-            "Never a shell string — see the store module docstring."
-        ),
+        description="Must be a key in trellis.schedule.catalog.JOB_CATALOG.",
     )
     cadence: str | None = Field(
         default=None,
         description="5-field cron expression, or null for manual-only.",
     )
     enabled: bool = Field(default=True)
-    timeout_seconds: int = Field(gt=0, default=3600)
-    description: str = Field(
-        min_length=1, description="Operator-facing: what this job does and why."
-    )
-    host_only: bool = Field(
-        default=False,
+    timeout_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        le=86400,
         description=(
-            "True when the job needs a host-only resource "
-            "(docker socket, gh auth, /mnt/data)."
+            "Overrides the catalog's default_timeout_seconds for this "
+            "job only; null defers to the catalog default."
         ),
     )
     run_requested_at: datetime | None = Field(
@@ -68,17 +72,15 @@ class ScheduledJob(TimestampedModel):
 
     @field_validator("name", mode="after")
     @classmethod
-    def _strip_name(cls, value: str) -> str:
+    def _known_catalog_name(cls, value: str) -> str:
         if not value.strip():
             msg = "name must not be blank"
             raise ValueError(msg)
-        return value
-
-    @field_validator("command", mode="after")
-    @classmethod
-    def _non_blank_argv(cls, value: list[str]) -> list[str]:
-        if any(not arg.strip() for arg in value):
-            msg = "command entries must not be blank"
+        if value not in JOB_CATALOG:
+            msg = (
+                f"name {value!r} is not a trellis.schedule.catalog.JOB_CATALOG "
+                "job — an unknown name is a degraded row, never a run"
+            )
             raise ValueError(msg)
         return value
 

@@ -107,21 +107,35 @@ dispatcher cron** needs so schedules can later be edited from a UI (plan p1
 §(b), PR 6) without the container ever touching crontab. The container only
 ever reads it today; there is no REST route or UI yet.
 
-Each row is a `ScheduledJob`: `name`, `command` (an **argv list**, never a
-shell string), `cadence` (a 5-field cron expression, or `null` for
-manual-only — triggered later by setting `run_requested_at`), `enabled`,
-`timeout_seconds`, an operator-facing `description`, and `host_only` (true
-for jobs that need the docker socket or `gh` auth — `backup-nightly` and
-`roadmap-nightly` — which the API container will never have). There is no
-code path anywhere in this registry, the store, or `due-jobs` /
-`record-job-run` that execs a command; see
-[`schedule_store.py`](../../src/trellis/stores/schedule_store.py)'s module
-docstring for the full argument. The one thing that does exec a job is the
-reference dispatcher at
+**The command boundary.** `schedule.json` holds only operator-tunable state —
+it never holds a command. Each row is a `ScheduledJob`: `name` (must be a key
+in `trellis.schedule.catalog.JOB_CATALOG`, validated on every read and write —
+an unknown name degrades the row, it is never treated as a job to run),
+`cadence` (a 5-field cron expression, or `null` for manual-only — triggered
+later by setting `run_requested_at`), `enabled`, an optional `timeout_seconds`
+override (bounded `1..86400`; `null` defers to the catalog default), and
+`run_requested_at`. The command, operator-facing description, and `host_only`
+flag all come from [`trellis.schedule.catalog`](../../src/trellis/schedule/catalog.py)
+under that same `name` — the **only** source of what a job runs. A
+Trellis-native job carries its argv fixed in source; a host-only job
+(`capture-nightly`, `curate-nightly`, `backup-nightly`, `roadmap-nightly` —
+they need the host's project directories, the docker socket, or `gh` auth,
+none of which the API container has) carries no argv at all — its executable
+is `$TRELLIS_HOST_JOBS_DIR/<name>`, placed there by the operator outside the
+shared data mount, resolved by the host dispatcher itself after checking
+`name` against `^[a-z0-9-]+$` (`trellis.schedule.catalog.validate_host_job_name`).
+Because the model is `extra="forbid"`, a legacy or tampered row still
+carrying the old `command` field fails validation the same way an unknown
+`name` does — it degrades, it does not run. So editing `schedule.json`, by
+hand or (once PR 6 ships) over an API, can change only *whether* and *when* a
+catalog job runs, never *what* runs; see
+[`catalog.py`](../../src/trellis/schedule/catalog.py)'s module docstring and
+[`schedule_store.py`](../../src/trellis/stores/schedule_store.py)'s for the
+full argument. The one thing that execs a job is the reference dispatcher at
 [`docs/ops/job-dispatcher.sh.example`](../ops/job-dispatcher.sh.example) —
-documentation, not installed by this repo — which builds the command as a
-bash array from the JSON array and execs it directly, never through `sh -c`
-or `eval`.
+documentation, not installed by this repo — which reads the command from
+`due-jobs`' catalog-joined output (never from `schedule.json`), builds it as
+a bash array, and execs it directly, never through `sh -c` or `eval`.
 
 `ScheduleStore` is a third [`DegradableJsonStore`](#if-the-file-is-damaged)
 subclass, alongside `PolicyStore` and `AdvisoryStore`: **reads degrade,
@@ -130,14 +144,15 @@ still serve what parsed) rather than silently collapsing two rows to one.
 
 #### `trellis admin init-schedule`
 
-Seed the registry with Trellis's own defaults: the nightly
+Seed the registry from the catalog's defaults: the nightly
 capture/curate/backup/roadmap sweeps, the tuner dry-run, and the manual-only
-commands from the UI gap inventory (`trellis_cli.schedule_seed`). Adds only
+commands from the UI gap inventory (`trellis_cli.schedule_seed`, which builds
+one minimal row per `trellis.schedule.catalog.JOB_CATALOG` entry). Adds only
 jobs whose `name` is not already present — never overwrites an
 operator-edited row, so it is safe to re-run. `trellis admin migrate-graph`
-is deliberately not seeded: its whole shape is a pair of `--from-config` /
-`--to-config` YAML paths chosen per migration, so there is no stable default
-command to seed.
+is deliberately not in the catalog: its whole shape is a pair of
+`--from-config` / `--to-config` YAML paths chosen per migration, so there is
+no stable default command to seed.
 
 ```bash
 trellis admin init-schedule [--format text|json]
@@ -163,8 +178,13 @@ trellis admin due-jobs [--format text|json]
 ```
 
 ```json
-{"status": "ok", "count": 1, "due_jobs": [{"name": "tune", "command": ["trellis", "worker", "tune", "--dry-run", "--format", "json"], "cadence": "0 4 * * *", "host_only": false, "timeout_seconds": 3600, "last_completed_at": null, "run_requested_at": null}], "schedule_file": "/path/to/schedule.json", "schedule_file_present": true, "store_degradation": null}
+{"status": "ok", "count": 2, "due_jobs": [{"name": "tune", "command": ["trellis", "worker", "tune", "--dry-run", "--format", "json"], "host_only": false, "cadence": "0 4 * * *", "timeout_seconds": 3600, "last_completed_at": null, "run_requested_at": null}, {"name": "backup-nightly", "command": null, "host_only": true, "cadence": "30 4 * * *", "timeout_seconds": 3600, "last_completed_at": null, "run_requested_at": null}], "schedule_file": "/path/to/schedule.json", "schedule_file_present": true, "store_degradation": null}
 ```
+
+`command` is joined from `trellis.schedule.catalog.JOB_CATALOG` by `name`,
+never read from `schedule.json`. A host-only row reports `command: null` — a
+marker, not a path — so the dispatcher resolves
+`$TRELLIS_HOST_JOBS_DIR/<name>` itself; see "The command boundary" above.
 
 Works on a degraded file — jobs that parsed are still checked — but reports
 `"status": "degraded"` and exits `EXIT_STORE` (5) under both formats, same

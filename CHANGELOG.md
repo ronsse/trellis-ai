@@ -54,7 +54,12 @@ All notable changes to Trellis will be documented in this file.
   draft of this entry claimed "no arbitrary command execution anywhere" on
   the strength of argv-not-shell alone; that claim did not hold once
   `schedule.json`'s own `command` field was the thing deciding what an
-  argv-exec'd — this redesign is the fix.)
+  argv-exec'd — this redesign is the fix.) **Deviation from the original
+  PR:** `capture-nightly` and `curate-nightly` are now catalogued
+  `host_only=True` (they were `False`) — both need the host's Claude Code
+  project directories / `flock`-serialized worker invocation that a
+  container does not have, matching `backup-nightly` and
+  `roadmap-nightly`.
 - **Pack feedback from the Packs detail view.** `POST /packs/{pack_id}/feedback`
   was the only learning-loop input the dashboard could add and the UI never
   called it — the "Feedback" count on a pack's detail page only ever grew by

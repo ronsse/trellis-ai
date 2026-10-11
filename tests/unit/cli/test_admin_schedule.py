@@ -40,9 +40,7 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _job(**overrides: object) -> ScheduledJob:
     defaults: dict[str, object] = {
         "name": "tune",
-        "command": ["trellis", "worker", "tune", "--dry-run"],
         "cadence": "0 4 * * *",
-        "description": "Parameter tuner, dry-run.",
     }
     defaults.update(overrides)
     return ScheduledJob.model_validate(defaults)
@@ -50,6 +48,19 @@ def _job(**overrides: object) -> ScheduledJob:
 
 def _seed_jobs(stores_dir: Path, jobs: list[ScheduledJob]) -> None:
     ScheduleStore(stores_dir / "schedule.json").put_many(jobs)
+
+
+def _write_raw_rows(stores_dir: Path, rows: list[dict[str, Any]]) -> None:
+    """Write schedule.json rows that skip ``ScheduledJob`` validation entirely.
+
+    Used to prove a row that could never be *constructed* through the
+    schema still can't make it through ``due-jobs`` if it somehow lands
+    in the file directly (a tampered write, or a legacy row from before
+    this redesign).
+    """
+    (stores_dir / "schedule.json").write_text(
+        json.dumps({"jobs": rows}), encoding="utf-8"
+    )
 
 
 def _events_for(stores_dir: Path, job_name: str) -> list[dict[str, Any]]:
@@ -249,21 +260,93 @@ class TestDueJobs:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         stores_dir = _env(tmp_path, monkeypatch)
-        _seed_jobs(
-            stores_dir,
-            [
-                _job(
-                    name="worker-enrich",
-                    cadence=None,
-                    command=["trellis", "worker", "enrich"],
-                )
-            ],
-        )
+        _seed_jobs(stores_dir, [_job(name="worker-enrich", cadence=None)])
 
         result = runner.invoke(app, ["admin", "due-jobs", "--format", "json"])
 
         assert result.exit_code == 0, result.output
         assert json.loads(result.stdout)["count"] == 0
+
+    def test_due_job_command_is_the_catalog_argv_not_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The schedule file never supplies a command — ``due-jobs`` joins
+        it from :data:`trellis.schedule.catalog.JOB_CATALOG` by name.
+        """
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(stores_dir, [_job(name="tune", cadence="0 4 * * *")])
+
+        result = runner.invoke(app, ["admin", "due-jobs", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        due = json.loads(result.stdout)["due_jobs"][0]
+        assert due["command"] == [
+            "trellis",
+            "worker",
+            "tune",
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+        assert due["host_only"] is False
+
+    def test_a_host_only_due_job_reports_null_command_and_host_only_true(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(stores_dir, [_job(name="capture-nightly", cadence="0 3 * * *")])
+
+        result = runner.invoke(app, ["admin", "due-jobs", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        due = json.loads(result.stdout)["due_jobs"][0]
+        assert due["name"] == "capture-nightly"
+        assert due["command"] is None
+        assert due["host_only"] is True
+
+    def test_a_tampered_command_row_is_never_emitted_as_due(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """brief item 2/6: a row carrying ``command`` can't make ``due-jobs``
+        emit it — the row degrades instead of running.
+        """
+        stores_dir = _env(tmp_path, monkeypatch)
+        _write_raw_rows(
+            stores_dir,
+            [
+                {
+                    "name": "tune",
+                    "cadence": "0 4 * * *",
+                    "command": ["bash", "-c", "touch /tmp/pwned"],
+                }
+            ],
+        )
+
+        result = runner.invoke(app, ["admin", "due-jobs", "--format", "json"])
+
+        # The whole file degrades (one invalid row), so due-jobs must say
+        # so rather than report 0 due jobs as though everything parsed.
+        assert result.exit_code == EXIT_STORE, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "degraded"
+        assert payload["due_jobs"] == []
+
+    def test_an_unknown_job_name_is_never_emitted_as_due(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """brief item 2/6: an unknown catalog name never appears as due."""
+        stores_dir = _env(tmp_path, monkeypatch)
+        _write_raw_rows(
+            stores_dir,
+            [{"name": "not-a-real-job", "cadence": "0 4 * * *"}],
+        )
+
+        result = runner.invoke(app, ["admin", "due-jobs", "--format", "json"])
+
+        assert result.exit_code == EXIT_STORE, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "degraded"
+        assert payload["due_jobs"] == []
 
     def test_a_recently_completed_periodic_job_drops_off(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -379,14 +462,14 @@ class TestInitSchedule:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         stores_dir = _env(tmp_path, monkeypatch)
-        _seed_jobs(stores_dir, [_job(name="tune", description="operator-edited")])
+        _seed_jobs(stores_dir, [_job(name="tune", enabled=False)])
 
         result = runner.invoke(app, ["admin", "init-schedule", "--format", "json"])
 
         assert result.exit_code == 0, result.output
         assert "tune" in json.loads(result.stdout)["skipped"]
         store = ScheduleStore(stores_dir / "schedule.json")
-        assert store.get("tune").description == "operator-edited"
+        assert store.get("tune").enabled is False
 
     def test_degraded_file_exits_store_and_adds_nothing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -6,8 +6,9 @@ the staleness fingerprint, non-finite-float guards) is exercised once per
 *behaviour*, not duplicated test-by-test from that file — it is the same
 ``DegradableJsonStore`` base, unmodified here. What is specific to
 ``ScheduleStore`` — its row key (``name``, not an id the store mints),
-the duplicate-name reject rule, and that the degraded/stale write paths
-are wired on *this* subclass too — gets its own coverage below.
+the duplicate-name reject rule, that an unknown or tampered row degrades
+rather than running, and that the degraded/stale write paths are wired on
+*this* subclass too — gets its own coverage below.
 """
 
 from __future__ import annotations
@@ -26,9 +27,7 @@ from trellis.stores.schedule_store import ScheduleStore
 def _job(**overrides: object) -> ScheduledJob:
     defaults: dict[str, object] = {
         "name": "tune",
-        "command": ["trellis", "worker", "tune", "--dry-run"],
         "cadence": "0 4 * * *",
-        "description": "Parameter tuner, dry-run.",
     }
     defaults.update(overrides)
     return ScheduledJob.model_validate(defaults)
@@ -80,9 +79,11 @@ class TestScheduleStore:
 
     def test_put_many_returns_count(self, tmp_path: Path) -> None:
         store = ScheduleStore(tmp_path / "schedule.json")
-        count = store.put_many([_job(name="a"), _job(name="b")])
+        count = store.put_many(
+            [_job(name="tune"), _job(name="worker-enrich", cadence=None)]
+        )
         assert count == 2
-        assert {j.name for j in store.list()} == {"a", "b"}
+        assert {j.name for j in store.list()} == {"tune", "worker-enrich"}
 
     def test_persistence_across_instances(self, tmp_path: Path) -> None:
         path = tmp_path / "schedule.json"
@@ -94,6 +95,103 @@ class TestScheduleStore:
 
     def test_empty_store_on_new_path(self, tmp_path: Path) -> None:
         store = ScheduleStore(tmp_path / "new" / "schedule.json")
+        assert store.list() == []
+
+
+class TestUnknownCatalogNameNeverPersists:
+    """Brief item 2 and 6: an unknown job name is a degraded row, never a run.
+
+    ``ScheduledJob`` itself refuses an unknown name (see
+    ``tests/unit/schemas/test_schedule.py``); this class pins that the
+    *store* carries that refusal through for a row that reaches it only
+    as raw JSON — never via the validated constructor.
+    """
+
+    def test_an_unknown_name_written_directly_to_the_file_degrades(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "schedule.json"
+        path.write_text(
+            json.dumps({"jobs": [{"name": "not-a-real-job", "cadence": None}]}),
+            encoding="utf-8",
+        )
+
+        store = ScheduleStore(path)
+
+        assert store.list() == []
+        degradation = store.degradation
+        assert degradation is not None
+        assert degradation.reason == "invalid_rows"
+        assert degradation.rows_skipped == 1
+
+    def test_an_unknown_name_never_appears_as_a_surviving_row_alongside_a_good_one(
+        self, tmp_path: Path
+    ) -> None:
+        good = _job()
+        path = tmp_path / "schedule.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "jobs": [
+                        good.model_dump(mode="json"),
+                        {"name": "not-a-real-job", "cadence": None},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        store = ScheduleStore(path)
+
+        assert [j.name for j in store.list()] == ["tune"]
+
+
+class TestTamperedCommandFieldNeverPersists:
+    """Brief item 2 and 6: a legacy/tampered row carrying ``command`` must
+    not execute it — proven against the exact payload the brief names.
+    """
+
+    def test_a_tampered_command_field_degrades_the_row_not_the_registry(
+        self, tmp_path: Path
+    ) -> None:
+        good = _job(name="worker-enrich", cadence=None)
+        tampered_row = {
+            "name": "tune",
+            "cadence": "0 4 * * *",
+            "command": ["bash", "-c", "touch /tmp/pwned"],
+        }
+        path = tmp_path / "schedule.json"
+        path.write_text(
+            json.dumps({"jobs": [good.model_dump(mode="json"), tampered_row]}),
+            encoding="utf-8",
+        )
+
+        store = ScheduleStore(path)
+
+        names = [j.name for j in store.list()]
+        assert names == ["worker-enrich"], (
+            f"a row carrying 'command' must never survive into list() — got {names}"
+        )
+        degradation = store.degradation
+        assert degradation is not None
+        assert degradation.reason == "invalid_rows"
+        assert degradation.rows_skipped == 1
+
+    def test_tune_itself_is_absent_while_its_tampered_row_is_present(
+        self, tmp_path: Path
+    ) -> None:
+        """The catalog-valid name on the tampered row does not resurrect it."""
+        tampered_row = {
+            "name": "tune",
+            "cadence": "0 4 * * *",
+            "command": ["bash", "-c", "touch /tmp/pwned"],
+        }
+        path = tmp_path / "schedule.json"
+        path.write_text(json.dumps({"jobs": [tampered_row]}), encoding="utf-8")
+
+        store = ScheduleStore(path)
+
+        assert store.get("tune") is None
         assert store.list() == []
 
 
@@ -219,7 +317,7 @@ class TestDegradationIsPerRow:
         store = ScheduleStore(path)
 
         with pytest.raises(DegradedStoreWriteError):
-            store.put(_job(name="other"))
+            store.put(_job(name="worker-enrich", cadence=None))
 
         assert path.read_bytes() == before
 
@@ -233,14 +331,14 @@ class TestStaleWritesAreRefused:
             {
                 "jobs": [
                     _job().model_dump(mode="json"),
-                    _job(name="other").model_dump(mode="json"),
+                    _job(name="worker-enrich", cadence=None).model_dump(mode="json"),
                 ]
             }
         )
         path.write_text(theirs, encoding="utf-8")
 
         with pytest.raises(StaleStoreWriteError):
-            store.put(_job(name="third"))
+            store.put(_job(name="worker-mine-precedents", cadence=None))
         assert path.read_text(encoding="utf-8") == theirs
 
     def test_consecutive_writes_from_one_store_do_not_trip_the_guard(
@@ -248,4 +346,4 @@ class TestStaleWritesAreRefused:
     ) -> None:
         store = ScheduleStore(tmp_path / "schedule.json")
         store.put(_job())
-        store.put(_job(name="other"))  # must not raise
+        store.put(_job(name="worker-enrich", cadence=None))  # must not raise
