@@ -57,7 +57,7 @@ from trellis.core.project import project_override, resolve_project
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.core.write_config import (
     MINHASH_SEED_MAX_DOCS_ENV,
-    WriteBehaviourConfig,
+    resolve_write_behaviour,
 )
 from trellis.core.write_provenance import get_write_provenance
 from trellis.errors import TrellisError
@@ -495,7 +495,7 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
         memory_extraction_env_enabled,
     )
 
-    if not memory_extraction_env_enabled():
+    if not memory_extraction_env_enabled(registry):
         return None
 
     try:
@@ -831,7 +831,7 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
         # fails again, fails loudly again.
         index = MinHashIndex()
         document_store = registry.knowledge.document_store
-        max_docs = WriteBehaviourConfig.from_env().minhash_seed_max_docs
+        max_docs = resolve_write_behaviour(registry).minhash_seed_max_docs
         started = time.perf_counter()
         rows_read = (
             _seed_minhash_index(index, document_store, max_docs=max_docs)
@@ -2086,7 +2086,7 @@ def save_memory(
     # default: the deterministic-only path below is unchanged. An explicit
     # supersedes= bypasses it: the caller has already said what this replaces,
     # and the judge's verdict is not consulted over that declaration.
-    if reconcile_on_write_enabled() and supersedes is None:
+    if reconcile_on_write_enabled(registry) and supersedes is None:
         return _save_memory_reconciled(
             registry,
             executor,
@@ -2308,7 +2308,7 @@ def _compute_reconcile_outcome(
     The model is never a hard dependency: an unbuildable / unavailable client
     yields a fallback ADD outcome rather than raising.
     """
-    model_id = configured_model_id()
+    model_id = configured_model_id(registry)
     try:
         client = _build_llm_client(registry, LLMConsumer.RECONCILE)
     except Exception:
@@ -2329,7 +2329,7 @@ def _compute_reconcile_outcome(
         client,
         new_content=content,
         candidate=candidate,
-        timeout=reconcile_timeout_seconds(),
+        timeout=reconcile_timeout_seconds(registry),
         model_id=model_id,
     )
 
@@ -2580,7 +2580,7 @@ def _save_memory_reconciled(
         outcome = ReconcileOutcome(
             decision=ReconcileDecision.ADD,
             confidence=0.0,
-            model_id=configured_model_id(),
+            model_id=configured_model_id(registry),
             fallback=True,
             fallback_reason=ReconcileFallbackReason.JUDGE_ERROR,
         )
@@ -2970,7 +2970,7 @@ def _require_pack_attribution(
     still joins to nothing, and telling the caller that is more use than
     a message claiming they cited nothing.
     """
-    if not WriteBehaviourConfig.from_env().require_pack_attribution:
+    if not resolve_write_behaviour(registry).require_pack_attribution:
         return
 
     item_ids = lookup_pack_item_ids(registry.operational.event_log, pack_id)
@@ -3053,7 +3053,7 @@ def _require_bodied_attribution(
     for not judging an item they were never shown is the expensive
     mistake, and a gate that cannot be computed must not be enforced.
     """
-    if not WriteBehaviourConfig.from_env().require_bodied_attribution:
+    if not resolve_write_behaviour(registry).require_bodied_attribution:
         return
 
     bodied = lookup_pack_bodied_item_ids(registry.operational.event_log, pack_id)

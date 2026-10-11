@@ -337,7 +337,9 @@ def sync_records(
     # flag is on. Every sync_records caller (corpus, conversation-export,
     # session capture) inherits tagging through this single seam; disabled →
     # None → documents are stored untagged exactly as before.
-    classifier = build_ingest_classifier() if classify_on_ingest_enabled() else None
+    classifier = (
+        build_ingest_classifier() if classify_on_ingest_enabled(registry) else None
+    )
     mirror = _VectorMirrorTally()
 
     for record in records:

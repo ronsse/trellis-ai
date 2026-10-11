@@ -3,8 +3,9 @@
 This registry validates nothing yet (no write route exists in this PR —
 see the module docstring); what must hold is the catalog's own shape: it
 names exactly the tunables this PR's precedence layer governs, every spec
-is well-formed, and ``settings_live`` tells the truth about the one knob
-(``pack_holdout_rate``) a settings override actually reaches today.
+is well-formed, and ``settings_live`` tells the truth about which knobs a
+settings override actually reaches today (all of them except
+``minhash_seed_max_docs``, which instead carries ``restart_required``).
 """
 
 from __future__ import annotations
@@ -35,11 +36,16 @@ class TestCatalogMembership:
         """
         assert set(ENV_VAR_BY_FIELD) <= set(SETTINGS_REGISTRY)
 
-    def test_registry_is_exactly_those_twelve_plus_graph_seeding(self) -> None:
-        assert set(SETTINGS_REGISTRY) == set(ENV_VAR_BY_FIELD) | {"graph_seeding"}
+    def test_registry_is_exactly_those_twelve_plus_two_catalog_only_entries(
+        self,
+    ) -> None:
+        assert set(SETTINGS_REGISTRY) == set(ENV_VAR_BY_FIELD) | {
+            "graph_seeding",
+            "filter_legacy_advisories",
+        }
 
-    def test_thirteen_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 13
+    def test_fourteen_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 14
 
     def test_auto_promote_is_explicitly_not_registered(self) -> None:
         """Excluded per owner decision, deferred to a later PR (plan p1)."""
@@ -71,12 +77,15 @@ class TestEverySpecIsWellFormed:
     def test_name_field_matches_its_own_registry_key(self, name: str) -> None:
         assert SETTINGS_REGISTRY[name].name == name
 
-    def test_no_restart_required_true_in_this_catalog(self) -> None:
-        """Every entry's own "hot-reload: yes" classification (plan p1
-        §(a)): none of the 13 currently registered knobs needs a restart
-        to take effect.
+    def test_exactly_one_entry_needs_a_restart(self) -> None:
+        """``minhash_seed_max_docs`` is read once at process start (its own
+        description says why); every other of the 14 registered knobs is
+        re-read live, so it carries ``settings_live=True`` instead.
         """
-        assert all(not spec.restart_required for spec in SETTINGS_REGISTRY.values())
+        restarters = [
+            name for name, spec in SETTINGS_REGISTRY.items() if spec.restart_required
+        ]
+        assert restarters == ["minhash_seed_max_docs"]
 
 
 class TestUnsafeKnobsMatchThePlanPlusOneDocumentedExtension:
@@ -110,15 +119,80 @@ class TestSettingsLive:
     test than "every spec is well-formed".
     """
 
-    def test_exactly_one_entry_is_settings_live(self) -> None:
-        live = [name for name, spec in SETTINGS_REGISTRY.items() if spec.settings_live]
-        assert live == ["pack_holdout_rate"]
+    def test_every_entry_except_minhash_is_settings_live(self) -> None:
+        not_live = [
+            name for name, spec in SETTINGS_REGISTRY.items() if not spec.settings_live
+        ]
+        assert not_live == ["minhash_seed_max_docs"]
 
-    def test_graph_seeding_is_explicitly_not_settings_live(self) -> None:
-        """Catalog-only in this PR — builder_factory.py's own env read of
-        ``TRELLIS_GRAPH_SEEDING`` is untouched.
+    def test_graph_seeding_is_now_settings_live(self) -> None:
+        """Was catalog-only through an earlier PR; this PR wires
+        ``builder_factory._graph_seeding_enabled`` to read settings too.
         """
-        assert SETTINGS_REGISTRY["graph_seeding"].settings_live is False
+        assert SETTINGS_REGISTRY["graph_seeding"].settings_live is True
+
+    def test_filter_legacy_advisories_is_settings_live(self) -> None:
+        assert SETTINGS_REGISTRY["filter_legacy_advisories"].settings_live is True
+
+
+class TestEveryEntryIsLiveOrExplainsWhyNot:
+    """Every :class:`SettingSpec` must be ``settings_live`` or
+    ``restart_required`` (with the reason stated in its own description) —
+    an entry that is neither would be stored, reported as in force, and
+    have no runtime effect with nothing to catch the gap. Proven against a
+    deliberately defective mutant entry, not just the real registry, so
+    this test cannot pass merely because every *current* entry happens to
+    comply.
+    """
+
+    def test_every_real_entry_is_live_or_restart_required(self) -> None:
+        violations = [
+            name
+            for name, spec in SETTINGS_REGISTRY.items()
+            if not spec.settings_live and not spec.restart_required
+        ]
+        assert violations == []
+
+    def test_a_restart_required_entry_must_say_why_in_its_description(self) -> None:
+        """``restart_required`` alone is not enough — an operator reading
+        only the description must be told it needs a restart.
+        """
+        for spec in SETTINGS_REGISTRY.values():
+            if spec.restart_required:
+                assert "restart" in spec.description.lower(), spec.name
+
+    def test_mutant_neither_live_nor_restart_required_is_caught(self) -> None:
+        """A deliberately defective entry: ``settings_live=False`` and
+        ``restart_required=False`` together. This is exactly the gap the
+        brief calls out — stored, reported as in force, inert — so the
+        rule above must flag it rather than let it slip through as
+        "well-formed".
+        """
+        base = next(iter(SETTINGS_REGISTRY.values()))
+        mutant = replace(base, settings_live=False, restart_required=False)
+        defective_registry = {**SETTINGS_REGISTRY, mutant.name: mutant}
+
+        violations = [
+            name
+            for name, spec in defective_registry.items()
+            if not spec.settings_live and not spec.restart_required
+        ]
+        assert violations == [mutant.name]
+
+    def test_mutant_restart_required_with_no_reason_is_caught(self) -> None:
+        """A second defective shape: ``restart_required=True`` but a
+        description that never says so — a human reading the catalog has
+        no way to know why the knob is listed as live-ineligible.
+        """
+        base = next(iter(SETTINGS_REGISTRY.values()))
+        mutant = replace(
+            base,
+            settings_live=False,
+            restart_required=True,
+            description="Does a thing. " + "x" * 40,
+        )
+
+        assert "restart" not in mutant.description.lower()
 
 
 class TestLookupHelpers:
