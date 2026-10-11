@@ -127,7 +127,10 @@ fi
 
 echo "=== dispatcher tick $(date -Is) ==="
 
-due_json="$("$TRELLIS" admin due-jobs --format json 2>&1)"
+# stdout only: a warning on stderr (e.g. a degraded schedule.json) must
+# reach the log, not the JSON jq parses below, or one log line turns
+# every tick into "no jobs due".
+due_json="$("$TRELLIS" admin due-jobs --format json)"
 due_status=$?
 if [[ $due_status -ne 0 ]]; then
   # due-jobs exits EXIT_STORE (5) when schedule.json is degraded, but
@@ -177,7 +180,9 @@ printf '%s' "$due_json" | jq -c '.due_jobs[]' | while IFS= read -r job_json; do
 
   echo "--- running $name: ${cmd[*]}"
   start_ms=$(date +%s%3N)
-  timeout "${timeout_s}s" "${cmd[@]}"
+  # </dev/null: the job runs inside a `while read` loop fed by a pipe, so
+  # without it a job that reads stdin would consume the remaining due jobs.
+  timeout "${timeout_s}s" "${cmd[@]}" </dev/null
   exit_code=$?
   end_ms=$(date +%s%3N)
   duration_ms=$(( end_ms - start_ms ))
@@ -189,7 +194,7 @@ printf '%s' "$due_json" | jq -c '.due_jobs[]' | while IFS= read -r job_json; do
     --job "$name" \
     --duration-ms "$duration_ms" \
     --exit-code "$exit_code" \
-    --format json
+    --format json </dev/null
 
   echo "--- $name done: exit=$exit_code duration_ms=$duration_ms"
 done
