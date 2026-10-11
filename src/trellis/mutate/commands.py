@@ -42,9 +42,14 @@ class Operation(StrEnum):
     RETENTION_PRUNE = "retention.prune"
     RETENTION_RESTORE = "retention.restore"
 
-    # Admin — routed only through an admin-scope executor
-    # (``build_schedule_executor``), never through
-    # ``create_curate_handlers``: see ``mutate/schedule_handlers.py``.
+    # Admin — each routed only through its own admin-scope executor, never
+    # through ``create_curate_handlers``. SCHEDULE_UPDATE and
+    # JOB_RUN_REQUEST go through ``build_schedule_executor`` (see
+    # ``mutate/schedule_handlers.py``); SETTINGS_UPDATE is a *separate*
+    # executor, ``build_settings_executor`` (see
+    # ``mutate/handlers.py::create_settings_handlers``) — the two
+    # executors are disjoint, not one shared admin executor (gate #860b,
+    # follow-up 9).
     SCHEDULE_UPDATE = "schedule.update"
     JOB_RUN_REQUEST = "job.run_request"
     SETTINGS_UPDATE = "settings.update"

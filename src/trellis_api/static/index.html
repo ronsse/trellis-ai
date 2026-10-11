@@ -5924,8 +5924,15 @@
             // Never claims "nothing will pick this up": a dispatcher's own
             // due-jobs polls leave no record, so their absence proves
             // nothing either way (gate #860, blocker 5).
+            //
+            // "recorded at", not "started at": lastSeenAt is
+            // dispatcher_last_seen_at, the JOB_RUN_STARTED event's own
+            // occurred_at (when the EventLog appended it), not the
+            // payload's started_at -- those can differ (gate #860b,
+            // follow-up 4). Saying "started" would promise a value this
+            // field doesn't carry.
             const seenText = lastSeenAt
-                ? `Last job run recorded starting at ${fmtTime(lastSeenAt)}.`
+                ? `Last job run recorded at ${fmtTime(lastSeenAt)}.`
                 : 'No job run has ever been recorded.';
             el.innerHTML = `<div class="warn-banner">
                 <span class="warn-title">No recent job-run activity</span>
@@ -6011,7 +6018,7 @@
                 <td>${lastRunText(job.last_run)}</td>
                 <td>${nextDueCell}</td>
                 <td id="sched-actions-${escHtml(name)}">
-                    <button class="btn btn-sm" data-action="showEditJobForm" data-id="${escHtml(name)}">Edit</button>
+                    <button class="btn btn-sm" ${disabledAttr} data-action="showEditJobForm" data-id="${escHtml(name)}">Edit</button>
                     <button class="btn btn-sm" ${disabledAttr} data-action="confirmRunJob" data-id="${escHtml(name)}">Run now</button>
                 </td>
             </tr>`;
@@ -6065,7 +6072,8 @@
                 </div>
                 <div class="form-row">
                     <label for="sched-edit-timeout">Timeout seconds (1-86400)</label>
-                    <input type="number" id="sched-edit-timeout" min="1" max="86400" value="${escHtml(Number.isFinite(currentTimeout) ? String(currentTimeout) : '')}">
+                    <input type="number" id="sched-edit-timeout" min="1" max="86400" value="${escHtml(Number.isFinite(currentTimeout) ? String(currentTimeout) : '')}" data-initial-value="${escHtml(Number.isFinite(currentTimeout) ? String(currentTimeout) : '')}">
+                    <p class="field-hint">This cell shows the <em>effective</em> timeout (the catalog default when no override is stored). Leaving this field untouched sends no change, so a null override stays null -- it does not get pinned to the default (gate #860b, follow-up 8).</p>
                 </div>
                 <div id="sched-edit-result"></div>
                 <div id="sched-edit-actions">
@@ -6084,15 +6092,28 @@
         async function confirmEditJob(name) {
             const resultEl = document.getElementById('sched-edit-result');
             const cadenceRaw = document.getElementById('sched-edit-cadence').value.trim();
-            const timeoutRaw = document.getElementById('sched-edit-timeout').value.trim();
+            const timeoutEl = document.getElementById('sched-edit-timeout');
+            const timeoutRaw = timeoutEl.value.trim();
             const body = { cadence: cadenceRaw === '' ? null : cadenceRaw };
-            if (timeoutRaw !== '') {
-                const t = Number(timeoutRaw);
-                if (!Number.isInteger(t) || t < 1 || t > 86400) {
-                    resultEl.innerHTML = '<p style="color:var(--error)">Timeout must be an integer between 1 and 86400.</p>';
-                    return;
+            // The field is pre-filled with the row's *effective* timeout
+            // (catalog default when no override is stored), not the raw
+            // stored value, so a Save that never touched this field must
+            // not send it: that would pin a null override to the shown
+            // default (gate #860b, follow-up 8). Only send timeout_seconds
+            // when the user actually changed the field from what it was
+            // pre-filled with.
+            if (timeoutRaw !== (timeoutEl.dataset.initialValue || '')) {
+                if (timeoutRaw !== '') {
+                    const t = Number(timeoutRaw);
+                    if (!Number.isInteger(t) || t < 1 || t > 86400) {
+                        resultEl.innerHTML = '<p style="color:var(--error)">Timeout must be an integer between 1 and 86400.</p>';
+                        return;
+                    }
+                    body.timeout_seconds = t;
                 }
-                body.timeout_seconds = t;
+                // else: cleared -- there is no wire-level "revert to catalog
+                // default" signal, so an explicit clear is a no-op on this
+                // field rather than guessed at.
             }
             resultEl.innerHTML = loadingHtml('Saving...');
             try {

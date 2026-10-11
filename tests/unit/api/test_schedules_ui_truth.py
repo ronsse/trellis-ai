@@ -22,6 +22,20 @@ source itself, following the same source-regex convention as
    claim was false exactly when nothing was wrong. It now states only
    what the EventLog actually shows, and renders nothing at all once a
    run is seen.
+
+Gate #860b, follow-up 4, adds two more defects of the same kind:
+
+4a. The Edit button had no ``disabledAttr`` guard, unlike the checkbox
+    and "Run now" button on the same row, so clicking Edit then Save on
+    an unstored row silently enrolled it — the same bug blocker-pattern
+    already fixed for "Run now", just on a control that was missed.
+4b. The timeout field is pre-filled with the row's *effective* timeout
+    (the catalog default when no override is stored), not its raw
+    stored value, so an unchanged Save always re-sent that number as
+    an explicit override — pinning a null override to the shown
+    default. ``confirmEditJob`` now compares the field's current value
+    against the value it was pre-filled with and omits
+    ``timeout_seconds`` from the PATCH body entirely when they match.
 """
 
 from __future__ import annotations
@@ -49,6 +63,22 @@ def _show_edit_job_form_body(page: str) -> str:
         page,
         "function showEditJobForm(name) {",
         "\n        function cancelEditJobForm() {",
+    )
+
+
+def _confirm_edit_job_body(page: str) -> str:
+    return _between(
+        page,
+        "async function confirmEditJob(name) {",
+        "\n        function confirmRunJob(name) {",
+    )
+
+
+def _render_schedule_row_body(page: str) -> str:
+    return _between(
+        page,
+        "function renderScheduleRow(job, storeDegraded) {",
+        "\n        async function toggleJobEnabled(name) {",
     )
 
 
@@ -124,3 +154,54 @@ def test_dispatcher_banner_renders_nothing_once_a_run_is_seen() -> None:
         "\n        }\n",
     )
     assert "if (seen) { el.innerHTML = ''; return; }" in body
+
+
+# ---------------------------------------------------------------------------
+# Gate #860b, follow-up 4a: Edit is gated the same way Run now already is.
+# ---------------------------------------------------------------------------
+
+
+def test_edit_button_is_disabled_on_an_unstored_or_degraded_row() -> None:
+    body = _render_schedule_row_body(_page())
+    edit_button = _between(body, 'data-action="showEditJobForm"', "</button>")
+    run_now_button = _between(body, 'data-action="confirmRunJob"', "</button>")
+    # Both controls gate on the same computed attribute as the checkbox --
+    # Edit+Save on an unstored row must not silently enroll it, exactly
+    # like Run now already refuses one (gate #860b, follow-up 4a).
+    edit_prefix = body[: body.index('data-action="showEditJobForm"')]
+    run_now_prefix = body[: body.index('data-action="confirmRunJob"')]
+    assert "${disabledAttr}" in edit_prefix.splitlines()[-1]
+    assert "${disabledAttr}" in run_now_prefix.splitlines()[-1]
+    del edit_button, run_now_button  # only the gating prefix matters here
+
+
+# ---------------------------------------------------------------------------
+# Gate #860b, follow-up 4b: an unchanged Save never pins timeout_seconds.
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_field_remembers_its_prefilled_effective_value() -> None:
+    body = _show_edit_job_form_body(_page())
+    # The field is pre-filled from the row's *effective* (never-null)
+    # timeout, so confirmEditJob needs a separate record of that
+    # pre-filled value to detect "unchanged" -- stashed in a data
+    # attribute, the same pattern data-cadence already uses for blocker 3.
+    assert 'id="sched-edit-timeout"' in body
+    assert "data-initial-value=" in body
+
+
+def test_confirm_edit_job_omits_timeout_when_the_field_is_unchanged() -> None:
+    body = _confirm_edit_job_body(_page())
+    # confirmEditJob must compare the live field value against the
+    # pre-filled one and gate the body.timeout_seconds assignment on that
+    # comparison -- never assign it unconditionally whenever the field is
+    # merely non-empty (the pre-filled field is *always* non-empty, which
+    # is exactly how gate #860b's null->3600 pinning happened).
+    assert "dataset.initialValue" in body
+    assignment_index = body.index("body.timeout_seconds = t;")
+    comparison_index = body.index("timeoutRaw !== (")
+    assert comparison_index != -1
+    assert comparison_index < assignment_index, (
+        "body.timeout_seconds must be assigned only inside the "
+        "unchanged-value comparison, not unconditionally on a non-empty field"
+    )

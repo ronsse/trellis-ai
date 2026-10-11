@@ -341,10 +341,15 @@ and `GET /api/v1/advisories` already use — a caller must not read catalog
 defaults as the operator's own stored choices with no signal the file
 behind them is damaged.
 
-`dispatcher_seen` (and `dispatcher_last_seen_at`) answers "is any host
-dispatcher polling `due-jobs` at all" from the most recent `JOB_RUN_STARTED`
-across every job. The staleness window is **not** a fixed 15 minutes: a
-missing poll record is not evidence of a dead dispatcher, and a flat window
+`dispatcher_seen` (and `dispatcher_last_seen_at`) reflects only whether any
+job has actually *run* recently — the most recent `JOB_RUN_STARTED` across
+every job, `occurred_at` (when the EventLog recorded it, not necessarily
+the payload's own `started_at`) — never "is any host dispatcher polling
+`due-jobs` at all": a dispatcher can poll and find nothing due, which
+leaves no event and reads identically to no dispatcher running (gate
+#860b, follow-up 3; this is why the UI banner hedges rather than claiming
+"nothing will pick it up"). The staleness window is **not** a fixed 15
+minutes: a missing poll record is not evidence of a dead dispatcher, and a flat window
 false-positives against any cadence slower than it (a daily job's
 dispatcher would read "not reporting" ~23 hours a day). The window is the
 longest enabled, stored cadence's own tick interval plus two hours of
@@ -385,11 +390,19 @@ didn't stick.
 
 Refuses rather than runs for two cases, on both REST and the CLI (same
 handler, `trellis.mutate.schedule_handlers.JobRunRequestHandler`): a
-**disabled** job (422, `"job_disabled"`: "enable it first") and a job with
-**no stored row yet** (422, `"not_scheduled"`: run `init-schedule` first).
-Neither silently writes the catalog's default cadence into `schedule.json`
-just because "Run now" was clicked — a deferred run of an LLM-spending job
-would otherwise be a surprise spend the operator never asked for.
+**disabled** job ("enable it first") and a job with **no stored row yet**
+(run `init-schedule` first). `job_disabled`/`not_scheduled` are the
+handler's internal `rejection_reason`, visible only in the audit trail's
+`MUTATION_REJECTED.reason` — neither reaches the caller as a response
+`code`. REST answers 422 with a bare string `detail` (no `code` field;
+`_schedule_result_http_error` reads this case as plain caller-input
+rejection, same as a bad cadence). The CLI answers exit 2 with JSON
+`{"code": "validation_error", ...}` (`_cli_result_failure`'s single code
+for "the request you typed was bad"); the message text still names which
+case it was. Neither silently writes the catalog's default cadence into
+`schedule.json` just because "Run now" was clicked — a deferred run of an
+LLM-spending job would otherwise be a surprise spend the operator never
+asked for.
 
 ```json
 {"status": "ok", "name": "tune", "run_requested_at": "2026-10-11T03:00:00+00:00", "dispatcher_hint": "Accepted. A host dispatcher polling 'due-jobs' picks this up, typically within ~5 minutes, if one is installed."}

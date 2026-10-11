@@ -303,6 +303,29 @@ class TestListAdminJobs:
         # the operator's own choice, which this build cannot verify.
         assert tune["enabled"] is False
 
+    def test_unstored_row_on_a_clean_store_has_no_next_due_at(self, client):
+        """Gate #860b, follow-up 1 (the G1 mutant survivor): on a clean,
+        non-degraded store "tune" has no row at all, so
+        ``_job_row_or_default`` hands back the catalog default with
+        ``enabled=True`` (the store itself is not degraded) and the
+        catalog's own cadence. Unlike the degraded case above, nothing
+        here makes ``enabled`` false — the only thing standing between
+        this row and a ``next_due_at`` that ``due-jobs`` will never
+        honour is the ``stored`` flag itself (admin.py:1629's
+        ``stored and row.enabled and row.cadence is not None``). Dropping
+        just the ``stored`` conjunct would compute a next_due_at from the
+        catalog default, as if an operator had actually scheduled it.
+        """
+        row = next(
+            r
+            for r in client.get("/api/v1/admin/jobs").json()["jobs"]
+            if r["name"] == "tune"
+        )
+        assert row["stored"] is False
+        assert row["enabled"] is True
+        assert row["cadence"] == "0 4 * * *"
+        assert row["next_due_at"] is None
+
 
 # ---------------------------------------------------------------------------
 # PATCH /admin/jobs/<name>
