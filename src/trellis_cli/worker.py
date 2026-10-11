@@ -86,6 +86,7 @@ from trellis.stores.advisory_source import (
     resolve_advisory_path,
 )
 from trellis.stores.advisory_store import AdvisoryStore
+from trellis.stores.base.event_log import EventType
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.analyze import (
     _build_learning_registry_or_exit,
@@ -319,17 +320,20 @@ def tune_cmd(
         else None
     )
 
+    event_log = get_event_log()
     report = run_auto_promotion(
         tuner=tuner,
         parameter_store=get_parameter_store(),
         tuner_state=get_tuner_state_store(),
         outcome_store=get_outcome_store(),
-        event_log=get_event_log(),
+        event_log=event_log,
         policy=policy,
         since=since,
         dry_run=dry_run,
         source="trellis.worker.tune",
     )
+    if not dry_run:
+        _emit_tune_cycle_completed(event_log, report, tuner_name=tuner_name)
 
     if output_format == "json":
         payload = report_to_dict(report)
@@ -339,6 +343,26 @@ def tune_cmd(
         return
 
     _render_text(report, tuner_name=tuner_name)
+
+
+def _emit_tune_cycle_completed(
+    event_log: EventLog, report: Any, *, tuner_name: str
+) -> None:
+    """Make one ``worker tune`` pass durable where the API can read it (e167).
+
+    Mirrors :func:`_emit_curate_cycle_completed`: never called for a dry
+    run (``test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes``
+    pins "writes nothing" as including the EventLog), and wrapped whole
+    so a broken EventLog cannot fail the tuning pass it is reporting on.
+    """
+    try:
+        event_log.emit(
+            EventType.TUNE_CYCLE_COMPLETED,
+            source="trellis.worker.tune",
+            payload={"tuner_name": tuner_name, **report_to_dict(report)},
+        )
+    except Exception:
+        logger.warning("worker_tune.cycle_completed_emit_failed", exc_info=True)
 
 
 def _render_text(report: Any, *, tuner_name: str) -> None:
@@ -566,6 +590,7 @@ def run_curation_cycle(
 
     Returns a :class:`CurateCycleResult` with per-stage counts.
     """
+    started = time.monotonic()
     skipped: list[str] = []
 
     noise = _curate_stage_noise_tags(
@@ -599,7 +624,7 @@ def run_curation_cycle(
         skipped=skipped,
     )
 
-    return CurateCycleResult(
+    result = CurateCycleResult(
         noise_tagged=noise["noise_tagged"],
         noise_refused_non_document=noise["noise_refused_non_document"],
         advisories_generated=advisory["advisories_generated"],
@@ -616,6 +641,52 @@ def run_curation_cycle(
         skipped_stages=tuple(skipped),
         dry_run=dry_run,
     )
+    if not dry_run:
+        _emit_curate_cycle_completed(
+            event_log, result, duration_seconds=time.monotonic() - started
+        )
+    return result
+
+
+def _emit_curate_cycle_completed(
+    event_log: EventLog, result: CurateCycleResult, *, duration_seconds: float
+) -> None:
+    """Make one cycle's result durable where the API can read it (e167).
+
+    The nightly cron is the host-side ``curate-nightly.sh``, whose JSON
+    output lands in ``~/.trellis/logs/curate.log`` — a file the API
+    container cannot see and nothing renders. ``GET /api/v1/loops`` (and
+    any other API-side reader) can only see what the EventLog carries,
+    so this is the one place that gap can close: every field
+    ``--format json`` already reports (``status`` included — the same
+    derived field the CLI's own JSON surface adds alongside
+    ``result.to_dict()``), plus how long the cycle took.
+
+    Never called for a dry run: :func:`run_curation_cycle`'s own
+    docstring already promises a dry run makes no finding and no write,
+    and ``test_dry_run_writes_no_finding_and_nothing_else`` pins
+    "nothing else" as including the EventLog's row count.
+
+    Advisory, wrapped whole: an EventLog write that fails here must
+    never fail the cycle it is reporting on (CLAUDE.md's rule for an
+    advisory step on the write path; :func:`record_write_rejection` is
+    the existing instance of the same guard). ``emit`` is the one call
+    that can raise — the ``try`` wraps it alone, no narrower, so a new
+    way for it to fail is covered by construction rather than by an
+    enumerated exception type.
+    """
+    try:
+        event_log.emit(
+            EventType.CURATE_CYCLE_COMPLETED,
+            source="trellis.worker.curate",
+            payload={
+                "status": result.status,
+                **result.to_dict(),
+                "duration_seconds": duration_seconds,
+            },
+        )
+    except Exception:
+        logger.warning("worker_curate.cycle_completed_emit_failed", exc_info=True)
 
 
 def _curate_stage_noise_tags(

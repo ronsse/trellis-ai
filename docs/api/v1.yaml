@@ -1143,6 +1143,74 @@ components:
       - target_id
       title: LinkRequest
       type: object
+    LoopHealthResponse:
+      additionalProperties: false
+      description: 'Response for ``GET /api/v1/loops``: one row per loop.'
+      properties:
+        generated_at:
+          title: Generated At
+          type: string
+        loops:
+          items:
+            $ref: '#/components/schemas/LoopHealthRowResponse'
+          title: Loops
+          type: array
+      required:
+      - generated_at
+      title: LoopHealthResponse
+      type: object
+    LoopHealthRowResponse:
+      additionalProperties: false
+      description: 'One loop''s last-run snapshot, as served by ``GET /api/v1/loops``.
+
+
+        ``last_run_at`` / ``last_status`` / ``counters`` are ``None``
+
+        together exactly when the loop has produced no event the EventLog
+
+        can see — "never run (or ran before this build)", never a bare
+
+        ``0``. ``actuates`` says whether the loop can write without a human
+
+        approving each change; ``what_it_changes`` is the one-line
+
+        plain-English explanation either way.'
+      properties:
+        actuates:
+          title: Actuates
+          type: boolean
+        counters:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Counters
+        description:
+          title: Description
+          type: string
+        last_run_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Run At
+        last_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Status
+        name:
+          title: Name
+          type: string
+        what_it_changes:
+          title: What It Changes
+          type: string
+      required:
+      - name
+      - description
+      - actuates
+      - what_it_changes
+      title: LoopHealthRowResponse
+      type: object
     MetricsTimeseriesResponse:
       additionalProperties: false
       description: 'Response for ``GET /api/v1/metrics/timeseries``.
@@ -3166,6 +3234,35 @@ paths:
       summary: Create Link
       tags:
       - curate
+  /api/v1/loops:
+    get:
+      description: 'Is each curation / learning loop actually doing anything? (e167)
+
+
+        Reads existing events only (``trellis.ops.loop_health``), plus one
+
+        documented live store read for the tuner''s pending-proposal count.
+
+        A loop with no event yet reports ``last_run_at``/``last_status`` as
+
+        ``null`` — "never run (or ran before this build)" — which is a
+
+        different fact from a real run that counted zero, so the two must
+
+        never render the same.'
+      operationId: loop_health_api_v1_loops_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoopHealthResponse'
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: Loop Health
+      tags:
+      - admin
   /api/v1/measurements:
     get:
       description: Query Measurement nodes by subject / metric_name / observer.

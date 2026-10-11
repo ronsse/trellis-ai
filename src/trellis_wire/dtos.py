@@ -772,3 +772,34 @@ class MetricsTimeseriesResponse(WireModel):
     group_by: str = "none"
     days: int = 30
     series: list[TimeseriesSeriesResponse] = Field(default_factory=list)
+
+
+# -- Loop health (e167) --
+
+
+class LoopHealthRowResponse(WireModel):
+    """One loop's last-run snapshot, as served by ``GET /api/v1/loops``.
+
+    ``last_run_at`` / ``last_status`` / ``counters`` are ``None``
+    together exactly when the loop has produced no event the EventLog
+    can see — "never run (or ran before this build)", never a bare
+    ``0``. ``actuates`` says whether the loop can write without a human
+    approving each change; ``what_it_changes`` is the one-line
+    plain-English explanation either way.
+    """
+
+    name: str
+    description: str
+    actuates: bool
+    what_it_changes: str
+    #: ISO-8601 UTC, not a ``datetime`` — see module note on DTOs below.
+    last_run_at: str | None = None
+    last_status: str | None = None
+    counters: dict[str, Any] | None = None
+
+
+class LoopHealthResponse(WireModel):
+    """Response for ``GET /api/v1/loops``: one row per loop."""
+
+    generated_at: str
+    loops: list[LoopHealthRowResponse] = Field(default_factory=list)

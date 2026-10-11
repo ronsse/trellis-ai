@@ -326,6 +326,18 @@
         }
         .status-row:last-child { border-bottom: none; }
 
+        /* Loop health (e167) */
+        .loop-row { padding: 0.75rem 0; border-bottom: 1px solid var(--border); }
+        .loop-row:last-child { border-bottom: none; }
+        .loop-row-head {
+            display: flex; justify-content: space-between; align-items: center;
+            flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.3rem;
+        }
+        .loop-row-badges { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+        .loop-row-desc { font-size: 0.82rem; color: var(--text-dim); margin-bottom: 0.2rem; }
+        .loop-row-when { font-size: 0.8rem; margin-bottom: 0.3rem; }
+        .loop-row-counters { font-size: 0.75rem; color: var(--text-dim); }
+
         /* Review queue */
         .review-section {
             background: var(--surface);
@@ -1395,6 +1407,7 @@
             <a href="#" data-view="memories" data-label="Memories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.2" rx="7.5" ry="2.9"/><path d="M4.5 5.2v6.4c0 1.6 3.4 2.9 7.5 2.9s7.5-1.3 7.5-2.9V5.2"/><path d="M4.5 11.6V18c0 1.6 3.4 2.9 7.5 2.9s7.5-1.3 7.5-2.9v-6.4"/></svg><span class="nav-label">Memories</span><span class="nav-key">8</span></a>
             <a href="#" data-view="events" data-label="Events"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h12M9 12h12M9 18h12"/><circle cx="4" cy="6" r="1.3"/><circle cx="4" cy="12" r="1.3"/><circle cx="4" cy="18" r="1.3"/></svg><span class="nav-label">Events</span><span class="nav-key">9</span></a>
             <a href="#" data-view="packs" data-label="Packs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 16V8a1.9 1.9 0 0 0-.95-1.64l-6.6-3.8a1.9 1.9 0 0 0-1.9 0l-6.6 3.8A1.9 1.9 0 0 0 3.5 8v8a1.9 1.9 0 0 0 .95 1.64l6.6 3.8a1.9 1.9 0 0 0 1.9 0l6.6-3.8A1.9 1.9 0 0 0 20.5 16z"/><path d="M3.8 7.1L12 11.8l8.2-4.7M12 21.3V11.8"/></svg><span class="nav-label">Packs</span><span class="nav-key">0</span></a>
+            <a href="#" data-view="loops" data-label="Loops"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4M5.6 5.6l2.6 2.6M18.4 5.6l-2.6 2.6M5.6 18.4l2.6-2.6M18.4 18.4l-2.6-2.6"/></svg><span class="nav-label">Loops</span></a>
             <a href="#" data-view="advisories" data-label="Advisories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l8.5 4.9v9.2L12 21.5l-8.5-4.9V7.4z"/><path d="M12 8.2v5"/><circle cx="12" cy="16" r="0.9" fill="currentColor" stroke="none"/></svg><span class="nav-label">Advisories</span></a>
             <a href="#" data-view="policies" data-label="Policies"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l7.5 3v6.2c0 4.3-3.1 7.4-7.5 9.3-4.4-1.9-7.5-5-7.5-9.3V5.5z"/><path d="M9 12l2.2 2.2L15.5 9.5"/></svg><span class="nav-label">Policies</span></a>
         </nav>
@@ -1741,6 +1754,23 @@
             <div id="pack-detail-container"></div>
         </div>
 
+        <!-- ============ Loops (per-loop health; e167) ============ -->
+        <div id="view-loops" style="display:none">
+            <div class="section-header">
+                <h2>Loop Health</h2>
+                <div class="search-bar" style="margin:0">
+                    <button onclick="loadLoops()">Refresh</button>
+                </div>
+            </div>
+            <p style="font-size:0.8rem; color:var(--text-dim); margin-bottom:1rem;">
+                Is each curation / learning loop actually doing anything? Each row reads the
+                EventLog's most recent cycle for that loop &mdash; a loop that has never produced
+                one reads "Not measured", never a bare zero indistinguishable from "ran and did
+                nothing."
+            </p>
+            <div id="loops-rows"></div>
+        </div>
+
         <div id="view-advisories" style="display:none">
             <div id="advisories-banner"></div>
             <div class="search-bar">
@@ -2026,7 +2056,7 @@
         }
 
         // -- View switching --
-        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs', 'advisories', 'policies'];
+        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs', 'advisories', 'policies', 'loops'];
         const viewLoaded = {};
         // init() reveals the dashboard when its fetches resolve. Track where the
         // user actually is, so a click made while the API is still answering is
@@ -2061,6 +2091,7 @@
                 if (name === 'memories') loadMemories();
                 if (name === 'events') loadEvents();
                 if (name === 'packs') loadPacks();
+                if (name === 'loops') loadLoops();
                 if (name === 'advisories') loadAdvisories();
                 if (name === 'policies') loadPolicies();
             }
@@ -4172,7 +4203,7 @@
                 if (injected.length > 0) {
                     injectedHtml = `
                     <div style="overflow-x:auto"><table>
-                        <thead><tr><th>#</th><th>Item</th><th>Type</th><th>Strategy</th><th>Reason</th><th>Scores</th><th>Tokens</th></tr></thead>
+                        <thead><tr><th>#</th><th>Item</th><th>Type</th><th>Strategy</th><th>Reason</th><th>Scores</th><th>Tokens</th><th>Helpful</th><th>Unhelpful</th></tr></thead>
                         <tbody>${injected.map(it => `
                             <tr>
                                 <td>${it.rank != null ? it.rank : '-'}</td>
@@ -4182,6 +4213,8 @@
                                 <td style="font-size:0.78rem">${escHtml(it.selection_reason || '')}</td>
                                 <td style="font-size:0.72rem; color:var(--text-dim)">${escHtml(scoreBreakdownStr(it.score_breakdown))}</td>
                                 <td>${it.estimated_tokens != null ? it.estimated_tokens : '-'}</td>
+                                <td style="text-align:center"><input type="checkbox" class="fb-helpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark helpful"></td>
+                                <td style="text-align:center"><input type="checkbox" class="fb-unhelpful-cb" data-item-id="${escHtml(it.item_id)}" title="Mark unhelpful"></td>
                             </tr>`).join('')}
                         </tbody>
                     </table></div>`;
@@ -4239,6 +4272,24 @@
                     feedbackHtml += '</div>';
                 }
 
+                // Element-level verdicts ride the injected-items table's new
+                // Helpful/Unhelpful checkboxes (data-item-id, read via
+                // querySelectorAll rather than spliced into a selector or an
+                // inline handler -- item_id is an opaque agent-written id).
+                // The overall verdict buttons set success/rating the same
+                // way the REST/MCP surfaces already derive rating from
+                // success when omitted, so this form never invents a float.
+                const feedbackFormHtml = `
+                    <div style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem">
+                        <h4 style="font-size:0.9rem; margin-bottom:0.5rem">Record feedback</h4>
+                        <textarea id="pack-feedback-comment" class="review-rationale" placeholder="Optional comment"></textarea>
+                        <div style="margin-top:0.5rem; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap">
+                            <button class="btn btn-sm" data-act="submitPackFeedbackHelpful">👍 Helpful overall</button>
+                            <button class="btn btn-sm btn-danger" data-act="submitPackFeedbackUnhelpful">👎 Not helpful</button>
+                            <span id="pack-feedback-status" style="font-size:0.8rem"></span>
+                        </div>
+                    </div>`;
+
                 container.innerHTML = `
                     <div class="trace-detail fade-in">
                         <h3>
@@ -4254,9 +4305,66 @@
                         ${rejectedHtml}
                         ${budgetHtml}
                         ${feedbackHtml}
+                        ${feedbackFormHtml}
                     </div>
                 `;
                 container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+                // Checking one verdict for a row clears the other -- looked
+                // up through the row the checkbox sits in (closest('tr')),
+                // never through a selector built from the row's item_id, so
+                // an item_id holding selector-special characters cannot
+                // break this wiring.
+                container.querySelectorAll('.fb-helpful-cb, .fb-unhelpful-cb').forEach(cb => {
+                    cb.addEventListener('change', () => {
+                        if (!cb.checked) return;
+                        const row = cb.closest('tr');
+                        if (!row) return;
+                        const otherSel = cb.classList.contains('fb-helpful-cb') ? '.fb-unhelpful-cb' : '.fb-helpful-cb';
+                        const other = row.querySelector(otherSel);
+                        if (other) other.checked = false;
+                    });
+                });
+
+                async function submitPackFeedback(success) {
+                    const statusEl = document.getElementById('pack-feedback-status');
+                    const buttons = container.querySelectorAll('[data-act="submitPackFeedbackHelpful"], [data-act="submitPackFeedbackUnhelpful"]');
+                    buttons.forEach(b => { b.disabled = true; });
+                    if (statusEl) statusEl.textContent = 'Submitting...';
+                    try {
+                        const commentEl = document.getElementById('pack-feedback-comment');
+                        const comment = commentEl ? commentEl.value.trim() : '';
+                        const helpful_item_ids = Array.from(container.querySelectorAll('.fb-helpful-cb:checked')).map(cb => cb.dataset.itemId);
+                        const unhelpful_item_ids = Array.from(container.querySelectorAll('.fb-unhelpful-cb:checked')).map(cb => cb.dataset.itemId);
+                        const resp = await postJSON(`/packs/${encodeURIComponent(packId)}/feedback`, {
+                            success,
+                            comment: comment || null,
+                            helpful_item_ids,
+                            unhelpful_item_ids,
+                        });
+                        if (statusEl) {
+                            // event_log_in_sync: false means only the durable
+                            // JSONL row landed and a reconcile is owed -- per
+                            // PackFeedbackResponse's docstring, this must not
+                            // read as the feedback having driven behavior yet.
+                            statusEl.innerHTML = resp.event_log_in_sync
+                                ? '<span style="color:var(--success)">Feedback recorded.</span>'
+                                : '<span style="color:var(--warn)">Feedback written to the durable log; a reconcile is owed before it reaches the event log.</span>';
+                        }
+                        await loadPackDetail(packId);
+                    } catch (err) {
+                        // Absence must not read as success (#849): show the
+                        // error and re-enable the buttons rather than
+                        // silently resetting the form.
+                        if (statusEl) statusEl.innerHTML = `<span style="color:var(--error)">Failed to record feedback: ${escHtml(err.message)}</span>`;
+                        buttons.forEach(b => { b.disabled = false; });
+                    }
+                }
+                const feedbackFormActions = {
+                    submitPackFeedbackHelpful: () => submitPackFeedback(true),
+                    submitPackFeedbackUnhelpful: () => submitPackFeedback(false),
+                };
+                container.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', feedbackFormActions[b.dataset.act]));
             } catch (err) {
                 container.innerHTML = `<div class="trace-detail"><p style="color:var(--error)">Failed to load pack: ${escHtml(err.message)}</p></div>`;
             }
@@ -4375,6 +4483,88 @@
                 }
                 viewLoaded['dashboard'] = true;
             }
+        }
+
+        // ============================================================
+        //  LOOPS (per-loop health; e167)
+        // ============================================================
+        const LOOP_LABELS = {
+            noise_demotion: 'Noise demotion',
+            advisory_generation: 'Advisory generation',
+            advisory_fitness: 'Advisory fitness',
+            learning_candidate_scoring: 'Learning-candidate scoring',
+            precedent_promotion: 'Precedent promotion',
+            tuner: 'Tuner',
+            feedback_intake: 'Feedback intake',
+        };
+
+        // The nightly cron (worker curate) drives most of these loops once a
+        // day; two missed nights plus slack is "something broke," not
+        // scheduling jitter. Applied uniformly so a row that stops updating
+        // doesn't quietly read as fine just because its last status was "ok".
+        const LOOP_STALE_HOURS = 36;
+
+        async function loadLoops() {
+            const container = document.getElementById('loops-rows');
+            container.innerHTML = loadingHtml('Loading loop health...');
+            try {
+                const data = await fetchJSON('/loops');
+                const loops = data.loops || [];
+                if (loops.length === 0) {
+                    container.innerHTML = '<div class="empty-state"><p>No loops reported</p></div>';
+                    return;
+                }
+                container.innerHTML = `<div class="status-section" style="padding:0.25rem 1.25rem">` +
+                    loops.map(renderLoopRow).join('') + `</div>`;
+            } catch (err) {
+                container.innerHTML = `<div style="color:var(--error); padding:1.5rem; text-align:center">` +
+                    `Failed to load loop health: ${escHtml(err.message)}</div>`;
+            }
+        }
+
+        function renderLoopRow(loop) {
+            const label = LOOP_LABELS[loop.name] || loop.name;
+            const actuatesBadge = loop.actuates
+                ? '<span class="badge badge-accent" title="Writes without a human approving each change">actuates</span>'
+                : '<span class="badge badge-info" title="Senses / scores only &mdash; a human approves before anything changes">sensing only</span>';
+
+            let whenHtml;
+            let statusBadge = '';
+            if (!loop.last_run_at) {
+                whenHtml = '<span style="color:var(--text-dim)">Not measured &mdash; no event seen yet</span>';
+                statusBadge = '<span class="badge badge-info">never run</span>';
+            } else {
+                const ageMs = Date.now() - new Date(loop.last_run_at).getTime();
+                const stale = ageMs > LOOP_STALE_HOURS * 3600 * 1000;
+                whenHtml = `<span title="${escHtml(fmtUtc(loop.last_run_at))}">` +
+                    `${escHtml(fmtUtc(loop.last_run_at))} (${escHtml(timeAgo(loop.last_run_at))})</span>`;
+                if (stale) {
+                    whenHtml += ` <span class="badge badge-warn" title="No run seen in over ${escHtml(LOOP_STALE_HOURS)}h">stale</span>`;
+                }
+                const statusMap = { ok: 'badge-ok', degraded: 'badge-warn', stale: 'badge-warn', skipped: 'badge-info' };
+                if (loop.last_status) {
+                    statusBadge = `<span class="badge ${statusMap[loop.last_status] || 'badge-info'}">` +
+                        `${escHtml(loop.last_status)}</span>`;
+                }
+            }
+
+            const countersHtml = loop.counters
+                ? Object.entries(loop.counters).map(([k, v]) =>
+                      `<span class="mono" style="margin-right:0.75rem">${escHtml(k)}: ${escHtml(v === null ? 'null' : v)}</span>`
+                  ).join('')
+                : '<span style="color:var(--text-dim)">not measured</span>';
+
+            return `
+                <div class="loop-row">
+                    <div class="loop-row-head">
+                        <strong>${escHtml(label)}</strong>
+                        <span class="loop-row-badges">${actuatesBadge}${statusBadge}</span>
+                    </div>
+                    <div class="loop-row-desc">${escHtml(loop.description)}</div>
+                    <div class="loop-row-desc"><em>What it changes:</em> ${escHtml(loop.what_it_changes)}</div>
+                    <div class="loop-row-when">${whenHtml}</div>
+                    <div class="loop-row-counters">${countersHtml}</div>
+                </div>`;
         }
 
         // ============================================================

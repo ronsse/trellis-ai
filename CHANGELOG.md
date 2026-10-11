@@ -6,6 +6,41 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Loop health panel (e167): `GET /api/v1/loops`.** Answers "is each
+  curation / learning loop actually doing anything?" for all seven loops
+  (noise demotion, advisory generation, advisory fitness,
+  learning-candidate scoring, precedent promotion, tuner, feedback
+  intake) from the EventLog alone — no new probe. `trellis worker curate`
+  and `trellis worker tune` now emit `CURATE_CYCLE_COMPLETED` /
+  `TUNE_CYCLE_COMPLETED` at the end of every **live** run (never on
+  `--dry-run`, which still writes nothing), carrying the same counters
+  `--format json` already reports; the emit is wrapped whole, so a broken
+  EventLog write cannot fail the cycle it is reporting on. Each row
+  carries `actuates: bool` and a one-line `what_it_changes`, and — the
+  one load-bearing distinction — a loop with no event yet reports
+  `last_run_at`/`last_status`/`counters` all `null` ("never run"), never
+  a bare `0` indistinguishable from "ran and found nothing to do". New
+  module `trellis.ops.loop_health`; route is admin-scoped, alongside the
+  other Review-queue surfaces in `trellis_api.routes.admin`. A new Loops
+  tab in the operator UI (`src/trellis_api/static/index.html`) renders
+  the report: timestamps labelled UTC with relative age, a loop whose
+  last run is over 36h old is flagged `stale` independently of its own
+  `last_status`, a never-run loop reads "Not measured" rather than a
+  bare zero, and a fetch failure renders a visible error instead of a
+  silent empty state.
+- **Pack feedback from the Packs detail view.** `POST /packs/{pack_id}/feedback`
+  was the only learning-loop input the dashboard could add and the UI never
+  called it — the "Feedback" count on a pack's detail page only ever grew by
+  an agent calling the route directly. The injected-items table now carries a
+  Helpful/Unhelpful checkbox per row (checking one clears the other), plus an
+  optional comment and two overall-verdict buttons ("Helpful overall" /
+  "Not helpful") that set `success` and leave `rating` for the server to
+  derive, matching the existing REST/MCP contract. A successful submit shows
+  whether the event reached the EventLog yet (`event_log_in_sync`) and
+  reloads the pack so the new row and count reflect it; a failed submit shows
+  the error and re-enables the buttons instead of resetting the form. UI
+  only — the route and `PackFeedbackRequest`/`PackFeedbackResponse` shapes
+  are unchanged.
 - **Advisories and Policies tabs in the web UI (#850).** Both surfaces
   existed only as CLI/REST before this: `GET /advisories` (+
   `POST /advisories/generate`, an admin action gated behind an inline
