@@ -237,7 +237,11 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="high",
         risk_note=(
-            "Entity mentions are currently not being produced; under investigation."
+            "Runs extraction on every memory write and adds entities a "
+            "memory mentions, which is not proof they exist; those stay "
+            "out of packs until confirmed, but the graph grows with "
+            "every write and the additions are not undone by turning "
+            "this off again."
         ),
         group="ingest_tagging",
         settings_live=True,
@@ -255,9 +259,10 @@ _SPECS: tuple[SettingSpec, ...] = (
             "recording it as a new add. On, duplicate and superseding "
             "writes get folded into the right outcome automatically. "
             "Off (the default), every write is recorded as a new add "
-            "and no such judgment runs. This setting also gates the "
-            "broader pairwise-supersession rollout, so turning it on "
-            "changes more than just this one call's behavior."
+            "and no such judgment runs. A memory this marks superseded "
+            "is withheld from a pack whenever its successor is also a "
+            "candidate there, so turning this on changes what packs "
+            "serve, not only how writes are recorded."
         ),
         surfaces=("mcp",),
         restart_required=False,
@@ -440,15 +445,12 @@ _SPECS: tuple[SettingSpec, ...] = (
         type="str",
         default="hermes3:8b",
         description=(
-            "The model identifier labelled on reconcile verdict events "
-            "— the add/update/supersede/no-op judgment made when "
-            "reconcile-on-write is enabled. This is free text: nothing "
-            "validates it against the models actually available in "
-            "your deployment, so a typo silently changes verdict "
-            "quality with no error anywhere. A blank or "
-            "whitespace-only value is refused rather than stored, "
-            "since an empty override behaves the same as having none "
-            "at all."
+            "The model name recorded on reconcile verdict events when "
+            "the model client does not report its own. It is a label "
+            "for the audit trail only: it does not choose which model "
+            "judges verdicts, which comes from the configured LLM "
+            "client. Free text, not checked against available models; "
+            "a blank or whitespace-only value is refused."
         ),
         surfaces=("mcp",),
         restart_required=False,
@@ -509,11 +511,13 @@ _SPECS: tuple[SettingSpec, ...] = (
         type="bool",
         default=True,
         description=(
-            "Drops advisories that predate scoped success-history "
-            "tracking from what a pack serves, since the learning loop "
-            "has no history to grade them on. On by default, matching "
-            "how the system has always behaved. Turning this off lets "
-            "those older, ungraded advisories back into served packs."
+            "Withholds advisories written by the advisory generator "
+            "before it was repaired. Those rows were given a new random "
+            "id on every nightly run, so regeneration never replaces "
+            "them, and they carry no evidence-confidence data, so the "
+            "learning loop cannot grade them. On by default. Turning "
+            "this off serves those old rows again; it does not delete "
+            "them."
         ),
         # Kept out of write_config.py/WriteBehaviourConfig for the same
         # reason as graph_seeding: it governs what retrieval serves,
