@@ -45,27 +45,52 @@ closed row. The lookup closes every current match with ``FOREACH``, as
 current versions heals on its next write, and carries
 ``edge_id``/``created_at`` forward from the :func:`_shown_row` pick.
 
-``upsert_edge`` has its own race, separate from the node-duplication one
+``upsert_edge`` had its own race, separate from the node-duplication one
 above: an unprotected ``OPTIONAL MATCH`` for the existing edge followed
-by ``CREATE`` lets two concurrent writers on the same
+by ``CREATE`` let two concurrent writers on the same
 ``(source_id, target_id, edge_type)`` both observe "no current edge" and
-both create one, leaving two current rows for one logical edge (there is
-no uniqueness constraint to fall back on, because historical rows share
-the same key). ``upsert_edge`` therefore first writes ``_cas_lock`` to
-the current rows of both endpoints, in sorted ``node_id`` order, and only
-then resolves the endpoints and reads the existing edge. On Neo4j that
-write takes each row's lock, so an ``upsert_node`` on either endpoint
-that is already in flight commits before the endpoints are resolved, and
-the edge lands on the row it left current; a second writer of the same
-edge likewise waits for the first and reads its row as ``old``. The
-sorted order keeps writers of ``x->y`` and ``y->x`` from deadlocking.
-ArcadeDB takes no lock: a conflicting writer fails at commit and the
-driver retries it, but two concurrent writers of one edge can still both
-commit there and leave two current rows. Only single-row writers take the
-lock: ``upsert_edges_bulk`` does not (it would need a sorted per-row lock
-order across every row it writes, like Postgres's bulk edge path), so a
-bulk write racing another writer of the same edge can still leave two
-current rows.
+both create one, leaving two current rows for one logical edge. There is
+no uniqueness constraint on the edge rows themselves to fall back on,
+because historical rows share the same key, so ``upsert_edge`` first
+writes ``_cas_lock`` to the current rows of both endpoints, in sorted
+``node_id`` order, and only then resolves the endpoints and reads the
+existing edge. On Neo4j that write takes each row's lock, so an
+``upsert_node`` on either endpoint that is already in flight commits
+before the endpoints are resolved, and the edge lands on the row it left
+current; the sorted order keeps writers of ``x->y`` and ``y->x`` from
+deadlocking. But the endpoint rows are not the record two concurrent
+writers of *the same edge* actually contend over — the edge row is — so
+touching them does not reliably force that conflict, and on ArcadeDB
+(which takes no lock; a conflicting writer fails only at commit, and
+only when the commit happens to collide) two concurrent writers of one
+edge could still both commit and leave two current rows (the live
+failure ``test_concurrent_edge_update_leaves_one_current_row`` reproduced
+three times on ``live-infra.yml`` over 2026-10-10/11, across PR #848,
+PR #851 and a direct push to main).
+
+``upsert_edge`` closes that gap with an ``EdgeClaim`` node, keyed on the
+directed ``(source_id, target_id, edge_type)`` triplet under its own
+uniqueness constraint (mirroring the existing ``AliasClaim`` mechanism
+used by :meth:`upsert_alias` / :meth:`bind_alias_if_absent`) — the same
+genuine serialization point the node path lacked. Every ``upsert_edge``
+call ``MERGE``s and then touches (``_cas_lock`` SET/REMOVE) this claim
+row, in the same transaction, before resolving the existing edge: the
+``MERGE`` makes two writers racing to create the claim for the first
+time (the create-edge race) conflict under the unique constraint; the
+``_cas_lock`` touch makes two writers racing to re-version an
+*already-claimed* triplet (the update-edge race, and the shape the
+bug report reproduced) conflict as a write on that same existing row —
+exactly as ``update_node_if_current``'s own ``_cas_lock`` touch of ``cur``
+does for nodes. The write is executed through
+:meth:`_execute_edge_claim_write`, which re-runs the whole transaction
+on a lost claim race (:func:`_is_edge_claim_contention`, widened on
+ArcadeDB the same way :func:`_is_alias_claim_contention` is), so a
+retry always re-reads committed state rather than papering over a
+conflict that was never detected. Only single-row writers take the
+claim: ``upsert_edges_bulk`` does not (it would need a sorted per-row
+claim order across every row it writes, like Postgres's bulk edge
+path), so a bulk write racing another writer of the same edge can still
+leave two current rows.
 
 Per-backend subclasses override the **seams**:
 
@@ -381,6 +406,20 @@ def _alias_claim_key(source_system: str, raw_id: str) -> str:
     )
 
 
+def _edge_claim_key(source_id: str, target_id: str, edge_type: str) -> str:
+    """Return an injective, backend-portable key for one edge triplet.
+
+    Keyed on the directed ``(source_id, target_id, edge_type)`` triplet
+    ``upsert_edge``'s existing-edge ``OPTIONAL MATCH`` matches on — the
+    same shape :func:`_alias_claim_key` uses, for the same reason: a
+    JSON-encoded list so no separator choice can make two distinct
+    triplets collide.
+    """
+    return json.dumps(
+        [source_id, target_id, edge_type], ensure_ascii=False, separators=(",", ":")
+    )
+
+
 #: Label and key property of the alias claim node. The claim is the
 #: serialization point for every alias write: each writer ``MERGE``s it
 #: under a uniqueness constraint, so losing that race is how a concurrent
@@ -389,6 +428,15 @@ def _alias_claim_key(source_system: str, raw_id: str) -> str:
 #: apart — see :func:`_is_alias_claim_contention`.
 _ALIAS_CLAIM_LABEL = "AliasClaim"
 _ALIAS_CLAIM_KEY_PROPERTY = "claim_key"
+
+#: Label and key property of the edge claim node — the serialization
+#: point ``upsert_edge`` MERGEs under a uniqueness constraint so a
+#: concurrent re-versioner of the same ``(source_id, target_id,
+#: edge_type)`` triplet learns it lost instead of both committing a
+#: current row. Same identity-matching rationale as ``AliasClaim`` — see
+#: :func:`_is_edge_claim_contention`.
+_EDGE_CLAIM_LABEL = "EdgeClaim"
+_EDGE_CLAIM_KEY_PROPERTY = "claim_key"
 
 #: Phrases a unique-constraint violation carries, matched case-insensitively.
 #: Naming the claim's label and key property is necessary but not
@@ -413,6 +461,22 @@ def _names_token(message: str, token: str) -> bool:
         re.search(rf"(?<![0-9A-Za-z_]){re.escape(token)}(?![0-9A-Za-z_])", message)
         is not None
     )
+
+
+def _is_claim_contention(exc: Exception, label: str, key_property: str) -> bool:
+    """Return True when ``exc`` names a duplicate key on ``label``/``key_property``.
+
+    The mechanical half of :func:`_is_alias_claim_contention` and
+    :func:`_is_edge_claim_contention`, factored out because both claims
+    share one unique-constraint violation shape across both backends.
+    Each caller's own docstring carries the measurements specific to its
+    claim; this function only applies them.
+    """
+    message = str(getattr(exc, "message", "") or exc)
+    lowered = message.lower()
+    if not any(marker in lowered for marker in _UNIQUE_VIOLATION_MARKERS):
+        return False
+    return _names_token(message, label) and _names_token(message, key_property)
 
 
 def _is_alias_claim_contention(exc: Exception) -> bool:
@@ -453,13 +517,24 @@ def _is_alias_claim_contention(exc: Exception) -> bool:
     (:data:`_UNIQUE_VIOLATION_MARKERS`): the constraint's identity says
     *which* index a message is about, not that the index was violated.
     """
-    message = str(getattr(exc, "message", "") or exc)
-    lowered = message.lower()
-    if not any(marker in lowered for marker in _UNIQUE_VIOLATION_MARKERS):
-        return False
-    return _names_token(message, _ALIAS_CLAIM_LABEL) and _names_token(
-        message, _ALIAS_CLAIM_KEY_PROPERTY
-    )
+    return _is_claim_contention(exc, _ALIAS_CLAIM_LABEL, _ALIAS_CLAIM_KEY_PROPERTY)
+
+
+def _is_edge_claim_contention(exc: Exception) -> bool:
+    """Return True when an edge write lost the ``EdgeClaim`` unique race.
+
+    Same mechanism as :func:`_is_alias_claim_contention`, matched on
+    ``EdgeClaim``/``claim_key`` instead of ``AliasClaim``/``claim_key``:
+    ArcadeDB detects the duplicate only at commit and reports it on the
+    same ``Neo.ClientError.Transaction.TransactionNotFound`` channel;
+    Neo4j raises a schema-constraint error naming the same label and
+    property. Not independently measured against a live server the way
+    ``AliasClaim``'s violation shape was (see that function's docstring)
+    — the constraint DDL and the message shape both engines produce for
+    *any* unique-key violation are identical in mechanism and differ only
+    in the label, so this predicate rests on the same measurement.
+    """
+    return _is_claim_contention(exc, _EDGE_CLAIM_LABEL, _EDGE_CLAIM_KEY_PROPERTY)
 
 
 _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -479,6 +554,11 @@ _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
         "CREATE CONSTRAINT alias_claim_unique IF NOT EXISTS "
         f"FOR (c:{_ALIAS_CLAIM_LABEL}) "
         f"REQUIRE c.{_ALIAS_CLAIM_KEY_PROPERTY} IS UNIQUE"
+    ),
+    (
+        "CREATE CONSTRAINT edge_claim_unique IF NOT EXISTS "
+        f"FOR (c:{_EDGE_CLAIM_LABEL}) "
+        f"REQUIRE c.{_EDGE_CLAIM_KEY_PROPERTY} IS UNIQUE"
     ),
     # Lookup indexes
     "CREATE INDEX node_id_idx IF NOT EXISTS FOR (n:Node) ON (n.node_id)",
@@ -1068,6 +1148,51 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     )
         raise last_error  # type: ignore[misc]
 
+    def _is_edge_write_contention(self, exc: Exception) -> bool:
+        """Return True when ``exc`` means this edge write lost the ``EdgeClaim`` race.
+
+        Mirrors :meth:`_is_alias_write_contention` for the edge-triplet
+        claim :meth:`upsert_edge` MERGEs — see
+        :meth:`~trellis.stores.arcadedb.graph.ArcadeDBGraphStore._is_edge_write_contention`
+        for the ArcadeDB widening, a per-backend seam for the same reason
+        the alias one is.
+        """
+        return _is_edge_claim_contention(exc)
+
+    def _execute_edge_claim_write(
+        self, tx_function: Callable[[ManagedTransaction], Any]
+    ) -> Any:
+        """Run an edge write, re-running it when it loses the ``EdgeClaim`` race.
+
+        Mirrors :meth:`_execute_alias_write`. ``upsert_edge`` MERGEs the
+        ``EdgeClaim`` node that serializes every writer of one
+        ``(source_id, target_id, edge_type)`` triplet under a uniqueness
+        constraint, so this is a hard commit-time violation rather than
+        the optimistic "touch the endpoints and hope" a plain
+        ``session.execute_write`` depends on: endpoint nodes are not the
+        record two concurrent edge creations actually contend over, so
+        touching them cannot guarantee a conflict is raised between them.
+        The losing transaction is rolled back whole, so a retry re-reads
+        committed state — this time observing the winner's new current
+        edge as ``old`` — and reaches the same single-current-row answer
+        a serialized run would.
+        """
+        last_error: Exception | None = None
+        for _attempt in range(_ALIAS_CLAIM_RETRY_ATTEMPTS):
+            with self._driver.session(database=self._database) as session:
+                try:
+                    return session.execute_write(tx_function)
+                except Exception as exc:
+                    if not self._is_edge_write_contention(exc):
+                        raise
+                    last_error = exc
+                    logger.debug(
+                        "edge_claim_contention_retry",
+                        attempt=_attempt + 1,
+                        attempts=_ALIAS_CLAIM_RETRY_ATTEMPTS,
+                    )
+        raise last_error  # type: ignore[misc]
+
     def upsert_alias(
         self,
         entity_id: str,
@@ -1394,12 +1519,12 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             extractor_tier=extractor_tier,
         )
 
-        # One Cypher round trip: endpoint-lock prelude + endpoint MATCH +
-        # existing-edge OPTIONAL MATCH + close-old + create-new, in a
-        # single query. Each endpoint is narrowed to the row it shows
-        # (``_shown_row``), so an endpoint with two current rows (the
-        # module docstring) gets one new version, on that row, rather
-        # than one per row. When an endpoint has no current row the
+        # One Cypher round trip: endpoint-lock prelude + edge-claim prelude +
+        # endpoint MATCH + existing-edge OPTIONAL MATCH + close-old +
+        # create-new, in a single query. Each endpoint is narrowed to the
+        # row it shows (``_shown_row``), so an endpoint with two current
+        # rows (the module docstring) gets one new version, on that row,
+        # rather than one per row. When an endpoint has no current row the
         # aggregate still yields one row, of empty lists, on both
         # engines, so ``s`` and ``t`` are both null; ``WHERE s IS NOT
         # NULL`` drops that row, since a CREATE between nulls raises on
@@ -1424,6 +1549,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         }
         # Sorted, so writers of x->y and y->x take the locks in one order.
         lo_id, hi_id = sorted((source_id, target_id))
+        edge_claim_key = _edge_claim_key(source_id, target_id, edge_type)
 
         cypher = f"""
         // Lock both endpoints' current rows, lowest node_id first, before
@@ -1440,6 +1566,22 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         SET hi_cand._cas_lock = true
         REMOVE hi_cand._cas_lock
         WITH count(hi_cand) AS _locked_hi
+        // Claim the (source_id, target_id, edge_type) triplet before
+        // resolving `old`, for the same reason the endpoint locks run
+        // first: a concurrent re-versioner of this exact triplet must be
+        // forced to conflict here, not matched into silently. `MERGE`
+        // alone catches two writers racing to CREATE this claim for the
+        // first time (the EdgeClaim unique constraint); the `_cas_lock`
+        // SET/REMOVE additionally forces a real write conflict when the
+        // claim row already exists and two writers race to re-version
+        // the edge (the module docstring's open race) -- the endpoint
+        // touches above cannot do this, because the record two
+        // concurrent edge writers actually contend over is the edge row
+        // itself, not an endpoint node.
+        MERGE (ec:EdgeClaim {{claim_key: $edge_claim_key}})
+        SET ec._cas_lock = true
+        REMOVE ec._cas_lock
+        WITH count(ec) AS _claimed
         MATCH (s:Node {{node_id: $source_id}}) WHERE s.valid_to IS NULL
         MATCH (t:Node {{node_id: $target_id}}) WHERE t.valid_to IS NULL
         WITH collect(DISTINCT s) AS source_rows, collect(DISTINCT t) AS target_rows
@@ -1463,17 +1605,22 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         SET new.created_at = created_at_carry
         RETURN new.edge_id AS edge_id
         """
-        record = self._run_write_single(
-            cypher,
-            source_id=source_id,
-            target_id=target_id,
-            lo_id=lo_id,
-            hi_id=hi_id,
-            edge_type=edge_type,
-            now=now,
-            candidate_edge_id=candidate_edge_id,
-            base_props=base_props,
-        )
+
+        def _tx(tx: ManagedTransaction) -> Any:
+            return tx.run(
+                cypher,
+                source_id=source_id,
+                target_id=target_id,
+                lo_id=lo_id,
+                hi_id=hi_id,
+                edge_type=edge_type,
+                now=now,
+                candidate_edge_id=candidate_edge_id,
+                base_props=base_props,
+                edge_claim_key=edge_claim_key,
+            ).single()
+
+        record = self._execute_edge_claim_write(_tx)
         if record is None:
             msg = (
                 f"Cannot upsert edge: source {source_id!r} or target "

@@ -57,7 +57,10 @@ def graph_store():
     store = Neo4jGraphStore(URI, user=USER, password=PASSWORD, database=DATABASE)
     # Wipe all data the store might have created in a prior run.
     with store._driver.session(database=store._database) as session:
-        session.run("MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim DETACH DELETE n")
+        session.run(
+            "MATCH (n) WHERE n:Node OR n:Alias OR n:AliasClaim "
+            "OR n:EdgeClaim DETACH DELETE n"
+        )
     yield store
     store.close()
 

@@ -178,6 +178,28 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
             return True
         return getattr(exc, "code", None) == _GENERIC_ENGINE_ERROR_CODE
 
+    def _is_edge_write_contention(self, exc: Exception) -> bool:
+        """Widen the base ``EdgeClaim`` predicate over the generic error channel.
+
+        Mirrors :meth:`_is_alias_write_contention` exactly, for the same
+        reason. ``upsert_edge``'s claim MERGE is a first-creation race the
+        base class's unique-violation identity match already catches
+        (``Neo.ClientError.Transaction.TransactionNotFound`` naming
+        ``EdgeClaim``/``claim_key``). But most live contention is on an
+        **existing** claim row -- two re-versioners of the same already-
+        claimed triplet, which is the shape the bug report's update-race
+        test exercises -- and there the claim's ``_cas_lock`` SET/REMOVE
+        is a record the other side's commit already replaced, arriving
+        on the same :data:`_GENERIC_ENGINE_ERROR_CODE` bucket
+        :meth:`_is_alias_write_contention` widens over for
+        ``update_node_if_current``'s identical ``_cas_lock`` touch of an
+        existing row. Not independently re-measured for ``EdgeClaim`` --
+        same mechanism, same bucket, same per-backend reporting quirk.
+        """
+        if super()._is_edge_write_contention(exc):
+            return True
+        return getattr(exc, "code", None) == _GENERIC_ENGINE_ERROR_CODE
+
     @classmethod
     def prepare_registry_params(  # noqa: PLR0912, PLR0915
         cls,
