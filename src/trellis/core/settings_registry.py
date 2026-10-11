@@ -76,6 +76,28 @@ from trellis.core.write_config import ENV_VAR_BY_FIELD, parse_finite_float
 Risk = Literal["safe", "restart", "unsafe"]
 SettingType = Literal["bool", "int", "float", "str"]
 
+#: The UI's filter-box categories (brief e179, step 8): which area of the
+#: system a knob belongs to, independent of ``risk`` or ``settings_live``.
+#: ``"learning_loops"`` is currently unoccupied by this module's 14
+#: entries — it is reserved for the concurrent ``learning.auto_promote.*``
+#: PR, so the UI's filter box already has a place for those once they
+#: land, with no UI change.
+SettingGroup = Literal[
+    "retrieval", "ingest_tagging", "learning_loops", "feedback_attribution", "ops"
+]
+
+#: The one place a human-facing group name lives, so a UI reading this
+#: registry never hardcodes a display label (brief e179, step 8's "not
+#: UI strings"). Keys are exactly :data:`SettingGroup`'s members —
+#: ``tests.unit.core.test_settings_registry`` proves the sets match.
+GROUP_LABELS: dict[SettingGroup, str] = {
+    "retrieval": "Retrieval",
+    "ingest_tagging": "Ingest & tagging",
+    "learning_loops": "Learning loops",
+    "feedback_attribution": "Feedback & attribution",
+    "ops": "Ops",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class SettingSpec:
@@ -88,6 +110,10 @@ class SettingSpec:
     surfaces: tuple[str, ...]
     restart_required: bool
     risk: Risk
+    #: Which of the UI's five filter-box areas this knob belongs to (see
+    #: :data:`SettingGroup`). Independent of ``risk``: a knob can be
+    #: low-risk and still belong to a sensitive area, or vice versa.
+    group: SettingGroup
     #: Whether a *settings* override reaches this knob's real enforcement
     #: today (see the module docstring's "settings_live" section) — not
     #: merely whether it is reported correctly by the two surfaces that
@@ -132,6 +158,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="safe",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["classify_on_ingest"],
     ),
@@ -150,6 +177,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="safe",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["embed_on_ingest"],
     ),
@@ -169,6 +197,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="unsafe",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["memory_extraction"],
     ),
@@ -190,6 +219,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp",),
         restart_required=False,
         risk="unsafe",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["reconcile_on_write"],
     ),
@@ -207,6 +237,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="safe",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["trace_extraction"],
     ),
@@ -224,6 +255,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="safe",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["trace_extraction_min_confidence"],
         minimum=0.0,
@@ -245,6 +277,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api"),
         restart_required=False,
         risk="safe",
+        group="feedback_attribution",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["require_pack_attribution"],
     ),
@@ -267,6 +300,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api"),
         restart_required=False,
         risk="unsafe",
+        group="feedback_attribution",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["require_bodied_attribution"],
     ),
@@ -295,6 +329,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp",),
         restart_required=True,
         risk="restart",
+        group="ops",
         settings_live=False,
         env_var=ENV_VAR_BY_FIELD["minhash_seed_max_docs"],
         minimum=0,
@@ -319,6 +354,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="unsafe",
+        group="retrieval",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["pack_holdout_rate"],
         minimum=0.0,
@@ -345,6 +381,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp",),
         restart_required=False,
         risk="safe",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["reconcile_model"],
     ),
@@ -365,6 +402,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp",),
         restart_required=False,
         risk="safe",
+        group="ingest_tagging",
         settings_live=True,
         env_var=ENV_VAR_BY_FIELD["reconcile_timeout_s"],
         minimum=0.0,
@@ -388,6 +426,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="safe",
+        group="retrieval",
         settings_live=True,
         env_var="TRELLIS_GRAPH_SEEDING",
     ),
@@ -413,6 +452,7 @@ _SPECS: tuple[SettingSpec, ...] = (
         surfaces=("mcp", "api", "cli"),
         restart_required=False,
         risk="safe",
+        group="retrieval",
         settings_live=True,
         env_var="TRELLIS_FILTER_LEGACY_ADVISORIES",
     ),
@@ -617,8 +657,10 @@ def validate_value(spec: SettingSpec, raw: Any) -> bool | int | float | str:
 
 
 __all__ = [
+    "GROUP_LABELS",
     "SETTINGS_REGISTRY",
     "Risk",
+    "SettingGroup",
     "SettingSpec",
     "SettingType",
     "get_setting",

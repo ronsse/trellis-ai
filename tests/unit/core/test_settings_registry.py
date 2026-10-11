@@ -15,8 +15,10 @@ from dataclasses import replace
 import pytest
 
 from trellis.core.settings_registry import (
+    GROUP_LABELS,
     SETTINGS_REGISTRY,
     Risk,
+    SettingGroup,
     SettingSpec,
     SettingType,
     get_setting,
@@ -26,6 +28,9 @@ from trellis.core.write_config import ENV_VAR_BY_FIELD
 
 _VALID_RISKS: frozenset[Risk] = frozenset({"safe", "restart", "unsafe"})
 _VALID_TYPES: frozenset[SettingType] = frozenset({"bool", "int", "float", "str"})
+_VALID_GROUPS: frozenset[SettingGroup] = frozenset(
+    {"retrieval", "ingest_tagging", "learning_loops", "feedback_attribution", "ops"}
+)
 
 
 class TestCatalogMembership:
@@ -76,6 +81,10 @@ class TestEverySpecIsWellFormed:
     @pytest.mark.parametrize("name", list(SETTINGS_REGISTRY))
     def test_name_field_matches_its_own_registry_key(self, name: str) -> None:
         assert SETTINGS_REGISTRY[name].name == name
+
+    @pytest.mark.parametrize("name", list(SETTINGS_REGISTRY))
+    def test_group_is_a_declared_group(self, name: str) -> None:
+        assert SETTINGS_REGISTRY[name].group in _VALID_GROUPS
 
     def test_exactly_one_entry_needs_a_restart(self) -> None:
         """``minhash_seed_max_docs`` is read once at process start (its own
@@ -193,6 +202,34 @@ class TestEveryEntryIsLiveOrExplainsWhyNot:
         )
 
         assert "restart" not in mutant.description.lower()
+
+
+class TestEveryEntryHasAValidGroup:
+    """Grouping drives the UI's filter box (brief step 8, e179) — a value
+    outside the five declared areas would silently vanish from every
+    filter the UI builds from :data:`GROUP_LABELS`, with nothing to catch
+    the gap. ``GROUP_LABELS`` is the one place a human-facing group name
+    lives, so the UI never hardcodes one.
+    """
+
+    def test_every_group_has_a_display_label(self) -> None:
+        assert set(GROUP_LABELS) == _VALID_GROUPS
+
+    def test_mutant_unknown_group_is_caught(self) -> None:
+        """A deliberately defective entry: a group outside the declared
+        five. Dataclasses do not enforce ``Literal`` at runtime, so only
+        this membership check catches it.
+        """
+        base = next(iter(SETTINGS_REGISTRY.values()))
+        mutant = replace(base, group="not_a_real_group")  # type: ignore[arg-type]
+        defective_registry = {**SETTINGS_REGISTRY, mutant.name: mutant}
+
+        violations = [
+            name
+            for name, spec in defective_registry.items()
+            if spec.group not in _VALID_GROUPS
+        ]
+        assert violations == [mutant.name]
 
 
 class TestLookupHelpers:

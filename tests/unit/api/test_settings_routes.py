@@ -161,12 +161,45 @@ class TestListSettings:
             "surfaces": list(row["surfaces"]),
             "restart_required": False,
             "risk": "unsafe",
+            "group": "retrieval",
             "settings_live": True,
             "env_var": PACK_HOLDOUT_RATE_ENV,
             "effective_value": 0.0,
             "overridden_by": "default",
+            "stored_value": None,
+            "updated_at": None,
         }
         assert row["description"]
+
+    def test_group_labels_cover_every_entrys_group(self, client: TestClient) -> None:
+        """brief e179 step 8: the UI's filter box reads display labels from
+        ``groups``, not a hardcoded string -- so every group a real entry
+        names must have a label.
+        """
+        resp = client.get("/api/v1/settings")
+        body = resp.json()
+        used_groups = {row["group"] for row in body["settings"]}
+        assert used_groups <= set(body["groups"])
+        assert all(
+            isinstance(label, str) and label for label in body["groups"].values()
+        )
+
+    def test_stored_value_and_updated_at_reflect_a_real_override(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Unset -> both None (proven above); once a value is written, the
+        GET response's stored_value/updated_at must show it, not just
+        effective_value -- the two can legitimately differ (env-pinned).
+        """
+        path = resolve_settings_path(registry.stores_dir)
+        assert path is not None
+        store = SettingsStore(path)
+        store.set("pack_holdout_rate", 0.2)
+
+        resp = client.get("/api/v1/settings")
+        row = _entry(resp.json(), "pack_holdout_rate")
+        assert row["stored_value"] == 0.2
+        assert row["updated_at"] is not None
 
     def test_store_degradation_is_none_when_healthy(self, client: TestClient) -> None:
         resp = client.get("/api/v1/settings")

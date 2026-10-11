@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.settings_registry import (
+    GROUP_LABELS,
     SETTINGS_REGISTRY,
     SettingSpec,
     get_setting,
@@ -37,6 +38,7 @@ from trellis.core.write_config import WriteBehaviourConfig
 from trellis.mutate import Command, CommandStatus, Operation, build_settings_executor
 from trellis.retrieve.builder_factory import _graph_seeding_enabled
 from trellis.retrieve.pack_builder import _filter_legacy_advisories_enabled
+from trellis.schemas.settings import SettingRow
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 from trellis_api.app import get_registry
@@ -106,8 +108,12 @@ def _effective_values(settings_values: dict[str, Any]) -> dict[str, Any]:
 
 
 def _entry(
-    spec: SettingSpec, settings_values: dict[str, Any], effective: dict[str, Any]
+    spec: SettingSpec,
+    settings_values: dict[str, Any],
+    effective: dict[str, Any],
+    stored_rows: dict[str, SettingRow],
 ) -> dict[str, Any]:
+    stored_row = stored_rows.get(spec.name)
     return {
         "name": spec.name,
         "type": spec.type,
@@ -119,10 +125,24 @@ def _entry(
         "surfaces": list(spec.surfaces),
         "restart_required": spec.restart_required,
         "risk": spec.risk,
+        "group": spec.group,
         "settings_live": spec.settings_live,
         "env_var": spec.env_var,
         "effective_value": effective[spec.name],
         "overridden_by": resolve_source(spec, settings_values),
+        # The raw override on disk, if any -- distinct from
+        # effective_value, which may instead be the env or default value
+        # while a stored override sits inert underneath it (brief e179
+        # step 2's env-pin truthfulness).
+        "stored_value": stored_row.value if stored_row is not None else None,
+        # "Last changed ... when" (brief e179 step 1). The store never
+        # records who changed a setting -- SettingRow carries no
+        # changed_by field, and SettingsUpdateHandler's changed_by is
+        # audit-event-only -- so this reports only what the store
+        # actually knows rather than fabricating an attribution.
+        "updated_at": (
+            stored_row.updated_at.isoformat() if stored_row is not None else None
+        ),
     }
 
 
@@ -179,11 +199,12 @@ def list_settings() -> dict[str, Any]:
     registry = get_registry()
     store = _get_settings_store(registry)
     settings_values = store.as_values()
+    stored_rows = {row.name: row for row in store.list()}
     degradation = store.degradation
     effective = _effective_values(settings_values)
     return {
         "settings": [
-            _entry(spec, settings_values, effective)
+            _entry(spec, settings_values, effective, stored_rows)
             for spec in SETTINGS_REGISTRY.values()
         ],
         "store_degradation": (
@@ -195,6 +216,10 @@ def list_settings() -> dict[str, Any]:
         # unless it is bind-mounted, and nothing about this route lets a
         # caller tell the two cases apart without this label.
         "read_by": "trellis-api",
+        # Human-facing group labels, keyed the same way as each entry's
+        # "group" field, so the UI's filter box never hardcodes a display
+        # name (brief e179 step 8).
+        "groups": dict(GROUP_LABELS),
     }
 
 
