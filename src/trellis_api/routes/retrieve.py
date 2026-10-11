@@ -443,4 +443,9 @@ def list_precedent_domains() -> dict[str, Any]:
         {"domain": domain, "count": count}
         for domain, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     ]
-    return {"status": "ok", "total": sum(counts.values()), "domains": domains}
+    return {
+        "status": "ok",
+        "total": sum(counts.values()),
+        "domains": domains,
+        "truncated": scan.coverage.truncated,
+    }

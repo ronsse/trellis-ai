@@ -1367,6 +1367,7 @@ def test_list_precedent_domains_counts_every_promoted_precedent(client):
         {"domain": "platform", "count": 3},
         {"domain": "data", "count": 1},
     ]
+    assert data["truncated"] is False
 
 
 # -- Batch mutations --
