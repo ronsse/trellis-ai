@@ -15,20 +15,25 @@ proposals are read-only here.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import ValidationError
 
+from trellis.core.base import utc_now
+from trellis.core.cron import next_tick_after
 from trellis.core.error_sanitize import (
     describe_json_error,
     describe_os_error,
+    describe_validation_error,
     sanitize_error_message,
 )
 from trellis.core.path_presence import path_is_present
 from trellis.core.vector_metadata import resolve_vector_store
-from trellis.errors import StaleStoreWriteError
+from trellis.errors import StaleStoreWriteError, StoreWriteRefusedError
 from trellis.learning.artifacts import (
     LEARNING_ARTIFACTS_DIR_ENV,
     LEARNING_CANDIDATES_FILENAME,
@@ -57,13 +62,22 @@ from trellis.retrieve.effectiveness import (
     run_effectiveness_feedback,
 )
 from trellis.retrieve.metrics_timeseries import compute_timeseries
+from trellis.schedule.catalog import JOB_CATALOG, JobSpec
+from trellis.schemas.schedule import ScheduledJob
 from trellis.stores.advisory_source import load_advisory_store
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.vector import VectorStore
+from trellis.stores.schedule_store import ScheduleStore
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes.health import probe_backends
 from trellis_wire.dtos import (
+    AdminJobLastRun,
+    AdminJobListResponse,
+    AdminJobPatchRequest,
+    AdminJobPatchResponse,
+    AdminJobRunResponse,
+    AdminJobSummary,
     BackendHealth,
     CodeProposalListResponse,
     CodeProposalSummary,
@@ -1402,3 +1416,361 @@ def _code_proposal_source_file(preview: str) -> str | None:
     )
 
     return _parse_source_file_from_preview(preview)
+
+
+# ===========================================================================
+#  Scheduled jobs (plan p1 PR 6) — ``GET``/``PATCH /admin/jobs``,
+#  ``POST /admin/jobs/{name}/run``
+# ===========================================================================
+#
+# The writable surface is exactly ``enabled``, ``cadence``,
+# ``timeout_seconds`` (via PATCH) and ``run_requested_at`` (via run) — the
+# same fields :class:`~trellis.schemas.schedule.ScheduledJob` exposes, and
+# only for a ``name`` already present in :data:`trellis.schedule.catalog.
+# JOB_CATALOG`. No route here creates, deletes, or can ever carry a
+# command, argv, path or environment variable: ``AdminJobPatchRequest``
+# has no such field to forbid selectively, and ``extra="forbid"``
+# (:class:`~trellis_wire.base.WireRequestModel`) refuses any other field
+# name outright. See ``trellis.schedule.catalog``'s module docstring for
+# the full boundary argument.
+
+#: A dispatcher that has not started any job within this window reads as
+#: "not reporting" to the UI banner — roughly 3x the ~5 minute poll hint
+#: ``AdminJobRunResponse.dispatcher_hint`` gives, so one missed tick does
+#: not flap the banner.
+_DISPATCHER_STALE_SECONDS = 15 * 60
+
+
+def _get_schedule_store() -> ScheduleStore:
+    """Build a schedule store from the registry's stores directory.
+
+    Deliberately not cached — same rationale as ``policies.py``'s
+    ``_get_policy_store``: a host CLI and this containerised API both
+    write the same bind-mounted ``schedule.json``, so a cached store
+    could silently roll back a concurrent write (#413's defect).
+    :meth:`ScheduleStore.refuse_if_stale` backstops the window a fresh
+    read-per-call cannot close on its own.
+    """
+    registry = get_registry()
+    stores_dir = registry.stores_dir
+    if stores_dir is None:
+        msg = "stores_dir must be set on registry to use ScheduleStore"
+        raise ValueError(msg)
+    return ScheduleStore(stores_dir / "schedule.json")
+
+
+def _schedule_refusal_http_error(
+    store: ScheduleStore, exc: StoreWriteRefusedError
+) -> HTTPException:
+    """409 for a schedule write the store refused.
+
+    409, not 503: a degraded file does not repair itself, so "retry
+    later" is the wrong instruction for that case; a *stale* refusal is
+    the retryable one, which is why ``code`` distinguishes them (mirrors
+    ``policies.py``'s ``_refusal_http_error``). Unlike that helper,
+    ``message`` here is ``str(exc)`` itself — the store's own refusal
+    text, recovery command included — rather than a fixed restatement:
+    the store already composes one safe to return (nothing beyond what
+    ``GET /admin/jobs`` already discloses), and returning it verbatim is
+    what lets an operator act on the response without a second lookup.
+    """
+    degradation = store.degradation
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": exc.code.lower() if exc.code else "store_write_refused",
+            "message": str(exc),
+            "recovery": exc.recovery,
+            "store_degradation": (
+                degradation.to_dict() if degradation is not None else None
+            ),
+        },
+    )
+
+
+def _last_job_run(event_log: EventLog, name: str) -> AdminJobLastRun | None:
+    """The most recent run record for *name*, derived from the EventLog.
+
+    Reads the latest ``JOB_RUN_COMPLETED`` and the latest
+    ``JOB_RUN_STARTED`` and prefers whichever is more recent: normally
+    that is a completed pair, but when the latest start has no matching
+    completion yet (a run in flight, or a dispatcher that crashed before
+    reporting), this reports that started run with every other field
+    ``None`` rather than silently falling back to an older, finished run.
+    ``None`` only when the EventLog has no record of this job at all —
+    never a hardcoded literal (the ``/health`` route's status fields
+    must not be repeated here).
+    """
+    entity_id = f"job:{name}"
+    completed = event_log.get_events(
+        event_type=EventType.JOB_RUN_COMPLETED,
+        entity_id=entity_id,
+        order="desc",
+        limit=1,
+    )
+    started = event_log.get_events(
+        event_type=EventType.JOB_RUN_STARTED,
+        entity_id=entity_id,
+        order="desc",
+        limit=1,
+    )
+    if not completed and not started:
+        return None
+    if started and (not completed or started[0].occurred_at > completed[0].occurred_at):
+        payload = started[0].payload or {}
+        return AdminJobLastRun(
+            run_id=payload.get("run_id"),
+            started_at=payload.get("started_at"),
+        )
+    payload = completed[0].payload or {}
+    return AdminJobLastRun(
+        run_id=payload.get("run_id"),
+        started_at=payload.get("started_at"),
+        finished_at=payload.get("finished_at"),
+        duration_ms=payload.get("duration_ms"),
+        exit_code=payload.get("exit_code"),
+        status=payload.get("status"),
+    )
+
+
+def _dispatcher_last_seen_at(event_log: EventLog) -> datetime | None:
+    """The most recent ``JOB_RUN_STARTED`` across every catalog job.
+
+    No ``entity_id`` filter — this is a dispatcher-liveness signal, not a
+    per-job one: any job starting at all means some dispatcher polled
+    ``due-jobs`` recently.
+    """
+    events = event_log.get_events(
+        event_type=EventType.JOB_RUN_STARTED,
+        order="desc",
+        limit=1,
+    )
+    return events[0].occurred_at if events else None
+
+
+def _job_row_or_default(store: ScheduleStore, spec: JobSpec) -> ScheduledJob:
+    """The schedule-registry row for *spec*, or a fresh, unsaved default.
+
+    Mirrors ``trellis_cli.schedule_seed.default_scheduled_jobs``'s shape
+    for a job with no row yet, so a job always appears in the listing
+    even before ``init-schedule`` or a first ``PATCH`` has ever run.
+    Nothing is written here — this is a read-time convenience only, and
+    writing one of these is not how a job gets created (it is already in
+    :data:`trellis.schedule.catalog.JOB_CATALOG`; nothing here ever adds
+    to or removes from that catalog).
+    """
+    row = store.get(spec.name)
+    if row is not None:
+        return row
+    return ScheduledJob(name=spec.name, cadence=spec.default_cadence)
+
+
+def _job_summary(
+    spec: JobSpec,
+    row: ScheduledJob,
+    event_log: EventLog,
+    *,
+    now: datetime,
+) -> AdminJobSummary:
+    """Join one catalog entry with its schedule-registry row and run history."""
+    effective_timeout = (
+        row.timeout_seconds
+        if row.timeout_seconds is not None
+        else spec.default_timeout_seconds
+    )
+    next_due_at: str | None = None
+    if row.enabled and row.cadence is not None:
+        tick = next_tick_after(row.cadence, now)
+        if tick is not None:
+            next_due_at = tick.isoformat()
+    return AdminJobSummary(
+        name=spec.name,
+        description=spec.description,
+        host_only=spec.host_only,
+        spends_llm=spec.spends_llm,
+        heavy=spec.heavy,
+        enabled=row.enabled,
+        cadence=row.cadence,
+        timeout_seconds=effective_timeout,
+        run_requested_at=(
+            row.run_requested_at.isoformat()
+            if row.run_requested_at is not None
+            else None
+        ),
+        last_run=_last_job_run(event_log, spec.name),
+        next_due_at=next_due_at,
+    )
+
+
+@router.get("/admin/jobs", response_model=AdminJobListResponse)
+def list_admin_jobs() -> AdminJobListResponse:
+    """List every catalog job, joined with its schedule row and last-run status.
+
+    A job always appears here even with no schedule-registry row yet
+    (materialized with catalog defaults — see ``_job_row_or_default``);
+    this route never creates one. ``dispatcher_seen``/
+    ``dispatcher_last_seen_at`` answer the UI's "no dispatcher reporting"
+    banner from the EventLog's own ``JOB_RUN_STARTED`` events, never a
+    hardcoded literal.
+    """
+    registry = get_registry()
+    event_log = registry.operational.event_log
+    store = _get_schedule_store()
+    now = utc_now()
+    jobs = [
+        _job_summary(spec, _job_row_or_default(store, spec), event_log, now=now)
+        for spec in JOB_CATALOG.values()
+    ]
+    dispatcher_last_seen_at = _dispatcher_last_seen_at(event_log)
+    dispatcher_seen = (
+        dispatcher_last_seen_at is not None
+        and (now - dispatcher_last_seen_at).total_seconds() <= _DISPATCHER_STALE_SECONDS
+    )
+    return AdminJobListResponse(
+        count=len(jobs),
+        jobs=jobs,
+        dispatcher_last_seen_at=(
+            dispatcher_last_seen_at.isoformat()
+            if dispatcher_last_seen_at is not None
+            else None
+        ),
+        dispatcher_seen=dispatcher_seen,
+    )
+
+
+@router.patch("/admin/jobs/{name}", response_model=AdminJobPatchResponse)
+def patch_admin_job(
+    name: str,
+    body: AdminJobPatchRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> AdminJobPatchResponse:
+    """Edit a catalog job's mutable schedule fields.
+
+    The writable surface is exactly ``enabled``, ``cadence`` (cron-
+    validated) and ``timeout_seconds`` (bounded 1..86400) —
+    ``AdminJobPatchRequest``'s only fields, with ``extra="forbid"``
+    refusing anything else. ``name`` must already be a
+    :data:`trellis.schedule.catalog.JOB_CATALOG` key (404 otherwise);
+    this route never creates or deletes a job. Only fields the caller
+    actually set (``body.model_fields_set``) are changed — omitting a
+    field leaves it unchanged; an empty body is a no-op that writes
+    nothing and emits no event. A write while the schedule store is
+    degraded or stale is refused with 409 and the store's own error
+    text. Every applied change emits ``SCHEDULE_UPDATED`` with ``old``/
+    ``new`` dicts (only the fields that changed) and the caller's
+    identity.
+    """
+    spec = JOB_CATALOG.get(name)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"Unknown job: {name}")
+    store = _get_schedule_store()
+    current = _job_row_or_default(store, spec)
+    registry = get_registry()
+    event_log = registry.operational.event_log
+
+    fields_set = body.model_fields_set
+    if not fields_set:
+        return AdminJobPatchResponse(
+            job=_job_summary(spec, current, event_log, now=utc_now())
+        )
+
+    merged = current.model_dump(mode="json")
+    old_values: dict[str, Any] = {}
+    new_values: dict[str, Any] = {}
+    if "enabled" in fields_set:
+        old_values["enabled"] = current.enabled
+        new_values["enabled"] = body.enabled
+        merged["enabled"] = body.enabled
+    if "cadence" in fields_set:
+        old_values["cadence"] = current.cadence
+        new_values["cadence"] = body.cadence
+        merged["cadence"] = body.cadence
+    if "timeout_seconds" in fields_set:
+        old_values["timeout_seconds"] = current.timeout_seconds
+        new_values["timeout_seconds"] = body.timeout_seconds
+        merged["timeout_seconds"] = body.timeout_seconds
+    merged["name"] = spec.name
+    merged["updated_at"] = utc_now().isoformat()
+
+    try:
+        updated = ScheduledJob.model_validate(merged)
+    except (ValidationError, TypeError) as exc:
+        raise HTTPException(
+            status_code=422, detail=describe_validation_error(exc)
+        ) from exc
+
+    try:
+        store.put(updated)
+    except StoreWriteRefusedError as exc:
+        raise _schedule_refusal_http_error(store, exc) from exc
+
+    event_log.emit(
+        EventType.SCHEDULE_UPDATED,
+        source="trellis_api.admin.patch_job",
+        entity_id=f"job:{name}",
+        entity_type="scheduled_job",
+        payload={
+            "job": name,
+            "old": old_values,
+            "new": new_values,
+            **_audit_identity(ctx),
+        },
+    )
+    return AdminJobPatchResponse(
+        job=_job_summary(spec, updated, event_log, now=utc_now())
+    )
+
+
+@router.post("/admin/jobs/{name}/run", response_model=AdminJobRunResponse)
+def run_admin_job(
+    name: str,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> AdminJobRunResponse:
+    """Request an out-of-band run of a catalog job ("Run now").
+
+    Writes only ``run_requested_at`` on the schedule-registry row — this
+    route never executes the job inline and never claims to.
+    :func:`trellis.core.cron.is_job_due` treats a ``run_requested_at``
+    newer than the job's last completed run as always due, so a host
+    dispatcher polling ``due-jobs`` on its own cadence (typically within
+    ~5 minutes, if one is installed at all — see
+    ``docs/ops/job-dispatcher.sh.example``) is what actually picks the
+    job up from there. ``name`` must already be a
+    :data:`trellis.schedule.catalog.JOB_CATALOG` key (404 otherwise). A
+    write while the schedule store is degraded or stale is refused with
+    409 and the store's own error text. Emits ``JOB_RUN_REQUESTED`` with
+    the caller's identity.
+    """
+    spec = JOB_CATALOG.get(name)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"Unknown job: {name}")
+    store = _get_schedule_store()
+    current = _job_row_or_default(store, spec)
+    now = utc_now()
+    updated = current.model_copy(
+        update={"name": spec.name, "run_requested_at": now, "updated_at": now}
+    )
+
+    try:
+        store.put(updated)
+    except StoreWriteRefusedError as exc:
+        raise _schedule_refusal_http_error(store, exc) from exc
+
+    registry = get_registry()
+    registry.operational.event_log.emit(
+        EventType.JOB_RUN_REQUESTED,
+        source="trellis_api.admin.run_job",
+        entity_id=f"job:{name}",
+        entity_type="scheduled_job",
+        payload={
+            "job": name,
+            "previous_run_requested_at": (
+                current.run_requested_at.isoformat()
+                if current.run_requested_at is not None
+                else None
+            ),
+            "run_requested_at": now.isoformat(),
+            **_audit_identity(ctx),
+        },
+    )
+    return AdminJobRunResponse(name=name, run_requested_at=now.isoformat())

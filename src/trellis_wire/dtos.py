@@ -815,3 +815,125 @@ class LoopHealthResponse(WireModel):
 
     generated_at: str
     loops: list[LoopHealthRowResponse] = Field(default_factory=list)
+
+
+# -- Admin: scheduled jobs (plan p1 PR 6) --
+#
+# DTOs backing ``GET``/``PATCH /api/v1/admin/jobs`` and
+# ``POST /api/v1/admin/jobs/{name}/run``. The writable surface is
+# deliberately thin: ``enabled``, ``cadence``, ``timeout_seconds`` and
+# (via the run route) ``run_requested_at`` — the same four fields
+# :class:`~trellis.schemas.schedule.ScheduledJob` exposes. There is no
+# field here for a command, argv, path or environment variable, because
+# the job's command always comes from
+# :data:`trellis.schedule.catalog.JOB_CATALOG`, never from a request
+# body (see that module's docstring for the full boundary argument).
+
+
+class AdminJobLastRun(WireModel):
+    """Most recent job-run record for one catalog job, from the EventLog.
+
+    Derived from the latest ``JOB_RUN_STARTED`` / ``JOB_RUN_COMPLETED``
+    pair (see ``trellis admin record-job-run``) — never a hardcoded
+    literal. All fields ``None`` together means the job has no run
+    record the EventLog can see (never run, or run before this build).
+    ``started_at`` can be present with the rest ``None`` when a run
+    started but the dispatcher never called ``record-job-run`` to close
+    it out (crashed before reporting).
+    """
+
+    run_id: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_ms: int | None = None
+    exit_code: int | None = None
+    status: str | None = None
+
+
+class AdminJobSummary(WireModel):
+    """One job: catalog identity joined with its schedule-registry row.
+
+    ``name``, ``description``, ``host_only``, ``spends_llm`` and
+    ``heavy`` are fixed catalog facts (source-reviewed, never writable
+    over this API). ``enabled``, ``cadence``, ``timeout_seconds`` and
+    ``run_requested_at`` are the mutable schedule-registry row —
+    materialized with catalog defaults when no row has been written
+    yet, so a job always appears here even before ``init-schedule`` or
+    a first ``PATCH``. ``next_due_at`` is a display-only estimate
+    (``None`` for a manual-only job, or when no tick could be found).
+    """
+
+    name: str
+    description: str
+    host_only: bool
+    spends_llm: bool
+    heavy: bool
+    enabled: bool
+    cadence: str | None = None
+    timeout_seconds: int
+    run_requested_at: str | None = None
+    last_run: AdminJobLastRun | None = None
+    next_due_at: str | None = None
+
+
+class AdminJobListResponse(WireModel):
+    """Response for ``GET /api/v1/admin/jobs``.
+
+    ``dispatcher_last_seen_at`` is the most recent ``JOB_RUN_STARTED``
+    across every catalog job — the only signal this server has that
+    *some* dispatcher is polling ``due-jobs`` at all. ``dispatcher_seen``
+    is the boolean a UI banner reads directly (recently seen within a
+    server-chosen window) rather than re-deriving a staleness threshold
+    client-side; ``False`` with ``dispatcher_last_seen_at is None`` means
+    no dispatcher has ever reported.
+    """
+
+    count: int = 0
+    jobs: list[AdminJobSummary] = Field(default_factory=list)
+    dispatcher_last_seen_at: str | None = None
+    dispatcher_seen: bool = False
+
+
+class AdminJobPatchRequest(WireRequestModel):
+    """Body for ``PATCH /api/v1/admin/jobs/{name}``.
+
+    Every field is optional with no sentinel beyond Pydantic's own
+    ``model_fields_set``: the route reads which fields were actually
+    present in the request body (vs omitted) so a ``PATCH`` changes only
+    what the caller named — sending ``"cadence": null`` explicitly
+    clears cadence (makes the job manual-only); omitting ``cadence``
+    leaves it unchanged. ``extra="forbid"`` (:class:`WireRequestModel`)
+    refuses any other field name outright, including a command, argv,
+    path or environment variable — there is no such field here to
+    forbid *selectively*, which is the point.
+    """
+
+    enabled: bool | None = None
+    cadence: str | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=86400)
+
+
+class AdminJobPatchResponse(WireModel):
+    """Response for a successful ``PATCH /api/v1/admin/jobs/{name}``."""
+
+    status: str = "ok"
+    job: AdminJobSummary
+
+
+class AdminJobRunResponse(WireModel):
+    """Response for ``POST /api/v1/admin/jobs/{name}/run``.
+
+    Never claims synchronous execution: the write sets
+    ``run_requested_at`` and nothing else runs inline.
+    ``dispatcher_hint`` is the fixed, honest sentence a UI shows beside
+    the confirm — a host dispatcher polling ``due-jobs`` on its own
+    cadence is what actually executes the job, if one is installed.
+    """
+
+    status: str = "ok"
+    name: str
+    run_requested_at: str
+    dispatcher_hint: str = (
+        "Accepted. A host dispatcher polling 'due-jobs' picks this up, "
+        "typically within ~5 minutes, if one is installed."
+    )

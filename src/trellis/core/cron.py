@@ -199,6 +199,27 @@ def is_due_since(
     return False
 
 
+def next_tick_after(cadence: str, after: datetime) -> datetime | None:
+    """The first tick of ``cadence`` strictly after ``after``, minute resolution.
+
+    Walks forward minute by minute from the minute after ``after``, capped at
+    :data:`_MAX_WALK_MINUTES`. Returns ``None`` if no tick is found within
+    that walk (a day-of-month/month combination landing once a decade) —
+    "unknown", not a guess, matching :func:`is_due_since`'s own give-up
+    posture at the same bound. For display only (e.g. "next due"); never
+    used to decide due-ness, which stays :func:`is_job_due`'s job.
+    """
+    schedule = CronSchedule.parse(cadence)
+    cursor = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    steps = 0
+    while steps <= _MAX_WALK_MINUTES:
+        if schedule.matches(cursor):
+            return cursor
+        cursor += timedelta(minutes=1)
+        steps += 1
+    return None
+
+
 def is_job_due(
     *,
     enabled: bool,

@@ -1172,6 +1172,22 @@
             border-radius: 4px;
             font-family: var(--font-mono);
         }
+        /* Same shape as .degraded-banner, amber rather than red: a quiet
+           dispatcher is often just "none installed yet", not a data
+           problem, so it reads as a caution, not a failure. */
+        .warn-banner {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+            padding: 0.75rem 1.25rem;
+            margin-bottom: 1rem;
+            background: #422006;
+            border: 1px solid var(--warn);
+            border-radius: 8px;
+            font-size: 0.85rem;
+        }
+        .warn-banner .warn-title { color: var(--warn); font-weight: 600; }
+        .warn-banner .warn-detail { color: var(--text-dim); }
         .field-hint { color: var(--text-dim); font-size: 0.78rem; margin: 0.15rem 0 0.6rem; }
         .form-row { margin-bottom: 0.9rem; }
         .form-row label { display: block; font-size: 0.85rem; margin-bottom: 0.3rem; }
@@ -1424,6 +1440,7 @@
             <a href="#" data-view="loops" data-label="Loops"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4M5.6 5.6l2.6 2.6M18.4 5.6l-2.6 2.6M5.6 18.4l2.6-2.6M18.4 18.4l-2.6-2.6"/></svg><span class="nav-label">Loops</span></a>
             <a href="#" data-view="advisories" data-label="Advisories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l8.5 4.9v9.2L12 21.5l-8.5-4.9V7.4z"/><path d="M12 8.2v5"/><circle cx="12" cy="16" r="0.9" fill="currentColor" stroke="none"/></svg><span class="nav-label">Advisories</span></a>
             <a href="#" data-view="policies" data-label="Policies"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l7.5 3v6.2c0 4.3-3.1 7.4-7.5 9.3-4.4-1.9-7.5-5-7.5-9.3V5.5z"/><path d="M9 12l2.2 2.2L15.5 9.5"/></svg><span class="nav-label">Policies</span></a>
+            <a href="#" data-view="schedules" data-label="Schedules"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12.5" r="8.5"/><path d="M12 7.5v5l3.5 2"/><path d="M8.5 2.5h7"/></svg><span class="nav-label">Schedules</span></a>
         </nav>
 
         <div class="sidebar-foot" id="sidebar-foot" title="Backend version">&mdash;</div>
@@ -1861,6 +1878,41 @@
             </div>
             <p class="field-hint" id="policies-total"></p>
         </div>
+
+        <div id="view-schedules" style="display:none">
+            <div id="schedules-dispatcher-banner"></div>
+            <p class="field-hint">
+                Editing here can only change whether and when a catalog job runs &mdash;
+                <code>enabled</code>, <code>cadence</code> and <code>timeout_seconds</code> &mdash;
+                never what it runs; the command for each job comes from
+                <code>JOB_CATALOG</code> on the server, not from this page. "Run now" requests
+                an out-of-band run: a host dispatcher polling <code>due-jobs</code> picks it up,
+                typically within ~5 minutes, if one is installed &mdash; this page never runs a
+                job itself and a request here does not mean the job has started.
+            </p>
+            <div class="search-bar">
+                <button onclick="loadSchedules()">Refresh</button>
+            </div>
+            <div id="schedule-edit-form" style="display:none"></div>
+            <div class="status-section" style="padding:0; overflow:hidden">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Enabled</th>
+                            <th>Cadence</th>
+                            <th>Timeout</th>
+                            <th>Flags</th>
+                            <th>Last run (UTC)</th>
+                            <th>Next due</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="schedules-body"></tbody>
+                </table>
+            </div>
+            <p class="field-hint" id="schedules-total"></p>
+        </div>
     </div>
     </div>
     </div>
@@ -1969,6 +2021,32 @@
             return res.json();
         }
 
+        async function patchJSON(path, body) {
+            const headers = { 'Content-Type': 'application/json' };
+            const key = getApiKey();
+            if (key) headers['X-API-Key'] = key;
+            const res = await fetch(API + path, {
+                method: 'PATCH',
+                headers,
+                body: JSON.stringify(body)
+            });
+            await throwIfAuthRefused(res, key);
+            if (!res.ok) {
+                let detail = `${res.status} ${res.statusText}`;
+                try {
+                    // `detail` is a string, an object carrying `message`
+                    // (a 409 refusal), or a list (a 422 validation error).
+                    const j = await res.json();
+                    const d = j && j.detail;
+                    if (typeof d === 'string') detail = d;
+                    else if (d && typeof d.message === 'string') detail = d.message;
+                    else if (d) detail = JSON.stringify(d);
+                } catch { /* non-JSON */ }
+                throw new Error(detail);
+            }
+            return res.json();
+        }
+
         async function deleteJSON(path) {
             const headers = {};
             const key = getApiKey();
@@ -2052,6 +2130,8 @@
             loadTraceDetail, navigateToEntity, navigateToDocument,
             loadMemoryDetail, loadEventDetail, navigateToPack, loadPackDetail,
             confirmDeletePolicy, deletePolicy,
+            showEditJobForm, cancelEditJobForm, confirmRunJob, cancelRunJob, runJob,
+            toggleJobEnabled, confirmEditJob,
         };
         document.addEventListener('click', e => {
             const el = e.target instanceof Element && e.target.closest('[data-action]');
@@ -2075,7 +2155,7 @@
         }
 
         // -- View switching --
-        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs', 'advisories', 'policies', 'loops'];
+        const views = ['dashboard', 'metrics', 'review', 'evolution', 'graph', 'traces', 'precedents', 'memories', 'events', 'packs', 'advisories', 'policies', 'loops', 'schedules'];
         const viewLoaded = {};
         // init() reveals the dashboard when its fetches resolve. Track where the
         // user actually is, so a click made while the API is still answering is
@@ -2113,6 +2193,7 @@
                 if (name === 'loops') loadLoops();
                 if (name === 'advisories') loadAdvisories();
                 if (name === 'policies') loadPolicies();
+                if (name === 'schedules') loadSchedules();
             }
             // Focus search when switching to graph
             if (name === 'graph' && graphInitialized) {
@@ -5455,6 +5536,223 @@
                     actions.innerHTML =
                         '<button class="btn btn-sm btn-danger" onclick="runCreatePolicy()">Confirm create</button> ' +
                         '<button class="btn btn-ghost btn-sm" onclick="cancelCreatePolicyForm()">Cancel</button>';
+                }
+            }
+        }
+
+        // === Schedules (plan p1 PR 6: GET/PATCH /admin/jobs, POST /admin/jobs/{name}/run) ===
+
+        const DOW_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+        // A small hand-written cron-to-English formatter, not a library --
+        // mirrors trellis.core.cron's own "no dependency for one call site"
+        // choice. It only recognises the shapes the job catalog actually
+        // uses (fixed daily/weekly/monthly times, and simple step minutes);
+        // anything else falls back to the raw expression rather than
+        // guessing wrong. Cadence fields are evaluated on the HOST's local
+        // clock (trellis.core.cron), never UTC, so this never labels a time
+        // "UTC" -- only last-run timestamps (stamped by utc_now()) earn
+        // that label.
+        function describeCron(cadence) {
+            if (!cadence) return 'Manual only (no cadence; triggered only by "Run now")';
+            const parts = cadence.trim().split(/\s+/);
+            if (parts.length !== 5) return `Custom schedule (${cadence})`;
+            const [min, hour, dom, month, dow] = parts;
+            const pad2 = n => String(n).padStart(2, '0');
+            if (dom === '*' && month === '*' && dow === '*') {
+                if (/^\d+$/.test(min) && /^\d+$/.test(hour)) {
+                    return `Daily at ${pad2(hour)}:${pad2(min)} (host local time)`;
+                }
+                const stepMatch = min.match(/^\*\/(\d+)$/);
+                if (stepMatch && hour === '*') {
+                    return `Every ${stepMatch[1]} minute(s)`;
+                }
+            }
+            if (dom === '*' && month === '*' && /^[0-6]$/.test(dow) && /^\d+$/.test(min) && /^\d+$/.test(hour)) {
+                return `Weekly on ${DOW_NAMES[Number(dow)]} at ${pad2(hour)}:${pad2(min)} (host local time)`;
+            }
+            if (month === '*' && dow === '*' && /^\d+$/.test(dom) && /^\d+$/.test(min) && /^\d+$/.test(hour)) {
+                return `Monthly on day ${dom} at ${pad2(hour)}:${pad2(min)} (host local time)`;
+            }
+            return `Custom schedule (${cadence})`;
+        }
+
+        function renderDispatcherBanner(seen, lastSeenAt) {
+            const el = document.getElementById('schedules-dispatcher-banner');
+            if (!el) return;
+            if (seen) { el.innerHTML = ''; return; }
+            const seenText = lastSeenAt
+                ? `last seen starting a job at ${fmtDateUtc(lastSeenAt)}`
+                : 'never seen starting a job';
+            el.innerHTML = `<div class="warn-banner">
+                <span class="warn-title">No dispatcher reporting</span>
+                <span class="warn-detail">${escHtml(seenText)}. "Run now" still records the
+                    request; nothing will pick it up until a host dispatcher polling
+                    <code>trellis admin due-jobs</code> is running.</span>
+            </div>`;
+        }
+
+        async function loadSchedules() {
+            const tbody = document.getElementById('schedules-body');
+            const totalEl = document.getElementById('schedules-total');
+            tbody.innerHTML = `<tr><td colspan="8">${loadingHtml('Loading schedules...')}</td></tr>`;
+            renderDispatcherBanner(true, null);
+            totalEl.textContent = '';
+            try {
+                const data = await fetchJSON('/admin/jobs');
+                renderDispatcherBanner(data.dispatcher_seen, data.dispatcher_last_seen_at);
+                const rows = data.jobs || [];
+                tbody.innerHTML = rows.length
+                    ? rows.map(renderScheduleRow).join('')
+                    : `<tr><td colspan="8"><div class="empty-state">No catalog jobs.</div></td></tr>`;
+                totalEl.textContent = `${data.count ?? rows.length} job(s) in the catalog`;
+            } catch (err) {
+                tbody.innerHTML = `<tr><td colspan="8" style="color:var(--error)">Failed to load schedules: ${escHtml(err.message)}</td></tr>`;
+            }
+        }
+
+        function jobFlagBadges(job) {
+            let html = '';
+            if (job.host_only) html += '<span class="badge badge-info" title="Runs only on the host dispatcher, never in a container">host-only</span> ';
+            if (job.spends_llm) html += '<span class="badge badge-warn" title="Spends LLM credit when it runs">spends LLM</span> ';
+            if (job.heavy) html += '<span class="badge badge-warn" title="A heavy rebuild/reindex">heavy</span> ';
+            return html || '<span class="badge badge-accent">none</span>';
+        }
+
+        function lastRunText(lastRun) {
+            if (!lastRun) return 'never run';
+            if (lastRun.finished_at == null) {
+                return `running since ${fmtDateUtc(lastRun.started_at)}`;
+            }
+            const statusCls = lastRun.exit_code === 0 ? 'badge-ok' : 'badge-err';
+            return `<span class="badge ${statusCls}">${escHtml(lastRun.status || 'unknown')}</span> ` +
+                `exit ${escHtml(String(lastRun.exit_code))}, finished ${fmtDateUtc(lastRun.finished_at)}`;
+        }
+
+        function renderScheduleRow(job) {
+            const name = job.name;
+            const enabledAttr = job.enabled ? 'checked' : '';
+            return `<tr id="sched-row-${escHtml(name)}">
+                <td><code title="${escHtml(job.description || '')}">${escHtml(name)}</code></td>
+                <td><input type="checkbox" ${enabledAttr} id="sched-enabled-${escHtml(name)}" data-action="toggleJobEnabled" data-id="${escHtml(name)}"></td>
+                <td>${escHtml(job.cadence || '(none)')}<br><span class="field-hint" style="margin:0">${escHtml(describeCron(job.cadence))}</span></td>
+                <td>${escHtml(String(job.timeout_seconds))}s</td>
+                <td>${jobFlagBadges(job)}</td>
+                <td>${lastRunText(job.last_run)}</td>
+                <td>${job.next_due_at ? fmtDateUtc(job.next_due_at) : '&mdash;'}</td>
+                <td id="sched-actions-${escHtml(name)}">
+                    <button class="btn btn-sm" data-action="showEditJobForm" data-id="${escHtml(name)}">Edit</button>
+                    <button class="btn btn-sm" data-action="confirmRunJob" data-id="${escHtml(name)}">Run now</button>
+                </td>
+            </tr>`;
+        }
+
+        async function toggleJobEnabled(name) {
+            // The checkbox's own click already flipped its `checked`
+            // property before this delegated listener runs, so that's the
+            // state being requested -- the dispatcher passes only `data-id`,
+            // never a second value, so this reads it back off the DOM by id
+            // rather than widening the listener's contract.
+            const checkbox = document.getElementById('sched-enabled-' + name);
+            const checked = checkbox ? checkbox.checked : undefined;
+            try {
+                await patchJSON(`/admin/jobs/${encodeURIComponent(name)}`, { enabled: checked });
+                loadSchedules();
+            } catch (err) {
+                alert(`Failed to update ${name}: ${err.message}`);
+                loadSchedules();
+            }
+        }
+
+        function showEditJobForm(name) {
+            // Pull the current row's values back out of the DOM rather than
+            // refetching -- the row was just rendered from the same payload.
+            const row = document.getElementById('sched-row-' + name);
+            if (!row) return;
+            const cells = row.querySelectorAll('td');
+            const currentCadence = cells[2].textContent.trim().split('\n')[0].trim();
+            const currentTimeout = parseInt(cells[3].textContent, 10);
+            const el = document.getElementById('schedule-edit-form');
+            el.style.display = 'block';
+            el.innerHTML = `<div class="status-section">
+                <h4 style="margin-top:0">Edit ${escHtml(name)}</h4>
+                <div class="form-row">
+                    <label for="sched-edit-cadence">Cadence (5-field cron, or blank for manual-only)</label>
+                    <input type="text" id="sched-edit-cadence" value="${escHtml(currentCadence === '(none)' ? '' : currentCadence)}" placeholder="e.g. 0 4 * * *">
+                    <p class="field-hint">Evaluated on the host's local clock. Leave blank to clear (manual-only; only "Run now" triggers it).</p>
+                </div>
+                <div class="form-row">
+                    <label for="sched-edit-timeout">Timeout seconds (1-86400)</label>
+                    <input type="number" id="sched-edit-timeout" min="1" max="86400" value="${escHtml(Number.isFinite(currentTimeout) ? String(currentTimeout) : '')}">
+                </div>
+                <div id="sched-edit-result"></div>
+                <div id="sched-edit-actions">
+                    <button class="btn btn-sm" data-action="confirmEditJob" data-id="${escHtml(name)}">Save</button>
+                    <button class="btn btn-ghost btn-sm" data-action="cancelEditJobForm" data-id="${escHtml(name)}">Cancel</button>
+                </div>
+            </div>`;
+        }
+
+        function cancelEditJobForm() {
+            const el = document.getElementById('schedule-edit-form');
+            el.style.display = 'none';
+            el.innerHTML = '';
+        }
+
+        async function confirmEditJob(name) {
+            const resultEl = document.getElementById('sched-edit-result');
+            const cadenceRaw = document.getElementById('sched-edit-cadence').value.trim();
+            const timeoutRaw = document.getElementById('sched-edit-timeout').value.trim();
+            const body = { cadence: cadenceRaw === '' ? null : cadenceRaw };
+            if (timeoutRaw !== '') {
+                const t = Number(timeoutRaw);
+                if (!Number.isInteger(t) || t < 1 || t > 86400) {
+                    resultEl.innerHTML = '<p style="color:var(--error)">Timeout must be an integer between 1 and 86400.</p>';
+                    return;
+                }
+                body.timeout_seconds = t;
+            }
+            resultEl.innerHTML = loadingHtml('Saving...');
+            try {
+                await patchJSON(`/admin/jobs/${encodeURIComponent(name)}`, body);
+                cancelEditJobForm();
+                loadSchedules();
+            } catch (err) {
+                resultEl.innerHTML = `<p style="color:var(--error)">Save failed: ${escHtml(err.message)}</p>`;
+            }
+        }
+
+        function confirmRunJob(name) {
+            const cell = document.getElementById('sched-actions-' + name);
+            if (!cell) return;
+            const row = document.getElementById('sched-row-' + name);
+            const flagsCell = row ? row.querySelectorAll('td')[4] : null;
+            const risky = flagsCell && /spends LLM|heavy/.test(flagsCell.textContent);
+            const warning = risky
+                ? ' This job spends LLM credit or is a heavy rebuild &mdash; running it out of band still costs the same as its normal run.'
+                : '';
+            cell.innerHTML =
+                `<span style="color:var(--warn)">Request an out-of-band run of ${escHtml(name)}?${warning}</span> ` +
+                `<button class="btn btn-sm btn-danger" data-action="runJob" data-id="${escHtml(name)}">Confirm run</button> ` +
+                `<button class="btn btn-ghost btn-sm" data-action="cancelRunJob" data-id="${escHtml(name)}">Cancel</button>`;
+        }
+
+        function cancelRunJob() { loadSchedules(); }
+
+        async function runJob(name) {
+            const cell = document.getElementById('sched-actions-' + name);
+            if (cell) cell.innerHTML = loadingHtml('Requesting...');
+            try {
+                const r = await postJSON(`/admin/jobs/${encodeURIComponent(name)}/run`, undefined);
+                if (cell) {
+                    cell.innerHTML = `<span style="color:var(--success)">${escHtml(r.dispatcher_hint || 'Run requested.')}</span>`;
+                }
+                setTimeout(loadSchedules, 1500);
+            } catch (err) {
+                if (cell) {
+                    cell.innerHTML =
+                        `<span style="color:var(--error)">Run request failed: ${escHtml(err.message)}</span> ` +
+                        `<button class="btn btn-sm btn-danger" data-action="confirmRunJob" data-id="${escHtml(name)}">Retry</button>`;
                 }
             }
         }

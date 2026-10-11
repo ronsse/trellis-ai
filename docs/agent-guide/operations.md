@@ -156,9 +156,10 @@ trellis admin serve [--port PORT] [--host HOST] [--format text|json]
 ### Schedule registry + job runs (#e166)
 
 `schedule.json` (`<data_dir>/stores/schedule.json`) is the pieces a **host-side
-dispatcher cron** needs so schedules can later be edited from a UI (plan p1
-§(b), PR 6) without the container ever touching crontab. The container only
-ever reads it today; there is no REST route or UI yet.
+dispatcher cron** needs so schedules can be edited from a UI (plan p1 §(b),
+PR 6) without the container ever touching crontab. The REST routes, CLI
+parity and UI tab that edit it are documented below, under
+["Admin job schedules: REST, CLI and UI (plan p1 PR 6)"](#admin-job-schedules-rest-cli-and-ui-plan-p1-pr-6).
 
 **The command boundary.** `schedule.json` holds only operator-tunable state —
 it never holds a command. Each row is a `ScheduledJob`: `name` (must be a key
@@ -180,7 +181,7 @@ shared data mount, resolved by the host dispatcher itself after checking
 Because the model is `extra="forbid"`, a legacy or tampered row still
 carrying the old `command` field fails validation the same way an unknown
 `name` does — it degrades, it does not run. So editing `schedule.json`, by
-hand or (once PR 6 ships) over an API, can change only *whether* and *when* a
+hand or over the PR 6 API below, can change only *whether* and *when* a
 catalog job runs, never *what* runs; see
 [`catalog.py`](../../src/trellis/schedule/catalog.py)'s module docstring and
 [`schedule_store.py`](../../src/trellis/stores/schedule_store.py)'s for the
@@ -276,6 +277,103 @@ second number that could disagree with it.
 exists to durably record. Only a failure to write the EventLog pair itself
 (store unavailable) is this command's own failure, and exits `EXIT_STORE`
 (5) under both formats.
+
+### Admin job schedules: REST, CLI and UI (plan p1 PR 6)
+
+The write surface onto `schedule.json` promised above: `GET`/`PATCH
+/api/v1/admin/jobs`, `POST /api/v1/admin/jobs/{name}/run`
+(`src/trellis_api/routes/admin.py`), CLI parity (`trellis admin schedule set`
+/ `run`, `src/trellis_cli/admin_schedule.py`), and the web UI's **Schedules**
+tab. All three REST routes require admin scope. **The writable surface is
+exactly `enabled`, `cadence` (cron-validated) and `timeout_seconds` (bounded
+`1..86400`) via the PATCH, and `run_requested_at` via the run route — the
+same fields `ScheduledJob` exposes, and only for a `name` already present in
+`JOB_CATALOG`.** No route creates, deletes, or can ever carry a `command`,
+`argv`, `path` or environment variable: `AdminJobPatchRequest` has no such
+field, and `extra="forbid"` refuses any other field name outright (422).
+Both writes refuse with 409 and the schedule store's own error text (never a
+generic message) while it is degraded or stale; both emit an audit event
+(`SCHEDULE_UPDATED` / `JOB_RUN_REQUESTED`) carrying `old`/`new` dicts with
+only the fields that actually changed, plus the caller's identity
+(`key_id`/`key_name` over REST, `cli:<os user>` from the CLI).
+
+#### `GET /api/v1/admin/jobs`
+
+Lists every `JOB_CATALOG` job, joined with its `schedule.json` row
+(materialized with catalog defaults if the row doesn't exist yet — this
+route never creates one) and its last-run status. `last_run` is derived from
+the EventLog's own `JOB_RUN_STARTED`/`JOB_RUN_COMPLETED` pair for that job
+name — `null` means no record at all, never a hardcoded placeholder; an
+in-flight start newer than the last completion reports that start with every
+other field `null`, rather than falling back to an older finished run.
+`dispatcher_seen` (and `dispatcher_last_seen_at`) answers "is any host
+dispatcher polling `due-jobs` at all" from the most recent `JOB_RUN_STARTED`
+across every job, timing out after 15 minutes — roughly 3x the ~5 minute
+poll hint below, so one missed tick doesn't flap the UI's banner. Serves
+catalog defaults even when `schedule.json` is degraded (200, not 409 — a
+read is never refused, only a write).
+
+```json
+{"count": 1, "jobs": [{"name": "tune", "description": "...", "host_only": false, "spends_llm": true, "heavy": false, "enabled": true, "cadence": "0 4 * * *", "timeout_seconds": 3600, "run_requested_at": null, "last_run": {"run_id": "01M...", "started_at": "...", "finished_at": "...", "duration_ms": 12000, "exit_code": 0, "status": "ok"}, "next_due_at": "2026-10-12T04:00:00+00:00"}], "dispatcher_last_seen_at": "2026-10-11T02:55:00+00:00", "dispatcher_seen": true}
+```
+
+#### `PATCH /api/v1/admin/jobs/{name}`
+
+Edits `enabled`/`cadence`/`timeout_seconds`. 404 for a name not in
+`JOB_CATALOG` — this never creates a job. Only fields present in the body
+(`model_fields_set`) are changed; an empty body `{}` is a no-op that writes
+nothing and emits no event. A bad cron expression or an out-of-range
+timeout is 422. `cadence: null` clears it to manual-only (triggered only by
+the run route below).
+
+```bash
+curl -X PATCH https://host/api/v1/admin/jobs/tune -H "Authorization: Bearer $KEY" -d '{"enabled": false, "timeout_seconds": 60}'
+```
+
+#### `POST /api/v1/admin/jobs/{name}/run`
+
+Requests an out-of-band run ("Run now"). **Writes only `run_requested_at` —
+this route never executes the job inline and never claims to.**
+`is_job_due` treats a `run_requested_at` newer than the job's last completed
+run as always due, so a host dispatcher polling `due-jobs` on its own
+cadence is what actually picks it up from there — typically within ~5
+minutes, if one is installed at all. The response's `dispatcher_hint` field
+states exactly that; it is never worded as "started" or "completed".
+
+```json
+{"status": "ok", "name": "tune", "run_requested_at": "2026-10-11T03:00:00+00:00", "dispatcher_hint": "Accepted. A host dispatcher polling 'due-jobs' picks this up, typically within ~5 minutes, if one is installed."}
+```
+
+#### `trellis admin schedule set` / `trellis admin schedule run`
+
+CLI parity for the two writes above — same validation, same refusal
+posture, same audit events — for an operator at a terminal rather than a
+browser or the REST API.
+
+```bash
+trellis admin schedule set <name> [--enabled | --disabled] [--cadence CRON | --cadence none] [--timeout SECONDS] [--format text|json]
+trellis admin schedule run <name> [--format text|json]
+```
+
+`set` requires at least one of `--enabled`/`--disabled`, `--cadence` or
+`--timeout` (exits `EXIT_VALIDATION` otherwise, "no_fields") — omitting a
+flag leaves that field unchanged, it is never read as "clear it". Passing
+the literal `--cadence none` is how an operator clears cadence to
+manual-only; there is no other way to spell `null` on a command line. Both
+subcommands exit `EXIT_STORE` (5) under both formats on a degraded or stale
+schedule store, matching the REST routes' 409.
+
+#### The Schedules tab
+
+The operator UI's **Schedules** tab (`src/trellis_api/static/index.html`)
+renders `GET /admin/jobs`: cadence shown both as its raw cron expression and
+as hand-formatted text (explicitly labelled "host local time" — cron here
+evaluates on `trellis.core.cron`, the dispatcher host's own clock, never
+UTC), an enable toggle, inline cadence/timeout editing with client-side
+bounds validation before the PATCH, a two-step "Run now" confirmation (with
+an extra warning when the job is flagged `spends_llm` or `heavy`), last-run
+times rendered in UTC, and the "no dispatcher reporting" banner driven by
+`dispatcher_seen`.
 
 ---
 

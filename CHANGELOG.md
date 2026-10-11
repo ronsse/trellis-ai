@@ -6,6 +6,39 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Admin UI for the job schedule registry: `GET`/`PATCH /api/v1/admin/jobs`,
+  `POST /api/v1/admin/jobs/{name}/run`, CLI parity, a Schedules tab (e175,
+  plan p1 PR 6).** Completes the schedule registry below (#e166): an admin
+  can now edit a catalog job's `enabled`/`cadence`/`timeout_seconds` and
+  request an out-of-band run, without the write surface ever being able to
+  name a command, argv, path or environment variable —
+  `AdminJobPatchRequest` has no such field, and `extra="forbid"` refuses any
+  other field name with 422 rather than silently ignoring it. `GET
+  /api/v1/admin/jobs` joins every `JOB_CATALOG` entry with its
+  `ScheduleStore` row and its last-run status, derived from the EventLog's
+  own `JOB_RUN_STARTED`/`JOB_RUN_COMPLETED` pair — never a hardcoded
+  literal. "Run now" writes only `run_requested_at`; the response's
+  `dispatcher_hint` says a host dispatcher polling `due-jobs` picks it up,
+  typically within ~5 minutes, and never claims the run itself completed.
+  Both writes refuse with 409 and the schedule store's real error text while
+  it is degraded or stale, and both emit an audit event (`SCHEDULE_UPDATED`
+  / `JOB_RUN_REQUESTED`) carrying only the changed old/new fields plus the
+  caller's identity. `trellis admin schedule set <name>` / `schedule run
+  <name>` give the same two writes from a terminal, `--format json` and an
+  exit code independent of format. The web UI's new **Schedules** tab
+  renders cadence as both raw cron and hand-formatted text (labelled "host
+  local time", never UTC — `trellis.core.cron` evaluates on the dispatcher
+  host's own clock), an enable toggle, inline edit with bounds validation, a
+  two-step "Run now" confirm with an extra warning for `spends_llm`/`heavy`
+  jobs, and a "no dispatcher reporting" banner.
+  **Bug found and fixed in the same change:** `admin schedule set`'s
+  tri-state option detection compared `ctx.get_parameter_source(name)`
+  against `click.ParameterSource.COMMANDLINE` by identity — Typer invokes
+  that callback through its own vendored click fork, whose `ParameterSource`
+  is a distinct enum class with identically-named members, so the
+  comparison was always `False` and every `--enabled`/`--cadence`/`--timeout`
+  flag was silently a no-op regardless of what was passed. Fixed by
+  comparing `source.name == "COMMANDLINE"` instead.
 - **Schedule registry + job-run records (#e166).** The pieces a host-side
   dispatcher cron needs so job schedules can later be edited from a UI
   (plan p1 §(b)) without the container ever touching crontab — and the
@@ -46,10 +79,11 @@ All notable changes to Trellis will be documented in this file.
     `due-jobs` → exec argv (or resolve + exec a host-only path) →
     `record-job-run` loop under `flock`.
 
-  No REST route and no UI yet (a later PR, plan p1 PR 6). **The actual
+  The REST route and UI that edit this registry shipped separately, above
+  (plan p1 PR 6). **The actual
   boundary:** commands are fixed in source or confined to one host-only
   directory outside the shared mount; editing `schedule.json` — by hand, a
-  compromised container, or the future PR 6 API — can change only
+  compromised container, or the PR 6 API above — can change only
   *whether* and *when* a catalog job runs, never *what* runs. (An earlier
   draft of this entry claimed "no arbitrary command execution anywhere" on
   the strength of argv-not-shell alone; that claim did not hold once
