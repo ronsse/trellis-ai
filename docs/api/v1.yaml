@@ -1988,7 +1988,22 @@ components:
 
         ``None`` means the server withheld it — it is ops detail, gated like
 
-        the ``/readyz`` breakdown — not that the server cannot report it.'
+        the ``/readyz`` breakdown — not that the server cannot report it.
+
+
+        ``write_behaviour_settings`` is gated identically (``None`` under the
+
+        same withholding) but, unlike ``write_provenance``, is read fresh on
+
+        every call rather than cached once per process: a settings-store
+
+        override can change between two calls with no restart in between.
+
+        Each row is one :meth:`trellis.core.write_config.WriteBehaviourConfig.describe`
+
+        entry — ``name``, ``env_var``, ``value``, ``default``, ``overridden``,
+
+        and ``overridden_by`` (``"env"`` / ``"settings"`` / ``"default"``).'
       properties:
         api_major:
           title: Api Major
@@ -2012,6 +2027,14 @@ components:
         wire_schema:
           title: Wire Schema
           type: string
+        write_behaviour_settings:
+          anyOf:
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          - type: 'null'
+          title: Write Behaviour Settings
         write_provenance:
           anyOf:
           - additionalProperties: true
@@ -4394,7 +4417,26 @@ paths:
 
         this route was written for.  They appear when the API is served from
 
-        an editable install whose working tree has moved on.'
+        an editable install whose working tree has moved on.
+
+
+        ``write_behaviour_settings`` is gated the same way, for the same
+
+        reason — a knob''s ``overridden_by`` sits beside its env-sourced
+
+        counterpart in ``write_provenance.env_flags``, so splitting the gate
+
+        between them would publish half the same fact.  Unlike
+
+        ``write_provenance`` (a stamp frozen once per process) this is read
+
+        fresh from ``<data_dir>/stores/settings.json`` on every call, same as
+
+        ``trellis admin write-config`` — this process''s container may have
+
+        no store configured at all, in which case every row reports
+
+        ``"env"``/``"default"`` and never ``"settings"``.'
       operationId: api_version_api_version_get
       responses:
         '200':
