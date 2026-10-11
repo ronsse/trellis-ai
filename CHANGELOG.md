@@ -6,6 +6,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Advisories and Policies tabs in the web UI (#850).** Both surfaces
+  existed only as CLI/REST before this: `GET /advisories` (+
+  `POST /advisories/generate`, an admin action gated behind an inline
+  two-step confirm, never `window.confirm`) and `/policies*` (list is
+  read-scope, create/delete escalate to admin — a 403 now renders as "needs
+  an admin-scoped key" rather than a blank panel). A degraded
+  `AdvisoryStore`/`PolicyStore` (`DegradableJsonStore`) renders a dedicated
+  banner from `store_degradation` so a damaged file never reads the same as
+  an empty one, and `GET /advisories`' `stores_dir not configured` sentinel
+  (a 200 with `{"status": "error"}`, not an HTTP failure) is checked
+  explicitly rather than falling through to a silently empty table. Every
+  interpolated value goes through `escHtml`; dates are rendered through a new
+  UTC-labelled `fmtDateUtc` rather than the existing unlabelled `fmtDate`. The
+  policy create form submits exactly one rule per policy, matching
+  `trellis policy add`'s own shape; each field carries a one-line
+  description, including the deny-wins resolution order.
 - **Promotion-ready-candidate digest and readable fallback names (#845).**
   Prod had scored 796 learning candidates with 0 ever promoted, and 13 of the
   top 15 `promote_guidance` candidates carried an ugly bare-item-id
