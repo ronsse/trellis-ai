@@ -265,6 +265,12 @@ def metrics_timeseries(
     omitted (not zero-filled). An unknown ``metric`` / ``group_by`` /
     ``bucket`` (or a non-positive ``days``) returns 422 rather than a
     silent empty result, so a typo surfaces loudly.
+
+    ``scan_truncated`` / ``scanned_events`` carry
+    :func:`compute_timeseries`'s :class:`~trellis.stores.base.event_log.ScanCoverage`
+    (P1-8): when ``scan_truncated`` is true, the EventLog read hit its
+    cap and the window's recent-end buckets may be missing data rather
+    than genuinely empty.
     """
     if bucket != "day":
         raise HTTPException(
@@ -305,6 +311,8 @@ def metrics_timeseries(
             )
             for s in result.series
         ],
+        scan_truncated=result.scan.truncated,
+        scanned_events=result.scan.scanned,
     )
 
 
