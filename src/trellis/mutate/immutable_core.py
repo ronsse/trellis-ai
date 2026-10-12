@@ -123,6 +123,11 @@ GOVERNING_KEYS: frozenset[str] = frozenset(
         "learning.candidate_auto_promote.min_distinct_sessions",
         "learning.candidate_auto_promote.require_zero_unhelpful",
         "learning.candidate_auto_promote.max_promotions_per_run",
+        # PrecedentAutoDemotePolicy's SETTINGS_REGISTRY keys
+        # (trellis.learning.precedent_auto_demote) — same reasoning.
+        "learning.precedent_auto_demote.enabled",
+        "learning.precedent_auto_demote.mode",
+        "learning.precedent_auto_demote.max_demotions_per_run",
     }
 )
 

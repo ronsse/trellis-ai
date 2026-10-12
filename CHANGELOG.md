@@ -6,6 +6,54 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Precedent auto-demotion, and a real `commit` mode for
+  learning-candidate auto-promotion — both ship `enabled=False`.**
+  `trellis.learning.precedent_auto_demote.PrecedentAutoDemotePolicy`
+  evaluates current precedents against the same unhelpful-citation
+  evidence gate `demotion_gate.py` uses for noise, and reports what it
+  would demote; once an operator sets
+  `learning.precedent_auto_demote.enabled` (and, to actually commit,
+  its `mode` to `commit`), `run_precedent_auto_demotion` demotes each
+  would-demote precedent through the same governed path a human
+  `trellis curate demote-precedent` call uses, capped by
+  `max_demotions_per_run` and rate-limited per run. New CLI `trellis
+  curate evaluate-precedent-demotion`, catalog job
+  `evaluate-precedent-demotion` (daily cadence, deterministic, no LLM
+  spend), and `SETTINGS_REGISTRY` family `learning.precedent_auto_demote.*`
+  (group `learning_loops`). Every run emits exactly one
+  `LEARNING_AUTO_DEMOTE_EVALUATED` event, whatever it did, with the same
+  `outcome`/`configured_mode`/`policy_snapshot` shape the sibling
+  promotion event already used — a run that exits before evaluation
+  still emits one event rather than reading as "never ran".
+  - This is this project's safety rollback for auto-promotion's own
+    `commit` mode: `LearningCandidateAutoPromotePolicy.__post_init__`
+    now accepts `mode="commit"` (previously refused unconditionally
+    with a `ConfigError`) once constructed with
+    `demotion_enabled=True`, i.e. once
+    `learning.precedent_auto_demote.enabled` is also on — running one
+    loop's commit mode without the other's would leave a wrong
+    unattended promotion with no automatic undo. `run_candidate_auto_promotion`'s
+    commit-execution branch is now reachable: it promotes each
+    qualifying candidate through the same governed path a human
+    review-queue approval uses, capped by `max_promotions_per_run`.
+    The Settings UI still never offers `commit` as a selectable value
+    for `learning.candidate_auto_promote.mode` (only the environment
+    variable can set it, and construction still refuses it unless
+    auto-demotion is enabled too) — that permanent Settings-layer block
+    was previously described as lasting only "until auto-demotion
+    ships"; it ships in this change and the block stays.
+  - `trellis.ops.loop_health` gains a ninth row,
+    `learning_precedent_auto_demote`, placed directly after
+    `learning_candidate_auto_promote` since it is that loop's rollback;
+    both rows now derive `actuates` from the latest run's own recorded
+    effective mode rather than a hardcoded `False`, since both can now
+    genuinely commit. The `auto-promote-candidates` catalog job
+    description and the Loops tab's labels and Precedents-tab empty
+    state no longer claim auto-promotion can never write — they say
+    what it does in each mode instead.
+  - No default behavior changes: both policies ship `enabled=False`,
+    so every existing deployment stays exactly as report-only as
+    before until an operator opts in to one or both.
 - **Operator UI: paged search results, a reachable event lookup, typed
   report parameters, and a help link on every tab.** `GET /precedents/domains`
   mirrors `GET /traces/domains` (same shape, same demoted/archived

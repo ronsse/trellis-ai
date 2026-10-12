@@ -203,10 +203,23 @@ class TestListSettings:
         assert "auto-demotion" in row["refused_reason"]
 
     def test_no_other_entry_reports_a_refused_value(self, client: TestClient) -> None:
+        """Exactly the two entries that refuse ``commit`` through Settings
+        unconditionally report ``refused_values`` --
+        ``learning.candidate_auto_promote.mode`` and
+        ``learning.precedent_auto_demote.mode``. Both can still be set to
+        ``commit`` through their own environment variable; only
+        ``learning.candidate_auto_promote.mode``'s construction-time
+        check additionally refuses that env-set value unless the sibling
+        demotion policy is enabled too -- a separate gate this Settings-
+        layer block does not depend on. No other entry declares one.
+        """
         resp = client.get("/api/v1/settings")
         body = resp.json()
         refusing = [row["name"] for row in body["settings"] if row["refused_values"]]
-        assert refusing == ["learning.candidate_auto_promote.mode"]
+        assert refusing == [
+            "learning.candidate_auto_promote.mode",
+            "learning.precedent_auto_demote.mode",
+        ]
 
     def test_a_malformed_stored_row_is_flagged_not_silently_swallowed(
         self, client: TestClient, registry: StoreRegistry

@@ -1,15 +1,17 @@
 """Tests for :mod:`trellis.learning.candidate_auto_promote`.
 
-Report-only, evaluation-only: ``enabled=False`` / ``mode="report_only"``
-ship as the default, and the load-bearing claims under test are (1) a
-single-session (n=1) candidate can never qualify no matter how it is
-configured, (2) report-only truly never writes, (3) ``mode="commit"`` is
-refused with a :class:`~trellis.errors.ConfigError` at construction on
-every path, unconditionally, and (4) a candidate that already has any
-successful ``precedent.promote`` — human or automatic — is excluded from
-``would_promote`` and reported as ``already_promoted``. Auto-demotion and
-a working commit mode are deferred to a follow-up PR; this module never
-demotes anything (there is no ``sweep_auto_demotions`` here to test).
+Report-only, evaluation-only by default: ``enabled=False`` /
+``mode="report_only"`` ship as the default, and the load-bearing claims
+under test are (1) a single-session (n=1) candidate can never qualify no
+matter how it is configured, (2) report-only truly never writes, (3)
+``mode="commit"`` is refused with a :class:`~trellis.errors.ConfigError`
+at construction unless ``demotion_enabled=True`` is also passed — the
+sibling auto-demotion policy
+(:mod:`trellis.learning.precedent_auto_demote`) being switched on — and
+(4) a candidate that already has any successful ``precedent.promote`` —
+human or automatic — is excluded from ``would_promote`` and reported as
+``already_promoted``. This module never demotes anything itself (there
+is no ``sweep_auto_demotions`` here to test).
 
 ``TestFloorRefusalOnConstruction`` mirrors
 ``tests/unit/learning/tuners/test_resolve_auto_promote_overrides.py``'s
@@ -23,12 +25,16 @@ validates it directly (``TestResolveModeValidation``), because an invalid
 ``mode`` has to be refused before it is ever recorded as a
 ``configured_mode`` — raising only after construction would be too late.
 
-``_force_commit_policy`` bypasses that same ``__post_init__`` gate via
-``object.__setattr__`` (the dataclass is frozen) to exercise the
-commit-execution branch the module docstring says is kept in
-``run_candidate_auto_promotion`` "unreachable ... deliberately" rather than
-deleted — nothing in production can reach it this way either, but the
-branch still needs to stay correct for the follow-up that lifts the gate.
+``_force_commit_policy`` still bypasses ``__post_init__`` via
+``object.__setattr__`` (the dataclass is frozen) for the bulk of
+``TestRunCandidateAutoPromotionCommit`` — a convenience, not a necessity
+any more, since ``mode="commit", demotion_enabled=True`` now constructs
+through the public API too (see
+``TestCommitModeConstructionConditionalOnDemotion`` and
+``test_commit_branch_reachable_through_real_constructor_once_demotion_enabled``
+below, which use the real constructor on purpose to prove the branch
+``run_candidate_auto_promotion`` executes is reachable without any
+bypass, now that ``demotion_enabled=True`` makes it reachable).
 """
 
 from __future__ import annotations
@@ -150,16 +156,22 @@ class TestPolicyFloors:
 
 
 class TestCommitModeConstructionRefused:
-    """Item 2: commit mode must refuse to run on every resolution path.
+    """Commit mode must refuse to run unless the sibling auto-demotion
+    policy is also enabled.
 
     ``mode="commit"`` raises :class:`~trellis.errors.ConfigError` at
-    construction, unconditionally — regardless of ``enabled`` — so there
-    is no way to produce a policy whose configured ``mode`` is ``"commit"``
-    through the public API today."""
+    construction whenever ``demotion_enabled`` is its default
+    (``False``) — regardless of this policy's own ``enabled`` — so there
+    is no way to produce a policy whose configured ``mode`` is
+    ``"commit"`` through the public API without separately opting in to
+    ``demotion_enabled=True``. ``TestCommitModeConstructionConditionalOnDemotion``
+    below covers the other half: that passing ``demotion_enabled=True``
+    lifts the refusal."""
 
     def test_mode_commit_raises_configerror(self) -> None:
         with pytest.raises(
-            ConfigError, match="commit mode is not available until auto-demotion ships"
+            ConfigError,
+            match="commit mode is not available until auto-demotion is enabled",
         ):
             LearningCandidateAutoPromotePolicy(mode="commit")
 
@@ -171,6 +183,12 @@ class TestCommitModeConstructionRefused:
         with pytest.raises(ConfigError):
             LearningCandidateAutoPromotePolicy(enabled=True, mode="commit")
 
+    def test_mode_commit_raises_when_demotion_explicitly_disabled(self) -> None:
+        with pytest.raises(ConfigError):
+            LearningCandidateAutoPromotePolicy(
+                enabled=True, mode="commit", demotion_enabled=False
+            )
+
     def test_configerror_names_the_mode_setting(self) -> None:
         with pytest.raises(ConfigError) as exc_info:
             LearningCandidateAutoPromotePolicy(mode="commit")
@@ -180,13 +198,40 @@ class TestCommitModeConstructionRefused:
         """The resolver itself never validates (``TestFloorRefusalOnConstruction``
         below exercises the same pattern for the int floors); the same
         refusal must still hold once the resolved dict reaches
-        construction, for a mode value sourced from env."""
+        construction, for a mode value sourced from env, with
+        ``demotion_enabled`` left at its default."""
         resolved = resolve_candidate_auto_promote_overrides(
             env={CANDIDATE_AUTO_PROMOTE_MODE_ENV: "commit"}
         )
         assert resolved["mode"] == "commit"
         with pytest.raises(ConfigError):
             LearningCandidateAutoPromotePolicy(**resolved)
+
+
+class TestCommitModeConstructionConditionalOnDemotion:
+    """The other half of the gate above: ``demotion_enabled=True`` lifts
+    the refusal and lets ``mode="commit"`` construct."""
+
+    def test_demotion_enabled_lifts_the_refusal(self) -> None:
+        policy = LearningCandidateAutoPromotePolicy(
+            enabled=True, mode="commit", demotion_enabled=True
+        )
+        assert policy.mode == "commit"
+        assert policy.demotion_enabled is True
+
+    def test_demotion_enabled_alone_does_not_require_this_policy_enabled(self) -> None:
+        """Construction checks ``demotion_enabled``, not ``enabled`` —
+        a commit-mode policy with ``enabled=False`` still constructs
+        (and then behaves as ``report_only`` via ``effective_mode``)."""
+        policy = LearningCandidateAutoPromotePolicy(
+            enabled=False, mode="commit", demotion_enabled=True
+        )
+        assert policy.mode == "commit"
+        assert policy.effective_mode == "report_only"
+
+    def test_demotion_enabled_defaults_false(self) -> None:
+        policy = LearningCandidateAutoPromotePolicy()
+        assert policy.demotion_enabled is False
 
 
 class TestEffectiveMode:
@@ -666,12 +711,54 @@ class TestRunCandidateAutoPromotionReportOnly:
 
 class TestRunCandidateAutoPromotionCommit:
     """Real ``StoreRegistry`` + ``build_curate_executor`` — commit mode must
-    write only through the governed executor. ``mode="commit"`` cannot be
-    constructed through the normal API today
-    (``TestCommitModeConstructionRefused``); these use ``_force_commit_policy``
-    to exercise the branch the module docstring says is kept "unreachable
-    ... deliberately" rather than deleted, so it stays correct for the
-    follow-up that lifts the gate."""
+    write only through the governed executor. Most of these still use
+    ``_force_commit_policy`` as a convenience (nothing about it changed),
+    but the branch it exercises is no longer unreachable in production:
+    the first test below builds the policy through the real, public
+    constructor — ``demotion_enabled=True``, no bypass — to re-verify
+    that the commit branch ``run_candidate_auto_promotion`` executes is
+    actually correct now that construction can reach it, not only
+    correct under the bypass."""
+
+    def test_commit_branch_reachable_through_real_constructor_once_demotion_enabled(
+        self, tmp_path: Path
+    ) -> None:
+        """No ``_force_commit_policy`` here: ``mode="commit"`` is built
+        through ``LearningCandidateAutoPromotePolicy``'s normal
+        constructor, exactly as an operator who enabled both policies
+        would produce it, and the run still promotes through the
+        governed executor exactly like the bypass-based tests below."""
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            policy = LearningCandidateAutoPromotePolicy(
+                enabled=True, mode="commit", demotion_enabled=True
+            )
+            assert policy.effective_mode == "commit"
+
+            report = run_candidate_auto_promotion(
+                candidates=[_candidate("cand-real-ctor")],
+                policy=policy,
+                event_log=registry.operational.event_log,
+                executor=executor,
+                graph_store=registry.knowledge.graph_store,
+            )
+
+            assert report.mode == "commit"
+            assert report.promoted_count == 1
+            assert report.outcomes[0].disposition == "promoted"
+
+            promote_events = registry.operational.event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED,
+                payload_filters={
+                    "operation": Operation.PRECEDENT_PROMOTE.value,
+                    "requested_by": AUTO_PROMOTE_REQUESTED_BY,
+                    "status": "success",
+                },
+            )
+            assert len(promote_events) == 1
+        finally:
+            registry.close()
 
     def test_writes_entity_link_and_promote_through_executor(
         self, tmp_path: Path

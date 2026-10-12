@@ -1377,13 +1377,18 @@ a message saying so and exits `0`. Demoting a precedent whose lifecycle
 state is anything other than `"current"` (superseded, archived, or
 anything else) is refused, naming the actual state.
 
-Manual-trigger only in this release: there is no automatic demotion path
-yet. Who is demoting governs which precedents may be demoted:
+This command is also the governed write
+`trellis curate evaluate-precedent-demotion`'s `commit` mode uses, once
+an operator has enabled that automatic path (see below) — both routes
+end at the same handler. Who is demoting governs which precedents may
+be demoted:
 
-- A caller whose `--by` identity is the (not-yet-wired) automatic
-  requester identity may demote only a precedent whose own
-  `precedent.promote` event was itself automatic — re-derived from the
-  audit trail, never from a caller-supplied flag.
+- A caller whose `--by` identity is the automatic requester identity
+  (`auto:learning_candidate_demote`, `AUTO_DEMOTE_REQUESTED_BY` —
+  `trellis curate evaluate-precedent-demotion`'s commit mode uses this
+  automatically; a human never needs to pass it) may demote only a
+  precedent whose own `precedent.promote` event was itself automatic —
+  re-derived from the audit trail, never from a caller-supplied flag.
 - Every other caller (a human, via CLI/MCP/API) may demote any
   graph-backed precedent that is currently `"current"`.
 
@@ -1487,6 +1492,126 @@ Also reachable via `POST /precedents/{target_id}/reinstate` (`{"reason":
 ..., "requested_by"?}`, see REST Endpoints below) and MCP
 `execute_mutation` (`operation="precedent.reinstate"`,
 `args={"target_id", "reason"}`).
+
+### `trellis curate auto-promote-candidates`
+
+Evaluate learning candidates for automatic promotion to a precedent —
+default-off, report-only unless an operator enables commit mode. Every
+candidate gets a disposition: `would_promote`, `already_promoted` (a
+precedent already exists for it, whether a human approved it on the
+Review tab or an earlier automatic run created it), or
+`ineligible:<reason>` (not-promotable recommendation type, unhelpful
+citations when `require_zero_unhelpful`, or below the
+`min_helpful_count`/`min_distinct_sessions` floors). Evaluation order
+checks already-promoted first, so a candidate past the finish line is
+never re-counted toward `max_promotions_per_run`.
+
+`learning.candidate_auto_promote.mode` can only be set to `commit` once
+`learning.precedent_auto_demote.enabled` is also true —
+`evaluate-precedent-demotion` below is commit mode's safety rollback,
+so running one loop's commit mode without the other enabled would leave
+a wrong unattended promotion with no automatic undo.
+`LearningCandidateAutoPromotePolicy.__post_init__` raises
+`ConfigError` at construction if `mode="commit"` is requested without
+that sibling policy enabled; `--dry-run` sidesteps this by forcing the
+run's `effective_mode` to `report_only` *before* construction, so a
+stored or env-configured `commit` never reaches the check — the run
+still truthfully reports the pre-`--dry-run` value as `configured_mode`,
+distinct from the `mode` that actually ran, in the CLI output, the
+emitted event, and the Loop Health row. In `commit` mode each
+`would_promote` candidate is promoted through the same governed path a
+human Review-queue approval uses (`submit_learning_promotion`), capped
+by `max_promotions_per_run`.
+
+Every run — including one that fails before evaluating a single
+candidate — emits exactly one `LEARNING_AUTO_PROMOTE_EVALUATED` event,
+carrying `outcome: "ok"` (or `"degraded"` if a candidate was skipped
+for having no usable id) for a completed run, or `outcome: "refused"`
+(the `ConfigError` case, exit 5) / `"failed"` (a malformed
+`--candidates` file or similar, exit 2 or 1) for one that never reached
+evaluation — never zero events, so a silent exit cannot read as "this
+job never ran" to `trellis.ops.loop_health`.
+
+Both policies ship `enabled=False` by default: nothing commits
+unattended until an operator turns both on.
+
+```bash
+trellis curate auto-promote-candidates [--candidates <path>] [--dry-run] [--format text|json]
+```
+
+| Argument/Option | Required | Default | Description |
+|-----------------|----------|---------|-------------|
+| `--candidates` | No | `resolve_learning_artifacts_dir()`'s `intent_learning_candidates.json` | Path to the candidates file the Review queue also reads |
+| `--dry-run` | No | off | Force this run's effective mode to `report_only`, regardless of configured mode |
+| `--format` | No | `text` | Output format |
+
+**Example:**
+
+```bash
+trellis curate auto-promote-candidates --dry-run --format json
+```
+
+Catalog job `auto-promote-candidates` runs this on a daily cadence (see
+[Schedule registry + job runs](#schedule-registry--job-runs) below); the job's own stored mode governs
+whether that scheduled run can commit.
+
+### `trellis curate evaluate-precedent-demotion`
+
+Evaluate current precedents for demotion against the evidence they have
+accumulated since promotion — default-off, report-only unless an
+operator enables commit mode. This is `auto-promote-candidates`'
+safety rollback: joining `PACK_ASSEMBLED.injected_items` to
+`FEEDBACK_RECORDED` by pack id, a precedent demotes only on a floor of
+unhelpful citations (`--min-unhelpful-citations`, provisional — borrowed
+from `trellis.classify.demotion_gate`, measured for noise documents, not
+for precedents) — never on the absence of helpful ones — and any
+precedent cited helpful at least as often as unhelpful is refused
+regardless of the unhelpful count. An already-demoted or archived
+precedent, or one otherwise not in the current lifecycle state, is
+reported `already_demoted` or `ineligible:<reason>` without being
+judged.
+
+Only a precedent served through a flat `get_context` pack can
+accumulate evidence this way: `get_lessons` and sectioned packs emit no
+per-item attribution, so a precedent reachable only through those
+surfaces always refuses for want of evidence, regardless of how useful
+it actually is — `attribution_caveat` in this command's own output
+(every format) says so.
+
+`learning.precedent_auto_demote.mode` only commits once
+`learning.precedent_auto_demote.enabled` is also true
+(`effective_mode`). Unlike the promotion policy above, this policy
+carries no construction-time gate on a sibling — demotion is itself the
+rollback a safe commit mode needs. In `commit` mode each `would_demote`
+precedent is demoted through the same governed path
+`trellis curate demote-precedent` uses, capped by
+`max_demotions_per_run` and rate-limited per run
+(`skipped_rate_limited`).
+
+Every run — including one that fails before evaluating a single
+precedent — emits exactly one `LEARNING_AUTO_DEMOTE_EVALUATED` event,
+mirroring the promotion event's `outcome`/`configured_mode`/
+`policy_snapshot` shape.
+
+```bash
+trellis curate evaluate-precedent-demotion [--min-unhelpful-citations <n>] [--dry-run] [--format text|json]
+```
+
+| Argument/Option | Required | Default | Description |
+|-----------------|----------|---------|-------------|
+| `--min-unhelpful-citations` | No | `MIN_UNHELPFUL_CITATIONS` | Per-precedent unhelpful-citation floor |
+| `--dry-run` | No | off | Force this run's effective mode to `report_only`, regardless of configured mode |
+| `--format` | No | `text` | Output format |
+
+**Example:**
+
+```bash
+trellis curate evaluate-precedent-demotion --dry-run --format json
+```
+
+Catalog job `evaluate-precedent-demotion` runs this on a daily cadence
+(see [Schedule registry + job runs](#schedule-registry--job-runs) below); the job's own stored mode
+governs whether that scheduled run can commit.
 
 ### `trellis curate feedback`
 

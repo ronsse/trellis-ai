@@ -40,6 +40,9 @@ from trellis.core.write_config import WriteBehaviourConfig
 from trellis.learning.candidate_auto_promote import (
     resolve_candidate_auto_promote_overrides,
 )
+from trellis.learning.precedent_auto_demote import (
+    resolve_precedent_auto_demote_overrides,
+)
 from trellis.learning.tuners.auto_promote import resolve_auto_promote_overrides
 from trellis.mutate import Command, CommandStatus, Operation, build_settings_executor
 from trellis.ops.capture_health import resolve_capture_thresholds
@@ -121,12 +124,14 @@ def _effective_values(
     twelve fields can't land in ``parse_errors``: every one of its
     per-field helpers (``_truthy``, ``_min_confidence``, the clamps)
     already degrades a garbage value to a default with a warning log,
-    never a raised exception. The two auto-promote resolvers below make
-    no such promise -- ``resolve_auto_promote_overrides`` and
-    ``resolve_candidate_auto_promote_overrides`` do ``int(float(raw))``
-    on a non-blank env value and let ``ValueError``/``TypeError`` fly, by
-    design, for their real caller (the CLI / worker), which wants a loud
-    failure. This route is read by an operator who did not necessarily
+    never a raised exception. The three resolvers below make no such
+    promise -- ``resolve_auto_promote_overrides``,
+    ``resolve_candidate_auto_promote_overrides`` and
+    ``resolve_precedent_auto_demote_overrides`` do ``int(float(raw))`` (or
+    raise a value-free ``ValueError`` on a bad ``mode``) on a non-blank
+    env value and let ``ValueError``/``TypeError``/``OverflowError`` fly,
+    by design, for their real caller (the CLI / worker), which wants a
+    loud failure. This route is read by an operator who did not necessarily
     set the bad value and must still see every *other* setting, so a
     family that fails to resolve degrades to each of its entries'
     registry defaults here, with a FIXED, value-free reason recorded
@@ -204,13 +209,14 @@ def _effective_values(
 
     effective["graph_max_subgraph_depth"] = _resolve_max_subgraph_depth()
 
-    # The two auto-promote families resolve env > settings > default here,
-    # through the same two resolver functions every other caller of
-    # AutoPromotePolicy and LearningCandidateAutoPromotePolicy routes
-    # through, just without their own real caller's config.yaml layer
-    # underneath: this route has no access to trellis_cli.worker's yaml
-    # loader, and a third layer below "default" cannot change which of
-    # env/settings/default resolve_source already reported. An
+    # The three auto-promote/demote families resolve env > settings >
+    # default here, through the same resolver functions every other
+    # caller of AutoPromotePolicy, LearningCandidateAutoPromotePolicy and
+    # PrecedentAutoDemotePolicy routes through, just without their own
+    # real caller's config.yaml layer underneath: this route has no
+    # access to trellis_cli.worker's yaml loader, and a third layer below
+    # "default" cannot change which of env/settings/default resolve_source
+    # already reported. An
     # "effective_value" that silently ignored config.yaml would only
     # mislead when the stored/default value IS what's reported and
     # config.yaml sets something else -- the same honest-preview caveat
@@ -224,6 +230,10 @@ def _effective_values(
         (
             "learning.candidate_auto_promote.",
             lambda: resolve_candidate_auto_promote_overrides(settings=settings_values),
+        ),
+        (
+            "learning.precedent_auto_demote.",
+            lambda: resolve_precedent_auto_demote_overrides(settings=settings_values),
         ),
     ):
         try:
@@ -416,8 +426,9 @@ def _parse_error_reason(spec: SettingSpec) -> str:
 def _family_parse_error_reason() -> str:
     """The fixed, value-free reason for a whole-family resolution failure.
 
-    Used when ``resolve_auto_promote_overrides`` or
-    ``resolve_candidate_auto_promote_overrides`` raises: unlike
+    Used when ``resolve_auto_promote_overrides``,
+    ``resolve_candidate_auto_promote_overrides`` or
+    ``resolve_precedent_auto_demote_overrides`` raises: unlike
     :func:`_parse_error_reason`, the culprit is not necessarily *this*
     entry's own stored row -- it can be another entry in the same
     family whose environment variable is the one that is malformed, so

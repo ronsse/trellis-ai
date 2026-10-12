@@ -4804,14 +4804,16 @@
 
         // An empty Precedents tab has three true things to say, not one
         // generic "nothing here yet": whether anything is waiting on the
-        // human decision that is the only path to a precedent, what the
-        // report-only check last said it would do, and whether that check
-        // even runs unattended. Each comes from the surface that already
-        // owns that fact -- Review's own candidate list, the Loops tab's
-        // own counters, and the Schedules tab's own dispatcher signal --
-        // so this never re-derives or restates a number another tab could
-        // disagree with, and a fetch failure degrades its own line rather
-        // than blocking the other two.
+        // human decision that is the ordinary path to a precedent, what
+        // the auto-promotion loop last said it would do (and, once an
+        // operator has turned commit mode on, actually did do itself),
+        // and whether that loop even runs unattended. Each comes from
+        // the surface that already owns that fact -- Review's own
+        // candidate list, the Loops tab's own counters, and the
+        // Schedules tab's own dispatcher signal -- so this never
+        // re-derives or restates a number another tab could disagree
+        // with, and a fetch failure degrades its own line rather than
+        // blocking the other two.
         async function renderPrecedentsEmptyState() {
             const [candidatesRes, loopsRes, jobsRes] = await Promise.allSettled([
                 fetchJSON('/learning/candidates'),
@@ -4835,12 +4837,22 @@
                 const row = (loopsRes.value.loops || [])
                     .find(l => l.name === 'learning_candidate_auto_promote');
                 const wouldQualify = row && row.counters ? row.counters.last_run_would_promote : null;
-                qualifyLine = (wouldQualify === null || wouldQualify === undefined)
-                    ? 'The automatic report-only check that estimates what would qualify has not reported yet.'
-                    : `Its last report said ${escHtml(wouldQualify)} candidate(s) would qualify &mdash; ` +
-                      'it never promotes anything itself.';
+                const committed = !!(row && row.actuates);
+                if (wouldQualify === null || wouldQualify === undefined) {
+                    qualifyLine = 'The automatic check that estimates what would qualify has not reported yet.';
+                } else if (committed) {
+                    const promoted = row.counters.last_run_promoted;
+                    qualifyLine = `Its last run promoted ${escHtml(promoted == null ? 0 : promoted)} ` +
+                        `of ${escHtml(wouldQualify)} qualifying candidate(s) itself &mdash; it ships ` +
+                        'enabled=False by default, so this only happens once an operator turns commit ' +
+                        'mode on.';
+                } else {
+                    qualifyLine = `Its last report said ${escHtml(wouldQualify)} candidate(s) would qualify ` +
+                        '&mdash; it did not promote them itself (report-only, unless an operator enables ' +
+                        'commit mode).';
+                }
             } else {
-                qualifyLine = 'The automatic report-only check\'s last result could not be checked just now.';
+                qualifyLine = 'The automatic check\'s last result could not be checked just now.';
             }
 
             let scheduleLine = 'It is not currently confirmed to run on a schedule.';
@@ -4858,9 +4870,10 @@
             }
 
             return '<div class="empty-state"><div class="icon">&#x2713;</div>' +
-                '<p>No precedents yet. A precedent is created only when a human approves a learning ' +
-                'candidate on the <a href="#" onclick="switchView(\'review\'); return false;">Review</a> ' +
-                `tab. ${reviewLine} ${qualifyLine} ${scheduleLine}</p></div>`;
+                '<p>No precedents yet. A precedent is ordinarily created when a human approves a ' +
+                'learning candidate on the <a href="#" onclick="switchView(\'review\'); return false;">' +
+                'Review</a> tab; the auto-promotion loop below can also create one on its own once an ' +
+                `operator enables its commit mode. ${reviewLine} ${qualifyLine} ${scheduleLine}</p></div>`;
         }
 
         async function loadPrecedents() {
@@ -5645,7 +5658,14 @@
             precedent_promotion: 'Precedent promotion',
             tuner: 'Tuner',
             feedback_intake: 'Feedback intake',
-            learning_candidate_auto_promote: 'Learning-candidate auto-promotion (report-only)',
+            // Both ship enabled=False by default -- report-only until an
+            // operator turns them on, at which point the "actuates"
+            // badge (driven by the row's own last-run data, not a fixed
+            // label) reflects whether a run actually committed. Neither
+            // label hardcodes "(report-only)" any more: that qualifier
+            // stopped being categorically true once commit mode shipped.
+            learning_candidate_auto_promote: 'Learning-candidate auto-promotion',
+            learning_precedent_auto_demote: 'Precedent auto-demotion',
         };
 
         // Staleness is computed server-side, per loop, from that loop's own

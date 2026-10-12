@@ -40,11 +40,17 @@ enforcement site(s) were confirmed to resolve env > settings > default
 through a dedicated resolver, same as every other ``settings_live=True``
 entry below; the tuner's three ``learning.auto_promote.*`` knobs
 (:func:`trellis.learning.tuners.auto_promote.resolve_auto_promote_overrides`,
-env > settings > ``config.yaml`` > default); and the six
+env > settings > ``config.yaml`` > default); the six
 ``learning.candidate_auto_promote.*`` knobs for
 :class:`~trellis.learning.candidate_auto_promote.LearningCandidateAutoPromotePolicy`
 (env > settings > default — no ``config.yaml`` layer, since this policy has
-no legacy file-based config to shadow). Not registered: anything
+no legacy file-based config to shadow); and the three
+``learning.precedent_auto_demote.*`` knobs for
+:class:`~trellis.learning.precedent_auto_demote.PrecedentAutoDemotePolicy`
+(:func:`~trellis.learning.precedent_auto_demote.resolve_precedent_auto_demote_overrides`,
+same env > settings > default shape as the candidate-promotion family — this
+is commit mode's rollback policy, not a parameter of the promotion policy
+itself). Not registered: anything
 `StoreRegistry`-construction-time (backend choice, DSN, blob bucket,
 auth mode) — those are process-start parameters, never read live by any
 of the stores or readers this registry's siblings touch, so a settings
@@ -60,7 +66,8 @@ enforcement call site (``trace_ingest_hook.py``, ``memory_ingest_hook.py``,
 ``mcp/server.py``, ``builder_factory.py``, ``pack_builder.py``,
 ``demotion_gate.py``, ``advisory_generator.py``, ``capture_health.py``,
 ``session_capture/sweep.py``, ``trellis_cli.worker._build_auto_promote_policy``,
-``trellis.learning.candidate_auto_promote``) now resolves env > settings
+``trellis.learning.candidate_auto_promote``,
+``trellis.learning.precedent_auto_demote``) now resolves env > settings
 > default (the two auto-promote families add a ``config.yaml`` and/or
 default-only layer beneath that — see their own entries above) via
 :func:`trellis.core.write_config.resolve_write_behaviour` or an
@@ -104,6 +111,12 @@ from trellis.learning.candidate_auto_promote import (
     MIN_DISTINCT_SESSIONS_FLOOR,
     MIN_HELPFUL_COUNT_FLOOR,
 )
+from trellis.learning.precedent_auto_demote import (
+    MAX_DEMOTIONS_PER_RUN_FLOOR,
+    PRECEDENT_AUTO_DEMOTE_ENABLED_ENV,
+    PRECEDENT_AUTO_DEMOTE_MAX_DEMOTIONS_PER_RUN_ENV,
+    PRECEDENT_AUTO_DEMOTE_MODE_ENV,
+)
 from trellis.learning.tuners.auto_promote import (
     AUTO_PROMOTE_ENABLED_ENV,
     AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV,
@@ -130,9 +143,10 @@ SettingType = Literal["bool", "int", "float", "str"]
 
 #: The UI's filter-box categories: which area of the system a knob
 #: belongs to, independent of ``risk`` or ``settings_live``.
-#: ``"learning_loops"`` holds the tuner's ``learning.auto_promote.*`` and
-#: the ``learning.candidate_auto_promote.*`` entries below, out of this
-#: module's 31 entries total.
+#: ``"learning_loops"`` holds the tuner's ``learning.auto_promote.*``, the
+#: ``learning.candidate_auto_promote.*`` and the
+#: ``learning.precedent_auto_demote.*`` entries below, out of this
+#: module's 34 entries total.
 SettingGroup = Literal[
     "retrieval", "ingest_tagging", "learning_loops", "feedback_attribution", "ops"
 ]
@@ -209,8 +223,12 @@ class SettingSpec:
     #: with ``refused_reason`` as the message. For a value that is
     #: structurally valid and worth keeping in ``enum`` so the UI still
     #: documents it as a real (future) option, but is not yet safe to
-    #: accept — e.g. ``learning.candidate_auto_promote.mode``'s
-    #: ``"commit"`` before auto-demotion ships. Checked in
+    #: accept — e.g. ``learning.candidate_auto_promote.mode``'s and
+    #: ``learning.precedent_auto_demote.mode``'s ``"commit"``, which this
+    #: registry refuses at the Settings layer unconditionally, as a
+    #: second, independent gate alongside each policy's own
+    #: ``__post_init__`` check — only an environment variable can ever set
+    #: either to ``"commit"``. Checked in
     #: :func:`validate_value` after ``_check_bounds``, so it layers a
     #: business-rule refusal on top of, never instead of, the
     #: type/enum/bounds one.
@@ -668,14 +686,14 @@ _SPECS: tuple[SettingSpec, ...] = (
         type="bool",
         default=False,
         description=(
-            "Has no observable effect today: off (default) or on, "
-            "`trellis curate auto-promote-candidates` only ever reports "
-            "what it would promote — it never writes a precedent — "
-            "because learning.candidate_auto_promote.mode cannot be set "
-            "to `commit` yet (see that setting's own description for "
-            "why). This master switch starts mattering once a later "
-            "release adds a working commit mode, which is also when it "
-            "starts gating real writes."
+            "This master switch has no observable effect on its own "
+            "today. `trellis curate auto-promote-candidates` always "
+            "stays report-only unless the mode setting below is also "
+            "switched to `commit` via its environment variable, and "
+            "that is refused unless learning.precedent_auto_demote."
+            "enabled is on too. This master switch starts gating real "
+            "writes only once both that mode and the demotion policy "
+            "are enabled."
         ),
         surfaces=("cli",),
         restart_required=False,
@@ -690,35 +708,41 @@ _SPECS: tuple[SettingSpec, ...] = (
         type="str",
         default="report_only",
         description=(
-            "`report_only` (the only mode that can actually run today) "
-            "evaluates every candidate and emits the disposition event "
-            "but never writes. `commit` is reserved for a future release: "
-            "it would promote each qualifying candidate through the same "
-            "governed path a human review-queue approval uses, but "
-            "nothing today rolls a bad auto-promotion back, so building "
-            "a working commit mode on top of that gap would mean a wrong "
-            "unattended promotion has no automatic undo. Until that "
-            "rollback exists, trying to run with `commit` fails with a "
-            "configuration error rather than silently falling back to "
-            "report_only."
+            "`report_only` (default) evaluates every candidate and emits "
+            "the disposition event but never writes. `commit` promotes "
+            "each qualifying candidate through the same governed path a "
+            "human review-queue approval uses, but only once "
+            "learning.precedent_auto_demote.enabled is also on — that "
+            "policy is commit mode's rollback, so running one without the "
+            "other would leave a wrong unattended promotion with no "
+            "automatic undo. This setting itself cannot be written to "
+            "`commit` through Settings at all, by design (see "
+            "`refused_values` below); only the environment variable can, "
+            "and even then construction refuses it unless auto-demotion "
+            "is enabled too."
         ),
         surfaces=("cli",),
         restart_required=False,
         risk="caution",
         risk_note=(
             "Setting this to `commit` is refused immediately, at save "
-            "time, with the same message the job itself would raise if "
-            "this check were somehow bypassed: 'commit mode is not "
-            "available until auto-demotion ships'. `commit` stays in the "
-            "enum above because it documents a real future value, not a "
-            "typo to reject silently."
+            "time, regardless of any other configuration — this Settings-"
+            "layer block is permanent, not merely until auto-demotion "
+            "ships (it has). `commit` stays in the enum above because it "
+            "documents a real, reachable-by-env-var value, not a typo to "
+            "reject silently."
         ),
         group="learning_loops",
         settings_live=True,
         env_var=CANDIDATE_AUTO_PROMOTE_MODE_ENV,
         enum=("report_only", "commit"),
         refused_values=("commit",),
-        refused_reason=("commit mode is not available until auto-demotion ships"),
+        refused_reason=(
+            "commit mode cannot be set through Settings; only the "
+            f"{CANDIDATE_AUTO_PROMOTE_MODE_ENV} environment variable can, "
+            "and construction still refuses it unless auto-demotion "
+            "(learning.precedent_auto_demote.enabled) is also on"
+        ),
     ),
     SettingSpec(
         name="learning.candidate_auto_promote.min_helpful_count",
@@ -778,8 +802,8 @@ _SPECS: tuple[SettingSpec, ...] = (
             "report-only job mark a candidate `would_promote` despite a "
             "documented unhelpful citation already against it — the "
             "exact evidence the manual review queue would use to reject "
-            "it. This changes today's report, not a live write: nothing "
-            "this job does can commit a candidate yet."
+            "it. Shapes the report today; in commit mode (default off) "
+            "it shapes which candidates get written, not only reported."
         ),
         surfaces=("cli",),
         restart_required=False,
@@ -799,13 +823,14 @@ _SPECS: tuple[SettingSpec, ...] = (
         type="int",
         default=3,
         description=(
-            "Has no effect today since commit mode cannot run (see "
-            "learning.candidate_auto_promote.mode). It is a ceiling on "
-            "how many candidates one `commit`-mode run may promote, "
-            "regardless of how many qualify — bounding the blast radius "
-            "of a single scheduled run once commit mode exists, so a bug "
-            "that makes every candidate qualify still only promotes a "
-            "few before the job stops."
+            "This has no observable effect while commit mode stays "
+            "refused or while the master switch above is off. Once "
+            "both commit mode (see learning.candidate_auto_promote."
+            "mode) and that switch are enabled, this ceilings how many "
+            "candidates one `commit`-mode run may promote, regardless "
+            "of how many qualify — bounding a single scheduled run's "
+            "blast radius, so a bug that makes every candidate qualify "
+            "still only promotes a few before the job stops."
         ),
         surfaces=("cli",),
         restart_required=False,
@@ -814,6 +839,101 @@ _SPECS: tuple[SettingSpec, ...] = (
         settings_live=True,
         env_var=CANDIDATE_AUTO_PROMOTE_MAX_PROMOTIONS_PER_RUN_ENV,
         minimum=MAX_PROMOTIONS_PER_RUN_FLOOR,
+    ),
+    SettingSpec(
+        name="learning.precedent_auto_demote.enabled",
+        label="Auto-evaluate precedents for demotion",
+        type="bool",
+        default=False,
+        description=(
+            "This master switch has no observable effect on its own "
+            "today. `trellis curate evaluate-precedent-demotion` always "
+            "stays report-only unless the mode setting below is also "
+            "switched to `commit` via its environment variable. Once "
+            "both are on, a run demotes each current precedent the "
+            "evidence gate judges `would_demote` through the same "
+            "governed path a human `trellis curate demote-precedent` "
+            "call uses, capped by max_demotions_per_run — this is the "
+            "rollback learning.candidate_auto_promote.mode's own commit "
+            "mode depends on; enabling it does not, by itself, enable "
+            "that other policy. The unhelpful-citation floor the gate "
+            "judges against is provisional: borrowed from the "
+            "noise-document demotion gate and measured for noise "
+            "documents, not for precedents."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="low",
+        group="learning_loops",
+        settings_live=True,
+        env_var=PRECEDENT_AUTO_DEMOTE_ENABLED_ENV,
+    ),
+    SettingSpec(
+        name="learning.precedent_auto_demote.mode",
+        label="Precedent auto-demote mode",
+        type="str",
+        default="report_only",
+        description=(
+            "`report_only` (default) evaluates every current precedent "
+            "against the evidence gate and emits the disposition event "
+            "but never writes. `commit` demotes each `would_demote` "
+            "precedent through the same governed path a human `trellis "
+            "curate demote-precedent` call uses, capped by "
+            "max_demotions_per_run. Unlike "
+            "learning.candidate_auto_promote.mode, this policy's own "
+            "commit mode carries no further gate on a sibling policy: "
+            "demotion is itself the rollback a safe commit mode depends "
+            "on, so there is nothing else for it to wait on. This "
+            "setting itself cannot be written to `commit` through "
+            "Settings at all, by design (see `refused_values` below); "
+            "only the environment variable can."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "Setting this to `commit` is refused immediately, at save "
+            "time, regardless of any other configuration — this "
+            "Settings-layer block is permanent. `commit` stays in the "
+            "enum above because it documents a real, "
+            "reachable-by-env-var value, not a typo to reject silently."
+        ),
+        group="learning_loops",
+        settings_live=True,
+        env_var=PRECEDENT_AUTO_DEMOTE_MODE_ENV,
+        enum=("report_only", "commit"),
+        refused_values=("commit",),
+        refused_reason=(
+            "commit mode cannot be set through Settings; only the "
+            f"{PRECEDENT_AUTO_DEMOTE_MODE_ENV} environment variable can"
+        ),
+    ),
+    SettingSpec(
+        name="learning.precedent_auto_demote.max_demotions_per_run",
+        label="Precedent auto-demote: max demotions per run",
+        type="int",
+        default=3,
+        description=(
+            "This has no observable effect while commit mode stays "
+            "refused or while the master switch above is off. Once both "
+            "commit mode (see learning.precedent_auto_demote.mode) and "
+            "that switch are enabled, this ceilings how many precedents "
+            "one `commit`-mode run may demote, regardless of how many "
+            "the evidence gate judges `would_demote` — bounding a single "
+            "scheduled run's blast radius, so a bug that makes every "
+            "precedent qualify still only demotes a few before the job "
+            "stops. A separate floor and default from "
+            "learning.candidate_auto_promote.max_promotions_per_run: "
+            "promotion and demotion are different blast radii, and "
+            "nothing requires they move together."
+        ),
+        surfaces=("cli",),
+        restart_required=False,
+        risk="low",
+        group="learning_loops",
+        settings_live=True,
+        env_var=PRECEDENT_AUTO_DEMOTE_MAX_DEMOTIONS_PER_RUN_ENV,
+        minimum=MAX_DEMOTIONS_PER_RUN_FLOOR,
     ),
     SettingSpec(
         name="graph_max_subgraph_depth",

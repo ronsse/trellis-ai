@@ -228,16 +228,45 @@ JOB_CATALOG: Mapping[str, JobSpec] = _build_catalog(
             description=(
                 "Evaluates learning candidates against "
                 "trellis.learning.candidate_auto_promote's policy and "
-                "reports what it would promote — report_only is the only "
-                "mode that can run; commit mode is refused with a "
-                "configuration error until a follow-up ships "
-                "auto-demotion. Deterministic — no LLM calls, no spend. "
-                "This job's effect today is purely evidence-gathering: "
-                "every run that is not killed emits one "
+                "reports what it would promote. Both promotion and its "
+                "sibling demotion policy (the 'evaluate-precedent-"
+                "demotion' job) ship enabled=False by default, so this "
+                "job is report-only — evidence-gathering, nothing written "
+                "— until an operator turns promotion on; commit mode is "
+                "additionally refused at construction unless the "
+                "demotion policy is enabled too, since demotion is "
+                "commit mode's rollback. Deterministic — no LLM calls, no "
+                "spend. Every run that is not killed emits one "
                 "LEARNING_AUTO_PROMOTE_EVALUATED event, naming what it "
-                "would have promoted when it "
-                "completes evaluation, or the refusal/failure when it "
-                "does not."
+                "would have promoted (or promoted) when it completes "
+                "evaluation, or the refusal/failure when it does not."
+            ),
+        ),
+        JobSpec(
+            name="evaluate-precedent-demotion",
+            argv=(
+                "trellis",
+                "curate",
+                "evaluate-precedent-demotion",
+                "--format",
+                "json",
+            ),
+            default_cadence="30 6 * * *",
+            description=(
+                "Evaluates current precedents against "
+                "trellis.learning.precedent_auto_demote's policy and "
+                "reports what it would demote. Ships enabled=False by "
+                "default, so this job is report-only until an operator "
+                "turns it on; commit mode then demotes each would-demote "
+                "verdict through the same governed path a human "
+                "'trellis curate demote-precedent' call uses, capped by "
+                "max_demotions_per_run, and is this project's safety "
+                "rollback for auto-promote-candidates' own commit mode. "
+                "Deterministic — no LLM calls, no spend. Every run that "
+                "is not killed emits one "
+                "LEARNING_AUTO_DEMOTE_EVALUATED event, naming what it "
+                "would have demoted (or demoted) when it completes "
+                "evaluation, or the refusal/failure when it does not."
             ),
         ),
         # -- Trellis-native manual-only jobs: cadence=None by default, --

@@ -7,13 +7,17 @@ ships ``enabled=False`` with ``mode="report_only"`` as the default, so this
 module produces evidence for picking thresholds rather than promoting
 anything unattended.
 
-**Scope: evaluation only.** This module never commits a promotion and
-never demotes anything. ``mode="commit"`` is refused at construction
+**Scope: evaluation only, by default.** This module never demotes
+anything itself. ``mode="commit"`` is refused at construction
 (:meth:`LearningCandidateAutoPromotePolicy.__post_init__` raises
-:class:`~trellis.errors.ConfigError`) on every path that builds the policy
-— unattended commit, and the auto-demotion rollback a safe commit mode
-would depend on, are a follow-up. ``report_only`` is the only mode that
-can run today.
+:class:`~trellis.errors.ConfigError`) unless the caller also passes
+``demotion_enabled=True`` — the sibling precedent auto-demotion policy
+(:class:`trellis.learning.precedent_auto_demote.PrecedentAutoDemotePolicy`)
+being switched on, which is the rollback a safe commit mode depends on.
+Both policies still ship ``enabled=False`` by default, so ``report_only``
+is the only mode that runs unattended out of the box; an operator must
+deliberately enable auto-demotion *and* flip this policy to ``commit``
+before an unattended promotion can happen at all.
 
 Mirrors the shape of :mod:`trellis.learning.tuners.auto_promote` (the
 tuner's Tier-1 autonomy gate for *parameter* promotion) without reusing its
@@ -32,9 +36,13 @@ autonomy invariants this module satisfies today:
     and a disabled policy always behaves as ``report_only`` regardless of
     its configured ``mode`` (:attr:`LearningCandidateAutoPromotePolicy.effective_mode`).
 
-Invariants (a) reversible rollback and (b) post-change monitoring are what
-a safe commit mode needs and do not exist yet — that is exactly why commit
-mode is refused rather than shipped half-built.
+Invariant (a) reversible rollback is what a safe commit mode needs;
+:mod:`trellis.learning.precedent_auto_demote` now supplies it, which is
+why commit mode's refusal is conditional on that policy's ``enabled``
+rather than unconditional — but invariant (b) post-change monitoring is
+still an open gap (see that module's own docstring), and both policies
+ship ``enabled=False``, so nothing here promotes unattended out of the
+box.
 
 **Idempotency.** :func:`run_candidate_auto_promotion` never proposes a
 candidate that already has a precedent, promoted by a human or by an
@@ -220,13 +228,28 @@ class LearningCandidateAutoPromotePolicy:
             per tier-1 invariant (d). When ``False``,
             :attr:`effective_mode` is always ``"report_only"`` regardless
             of ``mode``, so a run never writes.
-        mode: ``"report_only"`` (default, and the only mode that can
-            construct) records what *would* be promoted without writing
-            anything. ``"commit"`` is reserved for a follow-up that adds
-            auto-demotion as commit mode's rollback; constructing this
-            policy with ``mode="commit"`` always raises
-            :class:`~trellis.errors.ConfigError`, regardless of
-            ``enabled``.
+        mode: ``"report_only"`` (default) records what *would* be
+            promoted without writing anything. ``"commit"`` promotes each
+            qualifying candidate through the same governed path a human
+            review-queue approval uses; constructing this policy with
+            ``mode="commit"`` raises :class:`~trellis.errors.ConfigError`
+            unless ``demotion_enabled`` is also ``True`` — commit mode's
+            rollback is the precedent auto-demotion policy, and running
+            one without the other leaves a bad unattended promotion with
+            no automatic undo. This check does not look at ``enabled``:
+            a commit-mode policy with ``enabled=False`` still constructs
+            (and immediately behaves as ``report_only`` via
+            :attr:`effective_mode`), so flipping ``enabled`` on later is a
+            safe no-op once demotion is already enabled.
+        demotion_enabled: Whether the sibling precedent auto-demotion
+            policy
+            (:class:`trellis.learning.precedent_auto_demote.PrecedentAutoDemotePolicy`)
+            is enabled. ``False`` by default. This is the only thing
+            ``mode="commit"`` checks at construction — it is the caller's
+            responsibility to pass the demotion policy's real
+            ``enabled`` value here (see
+            :mod:`trellis.learning.precedent_auto_demote` for where that
+            is resolved), not a copy of this policy's own ``enabled``.
         min_helpful_count: Minimum helpful-citation count
             (``citation_evidence.helpful_count``) for auto-promotion.
             There is no manual-review equivalent floor to match (a human
@@ -253,8 +276,9 @@ class LearningCandidateAutoPromotePolicy:
     Raises:
         ValueError: If ``mode`` is not ``"report_only"``/``"commit"``, or
             if any int knob is looser than its floor.
-        ConfigError: If ``mode="commit"`` — commit mode is not available
-            until auto-demotion ships.
+        ConfigError: If ``mode="commit"`` and ``demotion_enabled`` is
+            ``False`` — commit mode is refused until auto-demotion (its
+            rollback) is enabled too.
     """
 
     enabled: bool = False
@@ -263,6 +287,7 @@ class LearningCandidateAutoPromotePolicy:
     min_distinct_sessions: int = DEFAULT_MIN_DISTINCT_SESSIONS
     require_zero_unhelpful: bool = DEFAULT_REQUIRE_ZERO_UNHELPFUL
     max_promotions_per_run: int = DEFAULT_MAX_PROMOTIONS_PER_RUN
+    demotion_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.mode not in ("report_only", "commit"):
@@ -271,15 +296,18 @@ class LearningCandidateAutoPromotePolicy:
                 '"report_only" or "commit"'
             )
             raise ValueError(msg)
-        if self.mode == "commit":
-            # Refused unconditionally — regardless of ``enabled`` — because
-            # this is the only place a policy comes into existence
+        if self.mode == "commit" and not self.demotion_enabled:
+            # Conditional on ``demotion_enabled``, not on this
+            # policy's own ``enabled`` — this is the only place a policy
+            # comes into existence
             # (``trellis_cli.curate._build_candidate_auto_promote_policy``
             # today). Commit mode needs a reversible rollback (Tier-1
-            # invariant (a)) and post-change monitoring (invariant (b));
-            # neither exists yet, so there is no safe way to let this
-            # resolve. See the module docstring's "Scope: evaluation only".
-            msg = "commit mode is not available until auto-demotion ships"
+            # invariant (a)); that rollback is the precedent auto-demotion
+            # policy (:mod:`trellis.learning.precedent_auto_demote`), so
+            # commit is refused until the caller says that policy is also
+            # enabled. See the module docstring's "Scope: evaluation only,
+            # by default".
+            msg = "commit mode is not available until auto-demotion is enabled"
             raise ConfigError(msg, setting=CANDIDATE_AUTO_PROMOTE_MODE_SETTING)
         if self.min_helpful_count < MIN_HELPFUL_COUNT_FLOOR:
             msg = (
@@ -312,12 +340,13 @@ class LearningCandidateAutoPromotePolicy:
         Mirrors how ``AutoPromotePolicy.enabled`` gates
         ``run_auto_promotion``'s write path: once a policy exists, a
         disabled policy always behaves as ``report_only``, whatever
-        ``mode`` is configured to. But a policy with ``mode="commit"``
-        never gets that far: ``__post_init__`` refuses it unconditionally,
-        regardless of ``enabled``. So flipping ``mode`` to ``commit`` is
-        never a safe no-op — it fails policy construction, and therefore
-        the scheduled job, on the next run whether or not ``enabled`` is
-        set.
+        ``mode`` is configured to. A policy with ``mode="commit"`` can
+        exist with ``enabled=False`` (construction only checks
+        ``demotion_enabled``, not ``enabled``), and this property is what
+        makes that combination inert: it still reports ``report_only``
+        here, so flipping ``enabled`` on later — with ``demotion_enabled``
+        already ``True`` — is the only switch left to produce a real
+        commit-mode run.
         """
         if not self.enabled:
             return "report_only"
@@ -723,25 +752,27 @@ def run_candidate_auto_promotion(
 ) -> CandidateAutoPromoteReport:
     """Evaluate every candidate and report what would be promoted.
 
-    ``policy.mode`` can only ever be ``"report_only"`` — constructing a
-    ``mode="commit"`` policy already raised
-    :class:`~trellis.errors.ConfigError` (see
-    :meth:`LearningCandidateAutoPromotePolicy.__post_init__`) — so
-    ``effective_mode`` can never resolve to ``"commit"`` here, and the
-    commit-execution branch below is unreachable until a follow-up lifts
-    that gate. It is left in place deliberately, unexercised, rather than
-    removed, so that follow-up is a smaller diff.
+    ``policy.mode`` can be ``"commit"`` once the policy was constructed
+    with ``demotion_enabled=True`` (see
+    :meth:`LearningCandidateAutoPromotePolicy.__post_init__`) — the
+    commit-execution branch below is reachable in that configuration,
+    gated only by :attr:`LearningCandidateAutoPromotePolicy.enabled`
+    (via ``effective_mode``) and by the per-run cap. Both policies still
+    ship ``enabled=False`` by default, so nothing commits unattended out
+    of the box.
 
     ``force_report_only=True`` is an extra guard, checked ahead of
     :attr:`LearningCandidateAutoPromotePolicy.effective_mode` and never
     mixed into the policy object itself, so a dry-run can never be
-    mistaken for a persisted configuration change. It is not what makes
+    mistaken for a persisted configuration change. It is also what makes
     ``trellis curate auto-promote-candidates --dry-run`` work when
     ``learning.candidate_auto_promote.mode`` is configured as
-    ``"commit"``: a ``mode="commit"`` policy cannot even be constructed
-    (``__post_init__`` raises :class:`~trellis.errors.ConfigError`
-    unconditionally), so the CLI applies ``--dry-run`` earlier, before
-    building the policy — see
+    ``"commit"`` but ``learning.precedent_auto_demote.enabled`` is
+    ``False``: a ``mode="commit"`` policy cannot be constructed without
+    ``demotion_enabled=True`` (``__post_init__`` raises
+    :class:`~trellis.errors.ConfigError` otherwise), so the CLI resolves
+    ``--dry-run`` before building the policy and forces the mode passed
+    to construction to ``"report_only"`` first — see
     ``trellis_cli.curate._build_candidate_auto_promote_policy``.
 
     Before evaluating any candidate, scans for every entity id that

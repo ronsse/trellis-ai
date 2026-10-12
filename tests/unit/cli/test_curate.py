@@ -14,8 +14,13 @@ from typer.testing import CliRunner
 from tests.cli_output import assert_coloured, force_colour, plain
 from trellis.learning import submit_learning_promotion
 from trellis.learning.candidate_auto_promote import (
+    AUTO_PROMOTE_REQUESTED_BY,
     CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_SETTING,
     CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
+)
+from trellis.learning.precedent_auto_demote import (
+    PRECEDENT_AUTO_DEMOTE_ENABLED_SETTING,
+    PRECEDENT_AUTO_DEMOTE_MODE_SETTING,
 )
 from trellis.mutate.commands import (
     Command,
@@ -1927,21 +1932,28 @@ class TestCurateEvaluatePrecedentDemotion:
 
     The gate decision and the PACK_ASSEMBLED/FEEDBACK_RECORDED join are
     both already covered exhaustively at the unit level in
-    ``test_precedent_evidence_gate.py``; this class only pins the CLI
+    ``test_precedent_evidence_gate.py``; commit mode, rate-limiting and
+    the default-off posture have their own exhaustive unit coverage in
+    ``test_precedent_auto_demote.py``. This class only pins the CLI
     surface: option wiring, output shape in both formats, and that the
     attribution caveat actually reaches a caller.
     """
 
-    def _emit_promote(self, entity_id: str, *, at: datetime) -> None:
+    def _emit_promote(
+        self, entity_id: str, *, at: datetime, requested_by: str | None = None
+    ) -> None:
+        payload: dict[str, object] = {
+            "operation": Operation.PRECEDENT_PROMOTE.value,
+            "status": "success",
+        }
+        if requested_by is not None:
+            payload["requested_by"] = requested_by
         curate_cli._get_registry().operational.event_log.append(
             Event(
                 event_type=EventType.MUTATION_EXECUTED,
                 source="test",
                 entity_id=entity_id,
-                payload={
-                    "operation": Operation.PRECEDENT_PROMOTE.value,
-                    "status": "success",
-                },
+                payload=payload,
                 occurred_at=at,
             )
         )
@@ -2011,9 +2023,14 @@ class TestCurateEvaluatePrecedentDemotion:
         )
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout.strip())
+        assert data["enabled"] is False
+        assert data["mode"] == "report_only"
         assert data["would_demote_count"] == 0
+        assert data["demoted_count"] == 0
+        assert data["skipped_rate_limited_count"] == 0
         assert data["refused_count"] == 0
-        assert data["skipped_count"] == 0
+        assert data["already_demoted_count"] == 0
+        assert data["ineligible_count"] == 0
         assert data["outcomes"] == []
         assert data["attribution_caveat"]
 
@@ -2033,10 +2050,10 @@ class TestCurateEvaluatePrecedentDemotion:
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout.strip())
         assert data["would_demote_count"] == 0
-        assert data["refused_count"] == 1
+        assert data["ineligible_count"] == 1
         outcome = data["outcomes"][0]
         assert outcome["entity_id"] == "prec-1"
-        assert outcome["disposition"] == "refused"
+        assert outcome["disposition"] == "ineligible:no_evidence_supplied"
 
     def test_would_demote_a_precedent_cited_unhelpful_at_the_floor(self) -> None:
         self._upsert_graph_backed_precedent("prec-1")
@@ -2087,7 +2104,7 @@ class TestCurateEvaluatePrecedentDemotion:
         data = json.loads(result.stdout.strip())
         assert data["would_demote_count"] == 0
         outcome = next(o for o in data["outcomes"] if o["entity_id"] == "prec-1")
-        assert outcome["disposition"] == "refused"
+        assert outcome["disposition"] == "ineligible:insufficient_unhelpful_citations"
 
     def test_contested_citations_are_refused_not_demoted(self) -> None:
         """Helpful tying unhelpful refuses even once unhelpful alone
@@ -2112,7 +2129,7 @@ class TestCurateEvaluatePrecedentDemotion:
         data = json.loads(result.stdout.strip())
         assert data["would_demote_count"] == 0
         outcome = next(o for o in data["outcomes"] if o["entity_id"] == "prec-1")
-        assert outcome["disposition"] == "refused"
+        assert outcome["disposition"] == "ineligible:contested_by_helpful_citations"
         assert outcome["helpful_count"] == 2
         assert outcome["unhelpful_count"] == 2
 
@@ -2136,10 +2153,10 @@ class TestCurateEvaluatePrecedentDemotion:
         )
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout.strip())
-        assert data["skipped_count"] == 1
+        assert data["ineligible_count"] == 1
         outcome = data["outcomes"][0]
         assert outcome["entity_id"] == "prec-1"
-        assert outcome["disposition"] == "skipped"
+        assert outcome["disposition"] == "ineligible:not_graph_backed"
         assert outcome["reason"] == "not_graph_backed"
 
     def test_text_format_surfaces_the_not_graph_backed_skip_reason(self) -> None:
@@ -2152,7 +2169,7 @@ class TestCurateEvaluatePrecedentDemotion:
         result = runner.invoke(app, ["curate", "evaluate-precedent-demotion"])
         assert result.exit_code == 0, result.output
         output = plain(result.stdout)
-        assert "skipped: 1" in output
+        assert "ineligible: 1" in output
         assert "not_graph_backed" in output
 
     def test_untruncated_scan_prints_no_window_note(self) -> None:
@@ -2190,6 +2207,101 @@ class TestCurateEvaluatePrecedentDemotion:
         data = json.loads(result.stdout.strip())
         assert data["scan"]["truncated"] is True
         assert data["notes"]
+
+    def test_default_off_leaves_a_would_demote_precedent_unwritten(self) -> None:
+        """``enabled`` defaults ``False``, so a precedent that otherwise
+        clears the demotion floor is reported ``would_demote`` and
+        nothing is written -- the same posture
+        ``TestCurateAutoPromoteCandidates`` pins for its own policy."""
+        self._upsert_graph_backed_precedent("prec-1")
+        promoted_at = datetime(2026, 1, 1, tzinfo=UTC)
+        cited_at = promoted_at + timedelta(days=1)
+        self._emit_promote("prec-1", at=promoted_at)
+        for n in range(2):
+            pack_id = f"pack-{n}"
+            self._emit_pack_assembled(pack_id=pack_id, item_ids=["prec-1"], at=cited_at)
+            self._emit_feedback(pack_id=pack_id, at=cited_at, unhelpful=["prec-1"])
+
+        result = runner.invoke(
+            app, ["curate", "evaluate-precedent-demotion", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["enabled"] is False
+        assert data["mode"] == "report_only"
+        assert data["would_demote_count"] == 1
+        assert data["demoted_count"] == 0
+
+        event_log = curate_cli._get_registry().operational.event_log
+        demote_events = [
+            e
+            for e in event_log.get_events(event_type=EventType.MUTATION_EXECUTED)
+            if e.payload.get("operation") == Operation.PRECEDENT_DEMOTE.value
+        ]
+        assert demote_events == []
+        graph_store = curate_cli._get_registry().knowledge.graph_store
+        node = graph_store.get_node("prec-1")
+        assert node is not None
+        assert "lifecycle" not in node["properties"]
+
+    def test_commit_mode_demotes_a_would_demote_precedent_through_the_executor(
+        self,
+    ) -> None:
+        """Enabling the policy with mode=commit, through the same raw
+        settings-row write ``test_dry_run_overrides_a_stored_commit_mode``
+        uses for the promote side (the governed write refuses ``commit``
+        permanently -- see ``learning.precedent_auto_demote.mode``'s
+        ``refused_values`` -- so only a pre-existing or env-set row can
+        carry it), demotes a precedent whose citations clear the floor
+        through the governed ``precedent.demote`` path."""
+        stores_dir = Path(os.environ["TRELLIS_DATA_DIR"]) / "stores"
+        settings_store = SettingsStore(stores_dir / "settings.json")
+        settings_store.set(PRECEDENT_AUTO_DEMOTE_ENABLED_SETTING, True)
+        settings_store.set(PRECEDENT_AUTO_DEMOTE_MODE_SETTING, "commit")
+
+        self._upsert_graph_backed_precedent("prec-1")
+        promoted_at = datetime(2026, 1, 1, tzinfo=UTC)
+        cited_at = promoted_at + timedelta(days=1)
+        # requested_by must mark this as an auto-promotion: the demote
+        # handler's own provenance check refuses an auto-requested
+        # demotion of any precedent it cannot trace back to an
+        # auto-promote event (``AUTO_DEMOTE_REQUESTED_BY`` in
+        # ``trellis.mutate.handlers``), so a human-shaped promote event
+        # here would make this precedent ineligible, not demoted.
+        self._emit_promote(
+            "prec-1", at=promoted_at, requested_by=AUTO_PROMOTE_REQUESTED_BY
+        )
+        for n in range(2):
+            pack_id = f"pack-{n}"
+            self._emit_pack_assembled(pack_id=pack_id, item_ids=["prec-1"], at=cited_at)
+            self._emit_feedback(pack_id=pack_id, at=cited_at, unhelpful=["prec-1"])
+
+        result = runner.invoke(
+            app, ["curate", "evaluate-precedent-demotion", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["enabled"] is True
+        assert data["mode"] == "commit"
+        assert data["demoted_count"] == 1
+        outcome = next(o for o in data["outcomes"] if o["entity_id"] == "prec-1")
+        assert outcome["disposition"] == "demoted"
+
+        event_log = curate_cli._get_registry().operational.event_log
+        demote_events = event_log.get_events(event_type=EventType.MUTATION_EXECUTED)
+        demote_events = [
+            e
+            for e in demote_events
+            if e.payload.get("operation") == Operation.PRECEDENT_DEMOTE.value
+        ]
+        assert len(demote_events) == 1
+        assert demote_events[0].payload["status"] == "success"
+        assert demote_events[0].payload["requested_by"] == AUTO_DEMOTE_REQUESTED_BY
+
+        graph_store = curate_cli._get_registry().knowledge.graph_store
+        node = graph_store.get_node("prec-1")
+        assert node is not None
+        assert node["properties"]["lifecycle"]["state"] == "demoted"
 
 
 class TestCurateHelp:

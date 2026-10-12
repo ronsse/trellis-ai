@@ -28,14 +28,20 @@ from trellis.learning.candidate_auto_promote import (
     run_candidate_auto_promotion,
     sanitize_configured_mode,
 )
-from trellis.learning.precedent_evidence_gate import (
-    MIN_UNHELPFUL_CITATIONS,
-    emit_precedent_demotion_failure_event,
-    evaluate_precedent_demotions,
+from trellis.learning.precedent_auto_demote import (
+    PrecedentAutoDemoteMode,
+    PrecedentAutoDemotePolicy,
+    emit_precedent_auto_demote_failure_event,
+    resolve_precedent_auto_demote_overrides,
+    run_precedent_auto_demotion,
 )
-from trellis.learning.precedent_evidence_gate import (
-    report_to_dict as precedent_demotion_report_to_dict,
+from trellis.learning.precedent_auto_demote import (
+    report_to_dict as precedent_auto_demote_report_to_dict,
 )
+from trellis.learning.precedent_auto_demote import (
+    sanitize_configured_mode as sanitize_precedent_auto_demote_mode,
+)
+from trellis.learning.precedent_evidence_gate import MIN_UNHELPFUL_CITATIONS
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -926,25 +932,34 @@ def _build_candidate_auto_promote_policy(
     overrides: Mapping[str, bool | int | str],
     *,
     force_report_only: bool = False,
+    demotion_enabled: bool = False,
 ) -> LearningCandidateAutoPromotePolicy:
     """Construct the policy from already-resolved *overrides*.
 
     ``force_report_only`` (``--dry-run``) is applied here, to the mode
     *before* the policy is constructed — never after. A ``mode="commit"``
     policy raises :class:`~trellis.errors.ConfigError` unconditionally in
-    ``__post_init__`` (there is no way to construct one and then force it
-    back to report-only), so a stored ``mode="commit"`` would make
-    ``--dry-run`` itself fail with exit 5 if the override happened any
-    later than this. The caller is expected to have already captured
-    ``overrides["mode"]`` as ``configured_mode``
-    (:func:`_resolve_candidate_auto_promote_overrides_for_cli`) before
-    calling this — this function itself reports only the (possibly
-    forced) construction mode, never the pre-force value.
+    ``__post_init__`` unless ``demotion_enabled`` is also ``True`` (there
+    is no way to construct one and then force it back to report-only),
+    so a stored ``mode="commit"`` would make ``--dry-run`` itself fail
+    with exit 5 if the override happened any later than this. The caller
+    is expected to have already captured ``overrides["mode"]`` as
+    ``configured_mode`` (:func:`_resolve_candidate_auto_promote_overrides_for_cli`)
+    before calling this — this function itself reports only the
+    (possibly forced) construction mode, never the pre-force value.
+
+    ``demotion_enabled`` is the caller's already-resolved
+    ``learning.precedent_auto_demote.enabled`` value (see
+    :func:`_resolve_precedent_auto_demote_overrides_for_cli`) — it is not
+    one of this policy's own six knobs, since whether the *sibling*
+    demotion policy is enabled is what ``mode="commit"`` here is
+    conditioned on, not a setting of this policy's own namespace.
     """
     mode = "report_only" if force_report_only else overrides["mode"]
     return LearningCandidateAutoPromotePolicy(
         enabled=bool(overrides["enabled"]),
         mode=mode,  # type: ignore[arg-type]
+        demotion_enabled=demotion_enabled,
         min_helpful_count=int(overrides["min_helpful_count"]),
         min_distinct_sessions=int(overrides["min_distinct_sessions"]),
         require_zero_unhelpful=bool(overrides["require_zero_unhelpful"]),
@@ -981,8 +996,10 @@ def auto_promote_candidates(
             "before the policy is built. Without --dry-run, a stored or "
             "env-configured learning.candidate_auto_promote.mode of "
             "commit makes every run fail with a configuration error "
-            "(commit mode is not available yet); --dry-run avoids that by "
-            "forcing effective_mode to report_only ahead of the check, "
+            "unless learning.precedent_auto_demote.enabled is also true "
+            "(demotion is commit mode's safety rollback); --dry-run "
+            "avoids that failure either way by forcing effective_mode to "
+            "report_only ahead of the check, "
             "regardless of what mode resolved to. It never changes what "
             "configured_mode reports: a stored commit still reports "
             "configured_mode: commit (effective_mode: report_only) in the "
@@ -993,7 +1010,8 @@ def auto_promote_candidates(
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
 ) -> None:
-    """Evaluate learning candidates for automatic promotion — report-only.
+    """Evaluate learning candidates for automatic promotion — default-off,
+    report-only unless an operator enables commit mode.
 
     Every run — including one that fails before evaluating a single
     candidate — emits at least one ``LEARNING_AUTO_PROMOTE_EVALUATED``
@@ -1007,15 +1025,17 @@ def auto_promote_candidates(
     e.g. a stored or env ``mode="commit"`` without ``--dry-run``, exit 5)
     or ``outcome: "failed"`` (a malformed ``--candidates`` file, or a
     non-finite env override, exit 2 or 1) instead.
-    ``learning.candidate_auto_promote.mode`` cannot be set to ``commit``:
-    constructing the policy with that mode raises
+    ``learning.candidate_auto_promote.mode`` can only be set to
+    ``commit`` once ``learning.precedent_auto_demote.enabled`` is also
+    true — demotion is commit mode's safety rollback. Without that,
+    constructing the policy with ``mode="commit"`` raises
     :class:`~trellis.errors.ConfigError`, exit 5 — unless ``--dry-run``
     is passed, since ``--dry-run`` forces ``effective_mode`` to
     ``report_only`` ahead of that construction, so a configured
     ``commit`` never reaches it; ``configured_mode`` in the event and in
     this command's own output still reports the true pre-``--dry-run``
-    value. Unattended commit is a follow-up once an auto-demotion
-    rollback exists to monitor it.
+    value. Both policies still ship ``enabled=False`` by default, so
+    nothing commits unattended until an operator turns both on.
     """
     registry = _get_registry()
     event_log = get_event_log()
@@ -1057,14 +1077,21 @@ def auto_promote_candidates(
             registry.stores_dir
         )
         configured_mode = overrides["mode"]  # type: ignore[assignment]
+        demote_overrides = _resolve_precedent_auto_demote_overrides_for_cli(
+            registry.stores_dir
+        )
         policy = _build_candidate_auto_promote_policy(
-            overrides, force_report_only=dry_run
+            overrides,
+            force_report_only=dry_run,
+            demotion_enabled=bool(demote_overrides["enabled"]),
         )
 
         report = run_candidate_auto_promotion(
             candidates=candidates,
             policy=policy,
             event_log=event_log,
+            executor=build_curate_executor(registry),
+            graph_store=registry.knowledge.graph_store,
             force_report_only=dry_run,
             configured_mode=configured_mode,
         )
@@ -1105,6 +1132,46 @@ def auto_promote_candidates(
         console.print(f"  - {escape(outcome.candidate_id)}: {outcome.disposition}")
 
 
+def _resolve_precedent_auto_demote_overrides_for_cli(
+    stores_dir: Path | None,
+) -> dict[str, bool | int | str]:
+    """Load settings and resolve the three precedent-auto-demote knobs.
+
+    Mirrors :func:`_resolve_candidate_auto_promote_overrides_for_cli`: a
+    settings-store read failure degrades to the defaults alone — advisory,
+    never fails the job over a catalog/settings-file problem.
+    """
+    try:
+        settings = load_settings_values(stores_dir)
+    except Exception:
+        logger.warning("precedent_auto_demote_settings_read_failed", exc_info=True)
+        settings = {}
+    return resolve_precedent_auto_demote_overrides(settings=settings)
+
+
+def _build_precedent_auto_demote_policy(
+    overrides: Mapping[str, bool | int | str],
+    *,
+    force_report_only: bool = False,
+) -> PrecedentAutoDemotePolicy:
+    """Construct the policy from already-resolved *overrides*.
+
+    Unlike :func:`_build_candidate_auto_promote_policy`, ``mode="commit"``
+    carries no construction-time gate here — demotion is itself the
+    rollback a safe commit mode needs — so ``force_report_only``
+    (``--dry-run``) only forces this run's own mode, the same way it does
+    for the promotion command; it is applied before construction purely
+    for symmetry with that command's convention, not because construction
+    would otherwise fail.
+    """
+    mode = "report_only" if force_report_only else overrides["mode"]
+    return PrecedentAutoDemotePolicy(
+        enabled=bool(overrides["enabled"]),
+        mode=mode,  # type: ignore[arg-type]
+        max_demotions_per_run=int(overrides["max_demotions_per_run"]),
+    )
+
+
 @curate_app.command("evaluate-precedent-demotion")
 def evaluate_precedent_demotion(
     min_unhelpful_citations: int = typer.Option(
@@ -1117,9 +1184,24 @@ def evaluate_precedent_demotion(
             "measured for noise documents, not for precedents."
         ),
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Force report_only for this run's effective_mode, applied "
+            "before the policy is built. Without --dry-run, mode follows "
+            "learning.precedent_auto_demote.mode (or its env override), "
+            "which only takes effect once "
+            "learning.precedent_auto_demote.enabled is also true — see "
+            "effective_mode. It never changes what configured_mode "
+            "reports: a stored commit still reports configured_mode: "
+            "commit (effective_mode: report_only when disabled) in the "
+            "event, the Loop Health row, and this command's own output."
+        ),
+    ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
 ) -> None:
-    """Evaluate current precedents for demotion — report-only, writes nothing.
+    """Evaluate current precedents for demotion — default-off, report-only.
 
     Judges every precedent with a successful ``precedent.promote`` event
     against the citations its own packs collected since it was promoted,
@@ -1128,8 +1210,8 @@ def evaluate_precedent_demotion(
     never on the absence of helpful ones — and any precedent cited helpful
     at least as often as unhelpful is refused regardless of the unhelpful
     count. An already-demoted or archived precedent, or one otherwise not
-    in the current lifecycle state, is reported as skipped rather than
-    judged.
+    in the current lifecycle state, is reported ``already_demoted`` or
+    ``ineligible:<reason>`` without being judged.
 
     Only a precedent served through a flat ``get_context`` pack can
     accumulate evidence this way: ``get_lessons`` and sectioned packs emit
@@ -1138,28 +1220,65 @@ def evaluate_precedent_demotion(
     it actually is. See ``attribution_caveat`` in this command's own
     output (every format) for the same statement.
 
-    Every run — including one that fails before evaluating a single
-    precedent — emits at least one ``LEARNING_AUTO_DEMOTE_EVALUATED``
-    event and writes nothing else: no demotion, no node change, no commit
-    mode exists for this command.
+    ``learning.precedent_auto_demote.mode`` only commits once
+    ``learning.precedent_auto_demote.enabled`` is also true
+    (``effective_mode``); it ships ``enabled=False`` by default, so this
+    command writes nothing — one ``precedent.demote`` per ``would_demote``
+    verdict, capped by ``max_demotions_per_run``, through the same
+    governed path ``trellis curate demote-precedent`` uses — only once an
+    operator turns it on. Every run — including one that fails before
+    evaluating a single precedent — emits at least one
+    ``LEARNING_AUTO_DEMOTE_EVALUATED`` event.
     """
+    registry = _get_registry()
     event_log = get_event_log()
     graph_store = get_graph_store()
+    configured_mode: PrecedentAutoDemoteMode | None = None
     try:
-        report = evaluate_precedent_demotions(
-            event_log,
-            graph_store,
+        overrides = _resolve_precedent_auto_demote_overrides_for_cli(
+            registry.stores_dir
+        )
+        configured_mode = overrides["mode"]  # type: ignore[assignment]
+        policy = _build_precedent_auto_demote_policy(
+            overrides, force_report_only=dry_run
+        )
+
+        report = run_precedent_auto_demotion(
+            policy=policy,
+            event_log=event_log,
+            graph_store=graph_store,
+            executor=build_curate_executor(registry),
+            force_report_only=dry_run,
+            configured_mode=configured_mode,
             min_unhelpful_citations=min_unhelpful_citations,
         )
+    except ValueError as exc:
+        # Same value-free-message convention as auto_promote_candidates:
+        # never let str(exc) (which can embed the offending value) reach
+        # stderr.
+        emit_precedent_auto_demote_failure_event(
+            event_log, error=exc, configured_mode=configured_mode
+        )
+        console.print(
+            "[red]invalid precedent auto-demote configuration "
+            f"({escape(type(exc).__name__)})[/red]",
+            soft_wrap=True,
+        )
+        raise typer.Exit(code=EXIT_VALIDATION) from exc
     except Exception as exc:
-        emit_precedent_demotion_failure_event(event_log, error=exc)
+        emit_precedent_auto_demote_failure_event(
+            event_log, error=exc, configured_mode=configured_mode
+        )
         raise
 
     if output_format == "json":
-        emit_json(precedent_demotion_report_to_dict(report))
+        emit_json(precedent_auto_demote_report_to_dict(report))
         return
 
-    console.print("[bold]Evaluate Precedent Demotion[/bold] — mode=report_only")
+    console.print(
+        f"[bold]Evaluate Precedent Demotion[/bold] — mode={report.mode} "
+        f"(configured={sanitize_precedent_auto_demote_mode(report.configured_mode)})"
+    )
     if report.scan.truncated:
         # Same placement as `analyze token-usage`: before any count,
         # because a truncated discovery or join scan can under-count
@@ -1168,8 +1287,11 @@ def evaluate_precedent_demotion(
         console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     console.print(f"  {escape(report.attribution_caveat)}", soft_wrap=True)
     console.print(f"  would_demote: {report.would_demote_count}")
+    console.print(f"  demoted: {report.demoted_count}")
+    console.print(f"  skipped_rate_limited: {report.skipped_rate_limited_count}")
     console.print(f"  refused: {report.refused_count}")
-    console.print(f"  skipped: {report.skipped_count}")
+    console.print(f"  already_demoted: {report.already_demoted_count}")
+    console.print(f"  ineligible: {report.ineligible_count}")
     for outcome in report.outcomes:
         detail = outcome.reason or outcome.disposition
         console.print(f"  - {escape(outcome.entity_id)}: {escape(detail)}")

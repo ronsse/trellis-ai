@@ -644,19 +644,23 @@ def emit_precedent_demotion_failure_event(
     return event.event_id
 
 
-def evaluate_precedent_demotions(
+def judge_current_precedents(
     event_log: EventLog,
     graph_store: GraphStore,
     *,
     min_unhelpful_citations: int = MIN_UNHELPFUL_CITATIONS,
     promotion_scan_limit: int = _PROMOTION_SCAN_LIMIT,
     join_limit: int = _JOIN_SCAN_LIMIT,
-    source: str = "precedent_evidence_gate",
-) -> PrecedentDemotionReport:
-    """Evaluate every current precedent and report what would be demoted.
+) -> tuple[list[PrecedentDemotionOutcome], ScanCoverage]:
+    """Discover and judge every current precedent — the reusable core.
 
-    Writes nothing: no demotion, no node change. Discovers every
-    precedent with a successful ``precedent.promote`` event
+    Writes nothing and emits no event: this is the discovery-and-judging
+    body :func:`evaluate_precedent_demotions` has always run, pulled out
+    so a commit-capable caller
+    (:func:`trellis.learning.precedent_auto_demote.run_precedent_auto_demotion`)
+    can reuse it without duplicating the join/skip/judge logic or its own
+    event-emission shape. Discovers every precedent with a successful
+    ``precedent.promote`` event
     (:func:`discover_current_precedents_with_coverage`), skips one that
     is already demoted, archived, or otherwise not the current lifecycle
     state (:func:`precedent_skip_reason`) without reading its citations
@@ -669,17 +673,13 @@ def evaluate_precedent_demotions(
     precedents actually being judged (skipped ones never reach the
     join). Each precedent's own evidence is then attributed out of that
     one shared result (:func:`_attribute_precedent_citation_evidence`),
-    filtered to its own ``occurred_at >= promoted_at`` — the window
-    semantics are unchanged, only the repeated read is removed.
+    filtered to its own ``occurred_at >= promoted_at``.
 
-    Exactly one :attr:`EventType.LEARNING_AUTO_DEMOTE_EVALUATED` event is
-    emitted per call, covering every discovered precedent — mirrors
-    :func:`trellis.learning.candidate_auto_promote.run_candidate_auto_promotion`'s
-    "always emit, even for zero precedents" shape. Both the report and
-    that event carry the merged scan coverage
-    (:attr:`PrecedentDemotionReport.scan`): a truncated discovery or join
-    scan can under-count unhelpful citations and must not read as "no
-    evidence".
+    Returns the per-precedent outcomes (unordered relative to nothing in
+    particular — insertion order of
+    :func:`discover_current_precedents_with_coverage`'s result) and the
+    merged discovery+join scan coverage: a truncated scan can under-count
+    unhelpful citations and must not read as "no evidence".
     """
     promoted_at_by_entity, discovery_coverage = (
         discover_current_precedents_with_coverage(event_log, limit=promotion_scan_limit)
@@ -743,6 +743,39 @@ def evaluate_precedent_demotions(
         )
 
     scan = merge_coverage(discovery_coverage, join_coverage)
+    return outcomes, scan
+
+
+def evaluate_precedent_demotions(
+    event_log: EventLog,
+    graph_store: GraphStore,
+    *,
+    min_unhelpful_citations: int = MIN_UNHELPFUL_CITATIONS,
+    promotion_scan_limit: int = _PROMOTION_SCAN_LIMIT,
+    join_limit: int = _JOIN_SCAN_LIMIT,
+    source: str = "precedent_evidence_gate",
+) -> PrecedentDemotionReport:
+    """Evaluate every current precedent and report what would be demoted.
+
+    Writes nothing: no demotion, no node change. See
+    :func:`judge_current_precedents` for the discovery/judging logic this
+    wraps. Exactly one :attr:`EventType.LEARNING_AUTO_DEMOTE_EVALUATED`
+    event is emitted per call, covering every discovered precedent, with
+    ``mode`` always ``"report_only"`` — mirrors
+    :func:`trellis.learning.candidate_auto_promote.run_candidate_auto_promotion`'s
+    "always emit, even for zero precedents" shape. A caller that wants a
+    real, possibly-commit-mode run should use
+    :func:`trellis.learning.precedent_auto_demote.run_precedent_auto_demotion`
+    instead — this function's own event payload never varies by mode.
+    """
+    outcomes, scan = judge_current_precedents(
+        event_log,
+        graph_store,
+        min_unhelpful_citations=min_unhelpful_citations,
+        promotion_scan_limit=promotion_scan_limit,
+        join_limit=join_limit,
+    )
+
     notes: list[str] = []
     if scan.truncated and scan.note:
         notes.append(scan.note)
@@ -821,6 +854,7 @@ __all__ = [
     "evaluate_precedent_demotions",
     "gather_precedent_citation_evidence",
     "join_precedent_citation_events",
+    "judge_current_precedents",
     "judge_precedent_demotion",
     "precedent_skip_reason",
     "report_to_dict",
