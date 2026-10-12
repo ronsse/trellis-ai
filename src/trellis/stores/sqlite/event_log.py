@@ -102,6 +102,13 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
 
     # -- queries -------------------------------------------------------------
 
+    def get_event(self, event_id: str) -> Event | None:
+        """Direct primary-key lookup -- reaches the whole log, not a window."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM events WHERE event_id = ?", (event_id,))
+        row = cur.fetchone()
+        return self._row_to_event(row) if row is not None else None
+
     def get_events(
         self,
         *,

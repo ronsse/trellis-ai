@@ -218,6 +218,53 @@ class EventLogContractTests:
         assert "content" not in got.payload
 
     # ------------------------------------------------------------------
+    # get_event — single lookup by id, independent of any list window
+    # ------------------------------------------------------------------
+
+    def test_get_event_returns_the_matching_event(self, store: EventLog) -> None:
+        store.emit(EventType.TRACE_INGESTED, "ingest", entity_id="trace_1")
+        target = store.emit(
+            EventType.ENTITY_CREATED,
+            "curate",
+            entity_id="ent_42",
+            payload={"name": "auth"},
+        )
+        store.emit(EventType.TRACE_INGESTED, "ingest", entity_id="trace_2")
+
+        got = store.get_event(target.event_id)
+        assert got is not None
+        assert got.event_id == target.event_id
+        assert got.event_type == EventType.ENTITY_CREATED
+        assert got.payload == {"name": "auth"}
+
+    def test_get_event_missing_id_returns_none(self, store: EventLog) -> None:
+        store.emit(EventType.TRACE_INGESTED, "ingest")
+        assert store.get_event("no-such-event-id") is None
+
+    def test_get_event_on_empty_store_returns_none(self, store: EventLog) -> None:
+        assert store.get_event("anything") is None
+
+    def test_get_event_reaches_outside_a_recent_window(self, store: EventLog) -> None:
+        """A row buried under many newer ones is still found by id.
+
+        This is the behaviour a bounded list view cannot offer: a window
+        capped at ``limit`` can only page back so far, while ``get_event``
+        must reach the whole log regardless of how much has been appended
+        since.
+        """
+        old = store.emit(EventType.TRACE_INGESTED, "ingest", entity_id="old")
+        for _ in range(5):
+            store.emit(EventType.ENTITY_CREATED, "curate")
+
+        got = store.get_event(old.event_id)
+        assert got is not None
+        assert got.event_id == old.event_id
+        # Confirm the window really would have missed it: a 1-row desc
+        # window surfaces only the newest event, not ``old``.
+        windowed = store.get_events(limit=1, order="desc")
+        assert windowed[0].event_id != old.event_id
+
+    # ------------------------------------------------------------------
     # Empty store on every query path
     # ------------------------------------------------------------------
 

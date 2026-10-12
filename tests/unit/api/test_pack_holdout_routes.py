@@ -386,6 +386,8 @@ class _Scoped:
     served: str
     #: Each pack's ``PACK_ASSEMBLED`` payload, read from the event log.
     raw: dict[str, dict[str, Any]]
+    #: Each pack's ``PACK_ASSEMBLED`` event id, for ``GET /events/{id}``.
+    event_ids: dict[str, str]
 
 
 @pytest.fixture
@@ -428,7 +430,14 @@ def scoped(registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch) -> _Scoped:
         row[key] for row in (flat, sectioned) for key in _WOULD_BE_KEYS & set(row)
     )
     assert not set(raw[served]) & _WOULD_BE_KEYS
-    return _Scoped(client, headers, held, served, raw)
+    event_ids = {
+        event.entity_id: event.event_id
+        for event in registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ASSEMBLED, limit=100
+        )
+        if event.entity_id in raw
+    }
+    return _Scoped(client, headers, held, served, raw, event_ids)
 
 
 def _as_seen(raw: dict[str, Any], *, admin: bool) -> dict[str, Any]:
@@ -480,6 +489,23 @@ class TestOnlyAdminReadsTheWouldBePack:
             )
             assert response.status_code == 200, response.text
             payload = response.json()["pack"]["payload"]
+            assert payload == _as_seen(raw, admin=_CALLERS[caller]), (caller, pack_id)
+            assert payload["holdout"] is (pack_id in scoped.held)
+
+    @pytest.mark.parametrize("caller", sorted(_CALLERS))
+    def test_event_detail_carries_the_would_be_pack_to_admin_only(
+        self, caller: str, scoped: _Scoped
+    ) -> None:
+        """``GET /events/{id}`` makes the same promise as the pack-detail
+        and event-list views: a withheld pack's would-be pack reaches
+        ``admin`` callers only, even reached by id rather than by filter."""
+        for pack_id, raw in scoped.raw.items():
+            event_id = scoped.event_ids[pack_id]
+            response = scoped.client.get(
+                f"/api/v1/events/{event_id}", headers=scoped.headers[caller]
+            )
+            assert response.status_code == 200, response.text
+            payload = response.json()["event"]["payload"]
             assert payload == _as_seen(raw, admin=_CALLERS[caller]), (caller, pack_id)
             assert payload["holdout"] is (pack_id in scoped.held)
 

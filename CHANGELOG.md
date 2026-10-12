@@ -6,6 +6,29 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Operator UI: paged search results, a reachable event lookup, typed
+  report parameters, and a help link on every tab.** `GET /precedents/domains`
+  mirrors `GET /traces/domains` (same shape, same demoted/archived
+  filtering as `GET /precedents`), so the Precedents domain filter lists
+  every domain rather than only the ones on the current page; the Memories
+  search results are paged the same way the unfiltered document list
+  already is. `GET /events/{event_id}` gets one event by id regardless of
+  the recency window a list caller has loaded, 404 when absent, under the
+  same pack-holdout rule as `GET /events`; the Events detail view uses it
+  so an older event opens instead of reading as not found. The Graph tab's
+  first-visit sample load now renders a failed `/graph/search` call into a
+  banner instead of discarding it, and the Reports tab no longer runs a
+  report on open — the operator picks one. `GET /api/v1/analyze` gains a
+  `params_schema` field per report (`params_model.model_json_schema()`),
+  and the Reports tab renders a typed control per parameter from it —
+  a bounded number input for an integer/float, a checkbox for a boolean, a
+  select for an enum (the holdout report's `outcome` is now one) — with
+  client-side bounds checking before submit and a legible rendering of any
+  422 that still reaches the server. Every sidebar tab carries a small "?"
+  link to the matching section of the operator docs on GitHub; a test
+  reimplements GitHub's heading-to-anchor rule and checks every linked
+  anchor against the real headings in that file on this branch.
+
 - **Precedent demotion verb (manual-trigger only): `precedent.demote` through
   the governed mutation pipeline, with CLI `trellis curate
   demote-precedent`, REST `POST /precedents/{target_id}/demote`, and MCP

@@ -558,6 +558,26 @@
         .badge-info { background: var(--info-tint-bg); color: var(--info-tint-fg); }
         .badge-accent { background: var(--accent-tint-bg); color: var(--accent-tint-fg); }
 
+        /* Per-tab help link: a small "?" to the matching operator-docs
+           section on GitHub. Floated so it never displaces a view's own
+           layout (cards, search bars, section headers all differ per tab). */
+        .help-link {
+            float: right;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.3rem;
+            height: 1.3rem;
+            border-radius: 50%;
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            font-size: 0.72rem;
+            font-weight: 600;
+            text-decoration: none;
+            margin-left: 0.5rem;
+        }
+        .help-link:hover { color: var(--accent); border-color: var(--accent); }
+
         /* Readiness pill (G14): tiny by design -- a dot in the topbar, not
            a card. Failing component names surface only on hover. */
         .readiness-pill {
@@ -1805,6 +1825,7 @@
 
         <!-- ============ Graph Explorer ============ -->
         <div id="view-graph" style="display:none">
+            <div id="graph-sample-warning"></div>
             <div class="search-bar">
                 <input type="text" id="graph-search" placeholder="Search entities (e.g. table name, service, domain)..." aria-label="Search graph entities" onkeydown="if(event.key==='Enter')searchGraph()">
                 <button onclick="searchGraph()">Search</button>
@@ -2078,6 +2099,7 @@
                 <div id="report-params" style="display:flex; flex-wrap:wrap; gap:0.75rem"></div>
                 <button onclick="runReport()">Run</button>
             </div>
+            <p id="report-param-error" style="font-size:0.78rem; color:var(--error); margin-bottom:0.5rem"></p>
             <p id="report-description" style="font-size:0.78rem; color:var(--text-dim); margin-bottom:0.75rem"></p>
             <div id="report-meta" class="mono" style="font-size:0.75rem; color:var(--text-dim); margin-bottom:0.75rem"></div>
             <div id="report-output"></div>
@@ -2554,6 +2576,51 @@
             const d = document.createElement('div');
             d.textContent = String(s);
             return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        // Base of the operator docs this build was published alongside --
+        // every per-tab help link points at a `#anchor` under this file.
+        // tests/unit/api/test_ui_help_links.py pins that each anchor below
+        // resolves to an actual heading in that file on this branch.
+        const OPERATOR_DOCS_URL =
+            'https://github.com/ronsse/trellis-ai/blob/main/docs/agent-guide/operations.md';
+
+        function helpLinkHtml(anchor, label) {
+            const href = `${OPERATOR_DOCS_URL}#${anchor}`;
+            return `<a class="help-link" href="${escHtml(href)}" target="_blank" rel="noopener" ` +
+                `title="Operator docs: ${escHtml(label)}" aria-label="Help: ${escHtml(label)}">?</a>`;
+        }
+
+        // One doc anchor per nav tab -- the closest section in
+        // docs/agent-guide/operations.md (no 1:1 section exists for every
+        // tab, so a few name the nearest command/REST entry rather than a
+        // tab-specific heading). tests/unit/api/test_ui_help_links.py pins
+        // that every anchor here resolves to a real heading in that file.
+        const TAB_HELP_ANCHORS = {
+            dashboard: ['trellis-admin-stats', 'Dashboard'],
+            metrics: ['improvement-metrics-dashboard-admin-scope', 'Metrics'],
+            review: ['review-queue-admin-scope', 'Review'],
+            effectiveness: ['trellis-analyze-context-effectiveness', 'Effectiveness'],
+            graph: ['trellis-retrieve-entity', 'Graph'],
+            traces: ['trellis-retrieve-traces', 'Traces'],
+            precedents: ['trellis-retrieve-precedents', 'Precedents'],
+            memories: ['trellis-retrieve-search', 'Memories'],
+            events: ['explore', 'Events'],
+            packs: ['trellis-retrieve-pack', 'Packs'],
+            loops: ['get-apiv1loops', 'Loops'],
+            reports: ['get-apiv1analyze-and-get-apiv1analyzereport', 'Reports'],
+            advisories: ['advisories', 'Advisories'],
+            policies: ['policy-commands', 'Policies'],
+            schedules: ['the-schedules-tab', 'Schedules'],
+            tagrules: ['classify-rule-review--apply--revoke', 'Tag rules'],
+            settings: ['settings-store', 'Settings'],
+        };
+
+        function installHelpLinks() {
+            for (const [view, [anchor, label]] of Object.entries(TAB_HELP_ANCHORS)) {
+                const el = document.getElementById(`view-${view}`);
+                if (el) el.insertAdjacentHTML('afterbegin', helpLinkHtml(anchor, label));
+            }
         }
 
         // Shared formatter for any score/ratio/effect-size value that reaches
@@ -4031,7 +4098,18 @@
                 // Also open the browse panel so user sees all entities
                 searchGraph();
             } catch (e) {
-                // Silently ignore -- user can still search manually
+                // Surfaced rather than swallowed: without this, a failed
+                // sample load reads as an empty graph with no
+                // explanation, and the user can't tell "nothing to show
+                // yet" from "the search call failed".
+                const el = document.getElementById('graph-sample-warning');
+                if (el) {
+                    el.innerHTML = `<div class="warn-banner">
+                        <span class="warn-title">Could not load a starting sample</span>
+                        <span class="warn-detail">${escHtml(e.message)} Search or enter
+                            an entity ID above to browse the graph manually.</span>
+                    </div>`;
+                }
             }
         }
 
@@ -4874,18 +4952,17 @@
                     </tr>
                 `).join('');
 
-                // Pagination (search results are unpaged; list is offset-paged)
+                // Search results are offset-paged the same way the list
+                // is: the server applies offset/limit to the matches too
+                // (see GET /documents), so one idiom covers both.
                 const pag = document.getElementById('mem-pagination');
-                if (q) {
-                    pag.style.display = 'none';
-                } else {
-                    const total = data.total || 0;
-                    pag.style.display = total > limit ? 'flex' : 'none';
-                    document.getElementById('mem-page-info').textContent =
-                        `${(memOffset + 1).toLocaleString()}–${(memOffset + docs.length).toLocaleString()} of ${total.toLocaleString()}`;
-                    document.getElementById('mem-prev').disabled = memOffset === 0;
-                    document.getElementById('mem-next').disabled = memOffset + docs.length >= total;
-                }
+                const total = data.total || 0;
+                pag.style.display = total > limit ? 'flex' : 'none';
+                const totalLabel = data.total_exact === false ? `${fmtNum(total, 0)}+` : fmtNum(total, 0);
+                document.getElementById('mem-page-info').textContent =
+                    `${fmtNum(memOffset + 1, 0)}–${fmtNum(memOffset + docs.length, 0)} of ${totalLabel}`;
+                document.getElementById('mem-prev').disabled = memOffset === 0;
+                document.getElementById('mem-next').disabled = memOffset + docs.length >= total;
             } catch (err) {
                 body.innerHTML = `<tr><td colspan="5" style="color:var(--error); text-align:center; padding:2rem">Failed to load documents: ${escHtml(err.message)}</td></tr>`;
             }
@@ -5046,28 +5123,11 @@
             container.innerHTML = `<div class="trace-detail">${loadingHtml('Loading event...')}</div>`;
 
             try {
-                // No single-event endpoint: refetch the current window with
-                // payloads included and pick the event out client-side.
-                const type = document.getElementById('event-type').value;
-                const source = document.getElementById('event-source').value.trim();
-                const limit = document.getElementById('event-limit').value;
-                let url = `/events?limit=${limit}&order=desc&include_payload=true`;
-                if (type) url += `&event_type=${encodeURIComponent(type)}`;
-                if (source) url += `&source=${encodeURIComponent(source)}`;
-                if (eventPager.current) url += `&until=${encodeURIComponent(eventPager.current)}`;
-                const data = await fetchJSON(url);
-                const windowEvents = data.events || [];
-                const e = windowEvents.find(ev => ev.event_id === eventId);
-                if (!e) {
-                    // There is no GET /events/{id} -- this view can only
-                    // search the currently loaded window, so a miss must
-                    // say which window was searched rather than go blank.
-                    const windowDesc = windowEvents.length > 0
-                        ? `the loaded window (${windowEvents.length} of ${data.total || '?'} events, type/source filters as shown)`
-                        : 'the loaded window (empty)';
-                    container.innerHTML = `<div class="trace-detail"><p style="color:var(--text-dim)">Event <span class="mono">${escHtml(eventId)}</span> was not found in ${windowDesc}. Try Older to search further back, or clear filters.</p></div>`;
-                    return;
-                }
+                // A direct id lookup -- reaches the whole log, not just
+                // whatever window the list view has loaded, so an older
+                // event opens the same way a recent one does.
+                const data = await fetchJSON(`/events/${encodeURIComponent(eventId)}`);
+                const e = data.event;
 
                 const packLink = e.event_type === 'pack.assembled' && e.entity_id
                     ? `<button class="btn btn-ghost btn-sm" data-action="navigateToPack" data-id="${escHtml(e.entity_id)}">Inspect pack</button>`
@@ -5089,7 +5149,11 @@
                 `;
                 container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             } catch (err) {
-                container.innerHTML = `<div class="trace-detail"><p style="color:var(--error)">Failed to load event: ${escHtml(err.message)}</p></div>`;
+                const notFound = /^404\b/.test(err.message);
+                const msg = notFound
+                    ? `Event ${eventId} was not found.`
+                    : `Failed to load event ${eventId}: ${err.message}`;
+                container.innerHTML = `<div class="trace-detail"><p style="color:${notFound ? 'var(--text-dim)' : 'var(--error)'}">${escHtml(msg)}</p></div>`;
             }
         }
 
@@ -5690,6 +5754,11 @@
         // report name, rendered as secondary text next to the human
         // title rather than as the picker's primary label.
         let reportTitles = {};
+        // Keyed the same way: each report's params model as a JSON
+        // Schema (``params_model().model_json_schema()``), used to render
+        // a typed input (number with bounds, checkbox, select) instead of
+        // one plain text box per param.
+        let reportSchemas = {};
 
         async function loadReportsTab() {
             const picker = document.getElementById('report-picker');
@@ -5709,16 +5778,23 @@
                 reportDescriptions = {};
                 reportDefaults = {};
                 reportTitles = {};
+                reportSchemas = {};
                 reports.forEach(r => {
                     reportDescriptions[r.name] = r.description || '';
                     reportDefaults[r.name] = r.default_params || {};
                     reportTitles[r.name] = r.title || r.name;
+                    reportSchemas[r.name] = r.params_schema || {};
                 });
                 picker.innerHTML = reports.map(r =>
                     `<option value="${escHtml(r.name)}">${escHtml(r.title || r.name)}</option>`
                 ).join('');
                 onReportPickerChange();
-                runReport();
+                // The operator picks a report and clicks Run -- opening
+                // this tab no longer runs one unasked, which used to cost
+                // whatever work the first report in the list does on
+                // every visit, including ones that only wanted a
+                // different report.
+                outputEl.innerHTML = '<div class="empty-state"><p>Pick a report above and click Run.</p></div>';
             } catch (err) {
                 picker.innerHTML = '';
                 outputEl.innerHTML = `<div style="color:var(--error); padding:1.5rem; text-align:center">` +
@@ -5733,20 +5809,131 @@
             // text here, not the primary label.
             document.getElementById('report-description').innerHTML =
                 `${escHtml(reportDescriptions[name] || '')} <code style="font-size:0.72rem; color:var(--text-dim)">${escHtml(name)}</code>`;
+            const errorEl = document.getElementById('report-param-error');
+            if (errorEl) errorEl.textContent = '';
             const paramsEl = document.getElementById('report-params');
             const defaults = reportDefaults[name] || {};
+            const properties = (reportSchemas[name] && reportSchemas[name].properties) || {};
             const entries = Object.entries(defaults);
             if (entries.length === 0) {
                 paramsEl.innerHTML = '<span style="font-size:0.75rem; color:var(--text-dim)">no parameters</span>';
                 return;
             }
-            paramsEl.innerHTML = entries.map(([key, val]) =>
-                `<label style="display:flex; flex-direction:column; font-size:0.75rem; color:var(--text-dim); gap:0.2rem">` +
-                    `${escHtml(key)}<input type="text" class="report-param-input" data-param="${escHtml(key)}" ` +
+            paramsEl.innerHTML = entries
+                .map(([key, val]) => reportParamFieldHtml(key, val, properties[key] || {}))
+                .join('');
+        }
+
+        // A field typed `T | None` reaches here as `{"anyOf": [<T's own
+        // schema>, {"type": "null"}], "default": null}` (pydantic v2's
+        // JSON Schema shape for Optional) -- unwrap it to the branch the
+        // UI renders a control from. A required (non-Optional) field's
+        // schema is already that shape, so this is a no-op for it.
+        function reportParamInnerSchema(fieldSchema) {
+            if (fieldSchema && Array.isArray(fieldSchema.anyOf)) {
+                const inner = fieldSchema.anyOf.find(branch => branch && branch.type !== 'null');
+                if (inner) return inner;
+            }
+            return fieldSchema || {};
+        }
+
+        function reportParamFieldHtml(key, val, fieldSchema) {
+            const inner = reportParamInnerSchema(fieldSchema);
+            const label = `<label style="display:flex; flex-direction:column; font-size:0.75rem; color:var(--text-dim); gap:0.2rem">${escHtml(key)}`;
+
+            if (Array.isArray(inner.enum)) {
+                const options = inner.enum.map(opt =>
+                    `<option value="${escHtml(opt)}" ${opt === val ? 'selected' : ''}>${escHtml(opt)}</option>`
+                ).join('');
+                return `${label}<select class="report-param-input" data-kind="enum" data-param="${escHtml(key)}" ` +
+                    `style="font-size:0.8rem; width:8rem">${options}</select></label>`;
+            }
+            if (inner.type === 'boolean') {
+                return `${label}<input type="checkbox" class="report-param-input" data-kind="boolean" ` +
+                    `data-param="${escHtml(key)}" ${val ? 'checked' : ''} style="width:auto; align-self:flex-start"></label>`;
+            }
+            if (inner.type === 'integer' || inner.type === 'number') {
+                // The schema carries an inclusive bound (`minimum`/`maximum`,
+                // from a params Field's `ge`/`le`) or an exclusive one
+                // (`exclusiveMinimum`/`exclusiveMaximum`, from `gt`/`lt`),
+                // never both for the same side. The native `min`/`max`
+                // attributes only express "inclusive", so an exclusive
+                // bound is set there too (a one-ULP-loose native hint) and
+                // checked exactly by validateReportParamInput below.
+                const min = inner.minimum !== undefined ? inner.minimum : inner.exclusiveMinimum;
+                const max = inner.maximum !== undefined ? inner.maximum : inner.exclusiveMaximum;
+                const minAttr = min !== undefined ? ` min="${escHtml(min)}"` : '';
+                const maxAttr = max !== undefined ? ` max="${escHtml(max)}"` : '';
+                return `${label}<input type="number" step="${escHtml(inner.type === 'integer' ? '1' : 'any')}" ` +
+                    `class="report-param-input" data-kind="${escHtml(inner.type)}" data-param="${escHtml(key)}" ` +
+                    `data-min="${inner.minimum !== undefined ? escHtml(inner.minimum) : ''}" ` +
+                    `data-min-exclusive="${inner.exclusiveMinimum !== undefined ? escHtml(inner.exclusiveMinimum) : ''}" ` +
+                    `data-max="${inner.maximum !== undefined ? escHtml(inner.maximum) : ''}" ` +
+                    `data-max-exclusive="${inner.exclusiveMaximum !== undefined ? escHtml(inner.exclusiveMaximum) : ''}" ` +
+                    `style="font-size:0.8rem; width:8rem"${minAttr}${maxAttr} ` +
                     // escHtml(null) is '', so a default-less param renders an empty input rather
                     // than the literal text "null".
-                    `value="${escHtml(val)}" style="font-size:0.8rem; width:8rem"></label>`
-            ).join('');
+                    `value="${escHtml(val)}"></label>`;
+            }
+            return `${label}<input type="text" class="report-param-input" data-kind="string" data-param="${escHtml(key)}" ` +
+                `value="${escHtml(val)}" style="font-size:0.8rem; width:8rem"></label>`;
+        }
+
+        // Mirrors the bounds the server's own pydantic Field(ge=/le=/gt=/lt=)
+        // already enforces -- this is a legibility front for the same
+        // constraint, not a second source of truth for it, so a mismatch
+        // still ends in the server's 422, just later than it needs to.
+        function validateReportParamInput(input) {
+            const kind = input.dataset.kind;
+            const param = input.dataset.param;
+            if (kind === 'boolean' || kind === 'enum') return null;
+            const raw = input.value.trim();
+            // An empty optional field is left out of the request below and
+            // the server applies that param's own default -- not a 0 or an
+            // out-of-range value, so it is never a validation error here.
+            if (raw === '') return null;
+            if (kind !== 'integer' && kind !== 'number') return null;
+            const num = Number(raw);
+            if (!Number.isFinite(num)) return `${param} must be a number`;
+            if (kind === 'integer' && !Number.isInteger(num)) return `${param} must be a whole number`;
+            const min = input.dataset.min !== '' ? Number(input.dataset.min) : null;
+            const minExclusive = input.dataset.minExclusive !== '' ? Number(input.dataset.minExclusive) : null;
+            const max = input.dataset.max !== '' ? Number(input.dataset.max) : null;
+            const maxExclusive = input.dataset.maxExclusive !== '' ? Number(input.dataset.maxExclusive) : null;
+            if (min !== null && num < min) return `${param} must be >= ${min}`;
+            if (minExclusive !== null && num <= minExclusive) return `${param} must be > ${minExclusive}`;
+            if (max !== null && num > max) return `${param} must be <= ${max}`;
+            if (maxExclusive !== null && num >= maxExclusive) return `${param} must be < ${maxExclusive}`;
+            return null;
+        }
+
+        // Same {loc, msg} shape as a PATCH 422 (see formatPatchValidationDetail),
+        // and the same `message`-field shape as a typed-error envelope's
+        // body -- a report's 422/409 rendered legibly if client-side
+        // validation above still let a bad value through, or the server
+        // rejects a value the client-side check cannot see (@field_validator
+        // checks like HoldoutParams' outcome allow-list).
+        async function fetchReportJSON(path) {
+            const headers = {};
+            const key = getApiKey();
+            if (key) headers['X-API-Key'] = key;
+            const res = await fetch(API + path, { headers });
+            await throwIfAuthRefused(res, key);
+            if (!res.ok) {
+                let detail = `${res.status} ${res.statusText}`;
+                try {
+                    const j = await res.json();
+                    if (res.status === 422 && Array.isArray(j && j.detail)) {
+                        detail = formatPatchValidationDetail(j.detail);
+                    } else if (j && typeof j.detail === 'string') {
+                        detail = j.detail;
+                    } else if (j && typeof j.message === 'string') {
+                        detail = j.message;
+                    }
+                } catch { /* non-JSON */ }
+                throw new Error(detail);
+            }
+            return res.json();
         }
 
         async function runReport() {
@@ -5755,17 +5942,32 @@
             if (!name) return;
             const outputEl = document.getElementById('report-output');
             const metaEl = document.getElementById('report-meta');
+            const errorEl = document.getElementById('report-param-error');
+            const inputs = Array.from(document.querySelectorAll('.report-param-input'));
+            // Client-side validation before submit: catch an out-of-range
+            // or non-numeric value here rather than round-tripping it to
+            // the server only to render its 422.
+            const errors = inputs.map(validateReportParamInput).filter(Boolean);
+            if (errors.length > 0) {
+                if (errorEl) errorEl.textContent = errors.join('; ');
+                return;
+            }
+            if (errorEl) errorEl.textContent = '';
             outputEl.innerHTML = loadingHtml(`Running ${name}...`);
             metaEl.textContent = '';
             lastReportPayload = null;
             const params = new URLSearchParams();
-            document.querySelectorAll('.report-param-input').forEach(input => {
+            inputs.forEach(input => {
+                if (input.dataset.kind === 'boolean') {
+                    params.set(input.dataset.param, input.checked ? 'true' : 'false');
+                    return;
+                }
                 const raw = input.value.trim();
                 if (raw !== '') params.set(input.dataset.param, raw);
             });
             const qs = params.toString();
             try {
-                const data = await fetchJSON(`/analyze/${encodeURIComponent(name)}${qs ? '?' + qs : ''}`);
+                const data = await fetchReportJSON(`/analyze/${encodeURIComponent(name)}${qs ? '?' + qs : ''}`);
                 lastReportPayload = data;
                 metaEl.innerHTML = `computed_at: ${escHtml(fmtTime(data.computed_at, { empty: 'unknown' }))}` +
                     (data.cached ? ' <span class="badge badge-info">cached</span>' : '');
@@ -7831,6 +8033,7 @@
 
         initSidebar();
         TableUX.start();
+        installHelpLinks();
 
         init();
     </script>
