@@ -10,9 +10,9 @@ Drop-in skill files for Claude Code (and other agent frameworks that follow the 
 
 | Skill | Purpose |
 |---|---|
-| retrieve-before-task | Before starting non-trivial work, pull a token-budgeted context pack from Trellis and inject it into the task. |
-| record-after-task | After completing meaningful work, write a structured trace and mark its outcome. |
-| link-evidence | When the agent learns something durable, store it as a memory + entity in the knowledge graph. |
+| retrieve-before-task | Before non-trivial work, pull a token-budgeted context pack from Trellis — and again after a pivot, after compaction, and in every dispatched subagent. |
+| record-after-task | After meaningful work, write a schema-valid trace, grade the packs that were served by item id, and save any durable environment fact as knowledge. |
+| link-evidence | When the agent learns something durable, store it with `save_knowledge` anchored to the graph entity it is about, and check the reply to confirm the link. |
 
 ## Installing into Claude Code
 
@@ -60,7 +60,7 @@ trellis admin quickstart --with-skills user
 Each `SKILL.md` is plain markdown with YAML frontmatter — edit freely **after installing** (the installed copy under `~/.claude/skills/` is yours to change; the packaged source is the template). Common tweaks:
 
 - **Domain hints**: pre-fill `domain="backend"` or similar in the example tool calls.
-- **Token budgets**: lower `max_tokens` if you want leaner injections, or raise for deep-research workflows.
+- **Token budgets**: add `max_tokens` to the `get_context` call (default 2000) — lower for leaner injections, higher for deep-research workflows.
 - **When to trigger**: rewrite the `description` field so your agent invokes the skill in the moments you care about.
 
 ## Using these patterns elsewhere
