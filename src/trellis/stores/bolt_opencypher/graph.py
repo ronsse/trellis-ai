@@ -123,47 +123,18 @@ the same harness. ``live-infra.yml`` stays pinned to 26.8.1 on purpose
 so the race — and this fix — remain testable in CI; a deployment
 already on 26.10.1 gets the fix from the engine, not from this claim.
 
-``upsert_edges_bulk`` does not take the claim above -- a sorted
-per-row claim order across every row in a batch would need the
-bulk-friendly treatment this paragraph gives below, and it does not
-have one -- but it does lock every distinct endpoint the whole batch
-touches, in one sorted ``node_id`` order, before any row resolves its
-endpoints, using the same ``_cas_lock`` touch ``upsert_edge`` used
-before the claim row existed. The lock is one constant-text
-``UNWIND $lock_ids AS lock_nid`` clause over the sorted endpoint list,
-not one ``MATCH``/``SET``/``REMOVE`` clause built per endpoint: a Bolt
-driver caches a query plan by its literal text, so a clause built per
-call turns every new endpoint count into a fresh plan, and the lock
-order then rests on ``UNWIND`` visiting ``$lock_ids`` in list order on
-both engines. Neither engine documents that as a contract — Neo4j's
-Cypher Manual says ``UNWIND``'s row order is unspecified and that only
-``ORDER BY`` guarantees one — so this is a relied-upon, not a cited,
-property of the current single-pass execution of a plain ``UNWIND``
-over a literal list; a future runtime change that reorders ``UNWIND``
-could reopen the deadlock gap below silently, surfacing as a driver
-retry rather than a duplicate, since the write that establishes the
-order is still inside the ``count()`` barrier below. Two concurrent
-writers whose batches lock the same endpoints in opposite row order,
-100 reps on ``neo4j:2025.12``, produced zero deadlocks and zero
-duplicates (the same reps against the single-row lock's two-endpoint
-case below), which is evidence this holds today, not a guarantee it
-keeps holding. That is weaker than the per-row
-``MATCH``/``SET``/``REMOVE``/``WITH`` chain the single-row path uses,
-where each clause's own data dependency is a real guarantee rather
-than an observed one; the trade accepts that gap in exchange for
-fixing a measured, catastrophic planning cost that the stronger
-per-clause design could not avoid.
-
-On Neo4j this still takes each endpoint's lock, so a
-bulk writer and a single-row writer of the same triplet, or two bulk
-writers, serialize in the same global sorted order a single-row writer
-would use, and two bulk writers whose batches share endpoints in
-different row orders don't deadlock. ArcadeDB's bulk path takes no
-lock from this either, for the same reason as the single-row path
-before the claim row existed: a conflicting writer fails at commit and
-the driver retries it, not a row lock, so a pre-existing ArcadeDB
-duplicate between a bulk and a single-row writer of the same triplet
-is governed by OCC retry timing, not by this lock.
+``upsert_edges_bulk`` does not take the claim row above, but locks
+every distinct endpoint the whole batch touches -- same sorted
+``node_id`` order and ``_cas_lock`` touch as above -- before any row
+resolves its endpoints. The lock is one constant-text
+``UNWIND $lock_ids AS lock_nid`` clause over the sorted list, not one
+``MATCH``/``SET``/``REMOVE`` clause per endpoint: the Bolt driver
+caches a plan by query text, so a per-endpoint clause forces a fresh
+plan at every new count. Lock order rests on ``UNWIND`` visiting
+``$lock_ids`` in list order -- not a documented contract on either
+engine (Neo4j's Cypher Manual says only ``ORDER BY`` guarantees a row
+order), so this is relied-upon, not cited. ArcadeDB's bulk path takes
+no lock from this touch at all, for the same OCC reason as above.
 
 Per-backend subclasses override the **seams**:
 
@@ -1842,39 +1813,13 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # version would not get closed. Both Neo4j and ArcadeDB
             # accept the WHERE form.
             #
-            # Lock prelude: write ``_cas_lock`` to every distinct
-            # endpoint's current row across the whole batch, in the one
-            # sorted ``endpoint_ids`` order, before any row resolves its
-            # endpoints below -- the same idiom ``upsert_edge`` uses for
-            # its two endpoints, extended to however many distinct nodes
-            # this batch touches. One constant-text ``UNWIND $lock_ids``
-            # clause, not one MATCH/SET/REMOVE/WITH clause built per id:
-            # a per-id clause makes the query text -- and so the Bolt
-            # driver's cached query plan -- a function of the batch's
-            # distinct-endpoint count, forcing a fresh plan on every new
-            # count instead of reusing one; this constant-text form reuses
-            # the same plan at any batch size. Lock order then rests on
-            # ``UNWIND`` visiting ``$lock_ids`` in list order on both
-            # engines. Neither engine's docs make that a contract --
-            # Neo4j's Cypher Manual says ``UNWIND``'s row order is
-            # unspecified and only ``ORDER BY`` guarantees one -- so this
-            # is a measured property of the current single-pass
-            # execution of a plain ``UNWIND`` over a literal list (module
-            # docstring has the measurement and the trade-off against the
-            # single-row path's stronger clause-sequencing guarantee),
-            # not a cited one, and the lock order stays the ascending
-            # order ``$lock_ids`` carries in only as long as that holds.
-            # A missing endpoint just locks nothing for that id (the
-            # ``MATCH`` filters it out before ``count``); round trip 1 and
-            # the per-row MATCH below still own raising for that. On
-            # Neo4j this takes each row's lock, so single-row and bulk
-            # writers of one edge serialize in the same global order;
-            # ArcadeDB takes no lock from this touch (module docstring).
-            # ``count(lk)`` is a real barrier, not dead code: without it
-            # a planner is free to run the lock writes and the UNWIND
-            # write below out of order, which only the live race checks
-            # below can catch (a mock test pins query *text*, not the
-            # engine's execution order).
+            # Lock prelude: locks every distinct endpoint's current row,
+            # in sorted ``endpoint_ids`` order, before any row below
+            # resolves its endpoints -- design, plan-cache rationale and
+            # the UNWIND-order caveat are in the module docstring.
+            # ``count(lk)`` is a real barrier: drop it and the lock
+            # writes can run out of order with the row write below,
+            # caught only by the live race checks, not a mock test.
             lock_ids = endpoint_ids
 
             cypher = f"""
