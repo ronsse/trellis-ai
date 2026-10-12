@@ -62,8 +62,10 @@ from trellis.retrieve.excerpts import (
 from trellis.retrieve.formatters import format_index_line
 from trellis.retrieve.lifecycle import (
     ARCHIVED_REJECTION_REASON,
+    DEMOTED_REJECTION_REASON,
     SUPERSEDED_REJECTION_REASON,
     partition_archived,
+    partition_demoted,
     partition_superseded,
 )
 from trellis.retrieve.noise import (
@@ -2750,20 +2752,21 @@ class PackBuilder:
         signal_quality_spec: dict[str, Any],
         strategy_name: str,
     ) -> tuple[list[PackItem], list[RejectedItem]]:
-        """The two collect-seam gates, with what they removed handed back.
+        """The three collect-seam gates, with what they removed handed back.
 
         Replaces ``exclude_noise(exclude_archived(...))``. Behaviour is
         unchanged — the same items are dropped, in the same order — but the
-        drops are now *recorded*. Before #404 these two gates' only
-        observable was a ``logger.debug`` line, a no-op under the CLI's
-        ``WARNING`` default and under the MCP server's own configuration,
-        so an archived or noise-demoted item vanished from the pack, from
-        the ``PACK_ASSEMBLED`` payload and from the log at once.
+        drops are now *recorded*. Before #404 these gates' only observable
+        was a ``logger.debug`` line, a no-op under the CLI's ``WARNING``
+        default and under the MCP server's own configuration, so an
+        archived, noise-demoted or precedent-demoted item vanished from the
+        pack, from the ``PACK_ASSEMBLED`` payload and from the log at once.
 
         Order is load-bearing: archived is evaluated first, matching the
-        call nesting it replaces, because
+        call nesting it replaces, then noise, then demoted — because
         :func:`~trellis.retrieve.withholding.summarize_withheld` attributes
-        an item to the *first* gate that rejected it.
+        an item to the *first* gate that rejected it, and demoted joins
+        alongside (not ahead of or scrambled with) the other two.
 
         ``strategy_source`` is stamped from the running strategy rather
         than read off the item: ``_promote_strategy_source`` has not run
@@ -2774,11 +2777,17 @@ class PackBuilder:
         """
         kept, archived = partition_archived(items)
         kept, noisy = partition_by_signal_quality(kept, signal_quality_spec)
+        kept, demoted = partition_demoted(kept)
         rejected = cls._reject(
             archived, ARCHIVED_REJECTION_REASON, strategy_source=strategy_name
         )
         rejected.extend(
             cls._reject(noisy, NOISE_REJECTION_REASON, strategy_source=strategy_name)
+        )
+        rejected.extend(
+            cls._reject(
+                demoted, DEMOTED_REJECTION_REASON, strategy_source=strategy_name
+            )
         )
         return kept, rejected
 

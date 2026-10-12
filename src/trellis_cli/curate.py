@@ -218,6 +218,36 @@ def label(
     _execute_command(cmd, output_format)
 
 
+@curate_app.command("demote-precedent")
+def demote_precedent(
+    target_id: str = typer.Argument(..., help="Precedent entity ID to demote"),
+    reason: str = typer.Option(
+        ..., "--reason", help="Audit-trail justification (required, non-empty)"
+    ),
+    requested_by: str = typer.Option(
+        "cli:demote-precedent",
+        "--by",
+        help="Audit-trail identifier for the caller.",
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Demote a precedent, stamping it ``Lifecycle.state="demoted"``.
+
+    Reversible: a soft SCD-2 rewrite of the precedent's graph node, not a
+    purge. A demoted precedent stops reaching ``list_precedents`` /
+    ``get_lessons`` and is withheld from packs at the collect seam, with
+    the withholding recorded in ``rejected_items``.
+    """
+    cmd = Command(
+        operation=Operation.PRECEDENT_DEMOTE,
+        args={"target_id": target_id, "reason": reason},
+        target_id=target_id,
+        target_type="precedent",
+        requested_by=requested_by,
+    )
+    _execute_command(cmd, output_format)
+
+
 @curate_app.command()
 def prune(
     reason: str = typer.Option(

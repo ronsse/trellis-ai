@@ -211,6 +211,12 @@ NON_DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         # the dispatcher to pick up — a record character, like
         # feedback.record / observation.record / measurement.record.
         Operation.JOB_RUN_REQUEST,
+        # precedent.demote is, like entity.update, an SCD-2 rewrite: it
+        # stamps ``Lifecycle.state="demoted"`` on a new version of the
+        # node, and the pre-demotion version stays readable via
+        # ``get_node_history``/``as_of`` — nothing a later read cannot
+        # recover.
+        Operation.PRECEDENT_DEMOTE,
     }
 )
 

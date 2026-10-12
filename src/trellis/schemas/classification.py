@@ -349,6 +349,7 @@ LifecycleState = Literal[
     "deprecated",
     "superseded",
     "archived",
+    "demoted",
 ]
 
 

@@ -26,6 +26,7 @@ from trellis_wire.dtos import (
     LinkRequest,
     PackFeedbackRequest,
     PackFeedbackResponse,
+    PrecedentDemoteRequest,
     PromoteRequest,
 )
 
@@ -57,6 +58,24 @@ def promote(req: PromoteRequest) -> CommandResponse:
         },
         target_id=req.trace_id,
         target_type="trace",
+        requested_by=req.requested_by,
+    )
+    return _execute_command(cmd)
+
+
+@router.post("/precedents/{target_id}/demote", response_model=CommandResponse)
+def demote(target_id: str, req: PrecedentDemoteRequest) -> CommandResponse:
+    """Demote a precedent, stamping it ``Lifecycle.state="demoted"``.
+
+    Reversible (SCD-2 rewrite, not a purge). A demoted precedent stops
+    reaching ``GET /precedents`` / ``get_lessons`` and is withheld from
+    packs at the collect seam, recorded in ``rejected_items``.
+    """
+    cmd = Command(
+        operation=Operation.PRECEDENT_DEMOTE,
+        args={"target_id": target_id, "reason": req.reason},
+        target_id=target_id,
+        target_type="precedent",
         requested_by=req.requested_by,
     )
     return _execute_command(cmd)

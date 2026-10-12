@@ -233,6 +233,13 @@ class PromoteRequest(WireRequestModel):
     requested_by: str = "api:promote"
 
 
+class PrecedentDemoteRequest(WireRequestModel):
+    """Request to demote a precedent. ``target_id`` rides the URL path."""
+
+    reason: str
+    requested_by: str = "api:demote-precedent"
+
+
 class LinkRequest(WireRequestModel):
     """Request to create a graph edge.
 

@@ -2670,7 +2670,12 @@ def get_lessons(
     from trellis.retrieve.precedents import list_precedents as _list_prec  # noqa: PLC0415, I001
 
     registry = _get_registry()
-    lessons = _list_prec(registry.operational.event_log, domain=domain, limit=limit)
+    lessons = _list_prec(
+        registry.operational.event_log,
+        domain=domain,
+        limit=limit,
+        graph_store=registry.knowledge.graph_store,
+    )
 
     result = format_lessons_as_markdown(lessons, max_tokens=max_tokens)
     try:

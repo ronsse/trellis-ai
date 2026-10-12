@@ -2266,6 +2266,21 @@ components:
       - redaction
       title: PolicyType
       type: string
+    PrecedentDemoteRequest:
+      additionalProperties: false
+      description: Request to demote a precedent. ``target_id`` rides the URL path.
+      properties:
+        reason:
+          title: Reason
+          type: string
+        requested_by:
+          default: api:demote-precedent
+          title: Requested By
+          type: string
+      required:
+      - reason
+      title: PrecedentDemoteRequest
+      type: object
     PromoteRequest:
       additionalProperties: false
       description: Request to promote a trace to a precedent.
@@ -5282,6 +5297,48 @@ paths:
       summary: Count promoted precedents per domain
       tags:
       - retrieve
+  /api/v1/precedents/{target_id}/demote:
+    post:
+      description: 'Demote a precedent, stamping it ``Lifecycle.state="demoted"``.
+
+
+        Reversible (SCD-2 rewrite, not a purge). A demoted precedent stops
+
+        reaching ``GET /precedents`` / ``get_lessons`` and is withheld from
+
+        packs at the collect seam, recorded in ``rejected_items``.'
+      operationId: demote_api_v1_precedents__target_id__demote_post
+      parameters:
+      - in: path
+        name: target_id
+        required: true
+        schema:
+          title: Target Id
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrecedentDemoteRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Demote
+      tags:
+      - curate
   /api/v1/proposals:
     get:
       description: 'List pending tuner proposals awaiting a human approve / reject.

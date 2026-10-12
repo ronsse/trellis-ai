@@ -193,6 +193,57 @@ class TestExecuteMutationHappyPath:
         assert stored["metadata"]["uri"] == "s3://bucket/object.json"
 
 
+class TestPrecedentDemoteIsMcpReachable:
+    """``precedent.demote`` needs no MCP-specific wiring: ``_resolve_operation``
+    and ``execute_mutation`` are generic over every ``Operation`` enum
+    member, so registering the handler in ``create_curate_handlers`` is
+    sufficient. These tests pin that it actually is reachable end to end,
+    not merely registered.
+    """
+
+    def test_demotes_a_precedent_node(self, temp_registry: StoreRegistry) -> None:
+        graph = temp_registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None, node_type="precedent", properties={"name": "Pooling pattern"}
+        )
+
+        raw = execute_mutation(
+            operation="precedent.demote",
+            args={"target_id": node_id, "reason": "superseded by a broader pattern"},
+        )
+        payload = json.loads(raw)
+
+        assert payload["status"] == "success"
+        assert payload["operation"] == "precedent.demote"
+        assert payload["created_id"] == node_id
+        node = graph.get_node(node_id)
+        assert node["properties"]["lifecycle"]["state"] == "demoted"
+
+    def test_refuses_a_non_precedent_node(self, temp_registry: StoreRegistry) -> None:
+        graph = temp_registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None, node_type="owner", properties={"name": "Nate"}
+        )
+
+        raw = execute_mutation(
+            operation="precedent.demote",
+            args={"target_id": node_id, "reason": "r"},
+        )
+        payload = json.loads(raw)
+
+        assert payload["status"] == "rejected"
+
+    def test_refuses_a_missing_target(self, temp_registry: StoreRegistry) -> None:
+        raw = execute_mutation(
+            operation="precedent.demote",
+            args={"target_id": "ghost", "reason": "r"},
+        )
+        payload = json.loads(raw)
+
+        assert payload["status"] == "rejected"
+        assert "Node not found: ghost" in payload["message"]
+
+
 # ---------------------------------------------------------------------------
 # Error paths
 # ---------------------------------------------------------------------------

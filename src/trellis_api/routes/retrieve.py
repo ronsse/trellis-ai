@@ -417,7 +417,12 @@ def list_precedents(
 ) -> dict[str, Any]:
     """List promoted precedents."""
     registry = get_registry()
-    items = _list_precedents(registry.operational.event_log, domain=domain, limit=limit)
+    items = _list_precedents(
+        registry.operational.event_log,
+        domain=domain,
+        limit=limit,
+        graph_store=registry.knowledge.graph_store,
+    )
     return {"status": "ok", "count": len(items), "precedents": items}
 
 

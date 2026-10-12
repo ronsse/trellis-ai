@@ -110,12 +110,18 @@ logger = structlog.get_logger(__name__)
 #: submits — the promotion (``ENTITY_CREATE`` / ``LINK_CREATE`` /
 #: ``PRECEDENT_PROMOTE``, via :func:`submit_learning_promotion`). Demotion
 #: is not implemented here yet (see the module docstring's "Scope:
-#: evaluation only"); when it ships it should stamp the same identity. The
-#: ``auto:`` prefix mirrors no existing convention exactly (CLI/API/MCP/
-#: worker surfaces use ``<surface>:<verb>``) on purpose: an audit reader
-#: filtering by ``requested_by`` should be able to tell "a human" from
-#: "this policy" at a glance, the same way :func:`run_auto_promotion`
-#: never reuses ``cli:``/``api:`` identities for its own promotions.
+#: evaluation only") and, when it ships, must stamp its *own* identity —
+#: :data:`~trellis.mutate.handlers.AUTO_DEMOTE_REQUESTED_BY`, not this one.
+#: ``PrecedentDemoteHandler``'s provenance check is conditional on *who is
+#: demoting* (manual-trigger PR), so reusing this constant for the demote
+#: command's ``requested_by`` would make the automatic demote path look,
+#: to that check, like the thing it is demoting rather than the caller
+#: doing the demoting. The ``auto:`` prefix mirrors no existing convention
+#: exactly (CLI/API/MCP/worker surfaces use ``<surface>:<verb>``) on
+#: purpose: an audit reader filtering by ``requested_by`` should be able
+#: to tell "a human" from "this policy" at a glance, the same way
+#: :func:`run_auto_promotion` never reuses ``cli:``/``api:`` identities
+#: for its own promotions.
 AUTO_PROMOTE_REQUESTED_BY = "auto:learning_candidate"
 
 CandidateAutoPromoteMode = Literal["report_only", "commit"]

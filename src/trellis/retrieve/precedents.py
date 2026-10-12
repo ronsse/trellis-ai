@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.graph import GraphStore
 
 
 def list_precedents(
@@ -12,6 +14,7 @@ def list_precedents(
     *,
     domain: str | None = None,
     limit: int = 20,
+    graph_store: GraphStore | None = None,
 ) -> list[dict[str, Any]]:
     """Query PRECEDENT_PROMOTED events, optionally filtered by domain.
 
@@ -29,6 +32,19 @@ def list_precedents(
     truncate the SQL window and then drop non-matching rows in Python,
     silently returning fewer than ``limit`` matches even when more
     matches existed beyond the cap.
+
+    ``PRECEDENT_PROMOTED`` events are immutable (Hard Rule: traces/events
+    never mutate), so a demoted precedent's original promotion event is
+    returned by this scan forever, unconditionally — the event log alone
+    has no lifecycle awareness. When ``graph_store`` is given, each row's
+    current node is checked and skipped if its
+    ``properties[LIFECYCLE_KEY]["state"] == "demoted"``; this is an extra
+    store round-trip per row, bounded by ``limit``, and can return fewer
+    than ``limit`` rows once filtered (the same accepted cost the
+    ``domain`` filter above avoids by pushing into SQL instead — here
+    there is no SQL predicate to push into, since the node lives in a
+    different store than the event). Omitted, a caller with no graph
+    store handy gets the pre-demotion, event-log-only behaviour.
     """
     payload_filters = {"domain": domain} if domain else None
     events = event_log.get_events(
@@ -38,15 +54,23 @@ def list_precedents(
         payload_filters=payload_filters,
     )
 
-    return [
-        {
-            "event_id": e.event_id,
-            "entity_id": e.entity_id,
-            "title": e.payload.get("title", ""),
-            "description": e.payload.get("description", ""),
-            "domain": e.payload.get("domain"),
-            "occurred_at": e.occurred_at.isoformat(),
-            "payload": e.payload,
-        }
-        for e in events
-    ]
+    results: list[dict[str, Any]] = []
+    for e in events:
+        if graph_store is not None and e.entity_id:
+            node = graph_store.get_node(e.entity_id)
+            if node is not None:
+                lifecycle = node.get("properties", {}).get(LIFECYCLE_KEY) or {}
+                if lifecycle.get("state") == "demoted":
+                    continue
+        results.append(
+            {
+                "event_id": e.event_id,
+                "entity_id": e.entity_id,
+                "title": e.payload.get("title", ""),
+                "description": e.payload.get("description", ""),
+                "domain": e.payload.get("domain"),
+                "occurred_at": e.occurred_at.isoformat(),
+                "payload": e.payload,
+            }
+        )
+    return results

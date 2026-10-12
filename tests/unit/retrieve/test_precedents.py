@@ -15,8 +15,10 @@ from pathlib import Path
 import pytest
 
 from trellis.retrieve.precedents import list_precedents
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
+from trellis.stores.sqlite.graph import SQLiteGraphStore
 
 
 @pytest.fixture
@@ -24,6 +26,11 @@ def event_log(tmp_path: Path):
     log = SQLiteEventLog(tmp_path / "events.db")
     yield log
     log.close()
+
+
+@pytest.fixture
+def graph_store(tmp_path: Path):
+    return SQLiteGraphStore(tmp_path / "graph.db")
 
 
 def test_list_precedents_no_filter(event_log: SQLiteEventLog) -> None:
@@ -106,3 +113,108 @@ def test_list_precedents_no_match(event_log: SQLiteEventLog) -> None:
     )
     result = list_precedents(event_log, domain="nonexistent")
     assert result == []
+
+
+class TestGraphStoreExcludesDemoted:
+    """``graph_store`` is the opt-in check that reads past the immutable
+    ``PRECEDENT_PROMOTED`` event to the node's *current* lifecycle stamp.
+
+    Defective subject: a ``list_precedents`` that drops the
+    ``lifecycle.get("state") == "demoted"`` branch (or the ``graph_store
+    is not None`` guard around it) serves every row from
+    ``test_demoted_precedent_is_excluded`` regardless of the node's
+    current state — the first assertion below then fails.
+    """
+
+    def test_demoted_precedent_is_excluded(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        graph_store.upsert_node(
+            node_id="prec-1",
+            node_type="precedent",
+            properties={"name": "Refund flow", LIFECYCLE_KEY: {"state": "demoted"}},
+        )
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id="prec-1",
+            payload={"domain": "billing", "title": "Refund flow"},
+        )
+
+        result = list_precedents(event_log, graph_store=graph_store)
+        assert result == []
+
+    def test_non_demoted_precedent_is_included(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        graph_store.upsert_node(
+            node_id="prec-1",
+            node_type="precedent",
+            properties={"name": "Refund flow", LIFECYCLE_KEY: {"state": "current"}},
+        )
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id="prec-1",
+            payload={"domain": "billing", "title": "Refund flow"},
+        )
+
+        result = list_precedents(event_log, graph_store=graph_store)
+        assert [row["entity_id"] for row in result] == ["prec-1"]
+
+    def test_a_node_with_no_lifecycle_stamp_is_included(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """A node that predates the demote feature carries no lifecycle
+        key at all; absence must read as "not demoted", the same
+        fail-open rule :func:`trellis.retrieve.lifecycle.is_demoted`
+        follows."""
+        graph_store.upsert_node(
+            node_id="prec-1", node_type="precedent", properties={"name": "Refund flow"}
+        )
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id="prec-1",
+            payload={"domain": "billing", "title": "Refund flow"},
+        )
+
+        result = list_precedents(event_log, graph_store=graph_store)
+        assert [row["entity_id"] for row in result] == ["prec-1"]
+
+    def test_a_trace_mined_precedent_with_no_graph_node_is_included(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """Trace-mined precedents have no graph node at all (only the
+        ``PRECEDENT_PROMOTED`` event, ``entity_id`` = the trace id) —
+        ``graph_store.get_node`` returns ``None`` and the row must still
+        be served."""
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id="trace-1",
+            payload={"domain": "billing", "title": "Mined from a trace"},
+        )
+
+        result = list_precedents(event_log, graph_store=graph_store)
+        assert [row["entity_id"] for row in result] == ["trace-1"]
+
+    def test_without_graph_store_a_demoted_precedent_still_appears(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """Omitting ``graph_store`` preserves the pre-demote-feature
+        behaviour: the event-log scan alone, with no lifecycle awareness."""
+        graph_store.upsert_node(
+            node_id="prec-1",
+            node_type="precedent",
+            properties={"name": "Refund flow", LIFECYCLE_KEY: {"state": "demoted"}},
+        )
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id="prec-1",
+            payload={"domain": "billing", "title": "Refund flow"},
+        )
+
+        result = list_precedents(event_log)
+        assert [row["entity_id"] for row in result] == ["prec-1"]

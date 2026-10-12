@@ -1371,6 +1371,112 @@ def test_list_precedent_domains_counts_every_promoted_precedent(client):
     assert data["truncated"] is False
 
 
+class TestDemotePrecedentRoute:
+    """``POST /precedents/{target_id}/demote``."""
+
+    def _create_precedent(self, client) -> str:
+        resp = client.post(
+            "/api/v1/entities",
+            json={"entity_type": "precedent", "name": "Pooling pattern"},
+        )
+        assert resp.status_code == 200, resp.text
+        node_id: str = resp.json()["node_id"]
+        return node_id
+
+    def test_demote_stamps_the_precedent(self, client):
+        node_id = self._create_precedent(client)
+
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/demote",
+            json={"reason": "superseded by a broader pattern"},
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["status"] == "success"
+        assert data["created_id"] == node_id
+
+        graph = app_module._registry.knowledge.graph_store
+        node = graph.get_node(node_id)
+        assert node["properties"]["lifecycle"]["state"] == "demoted"
+
+    def test_demote_non_precedent_target_is_refused(self, client):
+        resp = client.post(
+            "/api/v1/entities",
+            json={"entity_type": "owner", "name": "Nate"},
+        )
+        node_id = resp.json()["node_id"]
+
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/demote",
+            json={"reason": "r"},
+        )
+        assert resp.status_code == 400, resp.text
+
+    def test_demote_missing_target_is_refused(self, client):
+        resp = client.post(
+            "/api/v1/precedents/ghost/demote",
+            json={"reason": "r"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "Node not found: ghost" in resp.json()["detail"]
+
+    def test_demote_blank_reason_is_refused(self, client):
+        node_id = self._create_precedent(client)
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/demote",
+            json={"reason": "   "},
+        )
+        assert resp.status_code == 400, resp.text
+
+    def test_demoted_precedent_excluded_from_list(self, client):
+        """Server-side exclusion: ``GET /precedents`` reaches through
+        ``list_precedents(graph_store=...)``, so a demoted precedent's
+        still-immutable ``PRECEDENT_PROMOTED`` event is skipped."""
+        event_log = app_module._registry.operational.event_log
+        node_id = self._create_precedent(client)
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id=node_id,
+            payload={"title": "Pooling pattern"},
+        )
+
+        before = client.get("/api/v1/precedents")
+        assert any(p["entity_id"] == node_id for p in before.json()["precedents"]), (
+            before.json()
+        )
+
+        demote_resp = client.post(
+            f"/api/v1/precedents/{node_id}/demote",
+            json={"reason": "no longer useful"},
+        )
+        assert demote_resp.status_code == 200, demote_resp.text
+
+        after = client.get("/api/v1/precedents")
+        assert not any(p["entity_id"] == node_id for p in after.json()["precedents"]), (
+            after.json()
+        )
+
+    def test_default_requested_by_is_the_api_surface(self, client):
+        node_id = self._create_precedent(client)
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/demote",
+            json={"reason": "r"},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = [
+            e
+            for e in app_module._registry.operational.event_log.get_events(
+                event_type=EventType.PRECEDENT_DEMOTED
+            )
+            if e.payload.get("target_id") == node_id
+        ]
+        assert len(events) == 1
+        assert events[0].payload["requested_by"] == "api:demote-precedent"
+
+
 # -- Batch mutations --
 
 

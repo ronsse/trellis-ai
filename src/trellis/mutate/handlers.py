@@ -23,6 +23,7 @@ from trellis.errors import (
 )
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
+from trellis.learning.candidate_auto_promote import AUTO_PROMOTE_REQUESTED_BY
 from trellis.learning.tag_evolution import MIN_TAG_KEYWORD_LENGTH
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.evidence_ingest import EvidenceEmbedMode
@@ -45,7 +46,7 @@ from trellis.schemas.well_known import (
     OBSERVATION,
     normalize_entity_name,
 )
-from trellis.stores.base.event_log import EventType
+from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.graph import AliasBindResult, AliasBindStatus, GraphStore
 from trellis.stores.null.event_log import NullEventLog
 from trellis.stores.registry import StoreRegistry
@@ -383,6 +384,172 @@ class PrecedentPromoteHandler:
             payload=payload,
         )
         return event.event_id, f"Precedent promoted: {args['title']}"
+
+
+#: Requester identity the future automatic demotion policy (PR 3's
+#: ``PrecedentAutoDemotePolicy``) will stamp on every ``precedent.demote``
+#: command it submits. Defined here, not in ``trellis.learning``, so that
+#: constant and :class:`PrecedentDemoteHandler`'s own provenance check
+#: below agree on the same string by construction rather than by two
+#: modules happening to copy the same literal — the future auto path
+#: imports this name rather than minting its own copy. Mirrors
+#: :data:`~trellis.learning.candidate_auto_promote.AUTO_PROMOTE_REQUESTED_BY`'s
+#: shape and reason for existing: an audit reader filtering by
+#: ``requested_by`` should be able to tell "a human demoted this" from
+#: "the automatic policy demoted this" at a glance. Deliberately a
+#: *different* string from ``AUTO_PROMOTE_REQUESTED_BY`` — see
+#: :meth:`PrecedentDemoteHandler.handle`'s docstring for why the two must
+#: never collide.
+AUTO_DEMOTE_REQUESTED_BY = "auto:learning_candidate_demote"
+
+#: Mirrors ``MAX_REDACTION_REASON_CHARS``: the recorded justification is
+#: written verbatim to the append-only audit log and must stay short and
+#: content-free.
+MAX_DEMOTION_REASON_CHARS = 2000
+
+
+def _was_auto_promoted(event_log: EventLog, entity_id: str) -> bool:
+    """Whether ``entity_id``'s ``precedent.promote`` event was itself automatic.
+
+    Re-derives provenance from the audit trail rather than trusting a
+    caller-supplied flag. ``submit_learning_promotion``'s
+    ``PRECEDENT_PROMOTE`` command sets ``target_id=entity_id``
+    (``trellis/learning/scoring.py``), and the executor stamps
+    ``requested_by`` onto every ``MUTATION_EXECUTED`` row for free
+    (``_emit_event``, ``trellis/mutate/executor.py``). A human-approved
+    precedent's promote event carries a different ``requested_by`` (e.g.
+    ``cli:promote-learning``, ``api:review-queue``) and is therefore
+    absent from this filtered query regardless of what the demotion
+    caller claims — the narrowing cannot be bypassed by a caller that
+    merely asserts "trust me, this one's auto."
+
+    Mirrors ``candidate_auto_promote._scan_already_promoted_entity_ids``'s
+    query shape but adds the ``requested_by`` filter that function
+    deliberately omits (it answers a different question: "promoted by
+    anyone, ever", not "promoted by the automatic policy specifically") —
+    which is why this is a new function rather than a call to that one.
+    """
+    events = event_log.get_events(
+        event_type=EventType.MUTATION_EXECUTED,
+        entity_id=entity_id,
+        order="desc",
+        payload_filters={
+            "operation": Operation.PRECEDENT_PROMOTE.value,
+            "status": "success",
+            "requested_by": AUTO_PROMOTE_REQUESTED_BY,
+        },
+        limit=1,
+    )
+    return bool(events)
+
+
+class PrecedentDemoteHandler:
+    """Stamp a precedent node ``Lifecycle.state="demoted"``, emitting PRECEDENT_DEMOTED.
+
+    Wires :data:`Operation.PRECEDENT_DEMOTE`. Modelled on
+    ``RedactionApplyHandler``'s node_type/target-lookup pattern and
+    ``RetentionPruneHandler._archive``'s graph write — the difference is
+    the state written (``"demoted"`` rather than ``"archived"``) and that
+    this PR is manual-trigger only.
+
+    **Provenance depends on who is demoting, not on who is being
+    demoted.** A caller whose own ``Command.requested_by`` equals
+    :data:`AUTO_DEMOTE_REQUESTED_BY` — the future automatic demotion
+    policy — may demote only a precedent whose own ``precedent.promote``
+    event was itself automatic (:func:`_was_auto_promoted`); every other
+    caller (a human, via CLI/MCP/API) may demote any precedent regardless
+    of how it was promoted. No auto-created precedent can exist yet in
+    this PR — promotion's own commit mode is still refused — so the first
+    half of this rule is currently unreachable in production; it exists
+    to pin the contract the future auto path depends on. Both halves are
+    pinned by tests with deliberately defective subjects: one that skips
+    the check, or trusts a caller-supplied boolean instead of re-deriving
+    it from the event log, must fail the "automatic caller is narrowed"
+    test; one that refuses every human too must fail the "human may
+    demote any precedent" test.
+
+    The check is always re-derived inside :meth:`handle` from the event
+    log, never from a caller-supplied flag on ``command.args`` — the
+    audit trail is authoritative and a caller cannot assert "trust me,
+    this one's auto."
+
+    SCD-2: the write closes the current node version and opens a new one
+    (:func:`_rewrite_current_node`), so the pre-demotion state stays
+    readable via ``get_node_history`` and ``as_of`` — demotion is
+    reversible the same way archival is.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        target_id = command.args["target_id"]
+        reason = str(command.args["reason"] or "").strip()
+        if not reason:
+            msg = "precedent.demote requires a non-empty reason for the audit trail"
+            raise ValidationError(msg, errors=[msg], code="demotion_reason_required")
+        if len(reason) > MAX_DEMOTION_REASON_CHARS:
+            msg = (
+                f"precedent.demote reason exceeds {MAX_DEMOTION_REASON_CHARS} "
+                "chars; it is written verbatim to the append-only audit log — "
+                "keep it short and content-free"
+            )
+            raise ValidationError(msg, errors=[msg], code="demotion_reason_too_long")
+
+        graph = self._registry.knowledge.graph_store
+        node = graph.get_node(target_id)
+        if node is None:
+            msg = f"Node not found: {target_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
+        if node["node_type"] != "precedent":
+            msg = (
+                f"Node {target_id} is not a precedent (node_type={node['node_type']!r})"
+            )
+            raise ValidationError(msg, errors=[msg], code="target_not_precedent")
+
+        if command.requested_by == AUTO_DEMOTE_REQUESTED_BY:
+            event_log = self._registry.operational.event_log
+            if not _was_auto_promoted(event_log, target_id):
+                msg = (
+                    f"Precedent {target_id} was not promoted by the automatic "
+                    "policy; the automatic demotion path may only demote "
+                    "precedents it (or an earlier run of it) promoted"
+                )
+                raise ValidationError(
+                    msg, errors=[msg], code="target_not_auto_promoted"
+                )
+
+        lifecycle = Lifecycle(
+            state="demoted",
+            valid_until=datetime.now(UTC),
+            deprecation_reason=reason,
+        ).model_dump(mode="json")
+
+        def demote(current: dict[str, Any]) -> dict[str, Any]:
+            props = dict(current["properties"])
+            props[LIFECYCLE_KEY] = lifecycle
+            return {"properties": props}
+
+        if _rewrite_current_node(graph, target_id, demote) is None:
+            # Vanished between the read above and the write (purged
+            # mid-command) — refused the same way as a target that was
+            # never there.
+            msg = f"Node not found: {target_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
+
+        self._registry.operational.event_log.emit(
+            EventType.PRECEDENT_DEMOTED,
+            source="mutation_executor",
+            entity_id=target_id,
+            entity_type="precedent",
+            payload={
+                "target_id": target_id,
+                "reason": reason,
+                "command_id": command.command_id,
+                "requested_by": command.requested_by,
+            },
+        )
+        return target_id, f"Precedent demoted: {target_id}"
 
 
 class LabelAddHandler:
@@ -2684,6 +2851,7 @@ def create_curate_handlers(
         ),
         Operation.TRACE_INGEST: TraceIngestHandler(registry),
         Operation.PRECEDENT_PROMOTE: PrecedentPromoteHandler(registry),
+        Operation.PRECEDENT_DEMOTE: PrecedentDemoteHandler(registry),
         Operation.LABEL_ADD: LabelAddHandler(registry),
         Operation.LABEL_REMOVE: LabelRemoveHandler(registry),
         Operation.FEEDBACK_RECORD: FeedbackRecordHandler(registry),

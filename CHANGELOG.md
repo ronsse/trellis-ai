@@ -6,6 +6,26 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Precedent demotion verb (manual-trigger only): `precedent.demote` through
+  the governed mutation pipeline, with CLI `trellis curate
+  demote-precedent`, REST `POST /precedents/{target_id}/demote`, and MCP
+  `execute_mutation`.** A new `Lifecycle.state` value, `"demoted"`, is a
+  reversible SCD-2 rewrite of a precedent's graph node — not a purge like
+  `redact` — so the pre-demotion version stays readable via
+  `get_node_history`/`as_of`. `PrecedentDemoteHandler` refuses a non-precedent
+  target and requires a non-empty, length-bounded reason written to the
+  audit trail. Provenance is re-derived from the event log, never trusted
+  from a caller-supplied flag: a caller demoting under the (not yet wired)
+  automatic requester identity may demote only a precedent whose own
+  `precedent.promote` event was itself automatic, while every other caller
+  may demote any precedent. Once demoted, a precedent is excluded from
+  `GET /precedents`, `trellis retrieve precedents` and `get_lessons`, and is
+  withheld from packs at the collect seam alongside the existing
+  archived/noise gates, recorded in `rejected_items` with its own reason so
+  the pack's withholding statement names it. `"demoted"` is deliberately
+  left out of `RetentionPruneHandler`'s `UNSELECTABLE_STATES`, so it stays
+  reachable by `retention.prune --lifecycle-state demoted`.
+
 - **Admin UI for the job schedule registry: `GET`/`PATCH /api/v1/admin/jobs`,
   `POST /api/v1/admin/jobs/{name}/run`, CLI parity, a Schedules tab (e175,
   plan p1 PR 6).** Completes the schedule registry below (#e166): an admin
