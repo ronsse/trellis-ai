@@ -51,7 +51,6 @@ class EventType(StrEnum):
 
     # Precedent lifecycle
     PRECEDENT_PROMOTED = "precedent.promoted"
-    PRECEDENT_UPDATED = "precedent.updated"
 
     # Policy
     POLICY_CREATED = "policy.created"
@@ -515,6 +514,21 @@ class EventType(StrEnum):
     #: every autonomous action leaves a self-identifying audit record.
     PARAMS_AUTO_PROMOTED = "parameters.auto_promoted"
     PARAMS_AUTO_ROLLED_BACK = "parameters.auto_rolled_back"
+
+    #: Emitted once per ``trellis curate auto-promote-candidates`` run (see
+    #: ``trellis.learning.candidate_auto_promote``). Tier-1 autonomy event
+    #: (c) for the learning-candidate promotion policy, mirroring
+    #: :attr:`PARAMS_AUTO_PROMOTED`. Today every run is report-only — a
+    #: commit mode exists in the schema but is refused at policy
+    #: construction (see the module's "Scope: evaluation only") — so every
+    #: candidate's disposition is one of ``would_promote``,
+    #: ``already_promoted`` (a precedent already exists for it, human or
+    #: automatic) or ``ineligible:<reason>``, and the run writes nothing
+    #: besides this event. Payload carries ``mode``, ``configured_mode``,
+    #: ``dispositions`` (per-candidate), ``counts``, and a
+    #: ``policy_snapshot`` of the knobs that produced this run, so a later
+    #: audit does not have to reconstruct settings state from elsewhere.
+    LEARNING_AUTO_PROMOTE_EVALUATED = "learning.auto_promote_evaluated"
 
     #: Emitted by the governed settings write path
     #: (``SettingsUpdateHandler`` / ``Operation.SETTINGS_UPDATE``) on every

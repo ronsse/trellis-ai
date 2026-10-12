@@ -22,6 +22,7 @@ from trellis.core.write_config import (
     ENV_VAR_BY_FIELD,
     TRUTHY,
     WriteBehaviourConfig,
+    parse_finite_int,
     resolve_overridden_by,
     resolve_write_behaviour,
 )
@@ -394,6 +395,40 @@ class TestPackHoldoutRate:
             "overridden": True,
             "overridden_by": "env",
         }
+
+
+class TestParseFiniteInt:
+    """``int(float(raw))`` inline has two under-caught failure modes:
+    ``int(float("nan"))`` raises ``ValueError`` on its own, but
+    ``int(float("inf"))`` (and ``"1e999"``, which overflows ``float`` to
+    ``inf``) raises ``OverflowError`` instead — not a ``ValueError``, so a
+    caller that only wraps ``except ValueError`` around the inline
+    expression lets it fly uncaught. ``parse_finite_int`` exists so every
+    env-sourced integer knob in the codebase gets one normalized
+    ``ValueError`` regardless of which non-finite spelling it was given."""
+
+    @pytest.mark.parametrize("raw", ["inf", "-inf", "Infinity", "1e999", "nan"])
+    def test_non_finite_raises_value_error(self, raw: str) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            parse_finite_int(raw)
+
+    def test_non_finite_never_raises_overflow_error(self) -> None:
+        try:
+            parse_finite_int("inf")
+        except OverflowError:
+            pytest.fail("OverflowError escaped parse_finite_int")
+        except ValueError:
+            pass
+
+    def test_garbage_string_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="not a number"):
+            parse_finite_int("notanumber")
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"), [("30", 30), ("3e1", 30), ("12.0", 12), (7, 7), (7.0, 7)]
+    )
+    def test_finite_values_parse_to_int(self, raw: object, expected: int) -> None:
+        assert parse_finite_int(raw) == expected
 
 
 class TestDescribe:

@@ -113,6 +113,28 @@ def test_stale_threshold_is_36_hours() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 2b. `failed`/`refused` get their own badge classes, not the `skipped`
+#     fallback.
+# ---------------------------------------------------------------------------
+
+
+def test_failed_and_refused_statuses_get_distinct_non_default_badges() -> None:
+    """A ``LEARNING_AUTO_PROMOTE_EVALUATED`` run's ``outcome`` can be
+    ``"refused"`` or ``"failed"`` (``loop_health.py``'s
+    ``_build_candidate_auto_promote_row``), not only ``ok`` / ``degraded``
+    / ``stale`` / ``skipped``. ``statusMap`` had no entry for either, so
+    both fell through to the same ``badge-info`` the never-run and
+    skipped states use — reading as informational rather than as a
+    problem a human should look at."""
+    page = _page()
+    body = _render_loop_row_body(page)
+    else_branch = _between(body, "} else {", "\n            }\n")
+    status_map_literal = _between(else_branch, "const statusMap = {", "};")
+    assert re.search(r"refused:\s*'badge-warn'", status_map_literal)
+    assert re.search(r"failed:\s*'badge-err'", status_map_literal)
+
+
+# ---------------------------------------------------------------------------
 # 3. Fetch failure is a visible error, not a silent empty state.
 # ---------------------------------------------------------------------------
 
@@ -141,3 +163,19 @@ def test_loops_view_is_wired_into_nav_and_switch_view() -> None:
     # pin the derivation mechanism itself rather than a stale array shape.
     assert "const views = navLinks.map(a => a.dataset.view);" in page
     assert re.search(r"if\s*\(name === 'loops'\)\s*loadLoops\(\);", page)
+
+
+# ---------------------------------------------------------------------------
+# 4. learning_candidate_auto_promote has a real label, not the raw key.
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_auto_promote_loop_has_a_loop_labels_entry() -> None:
+    """#861 added an 8th loop-health row,
+    ``learning_candidate_auto_promote``. Without a ``LOOP_LABELS`` entry,
+    ``renderLoopRow``'s ``LOOP_LABELS[loop.name] || loop.name`` fallback
+    would print the raw snake_case key instead of a readable title.
+    """
+    page = _page()
+    loop_labels_body = _between(page, "const LOOP_LABELS = {", "\n        };")
+    assert re.search(r"learning_candidate_auto_promote\s*:\s*'[^']+'", loop_labels_body)

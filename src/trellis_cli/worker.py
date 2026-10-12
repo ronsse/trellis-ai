@@ -66,6 +66,7 @@ from trellis.learning.tuners import (
     PostPromotionPolicy,
     RuleTuner,
     report_to_dict,
+    resolve_auto_promote_overrides,
     run_auto_promotion,
 )
 from trellis.llm.routing import LLMConsumer
@@ -239,18 +240,59 @@ def _load_auto_promote_config() -> _RawAutoPromoteConfig | None:
 
 
 def _build_auto_promote_policy() -> AutoPromotePolicy:
-    """Build the :class:`AutoPromotePolicy` from config, or a disabled default.
+    """Build the :class:`AutoPromotePolicy`: env > settings > config.yaml > default.
 
-    Absent config => ``AutoPromotePolicy(enabled=False)`` — global default
-    OFF, zero behaviour change versus running the tuner alone.
+    ``config.yaml``'s ``learning.auto_promote`` section (absent => every
+    field at its constructor default, i.e. disabled) supplies the
+    ``config_defaults`` floor; ``SETTINGS_REGISTRY``'s
+    ``learning.auto_promote.*`` entries and their ``TRELLIS_*`` env
+    equivalents can each override ``enabled``/``min_sample_size``/
+    ``min_effect_size`` on top, via :func:`resolve_auto_promote_overrides` —
+    the one resolver every caller of :class:`AutoPromotePolicy` must route
+    through. ``require_baseline`` and the post-promotion monitoring knobs
+    are config.yaml-only; they are not registered settings — only the
+    three tuner knobs above are. A settings-file read failure degrades to
+    config.yaml/defaults alone — advisory, like
+    :func:`trellis.core.write_config.resolve_write_behaviour`.
+    Construction (not this function) is what rejects a resolved value
+    looser than the manual-promotion floors — see
+    :meth:`AutoPromotePolicy.__post_init__`.
     """
     cfg = _load_auto_promote_config()
+    config_defaults = (
+        {}
+        if cfg is None
+        else {
+            "enabled": cfg.enabled,
+            "min_sample_size": cfg.min_sample_size,
+            "min_effect_size": cfg.min_effect_size,
+        }
+    )
+    try:
+        from trellis.stores.settings_store import load_settings_values  # noqa: PLC0415
+
+        stores_dir = _get_registry().stores_dir
+        settings = load_settings_values(stores_dir)
+    except Exception:  # advisory read; never fail a worker pass over this
+        logger.warning("auto_promote_settings_read_failed", exc_info=True)
+        settings = {}
+
+    resolved = resolve_auto_promote_overrides(
+        config_defaults=config_defaults, settings=settings
+    )
+    enabled = bool(resolved["enabled"])
+    min_sample_size = int(resolved["min_sample_size"])
+    min_effect_size = float(resolved["min_effect_size"])
     if cfg is None:
-        return AutoPromotePolicy(enabled=False)
+        return AutoPromotePolicy(
+            enabled=enabled,
+            min_sample_size=min_sample_size,
+            min_effect_size=min_effect_size,
+        )
     return AutoPromotePolicy(
-        enabled=cfg.enabled,
-        min_sample_size=cfg.min_sample_size,
-        min_effect_size=cfg.min_effect_size,
+        enabled=enabled,
+        min_sample_size=min_sample_size,
+        min_effect_size=min_effect_size,
         require_baseline=cfg.require_baseline,
         post_promotion=PostPromotionPolicy(
             min_samples_post_promote=cfg.post_min_samples,
@@ -270,9 +312,13 @@ def _build_auto_promote_policy_or_exit() -> AutoPromotePolicy:
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     except ValueError as exc:
         # AutoPromotePolicy.__post_init__ rejects thresholds looser than the
-        # manual gate or a disarmed rollback.
+        # manual gate or a disarmed rollback, and resolve_auto_promote_
+        # overrides rejects a non-finite env/stored value the same way —
+        # both raise with the raw value embedded in str(exc), so the
+        # message here names only the exception type, never the value.
         console.print(
-            f"[red]invalid learning.auto_promote config: {escape(str(exc))}[/red]",
+            "[red]invalid learning.auto_promote config "
+            f"({escape(type(exc).__name__)})[/red]",
             soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc

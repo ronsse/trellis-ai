@@ -504,6 +504,38 @@ def test_looser_than_manual_rejected_via_exit(config_dir: Path) -> None:
         worker._build_auto_promote_policy_or_exit()
 
 
+@pytest.mark.parametrize("raw", ["inf", "1e999", "nan"])
+def test_non_finite_env_threshold_rejected_via_exit_not_overflow(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    # A non-finite TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE must surface the
+    # same clean typer.Exit every other malformed config value gets here
+    # — never an uncaught OverflowError escaping past the
+    # `except ValueError` in _build_auto_promote_policy_or_exit.
+    monkeypatch.setenv("TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE", raw)
+    with pytest.raises(typer.Exit):
+        worker._build_auto_promote_policy_or_exit()
+
+
+def test_invalid_env_threshold_message_is_value_free(
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # `worker tune`'s message used to interpolate str(exc), which embeds
+    # the raw rejected value (e.g. "not a number: '<raw>'"). Plant a
+    # secret-shaped value and assert it never reaches the printed message
+    # — only the exception type name may appear.
+    secret = "SEKRETtune0d0d"  # noqa: S105 - synthetic test placeholder, not a credential
+    monkeypatch.setenv("TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE", secret)
+    with pytest.raises(typer.Exit):
+        worker._build_auto_promote_policy_or_exit()
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert "ValueError" in captured.out
+
+
 # ===========================================================================
 # worker curate — full cycle (WP3)
 # ===========================================================================

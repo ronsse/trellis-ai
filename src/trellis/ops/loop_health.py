@@ -10,7 +10,11 @@ silently inert for a month" had to SSH in and tail a file.
 :func:`summarize_loop_health` answers that from the EventLog alone (plus
 one documented exception below), reading ``CURATE_CYCLE_COMPLETED`` /
 ``TUNE_CYCLE_COMPLETED`` (:mod:`trellis_cli.worker`), ``PRECEDENT_PROMOTED``,
-``PARAMS_AUTO_PROMOTED`` and ``FEEDBACK_RECORDED``. It adds no new probe.
+``PARAMS_AUTO_PROMOTED``, ``FEEDBACK_RECORDED`` and
+``LEARNING_AUTO_PROMOTE_EVALUATED`` (the last one for the
+``learning_candidate_auto_promote`` row, which also folds in
+:func:`trellis.learning.candidate_auto_promote.compute_agreement_metric`'s
+read of ``REVIEW_DECISION_RECORDED``). It adds no new probe.
 
 **Never-run vs ran-and-counted-zero.** ``LoopHealthRow.last_run_at`` /
 ``last_status`` are ``None`` together exactly when the loop has produced
@@ -41,6 +45,9 @@ from typing import Any
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.core.cron import is_due_since
+from trellis.learning.candidate_auto_promote import compute_agreement_metric
+from trellis.schedule.catalog import JOB_CATALOG
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventLog,
@@ -128,6 +135,106 @@ def _scan(event_log: EventLog, event_type: EventType, *, limit: int) -> EventSca
     return scan_events(event_log, event_type=event_type, limit=limit)
 
 
+def _build_candidate_auto_promote_row(
+    event_log: EventLog, *, now: datetime, limit: int
+) -> tuple[LoopHealthRow, ScanCoverage]:
+    """Build the ``learning_candidate_auto_promote`` row.
+
+    Factored out of :func:`summarize_loop_health` to keep that function's
+    statement count under the lint threshold; the row itself follows the
+    same ``_scan`` + latest-event pattern as every other row there.
+    """
+    candidate_scan = _scan(
+        event_log, EventType.LEARNING_AUTO_PROMOTE_EVALUATED, limit=limit
+    )
+    latest = candidate_scan.events[-1] if candidate_scan.events else None
+
+    # compute_agreement_metric reads REVIEW_DECISION_RECORDED / its own
+    # event type directly (not via scan_events), matching the tuner row's
+    # documented live-read exception rather than this file's
+    # scan_events + ScanCoverage pattern.
+    agreement = compute_agreement_metric(event_log, limit=limit)
+
+    counters: dict[str, Any] | None = None
+    last_status: str | None = None
+    if latest is not None:
+        counts = latest.payload.get("counts") or {}
+        snapshot = latest.payload.get("policy_snapshot") or {}
+        skipped = counts.get("skipped") or 0
+        counters = {
+            "last_run_mode": latest.payload.get("mode"),
+            "last_run_would_promote": counts.get("would_promote"),
+            "last_run_already_promoted": counts.get("already_promoted"),
+            "last_run_promoted": counts.get("promoted"),
+            "last_run_ineligible": counts.get("ineligible"),
+            "last_run_skipped": skipped,
+            "configured_enabled": snapshot.get("enabled"),
+            # The run's true configured mode (pre-``--dry-run``, pre- any
+            # forced-report-only override) is a top-level payload field,
+            # not ``policy_snapshot.mode`` -- the snapshot reflects the
+            # *effective* policy the run actually used
+            # (``LearningCandidateAutoPromotePolicy`` can never even be
+            # constructed with ``mode="commit"``, so the snapshot can
+            # only ever read "report_only"). Reading the snapshot here
+            # silently discarded the one field that lets an operator see
+            # "commit is configured, --dry-run / enabled=false is the
+            # only reason nothing happened."
+            "configured_mode": latest.payload.get("configured_mode"),
+            "agreement_agree": agreement.agree,
+            "agreement_disagree": agreement.disagree,
+            "agreement_undecided": agreement.undecided,
+            "agreement_rate": agreement.rate,
+        }
+        # ``outcome`` is the one vocabulary key every
+        # LEARNING_AUTO_PROMOTE_EVALUATED payload carries uniformly,
+        # whether the run completed an evaluation ("ok"/"degraded",
+        # emitted by ``_emit_evaluated_event``) or never reached one
+        # ("refused"/"failed", emitted by
+        # ``emit_candidate_auto_promote_failure_event``). A refused or
+        # failed run must not read as "ok" just because it produced an
+        # event at all. Fall back to the pre-``outcome`` skipped-based
+        # rule for an older event recorded before that field existed,
+        # rather than reporting a misleading ``None``/``"ok"`` for it.
+        outcome = latest.payload.get("outcome")
+        last_status = (
+            outcome if outcome is not None else ("degraded" if skipped else "ok")
+        )
+
+        # Staleness: this row's job (``auto-promote-candidates``) runs on
+        # a known daily cadence (see JOB_CATALOG), so "ran once and
+        # reported ok" three days ago is not the same claim as "healthy
+        # today" -- the cron could have stopped firing entirely and this
+        # row would otherwise still read "ok" forever. Overrides whatever
+        # outcome-based status was just computed: an operator's first
+        # question for a loop that has gone quiet is "is it running at
+        # all", which a stale "failed" from a week ago answers no better
+        # than a stale "ok" would.
+        cadence = JOB_CATALOG["auto-promote-candidates"].default_cadence
+        if cadence is not None and is_due_since(cadence, latest.occurred_at, now):
+            last_status = "stale"
+
+    row = LoopHealthRow(
+        name="learning_candidate_auto_promote",
+        description=(
+            "Evaluates learning candidates and reports what it would "
+            "promote to a precedent, via `trellis curate "
+            "auto-promote-candidates`."
+        ),
+        actuates=False,
+        what_it_changes=(
+            "Nothing yet: `mode=commit` is refused with a configuration "
+            "error until a follow-up ships auto-demotion, so every run "
+            "today only reports a disposition per candidate "
+            "(would_promote / already_promoted / ineligible) — it never "
+            "writes a precedent."
+        ),
+        last_run_at=latest.occurred_at if latest else None,
+        last_status=last_status,
+        counters=counters,
+    )
+    return row, candidate_scan.coverage
+
+
 def summarize_loop_health(
     event_log: EventLog,
     tuner_state: TunerStateStore,
@@ -137,9 +244,10 @@ def summarize_loop_health(
 ) -> LoopHealthReport:
     """Build the ``GET /api/v1/loops`` report from existing events (+ one live read).
 
-    Seven rows, in the order the nightly cycle runs them: noise
+    Eight rows, in the order the nightly cycle runs them: noise
     demotion, advisory generation, advisory fitness, learning-candidate
-    scoring, precedent promotion, tuner, feedback intake.
+    scoring, precedent promotion, learning-candidate auto-promotion,
+    tuner, feedback intake.
     """
     now = now or datetime.now(UTC)
 
@@ -254,9 +362,12 @@ def summarize_loop_health(
         actuates=False,
         what_it_changes=(
             "Nothing schedules a promotion: a human approves one (Review "
-            "tab or `trellis curate promote-learning`). This row counts "
-            "every PRECEDENT_PROMOTED event, which also includes any "
-            "manual run of the unscheduled PrecedentMiner."
+            "tab or `trellis curate promote-learning`). The scheduled "
+            "learning_candidate_auto_promote loop below only reports what "
+            "it would promote — its `commit` mode is refused with a "
+            "configuration error. This row counts every "
+            "PRECEDENT_PROMOTED event, which also includes any manual "
+            "run of the unscheduled PrecedentMiner."
         ),
         job_name=LOOP_JOB.get("precedent_promotion"),
         last_run_at=precedent_latest.occurred_at if precedent_latest else None,
@@ -277,6 +388,10 @@ def summarize_loop_health(
             if precedent_latest
             else None
         ),
+    )
+
+    candidate_auto_promote_row, candidate_auto_promote_coverage = (
+        _build_candidate_auto_promote_row(event_log, now=now, limit=limit)
     )
 
     tune_scan = _scan(event_log, EventType.TUNE_CYCLE_COMPLETED, limit=limit)
@@ -355,6 +470,7 @@ def summarize_loop_health(
     scan_coverage = merge_coverage(
         curate_scan.coverage,
         precedent_scan.coverage,
+        candidate_auto_promote_coverage,
         tune_scan.coverage,
         auto_promoted_scan.coverage,
         feedback_scan.coverage,
@@ -368,6 +484,7 @@ def summarize_loop_health(
             advisory_fitness_row,
             learning_row,
             precedent_row,
+            candidate_auto_promote_row,
             tuner_row,
             feedback_row,
         ],

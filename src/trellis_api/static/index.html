@@ -4729,7 +4729,9 @@
                         '<p>No precedents yet. A precedent is created only when a learning candidate ' +
                         'is approved &mdash; Review &rarr; Learning promotion candidates, or ' +
                         '<code style="font-family:var(--font-mono)">trellis curate promote-learning</code>. ' +
-                        'Nothing schedules that promotion automatically today.</p></div>';
+                        'If the <code style="font-family:var(--font-mono)">auto-promote-candidates</code> ' +
+                        'job is scheduled, it reports nightly on what it would promote &mdash; it never ' +
+                        'promotes anything itself.</p></div>';
                     return;
                 }
 
@@ -5511,6 +5513,7 @@
             precedent_promotion: 'Precedent promotion',
             tuner: 'Tuner',
             feedback_intake: 'Feedback intake',
+            learning_candidate_auto_promote: 'Learning-candidate auto-promotion (report-only)',
         };
 
         // The nightly cron (worker curate) drives most of these loops once a
@@ -5556,7 +5559,7 @@
                 if (stale) {
                     whenHtml += ` <span class="badge badge-warn" title="No run seen in over ${escHtml(LOOP_STALE_HOURS)}h">stale</span>`;
                 }
-                const statusMap = { ok: 'badge-ok', degraded: 'badge-warn', stale: 'badge-warn', skipped: 'badge-info' };
+                const statusMap = { ok: 'badge-ok', degraded: 'badge-warn', stale: 'badge-warn', skipped: 'badge-info', refused: 'badge-warn', failed: 'badge-err' };
                 if (loop.last_status) {
                     statusBadge = `<span class="badge ${statusMap[loop.last_status] || 'badge-info'}">` +
                         `${escHtml(loop.last_status)}</span>`;
@@ -7489,9 +7492,19 @@
                 ? ''
                 : String(currentValue);
             if (s.enum) {
-                const options = s.enum.map(v =>
-                    `<option value="${escHtml(v)}" ${String(currentValue) === v ? 'selected' : ''}>${escHtml(v)}</option>`
-                ).join('');
+                const refusedValues = new Set(s.refused_values || []);
+                const options = s.enum.map(v => {
+                    // A refused member (e.g. "commit" before auto-demotion
+                    // ships) stays in the dropdown so it still documents
+                    // itself as a real future option, but every save of it
+                    // would itself be refused -- disable the option instead
+                    // of offering a value the next click only bounces back
+                    // as a validation error, and surface why via title.
+                    const refusedAttrs = refusedValues.has(v)
+                        ? ` disabled title="${escHtml(s.refused_reason || 'not available yet')}"`
+                        : '';
+                    return `<option value="${escHtml(v)}" ${String(currentValue) === v ? 'selected' : ''}${refusedAttrs}>${escHtml(v)}</option>`;
+                }).join('');
                 return `<select id="${escHtml(inputId)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>${options}</select>`;
             }
             if (s.type === 'bool') {
@@ -7532,6 +7545,16 @@
             // never folded into this class (brief e179 rework, step 2).
             const riskClass = s.risk === 'high' ? 'risk-high' : (s.risk === 'caution' ? 'risk-caution' : '');
             const pinNote = settingEnvPinNote(s);
+            // A garbage environment value for this entry's family, or a
+            // malformed stored row, degrades effective_value to the
+            // registry default instead of 500ing the whole route -- show
+            // why, right where the operator is already looking. The badge
+            // text stays source-agnostic: parse_error can originate from
+            // either a bad env override or a bad stored value, and it is
+            // always a fixed reason string, never the raw value itself.
+            const parseErrorHtml = s.parse_error
+                ? `<div class="field-hint"><span class="badge badge-err">unparseable value</span> ${escHtml(s.parse_error)}</div>`
+                : '';
             const notWritable = s.settings_writable === false;
             const liveHtml = notWritable
                 ? '<span class="badge badge-warn">Env only &mdash; read-only here</span>'
@@ -7553,6 +7576,7 @@
                 <td>
                     <div><code>${escHtml(formatSettingValue(s.effective_value))}</code> ${settingSourceBadge(s.overridden_by)}</div>
                     ${pinNote ? `<div class="field-hint">${pinNote}</div>` : ''}
+                    ${parseErrorHtml}
                 </td>
                 <td>${(s.stored_value === null || s.stored_value === undefined) ? '<span class="field-hint">(none)</span>' : `<code>${escHtml(String(s.stored_value))}</code>`}</td>
                 <td>${liveHtml}</td>

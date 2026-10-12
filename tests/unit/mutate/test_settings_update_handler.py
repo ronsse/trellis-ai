@@ -272,6 +272,42 @@ class TestRefusesRatherThanClamps:
         assert exc_info.value.code == "invalid_value"
         assert _store(registry).get("pack_holdout_rate") is None
 
+    def test_candidate_auto_promote_mode_commit_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        """``"commit"`` is a legal enum member of this setting -- it
+        documents a real future value -- so it passes
+        ``_check_bounds``'s enum check. ``SettingSpec.refused_values``
+        refuses it anyway, with the same message
+        ``LearningCandidateAutoPromotePolicy.__post_init__`` raises when a
+        ``mode="commit"`` policy is constructed, so an operator who sets
+        this today is refused immediately at save time rather than only
+        finding out the next time the job runs.
+        """
+        handler = SettingsUpdateHandler(registry)
+        cmd = _cmd("learning.candidate_auto_promote.mode", "commit")
+
+        with pytest.raises(ValidationError, match="auto-demotion") as exc_info:
+            handler.handle(cmd)
+        assert exc_info.value.code == "invalid_value"
+        assert _store(registry).get("learning.candidate_auto_promote.mode") is None
+
+    def test_candidate_auto_promote_mode_report_only_is_accepted(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The one mode that can actually run is not caught by the new
+        ``refused_values`` check -- it is scoped to ``"commit"`` only.
+        """
+        handler = SettingsUpdateHandler(registry)
+        cmd = _cmd("learning.candidate_auto_promote.mode", "report_only")
+
+        name, _message = handler.handle(cmd)
+
+        assert name == "learning.candidate_auto_promote.mode"
+        stored = _store(registry).get("learning.candidate_auto_promote.mode")
+        assert stored is not None
+        assert stored.value == "report_only"
+
 
 _FIVE_MAXIMA_CASES = [
     ("capture_warn_window_hours", 87_600),

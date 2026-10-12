@@ -17,12 +17,16 @@ route rather than merely a passthrough of the handler already tested in
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+from tests.integration._live_server import repo_src_pythonpath
 from trellis.auth import SCOPE_ADMIN, SCOPE_READ, generate_api_key
 from trellis.core.settings_registry import SETTINGS_REGISTRY, SettingSpec
 from trellis.mutate.policy_source import POLICY_FILENAME
@@ -161,6 +165,8 @@ class TestListSettings:
             "maximum": 1.0,
             "minimum_exclusive": False,
             "enum": None,
+            "refused_values": [],
+            "refused_reason": None,
             "description": row["description"],  # non-empty, checked below
             "risk_note": row["risk_note"],  # non-empty, checked below (risk=high)
             "surfaces": list(row["surfaces"]),
@@ -179,6 +185,28 @@ class TestListSettings:
         assert row["label"]
         assert row["description"]
         assert row["risk_note"]
+
+    def test_a_refused_enum_member_is_named_so_the_ui_can_grey_it_out(
+        self, client: TestClient
+    ) -> None:
+        """``learning.candidate_auto_promote.mode`` is the one entry that
+        declares ``refused_values`` -- the GET response must expose it
+        (and the reason) so a renderer can disable the ``commit`` option
+        instead of offering a value every save of it will itself refuse.
+        """
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.candidate_auto_promote.mode")
+        assert row["enum"] == ["report_only", "commit"]
+        assert row["refused_values"] == ["commit"]
+        assert row["refused_reason"]
+        assert "auto-demotion" in row["refused_reason"]
+
+    def test_no_other_entry_reports_a_refused_value(self, client: TestClient) -> None:
+        resp = client.get("/api/v1/settings")
+        body = resp.json()
+        refusing = [row["name"] for row in body["settings"] if row["refused_values"]]
+        assert refusing == ["learning.candidate_auto_promote.mode"]
 
     def test_a_malformed_stored_row_is_flagged_not_silently_swallowed(
         self, client: TestClient, registry: StoreRegistry
@@ -844,6 +872,290 @@ class TestGraphSeedingEffectiveValue:
         assert row["overridden_by"] == "env"
 
 
+# ---------------------------------------------------------------------------
+# A garbage auto-promote env value must degrade that family's entries, not
+# 500 the whole route -- resolve_auto_promote_overrides and
+# resolve_candidate_auto_promote_overrides both do int(float(raw))/float(raw)
+# on a non-blank env value and let ValueError/TypeError fly for their real
+# caller (the CLI/worker, which wants a loud failure); this route reads for
+# an operator who still needs to see every *other* setting.
+# ---------------------------------------------------------------------------
+
+AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV = "TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE"
+AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV = "TRELLIS_AUTO_PROMOTE_MIN_EFFECT_SIZE"
+CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV = (
+    "TRELLIS_CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT"
+)
+
+
+class TestAutoPromoteGarbageEnvDegradesInstead500:
+    def test_unparseable_tuner_int_does_not_500_the_route(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, "notanumber")
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.auto_promote.min_sample_size")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+        # A FIXED, value-free reason -- the raw env value never leaks
+        # back out through this field (reconciled onto main's
+        # parse_error contract: #867/#868).
+        assert "notanumber" not in row["parse_error"]
+
+    def test_unparseable_tuner_float_does_not_500_the_route(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV, "not-a-float")
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.auto_promote.min_effect_size")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+
+    def test_unparseable_candidate_int_does_not_500_the_route(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV, "garbage")
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.candidate_auto_promote.min_helpful_count")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+        # Same contract as the int-tuner case above: a FIXED reason,
+        # never the raw env value.
+        assert "garbage" not in row["parse_error"]
+
+    @pytest.mark.parametrize("raw", ["inf", "-inf", "1e999", "nan"])
+    def test_non_finite_tuner_int_does_not_500_the_route(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        """Same claim as the ``"notanumber"`` case above, but for the
+        specific non-finite spellings that raise ``OverflowError`` rather
+        than ``ValueError`` from a naive ``int(float(raw))`` -- the
+        regression this route's ``except (ValueError, TypeError)`` cannot
+        see unless the resolver itself never lets ``OverflowError``
+        through (``parse_finite_int``)."""
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, raw)
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.auto_promote.min_sample_size")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+
+    @pytest.mark.parametrize("raw", ["inf", "1e999", "nan"])
+    def test_non_finite_candidate_int_does_not_500_the_route(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        monkeypatch.setenv(CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV, raw)
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.candidate_auto_promote.min_helpful_count")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+
+    def test_invalid_env_mode_degrades_instead_of_echoing_the_raw_value(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``resolve_str`` used not to validate ``mode`` at
+        all, so an unrecognized env value sailed through as
+        ``effective_value`` with ``parse_error: null`` -- the one field
+        this whole family-degrade machinery exists to keep clean. The
+        resolver now raises before returning, so the existing
+        ``(ValueError, TypeError)`` catch in ``_effective_values``
+        degrades this row exactly like any other broken knob in the
+        family."""
+        secret = "SEKRETmode4b2e1d"  # noqa: S105 - synthetic test placeholder, not a credential
+        monkeypatch.setenv("TRELLIS_CANDIDATE_AUTO_PROMOTE_MODE", secret)
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.candidate_auto_promote.mode")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+        assert secret not in row["parse_error"]
+        assert secret not in json.dumps(resp.json())
+
+    def test_invalid_stored_mode_degrades_instead_of_echoing_the_raw_value(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        secret = "SEKRETstored91c0"  # noqa: S105 - synthetic test placeholder, not a credential
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("learning.candidate_auto_promote.mode", secret)
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.candidate_auto_promote.mode")
+        assert row["stored_value"] == secret  # the raw stored row is kept as-is
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+        assert secret not in row["parse_error"]
+
+    def test_bad_knob_in_one_family_does_not_blank_the_sibling_family(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A garbage ``learning.auto_promote.*`` env value must not touch
+        ``learning.candidate_auto_promote.*`` entries -- each family
+        resolves (and so fails) independently."""
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, "notanumber")
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        broken = _entry(body, "learning.auto_promote.min_sample_size")
+        assert broken["parse_error"] is not None
+        sibling = _entry(body, "learning.candidate_auto_promote.min_helpful_count")
+        assert sibling["parse_error"] is None
+        unrelated = _entry(body, "pack_holdout_rate")
+        assert unrelated["parse_error"] is None
+        assert unrelated["effective_value"] == 0.0
+
+    def test_every_other_family_still_reports_normally(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One field's garbage env value takes down its whole family (the
+        resolver fails atomically, so every entry sharing that prefix
+        degrades together) but every setting outside that one family
+        -- including ``learning.auto_promote.*``, a sibling family with
+        its own, separate resolver -- reports with no parse error."""
+        monkeypatch.setenv(CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV, "garbage")
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body["settings"]) == len(SETTINGS_REGISTRY)
+        broken_names = {
+            row["name"] for row in body["settings"] if row["parse_error"] is not None
+        }
+        assert broken_names == {
+            row["name"]
+            for row in body["settings"]
+            if row["name"].startswith("learning.candidate_auto_promote.")
+        }
+        assert broken_names  # the family is non-empty, so this isn't vacuous
+        unaffected = _entry(body, "learning.auto_promote.min_sample_size")
+        assert unaffected["parse_error"] is None
+
+    def test_cli_note_degrades_too_when_a_sibling_knobs_env_is_garbage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Companion to the route-level tests above: the CLI's own
+        success-note computation (``trellis_cli.admin_settings``) hits the
+        exact same resolver functions. Writing ``enabled`` must not raise
+        just because a *different* knob in the same family
+        (``min_sample_size``) has a garbage env value -- that is the
+        family's problem to report, not a reason to crash the note for a
+        value that actually resolved."""
+        from trellis.core.settings_registry import get_setting
+        from trellis_cli.admin_settings import _env_effective_value
+
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, "notanumber")
+        spec = get_setting("learning.auto_promote.enabled")
+        value = _env_effective_value(spec, {})
+        assert value == spec.default
+
+    @pytest.mark.parametrize("raw", ["inf", "1e999", "nan"])
+    def test_cli_note_degrades_on_a_non_finite_sibling_env_too(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        """Same claim as the test above, for the ``OverflowError``-raising
+        spellings rather than a garbage string -- ``_auto_promote_family_
+        value``'s own ``except (ValueError, TypeError)`` does not catch
+        ``OverflowError``, so this only stays clean because the resolver
+        itself never raises one."""
+        from trellis.core.settings_registry import get_setting
+        from trellis_cli.admin_settings import _env_effective_value
+
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, raw)
+        spec = get_setting("learning.auto_promote.enabled")
+        value = _env_effective_value(spec, {})
+        assert value == spec.default
+
+    @pytest.mark.parametrize("raw", ["nan", "inf", "-inf"])
+    def test_non_finite_tuner_float_degrades_instead_of_null(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        """``min_effect_size`` is the one float-typed knob in either
+        auto-promote family, and it took a different path to the same
+        hazard the int-typed knobs above are pinned against:
+        ``resolve_auto_promote_overrides`` parsed it with a bare
+        ``float(raw)`` (no finiteness check — unlike ``min_sample_size``'s
+        ``parse_finite_int``), and because this route never constructs
+        ``AutoPromotePolicy`` (so `__post_init__`'s own ``math.isfinite``
+        check never runs on this path), a ``nan``/``inf`` env value never
+        raised at all. It reached the response as
+        ``effective_value: None`` with no ``parse_error`` — FastAPI's
+        encoder silently maps a non-finite float to JSON ``null`` — which
+        reads as "no value", not as the operator-visible "this env value
+        is garbage, showing you the default instead" every other knob in
+        this family gets."""
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV, raw)
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.auto_promote.min_effect_size")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+
+    @pytest.mark.parametrize("raw", ["nan", "inf", "-inf"])
+    def test_cli_note_degrades_on_a_non_finite_effect_size_too(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        """Companion to the route-level test above, for the CLI's own
+        success-note computation -- the same resolver backs both."""
+        from trellis.core.settings_registry import get_setting
+        from trellis_cli.admin_settings import _env_effective_value
+
+        monkeypatch.setenv(AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV, raw)
+        spec = get_setting("learning.auto_promote.min_effect_size")
+        value = _env_effective_value(spec, {})
+        assert value == spec.default
+
+    @pytest.mark.parametrize(
+        "setting_name",
+        [
+            "learning.auto_promote.min_sample_size",
+            "learning.candidate_auto_promote.min_helpful_count",
+        ],
+    )
+    def test_non_finite_stored_int_does_not_500_the_route(
+        self, client: TestClient, registry: StoreRegistry, setting_name: str
+    ) -> None:
+        """Every int-typed knob above is pinned against a non-finite
+        *env* value because ``parse_finite_int`` guards that path. The
+        *settings-file* path through the exact same resolvers takes a
+        different, unguarded branch -- ``int(settings_map[setting_name])``
+        -- with no ``parse_finite_int`` in front of it, so a
+        ``float("inf")``/``float("nan")`` row written straight to
+        ``settings.json`` (by hand, or by a future writer that stops
+        validating finiteness) raises ``OverflowError``/``ValueError``
+        past both resolvers. ``_effective_values``'s
+        ``except (ValueError, TypeError)`` did not list ``OverflowError``,
+        so this one 500'd the whole route instead of degrading just this
+        family, unlike every env-sourced case above.
+
+        ``SettingsStore.set`` itself writes with ``allow_nan=False`` and
+        so refuses to persist ``inf`` -- this has to go in as a hand-
+        written file, standing in for an operator (or future writer)
+        that edits ``settings.json`` directly rather than going through
+        the store. Python's ``json`` module accepts the non-standard
+        ``Infinity`` literal on *read* even though it refuses to *write*
+        one, so this round-trips exactly as a real such file would.
+        """
+        path = resolve_settings_path(registry.stores_dir)
+        assert path is not None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {"settings": [{"name": setting_name, "value": "__INF__"}]}
+            ).replace('"__INF__"', "Infinity"),
+            encoding="utf-8",
+        )
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), setting_name)
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+
+
 class TestParseErrorReasonIsFixedPerType:
     """Unit-level on ``_parse_error_reason``.
 
@@ -906,3 +1218,59 @@ class TestParseErrorReasonIsFixedPerType:
             _parse_error_reason(enum_spec)
             == "stored value is not one of the allowed options"
         )
+
+
+class TestCaptureHealthImportIsHoisted:
+    """``_effective_values`` used to import
+    ``trellis.ops.capture_health.resolve_capture_thresholds`` lazily,
+    inside its own function body. By the time any test in the collected
+    suite reaches this module, something else has already imported
+    ``trellis.ops`` (directly, or via another route module), so a
+    reintroduced circular import between ``trellis_api.routes.settings``
+    and ``trellis.ops`` would never surface inside the pytest process --
+    the cycle only resolves because the dependency graph was pre-warmed
+    by an unrelated test running first. A fresh interpreter that imports
+    cold, in the order a real CLI process actually would -- the whole
+    ``trellis_cli.main`` Typer app (which pulls in ``trellis_cli.serve``
+    and ``trellis_cli.worker``), then ``trellis.core.settings_registry``
+    and ``trellis.learning.tuners`` directly -- before touching this
+    module at all, is the realistic worst case: whatever partial-init
+    state those three leave in ``sys.modules`` is exactly what this
+    module's own import would see in a real ``trellis worker tune`` or
+    ``trellis curate auto-promote-candidates`` invocation.
+
+    The child script also asserts ``resolve_capture_thresholds`` is
+    bound as a module-level attribute on ``trellis_api.routes.settings``
+    right after import, with no call into ``_effective_values``. A lazy,
+    in-function import would still import cleanly (that shape never
+    raised anything -- it just risked a silent info-log degrade, per the
+    module's own docstring), so a plain "did the import succeed" probe
+    would pass on the old shape too and prove nothing. Pinning the
+    attribute's presence is what actually distinguishes "hoisted" from
+    "lazy".
+    """
+
+    _CHILD = (
+        "import trellis_cli.main\n"
+        "import trellis.core.settings_registry\n"
+        "import trellis.learning.tuners\n"
+        "import trellis_api.routes.settings as m\n"
+        "assert hasattr(m, 'resolve_capture_thresholds'), "
+        "'resolve_capture_thresholds is not bound at module scope'\n"
+        "print('OK')\n"
+    )
+
+    def test_module_imports_cleanly_and_binds_the_name_at_module_scope(
+        self,
+    ) -> None:
+        env = {**os.environ, "PYTHONPATH": repo_src_pythonpath()}
+        result = subprocess.run(  # noqa: S603 — argv is this interpreter + a literal
+            [sys.executable, "-c", self._CHILD],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert result.stdout.strip() == "OK"

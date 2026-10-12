@@ -67,20 +67,28 @@ def _env_effective_value(spec: SettingSpec, settings_values: dict[str, Any]) -> 
 
     Delegates to :func:`trellis_api.routes.settings._effective_values`,
     the one resolver that already covers every entry (the twelve
-    ``WriteBehaviourConfig`` fields, the two asymmetric-env booleans, and
-    the dedicated per-knob resolvers this PR added for the rest), so the
-    CLI and ``GET /settings`` cannot answer this differently for the
-    same stored state (re-gate #867 B6: this used to index
-    ``WriteBehaviourConfig...as_dict()[spec.name]`` directly, which
+    ``WriteBehaviourConfig`` fields, the two asymmetric-env booleans, the
+    dedicated per-knob resolvers added for the knowledge-graph/noise-
+    demotion/advisory/capture-health knobs, and the two
+    ``learning.auto_promote.*`` / ``learning.candidate_auto_promote.*``
+    families), so the CLI and ``GET /settings`` cannot answer this
+    differently for the same stored state (re-gate #867 B6: this used to
+    index ``WriteBehaviourConfig...as_dict()[spec.name]`` directly, which
     ``KeyError``-ed for every knob added after that mapping was written,
     *after* the governed write itself had already succeeded). Imported
     lazily -- ``fastapi`` is a base dependency either way, but there is
     no reason for every CLI invocation to import the REST app module at
     startup.
+
+    ``_effective_values`` returns ``(effective, parse_errors)``; this
+    reads only the first element -- the CLI's own success note never
+    echoes a family's raw bad value either way (``_truthfulness_note``
+    reports the resolved/default value and the restart/env note, never
+    ``parse_errors`` itself).
     """
     from trellis_api.routes.settings import _effective_values  # noqa: PLC0415
 
-    return _effective_values(settings_values)[spec.name]
+    return _effective_values(settings_values)[0][spec.name]
 
 
 def _truthfulness_note(

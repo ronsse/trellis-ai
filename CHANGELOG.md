@@ -197,6 +197,122 @@ All notable changes to Trellis will be documented in this file.
   project directories / `flock`-serialized worker invocation that a
   container does not have, matching `backup-nightly` and
   `roadmap-nightly`.
+- **Report-only evaluation of learning candidates.** Owner's
+  stated intent is "eventually we want automatic promotion"; this PR
+  ships only the evaluation and reporting half of that — a candidate is
+  never promoted or demoted by this code. Auto-demotion and a working
+  commit mode are deferred to a follow-up PR.
+  - `trellis.learning.candidate_auto_promote.LearningCandidateAutoPromotePolicy`:
+    `enabled` (default `False`), `mode` (`report_only` default | `commit`),
+    `min_helpful_count` (≥1, default 5), `min_distinct_sessions` (≥2,
+    default 3 — an n=1 single-session candidate can never qualify),
+    `require_zero_unhelpful` (default `True`), `max_promotions_per_run`
+    (≥1, default 3). All six are `SETTINGS_REGISTRY` entries
+    (`learning.candidate_auto_promote.*`, group `learning_loops`)
+    resolved env > settings > default, each with a plain-English UI
+    description. **`mode="commit"` raises `ConfigError` at construction**
+    — "commit mode is not available until auto-demotion ships" — on
+    every resolution path (CLI, settings, env); `report_only` is the
+    only mode that can actually run. `--dry-run` forces this run's
+    *effective* mode to `report_only` before the policy is constructed,
+    so a stored or env-configured `commit` never reaches the refusal —
+    the run still truthfully reports what was configured: the CLI
+    output, the emitted event, and the Loop Health row all carry a
+    separate `configured_mode` (the pre-`--dry-run` value) alongside the
+    `mode`/`effective_mode` that actually ran, so "commit is configured"
+    and "commit ran" stay distinguishable. The Settings UI does not
+    offer `commit` as a selectable value for this setting at all, and the
+    settings route reports it under `refused_values`/`refused_reason`
+    rather than letting a client learn the refusal only by submitting it.
+  - The pre-existing tuner-side `trellis.learning.tuners.auto_promote.AutoPromotePolicy`
+    (`enabled`, `min_sample_size`, `min_effect_size`) is now also a
+    `SETTINGS_REGISTRY` family (`learning.auto_promote.*`). `resolve_auto_promote_overrides`
+    is new in this PR — it is the first thing to resolve env > settings >
+    config.yaml > default for this family — and reads three new env vars:
+    `TRELLIS_ENABLE_AUTO_PROMOTE`, `TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE`,
+    `TRELLIS_AUTO_PROMOTE_MIN_EFFECT_SIZE`. Registering the family adds a
+    UI-tunable surface, not a second resolution path. Both families' effective values now appear in
+    `GET /api/v1/settings` (#857), computed by calling each resolver
+    directly rather than reimplementing env/settings/default precedence a
+    third time.
+  - `run_candidate_auto_promotion` evaluates every candidate and reports
+    a disposition — never writes a precedent, since the commit-execution
+    branch is unreachable while `mode="commit"` is refused at
+    construction. Evaluation order: already-promoted (any existing
+    `PRECEDENT_PROMOTED` for that candidate's entity id, human or
+    automatic, reports `already_promoted` and is excluded from
+    `would_promote` and from the `max_promotions_per_run` cap), then
+    not-promotable recommendation type, then unhelpful citations (if
+    `require_zero_unhelpful`), then the helpful-count and
+    distinct-session floors.
+  - Distinct-session counting now reads the real `PACK_ASSEMBLED.session_id`
+    captured on each citation, never a pack or run id. A citation with
+    no captured session id cannot count toward `min_distinct_sessions`
+    and is reported separately as `sessionless_citations`.
+  - Every invocation of this command emits exactly one
+    `LEARNING_AUTO_PROMOTE_EVALUATED` event, whatever it did. A completed
+    run carries a per-candidate disposition, the
+    would_promote/already_promoted/promoted/ineligible counts, the
+    policy snapshot, and an `outcome` of `"ok"` (or `"degraded"` if a
+    candidate was skipped for having no usable id). A run that exits
+    *before* reaching evaluation — a missing/malformed `--candidates`
+    file or a top-level shape error (exit 2), a non-finite env override
+    (exit 1), or a refused `mode=commit` without `--dry-run` (exit 5,
+    `ConfigError`) — still emits one event, with `outcome: "refused"`
+    (the `ConfigError` case) or `outcome: "failed"` (everything else)
+    and an `error: {type, message}`, never zero events: a silent exit
+    would otherwise be indistinguishable from "this job never ran" in
+    `loop_health.py`, whose `last_status` now derives from this
+    `outcome` field (falling back to the old skipped-based rule for an
+    event recorded before the field existed) instead of always reading
+    "ok" off the mere presence of an event. `report_to_dict` adds
+    `already_promoted_count` alongside `would_promote_count`.
+    `compute_agreement_metric` compares this policy's `would_promote`
+    dispositions against later human Review-queue decisions
+    (agree/disagree/undecided). Two data gaps reported honestly, not
+    assumed away: there is no per-intent-family holdout marker anywhere
+    in the pipeline — `_holdout_arm_status` always reports `"unknown"`
+    and nothing gates on it — and no event records a human *rejecting*
+    a candidate for this surface (only `action="promote"` exists), so
+    `disagree` is structurally always `0` and `rate` can only be `None`
+    or `1.0` today; `AgreementMetric.note` says so in the payload rather
+    than leaving a reader to infer it from an un-explained constant.
+    The `loop_health` panel gains an eighth row,
+    `learning_candidate_auto_promote` (`actuates=False`: nothing it does
+    writes without a human in the loop today), whose `last_status` also
+    reads `"stale"` once the job's known daily cadence
+    (`auto-promote-candidates` in the job catalog) has had a tick with
+    no new run since.
+  - `trellis curate auto-promote-candidates` (job catalog:
+    `auto-promote-candidates`, nightly). A missing `--candidates` file,
+    one that isn't valid JSON, or one whose top level isn't a JSON
+    object (e.g. a bare list) all fail with a clean `BadParameter`
+    message (exit 2) instead of a raw traceback.
+  - The Precedents tab's empty state names the real promotion path
+    (`trellis curate promote-learning`) and, conditionally on whether
+    `auto-promote-candidates` is scheduled, that the job reports but
+    never commits — true both before and after the job is scheduled.
+  - **Removed `Operation.PRECEDENT_UPDATE` and `EventType.PRECEDENT_UPDATED`.**
+    The verb had a registry schema but no handler since the initial
+    commit, so every request for it was rejected at dispatch, and
+    `PRECEDENT_UPDATED` was never emitted; both are removed.
+  - The Settings UI never offers `commit` as a selectable value for
+    `learning.candidate_auto_promote.mode`: `GET /api/v1/settings` adds
+    `refused_values`/`refused_reason` to this setting's row (so a client
+    learns the refusal from the schema, not by submitting it and reading
+    a validation refusal — `400` over REST, exit `2` from the CLI), and
+    `renderValueInput` disables the refused option in the dropdown
+    instead of letting it be picked and then rejected. The save path's
+    "must be one of" validation error also no longer lists `commit`
+    among the values it suggests trying instead.
+  - `AutoPromotePolicy.__post_init__`'s effect-size floor check rejects
+    a non-finite `min_effect_size` (`NaN`/`inf`) regardless of whether it
+    arrived via env, the settings store, or `config.yaml` (a YAML
+    `.nan`/`.inf` literal parses straight to a non-finite `float`) — a
+    non-finite value compares `False` against every bound the "looser
+    than the manual floor" check uses, so without the dedicated
+    `isfinite` check it would construct successfully and let every
+    proposal clear the gate.
 - **Loop health panel (e167): `GET /api/v1/loops`.** Answers "is each
   curation / learning loop actually doing anything?" for all seven loops
   (noise demotion, advisory generation, advisory fitness,
