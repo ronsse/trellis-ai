@@ -123,10 +123,11 @@ def _split_script_and_markup(page: str) -> tuple[str, str]:
     # the text-node pass below (CodeQL py/bad-tag-filter).
     tag_flags = re.DOTALL | re.IGNORECASE
     script_text = "\n".join(
-        m.group(1) for m in re.finditer(r"<script[^>]*>(.*?)</script>", page, tag_flags)
+        m.group(1)
+        for m in re.finditer(r"<script[^>]*>(.*?)</script\b[^>]*>", page, tag_flags)
     )
-    markup = re.sub(r"<script[^>]*>.*?</script>", "", page, flags=tag_flags)
-    markup = re.sub(r"<style[^>]*>.*?</style>", "", markup, flags=tag_flags)
+    markup = re.sub(r"<script[^>]*>.*?</script\b[^>]*>", "", page, flags=tag_flags)
+    markup = re.sub(r"<style[^>]*>.*?</style\b[^>]*>", "", markup, flags=tag_flags)
     return script_text, markup
 
 
