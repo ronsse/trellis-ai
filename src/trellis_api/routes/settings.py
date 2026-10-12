@@ -41,6 +41,7 @@ from trellis.learning.candidate_auto_promote import (
 )
 from trellis.learning.tuners.auto_promote import resolve_auto_promote_overrides
 from trellis.mutate import Command, CommandStatus, Operation, build_settings_executor
+from trellis.ops.capture_health import resolve_capture_thresholds
 from trellis.retrieve.builder_factory import _graph_seeding_enabled
 from trellis.retrieve.pack_builder import _filter_legacy_advisories_enabled
 from trellis.schemas.settings import SettingRow
@@ -159,9 +160,6 @@ def _effective_values(
 
     from trellis.classify.demotion_gate import (  # noqa: PLC0415
         resolve_demotion_thresholds,
-    )
-    from trellis.ops.capture_health import (  # noqa: PLC0415
-        resolve_capture_thresholds,
     )
     from trellis.retrieve.advisory_generator import (  # noqa: PLC0415
         resolve_advisory_thresholds,
@@ -413,11 +411,16 @@ def _family_parse_error_reason() -> str:
     family whose environment variable is the one that is malformed, so
     the wording does not name "stored value" specifically. Still never
     the raw exception text or the offending value itself, which can
-    carry the bad env var's contents.
+    carry the bad env var's contents. Drops the same retired "; using
+    the default" suffix :func:`_parse_error_reason` explains above, kept
+    parallel across both reasons rather than correct for one and stale
+    on the other -- this one states only that resolution failed, not
+    which of this family's several entries the caller should expect to
+    see at their registry default because of it.
     """
     return (
         "this setting's family could not be resolved from the "
-        "environment or stored overrides; using the default"
+        "environment or stored overrides"
     )
 
 

@@ -312,9 +312,13 @@ def _build_auto_promote_policy_or_exit() -> AutoPromotePolicy:
         raise typer.Exit(code=EXIT_INTERNAL) from exc
     except ValueError as exc:
         # AutoPromotePolicy.__post_init__ rejects thresholds looser than the
-        # manual gate or a disarmed rollback.
+        # manual gate or a disarmed rollback, and resolve_auto_promote_
+        # overrides rejects a non-finite env/stored value the same way —
+        # both raise with the raw value embedded in str(exc), so the
+        # message here names only the exception type, never the value.
         console.print(
-            f"[red]invalid learning.auto_promote config: {escape(str(exc))}[/red]",
+            "[red]invalid learning.auto_promote config "
+            f"({escape(type(exc).__name__)})[/red]",
             soft_wrap=True,
         )
         raise typer.Exit(code=EXIT_INTERNAL) from exc

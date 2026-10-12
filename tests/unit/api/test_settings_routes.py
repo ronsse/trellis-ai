@@ -17,12 +17,16 @@ route rather than merely a passthrough of the handler already tested in
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+from tests.integration._live_server import repo_src_pythonpath
 from trellis.auth import SCOPE_ADMIN, SCOPE_READ, generate_api_key
 from trellis.core.settings_registry import SETTINGS_REGISTRY, SettingSpec
 from trellis.mutate.policy_source import POLICY_FILENAME
@@ -950,6 +954,43 @@ class TestAutoPromoteGarbageEnvDegradesInstead500:
         assert row["effective_value"] == row["default"]
         assert row["parse_error"] is not None
 
+    def test_invalid_env_mode_degrades_instead_of_echoing_the_raw_value(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``resolve_str`` used not to validate ``mode`` at
+        all, so an unrecognized env value sailed through as
+        ``effective_value`` with ``parse_error: null`` -- the one field
+        this whole family-degrade machinery exists to keep clean. The
+        resolver now raises before returning, so the existing
+        ``(ValueError, TypeError)`` catch in ``_effective_values``
+        degrades this row exactly like any other broken knob in the
+        family."""
+        secret = "SEKRETmode4b2e1d"  # noqa: S105 - synthetic test placeholder, not a credential
+        monkeypatch.setenv("TRELLIS_CANDIDATE_AUTO_PROMOTE_MODE", secret)
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.candidate_auto_promote.mode")
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+        assert secret not in row["parse_error"]
+        assert secret not in json.dumps(resp.json())
+
+    def test_invalid_stored_mode_degrades_instead_of_echoing_the_raw_value(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        secret = "SEKRETstored91c0"  # noqa: S105 - synthetic test placeholder, not a credential
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("learning.candidate_auto_promote.mode", secret)
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.candidate_auto_promote.mode")
+        assert row["stored_value"] == secret  # the raw stored row is kept as-is
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None
+        assert secret not in row["parse_error"]
+
     def test_bad_knob_in_one_family_does_not_blank_the_sibling_family(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1177,3 +1218,59 @@ class TestParseErrorReasonIsFixedPerType:
             _parse_error_reason(enum_spec)
             == "stored value is not one of the allowed options"
         )
+
+
+class TestCaptureHealthImportIsHoisted:
+    """``_effective_values`` used to import
+    ``trellis.ops.capture_health.resolve_capture_thresholds`` lazily,
+    inside its own function body. By the time any test in the collected
+    suite reaches this module, something else has already imported
+    ``trellis.ops`` (directly, or via another route module), so a
+    reintroduced circular import between ``trellis_api.routes.settings``
+    and ``trellis.ops`` would never surface inside the pytest process --
+    the cycle only resolves because the dependency graph was pre-warmed
+    by an unrelated test running first. A fresh interpreter that imports
+    cold, in the order a real CLI process actually would -- the whole
+    ``trellis_cli.main`` Typer app (which pulls in ``trellis_cli.serve``
+    and ``trellis_cli.worker``), then ``trellis.core.settings_registry``
+    and ``trellis.learning.tuners`` directly -- before touching this
+    module at all, is the realistic worst case: whatever partial-init
+    state those three leave in ``sys.modules`` is exactly what this
+    module's own import would see in a real ``trellis worker tune`` or
+    ``trellis curate auto-promote-candidates`` invocation.
+
+    The child script also asserts ``resolve_capture_thresholds`` is
+    bound as a module-level attribute on ``trellis_api.routes.settings``
+    right after import, with no call into ``_effective_values``. A lazy,
+    in-function import would still import cleanly (that shape never
+    raised anything -- it just risked a silent info-log degrade, per the
+    module's own docstring), so a plain "did the import succeed" probe
+    would pass on the old shape too and prove nothing. Pinning the
+    attribute's presence is what actually distinguishes "hoisted" from
+    "lazy".
+    """
+
+    _CHILD = (
+        "import trellis_cli.main\n"
+        "import trellis.core.settings_registry\n"
+        "import trellis.learning.tuners\n"
+        "import trellis_api.routes.settings as m\n"
+        "assert hasattr(m, 'resolve_capture_thresholds'), "
+        "'resolve_capture_thresholds is not bound at module scope'\n"
+        "print('OK')\n"
+    )
+
+    def test_module_imports_cleanly_and_binds_the_name_at_module_scope(
+        self,
+    ) -> None:
+        env = {**os.environ, "PYTHONPATH": repo_src_pythonpath()}
+        result = subprocess.run(  # noqa: S603 — argv is this interpreter + a literal
+            [sys.executable, "-c", self._CHILD],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert result.stdout.strip() == "OK"

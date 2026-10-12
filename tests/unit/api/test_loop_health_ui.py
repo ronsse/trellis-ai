@@ -113,6 +113,28 @@ def test_stale_threshold_is_36_hours() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 2b. `failed`/`refused` get their own badge classes, not the `skipped`
+#     fallback.
+# ---------------------------------------------------------------------------
+
+
+def test_failed_and_refused_statuses_get_distinct_non_default_badges() -> None:
+    """A ``LEARNING_AUTO_PROMOTE_EVALUATED`` run's ``outcome`` can be
+    ``"refused"`` or ``"failed"`` (``loop_health.py``'s
+    ``_build_candidate_auto_promote_row``), not only ``ok`` / ``degraded``
+    / ``stale`` / ``skipped``. ``statusMap`` had no entry for either, so
+    both fell through to the same ``badge-info`` the never-run and
+    skipped states use — reading as informational rather than as a
+    problem a human should look at."""
+    page = _page()
+    body = _render_loop_row_body(page)
+    else_branch = _between(body, "} else {", "\n            }\n")
+    status_map_literal = _between(else_branch, "const statusMap = {", "};")
+    assert re.search(r"refused:\s*'badge-warn'", status_map_literal)
+    assert re.search(r"failed:\s*'badge-err'", status_map_literal)
+
+
+# ---------------------------------------------------------------------------
 # 3. Fetch failure is a visible error, not a silent empty state.
 # ---------------------------------------------------------------------------
 

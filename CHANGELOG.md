@@ -293,17 +293,18 @@ All notable changes to Trellis will be documented in this file.
     `auto-promote-candidates` is scheduled, that the job reports but
     never commits — true both before and after the job is scheduled.
   - **Removed `Operation.PRECEDENT_UPDATE` and `EventType.PRECEDENT_UPDATED`.**
-    The handler for that verb had no writer since the initial commit;
-    removing the dead enum members and `PrecedentUpdateHandler` closes
-    that gap rather than leaving an operation nothing ever requests.
+    The verb had a registry schema but no handler since the initial
+    commit, so every request for it was rejected at dispatch, and
+    `PRECEDENT_UPDATED` was never emitted; both are removed.
   - The Settings UI never offers `commit` as a selectable value for
     `learning.candidate_auto_promote.mode`: `GET /api/v1/settings` adds
     `refused_values`/`refused_reason` to this setting's row (so a client
     learns the refusal from the schema, not by submitting it and reading
-    a 400), and `renderValueInput` disables the refused option in the
-    dropdown instead of letting it be picked and then rejected. The save
-    path's "must be one of" validation error also no longer lists
-    `commit` among the values it suggests trying instead.
+    a validation refusal — `400` over REST, exit `2` from the CLI), and
+    `renderValueInput` disables the refused option in the dropdown
+    instead of letting it be picked and then rejected. The save path's
+    "must be one of" validation error also no longer lists `commit`
+    among the values it suggests trying instead.
   - `AutoPromotePolicy.__post_init__`'s effect-size floor check rejects
     a non-finite `min_effect_size` (`NaN`/`inf`) regardless of whether it
     arrived via env, the settings store, or `config.yaml` (a YAML

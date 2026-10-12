@@ -120,6 +120,27 @@ AUTO_PROMOTE_REQUESTED_BY = "auto:learning_candidate"
 
 CandidateAutoPromoteMode = Literal["report_only", "commit"]
 
+
+def sanitize_configured_mode(value: object) -> str | None:
+    """Let only a validated enum member reach a payload or response.
+
+    ``configured_mode`` is threaded through call sites that straddle a
+    resolver or a policy construction (``emit_candidate_auto_promote_
+    failure_event`` accepts ``str | None`` precisely so a caller mid-
+    resolution can still report what it was trying). This is the single
+    point that refuses anything else before it reaches an event payload,
+    an API response or CLI output: ``None`` passes through (nothing
+    configured, or not resolved yet), either enum member passes through,
+    and every other value — a raw env or stored string included — becomes
+    the fixed marker ``"invalid"`` instead of being echoed.
+    """
+    if value is None:
+        return None
+    if value in ("report_only", "commit"):
+        return str(value)
+    return "invalid"
+
+
 # --------------------------------------------------------------------------
 # env / setting constants — mirror trellis.learning.tuners.auto_promote's
 # naming scheme for the three ``learning.auto_promote.*`` knobs.
@@ -239,8 +260,8 @@ class LearningCandidateAutoPromotePolicy:
     def __post_init__(self) -> None:
         if self.mode not in ("report_only", "commit"):
             msg = (
-                f"LearningCandidateAutoPromotePolicy.mode={self.mode!r} must "
-                'be "report_only" or "commit".'
+                "LearningCandidateAutoPromotePolicy.mode must be "
+                '"report_only" or "commit"'
             )
             raise ValueError(msg)
         if self.mode == "commit":
@@ -313,7 +334,17 @@ def resolve_candidate_auto_promote_overrides(
     :class:`LearningCandidateAutoPromotePolicy` with the result, and
     *that* construction is what rejects a value looser than the floors
     (:meth:`LearningCandidateAutoPromotePolicy.__post_init__`) — this
-    function never duplicates that check.
+    function never duplicates that check. ``mode`` is the one exception:
+    it is validated here, raising a value-free :class:`ValueError`, so an
+    unrecognized stored or env value never survives long enough to be
+    recorded as a ``configured_mode`` or echoed as a settings
+    ``effective_value`` — both read-side surfaces assume the resolver
+    already refused anything that is not an enum member.
+
+    Raises:
+        ValueError: If the resolved ``mode`` is neither ``"report_only"``
+            nor ``"commit"``. The message never includes the offending
+            value.
     """
     src_env: Mapping[str, str] = os.environ if env is None else env
     settings_map: Mapping[str, bool | int | float | str] = settings or {}
@@ -342,17 +373,22 @@ def resolve_candidate_auto_promote_overrides(
             return str(settings_map[setting_name])
         return default
 
+    mode = resolve_str(
+        CANDIDATE_AUTO_PROMOTE_MODE_ENV,
+        CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
+        "report_only",
+    )
+    if mode not in ("report_only", "commit"):
+        msg = f'{CANDIDATE_AUTO_PROMOTE_MODE_SETTING} must be "report_only" or "commit"'
+        raise ValueError(msg)
+
     return {
         "enabled": resolve_bool(
             CANDIDATE_AUTO_PROMOTE_ENABLED_ENV,
             CANDIDATE_AUTO_PROMOTE_ENABLED_SETTING,
             False,
         ),
-        "mode": resolve_str(
-            CANDIDATE_AUTO_PROMOTE_MODE_ENV,
-            CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
-            "report_only",
-        ),
+        "mode": mode,
         "min_helpful_count": resolve_int(
             CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_ENV,
             CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_SETTING,
@@ -535,7 +571,7 @@ def _emit_evaluated_event(
         # (see ``_emit_failed_event`` below, same event type, same key).
         "outcome": "degraded" if skipped else "ok",
         "mode": effective_mode,
-        "configured_mode": configured_mode,
+        "configured_mode": sanitize_configured_mode(configured_mode),
         "dispositions": [
             {
                 "candidate_id": o.candidate_id,
@@ -609,10 +645,15 @@ def emit_candidate_auto_promote_failure_event(
     outcome = "refused" if isinstance(error, ConfigError) else "failed"
     payload: dict[str, Any] = {
         "outcome": outcome,
-        "configured_mode": configured_mode,
+        "configured_mode": sanitize_configured_mode(configured_mode),
         "error": {
             "type": type(error).__name__,
-            "message": str(error),
+            # Never ``str(error)``: a resolver or policy ``ValueError``'s
+            # message can embed the raw stored/env value it rejected
+            # (``configured_mode`` itself, or an out-of-range knob). The
+            # type above already identifies what kind of failure this
+            # was; this fixed string is all the message ever carries.
+            "message": "withheld — see error.type",
         },
     }
     try:
@@ -963,7 +1004,7 @@ def report_to_dict(report: CandidateAutoPromoteReport) -> dict[str, Any]:
     return {
         "enabled": report.enabled,
         "mode": report.mode,
-        "configured_mode": report.configured_mode,
+        "configured_mode": sanitize_configured_mode(report.configured_mode),
         "would_promote_count": report.would_promote_count,
         "already_promoted_count": report.already_promoted_count,
         "promoted_count": report.promoted_count,

@@ -229,7 +229,7 @@ JOB_CATALOG: Mapping[str, JobSpec] = _build_catalog(
                 "configuration error until a follow-up ships "
                 "auto-demotion. Deterministic — no LLM calls, no spend. "
                 "This job's effect today is purely evidence-gathering: "
-                "every run emits at least one LEARNING_AUTO_PROMOTE_EVALUATED "
+                "every run that is not killed emits one LEARNING_AUTO_PROMOTE_EVALUATED "
                 "event, naming what it would have promoted when it "
                 "completes evaluation, or the refusal/failure when it "
                 "does not."

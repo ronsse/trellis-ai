@@ -383,7 +383,8 @@ class TestSessionIdJoin:
     ) -> None:
         """No ``session_id`` on the pack must report ``None`` — not the
         MCP-shaped ``run_id`` (which equals ``pack_id`` here and so is
-        unique per pack, the exact value M3's fallback would read)."""
+        unique per pack, the exact value a naive run_id-as-session-id
+        fallback would read)."""
         _emit_pack_assembled(
             event_log,
             pack_id="pack-nosess",
@@ -438,7 +439,7 @@ class TestSessionIdJoin:
         unique per pack) citing the same item helpful must score as
         ``distinct_helpful_sessions == 0`` / ``sessionless_citations == 5``
         once joined and scored — not 5 distinct sessions, which is what
-        M3's run_id fallback would produce."""
+        treating ``run_id`` as the session id would produce."""
         for n in range(5):
             pack_id = f"pack-sessionless-{n}"
             _emit_pack_assembled(

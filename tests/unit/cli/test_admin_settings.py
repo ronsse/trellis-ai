@@ -502,3 +502,68 @@ class TestStoredGarbageOnAnotherSettingNeverLeaksItsValue:
             monkeypatch.setenv("TRELLIS_LOG_LEVEL", "CRITICAL")
             configure_stderr_logging()
             clear_cached_logger_proxies()
+
+
+class TestEnvPinnedModeGarbageNeverReachesTheNote:
+    """``learning.candidate_auto_promote.mode``'s own
+    env var pins ``resolve_source`` to ``"env"``, so a successful
+    ``settings set``/``unset`` on that same name prints
+    ``_truthfulness_note``'s "env" branch, which embeds
+    ``_env_effective_value(spec, ...)`` verbatim as
+    ``effective value: '<value>'`` (``admin_settings.py`` lines 120-124).
+    Before ``resolve_candidate_auto_promote_overrides`` validated
+    ``mode``, a garbage env value sailed through unvalidated and that
+    note echoed it to an operator-scoped caller. The resolver now
+    raises a value-free ``ValueError`` on an unrecognized ``mode``,
+    which ``trellis_api.routes.settings._effective_values`` catches and
+    degrades the whole family to its stored/default values (the same
+    mechanism ``test_settings_routes.py`` proves for ``GET /settings``)
+    -- so the note reports the default instead of the secret.
+    """
+
+    def test_set_note_reports_the_default_not_the_env_secret(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        secret = "SEKRETadminnote7e2c"  # noqa: S105 - synthetic test placeholder, not a credential
+        monkeypatch.setenv("TRELLIS_CANDIDATE_AUTO_PROMOTE_MODE", secret)
+
+        result = _invoke(
+            [
+                "set",
+                "learning.candidate_auto_promote.mode",
+                "report_only",
+                "--format",
+                "json",
+            ]
+        )
+
+        assert result.exit_code == EXIT_OK, result.output
+        output = plain(result.output)
+        assert secret not in output
+        assert secret[:8] not in output
+        payload = json.loads(result.stdout)
+        assert "note" in payload, payload
+        assert secret not in payload["note"]
+        assert "effective value: 'report_only'" in payload["note"], payload["note"]
+
+    def test_unset_note_reports_the_default_not_the_env_secret(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        secret = "SEKRETadminnote91fa"  # noqa: S105 - synthetic test placeholder, not a credential
+        _store(tmp_path).set("learning.candidate_auto_promote.mode", "report_only")
+        monkeypatch.setenv("TRELLIS_CANDIDATE_AUTO_PROMOTE_MODE", secret)
+
+        result = _invoke(
+            ["unset", "learning.candidate_auto_promote.mode", "--format", "json"]
+        )
+
+        assert result.exit_code == EXIT_OK, result.output
+        output = plain(result.output)
+        assert secret not in output
+        assert secret[:8] not in output
+        payload = json.loads(result.stdout)
+        assert "note" in payload, payload
+        assert secret not in payload["note"]
+        assert "effective value: 'report_only'" in payload["note"], payload["note"]

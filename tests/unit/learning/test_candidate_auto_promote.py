@@ -13,12 +13,15 @@ demotes anything (there is no ``sweep_auto_demotions`` here to test).
 
 ``TestFloorRefusalOnConstruction`` mirrors
 ``tests/unit/learning/tuners/test_resolve_auto_promote_overrides.py``'s
-sibling pattern: the resolver never validates (confirmed by grep — no
-``settings_registry.validate_value`` exists anywhere in ``src/``), so the
-only real enforcement point is
+sibling pattern: the resolver never validates the three int floors
+(confirmed by grep — no ``settings_registry.validate_value`` exists
+anywhere in ``src/``), so the only real enforcement point for those is
 ``LearningCandidateAutoPromotePolicy.__post_init__``, exercised here by
 constructing the policy from a resolved dict, for both an env-sourced and a
-settings-sourced override.
+settings-sourced override. ``mode`` is the exception: the resolver
+validates it directly (``TestResolveModeValidation``), because an invalid
+``mode`` has to be refused before it is ever recorded as a
+``configured_mode`` — raising only after construction would be too late.
 
 ``_force_commit_policy`` bypasses that same ``__post_init__`` gate via
 ``object.__setattr__`` (the dataclass is frozen) to exercise the
@@ -30,6 +33,7 @@ branch still needs to stay correct for the follow-up that lifts the gate.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -65,10 +69,12 @@ from trellis.learning.candidate_auto_promote import (
     _scan_already_promoted_entity_ids,
     agreement_metric_to_dict,
     compute_agreement_metric,
+    emit_candidate_auto_promote_failure_event,
     precedent_entity_id_for_candidate,
     report_to_dict,
     resolve_candidate_auto_promote_overrides,
     run_candidate_auto_promotion,
+    sanitize_configured_mode,
 )
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Operation
@@ -257,10 +263,64 @@ class TestResolveOverridesPrecedence:
         assert resolved["require_zero_unhelpful"] is False
 
 
+class TestResolveModeValidation:
+    """``mode`` is the one knob the resolver validates itself: an
+    unrecognized value — stored or env-sourced — must never survive long
+    enough to be recorded as a ``configured_mode`` or echoed as a settings
+    ``effective_value``. The raised message never embeds the offending
+    value, so it is safe to let reach a CLI's stderr."""
+
+    def test_valid_modes_pass_through(self) -> None:
+        for mode in ("report_only", "commit"):
+            resolved = resolve_candidate_auto_promote_overrides(
+                env={CANDIDATE_AUTO_PROMOTE_MODE_ENV: mode}
+            )
+            assert resolved["mode"] == mode
+
+    def test_invalid_env_mode_raises_value_free_error(self) -> None:
+        secret = "SEKRETmode4b2e1d"  # noqa: S105 - synthetic test placeholder, not a credential
+        with pytest.raises(ValueError) as excinfo:
+            resolve_candidate_auto_promote_overrides(
+                env={CANDIDATE_AUTO_PROMOTE_MODE_ENV: secret}
+            )
+        assert secret not in str(excinfo.value)
+        assert "report_only" in str(excinfo.value)
+
+    def test_invalid_settings_mode_raises_value_free_error(self) -> None:
+        secret = "SEKRETstored91c0"  # noqa: S105 - synthetic test placeholder, not a credential
+        with pytest.raises(ValueError) as excinfo:
+            resolve_candidate_auto_promote_overrides(
+                settings={CANDIDATE_AUTO_PROMOTE_MODE_SETTING: secret}, env={}
+            )
+        assert secret not in str(excinfo.value)
+
+
+class TestSanitizeConfiguredMode:
+    """``sanitize_configured_mode`` is the single point every event
+    payload, API response and CLI output routes ``configured_mode``
+    through before it is recorded or rendered."""
+
+    def test_none_passes_through(self) -> None:
+        assert sanitize_configured_mode(None) is None
+
+    @pytest.mark.parametrize("mode", ["report_only", "commit"])
+    def test_enum_members_pass_through(self, mode: str) -> None:
+        assert sanitize_configured_mode(mode) == mode
+
+    @pytest.mark.parametrize(
+        "value",
+        ["SEKRETmode4b2e1d", "", "REPORT_ONLY", "report_only ", 1, True],
+    )
+    def test_everything_else_becomes_the_fixed_marker(self, value: Any) -> None:
+        assert sanitize_configured_mode(value) == "invalid"
+
+
 class TestFloorRefusalOnConstruction:
-    """The resolver never validates; construction does. Both a value
-    arriving via settings and the same value arriving via env must still be
-    refused once ``LearningCandidateAutoPromotePolicy`` is built from the
+    """The resolver never validates the three int floors; construction
+    does (``mode`` is the one knob the resolver validates itself — see
+    ``TestResolveModeValidation`` below). Both a value arriving via
+    settings and the same value arriving via env must still be refused
+    once ``LearningCandidateAutoPromotePolicy`` is built from the
     resolved dict — there is no separate ``settings_registry.validate_value``
     path to test instead."""
 
@@ -798,6 +858,64 @@ class TestAlreadyPromotedExclusion:
         assert report.already_promoted_count == 1
 
 
+class TestFailureEventPayloadIsValueFree:
+    """A failure event's payload must carry ``error.type`` and a fixed
+    reason, never ``str(exc)`` — a resolver or policy ``ValueError`` can
+    embed the raw stored/env value it rejected — and ``configured_mode``
+    is recorded only when it is an enum member."""
+
+    def test_error_message_is_fixed_never_str_exc(self, event_log: EventLog) -> None:
+        secret = "SEKRETtb11aa"  # noqa: S105 - synthetic test placeholder, not a credential
+        error = ValueError(f"not a number: {secret!r}")
+
+        event_id = emit_candidate_auto_promote_failure_event(
+            event_log, error=error, configured_mode="report_only"
+        )
+
+        assert event_id is not None
+        event = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )[0]
+        assert event.payload["error"]["type"] == "ValueError"
+        assert secret not in json.dumps(event.payload)
+        assert str(error) != event.payload["error"]["message"]
+
+    def test_invalid_configured_mode_becomes_the_fixed_marker(
+        self, event_log: EventLog
+    ) -> None:
+        secret = "SEKRETmode4b2e1d"  # noqa: S105 - synthetic test placeholder, not a credential
+
+        emit_candidate_auto_promote_failure_event(
+            event_log, error=ValueError("boom"), configured_mode=secret
+        )
+
+        event = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )[0]
+        assert event.payload["configured_mode"] == "invalid"
+        assert secret not in json.dumps(event.payload)
+
+    def test_none_configured_mode_stays_none(self, event_log: EventLog) -> None:
+        emit_candidate_auto_promote_failure_event(
+            event_log, error=ValueError("boom"), configured_mode=None
+        )
+
+        event = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )[0]
+        assert event.payload["configured_mode"] is None
+
+    def test_valid_configured_mode_passes_through(self, event_log: EventLog) -> None:
+        emit_candidate_auto_promote_failure_event(
+            event_log, error=ValueError("boom"), configured_mode="commit"
+        )
+
+        event = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )[0]
+        assert event.payload["configured_mode"] == "commit"
+
+
 class TestAlreadyPromotedScanOrderMatchesUnderTruncation:
     """``_scan_already_promoted_entity_ids`` must pass ``order="desc"``
     when scanning ``precedent.promote`` events: ``get_events``'s default
@@ -941,6 +1059,21 @@ class TestSerializationHelpers:
             "entity_id": None,
             "holdout_arm": "unknown",
         }
+
+    def test_report_to_dict_sanitizes_an_invalid_configured_mode(self) -> None:
+        """A report built with a bogus ``configured_mode`` — not reachable
+        through the normal resolver/policy path, but ``report_to_dict``
+        must not trust that and echo it anyway — never serialises the raw
+        value."""
+        secret = "SEKRETmode4b2e1d"  # noqa: S105 - synthetic test placeholder, not a credential
+        report = CandidateAutoPromoteReport(
+            enabled=True,
+            mode="report_only",
+            configured_mode=secret,  # type: ignore[arg-type]
+        )
+        data = report_to_dict(report)
+        assert data["configured_mode"] == "invalid"
+        assert secret not in json.dumps(data)
 
     def test_agreement_metric_to_dict_shape(self) -> None:
         """F1: the serialised payload carries the raw ``agree``/``disagree``/

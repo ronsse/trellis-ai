@@ -5539,7 +5539,7 @@
                 if (stale) {
                     whenHtml += ` <span class="badge badge-warn" title="No run seen in over ${escHtml(LOOP_STALE_HOURS)}h">stale</span>`;
                 }
-                const statusMap = { ok: 'badge-ok', degraded: 'badge-warn', stale: 'badge-warn', skipped: 'badge-info' };
+                const statusMap = { ok: 'badge-ok', degraded: 'badge-warn', stale: 'badge-warn', skipped: 'badge-info', refused: 'badge-warn', failed: 'badge-err' };
                 if (loop.last_status) {
                     statusBadge = `<span class="badge ${statusMap[loop.last_status] || 'badge-info'}">` +
                         `${escHtml(loop.last_status)}</span>`;

@@ -26,6 +26,7 @@ from trellis.learning.candidate_auto_promote import (
     report_to_dict,
     resolve_candidate_auto_promote_overrides,
     run_candidate_auto_promotion,
+    sanitize_configured_mode,
 )
 from trellis.mutate import (
     Command,
@@ -972,6 +973,21 @@ def auto_promote_candidates(
             force_report_only=dry_run,
             configured_mode=configured_mode,
         )
+    except ValueError as exc:
+        # A resolver or policy ValueError (an invalid mode, a knob looser
+        # than its floor, a non-finite env override) can embed the raw
+        # value it rejected — never let str(exc) reach stderr. The clean,
+        # value-free message plus a validation exit code is this
+        # command's whole response; the failure event records the type.
+        emit_candidate_auto_promote_failure_event(
+            event_log, error=exc, configured_mode=configured_mode
+        )
+        console.print(
+            "[red]invalid candidate auto-promote configuration "
+            f"({escape(type(exc).__name__)})[/red]",
+            soft_wrap=True,
+        )
+        raise typer.Exit(code=EXIT_VALIDATION) from exc
     except Exception as exc:
         emit_candidate_auto_promote_failure_event(
             event_log, error=exc, configured_mode=configured_mode
@@ -984,7 +1000,7 @@ def auto_promote_candidates(
 
     console.print(
         f"[bold]Auto-Promote Candidates[/bold] — mode={report.mode} "
-        f"(configured={report.configured_mode})"
+        f"(configured={sanitize_configured_mode(report.configured_mode)})"
     )
     console.print(f"  would_promote: {report.would_promote_count}")
     console.print(f"  already_promoted: {report.already_promoted_count}")

@@ -26,6 +26,7 @@ from trellis.mutate.executor import MutationExecutor
 from trellis.stores.base.event_log import EventType
 from trellis.stores.settings_store import SettingsStore
 from trellis_cli import curate as curate_cli
+from trellis_cli.exit_codes import EXIT_VALIDATION
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -1110,6 +1111,83 @@ class TestCurateAutoPromoteCandidates:
         assert len(evaluated_events) == 1
         assert evaluated_events[0].payload["outcome"] == "failed"
         assert evaluated_events[0].payload["error"]["type"] == "ValueError"
+
+    def test_non_finite_env_override_message_is_value_free(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The non-finite env override above is itself a resolver
+        ``ValueError`` whose ``str()`` embeds the raw rejected value —
+        plant a secret-shaped one and assert it reaches neither stdout
+        nor stderr nor the recorded event, in either output format, and
+        that the clean validation exit code is used (not an uncaught
+        traceback's exit 1)."""
+        secret = "SEKRETtb11aa"  # noqa: S105 - synthetic test placeholder, not a credential
+        monkeypatch.setenv("TRELLIS_CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT", secret)
+        for run_number, output_format in enumerate(("json", "text"), start=1):
+            candidates_path = self._write_candidates(tmp_path, [])
+
+            result = runner.invoke(
+                app,
+                [
+                    "curate",
+                    "auto-promote-candidates",
+                    "--candidates",
+                    str(candidates_path),
+                    "--format",
+                    output_format,
+                ],
+            )
+            assert result.exit_code == EXIT_VALIDATION, result.output
+            assert secret not in result.output
+
+            event_log = curate_cli._get_registry().operational.event_log
+            evaluated_events = event_log.get_events(
+                event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+            )
+            assert len(evaluated_events) == run_number
+            latest = evaluated_events[-1]
+            assert latest.payload["outcome"] == "failed"
+            assert latest.payload["error"]["type"] == "ValueError"
+            assert secret not in json.dumps(latest.payload)
+
+    def test_invalid_env_mode_rejected_with_clean_exit_and_value_free_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unrecognized ``TRELLIS_CANDIDATE_AUTO_PROMOTE_MODE`` must be
+        refused at resolve time with a clean, value-free exit — not
+        silently accepted (an invalid env mode plus ``--dry-run`` used to
+        exit 0 with ``outcome: ok``) and not a traceback embedding the
+        raw value."""
+        secret = "SEKRETmode4b2e1d"  # noqa: S105 - synthetic test placeholder, not a credential
+        monkeypatch.setenv("TRELLIS_CANDIDATE_AUTO_PROMOTE_MODE", secret)
+        candidates_path = self._write_candidates(tmp_path, [])
+
+        for run_number, extra_args in enumerate(([], ["--dry-run"]), start=1):
+            result = runner.invoke(
+                app,
+                [
+                    "curate",
+                    "auto-promote-candidates",
+                    "--candidates",
+                    str(candidates_path),
+                    "--format",
+                    "json",
+                    *extra_args,
+                ],
+            )
+            assert result.exit_code == EXIT_VALIDATION, result.output
+            assert secret not in result.output
+
+            event_log = curate_cli._get_registry().operational.event_log
+            evaluated_events = event_log.get_events(
+                event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+            )
+            assert len(evaluated_events) == run_number
+            latest = evaluated_events[-1]
+            assert latest.payload["outcome"] == "failed"
+            assert latest.payload["error"]["type"] == "ValueError"
+            assert latest.payload["configured_mode"] is None
+            assert secret not in json.dumps(latest.payload)
 
 
 class TestCurateHelp:
