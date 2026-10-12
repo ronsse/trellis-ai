@@ -37,7 +37,7 @@ from trellis.core.write_config import (
     resolve_overridden_by,
 )
 from trellis.core.write_provenance import build_write_provenance
-from trellis.errors import BackendNotInstalledError, StoreWriteRefusedError
+from trellis.errors import BackendNotInstalledError, ConfigError, StoreWriteRefusedError
 from trellis.llm.routing import LLMConsumer, LLMRoute, LLMRoutingError
 from trellis.schedule.catalog import JOB_CATALOG
 from trellis.stores.base.event_log import EventLog, EventType
@@ -167,6 +167,20 @@ def init(
     # Set up data directory. Not get_data_dir(): --force replaces a
     # config.yaml without reading it, so an unparseable one can be fixed.
     actual_data_dir = Path(data_dir) if data_dir else get_default_data_dir()
+    # path_is_present (not .exists(), which follows the link and reads a
+    # dangling symlink as absent) catches the case .mkdir(exist_ok=True)
+    # cannot self-heal: something is already at this path and it is not a
+    # directory — a dangling symlink or a stray file. Left unchecked,
+    # os.mkdir raises FileExistsError there (exist_ok only forgives an
+    # existing *directory*), surfacing as a raw traceback instead of a
+    # legible, recoverable error naming the path.
+    if path_is_present(actual_data_dir) and not actual_data_dir.is_dir():
+        msg = (
+            f"--data-dir {actual_data_dir} exists but is not a usable "
+            "directory (a broken symlink or a file is there); remove it "
+            "or point --data-dir elsewhere"
+        )
+        raise ConfigError(msg, setting="data_dir")
     actual_data_dir.mkdir(parents=True, exist_ok=True)
 
     # Create subdirectories for stores

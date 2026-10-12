@@ -982,7 +982,18 @@ class StoreRegistry:
             llm_config = data.get("llm", {})
             classify_config = data.get("classify", {})
             if data.get("data_dir"):
-                data_dir = Path(data["data_dir"])
+                raw_data_dir = data["data_dir"]
+                # yaml.safe_load hands back whatever scalar/collection was
+                # written; ``Path(5)`` or ``Path([1, 2])`` raises a raw,
+                # unhandled ``TypeError`` rather than this module's own
+                # ``ConfigError``, naming neither the key nor the file.
+                if not isinstance(raw_data_dir, str):
+                    msg = (
+                        f"Trellis config at {config_path}: 'data_dir' must be"
+                        f" a string path, not a {type(raw_data_dir).__name__}."
+                    )
+                    raise ConfigError(msg, setting="data_dir")
+                data_dir = Path(raw_data_dir)
 
         stores_dir = data_dir / "stores"
         return cls(
