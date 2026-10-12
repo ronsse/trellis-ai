@@ -87,6 +87,10 @@ All notable changes to Trellis will be documented in this file.
     path already does, raising `ConfigError` and naming the setting
     when one is found; the CLI exits `5` and the rejection is
     recorded. Only the environment variable can still select `commit`.
+    `GET /api/v1/settings` degrades only that setting's family to its
+    defaults, flagged with a parse error, rather than failing the page.
+    `--dry-run` writes nothing, so it still runs report-only over such a
+    stored value.
   - **The demote command carries an `idempotency_key`** derived from
     the precedent id and its evidence window start, so two overlapping
     runs cannot both count a demotion or spend rate-limit cap on the

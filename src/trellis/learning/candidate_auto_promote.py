@@ -377,13 +377,35 @@ def resolve_candidate_auto_promote_overrides(
     ``effective_value`` — both read-side surfaces assume the resolver
     already refused anything that is not an enum member.
 
+    A *stored* ``mode`` in the setting's ``refused_values`` (a
+    ``settings.json`` edited by hand, outside the governed write path) is
+    refused here rather than honoured; commit mode stays reachable only
+    through the environment variable.
+
     Raises:
         ValueError: If the resolved ``mode`` is neither ``"report_only"``
             nor ``"commit"``. The message never includes the offending
             value.
+        ConfigError: If a stored ``mode`` is one of the setting's
+            ``refused_values``.
     """
+    # Lazy: trellis.core.settings_registry imports this module's own
+    # constants at module level, so a module-level import would cycle.
+    from trellis.core.settings_registry import get_setting  # noqa: PLC0415
+
     src_env: Mapping[str, str] = os.environ if env is None else env
     settings_map: Mapping[str, bool | int | float | str] = settings or {}
+
+    mode_from_env = src_env.get(CANDIDATE_AUTO_PROMOTE_MODE_ENV, "").strip()
+    if not mode_from_env and CANDIDATE_AUTO_PROMOTE_MODE_SETTING in settings_map:
+        stored_mode = str(settings_map[CANDIDATE_AUTO_PROMOTE_MODE_SETTING])
+        spec = get_setting(CANDIDATE_AUTO_PROMOTE_MODE_SETTING)
+        if spec is not None and stored_mode in spec.refused_values:
+            msg = spec.refused_reason or (
+                f"{CANDIDATE_AUTO_PROMOTE_MODE_SETTING}={stored_mode!r} "
+                "is not accepted."
+            )
+            raise ConfigError(msg, setting=CANDIDATE_AUTO_PROMOTE_MODE_SETTING)
 
     def resolve_bool(env_name: str, setting_name: str, default: bool) -> bool:
         raw = src_env.get(env_name, "")

@@ -21,6 +21,7 @@ from trellis.learning.candidate_auto_promote import (
 from trellis.learning.precedent_auto_demote import (
     PRECEDENT_AUTO_DEMOTE_ENABLED_SETTING,
     PRECEDENT_AUTO_DEMOTE_MODE_ENV,
+    PRECEDENT_AUTO_DEMOTE_MODE_SETTING,
 )
 from trellis.mutate.commands import (
     Command,
@@ -2258,6 +2259,48 @@ class TestCurateEvaluatePrecedentDemotion:
         node = graph_store.get_node("prec-1")
         assert node is not None
         assert "lifecycle" not in node["properties"]
+
+    def test_dry_run_overrides_a_stored_commit_mode(self) -> None:
+        """A hand-written stored ``mode=commit`` refuses a real run (exit
+        5) and writes nothing; ``--dry-run`` writes nothing anyway, so it
+        still runs report-only, and its event names the stored mode."""
+        stores_dir = Path(os.environ["TRELLIS_DATA_DIR"]) / "stores"
+        store = SettingsStore(stores_dir / "settings.json")
+        store.set(PRECEDENT_AUTO_DEMOTE_ENABLED_SETTING, True)
+        store.set(PRECEDENT_AUTO_DEMOTE_MODE_SETTING, "commit")
+        self._upsert_graph_backed_precedent("prec-1")
+        promoted_at = datetime(2026, 1, 1, tzinfo=UTC)
+        cited_at = promoted_at + timedelta(days=1)
+        self._emit_promote("prec-1", at=promoted_at)
+        for n in range(2):
+            pack_id = f"pack-{n}"
+            self._emit_pack_assembled(pack_id=pack_id, item_ids=["prec-1"], at=cited_at)
+            self._emit_feedback(pack_id=pack_id, at=cited_at, unhelpful=["prec-1"])
+
+        refused = runner.invoke(
+            app, ["curate", "evaluate-precedent-demotion", "--format", "json"]
+        )
+        assert refused.exit_code == 5, refused.output
+
+        result = runner.invoke(
+            app,
+            ["curate", "evaluate-precedent-demotion", "--dry-run", "--format", "json"],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["mode"] == "report_only"
+        assert data["would_demote_count"] == 1
+        assert data["demoted_count"] == 0
+
+        registry = curate_cli._get_registry()
+        node = registry.knowledge.graph_store.get_node("prec-1")
+        assert node is not None
+        assert "lifecycle" not in node["properties"]
+        evaluated = registry.operational.event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_DEMOTE_EVALUATED
+        )
+        assert [e.payload["outcome"] for e in evaluated] == ["refused", "ok"]
+        assert all(e.payload["configured_mode"] == "commit" for e in evaluated)
 
     def test_commit_mode_demotes_a_would_demote_precedent_through_the_executor(
         self, monkeypatch: pytest.MonkeyPatch

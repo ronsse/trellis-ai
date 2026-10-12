@@ -37,6 +37,7 @@ from trellis.core.settings_registry import (
     validate_value,
 )
 from trellis.core.write_config import WriteBehaviourConfig
+from trellis.errors import ConfigError
 from trellis.learning.candidate_auto_promote import (
     resolve_candidate_auto_promote_overrides,
 )
@@ -238,7 +239,9 @@ def _effective_values(
     ):
         try:
             resolved = resolve()
-        except (ValueError, TypeError, OverflowError):
+        except (ValueError, TypeError, OverflowError, ConfigError):
+            # ``ConfigError`` is a stored value the setting refuses
+            # (a hand-edited ``mode: commit``); it degrades the same way.
             # One bad knob in a family must not blank every other
             # setting off the response -- degrade every entry in *this*
             # family to its registry default and record a FIXED,

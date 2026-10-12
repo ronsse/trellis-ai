@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -12,6 +12,7 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
+from trellis.errors import ConfigError
 from trellis.learning import (
     LEARNING_ARTIFACTS_DIR_ENV,
     LEARNING_CANDIDATES_FILENAME,
@@ -20,6 +21,7 @@ from trellis.learning import (
     submit_learning_promotion,
 )
 from trellis.learning.candidate_auto_promote import (
+    CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
     CandidateAutoPromoteMode,
     LearningCandidateAutoPromotePolicy,
     emit_candidate_auto_promote_failure_event,
@@ -29,6 +31,7 @@ from trellis.learning.candidate_auto_promote import (
     sanitize_configured_mode,
 )
 from trellis.learning.precedent_auto_demote import (
+    PRECEDENT_AUTO_DEMOTE_MODE_SETTING,
     PrecedentAutoDemoteMode,
     PrecedentAutoDemotePolicy,
     emit_precedent_auto_demote_failure_event,
@@ -901,9 +904,43 @@ def promote_learning(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_holding_a_refused_mode(
+    resolve: Callable[..., dict[str, bool | int | str]],
+    settings: Mapping[str, bool | int | float | str],
+    mode_setting: str,
+) -> tuple[dict[str, bool | int | str], ConfigError | None]:
+    """Resolve *settings*, holding back a refused stored mode for the caller.
+
+    A stored mode the setting refuses (a hand-edited ``mode: commit``)
+    makes *resolve* raise :class:`~trellis.errors.ConfigError`. That
+    refusal guards a write, and ``--dry-run`` writes nothing, so the
+    caller decides: raise it for a real run, drop it for a dry run. The
+    overrides come back with the stored value as ``mode`` either way, so
+    the run event still names the mode the operator configured.
+    """
+    try:
+        return resolve(settings=settings), None
+    except ConfigError as exc:
+        if exc.setting != mode_setting:
+            raise
+        rest = {k: v for k, v in settings.items() if k != mode_setting}
+        overrides = resolve(settings=rest)
+        overrides["mode"] = str(settings[mode_setting])
+        return overrides, exc
+
+
+def _raise_held_refusal(*refusals: ConfigError | None, dry_run: bool) -> None:
+    """Raise the first held refusal unless this is a ``--dry-run``."""
+    if dry_run:
+        return
+    for refusal in refusals:
+        if refusal is not None:
+            raise refusal
+
+
 def _resolve_candidate_auto_promote_overrides_for_cli(
     stores_dir: Path | None,
-) -> dict[str, bool | int | str]:
+) -> tuple[dict[str, bool | int | str], ConfigError | None]:
     """Load settings and resolve the six candidate-auto-promote knobs.
 
     A settings-store read failure degrades to the defaults alone —
@@ -925,7 +962,11 @@ def _resolve_candidate_auto_promote_overrides_for_cli(
     except Exception:
         logger.warning("candidate_auto_promote_settings_read_failed", exc_info=True)
         settings = {}
-    return resolve_candidate_auto_promote_overrides(settings=settings)
+    return _resolve_holding_a_refused_mode(
+        resolve_candidate_auto_promote_overrides,
+        settings,
+        CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
+    )
 
 
 def _build_candidate_auto_promote_policy(
@@ -1073,13 +1114,14 @@ def auto_promote_candidates(
         if not isinstance(candidates, list):
             candidates = []
 
-        overrides = _resolve_candidate_auto_promote_overrides_for_cli(
+        overrides, refusal = _resolve_candidate_auto_promote_overrides_for_cli(
             registry.stores_dir
         )
         configured_mode = overrides["mode"]  # type: ignore[assignment]
-        demote_overrides = _resolve_precedent_auto_demote_overrides_for_cli(
-            registry.stores_dir
+        demote_overrides, demote_refusal = (
+            _resolve_precedent_auto_demote_overrides_for_cli(registry.stores_dir)
         )
+        _raise_held_refusal(refusal, demote_refusal, dry_run=dry_run)
         policy = _build_candidate_auto_promote_policy(
             overrides,
             force_report_only=dry_run,
@@ -1134,7 +1176,7 @@ def auto_promote_candidates(
 
 def _resolve_precedent_auto_demote_overrides_for_cli(
     stores_dir: Path | None,
-) -> dict[str, bool | int | str]:
+) -> tuple[dict[str, bool | int | str], ConfigError | None]:
     """Load settings and resolve the three precedent-auto-demote knobs.
 
     Mirrors :func:`_resolve_candidate_auto_promote_overrides_for_cli`: a
@@ -1146,7 +1188,11 @@ def _resolve_precedent_auto_demote_overrides_for_cli(
     except Exception:
         logger.warning("precedent_auto_demote_settings_read_failed", exc_info=True)
         settings = {}
-    return resolve_precedent_auto_demote_overrides(settings=settings)
+    return _resolve_holding_a_refused_mode(
+        resolve_precedent_auto_demote_overrides,
+        settings,
+        PRECEDENT_AUTO_DEMOTE_MODE_SETTING,
+    )
 
 
 def _build_precedent_auto_demote_policy(
@@ -1235,10 +1281,11 @@ def evaluate_precedent_demotion(
     graph_store = get_graph_store()
     configured_mode: PrecedentAutoDemoteMode | None = None
     try:
-        overrides = _resolve_precedent_auto_demote_overrides_for_cli(
+        overrides, refusal = _resolve_precedent_auto_demote_overrides_for_cli(
             registry.stores_dir
         )
         configured_mode = overrides["mode"]  # type: ignore[assignment]
+        _raise_held_refusal(refusal, dry_run=dry_run)
         policy = _build_precedent_auto_demote_policy(
             overrides, force_report_only=dry_run
         )

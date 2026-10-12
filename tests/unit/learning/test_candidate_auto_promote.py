@@ -339,6 +339,46 @@ class TestResolveModeValidation:
             )
         assert secret not in str(excinfo.value)
 
+    def test_stored_commit_mode_is_refused_even_hand_written(
+        self, tmp_path: Path
+    ) -> None:
+        """A ``settings.json`` edited by hand, outside the governed write
+        path, must not switch promotion to commit: enabling demotion is an
+        ordinary Settings write, so honouring a stored ``commit`` here
+        would make the environment variable no longer the only way in."""
+        import json
+
+        from trellis.stores.settings_store import load_settings_values
+
+        stores_dir = tmp_path / "stores"
+        stores_dir.mkdir()
+        (stores_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "settings": [
+                        {
+                            "name": CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
+                            "value": "commit",
+                        }
+                    ]
+                }
+            )
+        )
+
+        settings = load_settings_values(stores_dir)
+        assert settings[CANDIDATE_AUTO_PROMOTE_MODE_SETTING] == "commit"
+
+        with pytest.raises(ConfigError) as excinfo:
+            resolve_candidate_auto_promote_overrides(settings=settings, env={})
+        assert excinfo.value.setting == CANDIDATE_AUTO_PROMOTE_MODE_SETTING
+
+    def test_env_commit_mode_still_resolves_over_a_stored_one(self) -> None:
+        resolved = resolve_candidate_auto_promote_overrides(
+            settings={CANDIDATE_AUTO_PROMOTE_MODE_SETTING: "commit"},
+            env={CANDIDATE_AUTO_PROMOTE_MODE_ENV: "commit"},
+        )
+        assert resolved["mode"] == "commit"
+
 
 class TestSanitizeConfiguredMode:
     """``sanitize_configured_mode`` is the single point every event
