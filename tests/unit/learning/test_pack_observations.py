@@ -874,6 +874,7 @@ class TestRealPackBuilderAttribution:
             payloads["entity_payload"],
             payloads["edge_payloads"],
             requested_by="test:promote-learning",
+            graph_store=registry.knowledge.graph_store,
         )
         assert outcome["status"] == "promoted"
 

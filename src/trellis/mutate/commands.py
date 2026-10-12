@@ -25,6 +25,7 @@ class Operation(StrEnum):
     # Curate
     PRECEDENT_PROMOTE = "precedent.promote"
     PRECEDENT_DEMOTE = "precedent.demote"
+    PRECEDENT_REINSTATE = "precedent.reinstate"
     ENTITY_CREATE = "entity.create"
     ENTITY_UPDATE = "entity.update"
     ENTITY_MERGE = "entity.merge"
@@ -163,6 +164,10 @@ class OperationRegistry:
         # verbatim into ``Lifecycle.deprecation_reason``, the same
         # discipline ``redaction.apply`` uses for its own ``reason``.
         self._schemas[Operation.PRECEDENT_DEMOTE] = {"target_id", "reason"}
+        # The reversal verb: ``target_id`` names the precedent entity,
+        # ``reason`` is written verbatim into the audit trail, same shape
+        # as ``precedent.demote``'s own schema.
+        self._schemas[Operation.PRECEDENT_REINSTATE] = {"target_id", "reason"}
         self._schemas[Operation.ENTITY_CREATE] = {"entity_type", "name"}
         self._schemas[Operation.ENTITY_UPDATE] = {"entity_id"}
         self._schemas[Operation.ENTITY_MERGE] = {"source_id", "target_id"}

@@ -562,6 +562,95 @@ class TestRestore:
         assert exc.value.code == "retention_restore_ids_required"
 
 
+class TestRestorePrecedentHistory:
+    """Prune-then-restore is not a second, unaudited way to undo a demotion.
+
+    A precedent that was demoted and then archived (``retention.prune``)
+    must come back **demoted** when restored, not ``current`` --
+    ``RetentionRestoreHandler`` reads the pre-archival state from the
+    node's SCD-2 history via ``_pre_archival_lifecycle`` rather than
+    assuming ``"current"``. When that history cannot answer the question
+    (fewer than two versions on record), restore refuses rather than
+    guesses.
+    """
+
+    def _node(self, registry: StoreRegistry, properties: dict[str, Any]) -> str:
+        return registry.knowledge.graph_store.upsert_node(
+            node_id=None, node_type="precedent", properties=properties
+        )
+
+    def test_restore_returns_a_demoted_precedent_to_demoted(
+        self, registry: StoreRegistry
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        precedent_id = self._node(registry, {"name": "Pooling pattern"})
+        executor = build_curate_executor(registry)
+
+        demote_result = executor.execute(
+            Command(
+                operation=Operation.PRECEDENT_DEMOTE,
+                args={"target_id": precedent_id, "reason": "superseded"},
+                target_id=precedent_id,
+                target_type="precedent",
+                requested_by="cli:demote-precedent",
+            )
+        )
+        assert demote_result.status == CommandStatus.SUCCESS
+
+        prune_result = executor.execute(
+            _prune(
+                {"lifecycle_states": ["demoted"], "older_than_days": 0},
+                reason="sweeping demoted precedents",
+                dry_run=False,
+            )
+        )
+        assert prune_result.status == CommandStatus.SUCCESS
+        node = graph.get_node(precedent_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+
+        restore_result = executor.execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": [precedent_id], "reason": "over-pruned"},
+            )
+        )
+        assert restore_result.status == CommandStatus.SUCCESS
+        node = graph.get_node(precedent_id)
+        assert node is not None
+        record = node["properties"][LIFECYCLE_KEY]
+        # Restored to the state the precedent held before archival --
+        # "demoted", not "current" -- so the prune/restore round trip
+        # cannot launder the earlier demotion.
+        assert record["state"] == "demoted"
+        assert record["deprecation_reason"] == "superseded"
+
+    def test_restore_refuses_a_precedent_with_insufficient_history(
+        self, registry: StoreRegistry
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        archived = {LIFECYCLE_KEY: {"state": ARCHIVED_STATE}}
+        precedent_id = self._node(registry, {"name": "Minted archived", **archived})
+        executor = build_curate_executor(registry)
+
+        result = executor.execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": [precedent_id], "reason": "corrective"},
+            )
+        )
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "retention_restore_history_unavailable"
+        )
+        # Refused, not guessed: the node is left exactly as it was.
+        node = graph.get_node(precedent_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+
+
 class TestNodePurgedMidCommand:
     """A purge that commits between a node's read and its rewrite stands.
 

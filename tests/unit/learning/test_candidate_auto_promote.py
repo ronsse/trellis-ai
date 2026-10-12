@@ -548,6 +548,22 @@ class TestRunCandidateAutoPromotionReportOnly:
                 executor=None,
             )
 
+    def test_commit_mode_without_graph_store_raises(self, event_log: EventLog) -> None:
+        """Same bypass as ``test_commit_mode_without_executor_raises``, this
+        time with an ``executor`` supplied so the first guard passes and
+        the ``graph_store`` guard is the one that fires — proving the two
+        checks are independent rather than one standing in for the other."""
+        policy = _force_commit_policy(enabled=True)
+        executor = MagicMock(spec=MutationExecutor)
+        with pytest.raises(ValueError, match="no graph_store"):
+            run_candidate_auto_promotion(
+                candidates=[_candidate()],
+                policy=policy,
+                event_log=event_log,
+                executor=executor,
+                graph_store=None,
+            )
+
     def test_exactly_one_event_emitted_with_correct_counts_and_snapshot(
         self, event_log: EventLog
     ) -> None:
@@ -671,6 +687,7 @@ class TestRunCandidateAutoPromotionCommit:
                 policy=policy,
                 event_log=registry.operational.event_log,
                 executor=executor,
+                graph_store=registry.knowledge.graph_store,
             )
 
             assert report.mode == "commit"
@@ -706,6 +723,7 @@ class TestRunCandidateAutoPromotionCommit:
                 policy=policy,
                 event_log=registry.operational.event_log,
                 executor=executor,
+                graph_store=registry.knowledge.graph_store,
                 requested_by=custom_requested_by,
             )
 
@@ -734,6 +752,7 @@ class TestRunCandidateAutoPromotionCommit:
                 policy=policy,
                 event_log=registry.operational.event_log,
                 executor=executor,
+                graph_store=registry.knowledge.graph_store,
             )
 
             dispositions = [o.disposition for o in report.outcomes]
@@ -763,6 +782,7 @@ class TestRunCandidateAutoPromotionCommit:
                 policy=policy,
                 event_log=registry.operational.event_log,
                 executor=executor,
+                graph_store=registry.knowledge.graph_store,
             )
 
             report = run_candidate_auto_promotion(
@@ -770,6 +790,7 @@ class TestRunCandidateAutoPromotionCommit:
                 policy=policy,
                 event_log=registry.operational.event_log,
                 executor=executor,
+                graph_store=registry.knowledge.graph_store,
             )
 
             dispositions = {o.candidate_id: o.disposition for o in report.outcomes}

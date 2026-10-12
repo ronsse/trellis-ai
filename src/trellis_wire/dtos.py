@@ -240,6 +240,22 @@ class PrecedentDemoteRequest(WireRequestModel):
     requested_by: str = "api:demote-precedent"
 
 
+class PrecedentReinstateRequest(WireRequestModel):
+    """Request to reinstate a demoted precedent. ``target_id`` rides the
+    URL path.
+
+    No ``already_demoted``-shaped response field exists for this verb: a
+    target that is not currently ``"demoted"`` is a hard rejection (400),
+    never a 200 idempotent no-op the way re-demoting an already-demoted
+    precedent is — so the response is a plain ``CommandResponse``
+    (``trellis_api.routes._results.command_response``), not a dedicated
+    DTO the way :class:`PrecedentDemoteResponse` is.
+    """
+
+    reason: str
+    requested_by: str = "api:reinstate-precedent"
+
+
 class LinkRequest(WireRequestModel):
     """Request to create a graph edge.
 

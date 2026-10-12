@@ -33,12 +33,14 @@ from trellis.learning.evidence_gate import (
     CitationEvidence,
     screen_noise_candidates,
 )
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.schemas.parameters import ParameterScope
 
 if TYPE_CHECKING:
     from trellis.mutate import MutationExecutor
     from trellis.ops.registry import ParameterRegistry
     from trellis.stores.base.document import DocumentStore
+    from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
 
@@ -853,12 +855,34 @@ def build_learning_promotion_payloads(
     }
 
 
+def _precedent_lifecycle_state(node: Mapping[str, Any]) -> str:
+    """Read a graph node's ``Lifecycle.state``, fail-open to "current".
+
+    Mirrors ``trellis.mutate.handlers._current_lifecycle_state``'s own
+    fail-open convention without importing that module's private helper
+    across a package boundary: absent or malformed ``properties.lifecycle``
+    is not evidence of demotion, so it reads as "current" rather than
+    refusing.
+    """
+    from trellis.mutate.retention import CURRENT_STATE  # noqa: PLC0415
+
+    properties = node.get("properties")
+    if not isinstance(properties, Mapping):
+        return CURRENT_STATE
+    record = properties.get(LIFECYCLE_KEY)
+    if not isinstance(record, Mapping):
+        return CURRENT_STATE
+    state = record.get("state")
+    return state if isinstance(state, str) and state else CURRENT_STATE
+
+
 def submit_learning_promotion(
     executor: MutationExecutor,
     entity_payload: Mapping[str, Any],
     edge_payloads: Sequence[Mapping[str, Any]],
     *,
     requested_by: str,
+    graph_store: GraphStore,
 ) -> dict[str, Any]:
     """Submit one approved promotion through the governed pipeline.
 
@@ -873,6 +897,18 @@ def submit_learning_promotion(
     ``entity_id`` and a non-empty ``properties`` dict on both — this
     function trusts that contract rather than re-guarding.
 
+    **A demoted precedent refuses re-approval.** ``ENTITY_CREATE`` replaces
+    the whole ``properties`` dict, including ``lifecycle`` — so re-approving
+    a learning candidate whose target entity was already promoted and then
+    demoted would silently erase the demotion and read the node back as
+    current, with no reason recorded and no event naming what happened.
+    ``graph_store`` exists so this function can check that *before* issuing
+    the write, rather than after: when the target entity already exists and
+    is currently demoted, the whole submission (entity, edges, promote
+    event) is refused and ``precedent.reinstate`` is named as the way back.
+    This is neither the silent overwrite nor a silent no-op — it is a
+    distinct ``"refused_demoted"`` status with a message an operator reads.
+
     After the entity + edges land, a governed ``PRECEDENT_PROMOTE`` is
     submitted so the promotion emits a ``PRECEDENT_PROMOTED`` event and
     becomes visible to ``get_lessons`` / ``list_precedents``. Without it
@@ -880,6 +916,24 @@ def submit_learning_promotion(
     which only queries ``PRECEDENT_PROMOTED`` events — never surfaces it.
     """
     from trellis.mutate import Command, CommandStatus, Operation  # noqa: PLC0415
+
+    target_entity_id = entity_payload["entity_id"]
+    existing_node = graph_store.get_node(target_entity_id)
+    if (
+        existing_node is not None
+        and existing_node.get("node_type") == "precedent"
+        and _precedent_lifecycle_state(existing_node) == "demoted"
+    ):
+        return {
+            "status": "refused_demoted",
+            "entity_id": target_entity_id,
+            "message": (
+                f"{target_entity_id} was demoted and will not be silently "
+                "re-approved by promoting its learning candidate again; "
+                "reinstate it first with precedent.reinstate, which "
+                "records a reason, or leave it demoted"
+            ),
+        }
 
     entity_cmd = Command(
         operation=Operation.ENTITY_CREATE,

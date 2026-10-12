@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from tests.chunk_corpus import seed_chunk_favouring, seed_chunked
 from tests.cli_output import assert_coloured, force_colour, plain
+from trellis.stores.base.event_log import EventType
 from trellis_cli.exit_codes import EXIT_VALIDATION
 from trellis_cli.main import app
 
@@ -1249,6 +1250,69 @@ class TestRetrievePrecedents:
         data = json.loads(result.stdout.strip())
         assert data["status"] == "ok"
         assert data["count"] == 0
+
+    def test_demoted_precedent_excluded_and_reinstated_is_included_again(
+        self,
+    ) -> None:
+        """End-to-end reader-completeness across the CLI's own write and
+        read surfaces: a precedent demoted via ``curate demote-precedent``
+        drops out of ``retrieve precedents``, and reinstating it via
+        ``curate reinstate-precedent`` -- the reversal verb demotion
+        shipped without -- brings it back, exactly PR #872's
+        reader-completeness property carried to the new verb.
+        """
+        from trellis_cli.stores import get_event_log, get_graph_store
+
+        create = runner.invoke(
+            app,
+            ["curate", "entity", "precedent", "Pooling pattern", "--format", "json"],
+        )
+        node_id = json.loads(create.stdout.strip())["node_id"]
+        get_event_log().emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id=node_id,
+            payload={"title": "Pooling pattern"},
+        )
+        assert get_graph_store() is not None  # sanity: same process stores
+
+        demote = runner.invoke(
+            app,
+            [
+                "curate",
+                "demote-precedent",
+                node_id,
+                "--reason",
+                "superseded",
+                "--format",
+                "json",
+            ],
+        )
+        assert demote.exit_code == 0, demote.output
+
+        excluded = runner.invoke(app, ["retrieve", "precedents", "--format", "json"])
+        excluded_data = json.loads(excluded.stdout.strip())
+        assert not any(p.get("entity_id") == node_id for p in excluded_data["items"])
+
+        reinstate = runner.invoke(
+            app,
+            [
+                "curate",
+                "reinstate-precedent",
+                node_id,
+                "--reason",
+                "demotion was a mistake",
+                "--format",
+                "json",
+            ],
+        )
+        assert reinstate.exit_code == 0, reinstate.output
+
+        included = runner.invoke(app, ["retrieve", "precedents", "--format", "json"])
+        included_data = json.loads(included.stdout.strip())
+        assert any(p.get("entity_id") == node_id for p in included_data["items"]), (
+            included_data
+        )
 
 
 class TestRetrieveFileContext:

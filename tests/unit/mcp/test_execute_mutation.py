@@ -243,6 +243,147 @@ class TestPrecedentDemoteIsMcpReachable:
         assert payload["status"] == "rejected"
         assert "Node not found: ghost" in payload["message"]
 
+    def test_mutation_executed_event_carries_the_target_as_entity_id(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The literal bug this guards against: an MCP ``execute_mutation``
+        call used to reach the executor with ``Command.target_id`` unset,
+        so the audited ``MUTATION_EXECUTED`` event's ``entity_id`` came
+        back ``None`` -- an audit trail that cannot say which precedent a
+        demotion touched.
+
+        ``_resolve_execute_mutation_target`` fixes this by deriving
+        ``target_id`` from ``args["target_id"]`` before the command is
+        built. Defective subject: reverting that derivation (passing
+        ``target_id=None`` through to the ``Command``) makes this
+        assertion fail with ``entity_id is None``, the exact symptom
+        reported.
+        """
+        graph = temp_registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None, node_type="precedent", properties={"name": "Pooling pattern"}
+        )
+
+        raw = execute_mutation(
+            operation="precedent.demote",
+            args={"target_id": node_id, "reason": "superseded"},
+        )
+        payload = json.loads(raw)
+        assert payload["status"] == "success"
+
+        events = [
+            e
+            for e in temp_registry.operational.event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED
+            )
+            if e.payload.get("operation") == "precedent.demote"
+        ]
+        assert len(events) == 1
+        assert events[0].entity_id == node_id
+
+
+class TestPrecedentReinstateIsMcpReachable:
+    """``precedent.reinstate`` needs no MCP-specific wiring either -- same
+    genericity as :class:`TestPrecedentDemoteIsMcpReachable` above, which
+    these tests mirror.
+    """
+
+    def _demoted_precedent(self, temp_registry: StoreRegistry) -> str:
+        graph = temp_registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None, node_type="precedent", properties={"name": "Pooling pattern"}
+        )
+        raw = execute_mutation(
+            operation="precedent.demote",
+            args={"target_id": node_id, "reason": "superseded"},
+        )
+        assert json.loads(raw)["status"] == "success"
+        return node_id
+
+    def test_reinstates_a_demoted_precedent(self, temp_registry: StoreRegistry) -> None:
+        node_id = self._demoted_precedent(temp_registry)
+
+        raw = execute_mutation(
+            operation="precedent.reinstate",
+            args={"target_id": node_id, "reason": "demotion was a mistake"},
+        )
+        payload = json.loads(raw)
+
+        assert payload["status"] == "success"
+        assert payload["operation"] == "precedent.reinstate"
+        assert payload["created_id"] == node_id
+        graph = temp_registry.knowledge.graph_store
+        node = graph.get_node(node_id)
+        assert node["properties"]["lifecycle"]["state"] == "current"
+
+    def test_refuses_a_non_demoted_target(self, temp_registry: StoreRegistry) -> None:
+        graph = temp_registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None, node_type="precedent", properties={"name": "Pooling pattern"}
+        )
+
+        raw = execute_mutation(
+            operation="precedent.reinstate",
+            args={"target_id": node_id, "reason": "r"},
+        )
+        payload = json.loads(raw)
+
+        assert payload["status"] == "rejected"
+        assert "not 'demoted'" in payload["message"]
+
+    def test_refuses_the_automatic_requester(self, temp_registry: StoreRegistry) -> None:
+        """Human-only, end to end through MCP: the automatic demotion
+        policy's own identity may not reinstate anything it -- or anyone
+        else -- demoted."""
+        node_id = self._demoted_precedent(temp_registry)
+
+        raw = execute_mutation(
+            operation="precedent.reinstate",
+            args={"target_id": node_id, "reason": "r"},
+            actor="auto:learning_candidate_demote",
+        )
+        payload = json.loads(raw)
+
+        assert payload["status"] == "rejected"
+        assert "human-only" in payload["message"]
+        graph = temp_registry.knowledge.graph_store
+        node = graph.get_node(node_id)
+        assert node["properties"]["lifecycle"]["state"] == "demoted"
+
+    def test_refuses_a_missing_target(self, temp_registry: StoreRegistry) -> None:
+        raw = execute_mutation(
+            operation="precedent.reinstate",
+            args={"target_id": "ghost", "reason": "r"},
+        )
+        payload = json.loads(raw)
+
+        assert payload["status"] == "rejected"
+        assert "Node not found: ghost" in payload["message"]
+
+    def test_mutation_executed_event_carries_the_target_as_entity_id(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Same audit-trail guarantee as demote's own version of this
+        test, for the reversal verb."""
+        node_id = self._demoted_precedent(temp_registry)
+
+        raw = execute_mutation(
+            operation="precedent.reinstate",
+            args={"target_id": node_id, "reason": "demotion was a mistake"},
+        )
+        payload = json.loads(raw)
+        assert payload["status"] == "success"
+
+        events = [
+            e
+            for e in temp_registry.operational.event_log.get_events(
+                event_type=EventType.MUTATION_EXECUTED
+            )
+            if e.payload.get("operation") == "precedent.reinstate"
+        ]
+        assert len(events) == 1
+        assert events[0].entity_id == node_id
+
 
 # ---------------------------------------------------------------------------
 # Error paths

@@ -1442,6 +1442,7 @@ def promote_learning_candidates(
             entry["entity_payload"],
             entry["edge_payloads"],
             requested_by="api:review.promote-learning",
+            graph_store=registry.knowledge.graph_store,
         )
         if outcome["status"] == "promoted":
             promoted_count += 1

@@ -1349,13 +1349,21 @@ JSON).
 Demote a precedent, stamping its graph node `Lifecycle.state="demoted"`
 through the governed pipeline. An SCD-2 rewrite, not a purge — contrast
 `redact` above — so the pre-demotion version stays readable via
-`get_node_history` / `as_of`. There is no dedicated reversal verb yet,
-though: an operator undoes a demotion with `entity.update` to set
-`Lifecycle.state` back to `"current"`, and the demoted version remains in
-history either way. Once demoted, the precedent stops reaching
-`GET /precedents`, `trellis retrieve precedents` and `get_lessons`, and is
-withheld from packs at the collect seam — `rejected_items` records it with
-reason `"demoted"`, and the pack's withholding statement names it.
+`get_node_history` / `as_of`. The reversal verb is
+`trellis curate reinstate-precedent` (below), **not** `entity.update`:
+`EntityUpdateHandler` refuses a write to `properties.lifecycle` on a
+precedent node, naming `precedent.demote`/`precedent.reinstate` as the
+way to change it, so a demotion can no longer be undone silently with no
+reason recorded and no vector re-sync. Once demoted, the precedent stops
+reaching `GET /precedents`, `trellis retrieve precedents` and
+`get_lessons`, is withheld from packs at the collect seam —
+`rejected_items` records it with reason `"demoted"`, and the pack's
+withholding statement names it — and its vector row is re-synced in the
+same call so a semantic hit stops carrying the pre-demotion snapshot.
+Re-approving the demoted precedent's learning candidate from the Review
+tab or the CLI is refused too, naming `reinstate-precedent` as the way
+back, rather than silently rewriting the node back to `"current"` — see
+`trellis.learning.scoring.submit_learning_promotion`.
 
 Only a precedent promoted from a learning candidate has a graph node and
 can be demoted. A trace- or miner-sourced precedent id — one with a
@@ -1418,6 +1426,67 @@ trellis curate demote-precedent 01JRK5N7QF --reason "superseded by a broader pat
 Also reachable via `POST /precedents/{target_id}/demote` (`{"reason": ...,
 "requested_by"?}`, see REST Endpoints below) and MCP `execute_mutation`
 (`operation="precedent.demote"`, `args={"target_id", "reason"}`).
+
+### `trellis curate reinstate-precedent`
+
+Reinstate a demoted precedent, stamping its graph node back to
+`Lifecycle.state="current"` through the governed pipeline — the reversal
+verb `demote-precedent` shipped without. An SCD-2 rewrite in the other
+direction, so the demoted version stays readable via `get_node_history` /
+`as_of` too. Only a precedent whose current state is `"demoted"` may be
+reinstated: a target that is `"current"`, `"archived"`, not found, or not
+graph-backed is refused legibly, naming its actual state rather than
+quietly no-opping or re-demoting. The precedent's vector row is re-synced
+in the same call, so a semantic hit stops carrying the demoted snapshot
+and the pack collect seam serves the item again. Human-only: a caller
+whose `--by` identity is the automatic demotion policy's own identity
+(the same automatic-requester string `demote-precedent` recognizes) is
+refused outright, since the automatic path has no legitimate reason to
+reverse a demotion.
+
+After a successful reinstate every reader serves the precedent again:
+`get_lessons`, `GET /precedents`, `GET /precedents/domains`,
+`trellis retrieve precedents`, and a flat pack at the collect seam.
+
+Exit codes follow the `exit_codes` map: `2` (rejected — e.g. blank/
+over-long reason, a missing target, a non-precedent target, a
+non-graph-backed precedent id, a non-`"demoted"` lifecycle state, or the
+automatic-requester identity), `5` (failed), `0` success.
+
+```bash
+trellis curate reinstate-precedent <target_id> --reason <text> [--by <caller>] [--format text|json]
+```
+
+| Argument/Option | Required | Default | Description |
+|-----------------|----------|---------|-------------|
+| `target_id` | **Yes** | -- | Precedent entity ID to reinstate |
+| `--reason` | **Yes** | -- | Audit-trail justification (non-empty, ≤2000 chars, keep it content-free) |
+| `--by` | No | `cli:reinstate-precedent` | Audit-trail identifier for the caller |
+| `--format` | No | `text` | Output format |
+
+**Example:**
+
+```bash
+trellis curate reinstate-precedent 01JRK5N7QF --reason "demotion was a mistake" --format json
+```
+
+**JSON output (success):**
+
+```json
+{
+  "status": "success",
+  "command_id": "01JRK9C1QF8GHTM2XVZP3CWD9E",
+  "operation": "precedent.reinstate",
+  "message": "Precedent reinstated: 01JRK5N7QF",
+  "created_id": "01JRK5N7QF",
+  "warnings": []
+}
+```
+
+Also reachable via `POST /precedents/{target_id}/reinstate` (`{"reason":
+..., "requested_by"?}`, see REST Endpoints below) and MCP
+`execute_mutation` (`operation="precedent.reinstate"`,
+`args={"target_id", "reason"}`).
 
 ### `trellis curate feedback`
 
@@ -2247,7 +2316,7 @@ The stamp's first deterministic producer is an explicit declaration by the agent
 
 Undoing a stamp:
 
-- **Entity:** `execute_mutation("entity.update", {"entity_id": N, "properties": {"lifecycle": {"state": "current"}}})` — the same operation and top-level property merge as the stamp. It leaves `lifecycle` set to `current` rather than removing the key, which the gate reads exactly as an unstamped node.
+- **Entity:** `execute_mutation("entity.update", {"entity_id": N, "properties": {"lifecycle": {"state": "current"}}})` — the same operation and top-level property merge as the stamp. It leaves `lifecycle` set to `current` rather than removing the key, which the gate reads exactly as an unstamped node. **Not for a precedent node**: `entity.update` refuses any write to `properties.lifecycle` where the current node type is `"precedent"`, naming `precedent.demote`/`precedent.reinstate` as the way to change it instead — those are the only path for a precedent, supersession stamp or not.
 - **Document (operator-only):** read the metadata bag with `GET /api/v1/documents/{doc_id}`, set its `lifecycle` to `{"state": "current"}`, and submit `execute_mutation("evidence.ingest", {"evidence": {"doc_id": …, "content": <unchanged>, "metadata": <bag>, "preserve_updated_at": true}}, idempotency_key=<fresh>)`, adding `"uri": <the bag's uri>` when the content is empty (the handler refuses empty content without one). `execute_mutation` runs the default `soft` executor, so with `TRELLIS_ENABLE_EMBED_ON_INGEST=1` this re-embeds the document and restamps its vector row's `created_at`. There is no restore tool.
 
 ---
@@ -2309,7 +2378,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `entity.create` | `entity_type`, `name` | Create a new entity |
-| `entity.update` | `entity_id` | Update entity properties. An `entity_id` that names no node, including one redacted while the command runs, is rejected (`target_not_found`). |
+| `entity.update` | `entity_id` | Update entity properties. An `entity_id` that names no node, including one redacted while the command runs, is rejected (`target_not_found`). A write to `properties.lifecycle` where the node's current type is `"precedent"` is refused -- use `precedent.demote`/`precedent.reinstate` instead. |
 | `entity.merge` | `source_id`, `target_id` | Merge two entities |
 
 **Example -- create entity:**
@@ -2334,6 +2403,7 @@ result = executor.execute(cmd)
 |-----------|---------------|-------------|
 | `precedent.promote` | `trace_id`, `title`, `description` | Promote a trace to a precedent (also available via CLI) |
 | `precedent.demote` | `target_id`, `reason` | Demote a precedent (also available via CLI and REST) |
+| `precedent.reinstate` | `target_id`, `reason` | Reinstate a demoted precedent, human-only (also available via CLI and REST) |
 
 ### Link Operations
 
@@ -2361,7 +2431,7 @@ result = executor.execute(cmd)
 |-----------|---------------|-------------|
 | `redaction.apply` | `target_id`, `reason` | Hard-purge a graph entity: all SCD-2 versions, its edges, aliases, and vector entry. Emits `REDACTION_APPLIED` (counts + id pointers, never content). Also available via `trellis curate redact`. |
 | `retention.prune` | `criteria`, `reason` | Archive low-value derived items. **Phase one is archival, not deletion**: candidates are stamped `Lifecycle.state="archived"` and retrieval stops serving them; content stays in the store, so a wrong prune is walked back by re-stamping. **`dry_run` defaults to `true`** — a run writes nothing unless it is passed `false` (CLI: `--apply`). `criteria` selects `noise_documents` / `unconfirmed_mints` / `lifecycle_states`, with `older_than_days` gating the age-based two only. `lifecycle_states` accepts the whole vocabulary but phase one **cannot select `archived` or `current`** — the first is already archived, the second is an explicit assertion that the item belongs in service — so naming either returns zero by construction. Those states are reported back on `unselectable_lifecycle_states` (in the `RETENTION_PRUNED` payload and the operator message) and skip the scan entirely, so an inert criterion never reads as an empty corpus ([#419](https://github.com/ronsse/trellis-ai/issues/419)). Traces and event-log rows are never candidates (the resolver cannot reach them); confirmed entities are never candidates at any age. A candidate that vanishes before it is written, including a node redacted while the run is in progress, is counted in `skipped`, not re-created. Emits `RETENTION_PRUNED` in both modes, and also when an applied run fails part-way, counting what it archived before the failure. See [`adr-retention-prune.md`](../design/adr-retention-prune.md) §6. |
-| `retention.restore` | `item_ids`, `reason` | Return archived items to `Lifecycle.state="current"`. The governed inverse of `retention.prune`, and what makes phase-one archival's reversibility real — direct store writes are forbidden and there is no governed document-update verb. Takes **explicit ids** (they ride the `RETENTION_PRUNED` payload), not criteria: re-deriving the set would re-run the selection that was wrong. Ids that are not archived or name no item, including a node redacted while the command runs, are skipped (`skipped_ids`), not errors. Emits `RETENTION_RESTORED`, also when the command fails part-way, listing what it restored before the failure. |
+| `retention.restore` | `item_ids`, `reason` | Return archived items to `Lifecycle.state="current"`. The governed inverse of `retention.prune`, and what makes phase-one archival's reversibility real — direct store writes are forbidden and there is no governed document-update verb. Takes **explicit ids** (they ride the `RETENTION_PRUNED` payload), not criteria: re-deriving the set would re-run the selection that was wrong. Ids that are not archived or name no item, including a node redacted while the command runs, are skipped (`skipped_ids`), not errors. Emits `RETENTION_RESTORED`, also when the command fails part-way, listing what it restored before the failure. A precedent is **not** unconditionally restored to `"current"`: it comes back to whatever lifecycle state it held immediately before that archival, read from SCD-2 history, so a precedent that was demoted and then pruned comes back demoted — prune-then-restore is not a second, unaudited way to undo a demotion. Refuses (does not guess `"current"`) when that pre-archival state cannot be read from history. |
 
 ### Batch Execution
 
@@ -2988,7 +3058,8 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | Method | Endpoint | Body | Description |
 |--------|----------|------|-------------|
 | POST | `/precedents` | `{trace_id, title, description}` | Promote trace |
-| POST | `/precedents/{target_id}/demote` | `{reason, requested_by?}` | Demote precedent (SCD-2 rewrite, not a purge; no dedicated reversal verb yet -- see `trellis curate demote-precedent` above) |
+| POST | `/precedents/{target_id}/demote` | `{reason, requested_by?}` | Demote precedent (SCD-2 rewrite, not a purge; reversal is `/precedents/{target_id}/reinstate` below -- see `trellis curate demote-precedent` above) |
+| POST | `/precedents/{target_id}/reinstate` | `{reason, requested_by?}` | Reinstate a demoted precedent (SCD-2 rewrite back to `"current"`, vector row re-synced; refuses a non-`"demoted"` target or the automatic-requester identity -- see `trellis curate reinstate-precedent` above) |
 | POST | `/links` | `{source_id, target_id, edge_kind?}` | Create edge |
 | POST | `/entities` | `{entity_type, name, properties?}` | Create entity |
 | POST | `/feedback` | `{target_id, rating, comment?, pack_id?}` | Record feedback (pass `pack_id` so it joins) |

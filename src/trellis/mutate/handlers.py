@@ -551,10 +551,16 @@ class PrecedentDemoteHandler:
 
     SCD-2: the write closes the current node version and opens a new one
     (:func:`_rewrite_current_node`), so the pre-demotion state stays
-    readable via ``get_node_history`` and ``as_of``. There is no
-    dedicated reversal verb yet, though: an operator undoes a demotion
-    with ``entity.update`` to set ``Lifecycle.state`` back to
-    ``"current"``, and the demoted version remains in history either way.
+    readable via ``get_node_history`` and ``as_of``. The reversal verb is
+    :data:`Operation.PRECEDENT_REINSTATE` (:class:`PrecedentReinstateHandler`)
+    — ``entity.update`` refuses a write to ``properties.lifecycle`` on a
+    precedent node, so it is no longer a way to undo this.
+
+    **Vector sync.** The graph write alone leaves a semantic hit serving
+    the pre-demotion snapshot (a vector row's metadata is an embed-time
+    copy — see :func:`_sync_vector_lifecycle`), so the handler re-stamps
+    the precedent's vector row with the same ``lifecycle`` dict it just
+    wrote to the graph, in the same call.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -662,6 +668,11 @@ class PrecedentDemoteHandler:
             msg = f"Node not found: {target_id}"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
 
+        # Keep the semantic path from continuing to serve the
+        # pre-demotion snapshot: a vector row's metadata is an embed-time
+        # copy, not a read of the graph store (#338-style gap).
+        _sync_vector_lifecycle(self._registry, target_id, lifecycle)
+
         self._registry.operational.event_log.emit(
             EventType.PRECEDENT_DEMOTED,
             source="mutation_executor",
@@ -675,6 +686,120 @@ class PrecedentDemoteHandler:
             },
         )
         return target_id, f"Precedent demoted: {target_id}"
+
+
+class PrecedentReinstateHandler:
+    """Stamp a demoted precedent node back to ``Lifecycle.state="current"``.
+
+    Wires :data:`Operation.PRECEDENT_REINSTATE` — the reversal verb
+    :class:`PrecedentDemoteHandler` shipped without. Modelled closely on
+    that handler: same reason validation
+    (:data:`MAX_DEMOTION_REASON_CHARS`), same not-found/not-graph-backed/
+    not-a-precedent checks, same ``_rewrite_current_node`` SCD-2 write and
+    :func:`_sync_vector_lifecycle` call.
+
+    **Human-only.** Unlike demotion (where the automatic policy may demote
+    only what it itself promoted), reinstatement has no automatic path at
+    all: a caller whose ``Command.requested_by`` equals
+    :data:`AUTO_DEMOTE_REQUESTED_BY` is refused outright, narrowing or not.
+    A policy that can demote only its own promotions reinstating one would
+    be a silent self-reversal loop with no human in it.
+
+    **Only a currently-demoted target may be reinstated.** There is no
+    idempotent-no-op branch here the way ``PrecedentDemoteHandler`` has
+    one for re-demotion: reinstating a target that is already ``current``,
+    ``archived``, ``superseded``, or anything else is refused, legibly
+    naming the actual state — which also covers "reinstating twice"
+    without a special case, since the first reinstate already moved the
+    state to ``current``.
+
+    SCD-2: the write closes the demoted version and opens a fresh
+    ``current`` one, so the demoted version stays readable via
+    ``get_node_history``/``as_of``. The vector row is re-synced in the
+    same call, so a semantic hit stops carrying the demoted snapshot.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        target_id = command.args["target_id"]
+        reason = str(command.args["reason"] or "").strip()
+        if not reason:
+            msg = "precedent.reinstate requires a non-empty reason for the audit trail"
+            raise ValidationError(msg, errors=[msg], code="reinstate_reason_required")
+        if len(reason) > MAX_DEMOTION_REASON_CHARS:
+            msg = (
+                f"precedent.reinstate reason exceeds {MAX_DEMOTION_REASON_CHARS} "
+                "chars; it is written verbatim to the append-only audit log — "
+                "keep it short and content-free"
+            )
+            raise ValidationError(msg, errors=[msg], code="reinstate_reason_too_long")
+
+        if command.requested_by == AUTO_DEMOTE_REQUESTED_BY:
+            msg = (
+                "precedent.reinstate is human-only; the automatic demotion "
+                "policy's identity may not reinstate any precedent"
+            )
+            raise ValidationError(msg, errors=[msg], code="reinstate_requires_human")
+
+        graph = self._registry.knowledge.graph_store
+        event_log = self._registry.operational.event_log
+        node = graph.get_node(target_id)
+        if node is None:
+            if _is_promoted_precedent_event(event_log, target_id):
+                msg = (
+                    f"Precedent {target_id} cannot be reinstated: only promoted "
+                    "learning precedents can be reinstated; this id has no "
+                    "graph node"
+                )
+                raise ValidationError(msg, errors=[msg], code="target_not_graph_backed")
+            msg = f"Node not found: {target_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
+        if node["node_type"] != "precedent":
+            msg = (
+                f"Node {target_id} is not a precedent (node_type={node['node_type']!r})"
+            )
+            raise ValidationError(msg, errors=[msg], code="target_not_precedent")
+
+        current_state = _current_lifecycle_state(node)
+        if current_state != "demoted":
+            msg = (
+                f"Precedent {target_id} cannot be reinstated: its lifecycle "
+                f"state is {current_state!r}, not 'demoted'"
+            )
+            raise ValidationError(msg, errors=[msg], code="target_not_demoted")
+
+        # A fresh Lifecycle for the transition, matching
+        # PrecedentDemoteHandler's own convention rather than reading and
+        # merging the demoted record forward: the demotion's valid_until /
+        # deprecation_reason belong to that transition, not this one.
+        lifecycle = Lifecycle(state=CURRENT_STATE).model_dump(mode="json")
+
+        def reinstate(current: dict[str, Any]) -> dict[str, Any]:
+            props = dict(current["properties"])
+            props[LIFECYCLE_KEY] = lifecycle
+            return {"properties": props}
+
+        if _rewrite_current_node(graph, target_id, reinstate) is None:
+            msg = f"Node not found: {target_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
+
+        _sync_vector_lifecycle(self._registry, target_id, lifecycle)
+
+        self._registry.operational.event_log.emit(
+            EventType.PRECEDENT_REINSTATED,
+            source="mutation_executor",
+            entity_id=target_id,
+            entity_type="precedent",
+            payload={
+                "target_id": target_id,
+                "reason": reason,
+                "command_id": command.command_id,
+                "requested_by": command.requested_by,
+            },
+        )
+        return target_id, f"Precedent reinstated: {target_id}"
 
 
 class LabelAddHandler:
@@ -1854,6 +1979,16 @@ class EntityUpdateHandler:
     Idempotency: a same-payload re-submission still creates a new version
     row (SCD-2 has no same-value short-circuit at this layer); use
     ``Command.idempotency_key`` when at-most-once semantics are required.
+
+    **Precedents are the one exception to the property merge.** A write
+    naming ``properties.lifecycle`` on a node whose current ``node_type``
+    is ``"precedent"`` is refused rather than merged: this used to be the
+    only way to undo a ``precedent.demote`` (silently, with no reason
+    recorded and no vector re-sync), which is exactly the gap
+    :class:`PrecedentReinstateHandler` closes. Every other node's
+    ``lifecycle`` key is an ordinary property this handler merges like any
+    other — the save-surfaces' supersession stamp (``mcp.supersession``)
+    still writes it this way.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -1863,6 +1998,22 @@ class EntityUpdateHandler:
         entity_id = command.args["entity_id"]
         store = self._registry.knowledge.graph_store
         supplied_properties = command.args.get("properties") or {}
+
+        if (
+            isinstance(supplied_properties, dict)
+            and LIFECYCLE_KEY in supplied_properties
+        ):
+            existing_node = store.get_node(entity_id)
+            if existing_node is not None and existing_node["node_type"] == "precedent":
+                msg = (
+                    f"entity.update refuses a write to properties.{LIFECYCLE_KEY} "
+                    f"on precedent {entity_id}: use precedent.demote or "
+                    "precedent.reinstate instead, which keep the audit trail "
+                    "and the vector row in sync"
+                )
+                raise ValidationError(
+                    msg, errors=[msg], code="precedent_lifecycle_via_entity_update"
+                )
 
         def update(existing: dict[str, Any]) -> dict[str, Any]:
             # Partial update: merge caller-supplied properties onto the
@@ -2814,6 +2965,49 @@ class RetentionPruneHandler:
         return _rewrite_current_node(graph, candidate.item_id, archive) is not None
 
 
+def _pre_archival_lifecycle(graph: GraphStore, item_id: str) -> dict[str, Any]:
+    """Return the ``Lifecycle`` dict ``item_id`` held right before its most
+    recent archival, read from SCD-2 history rather than assumed.
+
+    A plain ``Lifecycle(state="current")`` here would restore a precedent
+    that was *demoted*, then pruned, straight back to ``"current"`` --
+    laundering the demotion through a prune/restore round-trip with no
+    trace of it in the new version (the demoted one is still in history,
+    but nothing about the restored version says to look). Walks back past
+    every consecutive archived-state version -- an intervening write that
+    never touches ``lifecycle`` (e.g. ``entity.update``) carries
+    ``"archived"`` forward through the property merge, so more than one
+    version can read as archived -- to the version immediately before the
+    most recent transition into it, and returns that version's whole
+    ``Lifecycle`` record, not just its ``state``, so a demotion's
+    ``deprecation_reason`` and ``valid_until`` come back too.
+
+    Refuses rather than guesses when history cannot answer the question:
+    fewer than two versions on record, or every version on record itself
+    reads as archived (no pre-archival version exists to read).
+    """
+    history = graph.get_node_history(item_id)
+    idx = 0
+    total = len(history)
+    while idx < total and _current_lifecycle_state(history[idx]) == ARCHIVED_STATE:
+        idx += 1
+    if idx >= total:
+        msg = (
+            f"retention.restore cannot determine the lifecycle state "
+            f"{item_id} held before archival: its SCD-2 history has no "
+            "version that is not itself archived"
+        )
+        raise ValidationError(
+            msg, errors=[msg], code="retention_restore_history_unavailable"
+        )
+    record = history[idx]["properties"].get(LIFECYCLE_KEY)
+    if isinstance(record, dict):
+        return dict(record)
+    # Absent/malformed on the pre-archival version itself fails open to
+    # "current", matching _current_lifecycle_state's own convention.
+    return Lifecycle(state=CURRENT_STATE).model_dump(mode="json")
+
+
 class RetentionRestoreHandler:
     """Return archived items to ``Lifecycle.state="current"``.
 
@@ -2833,10 +3027,16 @@ class RetentionRestoreHandler:
     them from criteria would re-run the selection that was wrong the first
     time.
 
-    Restoring sets ``state="current"`` and clears the archival's
-    ``valid_until`` / ``deprecation_reason`` rather than deleting the
-    lifecycle record — the item is current again, and the ``RETENTION_PRUNED``
-    → ``RETENTION_RESTORED`` event pair is the history.
+    Restoring a document sets ``state="current"`` and clears the
+    archival's ``valid_until`` / ``deprecation_reason`` rather than
+    deleting the lifecycle record — the item is current again, and the
+    ``RETENTION_PRUNED`` → ``RETENTION_RESTORED`` event pair is the
+    history. A graph node is restored to whatever state it held
+    immediately *before* that archival instead — read from SCD-2 history
+    via :func:`_pre_archival_lifecycle` rather than assumed to be
+    ``"current"`` — so a precedent that was demoted and then pruned comes
+    back demoted, not reinstated: prune-then-restore is not a second,
+    unaudited way to undo a demotion.
 
     An id that is not archived is counted in ``skipped``, not raised: a
     corrective batch assembled from an audit payload will legitimately name
@@ -2957,7 +3157,18 @@ class RetentionRestoreHandler:
             record = props.get(LIFECYCLE_KEY)
             if not isinstance(record, dict) or record.get("state") != ARCHIVED_STATE:
                 return None
-            props[LIFECYCLE_KEY] = current
+            if node["node_type"] == "precedent":
+                # Not ``current`` unconditionally: read the state the node
+                # held just before this archival (SCD-2 history), so a
+                # precedent that was demoted and then pruned comes back
+                # demoted, not silently reinstated (see
+                # _pre_archival_lifecycle). Scoped to precedents: every
+                # other node type has no "demoted" concept to launder, and
+                # requiring pre-archival history from them would refuse a
+                # restore for a node that was simply minted archived.
+                props[LIFECYCLE_KEY] = _pre_archival_lifecycle(graph, item_id)
+            else:
+                props[LIFECYCLE_KEY] = current
             return {"properties": props}
 
         return _rewrite_current_node(graph, item_id, restore) is not None
@@ -2977,6 +3188,7 @@ def create_curate_handlers(
         Operation.TRACE_INGEST: TraceIngestHandler(registry),
         Operation.PRECEDENT_PROMOTE: PrecedentPromoteHandler(registry),
         Operation.PRECEDENT_DEMOTE: PrecedentDemoteHandler(registry),
+        Operation.PRECEDENT_REINSTATE: PrecedentReinstateHandler(registry),
         Operation.LABEL_ADD: LabelAddHandler(registry),
         Operation.LABEL_REMOVE: LabelRemoveHandler(registry),
         Operation.FEEDBACK_RECORD: FeedbackRecordHandler(registry),

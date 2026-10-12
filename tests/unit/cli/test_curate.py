@@ -23,7 +23,9 @@ from trellis.mutate.commands import (
     Operation,
 )
 from trellis.mutate.executor import MutationExecutor
+from trellis.mutate.handlers import AUTO_DEMOTE_REQUESTED_BY
 from trellis.stores.base.event_log import EventType
+from trellis.stores.base.graph import GraphStore
 from trellis.stores.settings_store import SettingsStore
 from trellis_cli import curate as curate_cli
 from trellis_cli.exit_codes import EXIT_VALIDATION
@@ -571,6 +573,184 @@ class TestCurateDemotePrecedent:
         assert events[0].payload["requested_by"] == "cli:demote-precedent"
 
 
+class TestCurateReinstatePrecedent:
+    def _create_precedent(self) -> str:
+        r = runner.invoke(
+            app,
+            ["curate", "entity", "precedent", "Pooling pattern", "--format", "json"],
+        )
+        node_id: str = json.loads(r.stdout.strip())["node_id"]
+        return node_id
+
+    def _demote(self, node_id: str, *, requested_by: str = "cli:demote-precedent") -> None:
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "demote-precedent",
+                node_id,
+                "--reason",
+                "superseded",
+                "--by",
+                requested_by,
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_reinstate_stamps_the_precedent(self) -> None:
+        node_id = self._create_precedent()
+        self._demote(node_id)
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "reinstate-precedent",
+                node_id,
+                "--reason",
+                "demotion was a mistake",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "success"
+        assert data["operation"] == "precedent.reinstate"
+        assert data["created_id"] == node_id
+        assert data["command_id"]
+
+        graph = curate_cli._get_registry().knowledge.graph_store
+        node = graph.get_node(node_id)
+        assert node is not None
+        assert node["properties"]["lifecycle"]["state"] == "current"
+
+    def test_reinstate_non_demoted_target_is_refused(self) -> None:
+        """A freshly-created precedent is ``"current"``, not ``"demoted"``;
+        reinstating it must be refused rather than silently accepted, since
+        there is no demotion to reverse."""
+        node_id = self._create_precedent()
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "reinstate-precedent",
+                node_id,
+                "--reason",
+                "r",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+        assert "not 'demoted'" in data["message"]
+
+    def test_reinstate_missing_target_json(self) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "reinstate-precedent",
+                "ghost",
+                "--reason",
+                "r",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+        assert "Node not found: ghost" in data["message"]
+
+    def test_reinstate_blank_reason_rejected(self) -> None:
+        node_id = self._create_precedent()
+        self._demote(node_id)
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "reinstate-precedent",
+                node_id,
+                "--reason",
+                "  ",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == EXIT_VALIDATION
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+
+    def test_reinstate_automatic_requester_is_refused(self) -> None:
+        """Reinstatement has no automatic path at all: the automatic
+        demotion policy's own identity must be refused outright, narrowing
+        or not -- unlike demotion, which the policy may perform on what it
+        itself promoted."""
+        node_id = self._create_precedent()
+        self._demote(node_id)
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "reinstate-precedent",
+                node_id,
+                "--reason",
+                "r",
+                "--by",
+                AUTO_DEMOTE_REQUESTED_BY,
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+        assert "human-only" in data["message"]
+
+        graph = curate_cli._get_registry().knowledge.graph_store
+        node = graph.get_node(node_id)
+        assert node is not None
+        # Refused, not quietly no-op'd: the precedent is still demoted.
+        assert node["properties"]["lifecycle"]["state"] == "demoted"
+
+    def test_reinstate_default_requested_by_is_cli(self) -> None:
+        """A human-run CLI invocation must carry a non-automatic
+        ``requested_by``, matching ``demote-precedent``'s own guarantee."""
+        node_id = self._create_precedent()
+        self._demote(node_id)
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "reinstate-precedent",
+                node_id,
+                "--reason",
+                "r",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        events = [
+            e
+            for e in curate_cli._get_registry().operational.event_log.get_events(
+                event_type=EventType.PRECEDENT_REINSTATED
+            )
+            if e.payload.get("target_id") == node_id
+        ]
+        assert len(events) == 1
+        assert events[0].payload["requested_by"] == "cli:reinstate-precedent"
+
+
 class TestCurateFeedback:
     def test_feedback(self) -> None:
         result = runner.invoke(app, ["curate", "feedback", "trace_1", "0.9"])
@@ -843,6 +1023,15 @@ class TestSubmitPromotion:
             "properties": {"source_of_truth": "reviewed_promotion"},
         }
 
+    @staticmethod
+    def _graph_store_with_no_existing_node() -> MagicMock:
+        """A fresh first-time promotion: nothing by this entity_id exists
+        yet, so the demoted-precedent refusal check in
+        ``submit_learning_promotion`` must not fire."""
+        store = MagicMock(spec=GraphStore)
+        store.get_node.return_value = None
+        return store
+
     def test_entity_failure_short_circuits_edges(self) -> None:
         executor = MagicMock(spec=MutationExecutor)
         executor.execute.return_value = CommandResult(
@@ -857,6 +1046,7 @@ class TestSubmitPromotion:
             self._entity_payload(),
             [self._edge_payload("doc:t1"), self._edge_payload("doc:t2")],
             requested_by="cli:promote-learning",
+            graph_store=self._graph_store_with_no_existing_node(),
         )
 
         assert outcome["status"] == "entity_failed"
@@ -900,6 +1090,7 @@ class TestSubmitPromotion:
             self._entity_payload(),
             [self._edge_payload("doc:t1"), self._edge_payload("doc:t2")],
             requested_by="cli:promote-learning",
+            graph_store=self._graph_store_with_no_existing_node(),
         )
 
         assert outcome["status"] == "promoted"
@@ -931,6 +1122,7 @@ class TestSubmitPromotion:
             self._entity_payload(),
             [],
             requested_by="cli:promote-learning",
+            graph_store=self._graph_store_with_no_existing_node(),
         )
 
         # First submitted command is the ENTITY_CREATE (a trailing
@@ -945,6 +1137,65 @@ class TestSubmitPromotion:
         properties = submitted.args["properties"]
         assert properties == {"description": "test"}
         assert properties is not self._entity_payload()["properties"]
+
+    def test_refuses_to_reapprove_a_demoted_precedent(self) -> None:
+        """A demoted precedent's learning candidate must not be silently
+        un-demoted by re-approving it: ``ENTITY_CREATE`` overwrites the
+        whole ``properties`` dict, including ``lifecycle``, so without this
+        check a re-approval would read the node back as current with no
+        reason recorded. The refusal must name ``precedent.reinstate`` and
+        must not issue the ``ENTITY_CREATE`` at all — neither a silent
+        overwrite nor a silent no-op."""
+        executor = MagicMock(spec=MutationExecutor)
+        graph_store = MagicMock(spec=GraphStore)
+        graph_store.get_node.return_value = {
+            "node_id": "precedent://learning/test",
+            "node_type": "precedent",
+            "properties": {"lifecycle": {"state": "demoted"}},
+        }
+
+        outcome = submit_learning_promotion(
+            executor,
+            self._entity_payload(),
+            [self._edge_payload("doc:t1")],
+            requested_by="cli:promote-learning",
+            graph_store=graph_store,
+        )
+
+        assert outcome["status"] == "refused_demoted"
+        assert "precedent.reinstate" in outcome["message"]
+        executor.execute.assert_not_called()
+
+    def test_does_not_refuse_a_current_precedent(self) -> None:
+        """Mutant proof's control case: an existing *current* precedent
+        (e.g. a second promotion run touching the same target entity_id)
+        must still reach ``ENTITY_CREATE`` — the refusal is specific to
+        ``lifecycle.state == "demoted"``, not to "the node already
+        exists"."""
+        executor = MagicMock(spec=MutationExecutor)
+        executor.execute.return_value = CommandResult(
+            command_id="cmd-1",
+            status=CommandStatus.SUCCESS,
+            operation=Operation.ENTITY_CREATE,
+            created_id="precedent://learning/test",
+        )
+        graph_store = MagicMock(spec=GraphStore)
+        graph_store.get_node.return_value = {
+            "node_id": "precedent://learning/test",
+            "node_type": "precedent",
+            "properties": {"lifecycle": {"state": "current"}},
+        }
+
+        outcome = submit_learning_promotion(
+            executor,
+            self._entity_payload(),
+            [],
+            requested_by="cli:promote-learning",
+            graph_store=graph_store,
+        )
+
+        assert outcome["status"] != "refused_demoted"
+        executor.execute.assert_called()
 
 
 class TestPromotionVisibleToGetLessons:
@@ -998,6 +1249,7 @@ class TestPromotionVisibleToGetLessons:
             payloads["entity_payload"],
             payloads["edge_payloads"],
             requested_by="test:promote-learning",
+            graph_store=registry.knowledge.graph_store,
         )
         assert outcome["status"] == "promoted"
         assert outcome["precedent_event_status"] == CommandStatus.SUCCESS.value

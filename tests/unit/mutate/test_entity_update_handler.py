@@ -23,6 +23,7 @@ from trellis.mutate.handlers import (
     EntityUpdateHandler,
     create_curate_handlers,
 )
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -227,6 +228,150 @@ class TestEntityUpdateHandler:
         node = registry.knowledge.graph_store.get_node(node_id)
         assert node is not None
         assert node["properties"]["phase"] == "2"
+
+
+class TestEntityUpdatePrecedentLifecycleRefusal:
+    """``entity.update`` refuses a write to ``properties.lifecycle`` on a
+    precedent node (item 4 of the demotion-holes follow-up): this used to
+    be the only way to undo ``precedent.demote``, silently and with no
+    reason recorded. Every other node's ``lifecycle`` key is an ordinary
+    property this handler still merges like any other -- the save-surfaces'
+    supersession stamp (``mcp.supersession``) depends on that staying true.
+    """
+
+    def test_precedent_lifecycle_write_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Defective subject: a handler that drops the ``node_type ==
+        "precedent"`` guard (or the ``LIFECYCLE_KEY in supplied_properties``
+        check) lets this write through -- delete either condition in
+        ``EntityUpdateHandler.handle`` and this ``pytest.raises`` finds
+        nothing raised, with the node below silently reading back
+        ``current`` instead of ``demoted``.
+        """
+        node_id = _create_node(
+            registry,
+            node_type="precedent",
+            properties={
+                "name": "Pooling pattern",
+                LIFECYCLE_KEY: {"state": "demoted"},
+            },
+        )
+        handler = EntityUpdateHandler(registry)
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(
+                Command(
+                    operation=Operation.ENTITY_UPDATE,
+                    args={
+                        "entity_id": node_id,
+                        "properties": {LIFECYCLE_KEY: {"state": "current"}},
+                    },
+                )
+            )
+
+        assert exc_info.value.code == "precedent_lifecycle_via_entity_update"
+        message = str(exc_info.value)
+        assert "precedent.demote" in message
+        assert "precedent.reinstate" in message
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+
+    def test_precedent_update_without_lifecycle_key_still_merges(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The refusal is scoped to the ``lifecycle`` key specifically, not
+        to every write touching a precedent node."""
+        node_id = _create_node(
+            registry,
+            node_type="precedent",
+            properties={
+                "name": "Pooling pattern",
+                LIFECYCLE_KEY: {"state": "demoted"},
+            },
+        )
+        handler = EntityUpdateHandler(registry)
+
+        handler.handle(
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={"entity_id": node_id, "properties": {"note": "unrelated"}},
+            )
+        )
+
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"]["note"] == "unrelated"
+        assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+
+    def test_non_precedent_lifecycle_write_still_merges(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Control case for the mutant proof above: a non-precedent node's
+        ``lifecycle`` key is an ordinary property this handler still
+        merges -- the supersession stamp (``mcp.supersession``) writes
+        ``lifecycle`` through this exact path for non-precedent nodes and
+        must keep working.
+
+        Defective subject: a handler that refuses *any* ``lifecycle``
+        write regardless of ``node_type`` (over-broad fix) would raise
+        here too -- widen the ``node_type == "precedent"`` check to
+        unconditional and this ``handle`` call raises instead of merging.
+        """
+        node_id = _create_node(
+            registry,
+            node_type="document",
+            properties={"name": "Some note"},
+        )
+        handler = EntityUpdateHandler(registry)
+
+        returned_id, _ = handler.handle(
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={
+                    "entity_id": node_id,
+                    "properties": {LIFECYCLE_KEY: {"state": "superseded"}},
+                },
+            )
+        )
+
+        assert returned_id == node_id
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == "superseded"
+
+    def test_precedent_lifecycle_write_refused_through_executor(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The CLI/REST/MCP surfaces must see a REJECTED command, not a
+        store failure, and the refusal must name both reversal verbs."""
+        node_id = _create_node(
+            registry,
+            node_type="precedent",
+            properties={
+                "name": "Pooling pattern",
+                LIFECYCLE_KEY: {"state": "demoted"},
+            },
+        )
+        executor = build_curate_executor(registry)
+
+        result = executor.execute(
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={
+                    "entity_id": node_id,
+                    "properties": {LIFECYCLE_KEY: {"state": "current"}},
+                },
+            )
+        )
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "precedent_lifecycle_via_entity_update"
+        )
+        assert "precedent.reinstate" in result.message
 
 
 class TestEntityUpdateRacingAnotherWrite:

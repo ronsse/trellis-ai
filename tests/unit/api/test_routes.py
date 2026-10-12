@@ -1635,6 +1635,165 @@ class TestDemotePrecedentRoute:
         assert "graph node" in detail or "promoted" in detail
 
 
+class TestReinstatePrecedentRoute:
+    """``POST /precedents/{target_id}/reinstate`` -- the reversal verb
+    ``demote`` shipped without.
+    """
+
+    def _create_precedent(self, client) -> str:
+        resp = client.post(
+            "/api/v1/entities",
+            json={"entity_type": "precedent", "name": "Pooling pattern"},
+        )
+        assert resp.status_code == 200, resp.text
+        node_id: str = resp.json()["node_id"]
+        return node_id
+
+    def _demote(self, client, node_id: str, *, requested_by: str = "test:demote") -> None:
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/demote",
+            json={"reason": "superseded", "requested_by": requested_by},
+        )
+        assert resp.status_code == 200, resp.text
+
+    def test_reinstate_stamps_the_precedent(self, client):
+        node_id = self._create_precedent(client)
+        self._demote(client, node_id)
+
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/reinstate",
+            json={"reason": "demotion was a mistake"},
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["status"] == "success"
+        assert data["created_id"] == node_id
+
+        graph = app_module._registry.knowledge.graph_store
+        node = graph.get_node(node_id)
+        assert node["properties"]["lifecycle"]["state"] == "current"
+
+    def test_reinstate_non_demoted_target_is_refused(self, client):
+        """A freshly-created precedent is ``"current"``, not ``"demoted"``;
+        reinstating it must be refused, naming the actual state, rather
+        than silently accepted."""
+        node_id = self._create_precedent(client)
+
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/reinstate",
+            json={"reason": "r"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "not 'demoted'" in resp.json()["detail"]
+
+    def test_reinstate_missing_target_is_refused(self, client):
+        resp = client.post(
+            "/api/v1/precedents/ghost/reinstate",
+            json={"reason": "r"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "Node not found: ghost" in resp.json()["detail"]
+
+    def test_reinstate_blank_reason_is_refused(self, client):
+        node_id = self._create_precedent(client)
+        self._demote(client, node_id)
+
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/reinstate",
+            json={"reason": "   "},
+        )
+        assert resp.status_code == 400, resp.text
+
+    def test_reinstate_automatic_requester_is_refused(self, client):
+        """Reinstatement has no automatic path at all -- unlike demotion,
+        where the automatic policy may demote what it itself promoted,
+        the automatic identity reinstating anything is refused outright.
+
+        Defective subject: a route/handler that drops this check
+        reinstates the node anyway -- both the status code and the
+        unchanged-lifecycle assertion below catch it.
+        """
+        node_id = self._create_precedent(client)
+        self._demote(client, node_id)
+
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/reinstate",
+            json={
+                "reason": "r",
+                "requested_by": "auto:learning_candidate_demote",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert "human-only" in resp.json()["detail"]
+
+        graph = app_module._registry.knowledge.graph_store
+        node = graph.get_node(node_id)
+        assert node["properties"]["lifecycle"]["state"] == "demoted"
+
+    def test_default_requested_by_is_the_api_surface(self, client):
+        node_id = self._create_precedent(client)
+        self._demote(client, node_id)
+
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/reinstate",
+            json={"reason": "r"},
+        )
+        assert resp.status_code == 200, resp.text
+
+        events = [
+            e
+            for e in app_module._registry.operational.event_log.get_events(
+                event_type=EventType.PRECEDENT_REINSTATED
+            )
+            if e.payload.get("target_id") == node_id
+        ]
+        assert len(events) == 1
+        assert events[0].payload["requested_by"] == "api:reinstate-precedent"
+
+    def test_reinstated_precedent_is_served_by_every_reader_again(self, client):
+        """Reader-completeness, the property PR #872 established for
+        demotion, carried to its reversal: once reinstated, the precedent
+        must be served by ``GET /precedents`` and ``GET
+        /precedents/domains`` again, exactly as if it had never been
+        demoted.
+
+        Defective subject: a reader that caches the lifecycle state read
+        at demote time (rather than re-reading the live node on every
+        call) would still exclude the precedent here even though its
+        state is now ``"current"`` -- both assertions below catch that.
+        """
+        event_log = app_module._registry.operational.event_log
+        node_id = self._create_precedent(client)
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id=node_id,
+            payload={"domain": "platform", "title": "Pooling pattern"},
+        )
+
+        self._demote(client, node_id)
+        excluded = client.get("/api/v1/precedents")
+        assert not any(
+            p["entity_id"] == node_id for p in excluded.json()["precedents"]
+        )
+        assert client.get("/api/v1/precedents/domains").json()["total"] == 0
+
+        reinstate_resp = client.post(
+            f"/api/v1/precedents/{node_id}/reinstate",
+            json={"reason": "demotion was a mistake"},
+        )
+        assert reinstate_resp.status_code == 200, reinstate_resp.text
+
+        included = client.get("/api/v1/precedents")
+        assert any(p["entity_id"] == node_id for p in included.json()["precedents"]), (
+            included.json()
+        )
+        domains = client.get("/api/v1/precedents/domains").json()
+        assert domains["domains"] == [{"domain": "platform", "count": 1}]
+        assert domains["total"] == 1
+
+
 # -- Batch mutations --
 
 

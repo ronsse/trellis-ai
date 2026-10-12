@@ -29,6 +29,7 @@ from trellis_wire.dtos import (
     PackFeedbackResponse,
     PrecedentDemoteRequest,
     PrecedentDemoteResponse,
+    PrecedentReinstateRequest,
     PromoteRequest,
 )
 
@@ -72,17 +73,21 @@ def demote(target_id: str, req: PrecedentDemoteRequest) -> PrecedentDemoteRespon
     """Demote a precedent, stamping it ``Lifecycle.state="demoted"``.
 
     SCD-2 rewrite, not a purge, so the pre-demotion version stays
-    readable via ``get_node_history``/``as_of`` -- but there is no
-    dedicated reversal verb yet: an operator undoes a demotion with
-    ``entity.update`` to set ``Lifecycle.state`` back to ``"current"``.
-    A demoted precedent stops reaching ``GET /precedents`` /
-    ``get_lessons`` and is withheld from packs at the collect seam,
-    recorded in ``rejected_items``. Only a precedent promoted from a
-    learning candidate has a graph node and can be demoted -- a trace-
-    or miner-sourced precedent id is refused with a message naming that
-    gap. Re-demoting an already-demoted precedent is a 200 idempotent
-    no-op: ``already_demoted=true`` and nothing changes (no new SCD-2
-    version, no new event, the stored reason unchanged).
+    readable via ``get_node_history``/``as_of``. The reversal verb is
+    ``POST /precedents/{target_id}/reinstate`` (``precedent.reinstate``,
+    see :func:`reinstate` below) -- ``entity.update`` refuses a write to
+    ``properties.lifecycle`` on a precedent node, so it is no longer a
+    way to undo this. A demoted precedent stops reaching
+    ``GET /precedents`` / ``get_lessons`` and is withheld from packs at
+    the collect seam, recorded in ``rejected_items``. Only a precedent
+    promoted from a learning candidate has a graph node and can be
+    demoted -- a trace- or miner-sourced precedent id is refused with a
+    message naming that gap. Re-demoting an already-demoted precedent is
+    a 200 idempotent no-op: ``already_demoted=true`` and nothing changes
+    (no new SCD-2 version, no new event, the stored reason unchanged).
+    Re-approving its learning candidate instead of reinstating it is
+    refused too -- see
+    :func:`trellis.learning.scoring.submit_learning_promotion`.
     """
     cmd = Command(
         operation=Operation.PRECEDENT_DEMOTE,
@@ -106,6 +111,33 @@ def demote(target_id: str, req: PrecedentDemoteRequest) -> PrecedentDemoteRespon
         warnings=list(result.warnings),
         already_demoted=already_demoted,
     )
+
+
+@router.post("/precedents/{target_id:path}/reinstate", response_model=CommandResponse)
+def reinstate(target_id: str, req: PrecedentReinstateRequest) -> CommandResponse:
+    """Reinstate a demoted precedent, stamping it ``Lifecycle.state="current"``.
+
+    The reversal verb :func:`demote` shipped without: an SCD-2 rewrite in
+    the other direction, so the demoted version stays readable via
+    ``get_node_history``/``as_of`` too, and the precedent's vector row is
+    re-synced in the same call so a semantic hit stops carrying the
+    demoted snapshot. Only a currently ``"demoted"`` precedent may be
+    reinstated -- a target that is ``"current"``, ``"archived"``, not
+    found, or not graph-backed is refused with a 400 naming its actual
+    state; there is no 200 idempotent-no-op branch the way re-demoting an
+    already-demoted precedent has one, since reinstating twice already
+    moved the state to ``"current"`` on the first call. Human-only: a
+    ``requested_by`` equal to the automatic demotion policy's own
+    identity is refused outright.
+    """
+    cmd = Command(
+        operation=Operation.PRECEDENT_REINSTATE,
+        args={"target_id": target_id, "reason": req.reason},
+        target_id=target_id,
+        target_type="precedent",
+        requested_by=req.requested_by,
+    )
+    return _execute_command(cmd)
 
 
 @router.post("/links")
