@@ -38,9 +38,10 @@ from trellis.mutate.handlers import (
     create_curate_handlers,
     precedent_already_demoted_message,
 )
-from trellis.retrieve.lifecycle import partition_demoted
+from trellis.retrieve.builder_factory import build_strategies
+from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.strategies import SearchStrategy
 from trellis.schemas.classification import LIFECYCLE_KEY, Lifecycle
-from trellis.schemas.pack import PackItem
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -675,19 +676,21 @@ class TestPrecedentReinstateHandler:
 
 
 class TestVectorRowSyncOnDemoteAndReinstate:
-    """Item 3 of the demotion-holes follow-up: ``PrecedentDemoteHandler``
-    and ``PrecedentReinstateHandler`` must each reach the precedent's
-    *vector* row, not just its graph node -- a vector row's metadata is a
-    snapshot taken at embed time
+    """``PrecedentDemoteHandler`` and ``PrecedentReinstateHandler`` must
+    each reach the precedent's *vector* row, not just its graph node -- a
+    vector row's metadata is a snapshot taken at embed time
     (:func:`~trellis.mutate.handlers._sync_vector_lifecycle`), and the
     semantic search strategy serves from that snapshot. Mirrors
     ``TestVectorRowSync`` in ``test_retention_handler.py``, which pins the
     same gap for archival/restore.
 
-    End to end: a vector row is embedded, demoted, read back as a would-be
-    semantic hit, and run through the collect seam
-    (``partition_demoted``) -- which must withhold it. Then reinstated, and
-    the seam must stop withholding it.
+    End to end: a vector row is embedded, demoted, and run through the
+    real collect seam -- the same ``SemanticSearch`` strategy and
+    ``PackBuilder`` every production surface uses
+    (:func:`~trellis.retrieve.builder_factory.build_strategies`), not a
+    hand-authored ``PackItem`` standing in for what the strategy would
+    have produced -- which must withhold it. Then reinstated, and the
+    seam must stop withholding it.
     """
 
     @staticmethod
@@ -699,19 +702,20 @@ class TestVectorRowSyncOnDemoteAndReinstate:
         )
 
     @staticmethod
-    def _as_semantic_hit(row: dict[str, Any], node_id: str) -> PackItem:
-        """Shape a vector row's metadata the way ``SemanticSearch`` would
-        hand it to the collect seam -- a real ``PackItem`` built from
-        exactly the metadata dict :func:`_sync_vector_lifecycle` wrote,
-        not a hand-authored stand-in for it.
+    def _semantic_strategy(registry: StoreRegistry) -> SearchStrategy:
+        """The real ``SemanticSearch`` strategy, built the same way
+        :func:`~trellis.retrieve.builder_factory.build_pack_builder` builds
+        it for every production surface. Isolated from ``KeywordSearch``/
+        ``GraphSearch`` (also in ``build_strategies``'s returned list) the
+        same way the existing document-restore seam tests isolate
+        ``KeywordSearch`` -- a live graph read would otherwise mask the
+        very staleness this test exists to catch.
         """
-        return PackItem(
-            item_id=node_id,
-            item_type="document",
-            excerpt=row["metadata"].get("excerpt", ""),
-            relevance_score=1.0,
-            metadata={**row["metadata"], "source_strategy": "semantic"},
+        result = build_strategies(
+            registry,  # type: ignore[arg-type]
+            embedding_fn=lambda _text: [0.1, 0.2, 0.3],
         )
+        return next(s for s in result.strategies if s.name == "semantic")
 
     def test_demote_stamps_the_vector_row_and_the_seam_withholds_it(
         self, registry: StoreRegistry
@@ -719,8 +723,8 @@ class TestVectorRowSyncOnDemoteAndReinstate:
         """Defective subject: remove the ``_sync_vector_lifecycle(...)``
         call from ``PrecedentDemoteHandler.handle`` and the vector row's
         ``metadata`` keeps no ``lifecycle`` key at all -- the row-level
-        assertion fails first, and ``partition_demoted`` would still keep
-        the stale hit rather than withhold it.
+        assertion fails first, and the real collect seam would still
+        serve the stale hit rather than withhold it.
         """
         node_id = _create_node(registry)
         self._embed(registry, node_id)
@@ -733,17 +737,16 @@ class TestVectorRowSyncOnDemoteAndReinstate:
         # Metadata-only: nothing was re-embedded.
         assert row["vector"] == pytest.approx([0.1, 0.2, 0.3])
 
-        hit = self._as_semantic_hit(row, node_id)
-        kept, withheld = partition_demoted([hit])
-        assert kept == []
-        assert [item.item_id for item in withheld] == [node_id]
+        builder = PackBuilder(strategies=[self._semantic_strategy(registry)])
+        pack = builder.build(intent="pooling pattern")
+        assert node_id not in [item.item_id for item in pack.items]
 
     def test_reinstate_re_syncs_the_vector_row_and_the_seam_serves_it_again(
         self, registry: StoreRegistry
     ) -> None:
         """Defective subject: remove the ``_sync_vector_lifecycle(...)``
         call from ``PrecedentReinstateHandler.handle`` and the vector row
-        below keeps reading ``demoted`` after reinstatement -- the
+        below keeps reading ``demoted`` after reinstatement -- the real
         collect seam would then keep withholding a precedent that
         ``get_node`` already reports as current again.
         """
@@ -758,10 +761,9 @@ class TestVectorRowSyncOnDemoteAndReinstate:
         assert row is not None
         assert row["metadata"][LIFECYCLE_KEY]["state"] == "current"
 
-        hit = self._as_semantic_hit(row, node_id)
-        kept, withheld = partition_demoted([hit])
-        assert [item.item_id for item in kept] == [node_id]
-        assert withheld == []
+        builder = PackBuilder(strategies=[self._semantic_strategy(registry)])
+        pack = builder.build(intent="pooling pattern")
+        assert node_id in [item.item_id for item in pack.items]
 
     def test_missing_vector_row_is_not_an_error_for_either_verb(
         self, registry: StoreRegistry

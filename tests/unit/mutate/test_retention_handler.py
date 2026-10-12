@@ -807,6 +807,11 @@ class TestRestorePrecedentHistory:
             == "retention_restore_history_unavailable"
         )
         assert any(refused_id in w for w in result.warnings)
+        # The rejection must name the whole batch, not only the half that
+        # was refused -- an operator reading this message needs to see
+        # that ``never_archived_id`` was merely skipped, not lost.
+        assert refused_id in result.message
+        assert never_archived_id in result.message
 
 
 class TestNodePurgedMidCommand:
@@ -1124,6 +1129,79 @@ class TestVectorRowSync:
         doc = registry.knowledge.document_store.get("never_embedded")
         assert doc is not None
         assert doc["metadata"][LIFECYCLE_KEY]["state"] == ARCHIVED_STATE
+
+
+class TestVectorRowSyncOnGraphNodeRestore:
+    """``RetentionRestoreHandler``'s graph-node branch has no document write
+    to piggyback a vector mirror onto the way the document branch above
+    gets one for free from ``put_document`` -- it must re-stamp the vector
+    row directly, the same gap ``PrecedentDemoteHandler`` and
+    ``PrecedentReinstateHandler`` close with the same
+    ``_sync_vector_lifecycle`` call. Without it, a restored node's vector
+    row keeps reading ``archived`` and the semantic path keeps withholding
+    an item ``get_node`` already reports as current again.
+
+    End to end: a graph node is minted archived and embedded, restored,
+    and run through the real collect seam -- the same ``SemanticSearch``
+    strategy and ``PackBuilder`` every production surface uses
+    (:func:`~trellis.retrieve.builder_factory.build_strategies`), not a
+    hand-authored ``PackItem`` standing in for what the strategy would
+    have produced.
+    """
+
+    @staticmethod
+    def _embed(registry: StoreRegistry, node_id: str) -> None:
+        registry.knowledge.vector_store.upsert(
+            node_id,
+            [0.1, 0.2, 0.3],
+            {"excerpt": f"excerpt of {node_id}", "content_tags": {}},
+        )
+
+    def test_restore_re_syncs_the_vector_row_and_the_seam_serves_it_again(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Defective subject: remove the ``_sync_vector_lifecycle(...)``
+        call from ``RetentionRestoreHandler._restore``'s graph-node branch
+        and the vector row below keeps reading ``archived`` after restore
+        -- the real collect seam would then keep withholding a node that
+        ``get_node`` already reports as current again.
+        """
+        from trellis.retrieve.builder_factory import build_strategies
+        from trellis.retrieve.pack_builder import PackBuilder
+
+        graph = registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None,
+            node_type="concept",
+            properties={
+                "name": "Deprecated widget",
+                LIFECYCLE_KEY: {"state": ARCHIVED_STATE},
+            },
+        )
+        self._embed(registry, node_id)
+
+        result = build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={"item_ids": [node_id], "reason": "re-evaluated, still in use"},
+            )
+        )
+        assert result.status == CommandStatus.SUCCESS
+
+        row = registry.knowledge.vector_store.get(node_id)
+        assert row is not None
+        assert row["metadata"][LIFECYCLE_KEY]["state"] == CURRENT_STATE
+        # Metadata-only: nothing was re-embedded.
+        assert row["vector"] == pytest.approx([0.1, 0.2, 0.3])
+
+        strategies = build_strategies(
+            registry,  # type: ignore[arg-type]
+            embedding_fn=lambda _text: [0.1, 0.2, 0.3],
+        ).strategies
+        semantic = next(s for s in strategies if s.name == "semantic")
+        builder = PackBuilder(strategies=[semantic])
+        pack = builder.build(intent="deprecated widget")
+        assert node_id in [item.item_id for item in pack.items]
 
 
 class TestRestoreIsDurable:
