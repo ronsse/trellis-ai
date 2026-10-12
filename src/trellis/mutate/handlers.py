@@ -1884,6 +1884,14 @@ class EntityCreateHandler:
     ``document_ids`` follows the same omission semantics as
     :class:`EntityUpdateHandler`: an omitted field carries the stored link
     forward, an explicit value replaces it.
+
+    **An existing precedent's id is refused outright.** ENTITY_CREATE on
+    any other existing id is a legitimate upsert (it opens a new SCD-2
+    version, e.g. re-extracting an entity), but an unconditional property
+    replace on a precedent would drop its ``lifecycle`` — a demoted
+    precedent would come back ``"current"`` with no reason recorded and
+    no ``PRECEDENT_REINSTATED`` event, the same silent-reinstate shape
+    :class:`EntityUpdateHandler`'s guards close on the update path.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -1897,6 +1905,28 @@ class EntityCreateHandler:
         caller_id = command.args.get("entity_id")
         node_role = command.args.get("node_role", "semantic")
         generation_spec = command.args.get("generation_spec")
+
+        # One read serves both the precedent guard below and
+        # ``_resolve_document_ids``'s stored-link lookup, so a caller_id
+        # that already exists costs a single extra read either way.
+        existing_node = (
+            self._registry.knowledge.graph_store.get_node(caller_id)
+            if caller_id is not None
+            else None
+        )
+        if existing_node is not None and existing_node["node_type"] == "precedent":
+            msg = (
+                f"entity.create refuses to upsert over existing precedent "
+                f"{caller_id}: an unconditional property replace would drop "
+                "its lifecycle (a demoted precedent would come back "
+                "'current' with no reason recorded and no "
+                "PRECEDENT_REINSTATED event); use precedent.reinstate for "
+                "that, or entity.update for a non-lifecycle property edit"
+            )
+            raise ValidationError(
+                msg, errors=[msg], code="entity_create_over_existing_precedent"
+            )
+
         # ``document_ids`` is the first-class graph↔document link (Phase 4 of
         # ADR planes-and-substrates). Threading it here gives the pointer a
         # governed write path — the pointer-not-prose invariant depends on a
@@ -1910,7 +1940,7 @@ class EntityCreateHandler:
         # other writer established — e.g. re-extracting an entity that
         # ``save_knowledge`` had linked to its document. Omission means
         # "leave it alone"; an explicit value still replaces.
-        document_ids = self._resolve_document_ids(command, caller_id)
+        document_ids = self._resolve_document_ids(command, existing_node)
         node_id = self._registry.knowledge.graph_store.upsert_node(
             node_id=caller_id,
             node_type=command.args["entity_type"],
@@ -1939,25 +1969,23 @@ class EntityCreateHandler:
         return node_id, f"Entity created: {command.args['name']}"
 
     def _resolve_document_ids(
-        self, command: Command, caller_id: str | None
+        self, command: Command, existing_node: dict[str, Any] | None
     ) -> list[str] | None:
         """Command's ``document_ids``, else the stored link, else ``None``.
 
-        Only reads the store when the caller both named an id and omitted
-        the field — the common create-a-fresh-node path stays a single
-        write.
+        ``existing_node`` is whatever ``handle`` already read for the
+        precedent guard (``None`` when ``entity_id`` was omitted or named
+        no existing node) — reused here rather than re-read, so a caller_id
+        that already exists still costs one store read, not two.
         """
         if "document_ids" in command.args:
             supplied = command.args["document_ids"]
             return cast("list[str] | None", supplied)
-        if caller_id is None:
-            return None
-        existing = self._registry.knowledge.graph_store.get_node(caller_id)
-        if existing is None:
+        if existing_node is None:
             return None
         # ``get_node`` returns a (possibly empty) list; normalise empty to
         # ``None`` so ``validate_document_ids`` sees a clean value.
-        return cast("list[str] | None", existing.get("document_ids") or None)
+        return cast("list[str] | None", existing_node.get("document_ids") or None)
 
 
 class EntityUpdateHandler:
@@ -1994,13 +2022,25 @@ class EntityUpdateHandler:
 
     **Precedents are the one exception to the property merge.** A write
     naming ``properties.lifecycle`` on a node whose current ``node_type``
-    is ``"precedent"`` is refused rather than merged: this used to be the
+    is ``"precedent"``, *or* whose ``entity_type`` arg names ``"precedent"``
+    in the same call, is refused rather than merged: this used to be the
     only way to undo a ``precedent.demote`` (silently, with no reason
     recorded and no vector re-sync), which is exactly the gap
     :class:`PrecedentReinstateHandler` closes. Every other node's
     ``lifecycle`` key is an ordinary property this handler merges like any
     other — the save-surfaces' supersession stamp (``mcp.supersession``)
     still writes it this way.
+
+    **A precedent's ``node_type`` may not be changed away from
+    ``"precedent"`` at all**, lifecycle write or not: a two-step bypass
+    (update 1: ``entity_type="concept"`` with no lifecycle payload, so the
+    guard above never fires because nothing names ``lifecycle``; update 2:
+    ``entity_type="precedent"`` plus ``properties.lifecycle.state="current"``,
+    read against the *now-"concept"* stored node) would otherwise reinstate
+    a demoted precedent with no ``PRECEDENT_REINSTATED`` event and no
+    reason recorded. Refusing step 1 outright closes it before step 2 is
+    ever reached; the ``entity_type == "precedent"`` keying above is the
+    second, independent guard for the same end state.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -2010,22 +2050,53 @@ class EntityUpdateHandler:
         entity_id = command.args["entity_id"]
         store = self._registry.knowledge.graph_store
         supplied_properties = command.args.get("properties") or {}
-
-        if (
+        supplied_entity_type = command.args.get("entity_type")
+        touches_lifecycle = (
             isinstance(supplied_properties, dict)
             and LIFECYCLE_KEY in supplied_properties
+        )
+
+        # Read the existing node only when one of the two precedent guards
+        # below could actually need it, so the common case -- a property
+        # merge that names neither ``entity_type`` nor ``lifecycle`` --
+        # stays the single read ``_rewrite_current_node`` does internally.
+        existing_node = (
+            store.get_node(entity_id)
+            if (supplied_entity_type or touches_lifecycle)
+            else None
+        )
+        is_existing_precedent = (
+            existing_node is not None and existing_node["node_type"] == "precedent"
+        )
+
+        if (
+            is_existing_precedent
+            and supplied_entity_type
+            and supplied_entity_type != "precedent"
         ):
-            existing_node = store.get_node(entity_id)
-            if existing_node is not None and existing_node["node_type"] == "precedent":
-                msg = (
-                    f"entity.update refuses a write to properties.{LIFECYCLE_KEY} "
-                    f"on precedent {entity_id}: use precedent.demote or "
-                    "precedent.reinstate instead, which keep the audit trail "
-                    "and the vector row in sync"
-                )
-                raise ValidationError(
-                    msg, errors=[msg], code="precedent_lifecycle_via_entity_update"
-                )
+            msg = (
+                f"entity.update refuses to change {entity_id}'s entity_type "
+                f"away from 'precedent' (to {supplied_entity_type!r}): a "
+                "later update could then write properties.lifecycle under "
+                "that non-precedent node_type and slip past the guard that "
+                "refuses it on a precedent"
+            )
+            raise ValidationError(
+                msg, errors=[msg], code="precedent_entity_type_change_refused"
+            )
+
+        if touches_lifecycle and (
+            is_existing_precedent or supplied_entity_type == "precedent"
+        ):
+            msg = (
+                f"entity.update refuses a write to properties.{LIFECYCLE_KEY} "
+                f"on precedent {entity_id}: use precedent.demote or "
+                "precedent.reinstate instead, which keep the audit trail "
+                "and the vector row in sync"
+            )
+            raise ValidationError(
+                msg, errors=[msg], code="precedent_lifecycle_via_entity_update"
+            )
 
         def update(existing: dict[str, Any]) -> dict[str, Any]:
             # Partial update: merge caller-supplied properties onto the

@@ -374,6 +374,166 @@ class TestEntityUpdatePrecedentLifecycleRefusal:
         assert "precedent.reinstate" in result.message
 
 
+class TestEntityUpdatePrecedentTypeChangeRefusal:
+    """Closes the two-step bypass (item F1, demotion-holes follow-up):
+    update 1 moves a precedent's ``entity_type`` away from ``"precedent"``
+    with no ``lifecycle`` payload (the lifecycle guard above never fires,
+    since nothing names ``lifecycle``); update 2 moves it back to
+    ``"precedent"`` while writing ``properties.lifecycle.state="current"``
+    in the same call -- read against the *now non-precedent* stored node,
+    the old guard's ``existing_node["node_type"] == "precedent"`` check
+    was false, so the write went through with no ``PRECEDENT_REINSTATED``
+    event and no reason recorded. Two independent guards close it: a
+    precedent's ``node_type`` may not be changed away at all, and the
+    lifecycle guard is also keyed on a *supplied* ``entity_type ==
+    "precedent"``, not only the currently-stored one.
+    """
+
+    def test_node_type_change_away_from_precedent_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Defective subject: delete the node_type-away guard and this
+        ``pytest.raises`` finds nothing raised, with the node below
+        silently reading back ``node_type == "concept"``.
+        """
+        node_id = _create_node(
+            registry,
+            node_type="precedent",
+            properties={
+                "name": "Pooling pattern",
+                LIFECYCLE_KEY: {"state": "demoted"},
+            },
+        )
+        handler = EntityUpdateHandler(registry)
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(
+                Command(
+                    operation=Operation.ENTITY_UPDATE,
+                    args={"entity_id": node_id, "entity_type": "concept"},
+                )
+            )
+
+        assert exc_info.value.code == "precedent_entity_type_change_refused"
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["node_type"] == "precedent"
+        assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+
+    def test_two_step_bypass_is_closed_at_step_one(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The exact bypass sequence from the review (gate-876): step 1
+        types the precedent away with no lifecycle write -- this alone
+        would have succeeded before this fix, since the lifecycle guard
+        only fires on a lifecycle write. Step 2 (type it back while
+        writing ``lifecycle.state="current"`` in the same call) never
+        becomes reachable because step 1 is refused outright, so this
+        test exercises exactly the first half of the sequence and
+        confirms the node is untouched -- still ``precedent``, still
+        ``demoted`` -- after the refusal.
+        """
+        node_id = _create_node(
+            registry,
+            node_type="precedent",
+            properties={
+                "name": "Pooling pattern",
+                LIFECYCLE_KEY: {"state": "demoted"},
+            },
+        )
+        handler = EntityUpdateHandler(registry)
+
+        with pytest.raises(ValidationError):
+            handler.handle(
+                Command(
+                    operation=Operation.ENTITY_UPDATE,
+                    args={"entity_id": node_id, "entity_type": "concept"},
+                )
+            )
+
+        # Step 2 cannot be submitted against a node that never actually
+        # changed type -- confirm the state step 1 would have needed to
+        # reach is simply absent.
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["node_type"] == "precedent"
+        assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_REINSTATED
+        )
+        assert len(events) == 0
+
+    def test_supplied_entity_type_precedent_also_guards_the_lifecycle_write(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Pins mutant M3 (gate-876): a single ``entity.update`` call that
+        supplies BOTH ``entity_type: "precedent"`` and a ``lifecycle``
+        property is refused via the ``supplied_entity_type ==
+        "precedent"`` half of the guard's ``or`` -- not only via the
+        stored-type half exercised by
+        ``TestEntityUpdatePrecedentLifecycleRefusal``.
+
+        Defective subject: narrow the guard's condition from ``or`` to
+        ``and`` (``is_existing_precedent and supplied_entity_type ==
+        "precedent"``) and this still passes, since the stored type here
+        already is "precedent" -- that mutant is caught instead by
+        ``test_node_type_change_away_from_precedent_is_refused`` reaching
+        a node whose stored type is NOT precedent while ``entity_type``
+        is omitted, where ``and`` would require a redundant
+        ``entity_type="precedent"`` that test never supplies, making the
+        ``and``-guard raise nothing. Together the two tests pin both
+        halves of the ``or`` independently.
+        """
+        node_id = _create_node(
+            registry,
+            node_type="precedent",
+            properties={
+                "name": "Pooling pattern",
+                LIFECYCLE_KEY: {"state": "demoted"},
+            },
+        )
+        handler = EntityUpdateHandler(registry)
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(
+                Command(
+                    operation=Operation.ENTITY_UPDATE,
+                    args={
+                        "entity_id": node_id,
+                        "entity_type": "precedent",
+                        "properties": {LIFECYCLE_KEY: {"state": "current"}},
+                    },
+                )
+            )
+
+        assert exc_info.value.code == "precedent_lifecycle_via_entity_update"
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+
+    def test_entity_type_change_on_a_non_precedent_is_unaffected(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Control case: the node_type-away guard is scoped to precedents
+        only -- changing a concept's entity_type must still work."""
+        node_id = _create_node(
+            registry, node_type="concept", properties={"name": "Widget"}
+        )
+        handler = EntityUpdateHandler(registry)
+
+        returned_id, _ = handler.handle(
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={"entity_id": node_id, "entity_type": "document"},
+            )
+        )
+
+        assert returned_id == node_id
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["node_type"] == "document"
+
+
 class TestEntityUpdateRacingAnotherWrite:
     """A write that commits between the handler's read and its write wins."""
 
@@ -524,3 +684,144 @@ class TestEntityCreateDocumentIds:
         node = registry.knowledge.graph_store.get_node(node_id)
         assert node is not None
         assert node["document_ids"] == []
+
+
+class TestEntityCreateOverExistingPrecedentRefusal:
+    """``entity.create`` refuses an ``entity_id`` that already names a
+    precedent (item F1, demotion-holes follow-up): the handler's property
+    replace is unconditional, so re-creating over an existing precedent
+    id dropped its ``lifecycle`` -- a demoted precedent came back
+    "current" with no reason recorded and no ``PRECEDENT_REINSTATED``
+    event, the same silent-reinstate shape the ``entity.update`` guards
+    close on that verb.
+    """
+
+    def test_create_over_existing_precedent_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Defective subject: delete the precedent guard in
+        ``EntityCreateHandler.handle`` and this ``pytest.raises`` finds
+        nothing raised, with the node below silently reading back
+        ``lifecycle`` absent (equivalent to "current").
+        """
+        node_id = _create_node(
+            registry,
+            node_type="precedent",
+            properties={
+                "name": "Pooling pattern",
+                LIFECYCLE_KEY: {"state": "demoted"},
+            },
+        )
+        handler = EntityCreateHandler(registry)
+
+        with pytest.raises(ValidationError) as exc_info:
+            handler.handle(
+                Command(
+                    operation=Operation.ENTITY_CREATE,
+                    args={
+                        "entity_id": node_id,
+                        "entity_type": "precedent",
+                        "name": "Pooling pattern",
+                    },
+                )
+            )
+
+        assert exc_info.value.code == "entity_create_over_existing_precedent"
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == "demoted"
+        events = registry.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_REINSTATED
+        )
+        assert len(events) == 0
+
+    def test_create_over_existing_precedent_is_refused_through_executor(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The CLI/REST/MCP surfaces must see a REJECTED command, not a
+        store failure that would otherwise read as a crash."""
+        node_id = _create_node(
+            registry,
+            node_type="precedent",
+            properties={
+                "name": "Pooling pattern",
+                LIFECYCLE_KEY: {"state": "demoted"},
+            },
+        )
+        executor = build_curate_executor(registry)
+
+        result = executor.execute(
+            Command(
+                operation=Operation.ENTITY_CREATE,
+                args={
+                    "entity_id": node_id,
+                    "entity_type": "precedent",
+                    "name": "Pooling pattern",
+                },
+            )
+        )
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "entity_create_over_existing_precedent"
+        )
+
+    def test_create_over_existing_non_precedent_is_still_an_upsert(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Control case: the refusal is scoped to precedents only --
+        re-creating over an existing concept id must still work as the
+        ordinary upsert ``EntityCreateHandler``'s docstring describes
+        (e.g. re-extracting an entity)."""
+        node_id = _create_node(
+            registry, node_type="concept", properties={"name": "Original"}
+        )
+        handler = EntityCreateHandler(registry)
+
+        returned_id, _ = handler.handle(
+            Command(
+                operation=Operation.ENTITY_CREATE,
+                args={
+                    "entity_id": node_id,
+                    "entity_type": "concept",
+                    "name": "Replaced",
+                },
+            )
+        )
+
+        assert returned_id == node_id
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"]["name"] == "Replaced"
+
+    def test_create_over_existing_precedent_preserves_document_ids_resolution(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Control case for the refactor that threads ``existing_node``
+        into ``_resolve_document_ids`` instead of re-reading: a
+        non-precedent node's stored ``document_ids`` must still carry
+        forward on an omitted field."""
+        node_id = _create_node(
+            registry,
+            node_type="concept",
+            properties={"name": "Original"},
+            document_ids=["doc-7"],
+        )
+        handler = EntityCreateHandler(registry)
+
+        returned_id, _ = handler.handle(
+            Command(
+                operation=Operation.ENTITY_CREATE,
+                args={
+                    "entity_id": node_id,
+                    "entity_type": "concept",
+                    "name": "Replaced",
+                },
+            )
+        )
+
+        assert returned_id == node_id
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["document_ids"] == ["doc-7"]
