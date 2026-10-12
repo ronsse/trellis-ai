@@ -1111,6 +1111,12 @@ def evaluate_precedent_demotion(
         return
 
     console.print("[bold]Evaluate Precedent Demotion[/bold] — mode=report_only")
+    if report.scan.truncated:
+        # Same placement as `analyze token-usage`: before any count,
+        # because a truncated discovery or join scan can under-count
+        # unhelpful citations and read as "no evidence" rather than
+        # "didn't look far enough".
+        console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     console.print(f"  {escape(report.attribution_caveat)}", soft_wrap=True)
     console.print(f"  would_demote: {report.would_demote_count}")
     console.print(f"  refused: {report.refused_count}")

@@ -1335,6 +1335,16 @@ class TestCurateEvaluatePrecedentDemotion:
             )
         )
 
+    def _upsert_graph_backed_precedent(self, entity_id: str) -> None:
+        """A promoted precedent only reaches the citation gate at all
+        when it has a graph node -- a trace-/miner-sourced promotion
+        (never given one) is skipped as ``not_graph_backed`` instead.
+        Most of this class's scenarios are about the gate decision
+        itself, so they need a node to get there."""
+        curate_cli._get_registry().knowledge.graph_store.upsert_node(
+            node_id=entity_id, node_type="precedent", properties={}
+        )
+
     def _emit_pack_assembled(
         self, *, pack_id: str, item_ids: list[str], at: datetime
     ) -> None:
@@ -1403,6 +1413,7 @@ class TestCurateEvaluatePrecedentDemotion:
         assert len(evaluated) == 1
 
     def test_promoted_precedent_with_no_citations_is_refused(self) -> None:
+        self._upsert_graph_backed_precedent("prec-1")
         self._emit_promote("prec-1", at=datetime(2026, 1, 1, tzinfo=UTC))
 
         result = runner.invoke(
@@ -1417,6 +1428,7 @@ class TestCurateEvaluatePrecedentDemotion:
         assert outcome["disposition"] == "refused"
 
     def test_would_demote_a_precedent_cited_unhelpful_at_the_floor(self) -> None:
+        self._upsert_graph_backed_precedent("prec-1")
         promoted_at = datetime(2026, 1, 1, tzinfo=UTC)
         cited_at = promoted_at + timedelta(days=1)
         self._emit_promote("prec-1", at=promoted_at)
@@ -1440,6 +1452,7 @@ class TestCurateEvaluatePrecedentDemotion:
         (2) are refused once ``--min-unhelpful-citations`` raises it to
         3 -- proving the option actually reaches the gate rather than
         just being accepted and ignored."""
+        self._upsert_graph_backed_precedent("prec-1")
         promoted_at = datetime(2026, 1, 1, tzinfo=UTC)
         cited_at = promoted_at + timedelta(days=1)
         self._emit_promote("prec-1", at=promoted_at)
@@ -1469,6 +1482,7 @@ class TestCurateEvaluatePrecedentDemotion:
         """Helpful tying unhelpful refuses even once unhelpful alone
         would clear the floor -- the rule this module exists for,
         pinned once more at the CLI surface."""
+        self._upsert_graph_backed_precedent("prec-1")
         promoted_at = datetime(2026, 1, 1, tzinfo=UTC)
         cited_at = promoted_at + timedelta(days=1)
         self._emit_promote("prec-1", at=promoted_at)
@@ -1498,6 +1512,73 @@ class TestCurateEvaluatePrecedentDemotion:
         assert "flat" in output
         assert "get_context" in output
         assert "would_demote: 0" in output
+
+    def test_json_format_surfaces_the_not_graph_backed_skip_reason(self) -> None:
+        """Fix 1 at the CLI surface: a precedent with a successful
+        ``precedent.promote`` event but no graph node (the trace-/miner-
+        sourced path) is skipped with its own slug, not judged as if the
+        demote handler could ever act on it."""
+        self._emit_promote("prec-1", at=datetime(2026, 1, 1, tzinfo=UTC))
+
+        result = runner.invoke(
+            app, ["curate", "evaluate-precedent-demotion", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["skipped_count"] == 1
+        outcome = data["outcomes"][0]
+        assert outcome["entity_id"] == "prec-1"
+        assert outcome["disposition"] == "skipped"
+        assert outcome["reason"] == "not_graph_backed"
+
+    def test_text_format_surfaces_the_not_graph_backed_skip_reason(self) -> None:
+        """Same as above, text format -- the existing per-outcome loop
+        already prints ``reason``, so this only pins that the new slug
+        actually reaches it rather than silently reading ``would_demote``
+        or some other disposition."""
+        self._emit_promote("prec-1", at=datetime(2026, 1, 1, tzinfo=UTC))
+
+        result = runner.invoke(app, ["curate", "evaluate-precedent-demotion"])
+        assert result.exit_code == 0, result.output
+        output = plain(result.stdout)
+        assert "skipped: 1" in output
+        assert "not_graph_backed" in output
+
+    def test_untruncated_scan_prints_no_window_note(self) -> None:
+        self._emit_promote("prec-1", at=datetime(2026, 1, 1, tzinfo=UTC))
+
+        result = runner.invoke(app, ["curate", "evaluate-precedent-demotion"])
+        assert result.exit_code == 0, result.output
+        assert "window" not in plain(result.stdout)
+
+    def test_truncated_discovery_scan_prints_the_window_note(self) -> None:
+        """Fix 2 at the CLI surface: a capped discovery scan can hide an
+        older precedent entirely, not merely under-count one it already
+        knows about. Mirrors ``TestTruncationReachesTheOperator`` in
+        ``test_analyze.py`` -- drive the real CLI and read stdout rather
+        than asserting the note only lands on the report object."""
+        promoted_at = datetime(2026, 1, 1, tzinfo=UTC)
+        for n in range(501):  # one past the 500-event discovery-scan cap
+            self._emit_promote("flood", at=promoted_at + timedelta(seconds=n))
+
+        result = runner.invoke(app, ["curate", "evaluate-precedent-demotion"])
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.stdout)
+        assert "TRUNCATED" in rendered
+        assert "window" in rendered
+
+    def test_truncated_discovery_scan_sets_the_json_scan_field(self) -> None:
+        promoted_at = datetime(2026, 1, 1, tzinfo=UTC)
+        for n in range(501):
+            self._emit_promote("flood", at=promoted_at + timedelta(seconds=n))
+
+        result = runner.invoke(
+            app, ["curate", "evaluate-precedent-demotion", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["scan"]["truncated"] is True
+        assert data["notes"]
 
 
 class TestCurateHelp:

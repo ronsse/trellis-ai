@@ -35,10 +35,13 @@ from trellis.learning.precedent_evidence_gate import (
     REFUSED_NO_UNHELPFUL,
     SKIPPED_ALREADY_DEMOTED,
     SKIPPED_ARCHIVED,
+    SKIPPED_NOT_GRAPH_BACKED,
     PrecedentCitationEvidence,
     discover_current_precedents,
+    discover_current_precedents_with_coverage,
     evaluate_precedent_demotions,
     gather_precedent_citation_evidence,
+    join_precedent_citation_events,
     judge_precedent_demotion,
     precedent_skip_reason,
     report_to_dict,
@@ -310,11 +313,59 @@ class TestGatherPrecedentCitationEvidence:
         assert evidence is None
 
 
+class TestJoinPrecedentCitationEvents:
+    """The shared, run-once join -- ``gather_precedent_citation_evidence``
+    is now a thin per-entity wrapper over this."""
+
+    def test_returns_the_feedback_and_pack_events_untouched(
+        self, event_log: EventLog
+    ) -> None:
+        at = _T0 + timedelta(hours=1)
+        _emit_pack_assembled(event_log, pack_id="pack-1", item_ids=["p1"], at=at)
+        _emit_feedback(event_log, pack_id="pack-1", at=at, unhelpful=["p1"])
+
+        feedback_events, pack_events, coverage = join_precedent_citation_events(
+            event_log, since=_T0
+        )
+
+        assert len(feedback_events) == 1
+        assert "pack-1" in pack_events
+        assert coverage.truncated is False
+
+    def test_truncated_join_reports_truncated(self, event_log: EventLog) -> None:
+        """Fix 2's other scan: a capped PACK_ASSEMBLED/FEEDBACK_RECORDED
+        read can under-count unhelpful citations the same way a
+        truncated discovery scan can hide a precedent entirely. This is
+        the coverage ``gather_precedent_citation_evidence`` discards --
+        pinned here, at the source, so that discard is a choice made
+        once and not a spreading habit."""
+        at1 = _T0 + timedelta(hours=1)
+        _emit_pack_assembled(event_log, pack_id="pack-1", item_ids=["p1"], at=at1)
+        _emit_feedback(event_log, pack_id="pack-1", at=at1, unhelpful=["p1"])
+        at2 = _T0 + timedelta(hours=2)
+        _emit_pack_assembled(event_log, pack_id="pack-2", item_ids=["p1"], at=at2)
+        _emit_feedback(event_log, pack_id="pack-2", at=at2, unhelpful=["p1"])
+
+        _feedback_events, _pack_events, coverage = join_precedent_citation_events(
+            event_log, since=_T0, limit=1
+        )
+
+        assert coverage.truncated is True
+
+
 class TestPrecedentSkipReason:
-    def test_missing_node_is_judged_not_skipped(
+    def test_missing_node_is_skipped_not_judged(
         self, graph_store: SQLiteGraphStore
     ) -> None:
-        assert precedent_skip_reason(graph_store, "does-not-exist") is None
+        """A trace-/miner-sourced precedent never gets a graph entity
+        (``PrecedentPromoteHandler``'s docstring), so
+        ``PrecedentDemoteHandler`` refuses it outright
+        (``target_not_graph_backed``) -- "would_demote" here would
+        describe a write that handler can never make."""
+        assert (
+            precedent_skip_reason(graph_store, "does-not-exist")
+            == SKIPPED_NOT_GRAPH_BACKED
+        )
 
     def test_node_with_no_lifecycle_record_is_judged(
         self, graph_store: SQLiteGraphStore
@@ -373,6 +424,51 @@ class TestDiscoverCurrentPrecedents:
         assert discover_current_precedents(event_log) == {}
 
 
+class TestDiscoverCurrentPrecedentsWithCoverage:
+    def test_untruncated_scan_is_not_truncated(self, event_log: EventLog) -> None:
+        _emit_promote(event_log, "p1", at=_T0)
+
+        promoted_at, coverage = discover_current_precedents_with_coverage(event_log)
+
+        assert promoted_at == {"p1": _T0}
+        assert coverage.truncated is False
+        assert coverage.note == ""
+
+    def test_truncated_scan_reports_truncated_with_a_note(
+        self, event_log: EventLog
+    ) -> None:
+        """A full-looking read (``len(events) >= limit``) means older
+        promotions may have been dropped entirely -- the same
+        hand-detection the function's own docstring describes, since
+        its ``payload_filters`` read can't use ``scan_events``."""
+        _emit_promote(event_log, "p1", at=_T0)
+        _emit_promote(event_log, "p2", at=_T0 + timedelta(hours=1))
+
+        promoted_at, coverage = discover_current_precedents_with_coverage(
+            event_log, limit=1
+        )
+
+        assert len(promoted_at) == 1
+        assert coverage.truncated is True
+        assert coverage.note
+        assert coverage.scanned == 1
+        assert coverage.limit == 1
+
+    def test_discover_current_precedents_drops_the_coverage(
+        self, event_log: EventLog
+    ) -> None:
+        """The thin wrapper returns the same map as the coverage-carrying
+        function, just without the coverage -- pinning that the split
+        didn't change its contract for existing callers."""
+        _emit_promote(event_log, "p1", at=_T0)
+        _emit_promote(event_log, "p2", at=_T0 + timedelta(hours=1))
+
+        promoted_at, _coverage = discover_current_precedents_with_coverage(
+            event_log, limit=1
+        )
+        assert discover_current_precedents(event_log, limit=1) == promoted_at
+
+
 class TestEvaluatePrecedentDemotions:
     def test_would_demote_end_to_end(
         self, event_log: EventLog, graph_store: SQLiteGraphStore
@@ -397,9 +493,11 @@ class TestEvaluatePrecedentDemotions:
     def test_skipped_precedent_is_never_handed_to_the_gather_join(
         self, event_log: EventLog, graph_store: SQLiteGraphStore
     ) -> None:
-        """A demoted precedent needs no citation read at all -- the
-        skip check short-circuits before ``gather_precedent_citation_evidence``
-        is ever called for it."""
+        """A demoted precedent needs no citation read at all -- the skip
+        check keeps it out of ``to_judge`` entirely, so the shared join
+        (``join_precedent_citation_events``, which ``evaluate_precedent_demotions``
+        now calls once per run instead of once per precedent) never runs
+        when every discovered precedent is skipped."""
         graph_store.upsert_node(
             node_id="p1",
             node_type="precedent",
@@ -408,15 +506,115 @@ class TestEvaluatePrecedentDemotions:
         _emit_promote(event_log, "p1", at=_T0)
 
         with patch(
-            "trellis.learning.precedent_evidence_gate.gather_precedent_citation_evidence"
-        ) as mock_gather:
+            "trellis.learning.precedent_evidence_gate.join_precedent_citation_events"
+        ) as mock_join:
             report = evaluate_precedent_demotions(event_log, graph_store)
 
-        mock_gather.assert_not_called()
+        mock_join.assert_not_called()
         assert report.skipped_count == 1
         outcome = report.outcomes[0]
         assert outcome.disposition == DISPOSITION_SKIPPED
         assert outcome.reason == SKIPPED_ALREADY_DEMOTED
+
+    def test_precedent_with_no_graph_node_is_skipped_not_demoted(
+        self, event_log: EventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """Fix 1, end to end: a trace-/miner-sourced precedent (promoted
+        but never given a graph node) is skipped with
+        ``SKIPPED_NOT_GRAPH_BACKED``, not judged and reported as
+        ``would_demote`` for a write ``PrecedentDemoteHandler`` would
+        refuse (``target_not_graph_backed``)."""
+        _emit_promote(event_log, "p1", at=_T0)
+
+        report = evaluate_precedent_demotions(event_log, graph_store)
+
+        assert report.skipped_count == 1
+        assert report.would_demote_count == 0
+        outcome = report.outcomes[0]
+        assert outcome.entity_id == "p1"
+        assert outcome.disposition == DISPOSITION_SKIPPED
+        assert outcome.reason == SKIPPED_NOT_GRAPH_BACKED
+
+    def test_per_precedent_window_still_applies_after_shared_join(
+        self, event_log: EventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """Mutant proof for Fix 3: the shared join's ``since`` is the
+        *earliest* ``promoted_at`` among the precedents judged this run
+        (here, p1's), so its raw read can include citations that predate
+        a *later*-promoted precedent's (p2's) own window.
+        ``_attribute_precedent_citation_evidence`` must still filter each
+        precedent to its own ``promoted_at`` on top of that shared read --
+        removing or widening that per-row guard would let p2 be demoted
+        on citations that occurred before p2 was even promoted."""
+        graph_store.upsert_node(node_id="p1", node_type="precedent", properties={})
+        graph_store.upsert_node(node_id="p2", node_type="precedent", properties={})
+        _emit_promote(event_log, "p1", at=_T0)
+        p2_promoted_at = _T0 + timedelta(hours=10)
+        _emit_promote(event_log, "p2", at=p2_promoted_at)
+
+        # Two unhelpful citations for p2, both strictly before p2's own
+        # promotion but after p1's (the shared join's ``since``) -- in
+        # window for the one shared read, out of window for p2 itself.
+        early1 = _T0 + timedelta(hours=1)
+        _emit_pack_assembled(
+            event_log, pack_id="pack-early-1", item_ids=["p2"], at=early1
+        )
+        _emit_feedback(event_log, pack_id="pack-early-1", at=early1, unhelpful=["p2"])
+        early2 = _T0 + timedelta(hours=2)
+        _emit_pack_assembled(
+            event_log, pack_id="pack-early-2", item_ids=["p2"], at=early2
+        )
+        _emit_feedback(event_log, pack_id="pack-early-2", at=early2, unhelpful=["p2"])
+
+        report = evaluate_precedent_demotions(event_log, graph_store)
+
+        p2_outcome = next(o for o in report.outcomes if o.entity_id == "p2")
+        assert p2_outcome.disposition == DISPOSITION_REFUSED
+        assert p2_outcome.reason == REFUSED_NO_EVIDENCE
+        assert p2_outcome.unhelpful_count == 0
+
+    def test_truncated_discovery_scan_is_surfaced_on_report_and_event(
+        self, event_log: EventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """Fix 2, end to end: a truncated discovery scan can hide an
+        older precedent entirely, not merely under-count one it already
+        knows about -- both the report and the emitted event must say
+        so, not just ``discover_current_precedents_with_coverage``
+        itself."""
+        graph_store.upsert_node(node_id="p1", node_type="precedent", properties={})
+        graph_store.upsert_node(node_id="p2", node_type="precedent", properties={})
+        _emit_promote(event_log, "p1", at=_T0)
+        _emit_promote(event_log, "p2", at=_T0 + timedelta(hours=1))
+
+        report = evaluate_precedent_demotions(
+            event_log, graph_store, promotion_scan_limit=1
+        )
+
+        assert report.scan.truncated is True
+        assert report.notes
+        assert "TRUNCATED" in report.notes[0]
+
+        events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_DEMOTE_EVALUATED
+        )
+        assert len(events) == 1
+        assert events[0].payload["scan"]["truncated"] is True
+
+    def test_report_to_dict_carries_truncation(
+        self, event_log: EventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        graph_store.upsert_node(node_id="p1", node_type="precedent", properties={})
+        graph_store.upsert_node(node_id="p2", node_type="precedent", properties={})
+        _emit_promote(event_log, "p1", at=_T0)
+        _emit_promote(event_log, "p2", at=_T0 + timedelta(hours=1))
+
+        report = evaluate_precedent_demotions(
+            event_log, graph_store, promotion_scan_limit=1
+        )
+        data = report_to_dict(report)
+
+        assert data["scan"]["truncated"] is True
+        assert data["notes"]
 
     def test_no_evidence_refuses_not_skips(
         self, event_log: EventLog, graph_store: SQLiteGraphStore
