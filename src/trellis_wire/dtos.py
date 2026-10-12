@@ -1053,6 +1053,10 @@ class LoopHealthRowResponse(WireModel):
     description: str
     actuates: bool
     what_it_changes: str
+    #: The catalog job (``AdminJobSummary.name``) that drives this loop,
+    #: or ``None`` when nothing schedules it. A UI links this to the
+    #: Schedules tab row of the same name.
+    job_name: str | None = None
     #: ISO-8601 UTC, not a ``datetime`` — see module note on DTOs below.
     last_run_at: str | None = None
     last_status: str | None = None
@@ -1135,6 +1139,11 @@ class AdminJobSummary(WireModel):
     last_run: AdminJobLastRun | None = None
     next_due_at: str | None = None
     stored: bool = True
+    #: Loop names (``LoopHealthRowResponse.name``) this job drives, from
+    #: ``trellis.ops.loop_health.JOB_LOOPS`` — the one mapping both this
+    #: field and ``LoopHealthRowResponse.job_name`` are derived from.
+    #: Empty for a job that drives no loop (most of the catalog).
+    loops: list[str] = Field(default_factory=list)
 
 
 class AdminJobListResponse(WireModel):
@@ -1194,7 +1203,7 @@ class AdminJobRunResponse(WireModel):
     Never claims synchronous execution: the write sets
     ``run_requested_at`` and nothing else runs inline.
     ``dispatcher_hint`` is the fixed, honest sentence a UI shows beside
-    the confirm — a host dispatcher polling ``due-jobs`` on its own
+    the confirm — a host dispatcher polling for due jobs on its own
     cadence is what actually executes the job, if one is installed.
     ``run_requested_at`` is exactly what the re-read row carries —
     ``None`` on the (expected-unreachable, since a non-success result
@@ -1207,6 +1216,6 @@ class AdminJobRunResponse(WireModel):
     name: str
     run_requested_at: str | None
     dispatcher_hint: str = (
-        "Accepted. A host dispatcher polling 'due-jobs' picks this up, "
-        "typically within ~5 minutes, if one is installed."
+        "Accepted. A host dispatcher, if one is installed, picks this "
+        "up on its next poll, typically within ~5 minutes."
     )

@@ -115,6 +115,20 @@ class TestLoopHealthRoute:
             assert row["what_it_changes"]
             assert row["description"]
 
+    def test_job_name_matches_the_one_loop_job_mapping(self, client) -> None:
+        """Each loop names the catalog job that drives it, from
+        trellis.ops.loop_health.LOOP_JOB -- the single source of truth
+        AdminJobSummary.loops is also derived from."""
+        from trellis.ops.loop_health import LOOP_JOB
+
+        data = client.get("/api/v1/loops").json()
+        rows = {row["name"]: row for row in data["loops"]}
+        for loop_name, job_name in LOOP_JOB.items():
+            assert rows[loop_name]["job_name"] == job_name
+        for loop_name, row in rows.items():
+            if loop_name not in LOOP_JOB:
+                assert row["job_name"] is None, loop_name
+
 
 class TestLoopHealthScope:
     @pytest.fixture

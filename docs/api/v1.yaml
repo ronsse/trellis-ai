@@ -175,7 +175,7 @@ components:
 
         ``dispatcher_hint`` is the fixed, honest sentence a UI shows beside
 
-        the confirm — a host dispatcher polling ``due-jobs`` on its own
+        the confirm — a host dispatcher polling for due jobs on its own
 
         cadence is what actually executes the job, if one is installed.
 
@@ -190,7 +190,7 @@ components:
         which would report a value the handler never wrote.'
       properties:
         dispatcher_hint:
-          default: Accepted. A host dispatcher polling 'due-jobs' picks this up, typically within ~5 minutes, if one is installed.
+          default: Accepted. A host dispatcher, if one is installed, picks this up on its next poll, typically within ~5 minutes.
           title: Dispatcher Hint
           type: string
         name:
@@ -277,6 +277,11 @@ components:
           anyOf:
           - $ref: '#/components/schemas/AdminJobLastRun'
           - type: 'null'
+        loops:
+          items:
+            type: string
+          title: Loops
+          type: array
         name:
           title: Name
           type: string
@@ -1879,6 +1884,11 @@ components:
         description:
           title: Description
           type: string
+        job_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Job Name
         last_run_at:
           anyOf:
           - type: string

@@ -213,8 +213,12 @@ JOB_CATALOG: Mapping[str, JobSpec] = _build_catalog(
             argv=("trellis", "worker", "tune", "--dry-run", "--format", "json"),
             default_cadence="0 4 * * *",
             description=(
-                "Parameter tuner, dry-run (#557 D4): proposes promotions "
-                "and rollbacks without applying them until a human reviews."
+                "Parameter tuner. This scheduled run always passes "
+                "--dry-run, so it never auto-promotes a proposal — not "
+                "even when learning.auto_promote.enabled is set; that "
+                "setting only takes effect on a manual run made without "
+                "--dry-run. Every proposal here stays pending until a "
+                "human reviews it."
             ),
         ),
         # -- Trellis-native manual-only jobs: cadence=None by default, --
