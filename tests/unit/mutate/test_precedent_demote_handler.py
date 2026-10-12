@@ -807,7 +807,8 @@ class TestVectorSyncFailureSurfacesAsAWarning:
         registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def _raise_upsert(*_args: Any, **_kwargs: Any) -> None:
-            raise RuntimeError("vector backend unavailable")
+            msg = "vector backend unavailable"
+            raise RuntimeError(msg)
 
         monkeypatch.setattr(registry.knowledge.vector_store, "upsert", _raise_upsert)
 

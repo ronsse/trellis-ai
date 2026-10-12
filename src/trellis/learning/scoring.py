@@ -924,7 +924,9 @@ def _precedent_reapproval_refusal(
         )
     else:
         remedy = _REAPPROVAL_REMEDY.get(state, f"it is {state}; leave it {state}")
-    status = f"refused_{state}" if state in _REAPPROVAL_REMEDY else "refused_not_current"
+    status = (
+        f"refused_{state}" if state in _REAPPROVAL_REMEDY else "refused_not_current"
+    )
     return {
         "status": status,
         "entity_id": target_entity_id,
