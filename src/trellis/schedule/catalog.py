@@ -2,8 +2,9 @@
 
 ``schedule.json`` (:class:`~trellis.stores.schedule_store.ScheduleStore`,
 :class:`~trellis.schemas.schedule.ScheduledJob`) lives in a directory
-mounted read-write into every Trellis container, and a later PR (plan p1
-PR 6) makes it API-editable. Anything that can write that file therefore
+mounted read-write into every Trellis container, and is API-editable
+(plan p1 PR 6: ``GET``/``PATCH /admin/jobs``). Anything that can write
+that file therefore
 controls its contents — which is fine, because this module, not that
 file, decides what runs. A ``schedule.json`` row names a job by
 ``name``; the argv that name runs comes from :data:`JOB_CATALOG` here, in
@@ -99,6 +100,8 @@ class JobSpec:
     argv: tuple[str, ...] | None = None
     default_cadence: str | None = None
     default_timeout_seconds: int = 3600
+    spends_llm: bool = False
+    heavy: bool = False
 
     def __post_init__(self) -> None:
         validate_host_job_name(self.name)
@@ -168,6 +171,7 @@ JOB_CATALOG: Mapping[str, JobSpec] = _build_catalog(
             name="capture-nightly",
             host_only=True,
             default_cadence="0 3 * * *",
+            spends_llm=True,
             description=(
                 "Session capture sweep — turns recent Claude Code sessions "
                 "into traces. Host-only: the wrapper script it runs reads "
@@ -218,11 +222,13 @@ JOB_CATALOG: Mapping[str, JobSpec] = _build_catalog(
         JobSpec(
             name="worker-enrich",
             argv=("trellis", "worker", "enrich", "--format", "json"),
+            spends_llm=True,
             description="LLM-backed enrichment pass over recent documents.",
         ),
         JobSpec(
             name="worker-mine-precedents",
             argv=("trellis", "worker", "mine-precedents", "--format", "json"),
+            spends_llm=True,
             description="Mine failure-trace clusters into candidate precedents.",
         ),
         JobSpec(
@@ -254,6 +260,7 @@ JOB_CATALOG: Mapping[str, JobSpec] = _build_catalog(
         JobSpec(
             name="classify-shadow",
             argv=("trellis", "classify", "shadow", "--format", "json"),
+            spends_llm=True,
             description="LLM shadow-tag documents with no shadow record yet.",
         ),
         JobSpec(
@@ -274,6 +281,7 @@ JOB_CATALOG: Mapping[str, JobSpec] = _build_catalog(
         JobSpec(
             name="admin-reindex-vectors",
             argv=("trellis", "admin", "reindex-vectors", "--format", "json"),
+            heavy=True,
             description="Rebuild vector index rows from document store content.",
         ),
         JobSpec(

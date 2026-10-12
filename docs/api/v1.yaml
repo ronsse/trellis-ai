@@ -1,5 +1,315 @@
 components:
   schemas:
+    AdminJobLastRun:
+      additionalProperties: false
+      description: 'Most recent job-run record for one catalog job, from the EventLog.
+
+
+        Derived from the latest ``JOB_RUN_STARTED`` / ``JOB_RUN_COMPLETED``
+
+        pair (see ``trellis admin record-job-run``) — never a hardcoded
+
+        literal. All fields ``None`` together means the job has no run
+
+        record the EventLog can see (never run, or run before this build).
+
+        ``started_at`` can be present with the rest ``None`` when a run
+
+        started but the dispatcher never called ``record-job-run`` to close
+
+        it out (crashed before reporting).'
+      properties:
+        duration_ms:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Duration Ms
+        exit_code:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Exit Code
+        finished_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Finished At
+        run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Run Id
+        started_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Started At
+        status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      title: AdminJobLastRun
+      type: object
+    AdminJobListResponse:
+      additionalProperties: false
+      description: 'Response for ``GET /api/v1/admin/jobs``.
+
+
+        ``dispatcher_last_seen_at`` is the most recent ``JOB_RUN_STARTED``
+
+        across every catalog job — the only signal this server has that
+
+        *some* dispatcher is polling ``due-jobs`` at all. ``dispatcher_seen``
+
+        is the boolean a UI banner reads directly (recently seen within a
+
+        server-chosen window) rather than re-deriving a staleness threshold
+
+        client-side; ``False`` with ``dispatcher_last_seen_at is None`` means
+
+        no dispatcher has ever reported. ``store_degradation`` is ``None``
+
+        on a clean read and otherwise the same shape ``GET /api/v1/policies``
+
+        and ``GET /api/v1/advisories`` already use (``LoadDegradation.
+
+        to_dict()``, recovery command included) — a caller reading only
+
+        ``jobs``/``count`` would otherwise see catalog defaults presented as
+
+        the operator''s own stored choices with no signal that the file
+
+        behind them is damaged.'
+      properties:
+        count:
+          default: 0
+          title: Count
+          type: integer
+        dispatcher_last_seen_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Dispatcher Last Seen At
+        dispatcher_seen:
+          default: false
+          title: Dispatcher Seen
+          type: boolean
+        jobs:
+          items:
+            $ref: '#/components/schemas/AdminJobSummary'
+          title: Jobs
+          type: array
+        store_degradation:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Store Degradation
+      title: AdminJobListResponse
+      type: object
+    AdminJobPatchRequest:
+      additionalProperties: false
+      description: 'Body for ``PATCH /api/v1/admin/jobs/{name}``.
+
+
+        Every field is optional with no sentinel beyond Pydantic''s own
+
+        ``model_fields_set``: the route reads which fields were actually
+
+        present in the request body (vs omitted) so a ``PATCH`` changes only
+
+        what the caller named — sending ``"cadence": null`` explicitly
+
+        clears cadence (makes the job manual-only); omitting ``cadence``
+
+        leaves it unchanged. ``extra="forbid"`` (:class:`WireRequestModel`)
+
+        refuses any other field name outright, including a command, argv,
+
+        path or environment variable — there is no such field here to
+
+        forbid *selectively*, which is the point.'
+      properties:
+        cadence:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cadence
+        enabled:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Enabled
+        timeout_seconds:
+          anyOf:
+          - maximum: 86400.0
+            minimum: 1.0
+            type: integer
+          - type: 'null'
+          title: Timeout Seconds
+      title: AdminJobPatchRequest
+      type: object
+    AdminJobPatchResponse:
+      additionalProperties: false
+      description: Response for a successful ``PATCH /api/v1/admin/jobs/{name}``.
+      properties:
+        job:
+          $ref: '#/components/schemas/AdminJobSummary'
+        status:
+          default: ok
+          title: Status
+          type: string
+      required:
+      - job
+      title: AdminJobPatchResponse
+      type: object
+    AdminJobRunResponse:
+      additionalProperties: false
+      description: 'Response for ``POST /api/v1/admin/jobs/{name}/run``.
+
+
+        Never claims synchronous execution: the write sets
+
+        ``run_requested_at`` and nothing else runs inline.
+
+        ``dispatcher_hint`` is the fixed, honest sentence a UI shows beside
+
+        the confirm — a host dispatcher polling ``due-jobs`` on its own
+
+        cadence is what actually executes the job, if one is installed.
+
+        ``run_requested_at`` is exactly what the re-read row carries —
+
+        ``None`` on the (expected-unreachable, since a non-success result
+
+        raises before this is built) chance the handler''s own write did not
+
+        stick — never a timestamp this route or the CLI computed itself,
+
+        which would report a value the handler never wrote.'
+      properties:
+        dispatcher_hint:
+          default: Accepted. A host dispatcher polling 'due-jobs' picks this up, typically within ~5 minutes, if one is installed.
+          title: Dispatcher Hint
+          type: string
+        name:
+          title: Name
+          type: string
+        run_requested_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Run Requested At
+        status:
+          default: ok
+          title: Status
+          type: string
+      required:
+      - name
+      - run_requested_at
+      title: AdminJobRunResponse
+      type: object
+    AdminJobSummary:
+      additionalProperties: false
+      description: 'One job: catalog identity joined with its schedule-registry row.
+
+
+        ``name``, ``description``, ``host_only``, ``spends_llm`` and
+
+        ``heavy`` are fixed catalog facts (source-reviewed, never writable
+
+        over this API). ``enabled``, ``cadence``, ``timeout_seconds`` and
+
+        ``run_requested_at`` are the mutable schedule-registry row —
+
+        materialized with catalog defaults when no row has been written
+
+        yet, so a job always appears here even before ``init-schedule`` or
+
+        a first ``PATCH``. ``stored`` is ``False`` for exactly that
+
+        materialized-default case (including a row that failed to parse
+
+        out of a degraded store): the catalog default shown is never the
+
+        operator''s own choice, and ``next_due_at`` is always ``None`` for
+
+        such a row — ``due-jobs`` only ever evaluates a *stored* row, so a
+
+        catalog default could never actually fire at the time this field
+
+        would otherwise claim. ``default_cadence`` is the catalog''s own
+
+        default, shown alongside the effective ``cadence`` so an operator
+
+        can tell "customized" from "still the catalog default" without a
+
+        second request. ``next_due_at`` is a display-only estimate
+
+        (``None`` for a manual-only job, a job with no stored row, or when
+
+        no tick could be found).'
+      properties:
+        cadence:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cadence
+        default_cadence:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Default Cadence
+        description:
+          title: Description
+          type: string
+        enabled:
+          title: Enabled
+          type: boolean
+        heavy:
+          title: Heavy
+          type: boolean
+        host_only:
+          title: Host Only
+          type: boolean
+        last_run:
+          anyOf:
+          - $ref: '#/components/schemas/AdminJobLastRun'
+          - type: 'null'
+        name:
+          title: Name
+          type: string
+        next_due_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Due At
+        run_requested_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Run Requested At
+        spends_llm:
+          title: Spends Llm
+          type: boolean
+        stored:
+          default: true
+          title: Stored
+          type: boolean
+        timeout_seconds:
+          title: Timeout Seconds
+          type: integer
+      required:
+      - name
+      - description
+      - host_only
+      - spends_llm
+      - heavy
+      - enabled
+      - timeout_seconds
+      title: AdminJobSummary
+      type: object
     AxisReportResponse:
       additionalProperties: false
       description: 'Which retrieval axes this pack has, ran, and did not.
@@ -2711,6 +3021,157 @@ info:
   version: 0.2.0
 openapi: 3.1.0
 paths:
+  /api/v1/admin/jobs:
+    get:
+      description: 'List every catalog job, joined with its schedule row and last-run status.
+
+
+        A job always appears here even with no schedule-registry row yet
+
+        (materialized with catalog defaults — see ``_job_row_or_default``);
+
+        this route never creates one. ``dispatcher_seen``/
+
+        ``dispatcher_last_seen_at`` answer the UI''s "no dispatcher reporting"
+
+        banner from the EventLog''s own ``JOB_RUN_STARTED`` events, never a
+
+        hardcoded literal. ``store_degradation`` surfaces a degraded schedule
+
+        store the same way ``routes/policies.py`` does, so the UI can show a
+
+        banner instead of silently rendering catalog defaults as if they were
+
+        stored, operator-chosen values (gate #860, blocker 1).'
+      operationId: list_admin_jobs_api_v1_admin_jobs_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminJobListResponse'
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: List Admin Jobs
+      tags:
+      - admin
+  /api/v1/admin/jobs/{name}:
+    patch:
+      description: 'Edit a catalog job''s mutable schedule fields.
+
+
+        The writable surface is exactly ``enabled``, ``cadence`` (cron-
+
+        validated) and ``timeout_seconds`` (bounded 1..86400) —
+
+        ``AdminJobPatchRequest``''s only fields, with ``extra="forbid"``
+
+        refusing anything else. ``name`` must already be a
+
+        :data:`trellis.schedule.catalog.JOB_CATALOG` key (404 otherwise);
+
+        this route never creates or deletes a job. Only fields the caller
+
+        actually set (``body.model_fields_set``) are changed — omitting a
+
+        field leaves it unchanged; an empty body is a no-op that writes
+
+        nothing and emits no event. A write while the schedule store is
+
+        degraded or stale is refused with 409 and the store''s own error
+
+        text. Every applied change emits ``SCHEDULE_UPDATED`` with ``old``/
+
+        ``new`` dicts (only the fields that changed) and the caller''s
+
+        identity.'
+      operationId: patch_admin_job_api_v1_admin_jobs__name__patch
+      parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          title: Name
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminJobPatchRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminJobPatchResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Patch Admin Job
+      tags:
+      - admin
+  /api/v1/admin/jobs/{name}/run:
+    post:
+      description: 'Request an out-of-band run of a catalog job ("Run now").
+
+
+        Writes only ``run_requested_at`` on the schedule-registry row — this
+
+        route never executes the job inline and never claims to.
+
+        :func:`trellis.core.cron.is_job_due` treats a ``run_requested_at``
+
+        newer than the job''s last completed run as always due, so a host
+
+        dispatcher polling ``due-jobs`` on its own cadence (typically within
+
+        ~5 minutes, if one is installed at all — see
+
+        ``docs/ops/job-dispatcher.sh.example``) is what actually picks the
+
+        job up from there. ``name`` must already be a
+
+        :data:`trellis.schedule.catalog.JOB_CATALOG` key (404 otherwise). A
+
+        write while the schedule store is degraded or stale is refused with
+
+        409 and the store''s own error text. Emits ``JOB_RUN_REQUESTED`` with
+
+        the caller''s identity.'
+      operationId: run_admin_job_api_v1_admin_jobs__name__run_post
+      parameters:
+      - in: path
+        name: name
+        required: true
+        schema:
+          title: Name
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminJobRunResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Run Admin Job
+      tags:
+      - admin
   /api/v1/advisories:
     get:
       description: List stored advisories.

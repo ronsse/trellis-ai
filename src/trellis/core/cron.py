@@ -7,9 +7,13 @@ fired since this timestamp?" — is more than the job registry needs.
 This module implements exactly the standard 5-field grammar
 (``minute hour day-of-month month day-of-week``), nothing more: no
 ``@yearly``/``@reboot`` aliases, no seconds field, no timezone handling
-beyond whatever :class:`~datetime.datetime` the caller passes in (the
-registry's schedules run on local host time, matching the host crontab
-they replace).
+beyond whatever :class:`~datetime.datetime` the caller passes in. Every
+production caller (``trellis admin due-jobs``, the admin REST/CLI
+schedule routes) passes :func:`trellis.core.base.utc_now`, so a cadence
+like ``0 9 * * *`` fires at 09:00 **UTC**, not the host's local clock —
+unlike the crontab it replaces (gate #860, blocker 4). A caller that
+wants local-time semantics must convert before calling in; nothing here
+does that conversion.
 
 Day-of-month and day-of-week combine with OR, matching standard cron
 semantics, when both are restricted (neither is ``*``). When exactly one
@@ -197,6 +201,27 @@ def is_due_since(
         if steps > _MAX_WALK_MINUTES:
             return True
     return False
+
+
+def next_tick_after(cadence: str, after: datetime) -> datetime | None:
+    """The first tick of ``cadence`` strictly after ``after``, minute resolution.
+
+    Walks forward minute by minute from the minute after ``after``, capped at
+    :data:`_MAX_WALK_MINUTES`. Returns ``None`` if no tick is found within
+    that walk (a day-of-month/month combination landing once a decade) —
+    "unknown", not a guess, matching :func:`is_due_since`'s own give-up
+    posture at the same bound. For display only (e.g. "next due"); never
+    used to decide due-ness, which stays :func:`is_job_due`'s job.
+    """
+    schedule = CronSchedule.parse(cadence)
+    cursor = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    steps = 0
+    while steps <= _MAX_WALK_MINUTES:
+        if schedule.matches(cursor):
+            return cursor
+        cursor += timedelta(minutes=1)
+        steps += 1
+    return None
 
 
 def is_job_due(

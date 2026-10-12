@@ -1485,6 +1485,38 @@ def test_batch_refuses_an_unattended_writer(client):
     assert [r["status"] for r in data["results"]] == ["rejected"]
 
 
+@pytest.mark.parametrize("operation", ["schedule.update", "job.run_request"])
+def test_batch_refuses_schedule_admin_operations(client, operation):
+    """``schedule.update``/``job.run_request`` are admin-scoped: they are
+    handled only by ``trellis.mutate.build_schedule_executor``, never by
+    the curate-wired executor this route builds. Submitting either here
+    hits the ordinary "no handler registered" ``FAILED`` path — the same
+    refusal ``link.remove`` gets above — not a policy rejection and not a
+    crash.
+    """
+    resp = client.post(
+        "/api/v1/commands/batch",
+        json={
+            "commands": [
+                {
+                    "operation": operation,
+                    "args": {},
+                    "target_type": "schedule",
+                    "target_id": "tune",
+                }
+            ],
+            "strategy": "continue_on_error",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert (data["failed"], data["rejected"], data["succeeded"]) == (1, 0, 0)
+    (result,) = data["results"]
+    assert result["status"] == "failed"
+    assert "no handler registered" in result["message"].lower()
+    assert operation in result["message"].lower()
+
+
 def test_batch_feedback_record_refuses_an_out_of_range_rating(client):
     """A batch rating of 5.0 is rejected (HTTP 200) and nothing is recorded.
 

@@ -6,6 +6,72 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Admin UI for the job schedule registry: `GET`/`PATCH /api/v1/admin/jobs`,
+  `POST /api/v1/admin/jobs/{name}/run`, CLI parity, a Schedules tab (e175,
+  plan p1 PR 6).** Completes the schedule registry below (#e166): an admin
+  can now edit a catalog job's `enabled`/`cadence`/`timeout_seconds` and
+  request an out-of-band run, without the write surface ever being able to
+  name a command, argv, path or environment variable —
+  `AdminJobPatchRequest` has no such field, and `extra="forbid"` refuses any
+  other field name with 422 rather than silently ignoring it. `GET
+  /api/v1/admin/jobs` joins every `JOB_CATALOG` entry with its
+  `ScheduleStore` row and its last-run status, derived from the EventLog's
+  own `JOB_RUN_STARTED`/`JOB_RUN_COMPLETED` pair — never a hardcoded
+  literal. "Run now" writes only `run_requested_at`; the response's
+  `dispatcher_hint` says a host dispatcher polling `due-jobs` picks it up,
+  typically within ~5 minutes, and never claims the run itself completed.
+  Both writes refuse with 409 and the schedule store's real error text while
+  it is degraded or stale, and both emit an audit event (`SCHEDULE_UPDATED`
+  / `JOB_RUN_REQUESTED`) carrying only the changed old/new fields plus the
+  caller's identity. `trellis admin schedule set <name>` / `schedule run
+  <name>` give the same two writes from a terminal, `--format json` and an
+  exit code independent of format. The web UI's new **Schedules** tab
+  renders cadence as both raw cron and hand-formatted text (labelled UTC —
+  `trellis.core.cron` evaluates every production caller's `utc_now()`, not
+  the dispatcher host's local clock), an enable toggle, inline edit with
+  bounds validation, a two-step "Run now" confirm with an extra warning for
+  `spends_llm`/`heavy` jobs, and a dispatcher-activity banner that compares
+  against the longest enabled cadence's own tick interval rather than a
+  fixed window.
+  **Gate #860 fixes, same change:** a degraded schedule store is now
+  surfaced on `GET /api/v1/admin/jobs` (`store_degradation`, each row's
+  `stored: bool`) instead of showing catalog defaults as if they were the
+  operator's own stored, enabled choice; "Run now" refuses a disabled or
+  never-stored job (`job_disabled` / `not_scheduled`) instead of silently
+  enrolling it into the catalog's default cadence; `run_requested_at` in
+  the run response is exactly what the handler wrote, or `null`, never a
+  timestamp fabricated by the route or the CLI; and the Edit form reads the
+  current cadence from a data attribute rather than scraping rendered
+  table text, so saving with no changes round-trips instead of clobbering
+  the cadence with whatever the display text happened to contain.
+  **Bug found and fixed in the same change:** `admin schedule set`'s
+  tri-state option detection compared `ctx.get_parameter_source(name)`
+  against `click.ParameterSource.COMMANDLINE` by identity — Typer invokes
+  that callback through its own vendored click fork, whose `ParameterSource`
+  is a distinct enum class with identically-named members, so the
+  comparison was always `False` and every `--enabled`/`--cadence`/`--timeout`
+  flag was silently a no-op regardless of what was passed. Fixed by
+  comparing `source.name == "COMMANDLINE"` instead.
+- **Schedule writes route through `MutationExecutor`, not a direct store
+  call (e175 rework, PR #860).** The admin route and CLI above now submit
+  `Operation.SCHEDULE_UPDATE` / `Operation.JOB_RUN_REQUEST` `Command`s to a
+  new `trellis.mutate.build_schedule_executor`, whose `ScheduleUpdateHandler`
+  / `JobRunRequestHandler` (`trellis/mutate/schedule_handlers.py`) are the
+  only code left that calls `ScheduleStore.put`. Both handlers re-enforce
+  the same boundary the wire layer already had — a catalog job name only;
+  only `enabled`/`cadence`/`timeout_seconds` on update, no fields at all on
+  a run request; every check runs before the store write, so a rejected
+  command never reaches `ScheduleStore.put`. The two operations are
+  deliberately **not** in `create_curate_handlers`: that dict backs `POST
+  /api/v1/commands/batch` (`mutate` scope) and MCP `execute_mutation`, and
+  a mutate-scoped credential must not be able to edit a job's schedule or
+  request a run — those stay admin-only through a separate authorization
+  axis. Submitting either operation to the curate-wired executor fails
+  with "no handler registered for: \<operation\>", the same path an
+  unknown operation gets anywhere else. `changed_by`/audit identity comes
+  from the authenticated principal, never a client-supplied field, and a
+  policy scoped to `entity_type=schedule` now refuses the route and the
+  CLI the same way it refuses any other governed mutation.
 - **Governed tag/domain candidate review — Apply and
   Revoke.** `trellis classify tag-candidates` / `domain-candidates` have
   always *mined* keyword and alias rules (`TAG_KEYWORD_CANDIDATE` /
@@ -116,10 +182,11 @@ All notable changes to Trellis will be documented in this file.
     `due-jobs` → exec argv (or resolve + exec a host-only path) →
     `record-job-run` loop under `flock`.
 
-  No REST route and no UI yet (a later PR, plan p1 PR 6). **The actual
+  The REST route and UI that edit this registry shipped separately, above
+  (plan p1 PR 6). **The actual
   boundary:** commands are fixed in source or confined to one host-only
   directory outside the shared mount; editing `schedule.json` — by hand, a
-  compromised container, or the future PR 6 API — can change only
+  compromised container, or the PR 6 API above — can change only
   *whether* and *when* a catalog job runs, never *what* runs. (An earlier
   draft of this entry claimed "no arbitrary command execution anywhere" on
   the strength of argv-not-shell alone; that claim did not hold once

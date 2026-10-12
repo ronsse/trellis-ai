@@ -27,11 +27,15 @@ class TestOperation:
         # inverse of retention.prune, without which phase-one archival's
         # "walk it back by re-stamping" claim has no sanctioned path)
         # + ALIAS_UPSERT (governed alias/backfill writes)
+        # + SCHEDULE_UPDATE + JOB_RUN_REQUEST (plan p1 PR 6 rework — admin-only
+        # schedule-registry writes, handled only by
+        # trellis.mutate.build_schedule_executor, never create_curate_handlers;
+        # see trellis/mutate/schedule_handlers.py)
         # + SETTINGS_UPDATE (governed settings-store write; null value
         # means "remove the override" rather than a separate RESET verb)
         # + CLASSIFY_RULE_APPLY + CLASSIFY_RULE_REVOKE (governed tag/domain
         # candidate review)
-        assert len(Operation) == 24
+        assert len(Operation) == 26
 
 
 class TestCommand:

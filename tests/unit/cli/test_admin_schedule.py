@@ -1,8 +1,10 @@
-"""CLI contract for the schedule registry: record-job-run, due-jobs, init-schedule.
+"""CLI contract for the schedule registry: record-job-run, due-jobs, init-schedule,
+set, run.
 
-No REST route and no UI exist for any of this yet (plan p1, PR 6) — these
-three admin commands and the ``ScheduleStore``/``ScheduledJob`` they sit on
-are the whole surface.
+``set``/``run`` are the CLI-parity half of plan p1 PR 6's admin REST surface
+(``GET``/``PATCH /admin/jobs``, ``POST /admin/jobs/{name}/run`` in
+``trellis_api.routes.admin``) and a "Schedules" tab in the admin UI now cover
+the same ground from a browser.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.schedule import ScheduledJob
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -481,3 +484,382 @@ class TestInitSchedule:
 
         assert result.exit_code == EXIT_STORE, result.output
         assert json.loads(result.stdout)["status"] == "degraded"
+
+
+class TestScheduleSet:
+    def test_rejects_an_unknown_format(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _env(tmp_path, monkeypatch)
+        result = runner.invoke(
+            app,
+            ["admin", "schedule", "set", "tune", "--enabled", "--format", "bogus"],
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        assert "bogus" in result.output
+
+    def test_unknown_job_name_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _env(tmp_path, monkeypatch)
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "schedule",
+                "set",
+                "not-a-real-job",
+                "--enabled",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        assert json.loads(result.stdout)["code"] == "unknown_job"
+
+    def test_no_options_is_rejected_as_a_noop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _env(tmp_path, monkeypatch)
+        result = runner.invoke(
+            app, ["admin", "schedule", "set", "tune", "--format", "json"]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        assert json.loads(result.stdout)["code"] == "no_fields"
+
+    def test_bad_cadence_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _env(tmp_path, monkeypatch)
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "schedule",
+                "set",
+                "tune",
+                "--cadence",
+                "nonsense",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        assert json.loads(result.stdout)["code"] == "validation_error"
+
+    def test_out_of_range_timeout_is_rejected_by_the_option_itself(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _env(tmp_path, monkeypatch)
+        result = runner.invoke(
+            app,
+            ["admin", "schedule", "set", "tune", "--timeout", "0", "--format", "json"],
+        )
+        assert result.exit_code != 0, result.output
+
+    def test_enabling_a_job_writes_only_enabled_and_emits_schedule_updated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(stores_dir, [_job(name="tune", cadence="0 4 * * *", enabled=True)])
+
+        result = runner.invoke(
+            app,
+            ["admin", "schedule", "set", "tune", "--disabled", "--format", "json"],
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "ok"
+        assert payload["job"]["enabled"] is False
+        assert payload["job"]["cadence"] == "0 4 * * *"  # untouched
+
+        store = ScheduleStore(stores_dir / "schedule.json")
+        assert store.get("tune").cadence == "0 4 * * *"
+
+        events = _events_for(stores_dir, "tune")
+        updated = [
+            e for e in events if e["event_type"] == EventType.SCHEDULE_UPDATED.value
+        ]
+        assert len(updated) == 1
+        payload = updated[0]["payload"]
+        assert payload["old"]["enabled"] is True
+        assert payload["new"]["enabled"] is False
+        assert "cadence" not in payload["old"]
+        assert payload["key_name"].startswith("cli:")
+
+    def test_cadence_none_clears_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(stores_dir, [_job(name="tune", cadence="0 4 * * *")])
+
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "schedule",
+                "set",
+                "tune",
+                "--cadence",
+                "none",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["job"]["cadence"] is None
+        store = ScheduleStore(stores_dir / "schedule.json")
+        assert store.get("tune").cadence is None
+
+    def test_timeout_set_to_a_valid_bound(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(stores_dir, [_job(name="tune")])
+
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "schedule",
+                "set",
+                "tune",
+                "--timeout",
+                "600",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["job"]["timeout_seconds"] == 600
+
+    def test_degraded_store_exits_store_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        (stores_dir / "schedule.json").write_text("{}", encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            ["admin", "schedule", "set", "tune", "--enabled", "--format", "json"],
+        )
+
+        assert result.exit_code == EXIT_STORE, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert payload["message"]
+
+    def test_text_output_names_the_job(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _env(tmp_path, monkeypatch)
+        result = runner.invoke(app, ["admin", "schedule", "set", "tune", "--enabled"])
+        assert result.exit_code == 0, result.output
+        out = plain(result.output)
+        assert "tune" in out
+
+
+class TestScheduleRun:
+    def test_rejects_an_unknown_format(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _env(tmp_path, monkeypatch)
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "bogus"]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+
+    def test_unknown_job_name_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _env(tmp_path, monkeypatch)
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "not-a-real-job", "--format", "json"]
+        )
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        assert json.loads(result.stdout)["code"] == "unknown_job"
+
+    def test_never_claims_synchronous_execution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(
+            stores_dir,
+            [_job(name="tune", cadence="0 4 * * *", enabled=True)],
+        )
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.output
+        hint = json.loads(result.stdout)["dispatcher_hint"].lower()
+        assert "dispatcher" in hint
+        for forbidden in ("completed", "succeeded", "finished", "executed job"):
+            assert forbidden not in hint
+
+    def test_writes_only_run_requested_at_and_emits_job_run_requested(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(
+            stores_dir,
+            [_job(name="tune", cadence="0 4 * * *", enabled=True, timeout_seconds=55)],
+        )
+
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "ok"
+        assert payload["run_requested_at"]
+
+        store = ScheduleStore(stores_dir / "schedule.json")
+        row = store.get("tune")
+        assert row.run_requested_at is not None
+        assert row.enabled is True
+        assert row.cadence == "0 4 * * *"
+        assert row.timeout_seconds == 55
+
+        events = _events_for(stores_dir, "tune")
+        requested = [
+            e for e in events if e["event_type"] == EventType.JOB_RUN_REQUESTED.value
+        ]
+        assert len(requested) == 1
+        assert requested[0]["payload"]["key_name"].startswith("cli:")
+
+    def test_run_on_a_disabled_job_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gate #860, blocker 2: refuse rather than defer-and-maybe-spend."""
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(
+            stores_dir,
+            [_job(name="tune", cadence="0 4 * * *", enabled=False)],
+        )
+
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "json"]
+        )
+
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert "disabled" in payload["message"].lower()
+
+        row = ScheduleStore(stores_dir / "schedule.json").get("tune")
+        assert row is not None
+        assert row.run_requested_at is None
+
+    def test_run_on_a_never_stored_job_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gate #860, blocker 2 / F1: no row means no silent enrollment
+        into the catalog's default cadence."""
+        stores_dir = _env(tmp_path, monkeypatch)
+
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "json"]
+        )
+
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+        assert "init-schedule" in payload["message"].lower()
+        assert ScheduleStore(stores_dir / "schedule.json").get("tune") is None
+
+    def test_degraded_store_exits_store_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        (stores_dir / "schedule.json").write_text("{}", encoding="utf-8")
+
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "json"]
+        )
+
+        assert result.exit_code == EXIT_STORE, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "error"
+
+
+def _deny_schedule(stores_dir: Path, operation: str) -> None:
+    """Declare one enforced ``deny`` rule for *operation*, scoped to schedules.
+
+    Mirrors ``tests/unit/api/test_admin_jobs_routes.py``'s helper of the
+    same name: both ``set``/``run`` stamp ``target_type="schedule"`` on
+    the ``Command`` they build and execute via
+    ``trellis.mutate.build_schedule_executor``, whose ``policy_gate`` is
+    wired identically to ``build_curate_executor``'s — this is Stage 2
+    running on the CLI half of the admin-only surface.
+    """
+    policy = Policy(
+        policy_type="mutation",
+        scope=PolicyScope(level="entity_type", value="schedule"),
+        rules=[
+            PolicyRule(operation=operation, condition="synthetic-freeze", action="deny")
+        ],
+        enforcement="enforce",
+    )
+    (stores_dir / "policies.json").write_text(
+        json.dumps({"policies": [policy.model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+
+class TestPolicyDeny:
+    def test_a_policy_scoped_to_schedules_refuses_set(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(stores_dir, [_job(name="tune", cadence="0 4 * * *")])
+        _deny_schedule(stores_dir, "schedule.update")
+
+        result = runner.invoke(
+            app,
+            ["admin", "schedule", "set", "tune", "--disabled", "--format", "json"],
+        )
+
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["code"] == "validation_error"
+        assert "denied by policy" in payload["message"].lower()
+        # Nothing changed: the seeded row, not a partial write.
+        store = ScheduleStore(stores_dir / "schedule.json")
+        assert store.get("tune").enabled is True
+
+    def test_a_policy_scoped_to_schedules_refuses_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(stores_dir, [_job(name="tune", cadence="0 4 * * *")])
+        _deny_schedule(stores_dir, "job.run_request")
+
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "json"]
+        )
+
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        payload = json.loads(result.stdout)
+        assert payload["code"] == "validation_error"
+        assert "denied by policy" in payload["message"].lower()
+        store = ScheduleStore(stores_dir / "schedule.json")
+        assert store.get("tune").run_requested_at is None
+
+    def test_a_policy_scoped_to_schedules_leaves_other_commands_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The policy is scoped to ``schedule.update``; ``run`` on the
+        same job (a different operation) is untouched."""
+        stores_dir = _env(tmp_path, monkeypatch)
+        _seed_jobs(stores_dir, [_job(name="tune", cadence="0 4 * * *")])
+        _deny_schedule(stores_dir, "schedule.update")
+
+        result = runner.invoke(
+            app, ["admin", "schedule", "run", "tune", "--format", "json"]
+        )
+
+        assert result.exit_code == 0, result.output

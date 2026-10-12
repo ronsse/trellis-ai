@@ -547,6 +547,27 @@ class EventType(StrEnum):
     #: completed run per job name as its due-ness anchor.
     JOB_RUN_COMPLETED = "job.run_completed"
 
+    #: Emitted by the admin REST/CLI schedule-editing surface
+    #: (``PATCH /admin/jobs/{name}``, ``trellis admin schedule set``;
+    #: ``docs/design/p1-ui-control-plane.md`` §(b), plan PR 6) whenever a
+    #: write to :class:`~trellis.stores.schedule_store.ScheduleStore`
+    #: succeeds. ``entity_id`` is ``f"job:{name}"``, matching
+    #: :attr:`JOB_RUN_STARTED`/:attr:`JOB_RUN_COMPLETED`. Payload carries
+    #: ``old`` and ``new`` dicts (only the fields that changed:
+    #: ``enabled``, ``cadence``, ``timeout_seconds``) plus the actor
+    #: identity (``key_id``, ``key_name``) — never a command, argv, path
+    #: or environment variable, which this surface cannot change.
+    SCHEDULE_UPDATED = "schedule.updated"
+    #: Emitted by ``POST /admin/jobs/{name}/run`` / ``trellis admin
+    #: schedule run`` when a "Run now" request is accepted — i.e. the
+    #: store write that sets ``run_requested_at`` succeeded. This is a
+    #: *request*, not an execution: the actual run is still picked up by
+    #: a dispatcher polling ``due-jobs`` on its own cadence (typically
+    #: within ~5 minutes), which then emits :attr:`JOB_RUN_STARTED` /
+    #: :attr:`JOB_RUN_COMPLETED` as usual. ``entity_id`` is
+    #: ``f"job:{name}"``; payload carries ``run_requested_at`` and the
+    #: actor identity.
+    JOB_RUN_REQUESTED = "job.run_requested"
     #: Emitted by the governed classify-overlay write path
     #: (``ClassifyRuleApplyHandler`` / ``Operation.CLASSIFY_RULE_APPLY``) on
     #: every successful apply of a mined ``tag_keyword`` or ``domain_alias``
