@@ -170,11 +170,61 @@ class TestPrecedentPromotionWindows:
         report = summarize_loop_health(event_log, tuner_state, now=now)
 
         row = _row(report, "precedent_promotion")
-        assert row.counters == {"promoted_last_7d": 2, "promoted_last_30d": 2}
+        assert row.counters == {
+            "promoted_last_7d": 2,
+            "promoted_last_30d": 2,
+            "demoted_last_7d": 0,
+            "demoted_last_30d": 0,
+        }
         # PRECEDENT_PROMOTED carries no explicit success/outcome field —
         # the badge must never claim "ok" (a determination this event
         # never actually made), only the neutral "ran".
         assert row.last_status == "ran"
+
+    def test_a_demoted_precedent_is_reported_separately_not_subtracted(
+        self, tmp_path: Path
+    ) -> None:
+        """A PRECEDENT_PROMOTED event is immutable and never retracted, so
+        demoting the precedent it minted must not shrink
+        ``promoted_last_Nd`` — the demotion is counted under its own
+        ``demoted_last_Nd`` key instead.
+
+        Defective subject: a handler that folded demotions into the
+        promoted count (e.g. ``promoted - demoted``) would report
+        ``promoted_last_7d == 0`` here instead of ``1``; this assertion
+        fails against that subject and passes against the real one.
+        """
+        event_log, tuner_state = _stores(tmp_path)
+        now = datetime.now(UTC)
+        recent = now - timedelta(days=3)
+        event_log.append(
+            Event(
+                event_type=EventType.PRECEDENT_PROMOTED,
+                source="trellis.learning",
+                entity_id="cand-2",
+                occurred_at=recent,
+                payload={},
+            )
+        )
+        event_log.append(
+            Event(
+                event_type=EventType.PRECEDENT_DEMOTED,
+                source="mutation_executor",
+                entity_id="cand-2",
+                occurred_at=recent,
+                payload={"target_id": "cand-2", "reason": "superseded"},
+            )
+        )
+
+        report = summarize_loop_health(event_log, tuner_state, now=now)
+
+        row = _row(report, "precedent_promotion")
+        assert row.counters == {
+            "promoted_last_7d": 1,
+            "promoted_last_30d": 1,
+            "demoted_last_7d": 1,
+            "demoted_last_30d": 1,
+        }
 
 
 class TestTunerRow:

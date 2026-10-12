@@ -72,6 +72,16 @@ ARCHIVED_REJECTION_REASON = ARCHIVED_STATE
 SUPERSEDED_STATE = "superseded"
 SUPERSEDED_REJECTION_REASON = SUPERSEDED_STATE
 
+#: The ``Lifecycle.state`` value ``PrecedentDemoteHandler``
+#: (:mod:`trellis.mutate.handlers`) writes, reused verbatim as the
+#: ``RejectedItem.reason`` of :func:`partition_demoted` — the same
+#: no-second-vocabulary rule as :data:`ARCHIVED_REJECTION_REASON`, and the
+#: same by-value duplication :data:`SUPERSEDED_STATE` uses rather than a
+#: cross-module import (``mutate`` is the writer's layer; this module only
+#: reads).
+DEMOTED_STATE = "demoted"
+DEMOTED_REJECTION_REASON = DEMOTED_STATE
+
 #: The node property that points a ``save_knowledge`` graph node at its
 #: evidence document. ``GraphSearch`` spreads node properties into item
 #: metadata, so this is how a successor named by its *document* id is found
@@ -109,6 +119,41 @@ def partition_archived(
     withheld: list[PackItem] = []
     for item in items:
         if is_archived(item.metadata):
+            withheld.append(item)
+        else:
+            kept.append(item)
+    return kept, withheld
+
+
+def is_demoted(metadata: dict[str, Any] | None) -> bool:
+    """Whether a metadata bag carries ``Lifecycle.state == "demoted"``.
+
+    Mirrors :func:`is_archived`: anything malformed reads as **not**
+    demoted — a bad lifecycle record is a reason to keep serving an item,
+    never a reason to hide it.
+    """
+    if not metadata:
+        return False
+    record = metadata.get(LIFECYCLE_KEY)
+    if not isinstance(record, dict):
+        return False
+    return record.get("state") == DEMOTED_STATE
+
+
+def partition_demoted(
+    items: Iterable[PackItem],
+) -> tuple[list[PackItem], list[PackItem]]:
+    """Split ``items`` into ``(kept, withheld)`` on the demoted stamp.
+
+    Mirrors :func:`partition_archived`: a demoted precedent's graph node
+    (stamped by ``PrecedentDemoteHandler``) must stop reaching a pack
+    through the graph-serving path the same way an archived item does,
+    with the rejection recorded rather than silently dropped.
+    """
+    kept: list[PackItem] = []
+    withheld: list[PackItem] = []
+    for item in items:
+        if is_demoted(item.metadata):
             withheld.append(item)
         else:
             kept.append(item)
@@ -216,12 +261,16 @@ def partition_superseded(
 
 __all__ = [
     "ARCHIVED_REJECTION_REASON",
+    "DEMOTED_REJECTION_REASON",
+    "DEMOTED_STATE",
     "EVIDENCE_REF_KEY",
     "SUPERSEDED_REJECTION_REASON",
     "SUPERSEDED_STATE",
     "declared_successor",
     "exclude_archived",
     "is_archived",
+    "is_demoted",
     "partition_archived",
+    "partition_demoted",
     "partition_superseded",
 ]

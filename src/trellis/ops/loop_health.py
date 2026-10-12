@@ -10,7 +10,7 @@ silently inert for a month" had to SSH in and tail a file.
 :func:`summarize_loop_health` answers that from the EventLog alone (plus
 one documented exception below), reading ``CURATE_CYCLE_COMPLETED`` /
 ``TUNE_CYCLE_COMPLETED`` (:mod:`trellis_cli.worker`), ``PRECEDENT_PROMOTED``,
-``PARAMS_AUTO_PROMOTED``, ``FEEDBACK_RECORDED`` and
+``PRECEDENT_DEMOTED``, ``PARAMS_AUTO_PROMOTED``, ``FEEDBACK_RECORDED`` and
 ``LEARNING_AUTO_PROMOTE_EVALUATED`` (the last one for the
 ``learning_candidate_auto_promote`` row, which also folds in
 :func:`trellis.learning.candidate_auto_promote.compute_agreement_metric`'s
@@ -367,6 +367,15 @@ def summarize_loop_health(
     precedent_scan = _scan(event_log, EventType.PRECEDENT_PROMOTED, limit=limit)
     precedent_events = precedent_scan.events
     precedent_latest = precedent_events[-1] if precedent_events else None
+    # A promotion event is immutable and never retracted, so a precedent
+    # demoted after promoting still counts toward `promoted_last_Nd` --
+    # that counter answers "how many promotions happened", not "how many
+    # promoted precedents are still live". `demoted_last_Nd` is reported
+    # alongside it, from PRECEDENT_DEMOTED directly, rather than folded
+    # into the promoted figure, so neither number has to lie about what
+    # it means.
+    precedent_demoted_scan = _scan(event_log, EventType.PRECEDENT_DEMOTED, limit=limit)
+    precedent_demoted_events = precedent_demoted_scan.events
     precedent_row = LoopHealthRow(
         name="precedent_promotion",
         description=(
@@ -381,7 +390,10 @@ def summarize_loop_health(
             "only ever reports what it would promote; committing one "
             "automatically is refused until a follow-up ships "
             "auto-demotion. This count includes any promotion run by hand "
-            "as well as from the review queue."
+            "as well as from the review queue, and keeps rising even "
+            "after a promoted precedent is later demoted -- the demoted "
+            "count is tracked and shown separately, never subtracted "
+            "from this one."
         ),
         operator_hint="CLI: `trellis curate promote-learning`.",
         job_name=LOOP_JOB.get("precedent_promotion"),
@@ -400,6 +412,16 @@ def summarize_loop_health(
                 "promoted_last_30d": sum(
                     1
                     for e in precedent_events
+                    if e.occurred_at >= now - timedelta(days=30)
+                ),
+                "demoted_last_7d": sum(
+                    1
+                    for e in precedent_demoted_events
+                    if e.occurred_at >= now - timedelta(days=7)
+                ),
+                "demoted_last_30d": sum(
+                    1
+                    for e in precedent_demoted_events
                     if e.occurred_at >= now - timedelta(days=30)
                 ),
             }
@@ -500,6 +522,7 @@ def summarize_loop_health(
     scan_coverage = merge_coverage(
         curate_scan.coverage,
         precedent_scan.coverage,
+        precedent_demoted_scan.coverage,
         candidate_auto_promote_coverage,
         tune_scan.coverage,
         auto_promoted_scan.coverage,

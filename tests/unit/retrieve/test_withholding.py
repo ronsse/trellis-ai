@@ -43,7 +43,10 @@ from trellis.retrieve.formatters import (
     format_pack_as_markdown,
     format_sectioned_pack_as_markdown,
 )
-from trellis.retrieve.lifecycle import ARCHIVED_REJECTION_REASON
+from trellis.retrieve.lifecycle import (
+    ARCHIVED_REJECTION_REASON,
+    DEMOTED_REJECTION_REASON,
+)
 from trellis.retrieve.noise import NOISE_REJECTION_REASON
 from trellis.retrieve.pack_builder import PackBuilder, SemanticDedupConfig
 from trellis.retrieve.strategies import SearchStrategy
@@ -127,6 +130,10 @@ def _archived(item_id: str, **kw: Any) -> PackItem:
 
 def _noisy(item_id: str, **kw: Any) -> PackItem:
     return _item(item_id, metadata={"content_tags": {"signal_quality": "noise"}}, **kw)
+
+
+def _demoted(item_id: str, **kw: Any) -> PackItem:
+    return _item(item_id, metadata={LIFECYCLE_KEY: {"state": "demoted"}}, **kw)
 
 
 def _summary(pack: Any) -> dict[str, Any]:
@@ -324,6 +331,52 @@ class TestTheTwoSilentGatesAreRecorded:
         builder = PackBuilder(strategies=[_strategy("keyword", [both])])
         pack = builder.build("deploy checklist")
         assert _summary(pack)["by_reason"] == {ARCHIVED_REJECTION_REASON: 1}
+
+
+class TestTheDemotedGateIsRecorded:
+    """``partition_demoted`` (:mod:`trellis.retrieve.lifecycle`): a third
+    collect-seam gate, added alongside the two above for
+    ``PrecedentDemoteHandler``'s SCD-2 stamp. Same shape, same reasoning:
+    a demoted precedent's graph node must stop reaching a pack, and the
+    drop must be a row a caller can read rather than a ``logger.debug``
+    line.
+
+    Defective subject: a ``partition_demoted`` that returns its input
+    unchanged (a no-op) serves the demoted item below and records nothing
+    — both assertions in ``test_a_demoted_item_is_absent_and_recorded``
+    fail.
+    """
+
+    def test_a_demoted_item_is_absent_and_recorded(self) -> None:
+        builder = PackBuilder(
+            strategies=[_strategy("keyword", [_item("keep"), _demoted("gone")])]
+        )
+        pack = builder.build("deploy checklist")
+
+        assert [i.item_id for i in pack.items] == ["keep"]
+        rejected = pack.retrieval_report.rejected_items
+        assert [(r.item_id, r.reason) for r in rejected] == [
+            ("gone", DEMOTED_REJECTION_REASON)
+        ]
+        assert _summary(pack)["by_reason"] == {DEMOTED_REJECTION_REASON: 1}
+
+    def test_noise_is_evaluated_before_demoted(self) -> None:
+        """Pipeline order: ``partition_archived`` -> ``partition_by_signal_quality``
+        (noise) -> ``partition_demoted``. A noise-tagged item is gated by
+        noise before the demoted check ever runs, which only matters when
+        an item's ``content_tags`` and ``lifecycle`` could disagree — a
+        vector row's metadata is an embed-time snapshot (#338), so this is
+        a real, not merely hypothetical, shape."""
+        both = _item(
+            "both",
+            metadata={
+                LIFECYCLE_KEY: {"state": "demoted"},
+                "content_tags": {"signal_quality": "noise"},
+            },
+        )
+        builder = PackBuilder(strategies=[_strategy("keyword", [both])])
+        pack = builder.build("deploy checklist")
+        assert _summary(pack)["by_reason"] == {NOISE_REJECTION_REASON: 1}
 
 
 class TestTheSummaryReachesThePackAndTheEvent:

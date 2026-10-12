@@ -44,7 +44,10 @@ class TestOperation:
         # this verb)
         # + CLASSIFY_RULE_APPLY + CLASSIFY_RULE_REVOKE (governed tag/domain
         # candidate review)
-        assert len(Operation) == 25
+        # + PRECEDENT_DEMOTE (manual-trigger precedent demotion; an SCD-2
+        # rewrite to Lifecycle.state="demoted", provenance re-derived from
+        # the precedent's own precedent.promote MUTATION_EXECUTED event)
+        assert len(Operation) == 26
 
 
 class TestCommand:

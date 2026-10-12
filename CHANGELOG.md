@@ -6,6 +6,37 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Precedent demotion verb (manual-trigger only): `precedent.demote` through
+  the governed mutation pipeline, with CLI `trellis curate
+  demote-precedent`, REST `POST /precedents/{target_id}/demote`, and MCP
+  `execute_mutation`.** A new `Lifecycle.state` value, `"demoted"`, is an
+  SCD-2 rewrite of a precedent's graph node — not a purge like `redact` —
+  so the pre-demotion version stays readable via `get_node_history`/`as_of`.
+  There is no dedicated reversal verb yet, though: an operator undoes a
+  demotion with `entity.update` to set `Lifecycle.state` back to
+  `"current"`, and the demoted version remains in history either way —
+  that gap is tracked for a follow-up PR. Only a precedent promoted from a
+  learning candidate has a graph node and can be demoted; a trace- or
+  miner-sourced precedent id is refused with a message naming that gap
+  rather than a generic "Node not found". `PrecedentDemoteHandler` refuses
+  a non-precedent target and requires a non-empty, length-bounded reason
+  written to the audit trail. Provenance is re-derived from the event log,
+  never trusted from a caller-supplied flag: a caller demoting under the
+  (not yet wired) automatic requester identity may demote only a precedent
+  whose own `precedent.promote` event was itself automatic, while every
+  other caller may demote any graph-backed precedent regardless of lifecycle
+  state. Re-demoting an already-demoted precedent is an idempotent no-op
+  (no new SCD-2 version, no new event, the stored reason unchanged) that
+  says so; demoting a precedent whose lifecycle state is not `"current"`
+  (superseded, archived, or anything else) is refused, naming the actual
+  state. Once demoted, a precedent is excluded from `GET /precedents`,
+  `trellis retrieve precedents` and `get_lessons`, and is withheld from
+  packs at the collect seam alongside the existing archived/noise gates,
+  recorded in `rejected_items` with its own reason so the pack's
+  withholding statement names it. `"demoted"` is deliberately left out of
+  `RetentionPruneHandler`'s `UNSELECTABLE_STATES`, so it stays reachable by
+  `retention.prune --lifecycle-state demoted`.
+
 - **Admin UI for the job schedule registry: `GET`/`PATCH /api/v1/admin/jobs`,
   `POST /api/v1/admin/jobs/{name}/run`, CLI parity, a Schedules tab (e175,
   plan p1 PR 6).** Completes the schedule registry below (#e166): an admin
@@ -1392,6 +1423,27 @@ All notable changes to Trellis will be documented in this file.
   keyword or graph are healthy.
   ([#838](https://github.com/ronsse/trellis-ai/pull/838))
 
+- **The packaged agent skills no longer teach calls the server rejects or
+  ignores.** `record-after-task` showed `"source": "claude-code"` in both
+  example traces; `source` is an enum (`agent | human | workflow | system`)
+  and trace validation is all-or-nothing, so an agent that copied the example
+  lost the whole trace. The skill now documents the trace schema as the server
+  enforces it — the keys a step accepts, `result` as an object, artifacts in
+  top-level `artifacts_produced`, `metadata` and `outcome.metrics` as the home
+  for anything else — and adds grading packs by item id and saving environment
+  facts with `save_knowledge`. `link-evidence` told the reader to pass a
+  `save_memory` document id as `relates_to`, which creates no edge (documents
+  are not graph nodes), and claimed `save_knowledge` updates an existing
+  entity, which it does not: every call creates a node. It now stores the fact
+  and its anchor in one `save_knowledge(content=..., relates_to=...)` call,
+  uses `evidence_ref` for a document that already exists, and says to read the
+  reply for `Edge created` or the `edge not created` warning.
+  `retrieve-before-task` now covers retrieval after a pivot, after compaction
+  (`refresh=True`), in dispatched subagents, and survey-then-fetch with
+  `index=True` and `get_items`, and explains the `Withheld` line. All three
+  skills move to version 1.1.0; an existing install picks them up with
+  `trellis admin install-skills <scope> --force`.
+
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
   `2`, whatever refused it. A policy refusal, by `deny` or `require_approval`,
@@ -1423,6 +1475,24 @@ All notable changes to Trellis will be documented in this file.
   list is a `ConfigError` instead of a `TypeError` crash. The CLI turns off
   Typer's traceback locals, which Typer before 0.23 printed.
   ([#670](https://github.com/ronsse/trellis-ai/pull/670))
+
+- **The CLI finds the stores `trellis admin init --data-dir PATH` made, and
+  `admin init` repairs a missing stores directory.** Every CLI store command
+  checked `$TRELLIS_DATA_DIR`, else the config dir's `data/`, for the stores
+  directory, while the store registry reads `config.yaml`'s `data_dir`
+  first. So after `init --data-dir PATH` each store command exited `1` with
+  `Stores not initialized`, and the `trellis admin init` it advised found
+  `config.yaml` and did nothing. The stores guard now checks the registry's
+  directory and names it. `policy add` and the advisory commands write where
+  the MCP server and REST API read, and `demo reset` wipes the directory the
+  stores are in. For each, the directory differs from before only when
+  `config.yaml`'s `data_dir` differs from `$TRELLIS_DATA_DIR` (else the
+  config dir's `data/`). With `config.yaml` present, `admin init` recreates
+  a missing `stores/` directory without touching the file, and its JSON
+  adds `data_dir` and `stores_created`. A `config.yaml` the registry
+  refuses now makes `admin init` without `--force`, `policy`, `demo reset`
+  and `admin quickstart` exit `5` (was `0`).
+  ([#666](https://github.com/ronsse/trellis-ai/pull/666))
 
 - **`trellis curate entity`, `prune`, `restore`, `redact` and `link` show
   their warnings, as `label` already did.** Their output carried neither
@@ -2629,6 +2699,18 @@ All notable changes to Trellis will be documented in this file.
   surfaces give the same reason for the same input and a `200` sectioned
   response always has at least one section to read `axes` from.
   (follow-up F4 from the [#783](https://github.com/ronsse/trellis-ai/pull/783) gate)
+- **`upsert_edges_bulk` on Neo4j locks every distinct endpoint in the batch in
+  one constant-text query before resolving any row.** Two bulk writers of the
+  same `(source_id, target_id, edge_type)` triplet, or a bulk writer racing a
+  single-row `upsert_edge`, could each see "no current edge" and both create
+  one. A single `UNWIND $lock_ids AS lock_nid` clause over the sorted endpoint
+  list replaces one clause per endpoint, so the query text and cached plan stay
+  constant at any batch size, and the sort order keeps two such writers from
+  deadlocking on shared endpoints. ArcadeDB takes no lock from this touch; a
+  same-triplet duplicate there is still caught only by the existing OCC retry.
+  (follow-up 2 from the [#782](https://github.com/ronsse/trellis-ai/pull/782)
+  gate, repeated as follow-up 2 by the
+  [#803](https://github.com/ronsse/trellis-ai/pull/803) gate)
 - **The Python SDK's `get_objective_context` and `get_task_context` now name
   a failed or misconfigured retrieval axis, sync and async.** They read the
   response's `sections` and `withholding` but not its `axes` block, so an SDK

@@ -11,6 +11,7 @@ so one lucky interleaving cannot pass it.
 from __future__ import annotations
 
 import functools
+import logging
 import threading
 from collections.abc import Callable
 from typing import Any, Protocol
@@ -37,6 +38,8 @@ class _GraphStore(Protocol):
         edge_type: str,
         properties: dict[str, Any] | None = None,
     ) -> str: ...
+
+    def upsert_edges_bulk(self, edges: list[dict[str, Any]]) -> list[str]: ...
 
     def get_edges(
         self, node_id: str, direction: str = "both", edge_type: str | None = None
@@ -179,3 +182,183 @@ def check_edge_write_racing_node_upsert_keeps_one_current_node(
             assert len(current) == 1, (i, len(current))
     finally:
         second.close()
+
+
+def check_concurrent_bulk_edge_create_leaves_one_current_row(
+    store: _GraphStore, make_second_store: Any
+) -> None:
+    """Two instances calling ``upsert_edges_bulk`` for the same new edge
+    leave exactly one current row.
+
+    The bulk-vs-bulk shape of the create race: both writers' batches carry
+    one row apiece, for the same triplet. Repeated :data:`REPS` times with a
+    fresh triplet each rep, mirroring
+    :func:`check_concurrent_edge_create_leaves_one_current_row` at the bulk
+    entry point.
+    """
+    second = make_second_store()
+    try:
+        for i in range(REPS):
+            source_id = f"race-bulk-create-src-{i}"
+            target_id = f"race-bulk-create-tgt-{i}"
+            store.upsert_node(source_id, "race-node", {})
+            store.upsert_node(target_id, "race-node", {})
+
+            _race(
+                functools.partial(
+                    store.upsert_edges_bulk,
+                    [
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "edge_type": "race-rel",
+                            "properties": {"writer": "a"},
+                        }
+                    ],
+                ),
+                functools.partial(
+                    second.upsert_edges_bulk,
+                    [
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "edge_type": "race-rel",
+                            "properties": {"writer": "b"},
+                        }
+                    ],
+                ),
+            )
+
+            current = store.get_edges(
+                source_id, direction="outgoing", edge_type="race-rel"
+            )
+            assert len(current) == 1, (i, [row["edge_id"] for row in current])
+    finally:
+        second.close()
+
+
+def check_bulk_edge_create_racing_single_edge_write_leaves_one_current_row(
+    store: _GraphStore, make_second_store: Any
+) -> None:
+    """``upsert_edges_bulk`` racing single-row ``upsert_edge`` on the same
+    triplet leaves exactly one current row.
+
+    The mixed shape #782 follow-up 2 named: one writer uses the bulk entry
+    point, the other the single-row one, both for the same new edge.
+    Repeated :data:`REPS` times with a fresh triplet each rep.
+    """
+    second = make_second_store()
+    try:
+        for i in range(REPS):
+            source_id = f"race-bulk-single-src-{i}"
+            target_id = f"race-bulk-single-tgt-{i}"
+            store.upsert_node(source_id, "race-node", {})
+            store.upsert_node(target_id, "race-node", {})
+
+            _race(
+                functools.partial(
+                    store.upsert_edges_bulk,
+                    [
+                        {
+                            "source_id": source_id,
+                            "target_id": target_id,
+                            "edge_type": "race-rel",
+                            "properties": {"writer": "a"},
+                        }
+                    ],
+                ),
+                functools.partial(
+                    second.upsert_edge,
+                    source_id,
+                    target_id,
+                    "race-rel",
+                    {"writer": "b"},
+                ),
+            )
+
+            current = store.get_edges(
+                source_id, direction="outgoing", edge_type="race-rel"
+            )
+            assert len(current) == 1, (i, [row["edge_id"] for row in current])
+    finally:
+        second.close()
+
+
+class _RetryCapture(logging.Handler):
+    """Collects the neo4j driver's own "transaction will be retried" warnings.
+
+    The Bolt driver retries a transaction that fails with a retryable
+    error -- a deadlock included -- so a check that only asserts the
+    final row count passes whether the two writers' sorted lock order
+    avoided a deadlock or a deadlock happened and the driver silently
+    retried past it. Attaching this to the ``neo4j.session`` logger (the
+    one :mod:`neo4j` logs "...will be retried..." warnings on) during a
+    race turns that silent retry into an assertable record.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record.getMessage())
+
+
+def check_bulk_edge_writes_opposite_row_order_do_not_deadlock(
+    store: _GraphStore, make_second_store: Any
+) -> None:
+    """Two ``upsert_edges_bulk`` calls carrying the same two triplets in
+    opposite row order neither deadlock nor leave a duplicate current row.
+
+    Each writer's batch touches the same 4 endpoint nodes but orders its
+    two rows oppositely (writer one: triplet 1 then triplet 2; writer two:
+    triplet 2 then triplet 1), exercising the sorted lock order's deadlock
+    avoidance at batch granularity -- the shape the single-row ``x->y`` vs
+    ``y->x`` race exercises per edge. Repeated :data:`REPS` times with
+    fresh ids each rep.
+
+    A deadlock the driver retries past still leaves one current row, so
+    the row-count assertions alone cannot tell "no deadlock" from "a
+    deadlock happened and was retried away" -- :class:`_RetryCapture`
+    makes the driver's own retry warning assertable instead.
+    """
+    second = make_second_store()
+    retries = _RetryCapture()
+    session_logger = logging.getLogger("neo4j.session")
+    session_logger.addHandler(retries)
+    try:
+        for i in range(REPS):
+            s1, t1 = f"race-order-s1-{i}", f"race-order-t1-{i}"
+            s2, t2 = f"race-order-s2-{i}", f"race-order-t2-{i}"
+            for node_id in (s1, t1, s2, t2):
+                store.upsert_node(node_id, "race-node", {})
+            row1 = {
+                "source_id": s1,
+                "target_id": t1,
+                "edge_type": "race-rel",
+                "properties": {"writer": "a"},
+            }
+            row2 = {
+                "source_id": s2,
+                "target_id": t2,
+                "edge_type": "race-rel",
+                "properties": {"writer": "b"},
+            }
+
+            _race(
+                functools.partial(store.upsert_edges_bulk, [row1, row2]),
+                functools.partial(second.upsert_edges_bulk, [row2, row1]),
+            )
+
+            current_1 = store.get_edges(s1, direction="outgoing", edge_type="race-rel")
+            current_2 = store.get_edges(s2, direction="outgoing", edge_type="race-rel")
+            assert len(current_1) == 1, (i, [row["edge_id"] for row in current_1])
+            assert len(current_2) == 1, (i, [row["edge_id"] for row in current_2])
+    finally:
+        session_logger.removeHandler(retries)
+        second.close()
+    assert not retries.records, (
+        "a bulk writer's transaction was retried, so the sorted lock order "
+        "did not avoid a deadlock -- the driver just retried past it: "
+        f"{retries.records}"
+    )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from importlib.resources import files
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from trellis.schemas.trace import Trace
 from trellis_cli.claude_integration import (
     get_skills_target_dir,
     install_skills,
@@ -40,6 +42,29 @@ class TestPackageData:
         # Frontmatter + heading, so the file is a real SKILL.md not a stub.
         assert text.startswith("---")
         assert f"name: {name}" in text
+
+    @pytest.mark.parametrize("name", SKILL_NAMES)
+    def test_frontmatter_keeps_packaged_fields(self, name):
+        text = (files("trellis_cli.skills") / name / "SKILL.md").read_text()
+        frontmatter = text.split("---")[1]
+        fields = dict(line.split(": ", 1) for line in frontmatter.strip().splitlines())
+        assert {"name", "description", "version", "status"} <= set(fields)
+        # Hosts that list skills truncate or refuse a longer description.
+        assert len(fields["description"]) < 200
+
+    def test_record_after_task_example_traces_validate(self):
+        # An agent copies the example. Trace validation is all-or-nothing,
+        # so an example the schema rejects teaches every reader to lose
+        # the trace.
+        text = (
+            files("trellis_cli.skills") / "record-after-task" / "SKILL.md"
+        ).read_text()
+        examples = re.findall(
+            r"save_experience\(trace_json='(\{.*?\})'\)", text, flags=re.DOTALL
+        )
+        assert examples
+        for example in examples:
+            Trace.model_validate_json(example)
 
 
 # ---------------------------------------------------------------------------

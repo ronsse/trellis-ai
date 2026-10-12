@@ -60,6 +60,7 @@ from trellis.mcp.server import (
     search as _search,
 )
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
+from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.well_known import APPLIES_TO, CONCEPT, SOFTWARE_APPLICATION
 from trellis.stores.advisory_store import AdvisoryStore
@@ -1997,6 +1998,35 @@ class TestGetLessons:
     def test_with_domain_filter(self) -> None:
         result = get_lessons(domain="platform")
         assert isinstance(result, str)
+
+    def test_a_demoted_precedent_is_not_served(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """The promote event is immutable, so ``get_lessons`` has to read
+        the node's current lifecycle to withhold a demoted precedent.
+        """
+        graph = temp_registry.knowledge.graph_store
+        event_log = temp_registry.operational.event_log
+        for node_id, name, state in (
+            ("prec-live", "Live lesson", "current"),
+            ("prec-gone", "Demoted lesson", "demoted"),
+        ):
+            graph.upsert_node(
+                node_id=node_id,
+                node_type="precedent",
+                properties={"name": name, LIFECYCLE_KEY: {"state": state}},
+            )
+            event_log.emit(
+                EventType.PRECEDENT_PROMOTED,
+                source="test",
+                entity_id=node_id,
+                payload={"title": name, "description": f"{name} body"},
+            )
+
+        result = get_lessons()
+
+        assert "Live lesson" in result
+        assert "Demoted lesson" not in result
 
     def test_invalid_limit_type_raises(self) -> None:
         # ``limit`` is typed ``int`` and is forwarded down to the SQL layer.

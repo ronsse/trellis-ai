@@ -218,6 +218,44 @@ def label(
     _execute_command(cmd, output_format)
 
 
+@curate_app.command("demote-precedent")
+def demote_precedent(
+    target_id: str = typer.Argument(..., help="Precedent entity ID to demote"),
+    reason: str = typer.Option(
+        ..., "--reason", help="Audit-trail justification (required, non-empty)"
+    ),
+    requested_by: str = typer.Option(
+        "cli:demote-precedent",
+        "--by",
+        help="Audit-trail identifier for the caller.",
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Demote a precedent, stamping it ``Lifecycle.state="demoted"``.
+
+    A soft SCD-2 rewrite of the precedent's graph node, not a purge, so
+    the pre-demotion version stays readable via ``get_node_history``/
+    ``as_of`` -- but there is no dedicated reversal verb yet: an
+    operator undoes a demotion with ``entity.update`` to set
+    ``Lifecycle.state`` back to ``"current"``. A demoted precedent stops
+    reaching ``list_precedents`` / ``get_lessons`` and is withheld from
+    packs at the collect seam, with the withholding recorded in
+    ``rejected_items``. Only a precedent promoted from a learning
+    candidate has a graph node and can be demoted; a trace- or
+    miner-sourced precedent id is refused. Re-demoting an
+    already-demoted precedent is an idempotent no-op (exit 0, message
+    says so, nothing changes).
+    """
+    cmd = Command(
+        operation=Operation.PRECEDENT_DEMOTE,
+        args={"target_id": target_id, "reason": reason},
+        target_id=target_id,
+        target_type="precedent",
+        requested_by=requested_by,
+    )
+    _execute_command(cmd, output_format)
+
+
 @curate_app.command()
 def prune(
     reason: str = typer.Option(

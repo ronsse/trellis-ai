@@ -451,6 +451,126 @@ class TestCurateRedact:
         assert "Node not found" in rendered
 
 
+class TestCurateDemotePrecedent:
+    def _create_precedent(self) -> str:
+        r = runner.invoke(
+            app,
+            ["curate", "entity", "precedent", "Pooling pattern", "--format", "json"],
+        )
+        node_id: str = json.loads(r.stdout.strip())["node_id"]
+        return node_id
+
+    def test_demote_stamps_the_precedent(self) -> None:
+        node_id = self._create_precedent()
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "demote-precedent",
+                node_id,
+                "--reason",
+                "superseded by a broader pattern",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "success"
+        assert data["operation"] == "precedent.demote"
+        assert data["created_id"] == node_id
+        assert data["command_id"]
+
+    def test_demote_non_precedent_target_is_refused(self) -> None:
+        """Reuses ``TestCurateRedact``'s node (``entity person``, not
+        ``precedent``): the handler's ``node_type`` check refuses it."""
+        r = runner.invoke(
+            app,
+            ["curate", "entity", "person", "Junk Mint", "--format", "json"],
+        )
+        node_id = json.loads(r.stdout.strip())["node_id"]
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "demote-precedent",
+                node_id,
+                "--reason",
+                "r",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code != 0
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+
+    def test_demote_missing_target_json(self) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "demote-precedent",
+                "ghost",
+                "--reason",
+                "r",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 2, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+        assert "Node not found: ghost" in data["message"]
+
+    def test_demote_blank_reason_rejected(self) -> None:
+        node_id = self._create_precedent()
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "demote-precedent",
+                node_id,
+                "--reason",
+                "  ",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 2
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+
+    def test_demote_default_requested_by_is_cli(self) -> None:
+        """A human-run CLI invocation must carry a non-automatic
+        ``requested_by``, so a later human demote of an auto-promoted
+        precedent is never mistaken for the automatic path."""
+        node_id = self._create_precedent()
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "demote-precedent",
+                node_id,
+                "--reason",
+                "r",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        events = [
+            e
+            for e in curate_cli._get_registry().operational.event_log.get_events(
+                event_type=EventType.PRECEDENT_DEMOTED
+            )
+            if e.payload.get("target_id") == node_id
+        ]
+        assert len(events) == 1
+        assert events[0].payload["requested_by"] == "cli:demote-precedent"
+
+
 class TestCurateFeedback:
     def test_feedback(self) -> None:
         result = runner.invoke(app, ["curate", "feedback", "trace_1", "0.9"])

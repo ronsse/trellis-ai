@@ -22,6 +22,10 @@ trellis admin init [--data-dir PATH] [--force] [--format text|json]
 | `--force` | `false` | Overwrite existing config |
 | `--format` | `text` | Output format |
 
+`init` writes the data directory into `config.yaml` as `data_dir`. Every surface that opens the stores (CLI commands, `admin health`, the MCP server, the REST API and the capture sweep) reads it from there first, then from `$TRELLIS_DATA_DIR`, then uses `data/` in the config dir. With `--force`, the `--data-dir` default above applies: `init` does not read the `config.yaml` it replaces.
+
+When `config.yaml` exists and `--force` is not given, `init` leaves the file alone. If the `stores/` directory in that data directory is missing, `init` recreates it and reports `"stores_created": true`. That is the fix for `Stores not initialized at PATH`.
+
 **JSON output (success):**
 
 ```json
@@ -31,7 +35,7 @@ trellis admin init [--data-dir PATH] [--force] [--format text|json]
 **JSON output (already exists):**
 
 ```json
-{"status": "exists", "config_dir": "/home/user/.trellis"}
+{"status": "exists", "config_dir": "/home/user/.trellis", "data_dir": "/home/user/.trellis/data", "stores_created": false}
 ```
 
 ### `trellis admin health`
@@ -1340,6 +1344,81 @@ A `target_id` that names no node, including one already redacted, exits `2`
 with the message `Node not found: <target_id>` (`"status": "rejected"` in the
 JSON).
 
+### `trellis curate demote-precedent`
+
+Demote a precedent, stamping its graph node `Lifecycle.state="demoted"`
+through the governed pipeline. An SCD-2 rewrite, not a purge — contrast
+`redact` above — so the pre-demotion version stays readable via
+`get_node_history` / `as_of`. There is no dedicated reversal verb yet,
+though: an operator undoes a demotion with `entity.update` to set
+`Lifecycle.state` back to `"current"`, and the demoted version remains in
+history either way. Once demoted, the precedent stops reaching
+`GET /precedents`, `trellis retrieve precedents` and `get_lessons`, and is
+withheld from packs at the collect seam — `rejected_items` records it with
+reason `"demoted"`, and the pack's withholding statement names it.
+
+Only a precedent promoted from a learning candidate has a graph node and
+can be demoted. A trace- or miner-sourced precedent id — one with a
+`PRECEDENT_PROMOTED` event but no graph entity — is refused with a message
+naming that gap (`target_not_graph_backed`), not a generic "Node not
+found".
+
+Re-demoting an already-demoted precedent is an idempotent no-op: no new
+SCD-2 version, no new event, the stored reason unchanged — the CLI prints
+a message saying so and exits `0`. Demoting a precedent whose lifecycle
+state is anything other than `"current"` (superseded, archived, or
+anything else) is refused, naming the actual state.
+
+Manual-trigger only in this release: there is no automatic demotion path
+yet. Who is demoting governs which precedents may be demoted:
+
+- A caller whose `--by` identity is the (not-yet-wired) automatic
+  requester identity may demote only a precedent whose own
+  `precedent.promote` event was itself automatic — re-derived from the
+  audit trail, never from a caller-supplied flag.
+- Every other caller (a human, via CLI/MCP/API) may demote any
+  graph-backed precedent that is currently `"current"`.
+
+Exit codes follow the `exit_codes` map: `3` (rejected by a policy), `2`
+(rejected otherwise — e.g. blank/over-long reason, a missing target, a
+non-precedent target, a non-graph-backed precedent id, a non-`current`
+lifecycle state, or an auto caller targeting a human-approved precedent),
+`5` (failed), `0` success (including the already-demoted no-op).
+
+```bash
+trellis curate demote-precedent <target_id> --reason <text> [--by <caller>] [--format text|json]
+```
+
+| Argument/Option | Required | Default | Description |
+|-----------------|----------|---------|-------------|
+| `target_id` | **Yes** | -- | Precedent entity ID to demote |
+| `--reason` | **Yes** | -- | Audit-trail justification (non-empty, ≤2000 chars, keep it content-free) |
+| `--by` | No | `cli:demote-precedent` | Audit-trail identifier for the caller |
+| `--format` | No | `text` | Output format |
+
+**Example:**
+
+```bash
+trellis curate demote-precedent 01JRK5N7QF --reason "superseded by a broader pattern" --format json
+```
+
+**JSON output (success):**
+
+```json
+{
+  "status": "success",
+  "command_id": "01JRK9C1QF8GHTM2XVZP3CWD9E",
+  "operation": "precedent.demote",
+  "message": "Precedent demoted: 01JRK5N7QF",
+  "created_id": "01JRK5N7QF",
+  "warnings": []
+}
+```
+
+Also reachable via `POST /precedents/{target_id}/demote` (`{"reason": ...,
+"requested_by"?}`, see REST Endpoints below) and MCP `execute_mutation`
+(`operation="precedent.demote"`, `args={"target_id", "reason"}`).
+
 ### `trellis curate feedback`
 
 Record feedback (rating and optional comment) on a trace or precedent.
@@ -1853,7 +1932,12 @@ trellis retrieve entity <entity_id> [--format text|json]
 
 ### `trellis retrieve precedents`
 
-List precedents, optionally filtered by domain.
+List precedents, optionally filtered by domain. Excludes any precedent
+whose graph node is stamped `Lifecycle.state="demoted"` or `"archived"`.
+The filter applies before `--limit`, not after: a page is never shorter
+than `--limit` while that many servable (non-demoted, non-archived)
+precedents exist, even when demoted/archived rows sit inside the
+underlying scan window.
 
 ```bash
 trellis retrieve precedents [--domain DOMAIN] [--limit N] [--format text|json]
@@ -2249,6 +2333,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `precedent.promote` | `trace_id`, `title`, `description` | Promote a trace to a precedent (also available via CLI) |
+| `precedent.demote` | `target_id`, `reason` | Demote a precedent (also available via CLI and REST) |
 
 ### Link Operations
 
@@ -2895,13 +2980,15 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | GET | `/graph/search/facets` | `?q=...` | Count current graph nodes per stored `node_type` under `/graph/search`'s `q`; the counts sum to its `total`. |
 | GET | `/traces` | `?domain=...&limit=20` | List traces |
 | GET | `/traces/{id}` | — | Get trace by ID, with `evidence_links`: for each evidence ref that something can show, keyed by `evidence_id`, `{document_id}` when a document holds the evidence record (the evidence writers store it under its `evidence_id`), else `{entity_id}` when trace extraction wrote its `evidence:<id>` graph node. A ref with neither, or with an empty `evidence_id`, has no entry. `evidence_links` is `null` when the knowledge stores cannot be read; the trace is still served. |
-| GET | `/precedents` | `?domain=...&limit=20` | List precedents |
+| GET | `/precedents` | `?domain=...&limit=20` | List precedents. Excludes precedents whose graph node is stamped `Lifecycle.state="demoted"` or `"archived"`; the filter applies before `limit`. |
+| GET | `/precedents/domains` | — | Count promoted precedents per domain, for a domain filter's options. Excludes demoted/archived precedents, same filter as above. |
 
 ### Curate
 
 | Method | Endpoint | Body | Description |
 |--------|----------|------|-------------|
 | POST | `/precedents` | `{trace_id, title, description}` | Promote trace |
+| POST | `/precedents/{target_id}/demote` | `{reason, requested_by?}` | Demote precedent (SCD-2 rewrite, not a purge; no dedicated reversal verb yet -- see `trellis curate demote-precedent` above) |
 | POST | `/links` | `{source_id, target_id, edge_kind?}` | Create edge |
 | POST | `/entities` | `{entity_type, name, properties?}` | Create entity |
 | POST | `/feedback` | `{target_id, rating, comment?, pack_id?}` | Record feedback (pass `pack_id` so it joins) |
@@ -3055,7 +3142,7 @@ Start with `trellis-mcp`. 16 tools: 10 core tools and 3 sectioned-context tools 
 | `save_experience` | `trace_json` | Confirmation with trace_id. The server sets `metadata.project` before ingest ([trace-format.md § Project stamp](trace-format.md#project-stamp)) |
 | `save_knowledge` | `name`, `entity_type?`, `properties?`, `relates_to?`, `edge_kind?`, `content?`, `evidence_ref?`, `supersedes?` | Confirmation with entity_id. `supersedes` names an entity this one replaces (see "The stamp's first deterministic producer" above). |
 | `save_memory` | `content`, `metadata?`, `doc_id?`, `supersedes?` | Confirmation with doc_id. `supersedes` names a document this memory replaces. Tags the document inline when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (see "Document → content tags"), embeds it when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`. |
-| `get_lessons` | `domain?`, `limit?`, `max_tokens?` | Markdown list of precedents |
+| `get_lessons` | `domain?`, `limit?`, `max_tokens?` | Markdown list of precedents, excluding demoted/archived ones |
 | `get_graph` | `entity_id`, `depth?`, `max_tokens?` | Markdown subgraph. Renders each node's `document_ids` as copy-pastable evidence pointers — an `Evidence documents` section for the root entity, an inline `docs:` suffix per neighbor — so entity → evidence is followable with `get_items`. |
 | `get_items` | `item_ids`, `pack_id?`, `max_tokens?` | Markdown bodies for known ids (max 50), resolved against the document store, the graph, then the trace store. Items over budget are omitted whole with their ids listed for a follow-up call — never truncated; unknown ids are listed as not found. Emits `PACK_ITEMS_FETCHED` with the served ids; pass the `pack_id` that surfaced them to keep the fetch attributable. |
 | `record_feedback` | `trace_id?`, `pack_id?`, `success?`, `rating?`, `notes?`, `helpful_item_ids?`, `unhelpful_item_ids?`, `followed_advisory_ids?` | Confirmation |
