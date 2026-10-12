@@ -3113,6 +3113,48 @@ def _pre_archival_lifecycle(graph: GraphStore, item_id: str) -> dict[str, Any]:
     return Lifecycle(state=CURRENT_STATE).model_dump(mode="json")
 
 
+def _validate_restore_args(command: Command) -> tuple[list[str], str]:
+    """``item_ids`` and ``reason``, validated for ``retention.restore``.
+
+    Split out of ``RetentionRestoreHandler.handle`` to keep that method's
+    branch count under the linter's ceiling.
+    """
+    raw_ids = command.args["item_ids"]
+    if not isinstance(raw_ids, list) or not raw_ids:
+        msg = "retention.restore requires a non-empty item_ids list"
+        raise ValidationError(msg, code="retention_restore_ids_required")
+    item_ids = [str(i) for i in raw_ids]
+
+    reason = str(command.args["reason"] or "").strip()
+    if not reason:
+        msg = "retention.restore requires a non-empty reason for the audit trail"
+        raise ValidationError(msg, code="retention_reason_required")
+    if len(reason) > MAX_RETENTION_REASON_CHARS:
+        msg = f"retention.restore reason exceeds {MAX_RETENTION_REASON_CHARS} chars"
+        raise ValidationError(msg, code="retention_reason_too_long")
+    return item_ids, reason
+
+
+def _raise_nothing_restored(refused: list[dict[str, str]]) -> None:
+    """Escalate a wholly-unactioned ``retention.restore`` batch.
+
+    "Skipped" alone is a legitimate success (a corrective batch may
+    legitimately name items someone else already restored), but a batch
+    that restored nothing *and* refused at least one id is not a no-op
+    retry — it is reported to the caller as rejected, naming every
+    refused id rather than only the first. Split out of
+    ``RetentionRestoreHandler.handle`` to keep that method's branch count
+    under the linter's ceiling.
+    """
+    codes = {r["code"] for r in refused}
+    code = (
+        next(iter(codes)) if len(codes) == 1 else "retention_restore_nothing_restored"
+    )
+    detail = "; ".join(f"{r['item_id']} ({r['code']})" for r in refused)
+    msg = f"retention.restore restored none of the requested items: {detail}"
+    raise ValidationError(msg, errors=[r["message"] for r in refused], code=code)
+
+
 class RetentionRestoreHandler:
     """Return archived items to ``Lifecycle.state="current"``.
 
@@ -3167,43 +3209,8 @@ class RetentionRestoreHandler:
         self._registry = registry
 
     def handle(self, command: Command) -> tuple[str | None, str]:
-        raw_ids = command.args["item_ids"]
-        if not isinstance(raw_ids, list) or not raw_ids:
-            msg = "retention.restore requires a non-empty item_ids list"
-            raise ValidationError(msg, code="retention_restore_ids_required")
-        item_ids = [str(i) for i in raw_ids]
-
-        reason = str(command.args["reason"] or "").strip()
-        if not reason:
-            msg = "retention.restore requires a non-empty reason for the audit trail"
-            raise ValidationError(msg, code="retention_reason_required")
-        if len(reason) > MAX_RETENTION_REASON_CHARS:
-            msg = f"retention.restore reason exceeds {MAX_RETENTION_REASON_CHARS} chars"
-            raise ValidationError(msg, code="retention_reason_too_long")
-
-        restored: list[str] = []
-        skipped: list[str] = []
-        refused: list[dict[str, str]] = []
-        unfinished: Exception | None = None
-        try:
-            for item_id in item_ids:
-                try:
-                    if self._restore(item_id):
-                        restored.append(item_id)
-                    else:
-                        skipped.append(item_id)
-                except ValidationError as exc:
-                    # A per-item history refusal (see
-                    # _pre_archival_lifecycle): does not abort the batch.
-                    # Anything other than this specific, expected refusal
-                    # still escapes to the outer except below and aborts
-                    # the remainder, same as before.
-                    refused.append(
-                        {"item_id": item_id, "code": exc.code, "message": str(exc)}
-                    )
-        except Exception as exc:
-            # Re-raised after the event: what was restored stays restored.
-            unfinished = exc
+        item_ids, reason = _validate_restore_args(command)
+        restored, skipped, refused, unfinished = self._restore_batch(item_ids)
 
         payload: dict[str, Any] = {
             "reason": reason,
@@ -3246,22 +3253,38 @@ class RetentionRestoreHandler:
         if unfinished is not None:
             raise unfinished
         if not restored and refused:
-            # Nothing in the batch actually changed state. "Skipped" alone
-            # is a legitimate success (a corrective batch may legitimately
-            # name items already restored by someone else), but a batch
-            # that restored nothing *and* refused at least one id is not a
-            # no-op retry — it is reported to the caller as rejected,
-            # naming every refused id rather than only the first.
-            codes = {r["code"] for r in refused}
-            code = (
-                next(iter(codes))
-                if len(codes) == 1
-                else "retention_restore_nothing_restored"
-            )
-            detail = "; ".join(f"{r['item_id']} ({r['code']})" for r in refused)
-            msg = f"retention.restore restored none of the requested items: {detail}"
-            raise ValidationError(msg, errors=[r["message"] for r in refused], code=code)
+            _raise_nothing_restored(refused)
         return command.command_id, message
+
+    def _restore_batch(
+        self, item_ids: list[str]
+    ) -> tuple[list[str], list[str], list[dict[str, str]], Exception | None]:
+        """Restore every id, collecting outcomes rather than aborting on a
+        per-item history refusal (see ``_pre_archival_lifecycle``).
+        Anything other than that specific, expected refusal still escapes
+        to the outer ``except`` and aborts the remainder via the returned
+        exception — what was restored before it stays restored. Split out
+        of ``handle`` to keep that method's branch count under the
+        linter's ceiling.
+        """
+        restored: list[str] = []
+        skipped: list[str] = []
+        refused: list[dict[str, str]] = []
+        unfinished: Exception | None = None
+        try:
+            for item_id in item_ids:
+                try:
+                    if self._restore(item_id):
+                        restored.append(item_id)
+                    else:
+                        skipped.append(item_id)
+                except ValidationError as exc:
+                    refused.append(
+                        {"item_id": item_id, "code": exc.code, "message": str(exc)}
+                    )
+        except Exception as exc:
+            unfinished = exc
+        return restored, skipped, refused, unfinished
 
     def _restore(self, item_id: str) -> bool:
         """Un-archive one item. Returns False if it was not archived."""

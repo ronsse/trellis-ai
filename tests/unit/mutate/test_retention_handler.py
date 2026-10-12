@@ -561,6 +561,46 @@ class TestRestore:
             )
         assert exc.value.code == "retention_restore_ids_required"
 
+    def test_archived_non_precedent_node_restores_to_current(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Pins mutant M6 (gate-876): a mutant that routes ``_restore``'s
+        graph-node branch through ``_pre_archival_lifecycle`` for every
+        ``node_type``, not only ``"precedent"``, raises here instead of
+        restoring -- this node has no SCD-2 history to walk at all, because
+        it was minted archived (a deprecated concept extracted straight
+        into the archived state), the same shape a legitimately
+        never-current non-precedent node can have.
+        ``TestNodePurgedMidCommand::test_restore_skips_it`` exercises this
+        branch too, but only incidentally -- it is there to pin the purge
+        race, and this is the direct case the review asked for.
+        """
+        graph = registry.knowledge.graph_store
+        node_id = graph.upsert_node(
+            node_id=None,
+            node_type="concept",
+            properties={
+                "name": "Deprecated widget",
+                LIFECYCLE_KEY: {"state": ARCHIVED_STATE},
+            },
+        )
+        assert len(graph.get_node_history(node_id)) == 1
+
+        result = build_curate_executor(registry).execute(
+            Command(
+                operation=Operation.RETENTION_RESTORE,
+                args={
+                    "item_ids": [node_id],
+                    "reason": "re-evaluated, still in use",
+                },
+            )
+        )
+
+        assert result.status == CommandStatus.SUCCESS
+        node = graph.get_node(node_id)
+        assert node is not None
+        assert node["properties"][LIFECYCLE_KEY]["state"] == CURRENT_STATE
+
 
 class TestRestorePrecedentHistory:
     """Prune-then-restore is not a second, unaudited way to undo a demotion.
@@ -690,7 +730,8 @@ class TestRestorePrecedentHistory:
 
         first_ok = demoted_then_pruned("Pooling pattern A")
         refused_id = self._node(
-            registry, {"name": "Minted archived", LIFECYCLE_KEY: {"state": ARCHIVED_STATE}}
+            registry,
+            {"name": "Minted archived", LIFECYCLE_KEY: {"state": ARCHIVED_STATE}},
         )
         second_ok = demoted_then_pruned("Pooling pattern B")
 
@@ -745,7 +786,8 @@ class TestRestorePrecedentHistory:
         """
         executor = build_curate_executor(registry)
         refused_id = self._node(
-            registry, {"name": "Minted archived", LIFECYCLE_KEY: {"state": ARCHIVED_STATE}}
+            registry,
+            {"name": "Minted archived", LIFECYCLE_KEY: {"state": ARCHIVED_STATE}},
         )
         never_archived_id = self._node(registry, {"name": "Never archived"})
 
