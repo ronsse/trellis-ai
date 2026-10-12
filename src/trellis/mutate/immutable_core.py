@@ -217,6 +217,10 @@ NON_DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         # ``get_node_history``/``as_of`` — nothing a later read cannot
         # recover.
         Operation.PRECEDENT_DEMOTE,
+        # precedent.reinstate is demote's own reversal verb — the same
+        # SCD-2 rewrite in the other direction, so the demoted version
+        # stays readable via get_node_history/as_of too.
+        Operation.PRECEDENT_REINSTATE,
     }
 )
 

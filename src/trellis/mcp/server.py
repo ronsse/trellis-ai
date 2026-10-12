@@ -3775,6 +3775,45 @@ def query_observations(
     return json.dumps({"status": "ok", "observations": projected})
 
 
+def _resolve_execute_mutation_target(
+    op: Any, args: dict[str, Any]
+) -> tuple[str | None, str | None, dict[str, Any]]:
+    """Derive ``Command.target_id``/``target_type`` for the operations whose
+    audit-event ``entity_id`` would otherwise read as ``None`` through this
+    MCP entry point, plus (``trace.ingest`` only) the project-stamped args.
+
+    ``MutationExecutor`` reads ``Command.target_id``, never
+    ``args["target_id"]`` -- so the CLI and REST routes that copy a path
+    or query parameter onto ``Command.target_id`` themselves
+    (``trellis_cli.curate.demote_precedent``/``reinstate_precedent``,
+    ``trellis_api.routes.curate.demote``/``reinstate``) stay correct,
+    while ``execute_mutation``, which forwards ``args`` unchanged into
+    ``Command(...)``, silently left ``target_id`` -- and the audited
+    ``entity_id`` -- ``None`` unless special-cased here.
+
+    Scoped to ``trace.ingest`` (stamp + target, as in ``save_experience``)
+    and ``precedent.demote``/``precedent.reinstate`` (``args["target_id"]``
+    names the audited precedent directly) -- not generalized to every
+    operation whose ``args`` happens to carry a ``target_id``-shaped key,
+    since ``link.create``/``entity.merge`` carry one there with a
+    different meaning.
+    """
+    if op is Operation.TRACE_INGEST:
+        # A trace that does not validate goes on as sent and untargeted,
+        # for the handler to refuse.
+        try:
+            trace = Trace.model_validate(args.get("trace"))
+        except ValidationError:
+            return None, None, args
+        stamped = {**args, "trace": _stamp_trace_project(trace)}
+        return trace.trace_id, "trace", stamped
+    if op in (Operation.PRECEDENT_DEMOTE, Operation.PRECEDENT_REINSTATE):
+        candidate = args.get("target_id")
+        if isinstance(candidate, str) and candidate:
+            return candidate, "precedent", args
+    return None, None, args
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_MUTATE))
 def execute_mutation(
     operation: str,
@@ -3840,22 +3879,12 @@ def execute_mutation(
 
     requested_by = actor.strip() if actor and actor.strip() else "mcp:execute_mutation"
 
-    target_id: str | None = None
-    target_type: str | None = None
-    if op is Operation.TRACE_INGEST:
-        # Stamped before ingest, as in save_experience: a stored trace is
-        # immutable. Targeted as there too: the target is what an
-        # ``entity_type: trace`` policy matches and the audit event names. A
-        # trace that does not validate goes on as sent and untargeted, for the
-        # handler to refuse.
-        try:
-            trace = Trace.model_validate(args.get("trace"))
-        except ValidationError:
-            pass
-        else:
-            args = {**args, "trace": _stamp_trace_project(trace)}
-            target_id = trace.trace_id
-            target_type = "trace"
+    # Stamped before ingest, as in save_experience: a stored trace is
+    # immutable. Targeted as there too: the target is what an
+    # ``entity_type: trace`` policy matches and the audit event names.
+    # See _resolve_execute_mutation_target's docstring for why
+    # precedent.demote/precedent.reinstate are also special-cased here.
+    target_id, target_type, args = _resolve_execute_mutation_target(op, args)
 
     try:
         if op is Operation.EVIDENCE_INGEST and isinstance(args.get("evidence"), dict):

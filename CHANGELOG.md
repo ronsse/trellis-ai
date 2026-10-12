@@ -35,10 +35,8 @@ All notable changes to Trellis will be documented in this file.
   `execute_mutation`.** A new `Lifecycle.state` value, `"demoted"`, is an
   SCD-2 rewrite of a precedent's graph node — not a purge like `redact` —
   so the pre-demotion version stays readable via `get_node_history`/`as_of`.
-  There is no dedicated reversal verb yet, though: an operator undoes a
-  demotion with `entity.update` to set `Lifecycle.state` back to
-  `"current"`, and the demoted version remains in history either way —
-  that gap is tracked for a follow-up PR. Only a precedent promoted from a
+  The reversal verb, `precedent.reinstate`, and the other follow-up fixes
+  below shipped in the next PR. Only a precedent promoted from a
   learning candidate has a graph node and can be demoted; a trace- or
   miner-sourced precedent id is refused with a message naming that gap
   rather than a generic "Node not found". `PrecedentDemoteHandler` refuses
@@ -59,6 +57,78 @@ All notable changes to Trellis will be documented in this file.
   withholding statement names it. `"demoted"` is deliberately left out of
   `RetentionPruneHandler`'s `UNSELECTABLE_STATES`, so it stays reachable by
   `retention.prune --lifecycle-state demoted`.
+
+- **Precedent demotion's reversal verb and four ways a demotion could come
+  back or keep being served, closed: `precedent.reinstate`, through CLI
+  `trellis curate reinstate-precedent`, REST
+  `POST /precedents/{target_id}/reinstate`, and MCP `execute_mutation`.**
+  Human-only, like `precedent.demote`'s manual-trigger posture: a caller
+  under the automatic demotion policy's own requester identity is refused
+  outright. Only a precedent whose current state is `"demoted"` may be
+  reinstated — `"current"`, `"archived"`, not found, or not graph-backed is
+  refused legibly, naming the actual state rather than no-opping or
+  re-demoting. `PrecedentReinstateHandler` re-syncs the precedent's vector
+  row in the same call `PrecedentDemoteHandler` now also does on demote, so
+  a semantic hit stops carrying the pre-change snapshot and the pack
+  collect seam's `partition_demoted` sees the update. After a reinstate,
+  every reader serves the precedent again: `get_lessons`, `GET /precedents`,
+  `GET /precedents/domains`, `trellis retrieve precedents`, and a flat pack.
+  Four more gaps close alongside the new verb:
+  - **Re-approval no longer silently un-demotes.** Re-approving a precedent's
+    learning candidate (`submit_learning_promotion`, reachable from the
+    Review tab and the CLI) is refused for **every non-current state** —
+    demoted, archived, superseded, draft, and deprecated alike, each naming
+    its own remedy (`reinstate-precedent` for demoted, `retention.restore`
+    for archived, the successor entity for superseded) — instead of quietly
+    rewriting the node to `"current"` with no reason recorded. A precedent
+    that is already `"current"` (including one just reinstated) still
+    re-approves normally, adding a version and a `PRECEDENT_PROMOTED` event
+    exactly as a first-time promotion does: `entity.create`'s own existing-
+    precedent guard refuses only a non-current precedent or a mismatched
+    `entity_type`, not a current one, so legitimate re-approval and this
+    refusal coexist.
+  - **`entity.update` refuses the lifecycle bypass it used to be.** A write
+    to `properties.lifecycle` where the node's current type is `"precedent"`
+    is refused, naming `precedent.demote`/`precedent.reinstate` instead —
+    the only way `entity.update` could previously undo (or redo) a
+    demotion, unaudited and without the vector re-sync. Every other node
+    type's `lifecycle` key is unaffected (the save-surfaces' supersession
+    stamp still writes it this way). The guard reads the merged properties
+    whether `properties` arrives as a dict or as an iterable of `(key,
+    value)` pairs — both shapes are normalised before the check runs, so a
+    pairs-form payload can no longer reinstate a demoted precedent through
+    MCP `execute_mutation` or REST `/commands/batch` the way a dict-form
+    payload was already refused from doing.
+  - **An MCP `execute_mutation` demote (and now reinstate) carries its
+    target as `entity_id` on the `MUTATION_EXECUTED` event**, on every
+    surface — CLI, REST, and MCP alike — instead of `entity_id=None` on the
+    MCP path.
+  - **Prune-then-restore no longer launders a demotion.** `retention.restore`
+    returns a precedent to the lifecycle state it held immediately *before*
+    its archival — read from SCD-2 history — rather than unconditionally to
+    `"current"`, so a precedent that was demoted and then pruned comes back
+    demoted. A precedent whose pre-archival state cannot be read from
+    history is refused individually rather than aborting the whole batch:
+    the rest of a mixed batch still restores or skips, and the command is
+    rejected only when every requested id was refused and none was
+    restored.
+  - **`save_knowledge(supersedes=<precedent>)` is refused before any write.**
+    `plan_entity_supersession` previously let the evidence document get
+    written and only then hit `entity.update`'s lifecycle guard, so the
+    tool raised "no entity was created; re-send the same call to finish" —
+    advice that could never succeed, after a write had already landed. It
+    now refuses a precedent target immediately after the node lookup,
+    naming `precedent.demote` as the way to withdraw a precedent instead,
+    so nothing is written. (`save_memory`'s `supersedes` only ever accepts
+    a document id, so a precedent — a graph entity — was never reachable
+    through that tool.)
+  - **A demote/reinstate vector-sync failure now surfaces as a warning**
+    instead of a silent log line. `precedent.demote` and
+    `precedent.reinstate` still return `SUCCESS` when the paired vector-row
+    re-stamp fails, but the `CommandResult`/REST/MCP response now carries a
+    `..._vector_lifecycle_sync_failed` warning naming the risk — the
+    semantic path may keep serving a stale snapshot until the next resync —
+    on every surface that passes `result.warnings` through.
 
 - **Admin UI for the job schedule registry: `GET`/`PATCH /api/v1/admin/jobs`,
   `POST /api/v1/admin/jobs/{name}/run`, CLI parity, a Schedules tab (e175,

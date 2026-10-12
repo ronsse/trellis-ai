@@ -548,6 +548,22 @@ class TestRunCandidateAutoPromotionReportOnly:
                 executor=None,
             )
 
+    def test_commit_mode_without_graph_store_raises(self, event_log: EventLog) -> None:
+        """Same bypass as ``test_commit_mode_without_executor_raises``, this
+        time with an ``executor`` supplied so the first guard passes and
+        the ``graph_store`` guard is the one that fires — proving the two
+        checks are independent rather than one standing in for the other."""
+        policy = _force_commit_policy(enabled=True)
+        executor = MagicMock(spec=MutationExecutor)
+        with pytest.raises(ValueError, match="no graph_store"):
+            run_candidate_auto_promotion(
+                candidates=[_candidate()],
+                policy=policy,
+                event_log=event_log,
+                executor=executor,
+                graph_store=None,
+            )
+
     def test_exactly_one_event_emitted_with_correct_counts_and_snapshot(
         self, event_log: EventLog
     ) -> None:
@@ -671,6 +687,7 @@ class TestRunCandidateAutoPromotionCommit:
                 policy=policy,
                 event_log=registry.operational.event_log,
                 executor=executor,
+                graph_store=registry.knowledge.graph_store,
             )
 
             assert report.mode == "commit"
@@ -706,6 +723,7 @@ class TestRunCandidateAutoPromotionCommit:
                 policy=policy,
                 event_log=registry.operational.event_log,
                 executor=executor,
+                graph_store=registry.knowledge.graph_store,
                 requested_by=custom_requested_by,
             )
 
@@ -734,6 +752,7 @@ class TestRunCandidateAutoPromotionCommit:
                 policy=policy,
                 event_log=registry.operational.event_log,
                 executor=executor,
+                graph_store=registry.knowledge.graph_store,
             )
 
             dispositions = [o.disposition for o in report.outcomes]
@@ -763,6 +782,7 @@ class TestRunCandidateAutoPromotionCommit:
                 policy=policy,
                 event_log=registry.operational.event_log,
                 executor=executor,
+                graph_store=registry.knowledge.graph_store,
             )
 
             report = run_candidate_auto_promotion(
@@ -770,12 +790,59 @@ class TestRunCandidateAutoPromotionCommit:
                 policy=policy,
                 event_log=registry.operational.event_log,
                 executor=executor,
+                graph_store=registry.knowledge.graph_store,
             )
 
             dispositions = {o.candidate_id: o.disposition for o in report.outcomes}
             assert dispositions["cand-already"] == "already_promoted"
             assert dispositions["cand-new"] == "promoted"
             assert report.promoted_count == 1
+        finally:
+            registry.close()
+
+    def test_an_archived_precedent_refuses_resubmission_not_promotion(
+        self, tmp_path: Path
+    ) -> None:
+        """B1 delegation: the commit branch's only write path is
+        :func:`~trellis.learning.scoring.submit_learning_promotion` — the
+        same function the CLI/API review surfaces call — so it must not
+        duplicate or bypass that function's re-approval guard. The
+        candidate's target id is created directly as an already-archived
+        precedent, never through a ``precedent.promote`` event, so
+        ``_scan_already_promoted_entity_ids`` does not exclude it before
+        ``_evaluate_candidate`` runs and the submission call is actually
+        reached. Without the guard this would silently resurrect the
+        precedent as current via ``ENTITY_CREATE``."""
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            policy = _force_commit_policy(enabled=True)
+            candidate = _candidate("cand-archived")
+            entity_id = precedent_entity_id_for_candidate("cand-archived")
+            registry.knowledge.graph_store.upsert_node(
+                entity_id,
+                "precedent",
+                {
+                    "name": "Pre-existing archived precedent",
+                    "lifecycle": {"state": "archived"},
+                },
+            )
+
+            report = run_candidate_auto_promotion(
+                candidates=[candidate],
+                policy=policy,
+                event_log=registry.operational.event_log,
+                executor=executor,
+                graph_store=registry.knowledge.graph_store,
+            )
+
+            outcome = report.outcomes[0]
+            assert outcome.disposition == "ineligible:submission_refused_archived"
+            assert outcome.entity_id == entity_id
+            assert report.promoted_count == 0
+            node = registry.knowledge.graph_store.get_node(entity_id)
+            assert node is not None
+            assert node["properties"]["lifecycle"]["state"] == "archived"
         finally:
             registry.close()
 
@@ -1000,6 +1067,7 @@ class TestScanAlreadyPromotedEntityIdsIncludesDemoted:
                 policy=policy,
                 event_log=registry.operational.event_log,
                 executor=executor,
+                graph_store=registry.knowledge.graph_store,
             )
             entity_id = promote_report.outcomes[0].entity_id
 

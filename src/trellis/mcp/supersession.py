@@ -190,6 +190,13 @@ def plan_entity_supersession(
             "supersedes",
             f"supersedes does not reference an existing entity: {target}",
         )
+    if node.get("node_type") == "precedent":
+        return _refused(
+            "value",
+            "supersedes",
+            f"supersedes cannot target {target}: it is a precedent, which is "
+            "withdrawn with precedent.demote, not superseded",
+        )
     docs = registry.knowledge.document_store
     if evidence_ref is not None:
         z_doc = docs.get(evidence_ref)

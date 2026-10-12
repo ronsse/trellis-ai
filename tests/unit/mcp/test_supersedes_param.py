@@ -649,6 +649,17 @@ def _k2_archived(reg: StoreRegistry) -> Prepared:
     )
 
 
+def _k_precedent(reg: StoreRegistry) -> Prepared:
+    # A precedent is withdrawn with precedent.demote, never superseded: the
+    # refusal fires on the node's node_type alone, before any document
+    # lookup, so it holds whether or not the caller also passed content.
+    reg.knowledge.graph_store.upsert_node("zf-precedent", "precedent", {"name": "zf"})
+    return Prepared(
+        {"name": NAME, "content": X_TEXT, "supersedes": "zf-precedent"},
+        "supersedes cannot target zf-precedent: it is a precedent",
+    )
+
+
 def _k3_superseded(reg: StoreRegistry) -> Prepared:
     _node(reg, "zf-node", lifecycle=_stamp("zf-other-doc"))
     return Prepared(
@@ -732,6 +743,7 @@ REFUSALS = [
     ),
     RefusalCase("k2-archived", _KNOWLEDGE, _VALUE, "supersedes", _k2_archived),
     RefusalCase("k3-superseded", _KNOWLEDGE, _VALUE, "supersedes", _k3_superseded),
+    RefusalCase("k-precedent", _KNOWLEDGE, _VALUE, "supersedes", _k_precedent),
     RefusalCase("k4-content", _KNOWLEDGE, _VALUE, "content", _k4_content),
     RefusalCase(
         "k4-evidence-ref", _KNOWLEDGE, _VALUE, "evidence_ref", _k4_evidence_ref

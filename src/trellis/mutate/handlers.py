@@ -551,10 +551,16 @@ class PrecedentDemoteHandler:
 
     SCD-2: the write closes the current node version and opens a new one
     (:func:`_rewrite_current_node`), so the pre-demotion state stays
-    readable via ``get_node_history`` and ``as_of``. There is no
-    dedicated reversal verb yet, though: an operator undoes a demotion
-    with ``entity.update`` to set ``Lifecycle.state`` back to
-    ``"current"``, and the demoted version remains in history either way.
+    readable via ``get_node_history`` and ``as_of``. The reversal verb is
+    :data:`Operation.PRECEDENT_REINSTATE` (:class:`PrecedentReinstateHandler`)
+    — ``entity.update`` refuses a write to ``properties.lifecycle`` on a
+    precedent node, so it is no longer a way to undo this.
+
+    **Vector sync.** The graph write alone leaves a semantic hit serving
+    the pre-demotion snapshot (a vector row's metadata is an embed-time
+    copy — see :func:`_sync_vector_lifecycle`), so the handler re-stamps
+    the precedent's vector row with the same ``lifecycle`` dict it just
+    wrote to the graph, in the same call.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -662,6 +668,17 @@ class PrecedentDemoteHandler:
             msg = f"Node not found: {target_id}"
             raise ValidationError(msg, errors=[msg], code="target_not_found")
 
+        # Keep the semantic path from continuing to serve the
+        # pre-demotion snapshot: a vector row's metadata is an embed-time
+        # copy, not a read of the graph store (#338-style gap).
+        _sync_vector_lifecycle(
+            self._registry,
+            target_id,
+            lifecycle,
+            command=command,
+            log_event="precedent_demote_vector_lifecycle_sync_failed",
+        )
+
         self._registry.operational.event_log.emit(
             EventType.PRECEDENT_DEMOTED,
             source="mutation_executor",
@@ -675,6 +692,126 @@ class PrecedentDemoteHandler:
             },
         )
         return target_id, f"Precedent demoted: {target_id}"
+
+
+class PrecedentReinstateHandler:
+    """Stamp a demoted precedent node back to ``Lifecycle.state="current"``.
+
+    Wires :data:`Operation.PRECEDENT_REINSTATE` — the reversal verb
+    :class:`PrecedentDemoteHandler` shipped without. Modelled closely on
+    that handler: same reason validation
+    (:data:`MAX_DEMOTION_REASON_CHARS`), same not-found/not-graph-backed/
+    not-a-precedent checks, same ``_rewrite_current_node`` SCD-2 write and
+    :func:`_sync_vector_lifecycle` call.
+
+    **Human-only.** Unlike demotion (where the automatic policy may demote
+    only what it itself promoted), reinstatement has no automatic path at
+    all: a caller whose ``Command.requested_by`` equals
+    :data:`AUTO_DEMOTE_REQUESTED_BY` is refused outright, narrowing or not.
+    A policy that can demote only its own promotions reinstating one would
+    be a silent self-reversal loop with no human in it.
+
+    **Only a currently-demoted target may be reinstated.** There is no
+    idempotent-no-op branch here the way ``PrecedentDemoteHandler`` has
+    one for re-demotion: reinstating a target that is already ``current``,
+    ``archived``, ``superseded``, or anything else is refused, legibly
+    naming the actual state — which also covers "reinstating twice"
+    without a special case, since the first reinstate already moved the
+    state to ``current``.
+
+    SCD-2: the write closes the demoted version and opens a fresh
+    ``current`` one, so the demoted version stays readable via
+    ``get_node_history``/``as_of``. The vector row is re-synced in the
+    same call, so a semantic hit stops carrying the demoted snapshot.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        target_id = command.args["target_id"]
+        reason = str(command.args["reason"] or "").strip()
+        if not reason:
+            msg = "precedent.reinstate requires a non-empty reason for the audit trail"
+            raise ValidationError(msg, errors=[msg], code="reinstate_reason_required")
+        if len(reason) > MAX_DEMOTION_REASON_CHARS:
+            msg = (
+                f"precedent.reinstate reason exceeds {MAX_DEMOTION_REASON_CHARS} "
+                "chars; it is written verbatim to the append-only audit log — "
+                "keep it short and content-free"
+            )
+            raise ValidationError(msg, errors=[msg], code="reinstate_reason_too_long")
+
+        if command.requested_by == AUTO_DEMOTE_REQUESTED_BY:
+            msg = (
+                "precedent.reinstate is human-only; the automatic demotion "
+                "policy's identity may not reinstate any precedent"
+            )
+            raise ValidationError(msg, errors=[msg], code="reinstate_requires_human")
+
+        graph = self._registry.knowledge.graph_store
+        event_log = self._registry.operational.event_log
+        node = graph.get_node(target_id)
+        if node is None:
+            if _is_promoted_precedent_event(event_log, target_id):
+                msg = (
+                    f"Precedent {target_id} cannot be reinstated: only promoted "
+                    "learning precedents can be reinstated; this id has no "
+                    "graph node"
+                )
+                raise ValidationError(msg, errors=[msg], code="target_not_graph_backed")
+            msg = f"Node not found: {target_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
+        if node["node_type"] != "precedent":
+            msg = (
+                f"Node {target_id} is not a precedent (node_type={node['node_type']!r})"
+            )
+            raise ValidationError(msg, errors=[msg], code="target_not_precedent")
+
+        current_state = _current_lifecycle_state(node)
+        if current_state != "demoted":
+            msg = (
+                f"Precedent {target_id} cannot be reinstated: its lifecycle "
+                f"state is {current_state!r}, not 'demoted'"
+            )
+            raise ValidationError(msg, errors=[msg], code="target_not_demoted")
+
+        # A fresh Lifecycle for the transition, matching
+        # PrecedentDemoteHandler's own convention rather than reading and
+        # merging the demoted record forward: the demotion's valid_until /
+        # deprecation_reason belong to that transition, not this one.
+        lifecycle = Lifecycle(state=CURRENT_STATE).model_dump(mode="json")
+
+        def reinstate(current: dict[str, Any]) -> dict[str, Any]:
+            props = dict(current["properties"])
+            props[LIFECYCLE_KEY] = lifecycle
+            return {"properties": props}
+
+        if _rewrite_current_node(graph, target_id, reinstate) is None:
+            msg = f"Node not found: {target_id}"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
+
+        _sync_vector_lifecycle(
+            self._registry,
+            target_id,
+            lifecycle,
+            command=command,
+            log_event="precedent_reinstate_vector_lifecycle_sync_failed",
+        )
+
+        self._registry.operational.event_log.emit(
+            EventType.PRECEDENT_REINSTATED,
+            source="mutation_executor",
+            entity_id=target_id,
+            entity_type="precedent",
+            payload={
+                "target_id": target_id,
+                "reason": reason,
+                "command_id": command.command_id,
+                "requested_by": command.requested_by,
+            },
+        )
+        return target_id, f"Precedent reinstated: {target_id}"
 
 
 class LabelAddHandler:
@@ -1747,6 +1884,25 @@ class EntityCreateHandler:
     ``document_ids`` follows the same omission semantics as
     :class:`EntityUpdateHandler`: an omitted field carries the stored link
     forward, an explicit value replaces it.
+
+    **An existing precedent's id is refused unless it is current.**
+    ENTITY_CREATE on any other existing id is a legitimate upsert (it
+    opens a new SCD-2 version, e.g. re-extracting an entity), and
+    re-approving a learning candidate whose target is already a *current*
+    precedent is equally legitimate (``submit_learning_promotion`` writes
+    it this way; ``_precedent_reapproval_refusal`` already lets a current
+    precedent's re-approval through before this handler ever runs). What
+    is refused is an unconditional property replace that would drop a
+    *non-current* ``lifecycle`` — a demoted precedent would come back
+    ``"current"`` with no reason recorded and no ``PRECEDENT_REINSTATED``
+    event, the same silent-reinstate shape :class:`EntityUpdateHandler`'s
+    guards close on the update path. A ``entity_type`` other than
+    ``"precedent"`` over an existing precedent is refused outright,
+    whatever its lifecycle state, mirroring
+    :class:`EntityUpdateHandler`'s retype guard: it would otherwise
+    retype the node away from precedent in the same call that replaces
+    its properties, reaching the same end state as the two-step bypass
+    that guard closes.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -1760,6 +1916,45 @@ class EntityCreateHandler:
         caller_id = command.args.get("entity_id")
         node_role = command.args.get("node_role", "semantic")
         generation_spec = command.args.get("generation_spec")
+
+        # One read serves both the precedent guard below and
+        # ``_resolve_document_ids``'s stored-link lookup, so a caller_id
+        # that already exists costs a single extra read either way.
+        existing_node = (
+            self._registry.knowledge.graph_store.get_node(caller_id)
+            if caller_id is not None
+            else None
+        )
+        if existing_node is not None and existing_node["node_type"] == "precedent":
+            supplied_entity_type = command.args["entity_type"]
+            if supplied_entity_type != "precedent":
+                msg = (
+                    f"entity.create refuses to retype existing precedent "
+                    f"{caller_id} to {supplied_entity_type!r}: a later "
+                    "entity.update naming properties.lifecycle under that "
+                    "non-precedent node_type would then slip past the guard "
+                    "that refuses it on a precedent; use entity.update for "
+                    "a non-retyping property edit"
+                )
+                raise ValidationError(
+                    msg,
+                    errors=[msg],
+                    code="entity_create_retypes_existing_precedent",
+                )
+            if _current_lifecycle_state(existing_node) != CURRENT_STATE:
+                msg = (
+                    f"entity.create refuses to upsert over existing "
+                    f"precedent {caller_id}: an unconditional property "
+                    "replace would drop its lifecycle (a demoted precedent "
+                    "would come back 'current' with no reason recorded and "
+                    "no PRECEDENT_REINSTATED event); use "
+                    "precedent.reinstate for that, or entity.update for a "
+                    "non-lifecycle property edit"
+                )
+                raise ValidationError(
+                    msg, errors=[msg], code="entity_create_over_existing_precedent"
+                )
+
         # ``document_ids`` is the first-class graph↔document link (Phase 4 of
         # ADR planes-and-substrates). Threading it here gives the pointer a
         # governed write path — the pointer-not-prose invariant depends on a
@@ -1773,7 +1968,7 @@ class EntityCreateHandler:
         # other writer established — e.g. re-extracting an entity that
         # ``save_knowledge`` had linked to its document. Omission means
         # "leave it alone"; an explicit value still replaces.
-        document_ids = self._resolve_document_ids(command, caller_id)
+        document_ids = self._resolve_document_ids(command, existing_node)
         node_id = self._registry.knowledge.graph_store.upsert_node(
             node_id=caller_id,
             node_type=command.args["entity_type"],
@@ -1802,25 +1997,23 @@ class EntityCreateHandler:
         return node_id, f"Entity created: {command.args['name']}"
 
     def _resolve_document_ids(
-        self, command: Command, caller_id: str | None
+        self, command: Command, existing_node: dict[str, Any] | None
     ) -> list[str] | None:
         """Command's ``document_ids``, else the stored link, else ``None``.
 
-        Only reads the store when the caller both named an id and omitted
-        the field — the common create-a-fresh-node path stays a single
-        write.
+        ``existing_node`` is whatever ``handle`` already read for the
+        precedent guard (``None`` when ``entity_id`` was omitted or named
+        no existing node) — reused here rather than re-read, so a caller_id
+        that already exists still costs one store read, not two.
         """
         if "document_ids" in command.args:
             supplied = command.args["document_ids"]
             return cast("list[str] | None", supplied)
-        if caller_id is None:
-            return None
-        existing = self._registry.knowledge.graph_store.get_node(caller_id)
-        if existing is None:
+        if existing_node is None:
             return None
         # ``get_node`` returns a (possibly empty) list; normalise empty to
         # ``None`` so ``validate_document_ids`` sees a clean value.
-        return cast("list[str] | None", existing.get("document_ids") or None)
+        return cast("list[str] | None", existing_node.get("document_ids") or None)
 
 
 class EntityUpdateHandler:
@@ -1854,6 +2047,28 @@ class EntityUpdateHandler:
     Idempotency: a same-payload re-submission still creates a new version
     row (SCD-2 has no same-value short-circuit at this layer); use
     ``Command.idempotency_key`` when at-most-once semantics are required.
+
+    **Precedents are the one exception to the property merge.** A write
+    naming ``properties.lifecycle`` on a node whose current ``node_type``
+    is ``"precedent"``, *or* whose ``entity_type`` arg names ``"precedent"``
+    in the same call, is refused rather than merged: this used to be the
+    only way to undo a ``precedent.demote`` (silently, with no reason
+    recorded and no vector re-sync), which is exactly the gap
+    :class:`PrecedentReinstateHandler` closes. Every other node's
+    ``lifecycle`` key is an ordinary property this handler merges like any
+    other — the save-surfaces' supersession stamp (``mcp.supersession``)
+    still writes it this way.
+
+    **A precedent's ``node_type`` may not be changed away from
+    ``"precedent"`` at all**, lifecycle write or not: a two-step bypass
+    (update 1: ``entity_type="concept"`` with no lifecycle payload, so the
+    guard above never fires because nothing names ``lifecycle``; update 2:
+    ``entity_type="precedent"`` plus ``properties.lifecycle.state="current"``,
+    read against the *now-"concept"* stored node) would otherwise reinstate
+    a demoted precedent with no ``PRECEDENT_REINSTATED`` event and no
+    reason recorded. Refusing step 1 outright closes it before step 2 is
+    ever reached; the ``entity_type == "precedent"`` keying above is the
+    second, independent guard for the same end state.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -1862,7 +2077,62 @@ class EntityUpdateHandler:
     def handle(self, command: Command) -> tuple[str | None, str]:
         entity_id = command.args["entity_id"]
         store = self._registry.knowledge.graph_store
-        supplied_properties = command.args.get("properties") or {}
+        raw_properties = command.args.get("properties") or {}
+        # ``props.update(...)`` below accepts a dict OR an iterable of
+        # ``(key, value)`` pairs, and callers use both (MCP
+        # ``execute_mutation`` and REST ``/commands/batch`` both carry
+        # ``args`` as loosely-typed JSON, so a list-of-pairs payload reaches
+        # here unchanged). Normalising to a dict *here*, before either
+        # precedent guard reads it, means ``touches_lifecycle`` below sees
+        # the same key regardless of which shape the caller sent --
+        # otherwise a pairs-form ``[["lifecycle", {...}]]`` skipped the
+        # ``isinstance(..., dict)`` check entirely and reinstated a demoted
+        # precedent with no ``PRECEDENT_REINSTATED`` event.
+        supplied_properties: dict[str, Any] = dict(raw_properties)
+        supplied_entity_type = command.args.get("entity_type")
+        touches_lifecycle = LIFECYCLE_KEY in supplied_properties
+
+        # Read the existing node only when one of the two precedent guards
+        # below could actually need it, so the common case -- a property
+        # merge that names neither ``entity_type`` nor ``lifecycle`` --
+        # stays the single read ``_rewrite_current_node`` does internally.
+        existing_node = (
+            store.get_node(entity_id)
+            if (supplied_entity_type or touches_lifecycle)
+            else None
+        )
+        is_existing_precedent = (
+            existing_node is not None and existing_node["node_type"] == "precedent"
+        )
+
+        if (
+            is_existing_precedent
+            and supplied_entity_type
+            and supplied_entity_type != "precedent"
+        ):
+            msg = (
+                f"entity.update refuses to change {entity_id}'s entity_type "
+                f"away from 'precedent' (to {supplied_entity_type!r}): a "
+                "later update could then write properties.lifecycle under "
+                "that non-precedent node_type and slip past the guard that "
+                "refuses it on a precedent"
+            )
+            raise ValidationError(
+                msg, errors=[msg], code="precedent_entity_type_change_refused"
+            )
+
+        if touches_lifecycle and (
+            is_existing_precedent or supplied_entity_type == "precedent"
+        ):
+            msg = (
+                f"entity.update refuses a write to properties.{LIFECYCLE_KEY} "
+                f"on precedent {entity_id}: use precedent.demote or "
+                "precedent.reinstate instead, which keep the audit trail "
+                "and the vector row in sync"
+            )
+            raise ValidationError(
+                msg, errors=[msg], code="precedent_lifecycle_via_entity_update"
+            )
 
         def update(existing: dict[str, Any]) -> dict[str, Any]:
             # Partial update: merge caller-supplied properties onto the
@@ -1892,9 +2162,7 @@ class EntityUpdateHandler:
         # Bound and emitted only after the write succeeded, so a refused
         # update leaves neither an alias nor an event.
         final_name = written["properties"].get("name")
-        name_was_supplied = "name" in command.args or (
-            isinstance(supplied_properties, dict) and "name" in supplied_properties
-        )
+        name_was_supplied = "name" in command.args or "name" in supplied_properties
         if name_was_supplied:
             _bind_entity_name_alias(
                 store,
@@ -2450,15 +2718,21 @@ def _sync_vector_lifecycle(
     registry: StoreRegistry,
     item_id: str,
     lifecycle: dict[str, Any],
+    *,
+    command: Command | None = None,
+    log_event: str = "retention_vector_lifecycle_sync_failed",
 ) -> None:
     """Stamp a lifecycle record onto a vector row that has no document write.
 
-    **Repair only.** The writers that stamp a document and its row together
-    (``_archive``, ``_restore``) go through
-    :func:`~trellis.core.document_write.put_document`, which mirrors the bag
-    it just wrote — so the mirror cannot be the step a future edit forgets.
-    What is left here is ``_resync_archived``: a row that diverged *before*
-    that seam existed, repaired with no document write to mirror off.
+    Three call sites share this: ``RetentionPruneHandler._resync_archived``
+    (a row that diverged *before* the ``put_document`` mirror seam existed —
+    the writers that stamp a document and its row together, ``_archive`` and
+    ``_restore``, go through :func:`~trellis.core.document_write.put_document`
+    instead, so the mirror cannot be the step a future edit forgets) and
+    ``PrecedentDemoteHandler``/``PrecedentReinstateHandler``, neither of which
+    is a retention operation at all — pass ``log_event`` so the log line
+    names the actual caller rather than defaulting to "retention" for a
+    demotion or reinstatement.
 
     **A vector row's metadata is a snapshot taken at embed time**, and the
     semantic strategy builds its :class:`~trellis.schemas.pack.PackItem`
@@ -2481,6 +2755,15 @@ def _sync_vector_lifecycle(
     vector row is normal (structural nodes, un-embedded documents) and is a
     no-op rather than an error — retention must not fail because an item was
     never embedded.
+
+    **Visibility on failure.** The document/graph stamp is already written
+    by the time this runs, so a vector backend outage must not roll back the
+    transition — it is logged, not raised. Logging alone leaves a JSON
+    caller with no way to see that the semantic path went stale, so when
+    ``command`` is given the same condition is also appended to
+    ``command.metadata["handler_warnings"]``, which ``MutationExecutor``
+    folds into the returned ``CommandResult.warnings`` (see
+    ``_handler_warnings`` in ``executor.py``).
     """
     try:
         store = registry.knowledge.vector_store
@@ -2496,10 +2779,16 @@ def _sync_vector_lifecycle(
         # not roll back an archival, but it does leave the semantic path
         # stale, so it is logged rather than swallowed.
         logger.warning(
-            "retention_vector_lifecycle_sync_failed",
+            log_event,
             item_id=item_id,
             exc_info=True,
         )
+        if command is not None:
+            command.metadata.setdefault("handler_warnings", []).append(
+                f"{log_event}: vector row for {item_id} was not re-stamped; "
+                "the semantic path may continue serving a stale snapshot "
+                "until the next resync"
+            )
 
 
 def _prune_message(
@@ -2814,6 +3103,92 @@ class RetentionPruneHandler:
         return _rewrite_current_node(graph, candidate.item_id, archive) is not None
 
 
+def _pre_archival_lifecycle(graph: GraphStore, item_id: str) -> dict[str, Any]:
+    """Return the ``Lifecycle`` dict ``item_id`` held right before its most
+    recent archival, read from SCD-2 history rather than assumed.
+
+    A plain ``Lifecycle(state="current")`` here would restore a precedent
+    that was *demoted*, then pruned, straight back to ``"current"`` --
+    laundering the demotion through a prune/restore round-trip with no
+    trace of it in the new version (the demoted one is still in history,
+    but nothing about the restored version says to look). Walks back past
+    every consecutive archived-state version -- an intervening write that
+    never touches ``lifecycle`` (e.g. ``entity.update``) carries
+    ``"archived"`` forward through the property merge, so more than one
+    version can read as archived -- to the version immediately before the
+    most recent transition into it, and returns that version's whole
+    ``Lifecycle`` record, not just its ``state``, so a demotion's
+    ``deprecation_reason`` and ``valid_until`` come back too.
+
+    Refuses rather than guesses when history cannot answer the question:
+    every version on record reads as archived, including the degenerate
+    case of no history at all (an id purged mid-command) — either way,
+    no pre-archival version exists to read.
+    """
+    history = graph.get_node_history(item_id)
+    idx = 0
+    total = len(history)
+    while idx < total and _current_lifecycle_state(history[idx]) == ARCHIVED_STATE:
+        idx += 1
+    if idx >= total:
+        msg = (
+            f"retention.restore cannot determine the lifecycle state "
+            f"{item_id} held before archival: its SCD-2 history has no "
+            "version that is not itself archived"
+        )
+        raise ValidationError(
+            msg, errors=[msg], code="retention_restore_history_unavailable"
+        )
+    record = history[idx]["properties"].get(LIFECYCLE_KEY)
+    if isinstance(record, dict):
+        return dict(record)
+    # Absent/malformed on the pre-archival version itself fails open to
+    # "current", matching _current_lifecycle_state's own convention.
+    return Lifecycle(state=CURRENT_STATE).model_dump(mode="json")
+
+
+def _validate_restore_args(command: Command) -> tuple[list[str], str]:
+    """``item_ids`` and ``reason``, validated for ``retention.restore``.
+
+    Split out of ``RetentionRestoreHandler.handle`` to keep that method's
+    branch count under the linter's ceiling.
+    """
+    raw_ids = command.args["item_ids"]
+    if not isinstance(raw_ids, list) or not raw_ids:
+        msg = "retention.restore requires a non-empty item_ids list"
+        raise ValidationError(msg, code="retention_restore_ids_required")
+    item_ids = [str(i) for i in raw_ids]
+
+    reason = str(command.args["reason"] or "").strip()
+    if not reason:
+        msg = "retention.restore requires a non-empty reason for the audit trail"
+        raise ValidationError(msg, code="retention_reason_required")
+    if len(reason) > MAX_RETENTION_REASON_CHARS:
+        msg = f"retention.restore reason exceeds {MAX_RETENTION_REASON_CHARS} chars"
+        raise ValidationError(msg, code="retention_reason_too_long")
+    return item_ids, reason
+
+
+def _raise_nothing_restored(refused: list[dict[str, str]]) -> None:
+    """Escalate a wholly-unactioned ``retention.restore`` batch.
+
+    "Skipped" alone is a legitimate success (a corrective batch may
+    legitimately name items someone else already restored), but a batch
+    that restored nothing *and* refused at least one id is not a no-op
+    retry — it is reported to the caller as rejected, naming every
+    refused id rather than only the first. Split out of
+    ``RetentionRestoreHandler.handle`` to keep that method's branch count
+    under the linter's ceiling.
+    """
+    codes = {r["code"] for r in refused}
+    code = (
+        next(iter(codes)) if len(codes) == 1 else "retention_restore_nothing_restored"
+    )
+    detail = "; ".join(f"{r['item_id']} ({r['code']})" for r in refused)
+    msg = f"retention.restore restored none of the requested items: {detail}"
+    raise ValidationError(msg, errors=[r["message"] for r in refused], code=code)
+
+
 class RetentionRestoreHandler:
     """Return archived items to ``Lifecycle.state="current"``.
 
@@ -2833,46 +3208,43 @@ class RetentionRestoreHandler:
     them from criteria would re-run the selection that was wrong the first
     time.
 
-    Restoring sets ``state="current"`` and clears the archival's
-    ``valid_until`` / ``deprecation_reason`` rather than deleting the
-    lifecycle record — the item is current again, and the ``RETENTION_PRUNED``
-    → ``RETENTION_RESTORED`` event pair is the history.
+    Restoring a document sets ``state="current"`` and clears the
+    archival's ``valid_until`` / ``deprecation_reason`` rather than
+    deleting the lifecycle record — the item is current again, and the
+    ``RETENTION_PRUNED`` → ``RETENTION_RESTORED`` event pair is the
+    history. A graph node is restored to whatever state it held
+    immediately *before* that archival instead — read from SCD-2 history
+    via :func:`_pre_archival_lifecycle` rather than assumed to be
+    ``"current"`` — so a precedent that was demoted and then pruned comes
+    back demoted, not reinstated: prune-then-restore is not a second,
+    unaudited way to undo a demotion.
 
     An id that is not archived is counted in ``skipped``, not raised: a
     corrective batch assembled from an audit payload will legitimately name
     items someone else already restored.
+
+    A precedent whose history cannot answer what it held before archival
+    (:func:`_pre_archival_lifecycle`) is counted in ``refused``, not raised
+    out of the loop: the ids in the same batch after it are independent
+    restores and the ones already restored before it stay restored. Each
+    refusal's id and code land in the ``RETENTION_RESTORED`` payload's
+    ``refused_items`` and in ``CommandResult.warnings`` (via
+    ``command.metadata["handler_warnings"]``, see ``_handler_warnings`` in
+    ``executor.py``), so a caller sees exactly which ids need
+    ``precedent.reinstate`` or a different remedy instead of a blanket
+    retry. The command is rejected only when *nothing* in the batch was
+    restored — some skipped and some refused, with nothing restored, still
+    rejects, since "skipped" alone cannot turn a wholly-unactioned batch
+    into a reported success. A genuinely unexpected exception (not this
+    history refusal) still aborts the remainder of the batch, as before.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
 
     def handle(self, command: Command) -> tuple[str | None, str]:
-        raw_ids = command.args["item_ids"]
-        if not isinstance(raw_ids, list) or not raw_ids:
-            msg = "retention.restore requires a non-empty item_ids list"
-            raise ValidationError(msg, code="retention_restore_ids_required")
-        item_ids = [str(i) for i in raw_ids]
-
-        reason = str(command.args["reason"] or "").strip()
-        if not reason:
-            msg = "retention.restore requires a non-empty reason for the audit trail"
-            raise ValidationError(msg, code="retention_reason_required")
-        if len(reason) > MAX_RETENTION_REASON_CHARS:
-            msg = f"retention.restore reason exceeds {MAX_RETENTION_REASON_CHARS} chars"
-            raise ValidationError(msg, code="retention_reason_too_long")
-
-        restored: list[str] = []
-        skipped: list[str] = []
-        unfinished: Exception | None = None
-        try:
-            for item_id in item_ids:
-                if self._restore(item_id):
-                    restored.append(item_id)
-                else:
-                    skipped.append(item_id)
-        except Exception as exc:
-            # Re-raised after the event: what was restored stays restored.
-            unfinished = exc
+        item_ids, reason = _validate_restore_args(command)
+        restored, skipped, refused, unfinished = self._restore_batch(item_ids)
 
         payload: dict[str, Any] = {
             "reason": reason,
@@ -2880,12 +3252,22 @@ class RetentionRestoreHandler:
             "requested_by": command.requested_by,
             "restored": len(restored),
             "skipped": len(skipped),
+            "refused": len(refused),
             "restored_ids": restored,
             "skipped_ids": skipped,
+            "refused_ids": [r["item_id"] for r in refused],
+            "refused_items": refused,
         }
-        message = f"retention.restore: restored {len(restored)} item(s)" + (
-            f", {len(skipped)} not archived (skipped)" if skipped else ""
-        )
+        message = f"retention.restore: restored {len(restored)} item(s)"
+        if skipped:
+            message += f", {len(skipped)} not archived (skipped)"
+        if refused:
+            message += f", {len(refused)} refused (history unavailable)"
+            command.metadata.setdefault("handler_warnings", []).extend(
+                f"retention.restore: {r['item_id']} refused ({r['code']}): "
+                f"{r['message']}"
+                for r in refused
+            )
         try:
             self._registry.operational.event_log.emit(
                 EventType.RETENTION_RESTORED,
@@ -2904,7 +3286,39 @@ class RetentionRestoreHandler:
             message += " (WARNING: RETENTION_RESTORED audit emit failed)"
         if unfinished is not None:
             raise unfinished
+        if not restored and refused:
+            _raise_nothing_restored(refused)
         return command.command_id, message
+
+    def _restore_batch(
+        self, item_ids: list[str]
+    ) -> tuple[list[str], list[str], list[dict[str, str]], Exception | None]:
+        """Restore every id, collecting outcomes rather than aborting on a
+        per-item history refusal (see ``_pre_archival_lifecycle``).
+        Anything other than that specific, expected refusal still escapes
+        to the outer ``except`` and aborts the remainder via the returned
+        exception — what was restored before it stays restored. Split out
+        of ``handle`` to keep that method's branch count under the
+        linter's ceiling.
+        """
+        restored: list[str] = []
+        skipped: list[str] = []
+        refused: list[dict[str, str]] = []
+        unfinished: Exception | None = None
+        try:
+            for item_id in item_ids:
+                try:
+                    if self._restore(item_id):
+                        restored.append(item_id)
+                    else:
+                        skipped.append(item_id)
+                except ValidationError as exc:
+                    refused.append(
+                        {"item_id": item_id, "code": exc.code, "message": str(exc)}
+                    )
+        except Exception as exc:
+            unfinished = exc
+        return restored, skipped, refused, unfinished
 
     def _restore(self, item_id: str) -> bool:
         """Un-archive one item. Returns False if it was not archived."""
@@ -2957,7 +3371,18 @@ class RetentionRestoreHandler:
             record = props.get(LIFECYCLE_KEY)
             if not isinstance(record, dict) or record.get("state") != ARCHIVED_STATE:
                 return None
-            props[LIFECYCLE_KEY] = current
+            if node["node_type"] == "precedent":
+                # Not ``current`` unconditionally: read the state the node
+                # held just before this archival (SCD-2 history), so a
+                # precedent that was demoted and then pruned comes back
+                # demoted, not silently reinstated (see
+                # _pre_archival_lifecycle). Scoped to precedents: every
+                # other node type has no "demoted" concept to launder, and
+                # requiring pre-archival history from them would refuse a
+                # restore for a node that was simply minted archived.
+                props[LIFECYCLE_KEY] = _pre_archival_lifecycle(graph, item_id)
+            else:
+                props[LIFECYCLE_KEY] = current
             return {"properties": props}
 
         return _rewrite_current_node(graph, item_id, restore) is not None
@@ -2977,6 +3402,7 @@ def create_curate_handlers(
         Operation.TRACE_INGEST: TraceIngestHandler(registry),
         Operation.PRECEDENT_PROMOTE: PrecedentPromoteHandler(registry),
         Operation.PRECEDENT_DEMOTE: PrecedentDemoteHandler(registry),
+        Operation.PRECEDENT_REINSTATE: PrecedentReinstateHandler(registry),
         Operation.LABEL_ADD: LabelAddHandler(registry),
         Operation.LABEL_REMOVE: LabelRemoveHandler(registry),
         Operation.FEEDBACK_RECORD: FeedbackRecordHandler(registry),

@@ -47,7 +47,11 @@ class TestOperation:
         # + PRECEDENT_DEMOTE (manual-trigger precedent demotion; an SCD-2
         # rewrite to Lifecycle.state="demoted", provenance re-derived from
         # the precedent's own precedent.promote MUTATION_EXECUTED event)
-        assert len(Operation) == 26
+        # + PRECEDENT_REINSTATE (demote's own reversal verb, human-only:
+        # the SCD-2 rewrite back to Lifecycle.state="current", required
+        # because entity.update refuses to touch a precedent's lifecycle
+        # directly — see EntityUpdateHandler)
+        assert len(Operation) == 27
 
 
 class TestCommand:

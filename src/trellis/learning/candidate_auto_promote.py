@@ -103,6 +103,7 @@ from trellis.learning.scoring import (
 )
 from trellis.mutate import MutationExecutor, Operation
 from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
 
@@ -714,6 +715,7 @@ def run_candidate_auto_promotion(
     policy: LearningCandidateAutoPromotePolicy,
     event_log: EventLog,
     executor: MutationExecutor | None = None,
+    graph_store: GraphStore | None = None,
     requested_by: str = AUTO_PROMOTE_REQUESTED_BY,
     source: str = "candidate_auto_promote",
     force_report_only: bool = False,
@@ -771,7 +773,8 @@ def run_candidate_auto_promotion(
 
     Raises:
         ValueError: If the effective mode is ``"commit"`` but no
-            ``executor`` was given. Unreachable today — see above.
+            ``executor`` or ``graph_store`` was given. Unreachable
+            today — see above.
     """
     if configured_mode is None:
         configured_mode = policy.mode
@@ -782,6 +785,12 @@ def run_candidate_auto_promotion(
         msg = (
             "run_candidate_auto_promotion: effective mode is 'commit' but "
             "no executor was given."
+        )
+        raise ValueError(msg)
+    if effective_mode == "commit" and graph_store is None:
+        msg = (
+            "run_candidate_auto_promotion: effective mode is 'commit' but "
+            "no graph_store was given."
         )
         raise ValueError(msg)
 
@@ -836,6 +845,7 @@ def run_candidate_auto_promotion(
             continue
 
         assert executor is not None  # narrowed by the ValueError guard above
+        assert graph_store is not None  # narrowed by the ValueError guard above
         promotion_name = str(candidate.get("precedent_name", "")).strip()
         evidence = candidate.get("citation_evidence")
         if not isinstance(evidence, Mapping):
@@ -856,6 +866,7 @@ def run_candidate_auto_promotion(
             promotion["entity_payload"],
             promotion["edge_payloads"],
             requested_by=requested_by,
+            graph_store=graph_store,
         )
         if submission.get("status") == "promoted":
             promotions_committed += 1

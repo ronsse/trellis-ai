@@ -127,6 +127,27 @@ def _audit_warnings(audit_warning: str | None) -> list[str]:
     return [] if audit_warning is None else [audit_warning]
 
 
+def _handler_warnings(command: Command) -> list[str]:
+    """Warnings a handler left on ``command.metadata`` for the caller.
+
+    ``CommandHandler.handle`` returns a fixed ``(created_id, message)``
+    tuple with no warnings channel, so a handler that wants to report a
+    per-item condition it chose not to escalate (a batch item refused
+    while others in the same batch succeeded, a best-effort sync that
+    failed) has nowhere else to put it. It writes plain strings to
+    ``command.metadata["handler_warnings"]`` — a mutable dict field, so
+    this works even though ``Command`` itself is otherwise treated as
+    immutable — and this reads them back for every ``CommandResult``
+    built after ``handler.handle`` was called, success or rejection
+    alike, so a refusal a handler already decided not to abort the batch
+    over is visible on the result that reports the batch as a whole.
+    """
+    raw = command.metadata.get("handler_warnings")
+    if not isinstance(raw, list):
+        return []
+    return [str(w) for w in raw]
+
+
 class PolicyGate(Protocol):
     """Protocol for policy checking. Implementations injected by caller."""
 
@@ -321,7 +342,11 @@ class MutationExecutor:
                 status=CommandStatus.REJECTED,
                 operation=command.operation,
                 message=str(exc),
-                warnings=[*policy_warnings, *_audit_warnings(audit)],
+                warnings=[
+                    *policy_warnings,
+                    *_handler_warnings(command),
+                    *_audit_warnings(audit),
+                ],
                 metadata={"rejection_reason": reason},
             )
         except PolicyViolationError as exc:
@@ -485,7 +510,11 @@ class MutationExecutor:
             target_id=command.target_id,
             created_id=created_id,
             message=message,
-            warnings=[*policy_warnings, *_audit_warnings(audit)],
+            warnings=[
+                *policy_warnings,
+                *_handler_warnings(command),
+                *_audit_warnings(audit),
+            ],
         )
 
     def execute_batch(self, batch: CommandBatch) -> list[CommandResult]:

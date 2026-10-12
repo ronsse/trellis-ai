@@ -59,6 +59,8 @@ from trellis.mcp.server import (
 from trellis.mcp.server import (
     search as _search,
 )
+from trellis.mutate import build_curate_executor
+from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.schemas.advisory import Advisory, AdvisoryCategory, AdvisoryEvidence
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
@@ -2027,6 +2029,54 @@ class TestGetLessons:
 
         assert "Live lesson" in result
         assert "Demoted lesson" not in result
+
+    def test_a_reinstated_precedent_is_served_again(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Reader-completeness, the property PR #872 established for
+        demotion, carried to its reversal: once ``precedent.reinstate``
+        stamps the node back to ``"current"``, ``get_lessons`` must serve
+        it again -- it reads the node's live lifecycle, not a value
+        cached from an earlier call.
+        """
+        graph = temp_registry.knowledge.graph_store
+        event_log = temp_registry.operational.event_log
+        node_id = graph.upsert_node(
+            node_id=None,
+            node_type="precedent",
+            properties={"name": "Pooling pattern"},
+        )
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id=node_id,
+            payload={"title": "Pooling pattern", "description": "Pooling pattern body"},
+        )
+        executor = build_curate_executor(temp_registry)
+        demote_result = executor.execute(
+            Command(
+                operation=Operation.PRECEDENT_DEMOTE,
+                args={"target_id": node_id, "reason": "superseded"},
+                target_id=node_id,
+                target_type="precedent",
+                requested_by="cli:demote-precedent",
+            )
+        )
+        assert demote_result.status == CommandStatus.SUCCESS
+        assert "Pooling pattern" not in get_lessons()
+
+        reinstate_result = executor.execute(
+            Command(
+                operation=Operation.PRECEDENT_REINSTATE,
+                args={"target_id": node_id, "reason": "demotion was a mistake"},
+                target_id=node_id,
+                target_type="precedent",
+                requested_by="cli:reinstate-precedent",
+            )
+        )
+        assert reinstate_result.status == CommandStatus.SUCCESS
+
+        assert "Pooling pattern" in get_lessons()
 
     def test_invalid_limit_type_raises(self) -> None:
         # ``limit`` is typed ``int`` and is forwarded down to the SQL layer.

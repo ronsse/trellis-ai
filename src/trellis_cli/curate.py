@@ -243,19 +243,58 @@ def demote_precedent(
 
     A soft SCD-2 rewrite of the precedent's graph node, not a purge, so
     the pre-demotion version stays readable via ``get_node_history``/
-    ``as_of`` -- but there is no dedicated reversal verb yet: an
-    operator undoes a demotion with ``entity.update`` to set
-    ``Lifecycle.state`` back to ``"current"``. A demoted precedent stops
-    reaching ``list_precedents`` / ``get_lessons`` and is withheld from
-    packs at the collect seam, with the withholding recorded in
+    ``as_of``. The reversal verb is ``trellis curate reinstate-precedent``
+    (``precedent.reinstate``) -- ``entity.update`` refuses a write to
+    ``properties.lifecycle`` on a precedent node, so it is no longer a
+    way to undo this. A demoted precedent stops reaching
+    ``list_precedents`` / ``get_lessons`` and is withheld from packs at
+    the collect seam, with the withholding recorded in
     ``rejected_items``. Only a precedent promoted from a learning
     candidate has a graph node and can be demoted; a trace- or
     miner-sourced precedent id is refused. Re-demoting an
     already-demoted precedent is an idempotent no-op (exit 0, message
-    says so, nothing changes).
+    says so, nothing changes). Re-approving its learning candidate
+    instead of reinstating it is refused too -- see
+    :func:`trellis.learning.scoring.submit_learning_promotion`.
     """
     cmd = Command(
         operation=Operation.PRECEDENT_DEMOTE,
+        args={"target_id": target_id, "reason": reason},
+        target_id=target_id,
+        target_type="precedent",
+        requested_by=requested_by,
+    )
+    _execute_command(cmd, output_format)
+
+
+@curate_app.command("reinstate-precedent")
+def reinstate_precedent(
+    target_id: str = typer.Argument(..., help="Precedent entity ID to reinstate"),
+    reason: str = typer.Option(
+        ..., "--reason", help="Audit-trail justification (required, non-empty)"
+    ),
+    requested_by: str = typer.Option(
+        "cli:reinstate-precedent",
+        "--by",
+        help="Audit-trail identifier for the caller.",
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Reinstate a demoted precedent, stamping it ``Lifecycle.state="current"``.
+
+    The reversal verb ``trellis curate demote-precedent`` shipped
+    without: a soft SCD-2 rewrite in the other direction, so the demoted
+    version stays readable via ``get_node_history``/``as_of`` too, and
+    the precedent's vector row is re-synced in the same call so a
+    semantic hit stops carrying the demoted snapshot. Only a currently
+    ``"demoted"`` precedent may be reinstated -- a target that is
+    ``"current"``, ``"archived"``, not found, or not graph-backed is
+    refused legibly, naming its actual state. Human-only: the automatic
+    demotion policy's own identity is refused outright, since it has no
+    legitimate reason to reverse a demotion.
+    """
+    cmd = Command(
+        operation=Operation.PRECEDENT_REINSTATE,
         args={"target_id": target_id, "reason": reason},
         target_id=target_id,
         target_type="precedent",
@@ -401,11 +440,19 @@ def restore(
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
 ) -> None:
-    """Return archived items to ``Lifecycle.state="current"``.
+    """Return archived items to their pre-archival ``Lifecycle``.
 
-    The governed inverse of ``curate prune``. Ids that are not currently
-    archived are skipped, not treated as errors — a corrective batch built
-    from an audit payload will legitimately name items already restored.
+    The governed inverse of ``curate prune``. A restored document goes to
+    ``state="current"``; a restored precedent goes to whatever state its
+    SCD-2 history shows it held just before that archival (so a demoted
+    precedent that was then pruned comes back demoted, not reinstated).
+    Ids that are not currently archived are skipped, not treated as
+    errors — a corrective batch built from an audit payload will
+    legitimately name items already restored. A precedent whose history
+    cannot answer what it held before archival is refused individually
+    (named, with its code, in ``warnings``) without aborting the rest of
+    the batch; the command itself is rejected only when nothing in the
+    batch was actually restored.
     """
     ids = list(item_id)
     if from_file:
@@ -770,7 +817,8 @@ def promote_learning(
         )
         return
 
-    executor = build_curate_executor(_get_registry())
+    registry = _get_registry()
+    executor = build_curate_executor(registry)
 
     submission_results: list[dict[str, Any]] = []
     for entry in plan["results"]:
@@ -782,6 +830,7 @@ def promote_learning(
             entry["entity_payload"],
             entry["edge_payloads"],
             requested_by="cli:promote-learning",
+            graph_store=registry.knowledge.graph_store,
         )
         submission_results.append(
             {
