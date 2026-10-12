@@ -193,14 +193,13 @@ To wipe Trellis's SQLite stores too:
 
 ```bash
 rm -rf ~/.trellis/data/stores
-mkdir ~/.trellis/data/stores
+trellis admin init
 ```
 
-Trellis recreates each SQLite file on first use, but CLI commands that
-open a store exit with `Stores not initialized` until the `stores`
-directory exists. Don't run `trellis admin init` to fix that: with
-`config.yaml` present it does nothing, and `--force` rewrites
-`config.yaml` without the `knowledge:` block from Step 2.
+With `config.yaml` present, `trellis admin init` leaves it alone and only
+recreates the `stores` directory. Trellis recreates each SQLite file on
+first use. Don't add `--force`: it rewrites `config.yaml` without the
+`knowledge:` block from Step 2.
 
 ## Troubleshooting
 

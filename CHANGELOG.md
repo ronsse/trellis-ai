@@ -1424,6 +1424,24 @@ All notable changes to Trellis will be documented in this file.
   Typer's traceback locals, which Typer before 0.23 printed.
   ([#670](https://github.com/ronsse/trellis-ai/pull/670))
 
+- **The CLI finds the stores `trellis admin init --data-dir PATH` made, and
+  `admin init` repairs a missing stores directory.** Every CLI store command
+  checked `$TRELLIS_DATA_DIR`, else the config dir's `data/`, for the stores
+  directory, while the store registry reads `config.yaml`'s `data_dir`
+  first. So after `init --data-dir PATH` each store command exited `1` with
+  `Stores not initialized`, and the `trellis admin init` it advised found
+  `config.yaml` and did nothing. The stores guard now checks the registry's
+  directory and names it. `policy add` and the advisory commands write where
+  the MCP server and REST API read, and `demo reset` wipes the directory the
+  stores are in. For each, the directory differs from before only when
+  `config.yaml`'s `data_dir` differs from `$TRELLIS_DATA_DIR` (else the
+  config dir's `data/`). With `config.yaml` present, `admin init` recreates
+  a missing `stores/` directory without touching the file, and its JSON
+  adds `data_dir` and `stores_created`. A `config.yaml` the registry
+  refuses now makes `admin init` without `--force`, `policy`, `demo reset`
+  and `admin quickstart` exit `5` (was `0`).
+  ([#666](https://github.com/ronsse/trellis-ai/pull/666))
+
 - **`trellis curate entity`, `prune`, `restore`, `redact` and `link` show
   their warnings, as `label` already did.** Their output carried neither
   kind of warning a result holds: an `Enforcement.WARN` policy's verdict,
