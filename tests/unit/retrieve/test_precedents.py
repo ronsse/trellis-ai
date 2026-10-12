@@ -144,6 +144,27 @@ class TestGraphStoreExcludesDemoted:
         result = list_precedents(event_log, graph_store=graph_store)
         assert result == []
 
+    def test_archived_precedent_is_excluded(
+        self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
+    ) -> None:
+        """``retention.prune`` with ``lifecycle_states=["demoted"]`` archives
+        a demoted precedent; listing must not serve it again once archived.
+        """
+        graph_store.upsert_node(
+            node_id="prec-1",
+            node_type="precedent",
+            properties={"name": "Refund flow", LIFECYCLE_KEY: {"state": "archived"}},
+        )
+        event_log.emit(
+            EventType.PRECEDENT_PROMOTED,
+            source="test",
+            entity_id="prec-1",
+            payload={"domain": "billing", "title": "Refund flow"},
+        )
+
+        result = list_precedents(event_log, graph_store=graph_store)
+        assert result == []
+
     def test_non_demoted_precedent_is_included(
         self, event_log: SQLiteEventLog, graph_store: SQLiteGraphStore
     ) -> None:

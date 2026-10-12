@@ -38,7 +38,9 @@ def list_precedents(
     returned by this scan forever, unconditionally — the event log alone
     has no lifecycle awareness. When ``graph_store`` is given, each row's
     current node is checked and skipped if its
-    ``properties[LIFECYCLE_KEY]["state"] == "demoted"``; this is an extra
+    ``properties[LIFECYCLE_KEY]["state"]`` is ``"demoted"`` or
+    ``"archived"`` (retention archives a demoted precedent, and the pack
+    collect seam withholds both states); this is an extra
     store round-trip per row, bounded by ``limit``, and can return fewer
     than ``limit`` rows once filtered (the same accepted cost the
     ``domain`` filter above avoids by pushing into SQL instead — here
@@ -60,7 +62,7 @@ def list_precedents(
             node = graph_store.get_node(e.entity_id)
             if node is not None:
                 lifecycle = node.get("properties", {}).get(LIFECYCLE_KEY) or {}
-                if lifecycle.get("state") == "demoted":
+                if lifecycle.get("state") in ("demoted", "archived"):
                     continue
         results.append(
             {

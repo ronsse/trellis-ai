@@ -1400,6 +1400,26 @@ class TestDemotePrecedentRoute:
         node = graph.get_node(node_id)
         assert node["properties"]["lifecycle"]["state"] == "demoted"
 
+    def test_demote_addresses_a_learning_precedent_id(self, client):
+        """A learning promotion lands on ``precedent://learning/<candidate>``,
+        an id with slashes in it; the route must still match it.
+        """
+        node_id = "precedent://learning/cand-1"
+        graph = app_module._registry.knowledge.graph_store
+        graph.upsert_node(
+            node_id=node_id,
+            node_type="precedent",
+            properties={"name": "Pooling pattern"},
+        )
+
+        resp = client.post(
+            f"/api/v1/precedents/{node_id}/demote",
+            json={"reason": "superseded by a broader pattern"},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert graph.get_node(node_id)["properties"]["lifecycle"]["state"] == "demoted"
+
     def test_demote_non_precedent_target_is_refused(self, client):
         resp = client.post(
             "/api/v1/entities",

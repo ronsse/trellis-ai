@@ -63,7 +63,7 @@ def promote(req: PromoteRequest) -> CommandResponse:
     return _execute_command(cmd)
 
 
-@router.post("/precedents/{target_id}/demote", response_model=CommandResponse)
+@router.post("/precedents/{target_id:path}/demote", response_model=CommandResponse)
 def demote(target_id: str, req: PrecedentDemoteRequest) -> CommandResponse:
     """Demote a precedent, stamping it ``Lifecycle.state="demoted"``.
 
