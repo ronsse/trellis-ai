@@ -1407,15 +1407,16 @@ class ClassifyRuleRevokeHandler:
         if requested_by_claim is not None:
             payload["requested_by_claim"] = requested_by_claim
 
-        # Built and probed BEFORE the store write -- genuinely the
-        # mirror image of Apply's reorder now, with the same two
-        # independent probes in the same order. A non-finite float, a
-        # NUL byte or a lone surrogate can each reach this payload
-        # through a field the type guard above checks only for type
-        # (``command.metadata``'s identity fields), or through
-        # ``existing``'s own ``source_event_id``/``applied_by``, which
-        # may have been written by an earlier build or by hand-editing
-        # the overlay file. Discovering either failure only after
+        # Built and probed BEFORE the store write, with the same two
+        # probes Apply runs, in the same order. A NUL byte or lone
+        # surrogate can reach this payload inside a str the type guard
+        # above lets through (``command.metadata``'s identity fields),
+        # or through ``existing``'s own ``source_event_id``/``applied_by``,
+        # which may have been written by an earlier build or by
+        # hand-editing the overlay file. No current field can carry a
+        # non-finite float here; the serializability probe is a
+        # backstop for whatever this payload gains next. Discovering
+        # either failure only after
         # ``store.remove`` already ran would revoke the rule with no
         # ``CLASSIFY_RULE_REVOKED`` event to show for it; probing first
         # leaves the row in place on a refusal.
