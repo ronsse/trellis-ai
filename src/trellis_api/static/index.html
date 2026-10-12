@@ -1626,6 +1626,7 @@
             <a href="#" data-view="reports" data-label="Reports"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.5h9l3.5 3.5v15a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z"/><path d="M15 2.5V6h3.5"/><path d="M8 11h8M8 14.5h8M8 18h5"/></svg><span class="nav-label">Reports</span></a>
             <a href="#" data-view="advisories" data-label="Advisories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l8.5 4.9v9.2L12 21.5l-8.5-4.9V7.4z"/><path d="M12 8.2v5"/><circle cx="12" cy="16" r="0.9" fill="currentColor" stroke="none"/></svg><span class="nav-label">Advisories</span></a>
             <a href="#" data-view="policies" data-label="Policies"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l7.5 3v6.2c0 4.3-3.1 7.4-7.5 9.3-4.4-1.9-7.5-5-7.5-9.3V5.5z"/><path d="M9 12l2.2 2.2L15.5 9.5"/></svg><span class="nav-label">Policies</span></a>
+            <a href="#" data-view="tagrules" data-label="Tag rules"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 3.5h5.8a1.7 1.7 0 0 1 1.7 1.7v5.8L9.7 21.3a1.7 1.7 0 0 1-2.4 0l-5-5a1.7 1.7 0 0 1 0-2.4z"/><circle cx="15.3" cy="8.7" r="1.4"/></svg><span class="nav-label">Tag rules</span></a>
             <a href="#" data-view="settings" data-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.7 7.7 0 0 0 0-2l2-1.5-2-3.4-2.3.9a7.6 7.6 0 0 0-1.7-1l-.3-2.5h-4l-.3 2.5a7.6 7.6 0 0 0-1.7 1l-2.3-.9-2 3.4L6.6 11a7.7 7.7 0 0 0 0 2l-2 1.5 2 3.4 2.3-.9c.5.4 1.1.75 1.7 1l.3 2.5h4l.3-2.5c.6-.25 1.2-.6 1.7-1l2.3.9 2-3.4z"/></svg><span class="nav-label">Settings</span></a>
         </nav>
 
@@ -2135,6 +2136,59 @@
             <p class="field-hint" id="policies-total"></p>
         </div>
 
+        <div id="view-tagrules" style="display:none">
+            <p class="field-hint">
+                Mined keyword/alias candidates only ever propose &mdash; applying one here
+                writes it to the operator overlay through the same governed path as any
+                other rule change, with an audit trail recording what it replaced. A rule's
+                source is badged <code>default</code> (built in), <code>config</code>
+                (set in the static classification configuration; edit that to change it) or
+                <code>overlay</code> (applied here; revocable here).
+            </p>
+            <div id="tagrules-candidates-banner"></div>
+            <div class="search-bar">
+                <button onclick="loadTagRules()">Refresh</button>
+                <button onclick="confirmMineTagCandidates()">Mine candidates&hellip;</button>
+            </div>
+            <div id="tagrules-mine-result"></div>
+            <h3 style="margin:1.5rem 0 0.5rem">Open candidates</h3>
+            <div class="status-section" style="padding:0; overflow:hidden">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Kind</th>
+                            <th>Key</th>
+                            <th>Target</th>
+                            <th>Support</th>
+                            <th>Precision</th>
+                            <th>Status</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="tagrules-candidates-body"></tbody>
+                </table>
+            </div>
+            <p class="field-hint" id="tagrules-candidates-total"></p>
+
+            <h3 style="margin:1.5rem 0 0.5rem">Effective rules</h3>
+            <div class="status-section" style="padding:0; overflow:hidden">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Kind</th>
+                            <th>Key</th>
+                            <th>Target</th>
+                            <th>Source</th>
+                            <th>Applied</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="tagrules-rules-body"></tbody>
+                </table>
+            </div>
+            <p class="field-hint" id="tagrules-rules-total"></p>
+        </div>
+
         <div id="view-settings" style="display:none">
             <div id="runtime-auth-banner"></div>
             <div class="status-section">
@@ -2439,6 +2493,9 @@
             loadTraceDetail, navigateToEntity, navigateToDocument,
             loadMemoryDetail, loadEventDetail, navigateToPack, loadPackDetail,
             confirmDeletePolicy, deletePolicy,
+            confirmApplyTagCandidate, applyTagCandidate,
+            confirmDismissTagCandidate, dismissTagCandidate,
+            confirmRevokeTagRule, revokeTagRule,
             beginSaveSetting, beginResetSetting, confirmSaveSetting, confirmResetSetting,
             cancelSettingWrite,
         };
@@ -2566,6 +2623,7 @@
                 if (name === 'reports') loadReportsTab();
                 if (name === 'advisories') loadAdvisories();
                 if (name === 'policies') loadPolicies();
+                if (name === 'tagrules') loadTagRules();
                 if (name === 'settings') { loadRuntime(); loadSettings(); }
             }
             // Focus search when switching to graph
@@ -6388,6 +6446,310 @@
                         '<button class="btn btn-sm btn-danger" onclick="runCreatePolicy()">Confirm create</button> ' +
                         '<button class="btn btn-ghost btn-sm" onclick="cancelCreatePolicyForm()">Cancel</button>';
                 }
+            }
+        }
+
+        // -- Tag rules: mined candidate review (Apply/Revoke) --
+        // ID_ACTIONS (above) calls a handler with only `dataset.id`, so a
+        // compound key (kind+key for a rule; the full candidate for apply)
+        // is looked up from these session caches rather than carried
+        // through extra data-* attributes no dispatcher reads.
+        let tagCandidatesCache = {};
+        let effectiveRulesCache = {};
+
+        async function loadTagRules() {
+            await Promise.all([loadTagRuleCandidates(), loadEffectiveRules()]);
+        }
+
+        async function loadTagRuleCandidates() {
+            const tbody = document.getElementById('tagrules-candidates-body');
+            const totalEl = document.getElementById('tagrules-candidates-total');
+            tbody.innerHTML = `<tr><td colspan="7">${loadingHtml('Loading candidates...')}</td></tr>`;
+            renderDegradedBanner('tagrules-candidates-banner', null);
+            totalEl.textContent = '';
+            try {
+                const data = await fetchJSON('/classify/candidates');
+                renderDegradedBanner('tagrules-candidates-banner', data.store_degradation);
+                const all = data.candidates || [];
+                tagCandidatesCache = {};
+                all.forEach(c => { tagCandidatesCache[c.candidate_id] = c; });
+                const rows = all.filter(c => c.status === 'open');
+                if (rows.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">No open candidates. Try "Mine candidates" to scan for new keyword/alias proposals.</div></td></tr>`;
+                } else {
+                    tbody.innerHTML = rows.map(renderTagCandidateRow).join('');
+                }
+                totalEl.textContent = `${rows.length} open candidate${rows.length === 1 ? '' : 's'} (${data.count ?? all.length} total mined)`;
+            } catch (err) {
+                tbody.innerHTML = `<tr><td colspan="7" style="color:var(--error)">Failed to load candidates: ${escHtml(err.message)}</td></tr>`;
+            }
+        }
+
+        function renderTagCandidateRow(c) {
+            const m = c.metrics || {};
+            const support = m.support ?? '';
+            // tag_keyword candidates carry precision, domain_alias ones
+            // carry cooccurrence_rate -- both are the same shape of ratio,
+            // so one shared, non-finite-safe formatter renders either.
+            const precision = fmtNum(m.precision ?? m.cooccurrence_rate);
+            return `<tr id="tagcand-row-${escHtml(c.candidate_id)}">
+                <td>${escHtml(c.kind)}</td>
+                <td><code>${escHtml(c.key)}</code></td>
+                <td>${escHtml(c.target)}</td>
+                <td>${escHtml(String(support))}</td>
+                <td>${escHtml(String(precision))}</td>
+                <td>${escHtml(c.status)}</td>
+                <td id="tagcand-actions-${escHtml(c.candidate_id)}">
+                    <button class="btn btn-sm" data-action="confirmApplyTagCandidate" data-id="${escHtml(c.candidate_id)}">Apply</button>
+                    <button class="btn btn-ghost btn-sm" data-action="confirmDismissTagCandidate" data-id="${escHtml(c.candidate_id)}">Dismiss</button>
+                </td>
+            </tr>`;
+        }
+
+        // POST/DELETE on an overlay-store endpoint (rules apply/revoke): a
+        // refused write on a degraded or stale overlay answers 409 with
+        // `store_degradation` in its body (see renderDegradedBanner above).
+        // postJSON/deleteJSON discard that body on failure, so these two
+        // write paths use this local helper instead -- it mirrors
+        // writeSettingJSON's err.payload attachment rather than widening
+        // the two app-wide helpers every other tab's writes still use.
+        async function classifyRuleWriteJSON(method, path, body) {
+            const headers = { 'Content-Type': 'application/json' };
+            const key = getApiKey();
+            if (key) headers['X-API-Key'] = key;
+            const res = await fetch(API + path, {
+                method,
+                headers,
+                body: body === undefined ? undefined : JSON.stringify(body),
+            });
+            await throwIfAuthRefused(res, key);
+            if (!res.ok) {
+                let detail = `${res.status} ${res.statusText}`;
+                let payload = null;
+                try {
+                    payload = await res.json();
+                    const d = payload && payload.detail;
+                    if (typeof d === 'string') detail = d;
+                    else if (d && typeof d.message === 'string') detail = d.message;
+                    else if (d) detail = JSON.stringify(d);
+                } catch { /* non-JSON */ }
+                const err = new Error(detail);
+                err.status = res.status;
+                err.payload = payload;
+                throw err;
+            }
+            return res.json();
+        }
+
+        // Risk copy here is traced to the running classifier, not guessed:
+        // KeywordDomainClassifier requires at least two matching keywords
+        // for the same domain in one document before it assigns that
+        // domain (src/trellis/classify/classifiers/keyword.py), and no
+        // caller in this codebase overrides that threshold. Domain is never
+        // written at ordinary ingest time regardless of this rule --
+        // src/trellis/classify/ingest.py drops the classifier-derived
+        // domain facet before persisting -- so applying a tag_keyword rule
+        // only reaches already-stored content via a separate, explicitly
+        // opted-in reprocessing pass that an administrator runs later. A
+        // domain_alias rule never touches a document's tags at all: it
+        // only feeds future candidate mining and this listing's badges.
+        function confirmApplyTagCandidate(candidateId) {
+            const cell = document.getElementById('tagcand-actions-' + candidateId);
+            if (!cell) return;
+            const c = tagCandidatesCache[candidateId];
+            if (!c) {
+                cell.innerHTML = '<span style="color:var(--error)">Candidate no longer listed -- refresh.</span>';
+                return;
+            }
+            const risk = c.kind === 'domain_alias'
+                ? `Merge <code>${escHtml(c.key)}</code> into <code>${escHtml(c.target)}</code>? This only changes ` +
+                  `how future keyword/alias candidates are mined and how rules are labelled below &mdash; it does ` +
+                  `not change the domain on any document already stored.`
+                : `Apply <code>${escHtml(c.key)}</code> &rarr; <code>${escHtml(c.target)}</code>? A single keyword ` +
+                  `never assigns a domain by itself: this classifier requires at least two matching keywords for ` +
+                  `the same domain in one document, and a wrong domain hides content from domain-scoped queries ` +
+                  `rather than just re-ranking it. Even once applied, this has no effect by itself -- new and ` +
+                  `existing content is never auto-tagged with domain at write time; it only reaches already-stored ` +
+                  `content if an administrator later runs a separate, explicitly opted-in reprocessing pass.`;
+            cell.innerHTML =
+                `<div style="color:var(--warn); margin-bottom:0.25rem; max-width:32rem">${risk}</div>` +
+                `<button class="btn btn-sm" data-action="applyTagCandidate" data-id="${escHtml(candidateId)}">Confirm apply</button> ` +
+                `<button class="btn btn-ghost btn-sm" onclick="loadTagRuleCandidates()">Cancel</button>`;
+        }
+
+        async function applyTagCandidate(candidateId) {
+            const cell = document.getElementById('tagcand-actions-' + candidateId);
+            const c = tagCandidatesCache[candidateId];
+            if (!c) {
+                if (cell) cell.innerHTML = '<span style="color:var(--error)">Candidate no longer listed -- refresh.</span>';
+                return;
+            }
+            if (cell) cell.innerHTML = loadingHtml('Applying...');
+            try {
+                const m = c.metrics || {};
+                await classifyRuleWriteJSON('POST', '/classify/rules', {
+                    kind: c.kind,
+                    key: c.key,
+                    target: c.target,
+                    source_event_id: c.source_event_id,
+                    support: typeof m.support === 'number' ? m.support : null,
+                    precision: typeof m.precision === 'number' ? m.precision : null,
+                    lift: typeof m.lift === 'number' ? m.lift : null,
+                });
+                await loadTagRules();
+            } catch (err) {
+                if (cell) {
+                    cell.innerHTML = `<span style="color:var(--error)">Apply failed: ${escHtml(err.message)}</span> ` +
+                        `<button class="btn btn-sm" data-action="applyTagCandidate" data-id="${escHtml(candidateId)}">Retry</button>`;
+                }
+                const degradation = err.payload && err.payload.detail && err.payload.detail.store_degradation;
+                if (degradation) renderDegradedBanner('tagrules-candidates-banner', degradation);
+            }
+        }
+
+        // Dismissal is not a block: a candidate dismissed here goes back to
+        // `open` the next time mining resurfaces the same keyword/alias
+        // pair (see the dismiss-is-not-permanent note in the candidates
+        // list route's docstring), so the confirm copy says so rather than
+        // implying this is a one-way decision.
+        function confirmDismissTagCandidate(candidateId) {
+            const cell = document.getElementById('tagcand-actions-' + candidateId);
+            if (!cell) return;
+            const c = tagCandidatesCache[candidateId];
+            if (!c) {
+                cell.innerHTML = '<span style="color:var(--error)">Candidate no longer listed -- refresh.</span>';
+                return;
+            }
+            cell.innerHTML =
+                `<span style="color:var(--warn)">Dismiss <code>${escHtml(c.key)}</code> &rarr; ` +
+                `<code>${escHtml(c.target)}</code>? A later mining run can resurface the same candidate as open ` +
+                `again &mdash; this only drops it from today's open list.</span> ` +
+                `<button class="btn btn-ghost btn-sm" data-action="dismissTagCandidate" data-id="${escHtml(candidateId)}">Confirm dismiss</button> ` +
+                `<button class="btn btn-ghost btn-sm" onclick="loadTagRuleCandidates()">Cancel</button>`;
+        }
+
+        async function dismissTagCandidate(candidateId) {
+            const cell = document.getElementById('tagcand-actions-' + candidateId);
+            if (cell) cell.innerHTML = loadingHtml('Dismissing...');
+            try {
+                await postJSON(`/classify/candidates/${encodeURIComponent(candidateId)}/dismiss`);
+                await loadTagRuleCandidates();
+            } catch (err) {
+                if (cell) cell.innerHTML = `<span style="color:var(--error)">Dismiss failed: ${escHtml(err.message)}</span>`;
+            }
+        }
+
+        // Mining only proposes: it writes mined candidates for review, not
+        // any rule, tag or document (POST /classify/candidates/mine emits
+        // candidate records for the list above, nothing else), so the
+        // confirm copy can say that plainly rather than hedging it.
+        function confirmMineTagCandidates() {
+            const resultEl = document.getElementById('tagrules-mine-result');
+            resultEl.innerHTML =
+                '<p style="color:var(--warn)">Scan now for new keyword/alias candidates? This only proposes ' +
+                'candidates for review above &mdash; nothing is written to any rule or document until you ' +
+                'explicitly apply one.</p>' +
+                '<button class="btn btn-sm" onclick="mineTagCandidates()">Confirm mine</button> ' +
+                '<button class="btn btn-ghost btn-sm" onclick="cancelMineTagCandidates()">Cancel</button>';
+        }
+
+        function cancelMineTagCandidates() {
+            document.getElementById('tagrules-mine-result').innerHTML = '';
+        }
+
+        async function mineTagCandidates() {
+            const resultEl = document.getElementById('tagrules-mine-result');
+            resultEl.innerHTML = loadingHtml('Mining (deterministic scan, may take a moment)...');
+            try {
+                const r = await postJSON('/classify/candidates/mine', {
+                    kinds: ['tag_keyword', 'domain_alias'],
+                    use_recommended_defaults: true,
+                });
+                const defaultsNote = (r.used_recommended_defaults || []).length > 0
+                    ? ` (unreviewed defaults used for: ${r.used_recommended_defaults.map(escHtml).join(', ')})`
+                    : '';
+                resultEl.innerHTML = `<p style="color:var(--success)">Mined ${r.tag_keyword_count ?? 0} tag-keyword and ${r.domain_alias_count ?? 0} domain-alias candidate(s).${defaultsNote}</p>`;
+                await loadTagRuleCandidates();
+            } catch (err) {
+                resultEl.innerHTML = `<p style="color:var(--error)">Mine failed: ${escHtml(err.message)}</p>`;
+            }
+        }
+
+        async function loadEffectiveRules() {
+            const tbody = document.getElementById('tagrules-rules-body');
+            const totalEl = document.getElementById('tagrules-rules-total');
+            tbody.innerHTML = `<tr><td colspan="6">${loadingHtml('Loading rules...')}</td></tr>`;
+            renderDegradedBanner('tagrules-candidates-banner', null);
+            totalEl.textContent = '';
+            try {
+                const data = await fetchJSON('/classify/rules');
+                renderDegradedBanner('tagrules-candidates-banner', data.store_degradation);
+                const rows = data.rules || [];
+                effectiveRulesCache = {};
+                rows.forEach(r => { effectiveRulesCache[`${r.kind}:${r.key}`] = r; });
+                if (rows.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state">No effective rules.</div></td></tr>`;
+                } else {
+                    tbody.innerHTML = rows.map(renderEffectiveRuleRow).join('');
+                }
+                totalEl.textContent = `${data.count ?? rows.length} effective rule${(data.count ?? rows.length) === 1 ? '' : 's'}`;
+            } catch (err) {
+                tbody.innerHTML = `<tr><td colspan="6" style="color:var(--error)">Failed to load rules: ${escHtml(err.message)}</td></tr>`;
+            }
+        }
+
+        function renderEffectiveRuleRow(r) {
+            const id = `${r.kind}:${r.key}`;
+            const actions = r.source === 'overlay'
+                ? `<button class="btn btn-sm btn-danger" data-action="confirmRevokeTagRule" data-id="${escHtml(id)}">Revoke</button>`
+                : '';
+            return `<tr id="tagrule-row-${escHtml(id)}">
+                <td>${escHtml(r.kind)}</td>
+                <td><code>${escHtml(r.key)}</code></td>
+                <td>${escHtml(r.target)}</td>
+                <td>${escHtml(r.source)}</td>
+                <td>${escHtml(fmtTime(r.applied_at, { empty: '' }))}</td>
+                <td id="tagrule-actions-${escHtml(id)}">${actions}</td>
+            </tr>`;
+        }
+
+        // Revoking removes only the overlay row: it does not retag any
+        // content a backfill already processed under this rule, and
+        // (domain_alias) does not touch a document's tags at all -- so the
+        // confirm copy says what stays unchanged, not just what is removed.
+        function confirmRevokeTagRule(id) {
+            const cell = document.getElementById('tagrule-actions-' + id);
+            if (!cell) return;
+            const r = effectiveRulesCache[id];
+            const risk = r && r.kind === 'domain_alias'
+                ? `Revoke <code>${escHtml(r.key)}</code>? This only stops it affecting future candidate mining ` +
+                  `and this listing's badges &mdash; it does not change the domain on any document already stored.`
+                : `Revoke this rule? Removing the override does not retag any content a reprocessing pass already ` +
+                  `assigned under it &mdash; already-stored domain tags stay exactly as they are.`;
+            cell.innerHTML =
+                `<div style="color:var(--warn); margin-bottom:0.25rem; max-width:28rem">${risk}</div>` +
+                `<button class="btn btn-sm btn-danger" data-action="revokeTagRule" data-id="${escHtml(id)}">Confirm revoke</button> ` +
+                '<button class="btn btn-ghost btn-sm" onclick="loadEffectiveRules()">Cancel</button>';
+        }
+
+        async function revokeTagRule(id) {
+            const cell = document.getElementById('tagrule-actions-' + id);
+            const r = effectiveRulesCache[id];
+            if (!r) {
+                if (cell) cell.innerHTML = '<span style="color:var(--error)">Rule no longer listed -- refresh.</span>';
+                return;
+            }
+            if (cell) cell.innerHTML = loadingHtml('Revoking...');
+            try {
+                await classifyRuleWriteJSON('DELETE', `/classify/rules/${encodeURIComponent(r.kind)}/${encodeURIComponent(r.key)}`);
+                await loadEffectiveRules();
+            } catch (err) {
+                if (cell) {
+                    cell.innerHTML = `<span style="color:var(--error)">Revoke failed: ${escHtml(err.message)}</span> ` +
+                        `<button class="btn btn-sm btn-danger" data-action="confirmRevokeTagRule" data-id="${escHtml(id)}">Retry</button>`;
+                }
+                const degradation = err.payload && err.payload.detail && err.payload.detail.store_degradation;
+                if (degradation) renderDegradedBanner('tagrules-candidates-banner', degradation);
             }
         }
 

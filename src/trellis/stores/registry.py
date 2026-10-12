@@ -864,6 +864,18 @@ class StoreRegistry:
         """Return the base directory for store files, or ``None``."""
         return self._stores_dir
 
+    @property
+    def classify_config(self) -> dict[str, Any]:
+        """Return the ``classify:`` block parsed from ``config.yaml``.
+
+        Read-only by convention, not by type: callers (e.g.
+        ``ClassifyRuleRevokeHandler``) use this to tell a config.yaml-
+        sourced rule apart from one in the operator overlay
+        (:class:`~trellis.stores.classify_overrides_store.ClassifyOverridesStore`)
+        -- never to write through it. Mutate ``config.yaml`` itself for that.
+        """
+        return self._classify_config
+
     @classmethod
     def from_config_dir(
         cls,
@@ -1932,6 +1944,98 @@ class StoreRegistry:
         self._budget_config_cache = BudgetConfig.from_dict(budgets_data)
         return self._budget_config_cache
 
+    def _classify_overrides_store(self) -> Any:
+        """Fresh
+        :class:`~trellis.stores.classify_overrides_store.ClassifyOverridesStore`.
+
+        Built per call, never cached — the same "re-read is what makes an
+        edit live without a restart" posture
+        ``trellis_api.routes.settings._get_settings_store`` documents. The
+        file is small (tens of rows at most), so re-reading it on every
+        domain-vocabulary resolution is cheap. ``None`` with no
+        ``stores_dir`` (an in-memory or storeless deployment): every caller
+        below passes that through as "no overlay", not an error.
+        """
+        from trellis.stores.classify_overrides_store import (  # noqa: PLC0415
+            ClassifyOverridesStore,
+            resolve_classify_overrides_path,
+        )
+
+        path = resolve_classify_overrides_path(self._stores_dir)
+        if path is None:
+            return None
+        return ClassifyOverridesStore(path)
+
+    def _record_classify_overlay_rejection(self, error: ConfigError) -> None:
+        """Make a degraded classify overlay visible to ``trellis analyze health``.
+
+        Mirrors :func:`trellis.mutate.policy_source._record_gate_load_failure`:
+        :meth:`build_ingestion_pipeline` raises before a
+        :class:`~trellis.mutate.commands.Command` exists, so there is no
+        ``MUTATION_REJECTED``, and this call sits outside a
+        ``MutationExecutor`` boundary, so there is no boundary rejection
+        either. A ``WRITE_REJECTED`` event is the only channel left, and
+        it is the one ``trellis analyze health`` already reads.
+
+        Unlike the policy file, this refusal is narrow, not global: see
+        :data:`~trellis.stores.classify_overrides_store.CLASSIFY_OVERLAY_SURFACE`
+        for why it belongs in :mod:`trellis.ops.capture_health`'s
+        ``NON_CAPTURE_SURFACES`` rather than the ``config:`` prefix's
+        global-recovery class.
+
+        Fail-soft: a broken event log must never escalate a refused
+        ``backfill`` into a different crash. The ``ConfigError`` is
+        re-raised by the caller either way.
+        """
+        # ``error``, not ``warning`` or ``info`` -- ``trellis_cli.main._root``
+        # defaults ``TRELLIS_LOG_LEVEL`` to ``WARNING``, and this is the
+        # line an operator meets the failure on before they think to run a
+        # health command.
+        logger.error(
+            "classify_overlay_load_failed",
+            error=str(error),
+            impact="backfill is refused until the overlay file loads or is fixed",
+        )
+
+        try:
+            event_log = self.operational.event_log
+        # GRACEFUL-DEGRADATION: telemetry only. An operational plane that
+        # cannot be resolved is a real problem, but not this one, and the
+        # ConfigError the caller is about to re-raise is the better error
+        # to surface.
+        except Exception:
+            logger.warning(
+                "classify_overlay_load_failed.event_log_unavailable",
+                exc_info=True,
+            )
+            return
+
+        from trellis.ops.write_health import record_write_rejection  # noqa: PLC0415
+        from trellis.stores.classify_overrides_store import (  # noqa: PLC0415
+            CLASSIFY_OVERLAY_SURFACE,
+        )
+
+        record_write_rejection(
+            event_log,
+            tool=CLASSIFY_OVERLAY_SURFACE,
+            error=error,
+            # An explicit row rather than ``classify_rejection``'s fallback,
+            # for the same reason the policy gate takes one: this is not a
+            # payload the caller can fix, and ``other@`` would pool it with
+            # every unclassified boundary failure. The ``msg`` is the
+            # ConfigError verbatim, so the recovery advice it carries
+            # reaches an operator reading the event without re-running
+            # ``backfill``.
+            rejections=[
+                {
+                    "kind": "config_unreadable",
+                    "loc": "classify_overrides.json",
+                    "msg": str(error)[:500],
+                }
+            ],
+            source=CLASSIFY_OVERLAY_SURFACE,
+        )
+
     def build_ingestion_pipeline(self) -> Any:
         """Construct the default deterministic ingestion ClassifierPipeline.
 
@@ -1945,18 +2049,67 @@ class StoreRegistry:
                   - chargeback
 
         The ``domain_keywords`` map merges over the built-in domain defaults
-        (config wins on key collision), so an operator can register a custom
-        domain by editing ``config.yaml`` alone — no code change. Reserved
-        policy-namespace domain names are rejected loudly here. Returns a
-        deterministic-only pipeline (no LLM); the enrichment worker wires the
-        LLM fallback separately. See
-        :func:`trellis.classify.factory.build_ingestion_pipeline`.
+        (config wins on key collision), then the operator overlay
+        (``classify_overrides.json``, applied via ``trellis classify
+        apply-rule`` / ``POST /api/v1/classify/rules``) merges over *that*
+        (overlay wins) — so an operator can register a custom domain either
+        by editing ``config.yaml`` or by approving a mined candidate, with
+        the approved one taking precedence. Reserved policy-namespace domain
+        names are rejected loudly here. Returns a deterministic-only
+        pipeline (no LLM); the enrichment worker wires the LLM fallback
+        separately. See :func:`trellis.classify.factory.build_ingestion_pipeline`.
+
+        Raises:
+            ConfigError: the operator overlay loaded degraded. Unlike
+                :meth:`domain_keyword_map` / :meth:`domain_alias_map` --
+                read for *display* (``trellis classify effective-rules``,
+                ``GET /api/v1/classify/rules``), where the caller reports
+                ``store_degradation`` alongside a necessarily partial
+                answer -- this pipeline is handed straight to ``trellis
+                classify backfill``, which *writes* tags back to every
+                scanned document. Building it from a partial overlay view
+                would silently retag documents as though an unparsed rule
+                had never been applied: a previously-approved domain
+                keyword simply stops contributing, and a previously-merged
+                alias stops resolving, with no signal anywhere other than
+                this exception. Failing closed here is cheap (one backfill
+                invocation refused) against that: a batch of documents
+                written with the wrong tags, indistinguishable afterwards
+                from documents the overlay never covered.
+
+                The refusal is also recorded as a ``WRITE_REJECTED`` event
+                before the ``ConfigError`` propagates
+                (:meth:`_record_classify_overlay_rejection`), so it reaches
+                ``trellis analyze health`` instead of surfacing only to
+                whichever caller happened to invoke ``backfill``.
         """
         from trellis.classify.factory import (  # noqa: PLC0415
             build_ingestion_pipeline,
         )
 
-        return build_ingestion_pipeline(self._classify_config)
+        overrides = self._classify_overrides_store()
+        degradation = overrides.degradation if overrides is not None else None
+        if degradation is not None:
+            msg = (
+                "Refusing to build the classification pipeline: the "
+                f"operator overlay at {degradation.path} loaded degraded "
+                f"({degradation.reason}: {degradation.detail}). "
+                f"{degradation.rows_loaded} applied rule(s) parsed; "
+                f"{degradation.rows_skipped_display} did not. Backfilling "
+                "now would retag documents using only the rules that "
+                "parsed, silently treating every other applied rule as "
+                "though it had never been approved -- including any "
+                "applied domain keyword, which controls whether a document "
+                "is hard-excluded from a domain-scoped query. Fix the "
+                f"overlay file, then retry: {degradation.recovery}"
+            )
+            error = ConfigError(msg, setting="classify_overrides.json")
+            self._record_classify_overlay_rejection(error)
+            raise error
+        overlay_domains = overrides.domain_keywords_map() if overrides else None
+        return build_ingestion_pipeline(
+            self._classify_config, overlay_domains=overlay_domains
+        )
 
     def domain_keyword_map(self) -> dict[str, list[str]]:
         """The ``domain -> [keywords]`` map this deployment's classifier owns.
@@ -1968,8 +2121,9 @@ class StoreRegistry:
         (:mod:`trellis.learning.tag_evolution`) needs to know which keywords are
         *already* owned so it neither re-proposes them nor reads its own prior
         promotions as fresh evidence. "Already owned" has to mean owned in this
-        deployment, not merely in the shipped defaults, which is why this reads
-        the config rather than the built-ins alone.
+        deployment — config.yaml *and* the applied overlay — not merely in the
+        shipped defaults, which is why this reads both rather than the
+        built-ins alone.
 
         Raises:
             ValueError: When the ``classify.domain_keywords`` block is
@@ -1980,7 +2134,11 @@ class StoreRegistry:
             effective_domain_keywords,
         )
 
-        return effective_domain_keywords(self._classify_config)
+        overrides = self._classify_overrides_store()
+        overlay_domains = overrides.domain_keywords_map() if overrides else None
+        return effective_domain_keywords(
+            self._classify_config, overlay_domains=overlay_domains
+        )
 
     def domain_alias_map(self) -> dict[str, str]:
         """The ``alias -> canonical`` domain merge map this deployment owns.
@@ -1988,17 +2146,24 @@ class StoreRegistry:
         Read by :mod:`trellis.learning.domain_normalization` so the analyzer
         neither re-proposes a merge the operator already made nor reads its own
         prior output as fresh evidence — the same self-filtering rule
-        :meth:`domain_keyword_map` serves for keyword promotion.
+        :meth:`domain_keyword_map` serves for keyword promotion. Includes
+        the applied overlay
+        (:class:`~trellis.stores.classify_overrides_store.ClassifyOverridesStore`),
+        which wins over ``config.yaml`` on a colliding alias.
 
         Raises:
-            ValueError: When the ``classify.domain_aliases`` block is
-                malformed, self-mapping, or chained.
+            ValueError: When the ``classify.domain_aliases`` block (merged
+                with the overlay) is malformed, self-mapping, or chained.
         """
         from trellis.classify.factory import (  # noqa: PLC0415
             effective_domain_aliases,
         )
 
-        return effective_domain_aliases(self._classify_config)
+        overrides = self._classify_overrides_store()
+        overlay_aliases = overrides.domain_aliases_map() if overrides else None
+        return effective_domain_aliases(
+            self._classify_config, overlay_aliases=overlay_aliases
+        )
 
     def domain_aspect_tags(self) -> frozenset[str]:
         """Domain tags that name an aspect of engagement, not a subject.

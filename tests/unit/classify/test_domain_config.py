@@ -111,6 +111,23 @@ class TestBuildIngestionPipeline:
         with pytest.raises(ValueError, match="reserved namespace"):
             build_ingestion_pipeline({"domain_keywords": {"retention": ["x"]}})
 
+    def test_reserved_overlay_domain_names_the_overlay_file_not_a_constructor(
+        self,
+    ) -> None:
+        """A reserved domain reaching this through the overlay is refused
+        with a message naming ``classify_overrides.json``, not
+        ``KeywordDomainClassifier(extra_domains=...)`` -- the generic
+        constructor-argument wording that fires for a direct
+        ``KeywordDomainClassifier(extra_domains=...)`` call is correct
+        there, but unhelpful to an operator reading an overlay-sourced
+        failure."""
+        with pytest.raises(ValueError, match="operator overlay"):
+            build_ingestion_pipeline(None, overlay_domains={"lifecycle": ["x"]})
+        with pytest.raises(ValueError) as excinfo:
+            build_ingestion_pipeline(None, overlay_domains={"lifecycle": ["x"]})
+        assert "KeywordDomainClassifier(extra_domains=...)" not in str(excinfo.value)
+        assert "classify_overrides.json" in str(excinfo.value)
+
 
 class TestEffectiveDomainAliases:
     """The ``classify.domain_aliases`` block (#321 normalization).
@@ -149,6 +166,26 @@ class TestEffectiveDomainAliases:
         ``normalize_domain_tags`` deliberately does not perform."""
         with pytest.raises(ValueError, match="both an alias and a merge destination"):
             effective_domain_aliases({"domain_aliases": {"a": "b", "b": "c"}})
+
+    def test_overlay_alias_merges_in_alongside_config(self) -> None:
+        """A brand-new overlay alias reaches the merged map."""
+        merged = effective_domain_aliases(
+            {"domain_aliases": {"budget-hunting": "hunting"}},
+            overlay_aliases={"finances": "finance"},
+        )
+        assert merged == {"budget-hunting": "hunting", "finances": "finance"}
+
+    def test_overlay_alias_wins_on_collision_with_config(self) -> None:
+        """Precedence is default < ``config.yaml`` < operator overlay:
+        an overlay entry for a key ``config.yaml`` already
+        maps must win, not merely coexist. A merge that only *adds* the
+        overlay (e.g. ``dict.setdefault``) would leave this on the
+        ``config.yaml`` value instead."""
+        merged = effective_domain_aliases(
+            {"domain_aliases": {"hunting": "job-search"}},
+            overlay_aliases={"hunting": "employment"},
+        )
+        assert merged == {"hunting": "employment"}
 
 
 class TestEffectiveDomainAspects:

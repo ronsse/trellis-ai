@@ -780,6 +780,166 @@ class SchemaEvolutionListResponse(WireModel):
     candidates: list[SchemaEvolutionCandidate] = Field(default_factory=list)
 
 
+class ClassifyCandidate(WireModel):
+    """One mined ``tag_keyword`` or ``domain_alias`` candidate, latest emission only.
+
+    ``kind`` is ``"tag_keyword"`` (``key`` = keyword, ``target`` = domain
+    tag) or ``"domain_alias"`` (``key`` = alias, ``target`` = canonical
+    tag). ``status`` is ``"open"``, ``"applied"`` (an overlay row exists
+    for this ``(kind, key)``) or ``"dismissed"`` (a
+    ``CLASSIFY_CANDIDATE_DISMISSED`` event postdates this emission).
+
+    ``metrics`` carries the mined candidate's own kind-specific fields
+    verbatim from its ``to_event_payload()`` -- ``support``/``precision``/
+    ``recall``/``lift``/``has_write_target`` for ``tag_keyword``;
+    ``cooccurrence_rate``/``is_lexical_only``/``documents_gained``/etc. for
+    ``domain_alias``. The two kinds' metric vocabularies differ enough
+    that typing each field individually would force every row of one kind
+    to carry nulls for the other's fields; a passthrough dict keeps the
+    DTO's own fields (above) honest about what every row actually has.
+    """
+
+    candidate_id: str
+    kind: str
+    key: str
+    target: str
+    status: str
+    recurrence_count: int = 0
+    example_count: int = 0
+    notes: list[str] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    emitted_at: str
+    source_event_id: str
+
+
+class ClassifyCandidateListResponse(WireModel):
+    """List of mined classify candidates, deduped to their latest emission.
+
+    ``store_degradation`` is the overrides store's own
+    ``LoadDegradation.to_dict()`` (``None`` when the file loaded clean) --
+    an applied-row-derived ``"applied"``/``"dismissed"`` status above is
+    read from whatever of that file parsed, so a caller rendering this
+    list needs the same "is what I'm showing the whole picture?" signal
+    ``GET /settings`` and ``GET /policies`` already carry.
+    """
+
+    count: int = 0
+    candidates: list[ClassifyCandidate] = Field(default_factory=list)
+    store_degradation: dict[str, Any] | None = None
+
+
+class ClassifyMineRequest(WireRequestModel):
+    """Body for ``POST /api/v1/classify/candidates/mine``.
+
+    ``use_recommended_defaults`` (default ``True``) mirrors ``trellis
+    classify tag-candidates``/``domain-candidates``'s own
+    ``_tag_evolution_registry``/``_domain_normalization_registry``: when
+    the real, persistent ``ParameterRegistry`` is missing a required
+    threshold for a component, mine with that component's shipped
+    ``RECOMMENDED_SEED_VALUES`` instead of hard-failing -- never silent,
+    since the response's ``used_recommended_defaults`` names exactly
+    which component(s) this happened for and a ``structlog`` WARN is
+    emitted for each. Pin it ``False`` to require every threshold
+    pre-seeded (``trellis admin settings`` has no seeding command for
+    these yet -- seed via a governed write directly) and get a 400
+    naming the missing keys and their recommended values instead of a
+    mined set of candidates run against unreviewed defaults.
+    """
+
+    kinds: list[str] = Field(default_factory=lambda: ["tag_keyword", "domain_alias"])
+    scan_limit: int | None = None
+    use_recommended_defaults: bool = True
+
+
+class ClassifyMineResponse(WireModel):
+    """Outcome of one mining run, plus the candidates it just emitted."""
+
+    status: str = "ok"
+    tag_keyword_count: int = 0
+    domain_alias_count: int = 0
+    used_recommended_defaults: list[str] = Field(default_factory=list)
+    candidates: list[ClassifyCandidate] = Field(default_factory=list)
+
+
+class ClassifyRuleRow(WireModel):
+    """One effective tag/domain rule, with the source that wins it.
+
+    ``source`` is ``"default"`` (built-in), ``"config"``
+    (``config.yaml``) or ``"overlay"`` (applied through the governed
+    write path) -- the precedence documented in
+    ``trellis.classify.factory``. ``applied_at``/``applied_by``/
+    ``source_event_id`` are set only for an ``"overlay"`` row.
+    """
+
+    kind: str
+    key: str
+    target: str
+    source: str
+    applied_at: str | None = None
+    applied_by: str | None = None
+    source_event_id: str | None = None
+
+
+class ClassifyRuleListResponse(WireModel):
+    """Effective tag/domain rules, defaults and config.yaml included.
+
+    ``store_degradation`` is the overrides store's own
+    ``LoadDegradation.to_dict()`` (``None`` when the file loaded clean) --
+    a row that failed to parse there is simply missing from ``rules``
+    with no other signal, same reasoning as ``ClassifyCandidateListResponse``.
+    """
+
+    count: int = 0
+    rules: list[ClassifyRuleRow] = Field(default_factory=list)
+    store_degradation: dict[str, Any] | None = None
+
+
+class ClassifyRuleApplyRequest(WireRequestModel):
+    """Body for ``POST /api/v1/classify/rules``.
+
+    ``source_event_id`` must name the ``TAG_KEYWORD_CANDIDATE`` /
+    ``DOMAIN_ALIAS_CANDIDATE`` event this rule was mined from, so the
+    applied overlay row -- and its audit event -- stay traceable back to
+    the evidence that justified it. ``support``/``precision``/``lift``
+    are copied onto the ``CLASSIFY_RULE_APPLIED`` audit event verbatim;
+    they are optional only because a caller applying a rule with no
+    mined candidate behind it (hand-typed) has none to carry.
+
+    Each metric's range mirrors what :mod:`trellis.learning.tag_evolution`
+    computes it from -- ``support`` is a document count (``ge=0``),
+    ``precision`` is ``support / keyword_documents`` (``ge=0, le=1``), and
+    ``lift`` is ``precision / base_rate`` (``ge=0``, unbounded above).
+    ``allow_inf_nan=False`` on the two floats refuses a raw ``NaN``/
+    ``Infinity`` a scripted client can still send even though
+    ``json.dumps`` never emits one by default -- without it, a float
+    field happily accepts either and REST answers 400 from deeper in
+    the pipeline instead of a clean 422 at the boundary.
+    :class:`~trellis.mutate.handlers.ClassifyRuleApplyHandler` re-checks
+    the same ranges itself before any write
+    (``_validate_classify_rule_metrics``), so a caller that reaches the
+    handler directly -- the CLI, a direct ``MutationExecutor.execute``
+    -- is refused the same way even without this field; it buys REST
+    callers a cheaper, more specific error, not the only backstop.
+    """
+
+    kind: str
+    key: str
+    target: str
+    source_event_id: str
+    support: int | None = Field(default=None, ge=0)
+    precision: float | None = Field(default=None, ge=0.0, le=1.0, allow_inf_nan=False)
+    lift: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
+
+
+class ClassifyCandidateDismissResponse(WireModel):
+    """Outcome of dismissing one open candidate."""
+
+    status: str = "ok"
+    candidate_id: str
+    kind: str | None = None
+    message: str | None = None
+
+
 class DraftAdrResponse(WireModel):
     """Rendered promotion-ADR markdown for a schema-evolution candidate."""
 

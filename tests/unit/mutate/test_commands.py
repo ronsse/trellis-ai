@@ -29,7 +29,9 @@ class TestOperation:
         # + ALIAS_UPSERT (governed alias/backfill writes)
         # + SETTINGS_UPDATE (governed settings-store write; null value
         # means "remove the override" rather than a separate RESET verb)
-        assert len(Operation) == 22
+        # + CLASSIFY_RULE_APPLY + CLASSIFY_RULE_REVOKE (governed tag/domain
+        # candidate review)
+        assert len(Operation) == 24
 
 
 class TestCommand:

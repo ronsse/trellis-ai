@@ -133,7 +133,12 @@ def governing_key_refusal(component_id: str) -> str | None:
 #: *is* too, for the same reason: ``SettingsStore`` has no SCD-2 or
 #: history read — a write (including a null-value reset) overwrites or
 #: removes the prior override in place, and only the audit event, not the
-#: store, still has it.
+#: store, still has it. ``classify_rule.apply`` is here for the identical
+#: reason: ``ClassifyOverridesStore`` keys a row by ``(kind, key)`` and
+#: re-applying that key with a *different* ``target`` silently overwrites
+#: the prior row in place (CLAUDE.md: "a wrong rule hides content").
+#: ``classify_rule.revoke`` removes the row outright with no SCD-2 or
+#: history read either.
 DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
     {
         Operation.ENTITY_MERGE,
@@ -143,6 +148,8 @@ DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         Operation.REDACTION_APPLY,
         Operation.RETENTION_PRUNE,
         Operation.SETTINGS_UPDATE,
+        Operation.CLASSIFY_RULE_APPLY,
+        Operation.CLASSIFY_RULE_REVOKE,
     }
 )
 
