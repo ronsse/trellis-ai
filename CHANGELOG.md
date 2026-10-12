@@ -1412,6 +1412,27 @@ All notable changes to Trellis will be documented in this file.
   keyword or graph are healthy.
   ([#838](https://github.com/ronsse/trellis-ai/pull/838))
 
+- **The packaged agent skills no longer teach calls the server rejects or
+  ignores.** `record-after-task` showed `"source": "claude-code"` in both
+  example traces; `source` is an enum (`agent | human | workflow | system`)
+  and trace validation is all-or-nothing, so an agent that copied the example
+  lost the whole trace. The skill now documents the trace schema as the server
+  enforces it — the keys a step accepts, `result` as an object, artifacts in
+  top-level `artifacts_produced`, `metadata` and `outcome.metrics` as the home
+  for anything else — and adds grading packs by item id and saving environment
+  facts with `save_knowledge`. `link-evidence` told the reader to pass a
+  `save_memory` document id as `relates_to`, which creates no edge (documents
+  are not graph nodes), and claimed `save_knowledge` updates an existing
+  entity, which it does not: every call creates a node. It now stores the fact
+  and its anchor in one `save_knowledge(content=..., relates_to=...)` call,
+  uses `evidence_ref` for a document that already exists, and says to read the
+  reply for `Edge created` or the `edge not created` warning.
+  `retrieve-before-task` now covers retrieval after a pivot, after compaction
+  (`refresh=True`), in dispatched subagents, and survey-then-fetch with
+  `index=True` and `get_items`, and explains the `Withheld` line. All three
+  skills move to version 1.1.0; an existing install picks them up with
+  `trellis admin install-skills <scope> --force`.
+
 - **A policy refusal exits `3` on every single-command `trellis curate`
   write, and `curate link` refuses like the rest.** A refused write exited
   `2`, whatever refused it. A policy refusal, by `deny` or `require_approval`,
@@ -1443,6 +1464,24 @@ All notable changes to Trellis will be documented in this file.
   list is a `ConfigError` instead of a `TypeError` crash. The CLI turns off
   Typer's traceback locals, which Typer before 0.23 printed.
   ([#670](https://github.com/ronsse/trellis-ai/pull/670))
+
+- **The CLI finds the stores `trellis admin init --data-dir PATH` made, and
+  `admin init` repairs a missing stores directory.** Every CLI store command
+  checked `$TRELLIS_DATA_DIR`, else the config dir's `data/`, for the stores
+  directory, while the store registry reads `config.yaml`'s `data_dir`
+  first. So after `init --data-dir PATH` each store command exited `1` with
+  `Stores not initialized`, and the `trellis admin init` it advised found
+  `config.yaml` and did nothing. The stores guard now checks the registry's
+  directory and names it. `policy add` and the advisory commands write where
+  the MCP server and REST API read, and `demo reset` wipes the directory the
+  stores are in. For each, the directory differs from before only when
+  `config.yaml`'s `data_dir` differs from `$TRELLIS_DATA_DIR` (else the
+  config dir's `data/`). With `config.yaml` present, `admin init` recreates
+  a missing `stores/` directory without touching the file, and its JSON
+  adds `data_dir` and `stores_created`. A `config.yaml` the registry
+  refuses now makes `admin init` without `--force`, `policy`, `demo reset`
+  and `admin quickstart` exit `5` (was `0`).
+  ([#666](https://github.com/ronsse/trellis-ai/pull/666))
 
 - **`trellis curate entity`, `prune`, `restore`, `redact` and `link` show
   their warnings, as `label` already did.** Their output carried neither

@@ -4711,6 +4711,67 @@
             }
         }
 
+        // An empty Precedents tab has three true things to say, not one
+        // generic "nothing here yet": whether anything is waiting on the
+        // human decision that is the only path to a precedent, what the
+        // report-only check last said it would do, and whether that check
+        // even runs unattended. Each comes from the surface that already
+        // owns that fact -- Review's own candidate list, the Loops tab's
+        // own counters, and the Schedules tab's own dispatcher signal --
+        // so this never re-derives or restates a number another tab could
+        // disagree with, and a fetch failure degrades its own line rather
+        // than blocking the other two.
+        async function renderPrecedentsEmptyState() {
+            const [candidatesRes, loopsRes, jobsRes] = await Promise.allSettled([
+                fetchJSON('/learning/candidates'),
+                fetchJSON('/loops'),
+                fetchJSON('/admin/jobs'),
+            ]);
+
+            let reviewLine;
+            if (candidatesRes.status === 'fulfilled' && candidatesRes.value.status !== 'error') {
+                const n = candidatesRes.value.candidates.length;
+                reviewLine = n === 0
+                    ? 'No learning candidates are currently awaiting a decision.'
+                    : `${escHtml(n)} learning candidate(s) are awaiting a human decision on the ` +
+                      `<a href="#" onclick="switchView('review'); return false;">Review</a> tab.`;
+            } else {
+                reviewLine = 'Whether any learning candidates are awaiting review could not be checked just now.';
+            }
+
+            let qualifyLine;
+            if (loopsRes.status === 'fulfilled') {
+                const row = (loopsRes.value.loops || [])
+                    .find(l => l.name === 'learning_candidate_auto_promote');
+                const wouldQualify = row && row.counters ? row.counters.last_run_would_promote : null;
+                qualifyLine = (wouldQualify === null || wouldQualify === undefined)
+                    ? 'The automatic report-only check that estimates what would qualify has not reported yet.'
+                    : `Its last report said ${escHtml(wouldQualify)} candidate(s) would qualify &mdash; ` +
+                      'it never promotes anything itself.';
+            } else {
+                qualifyLine = 'The automatic report-only check\'s last result could not be checked just now.';
+            }
+
+            let scheduleLine = 'It is not currently confirmed to run on a schedule.';
+            if (jobsRes.status === 'fulfilled') {
+                const jobs = jobsRes.value.jobs || [];
+                const job = jobs.find(j => (j.loops || []).includes('learning_candidate_auto_promote'));
+                const scheduled = !!(job && job.stored && job.enabled);
+                if (scheduled && jobsRes.value.dispatcher_seen) {
+                    scheduleLine = 'It is scheduled, and a dispatcher has recently run it on its own.';
+                } else if (scheduled) {
+                    scheduleLine = 'It is scheduled, but no dispatcher has recently been seen running it.';
+                } else {
+                    scheduleLine = 'It is not currently scheduled to run on its own.';
+                }
+            }
+
+            return '<div class="empty-state"><div class="icon">&#x2713;</div>' +
+                '<p>No precedents yet. A precedent is created only when a human approves a learning ' +
+                'candidate on the <a href="#" onclick="switchView(\'review\'); return false;">Review</a> ' +
+                `tab. ${reviewLine} ${qualifyLine} ${scheduleLine}</p></div>`;
+        }
+
         async function loadPrecedents() {
             const domain = document.getElementById('prec-domain').value;
             const limit = document.getElementById('prec-limit').value;
@@ -4725,13 +4786,7 @@
                 const items = data.precedents || [];
 
                 if (items.length === 0) {
-                    container.innerHTML = '<div class="empty-state"><div class="icon">&#x2713;</div>' +
-                        '<p>No precedents yet. A precedent is created only when a learning candidate ' +
-                        'is approved &mdash; Review &rarr; Learning promotion candidates, or ' +
-                        '<code style="font-family:var(--font-mono)">trellis curate promote-learning</code>. ' +
-                        'If the <code style="font-family:var(--font-mono)">auto-promote-candidates</code> ' +
-                        'job is scheduled, it reports nightly on what it would promote &mdash; it never ' +
-                        'promotes anything itself.</p></div>';
+                    container.innerHTML = await renderPrecedentsEmptyState();
                     return;
                 }
 
@@ -5516,12 +5571,11 @@
             learning_candidate_auto_promote: 'Learning-candidate auto-promotion (report-only)',
         };
 
-        // The nightly cron (worker curate) drives most of these loops once a
-        // day; two missed nights plus slack is "something broke," not
-        // scheduling jitter. Applied uniformly so a row that stops updating
-        // doesn't quietly read as fine just because its last status was "ok".
-        const LOOP_STALE_HOURS = 36;
-
+        // Staleness is computed server-side, per loop, from that loop's own
+        // schedule (twice its cadence interval plus slack) -- a row with no
+        // job, or an unscheduled one, is reported as such (`schedule_status`)
+        // rather than ever being marked stale against a one-size-fits-all
+        // constant.
         async function loadLoops() {
             const container = document.getElementById('loops-rows');
             container.innerHTML = loadingHtml('Loading loop health...');
@@ -5552,24 +5606,28 @@
                 whenHtml = '<span style="color:var(--text-dim)">Not measured &mdash; no event seen yet</span>';
                 statusBadge = '<span class="badge badge-info">never run</span>';
             } else {
-                const ageMs = Date.now() - new Date(loop.last_run_at).getTime();
-                const stale = ageMs > LOOP_STALE_HOURS * 3600 * 1000;
                 whenHtml = `<span title="${escHtml(loop.last_run_at)}">` +
                     `${escHtml(fmtTime(loop.last_run_at))} (${escHtml(timeAgo(loop.last_run_at))})</span>`;
-                if (stale) {
-                    whenHtml += ` <span class="badge badge-warn" title="No run seen in over ${escHtml(LOOP_STALE_HOURS)}h">stale</span>`;
+                if (loop.stale) {
+                    whenHtml += ` <span class="badge badge-warn" title="No run seen within twice this job's own schedule interval">stale</span>`;
                 }
-                const statusMap = { ok: 'badge-ok', degraded: 'badge-warn', stale: 'badge-warn', skipped: 'badge-info', refused: 'badge-warn', failed: 'badge-err' };
+                const statusMap = { ok: 'badge-ok', ran: 'badge-info', degraded: 'badge-warn', stale: 'badge-warn', skipped: 'badge-info', refused: 'badge-warn', failed: 'badge-err' };
                 if (loop.last_status) {
                     statusBadge = `<span class="badge ${statusMap[loop.last_status] || 'badge-info'}">` +
                         `${escHtml(loop.last_status)}</span>`;
                 }
             }
+            if (loop.job_name && loop.schedule_status === 'not_scheduled') {
+                whenHtml += ' <span class="badge badge-info" title="This job has no enabled, stored cadence, so it only runs when triggered by hand">not scheduled</span>';
+            }
 
             const countersHtml = loop.counters
-                ? Object.entries(loop.counters).map(([k, v]) =>
-                      `<span class="mono" style="margin-right:0.75rem">${escHtml(k)}: ${escHtml(v === null ? 'null' : v)}</span>`
-                  ).join('')
+                ? Object.entries(loop.counters).map(([k, v]) => {
+                      const display = (v === null || v === undefined)
+                          ? '<span style="color:var(--text-dim)" title="not reported by the build that ran">&mdash;</span>'
+                          : escHtml(v);
+                      return `<span class="mono" style="margin-right:0.75rem">${escHtml(k)}: ${display}</span>`;
+                  }).join('')
                 : '<span style="color:var(--text-dim)">not measured</span>';
 
             // Names the catalog job that drives this loop, with a
