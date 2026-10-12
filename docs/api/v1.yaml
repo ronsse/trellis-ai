@@ -1902,6 +1902,15 @@ components:
         name:
           title: Name
           type: string
+        schedule_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Schedule Status
+        stale:
+          default: false
+          title: Stale
+          type: boolean
         what_it_changes:
           title: What It Changes
           type: string
@@ -4566,7 +4575,7 @@ paths:
       - curate
   /api/v1/loops:
     get:
-      description: 'Is each curation / learning loop actually doing anything? (e167)
+      description: 'Is each curation / learning loop actually doing anything?
 
 
         Reads existing events only (``trellis.ops.loop_health``), plus one
@@ -4579,7 +4588,17 @@ paths:
 
         different fact from a real run that counted zero, so the two must
 
-        never render the same.'
+        never render the same. ``schedule_status``/``stale`` are computed
+
+        here (not in ``summarize_loop_health``) from each row''s own
+
+        schedule-registry row, so a loop with no catalog job is never
+
+        "stale", a disabled or manual-only job reads "not_scheduled", and a
+
+        scheduled job''s threshold follows its own cadence rather than a
+
+        fixed constant.'
       operationId: loop_health_api_v1_loops_get
       responses:
         '200':

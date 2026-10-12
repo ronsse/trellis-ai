@@ -49,6 +49,7 @@ from trellis.learning.tuners import (
     preview_promotion,
     promote_proposal,
     reject_proposal,
+    resolve_auto_promote_overrides,
 )
 from trellis.llm.routing import LLMConsumer, LLMRoutingError
 from trellis.mutate import (
@@ -59,7 +60,7 @@ from trellis.mutate import (
     build_curate_executor,
     build_schedule_executor,
 )
-from trellis.ops.loop_health import JOB_LOOPS, summarize_loop_health
+from trellis.ops.loop_health import JOB_LOOPS, LoopHealthRow, summarize_loop_health
 from trellis.ops.parameter_reachability import (
     READ_POINTS,
     reachability_reasons,
@@ -345,34 +346,64 @@ def runtime() -> RuntimeResponse:
 
 @router.get("/loops", response_model=LoopHealthResponse)
 def loop_health() -> LoopHealthResponse:
-    """Is each curation / learning loop actually doing anything? (e167)
+    """Is each curation / learning loop actually doing anything?
 
     Reads existing events only (``trellis.ops.loop_health``), plus one
     documented live store read for the tuner's pending-proposal count.
     A loop with no event yet reports ``last_run_at``/``last_status`` as
     ``null`` — "never run (or ran before this build)" — which is a
     different fact from a real run that counted zero, so the two must
-    never render the same.
+    never render the same. ``schedule_status``/``stale`` are computed
+    here (not in ``summarize_loop_health``) from each row's own
+    schedule-registry row, so a loop with no catalog job is never
+    "stale", a disabled or manual-only job reads "not_scheduled", and a
+    scheduled job's threshold follows its own cadence rather than a
+    fixed constant.
     """
     registry = get_registry()
-    report = summarize_loop_health(
-        registry.operational.event_log, registry.operational.tuner_state_store
+    settings_values = load_settings_values(registry.stores_dir)
+    auto_promote_enabled = bool(
+        resolve_auto_promote_overrides(settings=settings_values)["enabled"]
     )
+    report = summarize_loop_health(
+        registry.operational.event_log,
+        registry.operational.tuner_state_store,
+        auto_promote_enabled=auto_promote_enabled,
+    )
+    store = _get_schedule_store()
+    now = utc_now()
     return LoopHealthResponse(
         generated_at=report.generated_at.isoformat(),
-        loops=[
-            LoopHealthRowResponse(
-                name=row.name,
-                description=row.description,
-                actuates=row.actuates,
-                what_it_changes=row.what_it_changes,
-                job_name=row.job_name,
-                last_run_at=row.last_run_at.isoformat() if row.last_run_at else None,
-                last_status=row.last_status,
-                counters=row.counters,
-            )
-            for row in report.loops
-        ],
+        loops=[_loop_health_row_response(row, store, now) for row in report.loops],
+    )
+
+
+def _loop_health_row_response(
+    row: LoopHealthRow, store: ScheduleStore, now: datetime
+) -> LoopHealthRowResponse:
+    """Map one core ``LoopHealthRow`` onto its wire row, adding schedule facts.
+
+    ``trellis_wire`` has no dependency on ``trellis`` core, so this file
+    (not ``loop_health.py``) is where a core row's fields become wire
+    fields — and where the schedule-registry lookup for
+    ``schedule_status``/``stale`` happens, since ``summarize_loop_health``
+    is deliberately EventLog-only plus one documented live read, and a
+    ``ScheduleStore`` lookup is neither.
+    """
+    schedule_status, stale = _loop_schedule_status_and_staleness(
+        row.job_name, row.last_run_at, store, now
+    )
+    return LoopHealthRowResponse(
+        name=row.name,
+        description=row.description,
+        actuates=row.actuates,
+        what_it_changes=row.what_it_changes,
+        job_name=row.job_name,
+        last_run_at=row.last_run_at.isoformat() if row.last_run_at else None,
+        last_status=row.last_status,
+        counters=row.counters,
+        schedule_status=schedule_status,
+        stale=stale,
     )
 
 
@@ -1781,6 +1812,74 @@ def _job_row_or_default(store: ScheduleStore, spec: JobSpec) -> ScheduledJob:
     return ScheduledJob(
         name=spec.name, cadence=spec.default_cadence, enabled=not store.is_degraded
     )
+
+
+#: Multiplier applied to a loop's own cadence tick interval before adding
+#: slack, when deciding whether its last run is stale
+#: (``_loop_schedule_status_and_staleness``). Two missed ticks, not one: a
+#: single late tick (dispatcher jitter, a run that started a few minutes
+#: after the hour) must not read as the loop having gone silent.
+_LOOP_STALE_CADENCE_MULTIPLIER = 2
+
+#: Slack seconds added on top of that doubled interval. Reuses the same
+#: value as the dispatcher-staleness window's own slack
+#: (``_DISPATCHER_STALE_SLACK_SECONDS``) for the identical reason — tick
+#: timing is never exact — but is named separately because the two
+#: windows answer different questions (is the dispatcher alive at all,
+#: vs has this one loop's own job reported recently).
+_LOOP_STALE_SLACK_SECONDS = _DISPATCHER_STALE_SLACK_SECONDS
+
+
+def _loop_schedule_status_and_staleness(
+    job_name: str | None,
+    last_run_at: datetime | None,
+    store: ScheduleStore,
+    now: datetime,
+) -> tuple[str | None, bool]:
+    """A Loops-tab row's schedule status, and whether its last run is stale.
+
+    ``job_name`` is ``None`` for a loop no catalog job drives at all (a
+    human action, or an agent's own call) — that row's ``schedule_status``
+    is ``None`` and it is never ``stale``: staleness is a claim about a
+    job that was supposed to run again by now, which does not apply to
+    something nothing schedules. When ``job_name`` names a catalog job
+    with no *stored*, *enabled* row with a cadence — never patched via
+    ``PATCH /admin/jobs``, disabled, or manual-only — ``schedule_status``
+    is ``"not_scheduled"`` and ``stale`` is ``False``: nothing promises
+    this job will run again, so "overdue" does not apply either.
+    Otherwise ``schedule_status`` is ``"scheduled"``, and ``stale`` is
+    ``True`` only once a *real* last run (``last_run_at`` is not ``None``
+    — a loop that has never run says so via that field already, not via
+    this one) is older than twice the job's own tick interval plus slack
+    (see :data:`_LOOP_STALE_CADENCE_MULTIPLIER` /
+    :data:`_LOOP_STALE_SLACK_SECONDS`), reusing the same
+    "stored-or-catalog cadence" read :func:`_job_row_or_default` already
+    makes for the Schedules tab, rather than a UI-side constant that
+    cannot see any of this.
+    """
+    if job_name is None:
+        return None, False
+    spec = JOB_CATALOG.get(job_name)
+    if spec is None:
+        return None, False
+    row = _job_row_or_default(store, spec)
+    stored = store.get(spec.name) is not None
+    if not (stored and row.enabled and row.cadence is not None):
+        return "not_scheduled", False
+    if last_run_at is None:
+        return "scheduled", False
+    first_tick = next_tick_after(row.cadence, now)
+    if first_tick is None:
+        return "scheduled", False
+    second_tick = next_tick_after(row.cadence, first_tick)
+    if second_tick is None:
+        return "scheduled", False
+    interval_seconds = (second_tick - first_tick).total_seconds()
+    threshold_seconds = (
+        _LOOP_STALE_CADENCE_MULTIPLIER * interval_seconds + _LOOP_STALE_SLACK_SECONDS
+    )
+    age_seconds = (now - last_run_at).total_seconds()
+    return "scheduled", age_seconds > threshold_seconds
 
 
 def _job_summary(

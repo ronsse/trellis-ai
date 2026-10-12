@@ -45,9 +45,7 @@ from typing import Any
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
-from trellis.core.cron import is_due_since
 from trellis.learning.candidate_auto_promote import compute_agreement_metric
-from trellis.schedule.catalog import JOB_CATALOG
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventLog,
@@ -80,6 +78,7 @@ LOOP_JOB: MappingABC[str, str] = {
     "advisory_generation": "curate-nightly",
     "advisory_fitness": "curate-nightly",
     "learning_candidate_scoring": "curate-nightly",
+    "learning_candidate_auto_promote": "auto-promote-candidates",
     "tuner": "tune",
 }
 
@@ -136,7 +135,7 @@ def _scan(event_log: EventLog, event_type: EventType, *, limit: int) -> EventSca
 
 
 def _build_candidate_auto_promote_row(
-    event_log: EventLog, *, now: datetime, limit: int
+    event_log: EventLog, *, limit: int
 ) -> tuple[LoopHealthRow, ScanCoverage]:
     """Build the ``learning_candidate_auto_promote`` row.
 
@@ -199,19 +198,14 @@ def _build_candidate_auto_promote_row(
         last_status = (
             outcome if outcome is not None else ("degraded" if skipped else "ok")
         )
-
-        # Staleness: this row's job (``auto-promote-candidates``) runs on
-        # a known daily cadence (see JOB_CATALOG), so "ran once and
-        # reported ok" three days ago is not the same claim as "healthy
-        # today" -- the cron could have stopped firing entirely and this
-        # row would otherwise still read "ok" forever. Overrides whatever
-        # outcome-based status was just computed: an operator's first
-        # question for a loop that has gone quiet is "is it running at
-        # all", which a stale "failed" from a week ago answers no better
-        # than a stale "ok" would.
-        cadence = JOB_CATALOG["auto-promote-candidates"].default_cadence
-        if cadence is not None and is_due_since(cadence, latest.occurred_at, now):
-            last_status = "stale"
+        # Staleness (is this job still firing at all, vs a stale status
+        # from a run that stopped happening) is reported as a separate
+        # field, computed uniformly for every loop with a scheduled job
+        # from the resolved schedule row -- see the ``/loops`` route. It
+        # is not folded into ``last_status`` here, so a quiet job reads
+        # its true last outcome rather than a status this function
+        # invents from a cadence assumption it cannot itself verify
+        # against any stored schedule override.
 
     row = LoopHealthRow(
         name="learning_candidate_auto_promote",
@@ -228,6 +222,7 @@ def _build_candidate_auto_promote_row(
             "(would_promote / already_promoted / ineligible) — it never "
             "writes a precedent."
         ),
+        job_name=LOOP_JOB.get("learning_candidate_auto_promote"),
         last_run_at=latest.occurred_at if latest else None,
         last_status=last_status,
         counters=counters,
@@ -241,6 +236,7 @@ def summarize_loop_health(
     *,
     now: datetime | None = None,
     limit: int = DEFAULT_SCAN_LIMIT,
+    auto_promote_enabled: bool = False,
 ) -> LoopHealthReport:
     """Build the ``GET /api/v1/loops`` report from existing events (+ one live read).
 
@@ -248,6 +244,15 @@ def summarize_loop_health(
     demotion, advisory generation, advisory fitness, learning-candidate
     scoring, precedent promotion, learning-candidate auto-promotion,
     tuner, feedback intake.
+
+    ``auto_promote_enabled`` is the caller's already-resolved (env >
+    settings > config.yaml > default) ``learning.auto_promote.enabled``
+    value. The tuner row's ``actuates`` is true only when that resolves
+    true AND a non-dry-run tune has actually happened
+    (``TUNE_CYCLE_COMPLETED`` is only ever emitted for one -- the
+    scheduled run always passes ``--dry-run``); this function has no
+    settings access of its own, so it cannot resolve that boolean
+    itself.
     """
     now = now or datetime.now(UTC)
 
@@ -371,7 +376,10 @@ def summarize_loop_health(
         ),
         job_name=LOOP_JOB.get("precedent_promotion"),
         last_run_at=precedent_latest.occurred_at if precedent_latest else None,
-        last_status="ok" if precedent_latest else None,
+        # PRECEDENT_PROMOTED carries no explicit outcome field -- "ran"
+        # (not "ok") so the badge never implies a success determination
+        # this event never actually made.
+        last_status="ran" if precedent_latest else None,
         counters=(
             {
                 "promoted_last_7d": sum(
@@ -391,7 +399,7 @@ def summarize_loop_health(
     )
 
     candidate_auto_promote_row, candidate_auto_promote_coverage = (
-        _build_candidate_auto_promote_row(event_log, now=now, limit=limit)
+        _build_candidate_auto_promote_row(event_log, limit=limit)
     )
 
     tune_scan = _scan(event_log, EventType.TUNE_CYCLE_COMPLETED, limit=limit)
@@ -421,7 +429,12 @@ def summarize_loop_health(
             "effect on a manual `trellis worker tune` run made without "
             "--dry-run."
         ),
-        actuates=True,
+        # Resolved settings alone are not enough: the schedule's own run
+        # is permanently --dry-run (see description above), so this is
+        # only ever true once a manual non-dry-run tune has actually
+        # happened -- which TUNE_CYCLE_COMPLETED's mere existence proves,
+        # since that event is only emitted for one.
+        actuates=auto_promote_enabled and tune_latest is not None,
         what_it_changes=(
             "The scheduled run writes nothing but pending proposals. "
             "Auto-promoting a proposal needs both "
@@ -431,7 +444,10 @@ def summarize_loop_health(
         ),
         job_name=LOOP_JOB.get("tuner"),
         last_run_at=tune_latest.occurred_at if tune_latest else None,
-        last_status="ok" if tune_latest else None,
+        # TUNE_CYCLE_COMPLETED carries no explicit outcome field -- "ran"
+        # (not "ok") so the badge never implies a success determination
+        # this event never actually made.
+        last_status="ran" if tune_latest else None,
         counters=tuner_counters,
     )
 
@@ -452,7 +468,10 @@ def summarize_loop_health(
         ),
         job_name=LOOP_JOB.get("feedback_intake"),
         last_run_at=latest_feedback.occurred_at if latest_feedback else None,
-        last_status="ok" if latest_feedback else None,
+        # FEEDBACK_RECORDED carries no explicit outcome field -- "ran"
+        # (not "ok") so the badge never implies a success determination
+        # this event never actually made.
+        last_status="ran" if latest_feedback else None,
         counters=(
             {
                 f"feedback_last_{days}d": sum(
