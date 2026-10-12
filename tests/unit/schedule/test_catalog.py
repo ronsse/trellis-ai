@@ -184,3 +184,24 @@ class TestNoAbsolutePersonalPath:
         monkeypatch.delenv("TRELLIS_CONFIG_DIR", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
         assert catalog_module._config_dir() == tmp_path / ".trellis"
+
+
+class TestTuneJobScheduleNeverAutoPromotes:
+    """The ``tune`` catalog entry's description is rendered verbatim as
+    the Schedules tab row's tooltip, so it must say truthfully that the
+    *scheduled* run can never auto-promote — ``--dry-run`` is baked into
+    its ``argv`` regardless of ``learning.auto_promote.enabled``."""
+
+    def test_description_states_the_schedule_never_auto_promotes(self) -> None:
+        description = JOB_CATALOG["tune"].description
+        assert "--dry-run" in description
+        assert "learning.auto_promote.enabled" in description
+        assert "never auto-promot" in description.lower()
+        # No internal issue/PR id in operator-facing copy: this field is
+        # rendered as the Schedules tab's row tooltip (title attribute).
+        assert "#" not in description
+
+    def test_argv_actually_carries_dry_run(self) -> None:
+        # The description's claim is only true because of this -- pin
+        # both together so neither can drift from the other unnoticed.
+        assert "--dry-run" in JOB_CATALOG["tune"].argv

@@ -116,9 +116,10 @@ health-signal rule exists to prevent.
   "loops": [
     {
       "name": "tuner",
-      "description": "Runs a RuleTuner pass over outcomes and, when learning.auto_promote.enabled is set, auto-promotes qualifying parameter proposals.",
+      "description": "Runs a RuleTuner pass over outcomes. The scheduled run always passes --dry-run, so the schedule itself never auto-promotes; learning.auto_promote.enabled only takes effect on a manual `trellis worker tune` run made without --dry-run.",
       "actuates": true,
-      "what_it_changes": "Auto-promotes a parameter proposal ONLY when learning.auto_promote.enabled is set (off by default); otherwise every proposal stays pending for a human to run `trellis metrics promote --commit`.",
+      "what_it_changes": "The scheduled run writes nothing but pending proposals. Auto-promoting a proposal needs both learning.auto_promote.enabled set AND a manual run without --dry-run; until both hold, every proposal stays pending for a human to run `trellis metrics promote --commit`.",
+      "job_name": "tune",
       "last_run_at": null,
       "last_status": null,
       "counters": {"pending_count": 3, "auto_promoted_total": 0}

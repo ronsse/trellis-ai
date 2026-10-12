@@ -38,6 +38,7 @@ path rather than opening a new one.
 
 from __future__ import annotations
 
+from collections.abc import Mapping as MappingABC
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -68,6 +69,37 @@ _PENDING_PROPOSAL_LIMIT = 2000
 #: ("FEEDBACK_RECORDED last 7d/30d").
 _FEEDBACK_WINDOWS_DAYS = (7, 30)
 
+#: Which catalog job (``trellis.schedule.catalog.JOB_CATALOG``) drives
+#: each loop below — the single place this mapping is maintained. A loop
+#: absent here has no scheduled job behind it at all: ``precedent_promotion``
+#: is a human action (Review tab / ``trellis curate promote-learning``) and
+#: ``feedback_intake`` is an agent's own ``record_feedback`` call, neither
+#: of which a cron job drives.
+LOOP_JOB: MappingABC[str, str] = {
+    "noise_demotion": "curate-nightly",
+    "advisory_generation": "curate-nightly",
+    "advisory_fitness": "curate-nightly",
+    "learning_candidate_scoring": "curate-nightly",
+    "tuner": "tune",
+}
+
+
+def _invert_loop_job(
+    mapping: MappingABC[str, str],
+) -> MappingABC[str, tuple[str, ...]]:
+    inverse: dict[str, list[str]] = {}
+    for loop_name, job_name in mapping.items():
+        inverse.setdefault(job_name, []).append(loop_name)
+    return {job_name: tuple(loops) for job_name, loops in inverse.items()}
+
+
+#: Inverse of :data:`LOOP_JOB`, derived once at import time: which loops a
+#: given catalog job drives. ``trellis_api.routes.admin`` threads this onto
+#: ``AdminJobSummary.loops`` so the Schedules tab can name what a job
+#: drives (and what disabling it stops) from this one mapping, rather than
+#: a second, independently-maintained one.
+JOB_LOOPS: MappingABC[str, tuple[str, ...]] = _invert_loop_job(LOOP_JOB)
+
 
 class LoopHealthRow(TrellisModel):
     """One loop's last-run snapshot.
@@ -76,13 +108,16 @@ class LoopHealthRow(TrellisModel):
     together when the loop has never produced a visible event — see
     module docstring. ``actuates`` is whether the loop can write without
     a human approving each change; ``what_it_changes`` is the one-line
-    explanation a UI renders next to it either way.
+    explanation a UI renders next to it either way. ``job_name`` is the
+    catalog job (see :data:`LOOP_JOB`) that drives this loop, or ``None``
+    when nothing schedules it.
     """
 
     name: str
     description: str
     actuates: bool
     what_it_changes: str
+    job_name: str | None = None
     last_run_at: datetime | None = None
     last_status: str | None = None
     counters: dict[str, Any] | None = None
@@ -250,6 +285,7 @@ def summarize_loop_health(
             "worker curate; demotion requires evidence of unhelpfulness, "
             "never absence of evidence (demotion_gate.py)."
         ),
+        job_name=LOOP_JOB.get("noise_demotion"),
         last_run_at=curate_latest.occurred_at if curate_latest else None,
         last_status=curate_status("noise_tags"),
         counters=curate_counters("noise_tagged", "noise_refused_non_document"),
@@ -264,6 +300,7 @@ def summarize_loop_health(
             "advisory can be served in a pack starting with the next "
             "retrieval."
         ),
+        job_name=LOOP_JOB.get("advisory_generation"),
         last_run_at=curate_latest.occurred_at if curate_latest else None,
         last_status=curate_status("advisories", degrade_aware=True),
         counters=curate_counters("advisories_generated", "advisories_refused"),
@@ -281,6 +318,7 @@ def summarize_loop_health(
             "suppressed/restored during worker curate; a suppressed "
             "advisory stops being served without being deleted."
         ),
+        job_name=LOOP_JOB.get("advisory_fitness"),
         last_run_at=curate_latest.occurred_at if curate_latest else None,
         last_status=curate_status("advisories", degrade_aware=True),
         counters=curate_counters("advisories_suppressed", "advisories_boosted"),
@@ -306,6 +344,7 @@ def summarize_loop_health(
             "it never promotes a candidate to a precedent itself — that is "
             "a separate human-run command (sensing only)."
         ),
+        job_name=LOOP_JOB.get("learning_candidate_scoring"),
         last_run_at=curate_latest.occurred_at if curate_latest else None,
         last_status=curate_status("learning"),
         counters=learning_counters,
@@ -330,6 +369,7 @@ def summarize_loop_health(
             "PRECEDENT_PROMOTED event, which also includes any manual "
             "run of the unscheduled PrecedentMiner."
         ),
+        job_name=LOOP_JOB.get("precedent_promotion"),
         last_run_at=precedent_latest.occurred_at if precedent_latest else None,
         last_status="ok" if precedent_latest else None,
         counters=(
@@ -375,17 +415,21 @@ def summarize_loop_health(
     tuner_row = LoopHealthRow(
         name="tuner",
         description=(
-            "Runs a RuleTuner pass over outcomes and, when "
-            "learning.auto_promote.enabled is set, auto-promotes "
-            "qualifying parameter proposals."
+            "Runs a RuleTuner pass over outcomes. The scheduled run "
+            "always passes --dry-run, so the schedule itself never "
+            "auto-promotes; learning.auto_promote.enabled only takes "
+            "effect on a manual `trellis worker tune` run made without "
+            "--dry-run."
         ),
         actuates=True,
         what_it_changes=(
-            "Auto-promotes a parameter proposal ONLY when "
-            "learning.auto_promote.enabled is set (off by default); "
-            "otherwise every proposal stays pending for a human to run "
-            "`trellis metrics promote --commit`."
+            "The scheduled run writes nothing but pending proposals. "
+            "Auto-promoting a proposal needs both "
+            "learning.auto_promote.enabled set AND a manual run without "
+            "--dry-run; until both hold, every proposal stays pending "
+            "for a human to run `trellis metrics promote --commit`."
         ),
+        job_name=LOOP_JOB.get("tuner"),
         last_run_at=tune_latest.occurred_at if tune_latest else None,
         last_status="ok" if tune_latest else None,
         counters=tuner_counters,
@@ -406,6 +450,7 @@ def summarize_loop_health(
             "behavior or content — it is the input the other loops above "
             "consume (sensing only)."
         ),
+        job_name=LOOP_JOB.get("feedback_intake"),
         last_run_at=latest_feedback.occurred_at if latest_feedback else None,
         last_status="ok" if latest_feedback else None,
         counters=(
