@@ -3415,7 +3415,24 @@ paths:
       - admin
   /api/v1/analyze:
     get:
-      description: List the reports available under ``GET /api/v1/analyze/{report}``.
+      description: 'List the reports available under ``GET /api/v1/analyze/{report}``.
+
+
+        ``params_schema`` is each report''s params DTO as JSON Schema
+
+        (``params_model.model_json_schema()``) — the same bounds
+
+        (``minimum``/``maximum``/``exclusiveMinimum``/``exclusiveMaximum``),
+
+        types (``integer``/``number``/``boolean``/``string``) and, where a
+
+        field restricts to a fixed set (``outcome`` on the holdout report),
+
+        ``enum`` that ``GET /api/v1/analyze/{report}`` itself enforces. A
+
+        client renders a typed control from this instead of a plain text box
+
+        per param.'
       operationId: list_analyze_reports_api_v1_analyze_get
       responses:
         '200':
@@ -3813,7 +3830,22 @@ paths:
 
         counted under the same filter as the rows, and the applied setting is
 
-        echoed back on the response.'
+        echoed back on the response.
+
+
+        A search (``q`` set) is paged the same way the unfiltered list is:
+
+        ``offset`` and ``limit`` both apply to the matches. Nothing in
+
+        ``DocumentStore`` counts a query''s total matches or offsets into them,
+
+        so this captures up to :data:`_SEARCH_SCAN_LIMIT` matches once and
+
+        pages that capture in Python; ``total`` and ``total_exact`` describe
+
+        the capture, so a query matching at least the scan bound reports
+
+        ``total_exact: false`` instead of a silently wrong exact total.'
       operationId: list_documents_api_v1_documents_get
       parameters:
       - description: Full-text search query
@@ -3837,13 +3869,13 @@ paths:
           minimum: 1
           title: Limit
           type: integer
-      - description: Offset (ignored when q is set)
+      - description: Offset, applied to search results too
         in: query
         name: offset
         required: false
         schema:
           default: 0
-          description: Offset (ignored when q is set)
+          description: Offset, applied to search results too
           minimum: 0
           title: Offset
           type: integer
@@ -4217,6 +4249,50 @@ paths:
       security:
       - APIKeyHeader: []
       summary: List Events
+      tags:
+      - explore
+  /api/v1/events/{event_id}:
+    get:
+      description: 'Fetch one event by id, reaching the whole log, not just a window.
+
+
+        ``GET /events`` pages a recency window via ``until``; an event older
+
+        than whatever window a caller has loaded cannot be reached through
+
+        it by id alone. This route does a direct lookup instead. On a
+
+        withheld pack''s row, the ``holdout_*`` keys but ``holdout_rate``
+
+        (the would-be pack) reach ``admin`` callers only, same as the list
+
+        and pack-detail views.'
+      operationId: get_event_api_v1_events__event_id__get
+      parameters:
+      - in: path
+        name: event_id
+        required: true
+        schema:
+          title: Event Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Get Event Api V1 Events  Event Id  Get
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Get Event
       tags:
       - explore
   /api/v1/evidence:

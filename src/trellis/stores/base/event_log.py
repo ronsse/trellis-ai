@@ -715,6 +715,22 @@ class EventLog(ABC):
         )
         return any(e.payload.get("idempotency_key") == key for e in events)
 
+    def get_event(self, event_id: str) -> Event | None:
+        """Fetch one event by id, independent of any caller's list window.
+
+        ``get_events`` has no ``event_id`` filter and no offset, so a
+        caller that only holds a recent page (a list view's ``until``
+        cursor, say) cannot reach an older row by id through it. Default
+        implementation scans the most recent ``DEFAULT_SCAN_LIMIT`` events
+        and matches client-side; ``event_id`` is the primary key in the
+        SQLite and Postgres backends, which override this with a direct,
+        unbounded indexed lookup instead.
+        """
+        for event in self.get_events(limit=DEFAULT_SCAN_LIMIT, order="desc"):
+            if event.event_id == event_id:
+                return event
+        return None
+
     def emit(
         self,
         event_type: EventType,

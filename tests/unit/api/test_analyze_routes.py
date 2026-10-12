@@ -78,6 +78,56 @@ def test_every_report_carries_a_human_title_distinct_from_its_raw_name(client):
         assert row["title"] != row["name"]
 
 
+def test_list_reports_includes_params_schema_matching_each_params_model(client):
+    # A UI client renders a typed input (number with bounds, checkbox,
+    # select) from `params_schema` instead of a plain text box per param,
+    # so this must be the exact schema the route's own DTO enforces --
+    # not a hand-maintained copy that can drift from it.
+    resp = client.get("/api/v1/analyze")
+    assert resp.status_code == 200
+    for row in resp.json()["reports"]:
+        entry = analyze._REPORTS[row["name"]]
+        assert row["params_schema"] == entry.params_model.model_json_schema()
+        assert set(row["params_schema"]["properties"]) == set(row["default_params"])
+
+
+def test_holdout_outcome_param_schema_is_an_enum_of_known_outcomes():
+    # The schema's enum is read from the same OUTCOMES tuple the
+    # field_validator checks against, so a client's <select> options can
+    # never list an outcome the server would then reject.
+    schema = analyze.HoldoutParams.model_json_schema()
+    outcome_schema = schema["properties"]["outcome"]
+    assert outcome_schema["enum"] == sorted(analyze.OUTCOMES)
+
+
+def test_holdout_numeric_param_schemas_carry_their_bounds():
+    schema = analyze.HoldoutParams.model_json_schema()
+    days_schema = schema["properties"]["days"]
+    assert days_schema["minimum"] == 1
+    assert days_schema["maximum"] == 365
+    # planned_mde uses gt=0 (exclusive) rather than ge=0.
+    mde_schema = schema["properties"]["planned_mde"]
+    assert mde_schema["exclusiveMinimum"] == 0
+    assert mde_schema["maximum"] == 100
+
+
+def test_holdout_boolean_param_schema_is_typed_boolean():
+    schema = analyze.HoldoutParams.model_json_schema()
+    assert schema["properties"]["itt"]["type"] == "boolean"
+
+
+def test_optional_param_schema_unwraps_to_a_typed_inner_branch():
+    # `until: str | None` is pydantic's Optional shape: an anyOf with a
+    # null branch. The UI unwraps this to the non-null branch to pick a
+    # control -- pin the shape it depends on.
+    schema = analyze.HoldoutParams.model_json_schema()
+    until_schema = schema["properties"]["until"]
+    assert "anyOf" in until_schema
+    non_null = [b for b in until_schema["anyOf"] if b.get("type") != "null"]
+    assert non_null
+    assert non_null[0]["type"] == "string"
+
+
 def test_pack_quality_is_not_in_the_allowlist():
     # pack-quality's only entry point requires a --scenarios file with no
     # built-in default, so there is no bounded query-param shape for it

@@ -206,11 +206,25 @@ class LearningCandidatesParams(TrellisModel):
     min_support: int = Field(default=2, ge=1, le=10_000)
 
 
+# `dict[str, Any]`, not the narrower inferred `dict[str, list[str]]`: pydantic's
+# `JsonDict` value union is invariant on `list[...]`, so a bare `list[str]`
+# does not satisfy `list[JsonValue]` on its own for mypy.
+_OUTCOME_SCHEMA_EXTRA: dict[str, Any] = {"enum": sorted(OUTCOMES)}
+
+
 class HoldoutParams(_OutcomeValidatorMixin, TrellisModel):
     days: int = Field(default=60, ge=1, le=365)
     until: str | None = Field(default=None, max_length=64)
     rate: float | None = Field(default=None, ge=0.0, le=1.0)
-    outcome: str = Field(default="log1p_turns", max_length=32)
+    # `json_schema_extra` reads from the same `OUTCOMES` tuple
+    # `_OutcomeValidatorMixin` validates against above, rather than a
+    # hand-copied literal list, so the UI's select options can never drift
+    # from what the field validator actually accepts.
+    outcome: str = Field(
+        default="log1p_turns",
+        max_length=32,
+        json_schema_extra=_OUTCOME_SCHEMA_EXTRA,
+    )
     itt: bool = Field(default=False)
     permutations: int = Field(default=10_000, ge=1, le=50_000)
     bootstraps: int = Field(default=4_000, ge=1, le=20_000)
@@ -579,7 +593,17 @@ _REPORTS: dict[str, _ReportEntry] = {
 
 @router.get("/analyze")
 async def list_analyze_reports() -> dict[str, Any]:
-    """List the reports available under ``GET /api/v1/analyze/{report}``."""
+    """List the reports available under ``GET /api/v1/analyze/{report}``.
+
+    ``params_schema`` is each report's params DTO as JSON Schema
+    (``params_model.model_json_schema()``) — the same bounds
+    (``minimum``/``maximum``/``exclusiveMinimum``/``exclusiveMaximum``),
+    types (``integer``/``number``/``boolean``/``string``) and, where a
+    field restricts to a fixed set (``outcome`` on the holdout report),
+    ``enum`` that ``GET /api/v1/analyze/{report}`` itself enforces. A
+    client renders a typed control from this instead of a plain text box
+    per param.
+    """
     return {
         "reports": [
             {
@@ -587,6 +611,7 @@ async def list_analyze_reports() -> dict[str, Any]:
                 "title": entry.title,
                 "description": entry.description,
                 "default_params": entry.params_model().model_dump(),
+                "params_schema": entry.params_model.model_json_schema(),
             }
             for name, entry in sorted(_REPORTS.items())
         ]

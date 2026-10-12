@@ -39,6 +39,14 @@ _PAYLOAD_SUMMARY_KEYS = (
 
 _PREVIEW_CHARS = 300
 
+#: ``DocumentStore.search`` takes no offset and nothing counts a query's
+#: total matches, unlike ``list_documents``/``count`` for the unfiltered
+#: listing. Paging a search the same way the list is paged means capturing
+#: a bounded window of matches once and slicing it in Python; this is that
+#: bound. A query that matches at least this many documents gets
+#: ``total_exact: false`` rather than a silently wrong exact total.
+_SEARCH_SCAN_LIMIT = 2000
+
 
 def _document_row(doc: dict[str, Any]) -> dict[str, Any]:
     """Shape a stored document into a list row: preview, never full content."""
@@ -83,7 +91,7 @@ def _document_row(doc: dict[str, Any]) -> dict[str, Any]:
 def list_documents(
     q: str | None = Query(None, description="Full-text search query"),
     limit: int = Query(50, ge=1, le=500, description="Max results"),
-    offset: int = Query(0, ge=0, description="Offset (ignored when q is set)"),
+    offset: int = Query(0, ge=0, description="Offset, applied to search results too"),
     include_chunks: bool = Query(
         False,
         description=(
@@ -98,19 +106,35 @@ def list_documents(
     ``include_chunks=true`` for the unfiltered listing. ``total`` is
     counted under the same filter as the rows, and the applied setting is
     echoed back on the response.
+
+    A search (``q`` set) is paged the same way the unfiltered list is:
+    ``offset`` and ``limit`` both apply to the matches. Nothing in
+    ``DocumentStore`` counts a query's total matches or offsets into them,
+    so this captures up to :data:`_SEARCH_SCAN_LIMIT` matches once and
+    pages that capture in Python; ``total`` and ``total_exact`` describe
+    the capture, so a query matching at least the scan bound reports
+    ``total_exact: false`` instead of a silently wrong exact total.
     """
     registry = get_registry()
     store = registry.knowledge.document_store
     if q:
-        docs = store.search(q, limit=limit, include_chunks=include_chunks)
+        matches = store.search(
+            q, limit=_SEARCH_SCAN_LIMIT, include_chunks=include_chunks
+        )
+        total = len(matches)
+        total_exact = total < _SEARCH_SCAN_LIMIT
+        docs = matches[offset : offset + limit]
     else:
         docs = store.list_documents(
             limit=limit, offset=offset, include_chunks=include_chunks
         )
+        total = store.count(include_chunks=include_chunks)
+        total_exact = True
     rows = [_document_row(d) for d in docs]
     return {
         "status": "ok",
-        "total": store.count(include_chunks=include_chunks),
+        "total": total,
+        "total_exact": total_exact,
         "count": len(rows),
         "offset": offset,
         "include_chunks": include_chunks,
@@ -213,6 +237,32 @@ def list_events(
             _event_row(e, include_payload=include_payload, blind=blind) for e in events
         ],
         "event_types": [e.value for e in EventType],
+    }
+
+
+@router.get("/events/{event_id}")
+def get_event(
+    event_id: str,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> dict[str, Any]:
+    """Fetch one event by id, reaching the whole log, not just a window.
+
+    ``GET /events`` pages a recency window via ``until``; an event older
+    than whatever window a caller has loaded cannot be reached through
+    it by id alone. This route does a direct lookup instead. On a
+    withheld pack's row, the ``holdout_*`` keys but ``holdout_rate``
+    (the would-be pack) reach ``admin`` callers only, same as the list
+    and pack-detail views.
+    """
+    registry = get_registry()
+    event_log = registry.operational.event_log
+    event = event_log.get_event(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"Event not found: {event_id}")
+    blind = _blind(ctx)
+    return {
+        "status": "ok",
+        "event": _event_row(event, include_payload=True, blind=blind),
     }
 
 

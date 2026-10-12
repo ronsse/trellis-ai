@@ -2306,7 +2306,7 @@ Three properties worth knowing:
 - **Counts and reasons only — never ids, never excerpts.** Naming the ids would invite a re-fetch of exactly what a gate decided not to serve. The ids stay in `PACK_ASSEMBLED.payload["withholding"]["withheld_item_ids"]`, which is an operator surface with a different access path.
 - **Graduated disclosure (#359) contributes nothing here.** A pointer is a *served* item — ranked, cited, fetchable via `get_items` — and calling it withheld would blur the distinction that change was careful to make.
 
-**One deliberate exception: the pack holdout.** `TRELLIS_PACK_HOLDOUT_RATE` (default `0`, off) withholds a whole built pack, items and advisories, from a random share of retrieval calls, so pack effect can be measured against a control arm. A pack is held out when a SHA-256 draw on its `pack_id` falls below the rate, so its arm is fixed by the id and is the same in every process. The caller receives an ordinary empty pack with its `pack_id` and no `Withheld:` line, because an agent that can tell it is in the control arm is no longer a control; a held-out pack reads exactly like a greenfield one. The record is complete on the operator path: see the `holdout` keys in the [`PACK_ASSEMBLED` payload table](#pack_assembled-event-payload). `GET /api/v1/events` and `GET /api/v1/packs/{pack_id}` return the would-be pack to `admin` callers only; any other key reads `holdout` and `holdout_rate` without it. The aggregate readers of `PACK_ASSEMBLED` (promotion, effectiveness and advisory fitness, advisory generation, pack telemetry and sections, serve attribution) drop held-out packs and the feedback naming them, so they report the served arm. While the rate is above `0`, `get_context` (full and `index=True`) and `search` render every empty pack with its `pack_id` header instead of the bare `No context found for: …` (or `No results found for: …`) line, so the capture join reads both kinds of empty pack alike. Each serving process reads the rate from its own environment on every build, so set it where the MCP server and the API run. `trellis admin write-config --format json` and `GET /api/version` report it, and an unparseable or out-of-range value means `0` with a warning (`pack_holdout_rate_unparseable` / `pack_holdout_rate_out_of_range`). A [settings-store](#settings-store) override reaches it at runtime (`SettingSpec.settings_live`, true for this knob and every other registered one — see "Precedence: env > settings > default" above); both surfaces' `overridden_by` names whether `env`, `settings` or `default` is in force. Why the exception: [`claude-md-rationale.md`](../design/claude-md-rationale.md).
+**One deliberate exception: the pack holdout.** `TRELLIS_PACK_HOLDOUT_RATE` (default `0`, off) withholds a whole built pack, items and advisories, from a random share of retrieval calls, so pack effect can be measured against a control arm. A pack is held out when a SHA-256 draw on its `pack_id` falls below the rate, so its arm is fixed by the id and is the same in every process. The caller receives an ordinary empty pack with its `pack_id` and no `Withheld:` line, because an agent that can tell it is in the control arm is no longer a control; a held-out pack reads exactly like a greenfield one. The record is complete on the operator path: see the `holdout` keys in the [`PACK_ASSEMBLED` payload table](#pack_assembled-event-payload). `GET /api/v1/events`, `GET /api/v1/events/{event_id}` and `GET /api/v1/packs/{pack_id}` return the would-be pack to `admin` callers only; any other key reads `holdout` and `holdout_rate` without it. The aggregate readers of `PACK_ASSEMBLED` (promotion, effectiveness and advisory fitness, advisory generation, pack telemetry and sections, serve attribution) drop held-out packs and the feedback naming them, so they report the served arm. While the rate is above `0`, `get_context` (full and `index=True`) and `search` render every empty pack with its `pack_id` header instead of the bare `No context found for: …` (or `No results found for: …`) line, so the capture join reads both kinds of empty pack alike. Each serving process reads the rate from its own environment on every build, so set it where the MCP server and the API run. `trellis admin write-config --format json` and `GET /api/version` report it, and an unparseable or out-of-range value means `0` with a warning (`pack_holdout_rate_unparseable` / `pack_holdout_rate_out_of_range`). A [settings-store](#settings-store) override reaches it at runtime (`SettingSpec.settings_live`, true for this knob and every other registered one — see "Precedence: env > settings > default" above); both surfaces' `overridden_by` names whether `env`, `settings` or `default` is in force. Why the exception: [`claude-md-rationale.md`](../design/claude-md-rationale.md).
 
 `PACK_ASSEMBLED.payload["withholding"]` is emitted on both pack kinds **even when nothing was withheld** (`{"total": 0, "by_reason": {}, ...}`), so an analyzer can tell "the summary ran and found nothing" from "the summary never ran". The two collect-seam gates — `signal_quality="noise"` and `Lifecycle.state="archived"` — now write `rejected_items` rows (reasons `noise` and `archived`) where previously their only observable was a `logger.debug` line that fires under **no shipped default** (`configure_stderr_logging` pins INFO, the CLI pins WARNING). `trellis -vv` or `TRELLIS_LOG_LEVEL=DEBUG` does enable it — which is precisely the point: the signal existed only for someone who already suspected the problem and went looking.
 
@@ -2500,9 +2500,15 @@ arithmetic.
 
 `GET /api/v1/analyze` lists every allowed report name, an operator-facing
 description (what it measures, what a good vs. a bad value looks like,
-which loop it informs), and that report's default query params.
-`GET /api/v1/analyze/{report}` runs one. An unrecognized `{report}` is a
-404 naming every allowed name (never a 500 from an unhandled import); an
+which loop it informs), that report's default query params, and
+`params_schema` — the params model as JSON Schema
+(`params_model.model_json_schema()`), the same `minimum`/`maximum`/
+`exclusiveMinimum`/`exclusiveMaximum` bounds, types, and (where a field
+restricts to a fixed set, such as the holdout report's `outcome`) `enum`
+that the run route below itself enforces, so a caller can render a typed
+control instead of a plain text box per param. `GET
+/api/v1/analyze/{report}` runs one. An unrecognized `{report}` is a 404
+naming every allowed name (never a 500 from an unhandled import); an
 unrecognized or out-of-range query param is a 422 (`extra="forbid"` on
 every params model, so a typo'd param name is rejected rather than
 silently ignored).
@@ -2556,12 +2562,19 @@ are computed only by `trellis analyze learning-candidates` or the nightly
 worker.
 
 The operator UI's **Reports** tab (`src/trellis_api/static/index.html`)
-renders this: a report picker populated from `GET /api/v1/analyze`, an
-editable params form seeded from each report's defaults, `computed_at`
-and a `cached` badge, scalar fields as cards and nested structures as
-collapsible JSON, a degraded-store payload rendered as a visible refusal
-rather than folded into the generic card view, and a fetch failure
-rendered as a visible error rather than a silently empty panel.
+renders this: a report picker populated from `GET /api/v1/analyze`, a
+params form typed from each report's `params_schema` — an integer/number
+field as a bounded number input, a boolean as a checkbox, an enum field
+(`outcome` on the holdout report) as a select, seeded from each report's
+defaults — client-side bounds validation before a run request leaves the
+browser, `computed_at` and a `cached` badge, scalar fields as cards and
+nested structures as collapsible JSON, a degraded-store payload rendered
+as a visible refusal rather than folded into the generic card view, and a
+fetch failure (including a 422 that still reaches the server, rendered as
+its field-by-field message rather than a bare status line) as a visible
+error rather than a silently empty panel. Opening the tab populates the
+picker and the first report's param form but does not run one — the
+operator picks a report and clicks Run.
 
 ### `trellis analyze context-effectiveness`
 
@@ -3052,6 +3065,13 @@ Start with `trellis admin serve` or `trellis-api`. Base path: `/api/v1/`.
 | GET | `/traces/{id}` | — | Get trace by ID, with `evidence_links`: for each evidence ref that something can show, keyed by `evidence_id`, `{document_id}` when a document holds the evidence record (the evidence writers store it under its `evidence_id`), else `{entity_id}` when trace extraction wrote its `evidence:<id>` graph node. A ref with neither, or with an empty `evidence_id`, has no entry. `evidence_links` is `null` when the knowledge stores cannot be read; the trace is still served. |
 | GET | `/precedents` | `?domain=...&limit=20` | List precedents. Excludes precedents whose graph node is stamped `Lifecycle.state="demoted"` or `"archived"`; the filter applies before `limit`. |
 | GET | `/precedents/domains` | — | Count promoted precedents per domain, for a domain filter's options. Excludes demoted/archived precedents, same filter as above. |
+
+### Explore
+
+| Method | Endpoint | Params/Body | Description |
+|--------|----------|-------------|-------------|
+| GET | `/documents` | `?q=...&limit=50&offset=0&include_chunks=false` | List or search documents, previews only. A search (`q` set) is paged the same way the unfiltered list is — `offset`/`limit` both apply to the matches, not just to the unfiltered case. Nothing in `DocumentStore` counts a query's total matches, so a search captures up to a bounded scan window once and pages that capture; `total_exact: false` on the response means the query matched at least that many documents, so `total` is a floor, not an exact count. |
+| GET | `/events/{event_id}` | — | Get one event by id, independent of whatever recency window a list caller has loaded (`GET /events` pages by `until`, with no `event_id` filter, so an older row is otherwise unreachable by id alone). 404 when absent. Same pack-holdout rule as the list route: the would-be pack on a withheld `PACK_ASSEMBLED` row reaches `admin` callers only. |
 
 ### Curate
 
