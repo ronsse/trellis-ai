@@ -335,22 +335,22 @@ class TestBuildLearningObservations:
 
 
 class TestSessionIdJoin:
-    """B-4 (gate-861 round 2): ``observation["session_id"]`` must come from
+    """``observation["session_id"]`` must come from
     ``PACK_ASSEMBLED.session_id`` alone, never fall back to ``run_id`` or
     ``pack_id`` — see the extensive comment at ``_join_one``'s
     ``"session_id"`` line in ``pack_observations.py``.
 
-    The gate's mutant M3 reintroduces exactly that fallback. It survived
-    the whole suite because no test here ever ran a pack through
-    ``session_id``-sensitive feedback shaped the way the MCP
-    ``record_feedback`` tool actually produces it: when a caller names no
-    trace, MCP sets ``run_id = pack_id`` (``mcp/server.py``'s
-    ``run_id=trace_id if has_trace else pack_id``), so every sessionless
-    pack has a ``run_id`` that is unique to that one pack — which is
-    exactly the shape under which a session_id-falls-back-to-run_id
-    mutant would manufacture a distinct "session" per pack instead of
-    reporting them as sessionless. ``_record`` below is called with
-    ``run_id=pack_id`` throughout to reproduce that MCP shape.
+    A fallback to ``run_id`` is easy to reintroduce silently unless a
+    test runs a pack through session_id-sensitive feedback shaped the
+    way the MCP ``record_feedback`` tool actually produces it: when a
+    caller names no trace, MCP sets ``run_id = pack_id``
+    (``mcp/server.py``'s ``run_id=trace_id if has_trace else pack_id``),
+    so every sessionless pack has a ``run_id`` that is unique to that one
+    pack — which is exactly the shape under which a
+    session_id-falls-back-to-run_id regression would manufacture a
+    distinct "session" per pack instead of reporting them as sessionless.
+    ``_record`` below is called with ``run_id=pack_id`` throughout to
+    reproduce that MCP shape.
     """
 
     def test_session_id_present_is_carried_through(

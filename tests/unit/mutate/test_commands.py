@@ -29,14 +29,15 @@ class TestOperation:
         # + ALIAS_UPSERT (governed alias/backfill writes)
         # + SETTINGS_UPDATE (governed settings-store write; null value
         # means "remove the override" rather than a separate RESET verb)
-        # - PRECEDENT_UPDATE (removed: this verb had no handler class
-        # anywhere in src/ since the initial commit (3b9cedbd) — see
-        # docs/design/adr-retention-prune.md's "Sibling unhandled verbs"
-        # row — so there was no writer to lose. Removed alongside
-        # EventType.PRECEDENT_UPDATED and PrecedentUpdateHandler's
-        # registration rather than carried forward unhandled into the
-        # report-only PR that introduced the auto-promote evaluator;
-        # commit mode there is refused via ConfigError, not via this verb)
+        # - PRECEDENT_UPDATE (removed: this verb had no handler anywhere
+        # in src/ since the initial commit — see docs/design/adr-retention
+        # -prune.md's "Sibling unhandled verbs" row — so every submission
+        # of it failed with "No handler registered" and there was no
+        # writer to lose. EventType.PRECEDENT_UPDATED is removed alongside
+        # it; that event type was never emitted either. Neither member is
+        # carried forward into the report-only auto-promote evaluator
+        # added here; its commit mode is refused via ConfigError, not via
+        # this verb)
         assert len(Operation) == 21
 
 

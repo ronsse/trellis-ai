@@ -580,9 +580,13 @@ _SPECS: tuple[SettingSpec, ...] = (
             "--commit` uses, with no human looking at it first. Off "
             "(default): the tuner still runs and still writes `pending` "
             "proposals, it just never promotes one itself. On: a "
-            "qualifying proposal is promoted unattended, on a schedule — "
-            "pair it with the min_sample_size / min_effect_size floors "
-            "below, never ship it alone."
+            "qualifying proposal is promoted unattended on the next "
+            "*live* run of `trellis worker tune` (one invoked without "
+            "--dry-run) — the job catalog's own scheduled `tune` entry "
+            "always passes --dry-run, so flipping this on changes "
+            "nothing until something runs the command live, scheduled "
+            "or manual. Pair it with the min_sample_size / "
+            "min_effect_size floors below, never ship it alone."
         ),
         surfaces=("cli",),
         restart_required=False,
@@ -934,7 +938,14 @@ def _check_bounds(spec: SettingSpec, value: bool | int | float | str) -> None:
     """Enum wins outright; otherwise a numeric min/max, bools exempt."""
     if spec.enum is not None:
         if not isinstance(value, str) or value not in spec.enum:
-            msg = f"{spec.name} must be one of {list(spec.enum)!r}, got {value!r}"
+            # A refused member (e.g. ``"commit"`` before auto-demotion
+            # ships) stays in ``spec.enum`` so the UI can still document
+            # it as a real future option (see ``refused_values``'s
+            # docstring), but this message tells the caller what they can
+            # actually set right now -- listing a value every submission
+            # of it will itself refuse is not "allowed".
+            allowed = [v for v in spec.enum if v not in spec.refused_values]
+            msg = f"{spec.name} must be one of {allowed!r}, got {value!r}"
             raise ValueError(msg)
         return
     if isinstance(value, bool) or not isinstance(value, int | float):

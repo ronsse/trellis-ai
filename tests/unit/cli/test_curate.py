@@ -917,7 +917,7 @@ def _auto_promote_candidate(
 
 
 class TestCurateAutoPromoteCandidates:
-    """Gate-861b B-2 and follow-up I: no CLI test existed for this command."""
+    """CLI-level coverage for ``curate auto-promote-candidates``."""
 
     def _write_candidates(self, tmp_path: Path, candidates: list[dict]) -> Path:
         path = tmp_path / "candidates.json"
@@ -925,8 +925,8 @@ class TestCurateAutoPromoteCandidates:
         return path
 
     def test_dry_run_overrides_a_stored_commit_mode(self, tmp_path: Path) -> None:
-        """B-2: without --dry-run a stored mode=commit refuses the whole
-        run with a configuration error (exit 5) before any candidate is
+        """Without --dry-run a stored mode=commit refuses the whole run
+        with a configuration error (exit 5) before any candidate is
         evaluated; --dry-run must still work in that case, running
         report-only and writing nothing — the policy must be forced to
         report_only *before* it is constructed, not after.
@@ -972,16 +972,24 @@ class TestCurateAutoPromoteCandidates:
         event_log = curate_cli._get_registry().operational.event_log
         mutation_events = event_log.get_events(event_type=EventType.MUTATION_EXECUTED)
         assert mutation_events == []
+        # Both invocations emit an event: the refused run records its own
+        # refusal (exit 5, below), and the dry-run that followed records
+        # its completed evaluation -- every exit path writes a run event.
         evaluated_events = event_log.get_events(
             event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
         )
-        assert len(evaluated_events) == 1
+        assert len(evaluated_events) == 2
+        refused_event, ok_event = evaluated_events
+        assert refused_event.payload["outcome"] == "refused"
+        assert refused_event.payload["configured_mode"] == "commit"
+        assert ok_event.payload["outcome"] == "ok"
+        assert ok_event.payload["configured_mode"] == "commit"
 
     def test_cli_resolves_the_policy_from_settings_not_a_hardcoded_default(
         self, tmp_path: Path
     ) -> None:
-        """Kills gate-861b's M5 (the CLI builds a default policy, ignoring
-        settings and env): a stored min_helpful_count floor above the
+        """The CLI must build its policy from settings/env, not a
+        hardcoded default: a stored min_helpful_count floor above the
         candidate's helpful_count must flip its disposition.
         """
         stores_dir = Path(os.environ["TRELLIS_DATA_DIR"]) / "stores"
@@ -1012,6 +1020,96 @@ class TestCurateAutoPromoteCandidates:
             data["outcomes"][0]["disposition"]
             == "ineligible:insufficient_helpful_count"
         )
+
+    def test_malformed_candidates_file_exits_nonzero_and_emits_a_failed_event(
+        self, tmp_path: Path
+    ) -> None:
+        """A ``--candidates`` file that isn't valid JSON must still leave
+        a trace in the event stream, not just a CLI error with no record
+        for ``loop_health.py`` to see."""
+        bad_path = tmp_path / "bad.json"
+        bad_path.write_text("{not valid json")
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(bad_path),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code != 0
+
+        event_log = curate_cli._get_registry().operational.event_log
+        evaluated_events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )
+        assert len(evaluated_events) == 1
+        assert evaluated_events[0].payload["outcome"] == "failed"
+        assert evaluated_events[0].payload["error"]["type"] == "BadParameter"
+
+    def test_wrong_top_level_json_shape_exits_nonzero_and_emits_a_failed_event(
+        self, tmp_path: Path
+    ) -> None:
+        """A candidates file whose top level isn't a JSON object (e.g. a
+        bare array) must be refused and recorded the same way a malformed
+        file is -- it is not "zero candidates", it is a shape error."""
+        arr_path = tmp_path / "arr.json"
+        arr_path.write_text(json.dumps([1, 2, 3]))
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(arr_path),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code != 0
+
+        event_log = curate_cli._get_registry().operational.event_log
+        evaluated_events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )
+        assert len(evaluated_events) == 1
+        assert evaluated_events[0].payload["outcome"] == "failed"
+        assert evaluated_events[0].payload["error"]["type"] == "BadParameter"
+
+    def test_non_finite_env_override_exits_nonzero_and_emits_a_failed_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-finite env override (``inf``/``nan``/``1e999``) for one of
+        this command's int knobs must be refused and recorded, not crash
+        with an uncaught traceback and no event."""
+        monkeypatch.setenv("TRELLIS_CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT", "inf")
+        candidates_path = self._write_candidates(tmp_path, [])
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(candidates_path),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code != 0
+
+        event_log = curate_cli._get_registry().operational.event_log
+        evaluated_events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )
+        assert len(evaluated_events) == 1
+        assert evaluated_events[0].payload["outcome"] == "failed"
+        assert evaluated_events[0].payload["error"]["type"] == "ValueError"
 
 
 class TestCurateHelp:

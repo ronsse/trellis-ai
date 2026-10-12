@@ -24,7 +24,10 @@ a different write path
 autonomy invariants this module satisfies today:
 
 (c) dedicated audit events — :attr:`EventType.LEARNING_AUTO_PROMOTE_EVALUATED`
-    self-identifies every run;
+    self-identifies every run, including one that never reaches
+    :func:`run_candidate_auto_promotion` at all
+    (:func:`emit_candidate_auto_promote_failure_event`, called from
+    ``trellis_cli.curate.auto_promote_candidates`` on every exit path);
 (d) per-scope opt-in / global default OFF — ``enabled=False`` by default,
     and a disabled policy always behaves as ``report_only`` regardless of
     its configured ``mode`` (:attr:`LearningCandidateAutoPromotePolicy.effective_mode`).
@@ -45,13 +48,13 @@ re-evaluation.
 
 Three data gaps are reported honestly here rather than silently assumed away:
 
-**Holdout-arm coverage.** The brief asks for "a holdout arm present for
-its intent family *if the data carries one*". It doesn't:
-:mod:`trellis.core.pack_holdout` implements one global, per-pack holdout
-rate — there is no per-intent-family holdout marker anywhere in the
-pipeline. :func:`_holdout_arm_status` always returns ``"unknown"`` rather
-than fabricate ``True``/``False``, and nothing in :func:`_evaluate_candidate`
-gates on it — it is reported, never enforced.
+**Holdout-arm coverage.** Reporting a holdout arm for a candidate's
+intent family would need a per-intent-family holdout marker. None
+exists: :mod:`trellis.core.pack_holdout` implements one global,
+per-pack holdout rate — there is no per-intent-family holdout marker
+anywhere in the pipeline. :func:`_holdout_arm_status` always returns
+``"unknown"`` rather than fabricate ``True``/``False``, and nothing in
+:func:`_evaluate_candidate` gates on it — it is reported, never enforced.
 
 **Session identity.** ``citation_evidence.distinct_helpful_sessions``
 (:mod:`trellis.learning.scoring`) counts real ``PACK_ASSEMBLED.session_id``
@@ -525,6 +528,12 @@ def _emit_evaluated_event(
     already_promoted = sum(1 for o in outcomes if o.disposition == "already_promoted")
     ineligible = sum(1 for o in outcomes if o.disposition.startswith("ineligible:"))
     payload: dict[str, Any] = {
+        # Top-level and not just derivable from ``counts.skipped`` so
+        # ``loop_health.py``'s ``_build_candidate_auto_promote_row`` can
+        # read a run's outcome the same way for a completed evaluation
+        # (this event) and for a run that never got this far at all
+        # (see ``_emit_failed_event`` below, same event type, same key).
+        "outcome": "degraded" if skipped else "ok",
         "mode": effective_mode,
         "configured_mode": configured_mode,
         "dispositions": [
@@ -559,6 +568,66 @@ def _emit_evaluated_event(
         source,
         payload=payload,
     )
+    return event.event_id
+
+
+def emit_candidate_auto_promote_failure_event(
+    event_log: EventLog,
+    *,
+    error: BaseException,
+    source: str = "candidate_auto_promote",
+    configured_mode: CandidateAutoPromoteMode | str | None = None,
+) -> str | None:
+    """Record a run that never produced outcomes at all.
+
+    Every exit path before or during a ``run_candidate_auto_promotion``
+    call -- a refused ``mode="commit"`` config, a malformed
+    ``--candidates`` file, a non-finite env override -- still has to
+    leave a trace in the same event stream :func:`_emit_evaluated_event`
+    writes to, or a failure looks identical to "this job never ran" and
+    ``loop_health.py``'s ``last_status`` keeps reporting whatever a prior
+    *successful* run last wrote, forever. Reuses
+    :attr:`EventType.LEARNING_AUTO_PROMOTE_EVALUATED` rather than a new
+    event type -- same reasoning as the module's "add a health signal as
+    an event, not a new probe" rule: one ordered stream lets a reader take
+    "the latest event of this type" as the run's current status,
+    regardless of which code path produced it.
+
+    ``outcome`` is ``"refused"`` for a :class:`~trellis.errors.ConfigError`
+    (a deliberate policy gate -- e.g. a stored or env ``mode="commit"``
+    without ``--dry-run``) and ``"failed"`` for anything else (a malformed
+    file, a non-finite env value, ...). Swallows its own emission failure
+    (logs instead) rather than letting an advisory write mask the
+    original exception -- the same shape as every other best-effort step
+    on a write path (see ``trellis.core.write_provenance.
+    resolve_stamp_staleness``).
+
+    Returns ``None`` (not the caller's exception) on an emission failure,
+    so a caller that always re-raises the original error after calling
+    this never has to guard against a second one escaping from here.
+    """
+    outcome = "refused" if isinstance(error, ConfigError) else "failed"
+    payload: dict[str, Any] = {
+        "outcome": outcome,
+        "configured_mode": configured_mode,
+        "error": {
+            "type": type(error).__name__,
+            "message": str(error),
+        },
+    }
+    try:
+        event = event_log.emit(
+            EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
+            source,
+            payload=payload,
+        )
+    except Exception:
+        logger.warning(
+            "candidate_auto_promote_failure_event_emit_failed",
+            exc_info=True,
+            original_error_type=type(error).__name__,
+        )
+        return None
     return event.event_id
 
 
@@ -601,6 +670,7 @@ def run_candidate_auto_promotion(
     requested_by: str = AUTO_PROMOTE_REQUESTED_BY,
     source: str = "candidate_auto_promote",
     force_report_only: bool = False,
+    configured_mode: CandidateAutoPromoteMode | None = None,
 ) -> CandidateAutoPromoteReport:
     """Evaluate every candidate and report what would be promoted.
 
@@ -643,11 +713,21 @@ def run_candidate_auto_promotion(
     only and commit runs both emit it, so a report-only run is visible in
     the audit trail even though it writes nothing else.
 
+    ``configured_mode`` lets a caller that forced ``policy.mode`` before
+    construction (``trellis_cli.curate._build_candidate_auto_promote_policy``,
+    for ``--dry-run``) pass the *true* pre-force value through — once a
+    ``mode="commit"`` policy has been forced to ``"report_only"`` so it
+    can even construct, ``policy.mode`` can no longer answer "what was
+    this configured to" on its own. Omitted (or ``None``), this falls
+    back to ``policy.mode``, unchanged from before this parameter
+    existed.
+
     Raises:
         ValueError: If the effective mode is ``"commit"`` but no
             ``executor`` was given. Unreachable today — see above.
     """
-    configured_mode = policy.mode
+    if configured_mode is None:
+        configured_mode = policy.mode
     effective_mode: CandidateAutoPromoteMode = (
         "report_only" if force_report_only else policy.effective_mode
     )

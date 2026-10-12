@@ -125,8 +125,8 @@ class TestPolicyFloors:
             LearningCandidateAutoPromotePolicy(min_helpful_count=0)
 
     def test_min_distinct_sessions_floor_refuses_n_of_1(self) -> None:
-        """The brief's explicit requirement: a single-session candidate must
-        never be configurable into qualifying, at the construction seam."""
+        """A single-session candidate must never be configurable into
+        qualifying, at the construction seam."""
         with pytest.raises(ValueError, match="single-session"):
             LearningCandidateAutoPromotePolicy(min_distinct_sessions=1)
 
@@ -377,10 +377,9 @@ class TestEvaluateCandidate:
         assert reason == "ineligible:insufficient_helpful_count"
 
     def test_single_session_candidate_never_qualifies(self) -> None:
-        """The brief's explicit n=1 requirement: a candidate whose helpful
-        citations all come from one session must never qualify, no matter
-        how high its helpful_count is or how loosely min_helpful_count is
-        configured."""
+        """A candidate whose helpful citations all come from one session
+        must never qualify, no matter how high its helpful_count is or
+        how loosely min_helpful_count is configured."""
         policy = LearningCandidateAutoPromotePolicy(min_helpful_count=1)
         candidate = _candidate(helpful_count=50, distinct_helpful_sessions=1)
         qualifies, reason = _evaluate_candidate(candidate, policy=policy)
@@ -800,15 +799,13 @@ class TestAlreadyPromotedExclusion:
 
 
 class TestAlreadyPromotedScanOrderMatchesUnderTruncation:
-    """gate-861 round 2, mutant M6: ``_scan_already_promoted_entity_ids``
-    drops ``order="desc"`` and still passes the whole suite, because no
-    existing test seeds more than ``_PROMOTION_SCAN_LIMIT`` (500)
-    successful ``precedent.promote`` events. ``get_events``'s default is
-    ``order="asc"`` (oldest-first), so on a truncated scan that default
-    keeps the *oldest* rows and drops the newest — the exact inversion
-    the docstring calls out as the hazard ``order="desc"`` exists to
-    avoid: a just-promoted entity would read back as not-yet-promoted on
-    a busy log and the auto-promote job would propose it all over again.
+    """``_scan_already_promoted_entity_ids`` must pass ``order="desc"``
+    when scanning ``precedent.promote`` events: ``get_events``'s default
+    is ``order="asc"`` (oldest-first), so on a truncated scan past
+    ``_PROMOTION_SCAN_LIMIT`` (500) successful promotions, that default
+    would keep the *oldest* rows and drop the newest — a just-promoted
+    entity would read back as not-yet-promoted on a busy log and the
+    auto-promote job would propose it all over again.
     """
 
     @staticmethod

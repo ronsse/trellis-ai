@@ -150,14 +150,19 @@ def _effective_values(
     ):
         try:
             resolved = resolve()
-        except (ValueError, TypeError) as exc:
+        except (ValueError, TypeError, OverflowError) as exc:
             # One bad knob in a family must not blank every other
             # setting off the response -- degrade every entry in *this*
             # family to its registry default and record why, rather
             # than letting the exception reach list_settings() and turn
             # the whole route into a 500. A typo'd
             # TRELLIS_CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT must not
-            # take down every other operator control.
+            # take down every other operator control. ``OverflowError``
+            # is a real member of this family, not a defensive extra:
+            # a stored or env ``Infinity``/``1e999`` round-trips through
+            # ``int(float(raw))`` inside the two resolvers and raises
+            # ``OverflowError``, not ``ValueError`` (see
+            # ``parse_finite_int``'s docstring in ``write_config.py``).
             message = str(exc)
             for spec in SETTINGS_REGISTRY.values():
                 if spec.name.startswith(prefix):
@@ -185,6 +190,13 @@ def _entry(
         "minimum": spec.minimum,
         "maximum": spec.maximum,
         "enum": list(spec.enum) if spec.enum is not None else None,
+        # Members of ``enum`` that are structurally valid but refused at
+        # write time (e.g. ``"commit"`` before auto-demotion ships) --
+        # kept in ``enum`` so the catalog still documents them as real
+        # future options, but named here so a renderer can grey one out
+        # instead of offering a value every save of it will refuse.
+        "refused_values": list(spec.refused_values),
+        "refused_reason": spec.refused_reason,
         "description": spec.description,
         "risk_note": spec.risk_note,
         "surfaces": list(spec.surfaces),

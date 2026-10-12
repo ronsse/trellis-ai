@@ -274,12 +274,11 @@ class TestRowMetadata:
     def test_precedent_row_does_not_claim_auto_promote_can_commit(
         self, tmp_path: Path
     ) -> None:
-        """Pins gate-861b's B-1: the precedent_promotion row must keep
-        saying nothing schedules a promotion. `learning_candidate_auto_promote`
-        reports what it would promote; its `commit` mode is refused with a
-        configuration error, so this row must never claim the loop "can
-        also commit one unattended when enabled" (main's honest wording,
-        restored after this PR briefly replaced it with a false claim).
+        """The precedent_promotion row must keep saying nothing schedules a
+        promotion. `learning_candidate_auto_promote` reports what it would
+        promote; its `commit` mode is refused with a configuration error,
+        so this row must never claim the loop "can also commit one
+        unattended when enabled".
         """
         event_log, tuner_state = _stores(tmp_path)
 
@@ -390,3 +389,199 @@ class TestCandidateAutoPromoteRowStatus:
         assert row.last_status == "ok"
         assert row.counters is not None
         assert row.counters["last_run_skipped"] == 0
+
+
+class TestCandidateAutoPromoteRowConfiguredMode:
+    """``counters["configured_mode"]`` must be the run's true configured
+    mode, not the policy it actually ran with -- the two differ exactly
+    when ``--dry-run`` (or ``enabled=false``) forced a ``mode="commit"``
+    configuration down to an effective ``report_only`` run.
+    """
+
+    def test_configured_mode_reads_the_top_level_field_not_the_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
+            source="candidate_auto_promote",
+            payload={
+                "outcome": "ok",
+                "mode": "report_only",
+                "configured_mode": "commit",
+                "dispositions": [],
+                "counts": {
+                    "total": 1,
+                    "would_promote": 1,
+                    "promoted": 0,
+                    "already_promoted": 0,
+                    "ineligible": 0,
+                    "skipped": 0,
+                },
+                # The effective policy a --dry-run forced to report_only
+                # -- LearningCandidateAutoPromotePolicy can never even be
+                # constructed with mode="commit", so this is always
+                # "report_only" whenever the top-level configured_mode is
+                # "commit". Reading this field for "configured_mode"
+                # would report the opposite of what was actually
+                # configured.
+                "policy_snapshot": {"enabled": True, "mode": "report_only"},
+            },
+        )
+
+        report = summarize_loop_health(event_log, tuner_state)
+
+        row = _row(report, "learning_candidate_auto_promote")
+        assert row.counters is not None
+        assert row.counters["configured_mode"] == "commit"
+
+
+class TestCandidateAutoPromoteRowOutcomeField:
+    """A run that never reaches an evaluation at all (env ``commit``
+    refused, a malformed ``--candidates`` file, garbage env overrides)
+    still emits one LEARNING_AUTO_PROMOTE_EVALUATED event
+    (``emit_candidate_auto_promote_failure_event``), with no ``counts``
+    key and an ``outcome`` of ``"refused"``/``"failed"`` -- this row
+    must surface that outcome, not fall back to reading it as "ok"
+    just because an event exists.
+    """
+
+    def test_refused_outcome_reports_refused_not_ok(self, tmp_path: Path) -> None:
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
+            source="candidate_auto_promote",
+            payload={
+                "outcome": "refused",
+                "configured_mode": "commit",
+                "error": {
+                    "type": "ConfigError",
+                    "message": "mode='commit' is refused",
+                },
+            },
+        )
+
+        report = summarize_loop_health(event_log, tuner_state)
+
+        row = _row(report, "learning_candidate_auto_promote")
+        assert row.last_status == "refused"
+        assert row.counters is not None
+        assert row.counters["configured_mode"] == "commit"
+
+    def test_failed_outcome_reports_failed_not_ok(self, tmp_path: Path) -> None:
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
+            source="candidate_auto_promote",
+            payload={
+                "outcome": "failed",
+                "configured_mode": "report_only",
+                "error": {"type": "ValueError", "message": "garbage env value"},
+            },
+        )
+
+        report = summarize_loop_health(event_log, tuner_state)
+
+        row = _row(report, "learning_candidate_auto_promote")
+        assert row.last_status == "failed"
+
+    def test_outcome_field_takes_priority_over_the_skipped_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """A payload that (hypothetically) carried both a non-zero
+        ``skipped`` count and an explicit ``outcome`` must report the
+        explicit value -- ``outcome`` is authoritative, the skipped-based
+        rule is only a fallback for events recorded before it existed.
+        """
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
+            source="candidate_auto_promote",
+            payload={
+                "outcome": "ok",
+                "mode": "report_only",
+                "configured_mode": "report_only",
+                "dispositions": [],
+                "counts": {
+                    "total": 1,
+                    "would_promote": 0,
+                    "promoted": 0,
+                    "already_promoted": 0,
+                    "ineligible": 0,
+                    "skipped": 1,
+                },
+                "policy_snapshot": {"enabled": True, "mode": "report_only"},
+            },
+        )
+
+        report = summarize_loop_health(event_log, tuner_state)
+
+        row = _row(report, "learning_candidate_auto_promote")
+        assert row.last_status == "ok"
+
+
+class TestCandidateAutoPromoteRowStaleness:
+    """This row's job (``auto-promote-candidates``) runs on a known
+    daily cadence (``0 6 * * *`` in the job catalog), so a loop that
+    last ran days ago must not keep reading as healthy as one that ran
+    five minutes ago -- the cron could have stopped firing entirely.
+    """
+
+    def test_a_run_several_days_stale_reports_stale_not_ok(
+        self, tmp_path: Path
+    ) -> None:
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
+            source="candidate_auto_promote",
+            payload={
+                "outcome": "ok",
+                "mode": "report_only",
+                "configured_mode": "report_only",
+                "dispositions": [],
+                "counts": {
+                    "total": 1,
+                    "would_promote": 1,
+                    "promoted": 0,
+                    "already_promoted": 0,
+                    "ineligible": 0,
+                    "skipped": 0,
+                },
+                "policy_snapshot": {"enabled": True, "mode": "report_only"},
+            },
+        )
+
+        later = datetime.now(UTC) + timedelta(days=3)
+        report = summarize_loop_health(event_log, tuner_state, now=later)
+
+        row = _row(report, "learning_candidate_auto_promote")
+        assert row.last_status == "stale"
+
+    def test_a_run_within_the_cadence_window_stays_ok(self, tmp_path: Path) -> None:
+        """Companion to the test above: a fresh run must not be
+        misreported as stale just because this rule now exists."""
+        event_log, tuner_state = _stores(tmp_path)
+        event_log.emit(
+            EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
+            source="candidate_auto_promote",
+            payload={
+                "outcome": "ok",
+                "mode": "report_only",
+                "configured_mode": "report_only",
+                "dispositions": [],
+                "counts": {
+                    "total": 1,
+                    "would_promote": 1,
+                    "promoted": 0,
+                    "already_promoted": 0,
+                    "ineligible": 0,
+                    "skipped": 0,
+                },
+                "policy_snapshot": {"enabled": True, "mode": "report_only"},
+            },
+        )
+
+        report = summarize_loop_health(event_log, tuner_state, now=datetime.now(UTC))
+
+        row = _row(report, "learning_candidate_auto_promote")
+        assert row.last_status == "ok"

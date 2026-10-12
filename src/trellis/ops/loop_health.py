@@ -44,7 +44,9 @@ from typing import Any
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
+from trellis.core.cron import is_due_since
 from trellis.learning.candidate_auto_promote import compute_agreement_metric
+from trellis.schedule.catalog import JOB_CATALOG
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventLog,
@@ -111,7 +113,6 @@ def _build_candidate_auto_promote_row(
         event_log, EventType.LEARNING_AUTO_PROMOTE_EVALUATED, limit=limit
     )
     latest = candidate_scan.events[-1] if candidate_scan.events else None
-    _ = now  # kept for signature symmetry with the other _build_* rows
 
     # compute_agreement_metric reads REVIEW_DECISION_RECORDED / its own
     # event type directly (not via scan_events), matching the tuner row's
@@ -133,18 +134,49 @@ def _build_candidate_auto_promote_row(
             "last_run_ineligible": counts.get("ineligible"),
             "last_run_skipped": skipped,
             "configured_enabled": snapshot.get("enabled"),
-            "configured_mode": snapshot.get("mode"),
+            # The run's true configured mode (pre-``--dry-run``, pre- any
+            # forced-report-only override) is a top-level payload field,
+            # not ``policy_snapshot.mode`` -- the snapshot reflects the
+            # *effective* policy the run actually used
+            # (``LearningCandidateAutoPromotePolicy`` can never even be
+            # constructed with ``mode="commit"``, so the snapshot can
+            # only ever read "report_only"). Reading the snapshot here
+            # silently discarded the one field that lets an operator see
+            # "commit is configured, --dry-run / enabled=false is the
+            # only reason nothing happened."
+            "configured_mode": latest.payload.get("configured_mode"),
             "agreement_agree": agreement.agree,
             "agreement_disagree": agreement.disagree,
             "agreement_undecided": agreement.undecided,
             "agreement_rate": agreement.rate,
         }
-        # An event existing is not the same claim as "the run was clean":
-        # a candidate with no usable id gets no outcome at all (see
-        # ``run_candidate_auto_promotion``'s ``skipped_count``), so a run
-        # that dropped input must not paint the same "ok" a run that
-        # evaluated everything it was given does.
-        last_status = "degraded" if skipped else "ok"
+        # ``outcome`` is the one vocabulary key every
+        # LEARNING_AUTO_PROMOTE_EVALUATED payload carries uniformly,
+        # whether the run completed an evaluation ("ok"/"degraded",
+        # emitted by ``_emit_evaluated_event``) or never reached one
+        # ("refused"/"failed", emitted by
+        # ``emit_candidate_auto_promote_failure_event``). A refused or
+        # failed run must not read as "ok" just because it produced an
+        # event at all. Fall back to the pre-``outcome`` skipped-based
+        # rule for an older event recorded before that field existed,
+        # rather than reporting a misleading ``None``/``"ok"`` for it.
+        outcome = latest.payload.get("outcome")
+        last_status = (
+            outcome if outcome is not None else ("degraded" if skipped else "ok")
+        )
+
+        # Staleness: this row's job (``auto-promote-candidates``) runs on
+        # a known daily cadence (see JOB_CATALOG), so "ran once and
+        # reported ok" three days ago is not the same claim as "healthy
+        # today" -- the cron could have stopped firing entirely and this
+        # row would otherwise still read "ok" forever. Overrides whatever
+        # outcome-based status was just computed: an operator's first
+        # question for a loop that has gone quiet is "is it running at
+        # all", which a stale "failed" from a week ago answers no better
+        # than a stale "ok" would.
+        cadence = JOB_CATALOG["auto-promote-candidates"].default_cadence
+        if cadence is not None and is_due_since(cadence, latest.occurred_at, now):
+            last_status = "stale"
 
     row = LoopHealthRow(
         name="learning_candidate_auto_promote",

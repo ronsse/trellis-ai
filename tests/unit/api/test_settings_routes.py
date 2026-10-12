@@ -158,6 +158,8 @@ class TestListSettings:
             "minimum": 0.0,
             "maximum": 1.0,
             "enum": None,
+            "refused_values": [],
+            "refused_reason": None,
             "description": row["description"],  # non-empty, checked below
             "risk_note": row["risk_note"],  # non-empty, checked below (risk=high)
             "surfaces": list(row["surfaces"]),
@@ -175,6 +177,28 @@ class TestListSettings:
         assert row["label"]
         assert row["description"]
         assert row["risk_note"]
+
+    def test_a_refused_enum_member_is_named_so_the_ui_can_grey_it_out(
+        self, client: TestClient
+    ) -> None:
+        """``learning.candidate_auto_promote.mode`` is the one entry that
+        declares ``refused_values`` -- the GET response must expose it
+        (and the reason) so a renderer can disable the ``commit`` option
+        instead of offering a value every save of it will itself refuse.
+        """
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), "learning.candidate_auto_promote.mode")
+        assert row["enum"] == ["report_only", "commit"]
+        assert row["refused_values"] == ["commit"]
+        assert row["refused_reason"]
+        assert "auto-demotion" in row["refused_reason"]
+
+    def test_no_other_entry_reports_a_refused_value(self, client: TestClient) -> None:
+        resp = client.get("/api/v1/settings")
+        body = resp.json()
+        refusing = [row["name"] for row in body["settings"] if row["refused_values"]]
+        assert refusing == ["learning.candidate_auto_promote.mode"]
 
     def test_group_labels_cover_every_entrys_group(self, client: TestClient) -> None:
         """brief e179 step 8: the UI's filter box reads display labels from
@@ -708,3 +732,50 @@ class TestAutoPromoteGarbageEnvDegradesInstead500:
         spec = get_setting("learning.auto_promote.min_effect_size")
         value = _env_effective_value(spec, {})
         assert value == spec.default
+
+    @pytest.mark.parametrize(
+        "setting_name",
+        [
+            "learning.auto_promote.min_sample_size",
+            "learning.candidate_auto_promote.min_helpful_count",
+        ],
+    )
+    def test_non_finite_stored_int_does_not_500_the_route(
+        self, client: TestClient, registry: StoreRegistry, setting_name: str
+    ) -> None:
+        """Every int-typed knob above is pinned against a non-finite
+        *env* value because ``parse_finite_int`` guards that path. The
+        *settings-file* path through the exact same resolvers takes a
+        different, unguarded branch -- ``int(settings_map[setting_name])``
+        -- with no ``parse_finite_int`` in front of it, so a
+        ``float("inf")``/``float("nan")`` row written straight to
+        ``settings.json`` (by hand, or by a future writer that stops
+        validating finiteness) raises ``OverflowError``/``ValueError``
+        past both resolvers. ``_effective_values``'s
+        ``except (ValueError, TypeError)`` did not list ``OverflowError``,
+        so this one 500'd the whole route instead of degrading just this
+        family, unlike every env-sourced case above.
+
+        ``SettingsStore.set`` itself writes with ``allow_nan=False`` and
+        so refuses to persist ``inf`` -- this has to go in as a hand-
+        written file, standing in for an operator (or future writer)
+        that edits ``settings.json`` directly rather than going through
+        the store. Python's ``json`` module accepts the non-standard
+        ``Infinity`` literal on *read* even though it refuses to *write*
+        one, so this round-trips exactly as a real such file would.
+        """
+        path = resolve_settings_path(registry.stores_dir)
+        assert path is not None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {"settings": [{"name": setting_name, "value": "__INF__"}]}
+            ).replace('"__INF__"', "Infinity"),
+            encoding="utf-8",
+        )
+
+        resp = client.get("/api/v1/settings")
+        assert resp.status_code == 200, resp.text
+        row = _entry(resp.json(), setting_name)
+        assert row["effective_value"] == row["default"]
+        assert row["parse_error"] is not None

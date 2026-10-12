@@ -184,3 +184,52 @@ class TestNonFiniteEnvValuesRaiseCleanly:
             pytest.fail("OverflowError escaped resolve_auto_promote_overrides")
         except ValueError:
             pass
+
+
+class TestNonFiniteEffectSizeViaConfigOrSettingsIsRefused:
+    """``min_effect_size``'s only non-finite guard reachable from
+    config.yaml or the settings store is :meth:`AutoPromotePolicy
+    .__post_init__`'s own ``math.isfinite`` check.
+
+    The resolver's env branch has its own explicit ``isfinite`` check
+    (because ``parse_finite_float`` promises only to normalize
+    ``OverflowError``, not to reject every non-finite result) — but the
+    ``settings``/``config_defaults`` branches do a bare ``float(...)``
+    with no such check, and a NaN or +-inf value from either source
+    compares ``False`` against ``min_effect_size < DEFAULT_MIN_EFFECT_SIZE``
+    (``float("nan") < x`` and ``float("inf") < x`` are both ``False``), so
+    the "looser than the manual floor" rule alone would silently *accept*
+    it. Only the dedicated ``isfinite`` check in ``__post_init__`` catches
+    this for a value that never passed through the resolver's env-only
+    guard — a config.yaml ``min_effect_size: .nan`` (YAML parses this to
+    ``float("nan")``) or a hand-edited/non-strict-writer settings.json
+    reach construction exactly this way.
+    """
+
+    @pytest.mark.parametrize("raw", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_settings_value_is_refused_at_construction(
+        self, raw: float
+    ) -> None:
+        resolved = resolve_auto_promote_overrides(
+            settings={AUTO_PROMOTE_MIN_EFFECT_SIZE_SETTING: raw},
+            env={},
+        )
+        with pytest.raises(ValueError, match="finite"):
+            AutoPromotePolicy(
+                min_sample_size=resolved["min_sample_size"],
+                min_effect_size=resolved["min_effect_size"],
+            )
+
+    @pytest.mark.parametrize("raw", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_config_yaml_value_is_refused_at_construction(
+        self, raw: float
+    ) -> None:
+        resolved = resolve_auto_promote_overrides(
+            config_defaults={"min_effect_size": raw},
+            env={},
+        )
+        with pytest.raises(ValueError, match="finite"):
+            AutoPromotePolicy(
+                min_sample_size=resolved["min_sample_size"],
+                min_effect_size=resolved["min_effect_size"],
+            )

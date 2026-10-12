@@ -6333,9 +6333,19 @@
             const disabledAttr = disabled ? 'disabled' : '';
             const ariaLabel = `New value for ${s.name}`;
             if (s.enum) {
-                const options = s.enum.map(v =>
-                    `<option value="${escHtml(v)}" ${String(currentValue) === v ? 'selected' : ''}>${escHtml(v)}</option>`
-                ).join('');
+                const refusedValues = new Set(s.refused_values || []);
+                const options = s.enum.map(v => {
+                    // A refused member (e.g. "commit" before auto-demotion
+                    // ships) stays in the dropdown so it still documents
+                    // itself as a real future option, but every save of it
+                    // would itself be refused -- disable the option instead
+                    // of offering a value the next click only bounces back
+                    // as a validation error, and surface why via title.
+                    const refusedAttrs = refusedValues.has(v)
+                        ? ` disabled title="${escHtml(s.refused_reason || 'not available yet')}"`
+                        : '';
+                    return `<option value="${escHtml(v)}" ${String(currentValue) === v ? 'selected' : ''}${refusedAttrs}>${escHtml(v)}</option>`;
+                }).join('');
                 return `<select id="${escHtml(inputId)}" aria-label="${escHtml(ariaLabel)}" ${disabledAttr}>${options}</select>`;
             }
             if (s.type === 'bool') {

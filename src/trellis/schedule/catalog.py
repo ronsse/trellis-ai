@@ -225,8 +225,10 @@ JOB_CATALOG: Mapping[str, JobSpec] = _build_catalog(
                 "configuration error until a follow-up ships "
                 "auto-demotion. Deterministic — no LLM calls, no spend. "
                 "This job's effect today is purely evidence-gathering: "
-                "one LEARNING_AUTO_PROMOTE_EVALUATED event per run naming "
-                "what it would have promoted."
+                "every run emits at least one LEARNING_AUTO_PROMOTE_EVALUATED "
+                "event, naming what it would have promoted when it "
+                "completes evaluation, or the refusal/failure when it "
+                "does not."
             ),
         ),
         # -- Trellis-native manual-only jobs: cadence=None by default, --

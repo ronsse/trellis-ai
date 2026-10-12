@@ -112,11 +112,10 @@ class TestCatalogMembership:
         )
 
     def test_candidate_auto_promote_mode_refuses_commit(self) -> None:
-        """Pins the declarative refusal :func:`validate_value` enforces
-        (follow-up C / gate-861b): ``commit`` stays a legal enum member
-        (it documents a real future value) but is named in
-        ``refused_values`` with a ``refused_reason`` an operator can act
-        on.
+        """Pins the declarative refusal :func:`validate_value` enforces:
+        ``commit`` stays a legal enum member (it documents a real future
+        value) but is named in ``refused_values`` with a ``refused_reason``
+        an operator can act on.
         """
         spec = get_setting("learning.candidate_auto_promote.mode")
         assert spec is not None
@@ -409,15 +408,14 @@ class TestLookupHelpers:
 
 
 class TestCandidateAutoPromoteFloorsMatchThePolicyConstants:
-    """gate-861 round 2, mutant M4: the registry's ``minimum=`` for
-    ``learning.candidate_auto_promote.min_distinct_sessions`` was changed
-    from the symbolic ``MIN_DISTINCT_SESSIONS_FLOOR`` to a hardcoded
-    literal ``1`` and nothing here noticed — a looser registry floor lets
-    a settings write *accept* a value that
-    ``LearningCandidateAutoPromotePolicy.__post_init__`` (which checks the
-    real constant, not the registry) then refuses at construction, the
-    exact "accepted by settings, refused by the job" gap follow-up K
-    describes. Pin every registry ``minimum`` for this family against the
+    """A registry ``minimum=`` for this family that drifts from its
+    production constant (e.g. a hardcoded literal standing in for
+    ``MIN_DISTINCT_SESSIONS_FLOOR``) would go unnoticed here while
+    creating an "accepted by settings, refused by the job" gap: a
+    settings write would *accept* a value that
+    ``LearningCandidateAutoPromotePolicy.__post_init__`` (which checks
+    the real constant, not the registry) then refuses at construction.
+    Pin every registry ``minimum`` for this family against the
     production constant it is supposed to mirror, not against its
     current numeric value, so a future deliberate floor change doesn't
     require touching this test.

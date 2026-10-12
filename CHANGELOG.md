@@ -111,8 +111,17 @@ All notable changes to Trellis will be documented in this file.
     description. **`mode="commit"` raises `ConfigError` at construction**
     — "commit mode is not available until auto-demotion ships" — on
     every resolution path (CLI, settings, env); `report_only` is the
-    only mode that can run, and `--dry-run` is accepted but has no
-    further effect since there is nothing else to force to report-only.
+    only mode that can actually run. `--dry-run` forces this run's
+    *effective* mode to `report_only` before the policy is constructed,
+    so a stored or env-configured `commit` never reaches the refusal —
+    the run still truthfully reports what was configured: the CLI
+    output, the emitted event, and the Loop Health row all carry a
+    separate `configured_mode` (the pre-`--dry-run` value) alongside the
+    `mode`/`effective_mode` that actually ran, so "commit is configured"
+    and "commit ran" stay distinguishable. The Settings UI does not
+    offer `commit` as a selectable value for this setting at all, and the
+    settings route reports it under `refused_values`/`refused_reason`
+    rather than letting a client learn the refusal only by submitting it.
   - The pre-existing tuner-side `trellis.learning.tuners.auto_promote.AutoPromotePolicy`
     (`enabled`, `min_sample_size`, `min_effect_size`) is now also a
     `SETTINGS_REGISTRY` family (`learning.auto_promote.*`). `resolve_auto_promote_overrides`
@@ -138,10 +147,23 @@ All notable changes to Trellis will be documented in this file.
     captured on each citation, never a pack or run id. A citation with
     no captured session id cannot count toward `min_distinct_sessions`
     and is reported separately as `sessionless_citations`.
-  - One `LEARNING_AUTO_PROMOTE_EVALUATED` event per run that actually
-    evaluates candidates, carrying a per-candidate disposition, the
-    would_promote/already_promoted/promoted/ineligible counts, and the
-    policy snapshot that produced them. `report_to_dict` adds
+  - Every invocation of this command emits exactly one
+    `LEARNING_AUTO_PROMOTE_EVALUATED` event, whatever it did. A completed
+    run carries a per-candidate disposition, the
+    would_promote/already_promoted/promoted/ineligible counts, the
+    policy snapshot, and an `outcome` of `"ok"` (or `"degraded"` if a
+    candidate was skipped for having no usable id). A run that exits
+    *before* reaching evaluation — a missing/malformed `--candidates`
+    file or a top-level shape error (exit 2), a non-finite env override
+    (exit 1), or a refused `mode=commit` without `--dry-run` (exit 5,
+    `ConfigError`) — still emits one event, with `outcome: "refused"`
+    (the `ConfigError` case) or `outcome: "failed"` (everything else)
+    and an `error: {type, message}`, never zero events: a silent exit
+    would otherwise be indistinguishable from "this job never ran" in
+    `loop_health.py`, whose `last_status` now derives from this
+    `outcome` field (falling back to the old skipped-based rule for an
+    event recorded before the field existed) instead of always reading
+    "ok" off the mere presence of an event. `report_to_dict` adds
     `already_promoted_count` alongside `would_promote_count`.
     `compute_agreement_metric` compares this policy's `would_promote`
     dispositions against later human Review-queue decisions
@@ -155,18 +177,15 @@ All notable changes to Trellis will be documented in this file.
     than leaving a reader to infer it from an un-explained constant.
     The `loop_health` panel gains an eighth row,
     `learning_candidate_auto_promote` (`actuates=False`: nothing it does
-    writes without a human in the loop today). A run that exits before
-    reaching evaluation — a missing/malformed `--candidates` file
-    (exit 2) or a refused `mode=commit` (exit 5, `ConfigError`) — emits
-    zero events, not one; "one event per run" describes a run that
-    evaluates candidates, not every invocation of the command.
+    writes without a human in the loop today), whose `last_status` also
+    reads `"stale"` once the job's known daily cadence
+    (`auto-promote-candidates` in the job catalog) has had a tick with
+    no new run since.
   - `trellis curate auto-promote-candidates` (job catalog:
-    `auto-promote-candidates`, nightly). A missing `--candidates` file or
-    one that isn't valid JSON now fails with a clean `BadParameter`
-    message instead of a raw traceback; a `--candidates` file that *is*
-    valid JSON but not an object (e.g. a top-level list) still raises an
-    unhandled `AttributeError` (exit 1) — that shape is not covered by
-    this fix.
+    `auto-promote-candidates`, nightly). A missing `--candidates` file,
+    one that isn't valid JSON, or one whose top level isn't a JSON
+    object (e.g. a bare list) all fail with a clean `BadParameter`
+    message (exit 2) instead of a raw traceback.
   - The Precedents tab's empty state names the real promotion path
     (`trellis curate promote-learning`) and, conditionally on whether
     `auto-promote-candidates` is scheduled, that the job reports but
@@ -175,6 +194,22 @@ All notable changes to Trellis will be documented in this file.
     The handler for that verb had no writer since the initial commit;
     removing the dead enum members and `PrecedentUpdateHandler` closes
     that gap rather than leaving an operation nothing ever requests.
+  - The Settings UI never offers `commit` as a selectable value for
+    `learning.candidate_auto_promote.mode`: `GET /api/v1/settings` adds
+    `refused_values`/`refused_reason` to this setting's row (so a client
+    learns the refusal from the schema, not by submitting it and reading
+    a 400), and `renderValueInput` disables the refused option in the
+    dropdown instead of letting it be picked and then rejected. The save
+    path's "must be one of" validation error also no longer lists
+    `commit` among the values it suggests trying instead.
+  - `AutoPromotePolicy.__post_init__`'s effect-size floor check rejects
+    a non-finite `min_effect_size` (`NaN`/`inf`) regardless of whether it
+    arrived via env, the settings store, or `config.yaml` (a YAML
+    `.nan`/`.inf` literal parses straight to a non-finite `float`) — a
+    non-finite value compares `False` against every bound the "looser
+    than the manual floor" check uses, so without the dedicated
+    `isfinite` check it would construct successfully and let every
+    proposal clear the gate.
 - **Loop health panel (e167): `GET /api/v1/loops`.** Answers "is each
   curation / learning loop actually doing anything?" for all seven loops
   (noise demotion, advisory generation, advisory fitness,

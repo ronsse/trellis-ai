@@ -245,10 +245,10 @@ def _build_auto_promote_policy() -> AutoPromotePolicy:
     ``min_effect_size`` on top, via :func:`resolve_auto_promote_overrides` —
     the one resolver every caller of :class:`AutoPromotePolicy` must route
     through. ``require_baseline`` and the post-promotion monitoring knobs
-    are config.yaml-only; they are not registered settings (the brief for
-    this PR scopes registration to the three tuner knobs named in the
-    plan).  A settings-file read failure degrades to config.yaml/defaults
-    alone — advisory, like :func:`trellis.core.write_config.resolve_write_behaviour`.
+    are config.yaml-only; they are not registered settings — only the
+    three tuner knobs above are. A settings-file read failure degrades to
+    config.yaml/defaults alone — advisory, like
+    :func:`trellis.core.write_config.resolve_write_behaviour`.
     Construction (not this function) is what rejects a resolved value
     looser than the manual-promotion floors — see
     :meth:`AutoPromotePolicy.__post_init__`.

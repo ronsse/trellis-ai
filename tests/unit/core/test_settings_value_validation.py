@@ -307,3 +307,23 @@ class TestRefusedValues:
         spec = get_setting("learning.candidate_auto_promote.mode")
         assert spec is not None
         assert validate_value(spec, "report_only") == "report_only"
+
+    def test_an_unrelated_invalid_value_error_does_not_list_a_refused_member(
+        self,
+    ) -> None:
+        """``_check_bounds``'s "must be one of" message is the only
+        listing of this enum's legal values an operator who fat-fingered
+        something else (e.g. ``"bogus"``) ever sees -- it must not name
+        ``"commit"`` as an allowed option when every attempt to actually
+        set it is itself refused. The enum-membership path and the
+        refused-value path are different ``raise`` sites (``_check_bounds``
+        fires first, before ``refused_values`` is even consulted), so this
+        is not redundant with ``test_candidate_auto_promote_mode_commit_is_refused``
+        above.
+        """
+        spec = get_setting("learning.candidate_auto_promote.mode")
+        assert spec is not None
+        with pytest.raises(ValueError, match="one of") as exc_info:
+            validate_value(spec, "bogus")
+        assert "commit" not in str(exc_info.value)
+        assert "report_only" in str(exc_info.value)
