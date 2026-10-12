@@ -16,15 +16,18 @@ from unittest.mock import MagicMock
 
 import pytest
 import typer
+from structlog.testing import capture_logs
 from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
 from tests.document_recency import fake_document_clock
 from tests.recovery_command import expected_recovery
+from tests.structlog_isolation import clear_cached_logger_proxies
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.errors import BackendNotInstalledError
 from trellis.llm import LLMResponse, Message
 from trellis.llm.routing import LLMConsumer
+from trellis.logging import configure_stderr_logging
 from trellis.ops.capture_health import check_capture_health, is_capture_surface
 from trellis.ops.write_health import WriteHealthReport, summarize_write_health
 from trellis.schemas.advisory import (
@@ -1758,6 +1761,57 @@ class TestWorkerCurateLoop:
             worker.run_curation_cycle = original  # type: ignore[assignment]
 
         assert len(calls) == 3
+
+    def test_registry_warning_logs_once_per_process_not_once_per_cycle(
+        self,
+        tmp_path: Path,
+        temp_stores: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A config.yaml parse warning fires once per process, not per cycle.
+
+        A top-level ``stores:`` block is deprecated and makes
+        ``StoreRegistry.from_config_dir`` log
+        ``registry_config_flat_stores_removed`` once per call. Each curate
+        cycle used to rebuild a *second* registry (via
+        ``trellis_cli.config.get_data_dir``) to resolve its advisory store,
+        re-parsing config.yaml and re-logging that warning every cycle. The
+        fix resolves ``stores_dir`` off the one cached registry instead, so
+        across ``max_cycles=3`` the warning fires exactly once — from
+        whichever call first builds the registry, not once per cycle.
+        """
+        _write_config(tmp_path / "config", "stores: {}\n")
+        _seed_promote_signal(temp_stores)
+
+        monkeypatch.setenv("TRELLIS_LOG_LEVEL", "WARNING")
+        configure_stderr_logging()
+        clear_cached_logger_proxies()
+        try:
+            with capture_logs() as cap_logs:
+                worker._run_curate_loop(
+                    interval=1,
+                    output_dir=tmp_path / "review",
+                    days=30,
+                    dry_run=False,
+                    skip_noise_tags=False,
+                    skip_advisories=False,
+                    skip_learning=False,
+                    no_meta_trace=True,
+                    output_format="json",
+                    max_cycles=3,
+                    shutdown=worker._ShutdownFlag(),
+                )
+        finally:
+            monkeypatch.setenv("TRELLIS_LOG_LEVEL", "CRITICAL")
+            configure_stderr_logging()
+            clear_cached_logger_proxies()
+
+        occurrences = [
+            e
+            for e in cap_logs
+            if e.get("event") == "registry_config_flat_stores_removed"
+        ]
+        assert len(occurrences) == 1, occurrences
 
     def test_loop_stops_on_shutdown_flag(
         self, tmp_path: Path, temp_stores: StoreRegistry

@@ -231,3 +231,33 @@ def test_plane_blocks_alone_do_not_warn(tmp_path: Path) -> None:
     assert warnings == []
     assert registry._resolve_backend("graph")[0] == "neo4j"
     assert registry._resolve_backend("trace")[0] == "postgres"
+
+
+# -- A non-string ``data_dir`` refuses, instead of a raw TypeError -------
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["5", "[/a, /b]", "{a: 1}"],
+    ids=["int", "list", "mapping"],
+)
+def test_a_non_string_data_dir_refuses_and_names_the_key(
+    tmp_path: Path, value: str
+) -> None:
+    """``Path(data["data_dir"])`` used to raise a raw ``TypeError`` for any
+    YAML scalar/collection other than a string — an int, a list, a mapping —
+    naming neither ``data_dir`` nor the file. It now raises this module's own
+    ``ConfigError`` before ``Path(...)`` ever sees the wrong type.
+    """
+    exc = _refusal(tmp_path, f"data_dir: {value}\n")
+
+    assert exc.setting == "data_dir"
+    assert "data_dir" in str(exc)
+    assert str(tmp_path / "config" / "config.yaml") in str(exc)
+
+
+def test_a_string_data_dir_still_loads(tmp_path: Path) -> None:
+    custom = tmp_path / "custom-data"
+    registry = _load(tmp_path, f"data_dir: {custom}\n")
+
+    assert registry.stores_dir == custom / "stores"
