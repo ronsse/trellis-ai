@@ -245,14 +245,25 @@ def test_every_learning_component_id_is_in_the_governing_roster() -> None:
 
 
 def test_the_governing_key_roster_matches_the_live_constants() -> None:
-    """The literals in ``immutable_core`` equal the ones the loops use.
+    """The literals in ``immutable_core`` include the ones the loops use.
 
-    :data:`GOVERNING_KEYS` spells its four ids as literals rather than
-    importing them, because ``trellis.mutate`` sits *below*
+    :data:`GOVERNING_KEYS` spells its four whole-loop ids as literals
+    rather than importing them, because ``trellis.mutate`` sits *below*
     ``trellis.learning`` in the import order and this module is not worth
     inverting that for. This is the other half of that trade: the
     duplication is checked by importing the real constants here, where a
     test may depend on anything.
+
+    A subset check, not equality: :data:`GOVERNING_KEYS` also carries
+    settings-registry leaf keys that the AST scan collects by
+    shape but that have no ``PARAM_COMPONENT_ID``-style live constant to
+    import and compare against. Equality would make every such addition
+    fail this test alongside the one it is meant to police; the roster's
+    completeness in the *other* direction — nothing stale, nothing
+    missing versus the scan — is
+    :func:`test_every_learning_component_id_is_in_the_governing_roster`'s
+    job, not this one's. This test's only claim is that these four never
+    drift from the modules that own them.
     """
     from trellis.learning.domain_normalization import (
         PARAM_COMPONENT_ID as DOMAIN_NORMALIZATION,
@@ -270,7 +281,7 @@ def test_the_governing_key_roster_matches_the_live_constants() -> None:
         SCHEMA_EVOLUTION,
         LEARNING_SCORING_COMPONENT,
         TAG_EVOLUTION,
-    } == GOVERNING_KEYS
+    } <= GOVERNING_KEYS
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
+from tests.recovery_command import expected_recovery
 from trellis.errors import DegradedStoreWriteError, StaleStoreWriteError
 from trellis.schemas.advisory import (
     Advisory,
@@ -465,7 +466,7 @@ class TestCorruptFileIsPreservedNotOverwritten:
 
         assert excinfo.value.code == "DEGRADED_STORE_WRITE"
         assert excinfo.value.path == str(path)
-        assert excinfo.value.recovery == f"mv {path} {path}.corrupt"
+        assert excinfo.value.recovery == expected_recovery(path)
 
     def test_a_refused_write_does_not_mutate_the_store_either(
         self, tmp_path: Path
@@ -622,9 +623,9 @@ class TestCorruptFileIsPreservedNotOverwritten:
         with pytest.raises(DegradedStoreWriteError) as excinfo:
             store.put(_advisory())
 
-        assert excinfo.value.recovery == f"mv {path} {path}.corrupt"
+        assert excinfo.value.recovery == expected_recovery(path)
         assert str(path) in str(excinfo.value)
-        assert f"mv {path}" in str(excinfo.value)
+        assert expected_recovery(path) in str(excinfo.value)
         assert store.degradation is not None
         assert store.degradation.to_dict()["recovery"] == excinfo.value.recovery
 
@@ -654,7 +655,7 @@ class TestCorruptFileIsPreservedNotOverwritten:
         assert lines[0]["log_level"] == "error"
         assert lines[0]["path"] == str(path)
         assert lines[0]["reason"] == "malformed_json"
-        assert lines[0]["recovery"] == f"mv {path} {path}.corrupt"
+        assert lines[0]["recovery"] == expected_recovery(path)
 
     def test_a_clean_load_says_nothing_alarming(self, tmp_path: Path) -> None:
         """A warning on every load would train the reader to skip it."""
@@ -1273,16 +1274,47 @@ class TestTheRecoveryCommandRuns:
             f"{path}.corrupt",
         ]
 
-    def test_an_ordinary_path_is_left_alone(self, tmp_path: Path) -> None:
-        """``shlex.quote`` must not start quoting every ordinary path.
+    def test_the_recovery_command_survives_a_metacharacter_without_a_space(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bracket is quoted on its own, not because a space came with it.
 
-        The command is pasted by hand and read by humans; gratuitous quotes
-        on the common case would be a regression in the thing this string
-        exists for.
+        ``[`` opens a glob, so an unquoted ``d[staging]/…`` can expand to
+        another path. The refused-write case above pairs its bracket with a
+        space, so a ``recovery`` that quoted only on a space would pass it;
+        this one catches that rewrite. The path is relative, after
+        ``chdir``, because under a ``--basetemp`` holding a space an absolute
+        ``tmp_path`` would be quoted for the space and the bracket would go
+        untested.
         """
-        path = tmp_path / "advisories.json"
+        monkeypatch.chdir(tmp_path)
+        data_dir = Path("d[staging]")
+        data_dir.mkdir()
+        path = data_dir / "advisories.json"
         path.write_text("{ broken", encoding="utf-8")
         store = AdvisoryStore(path)
 
         assert store.degradation is not None
-        assert store.degradation.recovery == f"mv {path} {path}.corrupt"
+        assert store.degradation.recovery == expected_recovery(path)
+
+    def test_an_ordinary_path_is_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``shlex.quote`` must not start quoting every ordinary path.
+
+        The command is pasted by hand and read by humans; gratuitous quotes
+        on the common case would be a regression in the thing this string
+        exists for. A literal on a relative path, after ``chdir``: under a
+        ``--basetemp`` holding a space, an absolute ``tmp_path`` needs
+        quoting, so a comparison with ``expected_recovery`` would quote both
+        sides and pass without testing the unquoted case.
+        """
+        monkeypatch.chdir(tmp_path)
+        path = Path("advisories.json")
+        path.write_text("{ broken", encoding="utf-8")
+        store = AdvisoryStore(path)
+
+        assert store.degradation is not None
+        assert (
+            store.degradation.recovery == "mv advisories.json advisories.json.corrupt"
+        )

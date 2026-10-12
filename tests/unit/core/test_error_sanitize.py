@@ -2,18 +2,57 @@
 
 from __future__ import annotations
 
+import json
+import time
+from importlib import import_module
+from typing import NoReturn
+
 import pytest
 import yaml
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from trellis.core.error_sanitize import (
+    DEFAULT_MAX_LEN,
     SUPPRESSED_MARKER,
+    describe_import_error,
+    describe_json_error,
+    describe_os_error,
+    describe_validation_error,
     describe_yaml_error,
     sanitize_error_message,
     sanitized_error_payload,
+    summarize_exception,
 )
+from trellis.errors import StoreError, TrellisError, ValidationError
 
 #: A fake credential planted where PyYAML's ``str(exc)`` would quote it.
 _SENTINEL = "XQ1BR6asQyYAJ6tcK6JnaWKZ"
+
+
+def _filler(length: int) -> str:
+    """``length`` chars of prose: short space-separated words, so no run
+    is 40+ chars and nothing resembles ``@``/``=``/``:`` — safe against
+    every ``_LEAK_PATTERNS`` entry and the long-opaque-token check."""
+    return ("lorem " * (length // 6 + 2))[:length]
+
+
+def _raise_inner_failure() -> NoReturn:
+    inner_message = "inner failure"
+    raise RuntimeError(inner_message)
+
+
+def _raise_store_error_chained_by_context_only() -> NoReturn:
+    """Raise a ``StoreError`` whose ``__context__`` (not ``__cause__``)
+    is set: a bare ``raise`` inside an ``except`` block. ``from None``
+    only silences the traceback printer's chaining note
+    (``__suppress_context__``) to satisfy B904 — it does not clear
+    ``__context__`` itself, which stays set to the inner exception."""
+    try:
+        _raise_inner_failure()
+    except RuntimeError:
+        outer_message = "outer failure"
+        raise StoreError(outer_message, store="pg") from None
 
 
 class TestCleanPassthrough:
@@ -46,6 +85,10 @@ class TestCleanPassthrough:
         msg = "node 01JGME6CE1RJ0S4W5X7Y8Z9ABC has no current version"
         assert sanitize_error_message(msg) == msg
 
+    def test_text_near_the_postgres_row_shape_passes_through(self) -> None:
+        msg = "Key (name) is not indexed"
+        assert sanitize_error_message(msg) == msg
+
 
 class TestSuppression:
     def test_email_suppressed(self) -> None:
@@ -67,6 +110,19 @@ class TestSuppression:
         assert sanitize_error_message("header Authorization: Bearer xyz") == (
             SUPPRESSED_MARKER
         )
+
+    def test_quoted_key_secret_assignment_suppressed(self) -> None:
+        # The shape a JSON body or a repr'd mapping takes: a closing quote
+        # sits between the key name and the ':'/'=' separator, which the
+        # pattern's un-quoted form (`key\s*[=:]`) does not match at all —
+        # this synthetic provider-error shape passed through unsuppressed
+        # before the pattern gained the optional quote.
+        msg = 'provider rejected request: {"api_key": "sk-synthetic-ABCDEF123456"}'
+        assert sanitize_error_message(msg) == SUPPRESSED_MARKER
+
+    def test_quoted_key_secret_assignment_single_quoted_suppressed(self) -> None:
+        msg = "provider error: {'authorization': 'Bearer synthetic-token-xyz'}"
+        assert sanitize_error_message(msg) == SUPPRESSED_MARKER
 
     def test_long_token_run_suppressed(self) -> None:
         token = "A" * 20 + "b1" * 12  # 44-char unbroken run
@@ -127,6 +183,143 @@ class TestSuppression:
             == SUPPRESSED_MARKER
         )
 
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            # ``str(exc)`` of psycopg 3.3 errors from PostgreSQL 16, with
+            # synthetic values. The DETAIL line quotes the offending row.
+            (
+                'duplicate key value violates unique constraint "pair_a_b_key"\n'
+                "DETAIL:  Key (a, b)=(1, synthetic b value) already exists."
+            ),
+            (
+                "duplicate key value violates unique constraint"
+                ' "widget_lower_label"\n'
+                "DETAIL:  Key (lower(label))=(synthetic label) already exists."
+            ),
+            (
+                'insert or update on table "widget" violates foreign key constraint'
+                ' "widget_parent_id_fkey"\n'
+                "DETAIL:  Key (parent_id)=(424242) is not present in table"
+                ' "parent".'
+            ),
+            (
+                'null value in column "label" of relation "widget" violates'
+                " not-null constraint\n"
+                "DETAIL:  Failing row contains (5, synthetic-name-5, null, 1,"
+                " null)."
+            ),
+        ],
+        ids=["unique-composite", "unique-expression", "foreign-key-insert", "not-null"],
+    )
+    def test_postgres_row_values_suppressed(self, msg: str) -> None:
+        assert sanitize_error_message(msg) == SUPPRESSED_MARKER
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            # Neo4j 2025.12 ``str(Neo4jError)`` over Bolt, captured against
+            # Trellis's own constraint DDL with synthetic values (gql_status
+            # 22N79). One per declared constraint label.
+            (
+                "{neo4j_code: Neo.ClientError.Schema.ConstraintValidationFailed} "
+                "{message: Node(0) already exists with label `Node` and "
+                "property `version_id` = 'synthetic-version-dup'} "
+                "{gql_status: 22N79}"
+            ),
+            (
+                "{neo4j_code: Neo.ClientError.Schema.ConstraintValidationFailed} "
+                "{message: Node(1) already exists with label `AliasClaim` and "
+                'property `claim_key` = \'["synthetic-system","synthetic-raw-id"]\'} '
+                "{gql_status: 22N79}"
+            ),
+            # ArcadeDB 26.8.1 over Bolt, raised inside a managed transaction
+            # with the value passed as a bound parameter (as the Bolt store
+            # itself issues writes) against an already-committed duplicate
+            # (gql_status 50N42). The index name carries the label and
+            # property; the record id varies per run. An alias claim key is
+            # the store's JSON array, so that value holds its own brackets.
+            (
+                "{neo4j_code: Neo.ClientError.Transaction.TransactionNotFound} "
+                "{message: Duplicated key [synthetic-version-dup] found on "
+                "index 'Node[version_id]' already assigned to record #1:0} "
+                "{gql_status: 50N42}"
+            ),
+            (
+                "{neo4j_code: Neo.ClientError.Transaction.TransactionNotFound} "
+                '{message: Duplicated key [["synthetic-system","synthetic-raw-id"]] '
+                "found on index 'AliasClaim[claim_key]' already assigned to "
+                "record #9:1} {gql_status: 50N42}"
+            ),
+        ],
+        ids=[
+            "neo4j-node-version-unique",
+            "neo4j-alias-claim-unique",
+            "arcadedb-node-tx",
+            "arcadedb-alias-claim-tx",
+        ],
+    )
+    def test_bolt_duplicate_constraint_values_suppressed(self, msg: str) -> None:
+        assert sanitize_error_message(msg) == SUPPRESSED_MARKER
+
+    def test_already_exists_without_quoted_value_passes_through(self) -> None:
+        # The Neo4j wording up to the property name, with no quoted value.
+        msg = (
+            "entity_type 'precedent' already exists with label `Tag` and "
+            "property `name` is already set"
+        )
+        assert sanitize_error_message(msg) == msg
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            # Neo4j 2025.12 ``str(Neo4jError)``, raised by the stores' own
+            # startup schema DDL (``CREATE CONSTRAINT ... IS UNIQUE``) run over
+            # two synthetic nodes that already duplicate the value (gql_status
+            # 50N11). Distinct from the write-time violation above. The two
+            # cases differ in label and property; the claim key is the store's
+            # JSON array.
+            (
+                "{neo4j_code: Neo.DatabaseError.Schema.ConstraintCreationFailed} "
+                "{message: Unable to create Constraint( "
+                "name='node_version_unique', type='NODE PROPERTY UNIQUENESS', "
+                "schema=(:Node {version_id}) ):\n"
+                "Both Node(0) and Node(1) have the label `Node` and property "
+                "`version_id` = 'synthetic-constraint-dup'. Note that only the "
+                "first found violation is shown.} {gql_status: 50N11} "
+                "{gql_status_description: error: general processing exception - "
+                "constraint creation failed. Unable to create "
+                "'node_version_unique'.}"
+            ),
+            (
+                "{neo4j_code: Neo.DatabaseError.Schema.ConstraintCreationFailed} "
+                "{message: Unable to create Constraint( "
+                "name='alias_claim_unique', type='NODE PROPERTY UNIQUENESS', "
+                "schema=(:AliasClaim {claim_key}) ):\n"
+                "Both Node(2) and Node(3) have the label `AliasClaim` and "
+                'property `claim_key` = \'["synthetic-system","synthetic-raw-id"]\'. '
+                "Note that only the first found violation is shown.} "
+                "{gql_status: 50N11} {gql_status_description: error: general "
+                "processing exception - constraint creation failed. Unable to "
+                "create 'alias_claim_unique'.}"
+            ),
+        ],
+        ids=["node-version-unique", "alias-claim-unique"],
+    )
+    def test_neo4j_constraint_creation_over_duplicates_suppressed(
+        self, msg: str
+    ) -> None:
+        assert sanitize_error_message(msg) == SUPPRESSED_MARKER
+
+    def test_constraint_creation_without_quoted_value_passes_through(self) -> None:
+        # The "have the label" wording up to the property name, with no
+        # quoted value — the near-miss control for the pattern above.
+        msg = (
+            "Both Node(0) and Node(1) have the label `Node` and property "
+            "`version_id` set but no single violation could be reported"
+        )
+        assert sanitize_error_message(msg) == msg
+
 
 class TestBounding:
     def test_long_clean_message_truncated(self) -> None:
@@ -138,6 +331,68 @@ class TestBounding:
     def test_custom_max_len(self) -> None:
         out = sanitize_error_message("abcdef", max_len=3)
         assert out == "abc…[truncated]"
+
+    def test_max_len_zero_truncates_to_empty(self) -> None:
+        assert sanitize_error_message("abcdef", max_len=0) == "…[truncated]"
+
+    @pytest.mark.parametrize("text", ["abcdef", "owned by jane.doe@example.com"])
+    @pytest.mark.parametrize("max_len", [-1, -500, -501])
+    def test_negative_max_len_raises(self, text: str, max_len: int) -> None:
+        # Every negative value raises, not only [-500, -1] where
+        # text[:max_len] outruns the scanned window, and a heuristic match
+        # does not turn the error into the marker.
+        with pytest.raises(ValueError, match="max_len"):
+            sanitize_error_message(text, max_len=max_len)
+
+
+class TestScanWindowBound:
+    """``sanitize_error_message`` scans ``max_len`` plus a fixed margin, not
+    the whole text: the email and credential-URL patterns backtrack
+    quadratically over a long run of word characters."""
+
+    def test_long_adversarial_run_sanitizes_well_under_a_second(self) -> None:
+        # An unbounded scan takes ~26 s on this input and the bounded one a
+        # few milliseconds, so the 1 s bound holds on a loaded runner.
+        text = "x" * 100_000 + "://"
+        start = time.perf_counter()
+        out = sanitize_error_message(text)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, f"took {elapsed:.3f}s — the scan is not bounded"
+        # The 100k-char run is itself a long opaque token either way.
+        assert out == SUPPRESSED_MARKER
+
+    @pytest.mark.parametrize(
+        "sensitive",
+        [
+            # The closing "@" lands ~170 chars past the cut.
+            "postgresql://svc_reader:"
+            + "%21".join(["Kd8sVq2m"] * 15)
+            + "@db.example.internal/x",
+            # FROM lands ~120 chars past the cut.
+            (
+                "SELECT id, display_name, email_address, phone_number, street_address,"
+                " city, region, postal_code, country_code, created_at, updated_at"
+                " FROM customers"
+            ),
+            # 40 of the token's 60 chars fall past the cut.
+            "Zq9xWv3Lk8" * 6,
+        ],
+        ids=["credential-url", "sql-column-list", "opaque-token"],
+    )
+    def test_secret_straddling_the_cut_is_suppressed(self, sensitive: str) -> None:
+        # Starts 20 chars before max_len, so only its pattern's tail is past it.
+        text = _filler(DEFAULT_MAX_LEN - 21) + " " + sensitive + " " + _filler(50)
+        assert sanitize_error_message(text) == SUPPRESSED_MARKER
+
+    def test_leak_wholly_beyond_the_window_passes_through_clean(self) -> None:
+        text = _filler(DEFAULT_MAX_LEN + 600) + " alice@example.com"
+        out = sanitize_error_message(text)
+        assert out == text[:DEFAULT_MAX_LEN] + "…[truncated]"
+
+    def test_window_grows_with_max_len(self) -> None:
+        # Past the default window, but visible under this max_len.
+        text = _filler(DEFAULT_MAX_LEN * 3) + " alice@example.com"
+        assert sanitize_error_message(text, max_len=len(text)) == SUPPRESSED_MARKER
 
 
 class TestPayload:
@@ -157,6 +412,149 @@ class TestPayload:
         # the message does not.
         assert payload["error_type"] == "RuntimeError"
         assert payload["message"] == SUPPRESSED_MARKER
+
+
+class TestSummarizeException:
+    """``summarize_exception`` — the structured shape audit/telemetry
+    events store for a caught error. Distinct from ``sanitized_error_payload``
+    above (a CLI/API envelope): an immutable audit event also gets
+    ``error_code``/``constraint`` as separate, filterable fields, and a
+    ``TrellisError``'s own ``.message`` is kept whole rather than cut to
+    one line, since Trellis composes that text itself.
+    """
+
+    def test_trellis_error_keeps_its_own_message_whole(self) -> None:
+        exc = TrellisError("line one\nline two", code="my_code")
+        assert summarize_exception(exc) == {
+            "error_type": "TrellisError",
+            "error_code": "my_code",
+            "message": "line one\nline two",
+        }
+
+    def test_generic_exception_keeps_only_the_first_line(self) -> None:
+        summary = summarize_exception(RuntimeError("line one\nline two"))
+        assert summary["message"] == "line one"
+        assert "line two" not in summary["message"]
+
+    def test_generic_exception_masks_a_quoted_value_on_its_first_line(self) -> None:
+        exc = RuntimeError('column "secret_value" rejected')
+        assert summarize_exception(exc)["message"] == 'column "..." rejected'
+
+    def test_error_code_prefers_sqlstate_over_sqlite_errorname_and_code(self) -> None:
+        class _FakeError(RuntimeError):
+            sqlstate = "23505"
+            sqlite_errorname = "SQLITE_READONLY"
+            code = "some_code"
+
+        assert summarize_exception(_FakeError("x"))["error_code"] == "23505"
+
+    def test_error_code_prefers_sqlite_errorname_over_code(self) -> None:
+        class _FakeError(RuntimeError):
+            sqlite_errorname = "SQLITE_READONLY"
+            code = "some_code"
+
+        assert summarize_exception(_FakeError("x"))["error_code"] == "SQLITE_READONLY"
+
+    def test_error_code_prefers_code_over_errno(self) -> None:
+        class _FakeError(RuntimeError):
+            code = "some_code"
+            errno = 5
+
+        assert summarize_exception(_FakeError("x"))["error_code"] == "some_code"
+
+    def test_error_code_falls_back_to_errno_last(self) -> None:
+        assert (
+            summarize_exception(OSError(2, "No such file or directory"))["error_code"]
+            == "2"
+        )
+
+    def test_error_code_none_when_nothing_applies(self) -> None:
+        assert summarize_exception(RuntimeError("plain"))["error_code"] is None
+
+    def test_constraint_key_absent_when_no_diag(self) -> None:
+        assert "constraint" not in summarize_exception(RuntimeError("plain"))
+
+    def test_constraint_key_present_when_diag_names_one(self) -> None:
+        class _Diag:
+            constraint_name = "users_email_key"
+
+        class _FakeError(RuntimeError):
+            diag = _Diag()
+
+        assert summarize_exception(_FakeError("x"))["constraint"] == "users_email_key"
+
+    def test_store_error_is_treated_as_a_trellis_error(self) -> None:
+        exc = StoreError("backend down", store="pg")
+        summary = summarize_exception(exc)
+        assert summary["error_type"] == "StoreError"
+        assert summary["message"] == "backend down"
+
+    def test_validation_error_s_default_code_survives(self) -> None:
+        summary = summarize_exception(ValidationError("bad field"))
+        assert summary["error_code"] == "VALIDATION_ERROR"
+
+    def test_empty_text_yields_an_empty_message_not_a_crash(self) -> None:
+        """S8 (R3): ``text.splitlines()`` on an empty string is ``[]``,
+        so the ``if text else ""`` guard is load-bearing — a bare
+        ``RuntimeError()`` (``str(exc) == ""``) must not raise
+        ``IndexError`` out of ``summarize_exception``."""
+        assert summarize_exception(RuntimeError())["message"] == ""
+
+    def test_generic_branch_suppresses_an_unquoted_dsn(self) -> None:
+        """S11 (R3): the generic branch's ``sanitize_error_message`` call
+        is load-bearing on its own, separately from ``_mask_quoted`` — an
+        unquoted credential (a DSN with no surrounding quotes) in a
+        foreign exception's first line must still be suppressed."""
+        text = "connect postgresql://svc_user:s3cr3t@db.internal/trellis failed"
+        assert summarize_exception(RuntimeError(text))["message"] == SUPPRESSED_MARKER
+
+    def test_cause_key_absent_when_nothing_is_chained(self) -> None:
+        assert "cause" not in summarize_exception(RuntimeError("plain"))
+
+    def test_cause_key_absent_when_only_context_is_set(self) -> None:
+        """A bare ``raise`` inside an ``except`` block sets the implicit
+        ``__context__`` but leaves ``__cause__`` ``None`` (the helper's
+        ``from None`` only silences the traceback printer, per its own
+        docstring), and ``summarize_exception`` must not confuse the
+        two."""
+        captured: list[BaseException] = []
+        try:
+            _raise_store_error_chained_by_context_only()
+        except StoreError as caught:
+            captured.append(caught)
+        exc = captured[0]
+        assert exc.__cause__ is None
+        assert exc.__context__ is not None
+
+        assert "cause" not in summarize_exception(exc)
+
+    def test_cause_summarized_one_level_from_a_chained_driver_error(self) -> None:
+        """A ``StoreError`` wrapping a psycopg-shaped deadlock records the
+        cause's SQLSTATE, first-line message and constraint — one level
+        only, read from ``__cause__``, never recursing further."""
+
+        class _Diag:
+            constraint_name = "orders_pkey"
+
+        class _FakePsycopgError(RuntimeError):
+            sqlstate = "40P01"
+            diag = _Diag()
+
+        cause = _FakePsycopgError(
+            "deadlock detected\nDETAIL: Process 123 blocked by process 456."
+        )
+        exc = StoreError("Purge of node n1 failed: DeadlockDetected", store="graph")
+        exc.__cause__ = cause
+
+        summary = summarize_exception(exc)
+        assert summary["error_type"] == "StoreError"
+        assert summary["message"] == "Purge of node n1 failed: DeadlockDetected"
+        assert summary["cause"] == {
+            "error_type": "_FakePsycopgError",
+            "error_code": "40P01",
+            "message": "deadlock detected",
+            "constraint": "orders_pkey",
+        }
 
 
 class TestDescribeYamlError:
@@ -221,3 +619,110 @@ class TestDescribeYamlError:
         described = describe_yaml_error(exc.value)
         assert described.startswith("a value could not be constructed (")
         assert _SENTINEL.lower() not in described.lower()
+
+
+class TestDescribeOsError:
+    """``describe_os_error`` names strerror/errno/filename, never str(exc)."""
+
+    def test_missing_file_names_strerror_errno_and_path(self, tmp_path) -> None:
+        missing = tmp_path / "does-not-exist" / f"{_SENTINEL}.json"
+        with pytest.raises(OSError) as exc:
+            missing.open()
+        described = describe_os_error(exc.value)
+        assert "errno" in described
+        assert str(missing) in described
+        # The strerror/errno text itself never carries the sentinel; the
+        # path does, and a path Trellis resolved itself is allowed under
+        # the storage and display rule's single-tenant row.
+        assert described == (
+            f"{exc.value.strerror}, errno {exc.value.errno}, path {missing!s}"
+        )
+
+    def test_no_filename_falls_back_to_available_fields(self) -> None:
+        exc = OSError(5, "Input/output error")
+        assert describe_os_error(exc) == "Input/output error, errno 5"
+
+    def test_no_fields_at_all_falls_back_to_type_name(self) -> None:
+        exc = OSError()
+        assert describe_os_error(exc) == "OSError"
+
+
+class TestDescribeJsonError:
+    """``describe_json_error`` names msg/lineno/colno, never the document."""
+
+    def test_malformed_document_is_never_quoted(self) -> None:
+        document = f'{{"key": {_SENTINEL}}}'
+        with pytest.raises(json.JSONDecodeError) as exc:
+            json.loads(document)
+        described = describe_json_error(exc.value)
+        assert _SENTINEL not in described
+        assert described == (
+            f"{exc.value.msg} (line {exc.value.lineno}, column {exc.value.colno})"
+        )
+
+    def test_truncated_document_reports_its_position(self) -> None:
+        with pytest.raises(json.JSONDecodeError) as exc:
+            json.loads('{"a": 1,')
+        described = describe_json_error(exc.value)
+        assert "line" in described
+        assert "column" in described
+
+
+class _SyntheticModel(BaseModel):
+    name: str
+    count: int
+
+
+class TestDescribeValidationError:
+    """``describe_validation_error`` gives loc/type, never pydantic's input_value."""
+
+    def test_input_value_is_never_present(self) -> None:
+        with pytest.raises(PydanticValidationError) as exc:
+            _SyntheticModel.model_validate({"name": _SENTINEL, "count": "not-an-int"})
+        described = describe_validation_error(exc.value)
+        assert _SENTINEL not in described
+        assert "input_value" not in described
+
+    def test_loc_and_type_pairs_are_present(self) -> None:
+        with pytest.raises(PydanticValidationError) as exc:
+            _SyntheticModel.model_validate({"name": "ok", "count": "not-an-int"})
+        described = describe_validation_error(exc.value)
+        assert "count: " in described
+
+    def test_missing_field_reports_its_loc(self) -> None:
+        with pytest.raises(PydanticValidationError) as exc:
+            _SyntheticModel.model_validate({"count": 1})
+        described = describe_validation_error(exc.value)
+        assert "name: missing" in described
+
+    def test_non_pydantic_exception_falls_back_to_type_name(self) -> None:
+        assert describe_validation_error(ValueError("plain")) == "ValueError"
+
+
+class TestDescribeImportError:
+    """``describe_import_error`` names the module, never str(exc)."""
+
+    def test_module_not_found_says_the_module_was_not_found(self) -> None:
+        """A missing module: ``ModuleNotFoundError``, the module itself
+        does not exist."""
+        with pytest.raises(ModuleNotFoundError) as exc:
+            import_module(f"trellis_test_missing_{_SENTINEL}")
+        described = describe_import_error(exc.value)
+        assert described == f"module {exc.value.name!r} was not found"
+
+    def test_missing_attribute_says_the_import_failed(self) -> None:
+        """``from <module> import <missing name>``: the module exists
+        and imports fine, but the name inside it does not — a plain
+        ``ImportError``, not a ``ModuleNotFoundError``."""
+        with pytest.raises(ImportError) as exc:
+            from os import (  # type: ignore[attr-defined]  # noqa: F401
+                this_name_does_not_exist_in_os,
+            )
+        assert not isinstance(exc.value, ModuleNotFoundError)
+        described = describe_import_error(exc.value)
+        assert described == f"an import from module {exc.value.name!r} failed"
+
+    def test_no_name_falls_back_to_type_name(self) -> None:
+        exc = ImportError("generic failure")
+        exc.name = None
+        assert describe_import_error(exc) == "ImportError"

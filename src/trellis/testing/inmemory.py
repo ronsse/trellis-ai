@@ -48,6 +48,9 @@ def _build_app(registry: StoreRegistry) -> FastAPI:
         yield
 
     app = FastAPI(lifespan=_noop_lifespan)
+    # create_app's exception handlers, so a TrellisError or a validation
+    # error answers here what it answers in production.
+    api_app_module.register_exception_handlers(app)
     app.include_router(version.router)
     app.include_router(admin.router, prefix="/api/v1", tags=["admin"])
     app.include_router(ingest.router, prefix="/api/v1", tags=["ingest"])

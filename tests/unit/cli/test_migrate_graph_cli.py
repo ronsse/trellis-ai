@@ -8,7 +8,9 @@ semantics; this file pins the CLI surface only.
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -16,12 +18,27 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from tests.unreadable_paths import (
+    UNREADABLE_PATH_IDS,
+    UNREADABLE_PATH_SHAPES,
+    UnreadablePathShape,
+    unreadable,
+)
+from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis_cli.admin import admin_app
 from trellis_cli.exit_codes import EXIT_STORE
 
 #: What a real read-only SQLite file raises on a write.
 _READONLY_DB = "attempt to write a readonly database"
+
+#: A PostgreSQL duplicate-key text quoting a synthetic row value, which
+#: ``sanitize_error_message`` suppresses.
+_SYNTHETIC_SECRET = "synthetic-secret-a1b2c3d4e5f6a1b2c3d4e5f6"  # noqa: S105 — test placeholder, not a real credential
+_SYNTHETIC_STORE_ERROR = (
+    'duplicate key value violates unique constraint "node_pkey" DETAIL: '
+    f"Key (external_id)=({_SYNTHETIC_SECRET}) already exists."
+)
 
 
 def _write_sqlite_config(tmp_path: Path, name: str) -> tuple[Path, Path]:
@@ -174,6 +191,123 @@ def test_migrate_graph_invalid_config_shape(tmp_path: Path, runner: CliRunner) -
     assert "graph" in result.output.lower()
 
 
+#: ``--from-config`` files the loader cannot use, and a phrase its refusal
+#: carries. ``None`` makes the path a directory.
+_UNUSABLE_CONFIGS: dict[str, tuple[bytes | None, str]] = {
+    "list": (b"- graph\n- backend\n", "must contain a 'graph:' block"),
+    "scalar": (b"42\n", "must contain a 'graph:' block"),
+    "bad_utf8": (
+        b"graph:\n  backend: sqlite\n  db_path: \xff\n",
+        "is not valid utf-8 text (byte offset 36)",
+    ),
+    "directory": (None, "Is a directory"),
+}
+
+
+@pytest.mark.parametrize("shape", list(_UNUSABLE_CONFIGS))
+def test_migrate_graph_refuses_an_unusable_config(
+    shape: str,
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config file the loader cannot use exits 2 with its reason.
+
+    The path is relative, which keeps each message inside 80 columns so
+    Rich cannot fold it mid-token, and its ``[cfg]`` segment is markup:
+    Rich deletes it unless the message escapes the path.
+    """
+    content, expected = _UNUSABLE_CONFIGS[shape]
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "[cfg]" / "src.yaml"
+    src.parent.mkdir()
+    if content is None:
+        src.mkdir()
+    else:
+        src.write_bytes(content)
+    dst_config, _ = _write_sqlite_config(tmp_path, "dst")
+
+    result = runner.invoke(
+        admin_app,
+        [
+            "migrate-graph",
+            "--from-config",
+            "[cfg]/src.yaml",
+            "--to-config",
+            str(dst_config),
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    output = " ".join(plain(result.output).split())
+    assert "[cfg]/src.yaml" in output
+    assert expected in output
+
+
+@pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+def test_migrate_graph_refuses_an_unreadable_config_path(
+    shape: UnreadablePathShape,
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config path the loader cannot read exits 2 with the OS's reason.
+
+    The loader used to check ``Path.exists()``, which called the first two
+    shapes absent ("Config file not found") and re-raised the third as a
+    traceback. ``unsearchable_parent`` skips where chmod does not restrict
+    the process (root); the shape probes that itself.
+    """
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "[cfg]" / "src.yaml"
+    dst_config, _ = _write_sqlite_config(tmp_path, "dst")
+
+    with unreadable(shape, src):
+        result = runner.invoke(
+            admin_app,
+            [
+                "migrate-graph",
+                "--from-config",
+                "[cfg]/src.yaml",
+                "--to-config",
+                str(dst_config),
+            ],
+        )
+
+    assert result.exit_code == 2, result.output
+    output = " ".join(plain(result.output).split())
+    assert f"Could not read [cfg]/src.yaml: {shape.message_fragment}" in output
+
+
+def test_migrate_graph_refuses_a_config_name_too_long(
+    tmp_path: Path, runner: CliRunner
+) -> None:
+    """A file name longer than NAME_MAX exits 2 with the OS's reason.
+
+    ``stat`` raises ``ENAMETOOLONG``, which ``Path.exists()`` re-raised as a
+    traceback. No chmod is involved, so this fails before the fix even as
+    root. The path is not asserted: it cannot fit in 80 columns, and Rich
+    folds an overlong token mid-word.
+    """
+    dst_config, _ = _write_sqlite_config(tmp_path, "dst")
+
+    result = runner.invoke(
+        admin_app,
+        [
+            "migrate-graph",
+            "--from-config",
+            str(tmp_path / ("x" * 300 + ".yaml")),
+            "--to-config",
+            str(dst_config),
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    output = " ".join(plain(result.output).split())
+    assert "Could not read" in output
+    assert os.strerror(errno.ENAMETOOLONG) in output
+
+
 def test_migrate_graph_capacity_exceeded_returns_nonzero(
     tmp_path: Path, runner: CliRunner
 ) -> None:
@@ -323,3 +457,142 @@ class TestFailedMigrationExitsTheSameWayOnBothSurfaces:
             admin_app, self._failing_migration_argv(src_config, text_dst)
         )
         assert text_result.exit_code == 0, text_result.output
+
+
+class TestStoreFailureTextIsSanitized:
+    """Every rendering of a destination store's failure text goes through
+    ``sanitize_error_message``; the JSON payload carries no traceback."""
+
+    @staticmethod
+    def _seeded_configs(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        message: str = _SYNTHETIC_STORE_ERROR,
+    ) -> tuple[Path, Path]:
+        """Seed two source nodes, THEN patch writes to fail.
+
+        Seeding the source also calls ``upsert_node``, so the patch must
+        land after seeding or it breaks setup instead of the migration.
+        Two nodes, so a sanitizer applied to one entry only is caught.
+        """
+        src_config, src_db = _write_sqlite_config(tmp_path, "src")
+        dst_config, _ = _write_sqlite_config(tmp_path, "dst")
+        src = SQLiteGraphStore(db_path=src_db)
+        src.upsert_node("n1", node_type="X", properties={})
+        src.upsert_node("n2", node_type="X", properties={})
+        src.close()
+
+        def _refuse_write(*_args: object, **_kwargs: object) -> None:
+            raise sqlite3.IntegrityError(message)
+
+        monkeypatch.setattr(SQLiteGraphStore, "upsert_node", _refuse_write)
+        return src_config, dst_config
+
+    def test_fail_fast_abort_line_is_sanitized(
+        self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default (stop-on-error) strategy: the ``Migration aborted:``
+        line wraps ``MigrationStepError``, which embeds ``str(exc)`` of
+        the underlying store error verbatim."""
+        src_config, dst_config = self._seeded_configs(tmp_path, monkeypatch)
+
+        result = runner.invoke(
+            admin_app,
+            [
+                "migrate-graph",
+                "--from-config",
+                str(src_config),
+                "--to-config",
+                str(dst_config),
+            ],
+        )
+
+        output = plain(result.output)
+        assert _SYNTHETIC_SECRET not in output
+        assert SUPPRESSED_MARKER in output
+        assert result.exit_code == EXIT_STORE
+
+    def test_continue_on_error_text_list_is_sanitized(
+        self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src_config, dst_config = self._seeded_configs(tmp_path, monkeypatch)
+
+        result = runner.invoke(
+            admin_app,
+            [
+                "migrate-graph",
+                "--from-config",
+                str(src_config),
+                "--to-config",
+                str(dst_config),
+                "--continue-on-error",
+            ],
+        )
+
+        output = plain(result.output)
+        assert _SYNTHETIC_SECRET not in output
+        assert output.count(SUPPRESSED_MARKER) == 2
+        assert result.exit_code == EXIT_STORE
+
+    def test_continue_on_error_json_errors_and_step_failures_are_sanitized(
+        self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src_config, dst_config = self._seeded_configs(tmp_path, monkeypatch)
+
+        result = runner.invoke(
+            admin_app,
+            [
+                "migrate-graph",
+                "--from-config",
+                str(src_config),
+                "--to-config",
+                str(dst_config),
+                "--continue-on-error",
+                "--format",
+                "json",
+            ],
+        )
+
+        payload = json.loads(result.stdout)
+        assert _SYNTHETIC_SECRET not in result.stdout
+        assert payload["status"] == "error"
+        assert [e["message"] for e in payload["errors"]] == [SUPPRESSED_MARKER] * 2
+        failures = sorted(payload["step_failures"], key=lambda f: f["entity_id"])
+        assert failures == [
+            {
+                "step": "upsert_node",
+                "entity_id": node_id,
+                "error_class": "IntegrityError",
+                "message": SUPPRESSED_MARKER,
+            }
+            for node_id in ("n1", "n2")
+        ]
+        assert result.exit_code == EXIT_STORE
+
+    def test_a_clean_failure_message_renders_unchanged(
+        self, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A message no leak heuristic flags passes through unchanged."""
+        src_config, dst_config = self._seeded_configs(
+            tmp_path, monkeypatch, message=_READONLY_DB
+        )
+
+        result = runner.invoke(
+            admin_app,
+            [
+                "migrate-graph",
+                "--from-config",
+                str(src_config),
+                "--to-config",
+                str(dst_config),
+                "--continue-on-error",
+                "--format",
+                "json",
+            ],
+        )
+
+        payload = json.loads(result.stdout)
+        clean = f"IntegrityError: {_READONLY_DB}"
+        assert [e["message"] for e in payload["errors"]] == [clean] * 2
+        assert [f["message"] for f in payload["step_failures"]] == [_READONLY_DB] * 2

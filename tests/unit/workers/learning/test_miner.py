@@ -386,6 +386,63 @@ class TestGenerateCandidatesHappy:
 
 
 # ---------------------------------------------------------------------------
+# generate_precedent_candidates — non-finite confidence from the LLM
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateCandidatesNonFiniteConfidence:
+    """A non-finite ``confidence`` from the model falls back to 0.5.
+
+    ``json.loads`` accepts the non-standard ``NaN`` token, and ``float()``
+    accepts the string ``"nan"`` too — both reached ``Precedent.confidence``
+    unclamped before this test, then failed the ``PRECEDENT_PROMOTED`` emit
+    (``allow_nan=False``) after an earlier candidate in the same reply had
+    already been emitted. ``coerce_finite_float`` catches both at the
+    source instead.
+    """
+
+    def _seed_failures(self, store: SQLiteTraceStore, count: int = 4) -> None:
+        for i in range(count):
+            t = _make_trace(
+                intent=f"fail-{i}",
+                status=OutcomeStatus.FAILURE,
+                summary=f"failed #{i}",
+            )
+            store.append(t)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw_confidence", [float("nan"), "nan"])
+    async def test_non_finite_confidence_falls_back_to_default(
+        self,
+        trace_store: SQLiteTraceStore,
+        event_log: SQLiteEventLog,
+        raw_confidence: object,
+    ) -> None:
+        self._seed_failures(trace_store)
+        response = json.dumps(
+            [
+                {
+                    "title": "Timeout pattern",
+                    "description": "Multiple traces failed due to timeouts",
+                    "pattern": "timeout on external calls",
+                    "confidence": raw_confidence,
+                },
+            ],
+            allow_nan=True,
+        )
+
+        miner = PrecedentMiner(trace_store, event_log=event_log, llm=_StubLLM(response))
+        result = await miner.generate_precedent_candidates()
+
+        assert len(result) == 1
+        assert result[0].confidence == 0.5
+
+        events = event_log.get_events(event_type=EventType.PRECEDENT_PROMOTED)
+        assert len(events) == 1
+        assert events[0].payload["confidence"] == 0.5
+
+
+# ---------------------------------------------------------------------------
 # generate_precedent_candidates — error handling
 # ---------------------------------------------------------------------------
 

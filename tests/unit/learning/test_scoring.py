@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
+from tests.structlog_isolation import clear_cached_logger_proxies
 from tests.unit.learning._registry_fixture import build_seeded_registry
 from trellis.learning.evidence_gate import (
     MIN_ATTRIBUTED_OBSERVATIONS,
@@ -18,6 +21,7 @@ from trellis.learning.evidence_gate import (
 from trellis.learning.scoring import (
     LEARNING_NOISE_SUCCESS_KEY,
     LEARNING_PROMOTE_SUCCESS_KEY,
+    LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT,
     analyze_learning_observations,
     build_learning_promotion_payloads,
     normalize_intent_family,
@@ -25,6 +29,21 @@ from trellis.learning.scoring import (
     write_learning_review_artifacts,
 )
 from trellis.ops import ParameterRegistry
+
+
+class _FakeDocumentStore:
+    """Minimal ``DocumentStore.get`` test double: an in-memory id->doc map.
+
+    Mirrors the real contract (``get`` returns ``None`` cleanly on a miss,
+    confirmed against the sqlite backend) rather than raising, so these
+    tests exercise the same "unresolvable" path a real store takes.
+    """
+
+    def __init__(self, documents: dict[str, dict] | None = None) -> None:
+        self._documents = documents or {}
+
+    def get(self, doc_id: str) -> dict | None:
+        return self._documents.get(doc_id)
 
 
 @pytest.fixture
@@ -123,6 +142,7 @@ def _make_observation(
     seed_entity_ids: list | None = None,
     selection_efficiency: float | None = None,
     citation_attributed: bool = False,
+    session_id: str | None = None,
 ) -> dict:
     obs: dict = {
         "run_id": run_id,
@@ -138,6 +158,12 @@ def _make_observation(
         obs["selection_efficiency"] = selection_efficiency
     if citation_attributed:
         obs["citation_attributed"] = True
+    # No default: a real PACK_ASSEMBLED.session_id (never a run/pack id —
+    # see scoring.py's _accumulate_item). Omitted entirely when None, the
+    # same shape a feedback row with no captured session id actually has,
+    # so a test must opt in rather than get one for free.
+    if session_id is not None:
+        obs["session_id"] = session_id
     return obs
 
 
@@ -321,6 +347,110 @@ class TestAnalyzeLearningObservations:
         assert sorted(run_ids) == ["run-alpha", "run-beta", "run-gamma"]
 
 
+class TestDistinctHelpfulSessions:
+    """B3: distinct sessions come from a real ``session_id``, never a
+    run or pack id — one conversation grading five packs helpful must
+    read as one session, not five (see ``_accumulate_item``'s
+    ``helpful_session_ids`` comment).
+    """
+
+    def test_one_session_over_five_packs_counts_as_one(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        item = _make_item(cited_helpful=True)
+        observations = [
+            _make_observation(
+                run_id=f"run-{n}",
+                outcome="success",
+                session_id="sess-1",
+                items=[item],
+            )
+            for n in range(5)
+        ]
+        result = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=1,
+        )
+        candidate = result["candidates"][0]
+        assert candidate["citation_evidence"]["helpful_count"] == 5
+        assert candidate["citation_evidence"]["distinct_helpful_sessions"] == 1
+        assert candidate["citation_evidence"]["sessionless_citations"] == 0
+
+    def test_five_distinct_sessions_counts_as_five(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        item = _make_item(cited_helpful=True)
+        observations = [
+            _make_observation(
+                run_id=f"run-{n}",
+                outcome="success",
+                session_id=f"sess-{n}",
+                items=[item],
+            )
+            for n in range(5)
+        ]
+        result = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=1,
+        )
+        candidate = result["candidates"][0]
+        assert candidate["citation_evidence"]["distinct_helpful_sessions"] == 5
+        assert candidate["citation_evidence"]["sessionless_citations"] == 0
+
+    def test_no_session_id_reports_sessionless_not_zero_sessions_silently(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        """A helpful citation with no captured session id must be visible
+        as ``sessionless_citations``, not just collapse into
+        ``distinct_helpful_sessions == 0`` with no explanation.
+        """
+        item = _make_item(cited_helpful=True)
+        observations = [
+            _make_observation(run_id=f"run-{n}", outcome="success", items=[item])
+            for n in range(3)
+        ]
+        result = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=1,
+        )
+        candidate = result["candidates"][0]
+        assert candidate["citation_evidence"]["helpful_count"] == 3
+        assert candidate["citation_evidence"]["distinct_helpful_sessions"] == 0
+        assert candidate["citation_evidence"]["sessionless_citations"] == 3
+
+    def test_mixed_session_and_sessionless_citations_both_counted(
+        self, learning_registry: ParameterRegistry
+    ) -> None:
+        item = _make_item(cited_helpful=True)
+        observations = [
+            _make_observation(run_id="run-a", outcome="success", items=[item]),
+            _make_observation(
+                run_id="run-b",
+                outcome="success",
+                session_id="sess-1",
+                items=[item],
+            ),
+            _make_observation(
+                run_id="run-c",
+                outcome="success",
+                session_id="sess-2",
+                items=[item],
+            ),
+        ]
+        result = analyze_learning_observations(
+            observations=observations,
+            registry=learning_registry,
+            min_support=1,
+        )
+        candidate = result["candidates"][0]
+        assert candidate["citation_evidence"]["helpful_count"] == 3
+        assert candidate["citation_evidence"]["distinct_helpful_sessions"] == 2
+        assert candidate["citation_evidence"]["sessionless_citations"] == 1
+
+
 class TestRegistryContract:
     """POC directive: scoring must raise on missing registry / keys.
 
@@ -400,35 +530,44 @@ def _make_promotable_candidate(
     candidate_id: str = "asset_generation:abc123",
     recommendation_type: str = "promote_guidance",
     intent_family: str = "asset_generation",
+    *,
+    item_id: str = "item-x",
+    title: str | None = "Test Guidance",
+    times_served: int = 5,
+    success_rate: float = 0.9,
+    citation_evidence: dict | None = None,
 ) -> dict:
+    name_title = (title or item_id).strip()
     return {
         "candidate_id": candidate_id,
         "intent_family": intent_family,
         "recommendation_type": recommendation_type,
-        "item_id": "item-x",
+        "item_id": item_id,
         "item_type": "guidance",
-        "title": "Test Guidance",
-        "precedent_name": f"Learning: {intent_family} :: Test Guidance",
+        "title": title,
+        "precedent_name": f"Learning: {intent_family} :: {name_title}",
         "precedent_properties": {
             "category": "retrieval_guidance",
             "intent_family": intent_family,
-            "source_item_id": "item-x",
+            "source_item_id": item_id,
             "source_item_type": "guidance",
-            "success_rate": 0.9,
+            "success_rate": success_rate,
             "retry_rate": 0.1,
-            "support_count": 5,
+            "support_count": times_served,
             "source_of_truth": "reviewed_promotion",
         },
         "target_entity_ids": ["entity://foo"],
         "supporting_run_ids": ["run-1"],
         "phases": ["GENERATE"],
         "metrics": {
-            "times_served": 5,
-            "success_rate": 0.9,
+            "times_served": times_served,
+            "success_rate": success_rate,
             "retry_rate": 0.1,
             "injection_rate": 0.0,
             "avg_selection_efficiency": None,
         },
+        "citation_evidence": citation_evidence
+        or {"appearances": times_served, "helpful_count": 0, "unhelpful_count": 0},
     }
 
 
@@ -670,6 +809,400 @@ class TestWriteLearningReviewArtifacts:
 
 
 # ---------------------------------------------------------------------------
+# Readable fallback names (#845)
+# ---------------------------------------------------------------------------
+
+
+def _report_with_candidates(*candidates: dict) -> dict:
+    return {
+        "artifact_version": "1.0",
+        "generated_at_utc": "2024-01-01T00:00:00.000Z",
+        "artifacts_root": None,
+        "min_support": 2,
+        "observation_count": len(candidates),
+        "candidate_count": len(candidates),
+        "candidates": list(candidates),
+    }
+
+
+def _write_capturing_fallback_failures(
+    report: dict, output_dir: Path, document_store: object | None = None
+) -> list[dict]:
+    """Write the artifacts; return any ``learning_readable_name_fallback_failed`` lines.
+
+    The fallback is wrapped whole, so a deleted guard that raises inside it
+    yields the same bare-id names as the guard itself; only this warning
+    tells the two apart.
+    """
+    with capture_logs() as logs:
+        clear_cached_logger_proxies()
+        write_learning_review_artifacts(
+            report=report, output_dir=output_dir, document_store=document_store
+        )
+    clear_cached_logger_proxies()
+    return [e for e in logs if e["event"] == "learning_readable_name_fallback_failed"]
+
+
+class TestReadableNameFallback:
+    def test_fallback_name_used_when_title_missing(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(item_id="item-no-title", title=None)
+        # A missing title means ``analyze_learning_observations`` already
+        # named this candidate with the bare item id (mirrors prod: see
+        # scoring.py's own precedent_name construction).
+        candidate["precedent_name"] = "Learning: asset_generation :: item-no-title"
+        store = _FakeDocumentStore(
+            {
+                "item-no-title": {
+                    "content": (
+                        "---\ntitle: ignored\n---\n"
+                        "## Readable Heading For Item\n\nBody text."
+                    )
+                }
+            }
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        updated = report["candidates"][0]
+        assert (
+            updated["precedent_name"]
+            == "Learning: asset_generation :: Readable Heading For Item"
+        )
+
+    def test_title_kept_when_present(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(
+            item_id="item-with-title", title="Existing Title"
+        )
+        original_name = candidate["precedent_name"]
+        store = _FakeDocumentStore(
+            {"item-with-title": {"content": "# A Totally Different Heading"}}
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        updated = report["candidates"][0]
+        assert updated["precedent_name"] == original_name
+
+    def test_unresolvable_item_keeps_bare_id(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(item_id="missing-item-id", title=None)
+        candidate["precedent_name"] = "Learning: asset_generation :: missing-item-id"
+        store = _FakeDocumentStore({})  # empty: nothing resolves
+        report = _report_with_candidates(candidate)
+        failures = _write_capturing_fallback_failures(report, tmp_path, store)
+        updated = report["candidates"][0]
+        expected = "Learning: asset_generation :: missing-item-id"
+        assert updated["precedent_name"] == expected
+        assert failures == []  # a miss is not a store failure
+
+    def test_no_document_store_keeps_bare_id(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(item_id="item-no-store", title=None)
+        candidate["precedent_name"] = "Learning: asset_generation :: item-no-store"
+        report = _report_with_candidates(candidate)
+        failures = _write_capturing_fallback_failures(report, tmp_path)
+        updated = report["candidates"][0]
+        expected = "Learning: asset_generation :: item-no-store"
+        assert updated["precedent_name"] == expected
+        assert failures == []  # no store is not a store failure
+
+    def test_frontmatter_and_heading_marker_both_stripped(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(item_id="item-fm", title=None)
+        store = _FakeDocumentStore(
+            {
+                "item-fm": {
+                    "content": (
+                        "---\nkey: value\nother: 1\n---\n"
+                        "\n"
+                        "### Heading Marker Stripped\n"
+                        "More body text that should not appear in the name."
+                    )
+                }
+            }
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        updated = report["candidates"][0]
+        assert (
+            updated["precedent_name"]
+            == "Learning: asset_generation :: Heading Marker Stripped"
+        )
+
+    def test_blank_content_keeps_bare_id(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(item_id="item-blank", title=None)
+        candidate["precedent_name"] = "Learning: asset_generation :: item-blank"
+        store = _FakeDocumentStore({"item-blank": {"content": "   \n\n  "}})
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        updated = report["candidates"][0]
+        assert updated["precedent_name"] == "Learning: asset_generation :: item-blank"
+
+    def test_store_failure_degrades_to_bare_ids(self, tmp_path: Path) -> None:
+        # An operational failure is not a clean miss: it must leave every
+        # bare-id name in place, log once, and still write both artifacts,
+        # because this write is the last stage of ``trellis worker curate``.
+        class _FailingDocumentStore:
+            def get(self, doc_id: str) -> dict | None:
+                msg = "database is locked"
+                raise sqlite3.OperationalError(msg)
+
+        evidence = {"appearances": 5, "helpful_count": 1, "unhelpful_count": 0}
+        first = _make_promotable_candidate(
+            candidate_id="asset_generation:f1",
+            item_id="item-f1",
+            title=None,
+            citation_evidence=evidence,
+        )
+        second = _make_promotable_candidate(
+            candidate_id="asset_generation:f2",
+            item_id="item-f2",
+            title=None,
+            citation_evidence=evidence,
+        )
+        report = _report_with_candidates(first, second)
+        failures = _write_capturing_fallback_failures(
+            report, tmp_path, _FailingDocumentStore()
+        )
+
+        names = [c["precedent_name"] for c in report["candidates"]]
+        assert names == [
+            "Learning: asset_generation :: item-f1",
+            "Learning: asset_generation :: item-f2",
+        ]
+        written = json.loads(
+            (tmp_path / "intent_learning_candidates.json").read_text("utf-8")
+        )
+        assert written["promotion_ready"]["count"] == 2
+        decisions_path = tmp_path / "promotion_decisions.template.json"
+        decisions = json.loads(decisions_path.read_text("utf-8"))
+        assert [d["promotion_name"] for d in decisions["decisions"]] == names
+        assert len(failures) == 1
+        assert failures[0]["log_level"] == "warning"
+        assert failures[0]["error_type"] == "OperationalError"
+
+
+# ---------------------------------------------------------------------------
+# Promotion-ready digest (#845)
+# ---------------------------------------------------------------------------
+
+
+class TestPromotionReadyDigest:
+    def test_count_and_top_include_eligible_candidate(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(
+            candidate_id="asset_generation:c1",
+            times_served=10,
+            success_rate=0.9,
+            citation_evidence={
+                "appearances": 10,
+                "helpful_count": 2,
+                "unhelpful_count": 0,
+            },
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        digest = report["promotion_ready"]
+        assert digest["count"] == 1
+        assert len(digest["top"]) == 1
+        row = digest["top"][0]
+        assert row["candidate_id"] == "asset_generation:c1"
+        assert row["helpful_count"] == 2
+        assert row["times_served"] == 10
+        assert row["success_rate"] == 0.9
+
+    def test_unhelpful_citation_excludes_candidate(self, tmp_path: Path) -> None:
+        candidate = _make_promotable_candidate(
+            candidate_id="asset_generation:c2",
+            citation_evidence={
+                "appearances": 5,
+                "helpful_count": 3,
+                "unhelpful_count": 1,
+            },
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        digest = report["promotion_ready"]
+        assert digest["count"] == 0
+        assert digest["top"] == []
+
+    def test_below_threshold_helpful_count_excluded(self, tmp_path: Path) -> None:
+        assert LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT == 1
+        candidate = _make_promotable_candidate(
+            candidate_id="asset_generation:c3",
+            citation_evidence={
+                "appearances": 5,
+                "helpful_count": 0,
+                "unhelpful_count": 0,
+            },
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        digest = report["promotion_ready"]
+        assert digest["count"] == 0
+        assert digest["top"] == []
+
+    def test_non_promote_guidance_recommendation_excluded(self, tmp_path: Path) -> None:
+        # Narrower literal, not PROMOTE_RECOMMENDATIONS: a promote_precedent
+        # candidate with equally strong evidence must NOT appear.
+        promote_precedent = _make_promotable_candidate(
+            candidate_id="asset_generation:c4",
+            recommendation_type="promote_precedent",
+            citation_evidence={
+                "appearances": 10,
+                "helpful_count": 5,
+                "unhelpful_count": 0,
+            },
+        )
+        investigate_noise = _make_promotable_candidate(
+            candidate_id="asset_generation:c5",
+            recommendation_type="investigate_noise",
+            citation_evidence={
+                "appearances": 10,
+                "helpful_count": 5,
+                "unhelpful_count": 0,
+            },
+        )
+        report = _report_with_candidates(promote_precedent, investigate_noise)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        digest = report["promotion_ready"]
+        assert digest["count"] == 0
+        assert digest["top"] == []
+
+    def test_ordering_by_helpful_count_desc(self, tmp_path: Path) -> None:
+        # ``high`` has the LOWER success_rate, so this pins helpful_count as
+        # the primary key rather than leaving it to a success_rate tie.
+        low = _make_promotable_candidate(
+            candidate_id="asset_generation:low",
+            success_rate=1.0,
+            citation_evidence={
+                "appearances": 5,
+                "helpful_count": 1,
+                "unhelpful_count": 0,
+            },
+        )
+        high = _make_promotable_candidate(
+            candidate_id="asset_generation:high",
+            success_rate=0.2,
+            citation_evidence={
+                "appearances": 5,
+                "helpful_count": 4,
+                "unhelpful_count": 0,
+            },
+        )
+        report = _report_with_candidates(low, high)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        top = report["promotion_ready"]["top"]
+        assert [row["candidate_id"] for row in top] == [
+            "asset_generation:high",
+            "asset_generation:low",
+        ]
+
+    def test_ordering_tiebreaks_on_success_rate_then_times_served(
+        self, tmp_path: Path
+    ) -> None:
+        # All three share helpful_count=1, so success_rate breaks the first
+        # tie and times_served breaks the second.
+        a = _make_promotable_candidate(
+            candidate_id="asset_generation:a",
+            success_rate=0.5,
+            times_served=10,
+            citation_evidence={
+                "appearances": 10,
+                "helpful_count": 1,
+                "unhelpful_count": 0,
+            },
+        )
+        b = _make_promotable_candidate(
+            candidate_id="asset_generation:b",
+            success_rate=0.9,
+            times_served=1,
+            citation_evidence={
+                "appearances": 1,
+                "helpful_count": 1,
+                "unhelpful_count": 0,
+            },
+        )
+        c = _make_promotable_candidate(
+            candidate_id="asset_generation:c",
+            success_rate=0.9,
+            times_served=20,
+            citation_evidence={
+                "appearances": 20,
+                "helpful_count": 1,
+                "unhelpful_count": 0,
+            },
+        )
+        report = _report_with_candidates(a, b, c)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        top = report["promotion_ready"]["top"]
+        assert [row["candidate_id"] for row in top] == [
+            "asset_generation:c",
+            "asset_generation:b",
+            "asset_generation:a",
+        ]
+
+    def test_top_capped_at_five(self, tmp_path: Path) -> None:
+        candidates = [
+            _make_promotable_candidate(
+                candidate_id=f"asset_generation:cand{i}",
+                citation_evidence={
+                    "appearances": 10,
+                    "helpful_count": 10 - i,
+                    "unhelpful_count": 0,
+                },
+            )
+            for i in range(7)
+        ]
+        report = _report_with_candidates(*candidates)
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        digest = report["promotion_ready"]
+        assert digest["count"] == 7
+        assert len(digest["top"]) == 5
+        assert [row["candidate_id"] for row in digest["top"]] == [
+            "asset_generation:cand0",
+            "asset_generation:cand1",
+            "asset_generation:cand2",
+            "asset_generation:cand3",
+            "asset_generation:cand4",
+        ]
+
+    def test_digest_uses_post_fallback_precedent_name(self, tmp_path: Path) -> None:
+        # The digest must reflect the readable-name fallback, not the stale
+        # bare-id name the pure aggregator produced — this is why the
+        # digest is computed inside write_learning_review_artifacts, after
+        # the fallback loop, rather than inside analyze_learning_observations.
+        candidate = _make_promotable_candidate(
+            candidate_id="asset_generation:fb",
+            item_id="item-fb",
+            title=None,
+            citation_evidence={
+                "appearances": 5,
+                "helpful_count": 1,
+                "unhelpful_count": 0,
+            },
+        )
+        candidate["precedent_name"] = "Learning: asset_generation :: item-fb"
+        store = _FakeDocumentStore(
+            {"item-fb": {"content": "Readable Fallback Name\nmore text"}}
+        )
+        report = _report_with_candidates(candidate)
+        write_learning_review_artifacts(
+            report=report, output_dir=tmp_path, document_store=store
+        )
+        row = report["promotion_ready"]["top"][0]
+        expected = "Learning: asset_generation :: Readable Fallback Name"
+        assert row["precedent_name"] == expected
+
+    def test_empty_candidates_produces_empty_digest(self, tmp_path: Path) -> None:
+        report = _report_with_candidates()
+        write_learning_review_artifacts(report=report, output_dir=tmp_path)
+        assert report["promotion_ready"] == {"count": 0, "top": []}
+
+
+# ---------------------------------------------------------------------------
 # Noise evidence screen (the #336 rule, ported into the learning layer)
 # ---------------------------------------------------------------------------
 
@@ -745,6 +1278,8 @@ class TestNoiseEvidenceScreen:
             "appearances": 2,
             "helpful_count": 0,
             "unhelpful_count": 2,
+            "distinct_helpful_sessions": 0,
+            "sessionless_citations": 0,
         }
         screen = report["noise_screen"]
         assert screen["proposed"] == 1
@@ -997,5 +1532,7 @@ class TestNoiseEvidenceScreen:
             "appearances": 2,
             "helpful_count": 0,
             "unhelpful_count": 1,
+            "distinct_helpful_sessions": 0,
+            "sessionless_citations": 0,
         }
         assert candidate["evidence_verdict"] == "insufficient_unhelpful_citations"

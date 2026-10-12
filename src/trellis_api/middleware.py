@@ -1,6 +1,6 @@
 """Request middleware — request-ID correlation and structured error envelope.
 
-Two pieces wired into the FastAPI app from :func:`create_app`:
+Four pieces wired into the FastAPI app from :func:`create_app`:
 
 * :func:`request_id_middleware` reads ``X-Request-ID`` from the
   incoming request (or mints a fresh ULID), binds it onto the
@@ -23,15 +23,26 @@ Two pieces wired into the FastAPI app from :func:`create_app`:
   This handler keeps the same envelope keys and fills them with what the
   exception already knows.
 
+* :func:`request_validation_error_handler` replaces FastAPI's default
+  422 handler. The default echoes the rejected value as
+  ``detail[].input``, and Starlette renders JSON with
+  ``allow_nan=False``, so an error echoing ``NaN`` or ``Infinity`` (both
+  of which Python's ``json`` module parses) makes that 422 raise and the
+  catch-all answer ``500 internal_error``. This handler writes a
+  non-finite float as its token.
+
 Health and version probes pass through the middleware too; the
 overhead is a ULID + a contextvar bind, both microsecond-scale.
 """
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from trellis.core.error_sanitize import sanitize_error_message
@@ -106,6 +117,42 @@ async def unhandled_exception_handler(
     )
 
 
+def _json_safe_float(value: float) -> float | str:
+    """A non-finite float as the token the caller sent; any other unchanged.
+
+    The spellings are the ones Python's ``json`` module parsed, and the
+    ones pydantic writes under ``ser_json_inf_nan="strings"``.
+    """
+    if math.isnan(value):
+        return "NaN"
+    if math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
+    return value
+
+
+async def request_validation_error_handler(
+    request: Request,  # noqa: ARG001 — Starlette's handler signature; the 422 needs nothing from it
+    exc: Exception,
+) -> JSONResponse:
+    """FastAPI's 422, with a non-finite float written as its token.
+
+    The same status and body as FastAPI's
+    ``request_validation_exception_handler`` — ``{"detail": [...]}`` from
+    ``exc.errors()`` through ``jsonable_encoder`` — with one difference: a
+    non-finite float anywhere in the errors, at any depth, is rendered as
+    its token. A missing-field error echoes the whole body as its
+    ``input``, so a non-finite number anywhere in a body missing a field
+    reaches the renderer, not only one in the field that failed. A finite
+    float is returned unchanged, so every finite case is FastAPI's own
+    response, byte for byte (``tests/unit/api/test_non_finite_body.py``).
+    """
+    # Registered only for RequestValidationError; the check narrows the
+    # type Starlette's handler signature widens.
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+    detail = jsonable_encoder(errors, custom_encoder={float: _json_safe_float})
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
 #: Status for a :class:`~trellis.errors.ConfigError` reaching the boundary.
 #:
 #: 409, and the choice is between this and keeping the 500, not between
@@ -136,10 +183,10 @@ async def unhandled_exception_handler(
 #: this handler is only the legibility half.
 #:
 #: It is also not the only channel, and the second one is stronger than
-#: the argument above: this handler calls ``logger.exception`` on **every**
-#: typed failure including the 409s, so an operator alerting on
-#: ``error``-level log lines sees ``api_trellis_error`` once per affected
-#: request with the traceback attached. If a deployment would rather have
+#: the argument above: this handler logs at ``error`` on **every** typed
+#: failure including the 409s, so an operator alerting on ``error``-level
+#: log lines sees ``api_trellis_error`` once per affected request, with the
+#: exception's type, code and message. If a deployment would rather have
 #: the 5xx rate move, the whole decision is one line — ``CONFIG_ERROR_STATUS
 #: = 500`` — and nothing else changes: the body stays legible, because the
 #: legibility lives in this handler and not in the catch-all.
@@ -194,9 +241,12 @@ async def trellis_error_handler(
     what makes handling the whole family safe rather than just
     ``ConfigError``: a driver-raised ``StoreError`` can echo a DSN with
     credentials, and an API response body is exactly the artifact #206
-    wrote that guard for. It is not a substitute for reading the logs —
-    ``logger.exception`` still records the full traceback under the same
-    ``request_id``.
+    wrote that guard for. The log line under the same ``request_id``
+    records the exception's type, code and message, and no traceback: a
+    store that maps a driver failure raises a type-only ``StoreError``
+    chained from the driver's exception, because a server's text can carry
+    query text and values (#702, #713), and a rendered traceback would
+    print that chained cause.
 
     Registered for :class:`~trellis.errors.TrellisError`, so Starlette's
     MRO lookup routes every subclass here and the catch-all keeps only
@@ -205,12 +255,15 @@ async def trellis_error_handler(
     request_id = getattr(request.state, "request_id", None)
     trellis_exc = exc if isinstance(exc, TrellisError) else TrellisError(str(exc))
     status_code = _error_status(trellis_exc)
-    logger.exception(
+    # No traceback on purpose; see the docstring. An untyped failure still
+    # reaches ``unhandled_exception_handler``, which logs its traceback.
+    logger.error(
         "api_trellis_error",
         path=request.url.path,
         method=request.method,
         request_id=request_id,
         exc_type=type(exc).__name__,
+        error=trellis_exc.message,
         error_code=trellis_exc.code,
         status_code=status_code,
     )

@@ -58,7 +58,7 @@ This is intentional:
 - MCP tools need token-budgeted markdown rendering, direct store
   access for dedup, and in-process context assembly.  Funneling
   those through HTTP would add 10+ms per tool call for no benefit.
-- The SDK's structural isolation (`trellis_sdk/test_isolation.py`)
+- The SDK's structural isolation (`tests/unit/sdk/test_isolation.py`)
   exists so client packages can depend on `trellis_sdk` alone.
   MCP has no such consumer — it's the server, not a client.
 

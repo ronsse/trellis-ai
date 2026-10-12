@@ -1,5 +1,10 @@
 """Learning module for Trellis — intent-family scoring and promotion."""
 
+from trellis.learning.artifacts import (
+    LEARNING_ARTIFACTS_DIR_ENV,
+    LEARNING_CANDIDATES_FILENAME,
+    resolve_learning_artifacts_dir,
+)
 from trellis.learning.evidence_gate import (
     MIN_ATTRIBUTED_OBSERVATIONS,
     MIN_UNHELPFUL_CITATIONS,
@@ -28,6 +33,7 @@ from trellis.learning.scoring import (
     LEARNING_NOISE_SUCCESS_KEY,
     LEARNING_PROMOTE_RETRY_KEY,
     LEARNING_PROMOTE_SUCCESS_KEY,
+    LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT,
     LEARNING_SCORING_COMPONENT,
     PROMOTE_RECOMMENDATIONS,
     REQUIRED_LEARNING_PARAMETER_KEYS,
@@ -40,10 +46,13 @@ from trellis.learning.scoring import (
 )
 
 __all__ = [
+    "LEARNING_ARTIFACTS_DIR_ENV",
+    "LEARNING_CANDIDATES_FILENAME",
     "LEARNING_NOISE_RETRY_KEY",
     "LEARNING_NOISE_SUCCESS_KEY",
     "LEARNING_PROMOTE_RETRY_KEY",
     "LEARNING_PROMOTE_SUCCESS_KEY",
+    "LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT",
     "LEARNING_SCORING_COMPONENT",
     "MIN_ATTRIBUTED_OBSERVATIONS",
     "MIN_UNHELPFUL_CITATIONS",
@@ -63,6 +72,7 @@ __all__ = [
     "derive_selection_efficiency",
     "normalize_intent_family",
     "prepare_learning_promotions",
+    "resolve_learning_artifacts_dir",
     "screen_noise_candidates",
     "submit_learning_promotion",
     "write_learning_review_artifacts",

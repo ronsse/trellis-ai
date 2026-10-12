@@ -68,6 +68,76 @@ class TestStrictMode:
         monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", raw)
         assert capture_sweep.strict_mode() is True
 
+    def test_a_settings_only_false_override_is_honoured(self, monkeypatch) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode({"capture_strict": False}) is False
+
+    def test_a_settings_only_string_false_is_honoured(self, monkeypatch) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode({"capture_strict": "false"}) is False
+
+    def test_a_settings_only_true_override_stays_strict(self, monkeypatch) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode({"capture_strict": True}) is True
+
+    def test_env_beats_a_settings_override(self, monkeypatch) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "1")
+        assert capture_sweep.strict_mode({"capture_strict": False}) is True
+
+    def test_none_settings_falls_back_to_the_default(self, monkeypatch) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode(None) is True
+
+    def test_a_settings_mapping_missing_the_key_falls_back_to_the_default(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode({"some_other_setting": 1}) is True
+
+    def test_a_stored_null_falls_back_to_the_default(self, monkeypatch) -> None:
+        """Re-gate #867 M28b: distinct from the case above -- the *key*
+        is present here with an explicit ``None`` value, which
+        ``load_settings_values`` never actually produces (a null row
+        degrades to the key being absent, the case already pinned
+        above), so this exercises ``strict_mode`` directly with a shape
+        no real caller can construct, per the gate's own note.
+
+        Mutating away the ``if stored is None: return True`` guard does
+        not change this assertion's outcome: the trailing ``return
+        stored if isinstance(stored, bool) else True`` already treats
+        any non-bool, ``None`` included, as "stay strict" — confirmed by
+        running the mutant locally and observing no behavioural change
+        for any input. The guard and the trailing line are redundant for
+        this one value, so no test, synthetic or otherwise, can
+        distinguish them; this pins the documented contract (a stored
+        null means "no override") without claiming to kill a mutant
+        that is semantically a no-op.
+        """
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode({"capture_strict": None}) is True
+
+    @pytest.mark.parametrize("stored", [0, 0.0])
+    def test_a_stored_falsy_non_bool_falls_back_to_strict(
+        self, monkeypatch, stored
+    ) -> None:
+        """B4b: ``bool(0)`` and ``bool(0.0)`` are both ``False`` in
+        Python, but ``capture_strict`` is a bool-typed setting -- a
+        stored 0/0.0 is not "a real False", it's a value shape the
+        write path should never have accepted. ``strict_mode`` must
+        fail CLOSED (stay strict) rather than silently opt the sweep
+        out, the same posture a stored ``null`` already gets.
+        """
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode({"capture_strict": stored}) is True
+
+    def test_a_stored_real_bool_false_still_disables_strict(self, monkeypatch) -> None:
+        """Companion to the case above: an actual ``bool`` False must
+        still opt out -- the fix narrows to bool, it does not refuse
+        every falsy value.
+        """
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        assert capture_sweep.strict_mode({"capture_strict": False}) is False
+
 
 class TestBuildJudgeClient:
     def test_returns_the_configured_client(self, registry) -> None:
@@ -118,7 +188,16 @@ class TestBuildJudgeClient:
         with pytest.raises(capture_sweep.CaptureJudgeUnavailableError) as exc:
             capture_sweep.build_judge_client(registry)
         assert isinstance(exc.value.__cause__, LLMRoutingError)
-        assert "llm.routes.session_capture names tier 'deep'" in str(exc.value)
+        # Names the setting, never the route's value: ``_validate_route``
+        # (routing.py) treats a route's tier as potentially a secret pasted
+        # in by mistake (a short password, a bare API key), so the message
+        # here -- which reaches the admin API's runtime panel verbatim as
+        # ``llm_routes_error`` -- must not echo "deep" back.
+        message = str(exc.value)
+        assert "llm.routes.session_capture names a tier llm.tiers does not define" in (
+            message
+        )
+        assert "deep" not in message
 
 
 class TestJudgeUnavailableSessions:

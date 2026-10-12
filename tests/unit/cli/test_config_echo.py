@@ -2,8 +2,11 @@
 
 config.yaml carries DSNs and passwords, so every surface that reads it
 describes a bad value without repeating it: ``admin health``'s backend
-report, the registry's refusal of an unknown backend, the registry's parse
-error, and the two CLI commands that parse the file themselves. Each case
+report, the registry's refusal of an unknown backend or of a key the backend
+does not accept, the registry's parse error, and the two CLI commands that
+parse the file themselves. A value typed where a key belongs (a DSN inside
+YAML flow braces) is a key, so a key that does not look like one is described
+by its length. Each case
 plants a fake credential where a real one would sit, runs both output arms,
 and requires the same exit code from each and no 8-character window of the
 credential on any surface, ignoring case (``!!bool`` echoes it lowercased).
@@ -11,6 +14,8 @@ credential on any surface, ignoring case (``!!bool`` echoes it lowercased).
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import traceback
 from pathlib import Path
@@ -19,6 +24,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from trellis_cli import main as main_module
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
 
@@ -244,3 +250,81 @@ def test_worker_tune_names_a_bad_config_without_quoting_it(
     _env(tmp_path, monkeypatch, config)
 
     _both(["worker", "tune"], 1)
+
+
+# Keys the backend's constructor does not take. ``flow_dsn`` is a DSN inside
+# YAML flow braces, which parses as a key with a null value.
+_UNACCEPTED_KEY = {
+    "flow_dsn": "knowledge:\n  document: {postgresql://u:{S}@h/db}\n",
+    "bare": "knowledge:\n  document:\n    backend: sqlite\n    {S}: x\n",
+}
+
+
+@pytest.mark.parametrize("config", _UNACCEPTED_KEY.values(), ids=_UNACCEPTED_KEY.keys())
+def test_a_key_the_backend_does_not_accept_is_a_config_error_that_omits_it(
+    tmp_path, monkeypatch, config
+):
+    _env(tmp_path, monkeypatch, config)
+
+    text, as_json = _both(["retrieve", "search", "probe"], 5)
+
+    assert json.loads(as_json.stdout)["error_type"] == "ConfigError"
+    assert (
+        "not shown>, which the sqlite backend does not accept; it accepts: db_path"
+        in (plain(text.stdout))
+    )
+
+
+def test_a_key_shaped_like_a_parameter_is_still_named(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch, "knowledge:\n  document:\n    db_pth: x\n")
+
+    text, _ = _both(["retrieve", "search", "probe"], 5)
+
+    assert "stores.document sets db_pth, which the sqlite backend" in plain(text.stdout)
+
+
+def test_migrate_graph_refuses_a_key_the_backend_does_not_accept(tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch, "{}\n")
+    _write(
+        tmp_path / "from.yaml", "graph: {backend: sqlite, postgresql://u:{S}@h/db}\n"
+    )
+    _write(tmp_path / "to.yaml", "graph:\n  backend: sqlite\n")
+    args = ["admin", "migrate-graph", "--from-config", str(tmp_path / "from.yaml")]
+    args += ["--to-config", str(tmp_path / "to.yaml"), "--dry-run"]
+
+    _, as_json = _both(args, 5)
+
+    assert json.loads(as_json.stdout)["error_type"] == "ConfigError"
+
+
+def test_a_placeholder_under_a_dsn_written_as_a_key_omits_the_key(
+    tmp_path, monkeypatch
+):
+    _env(
+        tmp_path,
+        monkeypatch,
+        "knowledge:\n  document:\n    postgresql://u:{S}@h/db: ${PGPASS}\n",
+    )
+
+    text, _ = _both(["admin", "health"], 5)
+
+    assert (
+        "knowledge.document.<44-character key, not shown> is the literal text ${PGPASS}"
+        in plain(text.stdout)
+    )
+
+
+def test_the_root_app_never_renders_locals():
+    """Typer below 0.23 prints every frame's locals, and ``typer>=0.9`` admits it."""
+    assert app.pretty_exceptions_show_locals is False
+    # The attribute is False under today's Typer whatever main.py says, so
+    # the pin is on the argument itself.
+    [call] = [
+        node.value
+        for node in ast.parse(inspect.getsource(main_module)).body
+        if isinstance(node, ast.Assign)
+        and any(getattr(target, "id", None) == "app" for target in node.targets)
+    ]
+    keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+    assert isinstance(keywords["pretty_exceptions_show_locals"], ast.Constant)
+    assert keywords["pretty_exceptions_show_locals"].value is False

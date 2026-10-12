@@ -24,13 +24,13 @@ from pathlib import PurePosixPath
 
 #: Test module -> (fewest cases that must pass, most that may skip).
 #:
-#: Hand-read off live-infra run 36293450400 at b51896b3 (2026-09-27), from
-#: that run's own per-test lines, never from this script: 25 passed, 15
-#: skipped. The 15 are ``SEARCH_ISSUING_TESTS``, which ``neo4j:2025.12``
+#: Hand-read off live-infra run 37484813426 at d873f570 (2026-10-06), from
+#: that run's own per-test lines, never from this script: 25 passed, 19
+#: skipped. The 19 are ``SEARCH_ISSUING_TESTS``, which ``neo4j:2025.12``
 #: cannot run. A change that removes passing contract cases, or gates more of
 #: them behind the ``SEARCH`` capability, edits this row in the same diff.
 FLOORS: dict[str, tuple[int, int]] = {
-    "tests/unit/stores/contracts/test_neo4j_vector_contract.py": (25, 15),
+    "tests/unit/stores/contracts/test_neo4j_vector_contract.py": (25, 19),
 }
 
 

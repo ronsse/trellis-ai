@@ -3,34 +3,67 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
+import structlog
 import typer
 from rich.markup import escape
 from rich.table import Table
 
-from trellis.learning import prepare_learning_promotions, submit_learning_promotion
+from trellis.learning import (
+    LEARNING_ARTIFACTS_DIR_ENV,
+    LEARNING_CANDIDATES_FILENAME,
+    prepare_learning_promotions,
+    resolve_learning_artifacts_dir,
+    submit_learning_promotion,
+)
+from trellis.learning.candidate_auto_promote import (
+    CandidateAutoPromoteMode,
+    LearningCandidateAutoPromotePolicy,
+    emit_candidate_auto_promote_failure_event,
+    report_to_dict,
+    resolve_candidate_auto_promote_overrides,
+    run_candidate_auto_promotion,
+    sanitize_configured_mode,
+)
 from trellis.mutate import (
     Command,
     CommandStatus,
     Operation,
     build_curate_executor,
 )
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
+from trellis.stores.settings_store import load_settings_values
+from trellis_cli.exit_codes import EXIT_VALIDATION, refusal_exit_code
 from trellis_cli.output import build_console, emit_json
-from trellis_cli.stores import _get_registry
+from trellis_cli.stores import _get_registry, get_event_log
 
 curate_app = typer.Typer(no_args_is_help=True)
 console = build_console()
+logger = structlog.get_logger(__name__)
+
+
+def _print_warnings(warnings: list[str]) -> None:
+    """Print a command's warnings below its result, one ``Warning:`` line each.
+
+    Every curate write that shows warnings renders them here, so they look
+    alike; ``promote-learning`` shows none yet. The ``escape`` is
+    load-bearing: a policy's id and condition are free text, and so is the
+    error the audit note quotes. ``[/x]`` in any of them raises
+    ``MarkupError``, after the write has committed on the success path. The
+    id-markup rule does not police a name like ``warning``, so the escape
+    lives in this one place.
+    """
+    for warning in warnings:
+        console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}", soft_wrap=True)
 
 
 def _execute_command(cmd: Command, output_format: str) -> None:
     """Submit a command, display the result, and exit non-zero on refusal or failure.
 
-    A REJECTED command exits ``EXIT_VALIDATION`` and a FAILED one
-    ``EXIT_STORE``, as ``prune``, ``restore`` and ``redact`` do. A DUPLICATE
-    exits ``0``.
+    A refused or failed command exits with ``refusal_exit_code``, as every
+    curate write does. A DUPLICATE exits ``0``.
     """
     result = build_curate_executor(_get_registry()).execute(cmd)
 
@@ -62,20 +95,22 @@ def _execute_command(cmd: Command, output_format: str) -> None:
             console.print(f"[green]\u2713 Command executed[/green]: {result.operation}")
         else:
             console.print(
-                f"[red]\u2717 Command {result.status}[/red]: {result.operation}"
+                f"[red]\u2717 Command {result.status}[/red]: {result.operation}",
+                soft_wrap=True,
             )
         console.print(f"  ID: {escape(result.command_id)}")
-        console.print(f"  Message: {result.message}", markup=False, highlight=False)
-        for warning in result.warnings:
-            console.print(f"  [yellow]Warning:[/yellow] {escape(warning)}")
+        console.print(
+            f"  Message: {result.message}",
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+        _print_warnings(result.warnings)
 
     # Below the format branch, so both formats exit alike
     # (tests/unit/test_format_exit_parity_rule.py) and warnings print first.
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        exit_code = (
-            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
-        )
-        raise typer.Exit(code=exit_code)
+        raise typer.Exit(code=refusal_exit_code(result))
 
 
 @curate_app.command()
@@ -125,10 +160,18 @@ def link(
         # of adr-extraction-validation.md §5.5); both error states should
         # exit non-zero so shell pipelines fail loud.
         if output_format == "json":
-            emit_json({"status": "error", "message": result.message})
+            emit_json(
+                {
+                    "status": result.status.value,
+                    "command_id": result.command_id,
+                    "message": result.message,
+                    "warnings": list(result.warnings),
+                }
+            )
         else:
-            console.print(f"[red]{result.message}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
+            _print_warnings(result.warnings)
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -138,6 +181,7 @@ def link(
                 "source_id": source_id,
                 "target_id": target_id,
                 "edge_kind": edge_kind,
+                "warnings": list(result.warnings),
             }
         )
     else:
@@ -155,6 +199,7 @@ def link(
             markup=False,
             highlight=False,
         )
+        _print_warnings(result.warnings)
 
 
 @curate_app.command()
@@ -235,11 +280,15 @@ def prune(
         "max_items": max_items,
     }
     if not (noise_documents or unconfirmed_mints or lifecycle_state):
-        console.print(
-            "[red]No criteria selected — a prune must say what it is pruning. "
+        message = (
+            "No criteria selected — a prune must say what it is pruning. "
             "Pass at least one of --noise-documents / --unconfirmed-mints / "
-            "--lifecycle-state.[/red]"
+            "--lifecycle-state."
         )
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{message}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_VALIDATION)
 
     cmd = Command(
@@ -251,20 +300,19 @@ def prune(
     result = build_curate_executor(_get_registry()).execute(cmd)
 
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        exit_code = (
-            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
-        )
         if output_format == "json":
             emit_json(
                 {
                     "status": result.status.value,
                     "command_id": result.command_id,
                     "message": result.message,
+                    "warnings": list(result.warnings),
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
-        raise typer.Exit(code=exit_code)
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
+            _print_warnings(result.warnings)
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -273,6 +321,7 @@ def prune(
                 "command_id": result.command_id,
                 "dry_run": not apply,
                 "message": result.message,
+                "warnings": list(result.warnings),
             }
         )
     else:
@@ -282,6 +331,7 @@ def prune(
                 "[yellow]Dry run — nothing was written. Re-run with --apply "
                 "to archive.[/yellow]"
             )
+        _print_warnings(result.warnings)
 
 
 @curate_app.command()
@@ -313,15 +363,22 @@ def restore(
     """
     ids = list(item_id)
     if from_file:
-        ids.extend(
-            line.strip()
-            for line in Path(from_file).read_text().splitlines()
-            if line.strip()
-        )
+        try:
+            text = Path(from_file).read_text()
+        except OSError as exc:
+            unreadable = f"Cannot read --from-file: {exc}"
+            if output_format == "json":
+                emit_json({"status": "error", "message": unreadable})
+            else:
+                console.print(f"[red]{escape(unreadable)}[/red]", soft_wrap=True)
+            raise typer.Exit(code=EXIT_VALIDATION) from exc
+        ids.extend(line.strip() for line in text.splitlines() if line.strip())
     if not ids:
-        console.print(
-            "[red]No ids supplied — pass --item-id (repeatable) or --from-file.[/red]"
-        )
+        message = "No ids supplied — pass --item-id (repeatable) or --from-file."
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{message}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_VALIDATION)
 
     cmd = Command(
@@ -333,20 +390,19 @@ def restore(
     result = build_curate_executor(_get_registry()).execute(cmd)
 
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        exit_code = (
-            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
-        )
         if output_format == "json":
             emit_json(
                 {
                     "status": result.status.value,
                     "command_id": result.command_id,
                     "message": result.message,
+                    "warnings": list(result.warnings),
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
-        raise typer.Exit(code=exit_code)
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
+            _print_warnings(result.warnings)
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -354,10 +410,12 @@ def restore(
                 "status": result.status.value,
                 "command_id": result.command_id,
                 "message": result.message,
+                "warnings": list(result.warnings),
             }
         )
     else:
         console.print(f"[green]✓[/green] {escape(result.message)}")
+        _print_warnings(result.warnings)
 
 
 @curate_app.command()
@@ -405,24 +463,24 @@ def redact(
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
         # Destructive command: error states must exit non-zero so shell
         # pipelines fail loud, and the code follows the exit_codes map —
-        # REJECTED is a validation/policy outcome (EXIT_VALIDATION),
-        # FAILED on this path is a store outcome such as target-not-found
-        # (EXIT_STORE). ``command_id`` rides the JSON so a failed attempt
-        # still joins to its MUTATION_REJECTED audit event.
-        exit_code = (
-            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
-        )
+        # a policy refusal is EXIT_POLICY, any other REJECTED (a blank
+        # reason, or a target id that names no node) EXIT_VALIDATION, and
+        # FAILED on this path is a store outcome such as a concurrent purge
+        # or a backend error (EXIT_STORE). ``command_id`` rides the JSON so
+        # a failed attempt still joins to its MUTATION_REJECTED audit event.
         if output_format == "json":
             emit_json(
                 {
                     "status": result.status.value,
                     "command_id": result.command_id,
                     "message": result.message,
+                    "warnings": list(result.warnings),
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
-        raise typer.Exit(code=exit_code)
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
+            _print_warnings(result.warnings)
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -431,10 +489,12 @@ def redact(
                 "command_id": result.command_id,
                 "target_id": target_id,
                 "message": result.message,
+                "warnings": list(result.warnings),
             }
         )
     else:
         console.print(f"[green]✓[/green] {escape(result.message)}")
+        _print_warnings(result.warnings)
 
 
 @curate_app.command()
@@ -465,8 +525,11 @@ def entity(
                     }
                 )
             else:
-                console.print(f"[red]Invalid JSON for --properties[/red]: {exc}")
-            raise typer.Exit(code=EXIT_INTERNAL) from exc
+                console.print(
+                    f"[red]Invalid JSON for --properties[/red]: {escape(str(exc))}",
+                    soft_wrap=True,
+                )
+            raise typer.Exit(code=EXIT_VALIDATION) from exc
 
     cmd = Command(
         operation=Operation.ENTITY_CREATE,
@@ -481,20 +544,19 @@ def entity(
     result = build_curate_executor(_get_registry()).execute(cmd)
 
     if result.status in (CommandStatus.FAILED, CommandStatus.REJECTED):
-        exit_code = (
-            EXIT_VALIDATION if result.status == CommandStatus.REJECTED else EXIT_STORE
-        )
         if output_format == "json":
             emit_json(
                 {
                     "status": result.status.value,
                     "command_id": result.command_id,
                     "message": result.message,
+                    "warnings": list(result.warnings),
                 }
             )
         else:
-            console.print(f"[red]{escape(result.message)}[/red]")
-        raise typer.Exit(code=exit_code)
+            console.print(f"[red]{escape(result.message)}[/red]", soft_wrap=True)
+            _print_warnings(result.warnings)
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         emit_json(
@@ -504,6 +566,7 @@ def entity(
                 "entity_type": entity_type,
                 "name": name,
                 "properties": {**props, "name": name},
+                "warnings": list(result.warnings),
             }
         )
     else:
@@ -514,6 +577,7 @@ def entity(
         console.print(f"  Name: {name}", markup=False, highlight=False)
         if properties:
             console.print(f"  Properties: {props}", markup=False, highlight=False)
+        _print_warnings(result.warnings)
 
 
 @curate_app.command()
@@ -539,7 +603,18 @@ def feedback(
     only; the per-item ``helpful_item_ids`` / ``unhelpful_item_ids``
     attribution the promote half of the loop consumes is carried by the
     MCP ``record_feedback`` tool and ``POST /packs/{pack_id}/feedback``.
+
+    ``rating`` is held to the MCP tool's inclusive range. Typer parses
+    ``nan`` and ``inf`` as floats, and NaN fails every comparison, so the
+    check is written as "inside the range" rather than "outside it".
     """
+    if not 0.0 <= rating <= 1.0:
+        message = f"rating must be between 0.0 and 1.0, got {rating}"
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{message}[/red]", soft_wrap=True)
+        raise typer.Exit(code=EXIT_VALIDATION)
     args: dict[str, object] = {"target_id": target_id, "rating": rating}
     if comment:
         args["comment"] = comment
@@ -718,3 +793,218 @@ def promote_learning(
             escape(edge_summary),
         )
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# auto-promote-candidates — report-only evaluation of learning candidates
+# ---------------------------------------------------------------------------
+
+
+def _resolve_candidate_auto_promote_overrides_for_cli(
+    stores_dir: Path | None,
+) -> dict[str, bool | int | str]:
+    """Load settings and resolve the six candidate-auto-promote knobs.
+
+    A settings-store read failure degrades to the defaults alone —
+    advisory, like every other settings-aware read in this CLI — never
+    fails the job over a catalog/settings-file problem.
+
+    Split out from policy construction so a caller can read
+    ``overrides["mode"]`` — the true *configured* mode — before anything
+    downstream gets a chance to lose or overwrite it: a ``mode="commit"``
+    policy raises :class:`~trellis.errors.ConfigError` unconditionally in
+    ``__post_init__`` (there is no way to construct one and then force it
+    back to report-only and read ``policy.mode`` afterwards), and
+    ``--dry-run`` forces the mode passed to construction to
+    ``"report_only"`` regardless of what this resolves to. This is the
+    only point the true value is ever available.
+    """
+    try:
+        settings = load_settings_values(stores_dir)
+    except Exception:
+        logger.warning("candidate_auto_promote_settings_read_failed", exc_info=True)
+        settings = {}
+    return resolve_candidate_auto_promote_overrides(settings=settings)
+
+
+def _build_candidate_auto_promote_policy(
+    overrides: Mapping[str, bool | int | str],
+    *,
+    force_report_only: bool = False,
+) -> LearningCandidateAutoPromotePolicy:
+    """Construct the policy from already-resolved *overrides*.
+
+    ``force_report_only`` (``--dry-run``) is applied here, to the mode
+    *before* the policy is constructed — never after. A ``mode="commit"``
+    policy raises :class:`~trellis.errors.ConfigError` unconditionally in
+    ``__post_init__`` (there is no way to construct one and then force it
+    back to report-only), so a stored ``mode="commit"`` would make
+    ``--dry-run`` itself fail with exit 5 if the override happened any
+    later than this. The caller is expected to have already captured
+    ``overrides["mode"]`` as ``configured_mode``
+    (:func:`_resolve_candidate_auto_promote_overrides_for_cli`) before
+    calling this — this function itself reports only the (possibly
+    forced) construction mode, never the pre-force value.
+    """
+    mode = "report_only" if force_report_only else overrides["mode"]
+    return LearningCandidateAutoPromotePolicy(
+        enabled=bool(overrides["enabled"]),
+        mode=mode,  # type: ignore[arg-type]
+        min_helpful_count=int(overrides["min_helpful_count"]),
+        min_distinct_sessions=int(overrides["min_distinct_sessions"]),
+        require_zero_unhelpful=bool(overrides["require_zero_unhelpful"]),
+        max_promotions_per_run=int(overrides["max_promotions_per_run"]),
+    )
+
+
+def _raise_bad_candidates_param(msg: str) -> NoReturn:
+    """Raise ``BadParameter`` from an inner function (TRY301): the two call
+    sites below are validation inside ``auto_promote_candidates``'s own
+    ``try`` block, caught by that same function's ``except Exception`` to
+    emit a failure event before re-raising — raising directly in the try
+    body is exactly the control-flow-as-exception shape TRY301 flags.
+    """
+    raise typer.BadParameter(msg, param_hint="'--candidates'")
+
+
+@curate_app.command("auto-promote-candidates")
+def auto_promote_candidates(
+    candidates_path: Path | None = typer.Option(  # noqa: B008 - typer option default
+        None,
+        "--candidates",
+        help=(
+            "Path to intent_learning_candidates.json. Defaults to "
+            "resolve_learning_artifacts_dir() over the registry's "
+            "stores_dir — the same directory the Review queue reads."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Force report_only for this run's effective_mode, applied "
+            "before the policy is built. Without --dry-run, a stored or "
+            "env-configured learning.candidate_auto_promote.mode of "
+            "commit makes every run fail with a configuration error "
+            "(commit mode is not available yet); --dry-run avoids that by "
+            "forcing effective_mode to report_only ahead of the check, "
+            "regardless of what mode resolved to. It never changes what "
+            "configured_mode reports: a stored commit still reports "
+            "configured_mode: commit (effective_mode: report_only) in the "
+            "event, the Loop Health row, and this command's own output —"
+            " --dry-run hides nothing about what is actually configured, "
+            "it only stops that configuration from taking effect."
+        ),
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Evaluate learning candidates for automatic promotion — report-only.
+
+    Every run — including one that fails before evaluating a single
+    candidate — emits at least one ``LEARNING_AUTO_PROMOTE_EVALUATED``
+    event and writes nothing else. A completed run's event names each
+    candidate's disposition — ``would_promote``, ``already_promoted`` (a
+    precedent already exists for it, human-approved or from an earlier
+    automatic run), or ``ineligible:<reason>`` — and carries
+    ``outcome: "ok"`` (or ``"degraded"`` if any candidate was skipped for
+    having no usable id). A run that never got that far carries
+    ``outcome: "refused"`` (a :class:`~trellis.errors.ConfigError` —
+    e.g. a stored or env ``mode="commit"`` without ``--dry-run``, exit 5)
+    or ``outcome: "failed"`` (a malformed ``--candidates`` file, or a
+    non-finite env override, exit 2 or 1) instead.
+    ``learning.candidate_auto_promote.mode`` cannot be set to ``commit``:
+    constructing the policy with that mode raises
+    :class:`~trellis.errors.ConfigError`, exit 5 — unless ``--dry-run``
+    is passed, since ``--dry-run`` forces ``effective_mode`` to
+    ``report_only`` ahead of that construction, so a configured
+    ``commit`` never reaches it; ``configured_mode`` in the event and in
+    this command's own output still reports the true pre-``--dry-run``
+    value. Unattended commit is a follow-up once an auto-demotion
+    rollback exists to monitor it.
+    """
+    registry = _get_registry()
+    event_log = get_event_log()
+    configured_mode: CandidateAutoPromoteMode | None = None
+    try:
+        if candidates_path is None:
+            resolved_dir = resolve_learning_artifacts_dir(registry.stores_dir)
+            if resolved_dir is None:
+                msg = (
+                    "no learning-artifacts directory: the store registry "
+                    f"has no stores_dir and {LEARNING_ARTIFACTS_DIR_ENV} "
+                    "is unset; pass --candidates"
+                )
+                _raise_bad_candidates_param(msg)
+            candidates_path = resolved_dir / LEARNING_CANDIDATES_FILENAME
+
+        try:
+            raw_text = candidates_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            msg = f"cannot read candidates file {candidates_path}: {exc}"
+            raise typer.BadParameter(msg, param_hint="'--candidates'") from exc
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            msg = f"candidates file {candidates_path} is not valid JSON: {exc}"
+            raise typer.BadParameter(msg, param_hint="'--candidates'") from exc
+        if not isinstance(payload, dict):
+            msg = (
+                f"candidates file {candidates_path} must contain a JSON "
+                'object with a top-level "candidates" array, got '
+                f"{type(payload).__name__}"
+            )
+            _raise_bad_candidates_param(msg)
+        candidates = payload.get("candidates", [])
+        if not isinstance(candidates, list):
+            candidates = []
+
+        overrides = _resolve_candidate_auto_promote_overrides_for_cli(
+            registry.stores_dir
+        )
+        configured_mode = overrides["mode"]  # type: ignore[assignment]
+        policy = _build_candidate_auto_promote_policy(
+            overrides, force_report_only=dry_run
+        )
+
+        report = run_candidate_auto_promotion(
+            candidates=candidates,
+            policy=policy,
+            event_log=event_log,
+            force_report_only=dry_run,
+            configured_mode=configured_mode,
+        )
+    except ValueError as exc:
+        # A resolver or policy ValueError (an invalid mode, a knob looser
+        # than its floor, a non-finite env override) can embed the raw
+        # value it rejected — never let str(exc) reach stderr. The clean,
+        # value-free message plus a validation exit code is this
+        # command's whole response; the failure event records the type.
+        emit_candidate_auto_promote_failure_event(
+            event_log, error=exc, configured_mode=configured_mode
+        )
+        console.print(
+            "[red]invalid candidate auto-promote configuration "
+            f"({escape(type(exc).__name__)})[/red]",
+            soft_wrap=True,
+        )
+        raise typer.Exit(code=EXIT_VALIDATION) from exc
+    except Exception as exc:
+        emit_candidate_auto_promote_failure_event(
+            event_log, error=exc, configured_mode=configured_mode
+        )
+        raise
+
+    if output_format == "json":
+        emit_json(report_to_dict(report))
+        return
+
+    console.print(
+        f"[bold]Auto-Promote Candidates[/bold] — mode={report.mode} "
+        f"(configured={sanitize_configured_mode(report.configured_mode)})"
+    )
+    console.print(f"  would_promote: {report.would_promote_count}")
+    console.print(f"  already_promoted: {report.already_promoted_count}")
+    console.print(f"  promoted: {report.promoted_count}")
+    console.print(f"  ineligible: {report.ineligible_count}")
+    for outcome in report.outcomes:
+        console.print(f"  - {escape(outcome.candidate_id)}: {outcome.disposition}")

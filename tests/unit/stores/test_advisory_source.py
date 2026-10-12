@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 from structlog.testing import capture_logs
 
+from tests.recovery_command import expected_recovery
 from tests.unreadable_paths import (
     UNREADABLE_PATH_IDS,
     UNREADABLE_PATH_SHAPES,
@@ -224,8 +225,17 @@ def _stub_live_backend_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
     resolution — not that the factory does.
     """
     from trellis.retrieve import builder_factory
+    from trellis.retrieve.strategies import BuildStrategiesResult
 
-    monkeypatch.setattr(builder_factory, "build_strategies", lambda *a, **k: [])
+    monkeypatch.setattr(
+        builder_factory,
+        "build_strategies",
+        lambda *a, **k: BuildStrategiesResult(
+            strategies=[],
+            embedder_configured=False,
+            embedder_resolve_failure=None,
+        ),
+    )
     monkeypatch.setattr(builder_factory, "build_reranker", lambda *a, **k: None)
     monkeypatch.setattr(builder_factory, "ParameterRegistry", lambda *a, **k: None)
 
@@ -431,7 +441,7 @@ class TestDegradedFileIsVisibleAtTheReadSurfaces:
         assert lines[0]["log_level"] == "error"
         assert lines[0]["surface"] == "mcp"
         assert lines[0]["path"] == str(path)
-        assert lines[0]["recovery"] == f"mv {path} {path}.corrupt"
+        assert lines[0]["recovery"] == expected_recovery(path)
 
     def test_the_reassuring_line_is_not_also_emitted(
         self, dirs: tuple[Path, Path]

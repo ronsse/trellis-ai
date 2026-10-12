@@ -10,7 +10,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from tests.cli_output import plain
+from tests.cli_output import assert_coloured, force_colour, plain
 from trellis_cli import admin
 from trellis_cli.main import app
 from trellis_cli.output import build_console
@@ -85,6 +85,19 @@ class TestQuickstart:
         result = runner.invoke(app, ["admin", "quickstart"])
         assert result.exit_code == 0
         assert "already" in result.stdout.lower()
+
+    @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
+    def test_missing_mcp_hint_keeps_its_extra(self, monkeypatch, colour):
+        """Rich read ``[dev]`` as a markup tag, so the hint said ``-e "."``."""
+        monkeypatch.setattr(admin.shutil, "which", lambda *_args, **_kwargs: None)
+        if colour:
+            force_colour(monkeypatch, admin)
+
+        result = runner.invoke(app, ["admin", "quickstart"])
+
+        assert result.exit_code == 0, result.output
+        text = assert_coloured(result.stdout) if colour else plain(result.stdout)
+        assert 'Run: uv pip install -e ".[dev]"' in " ".join(text.split())
 
     @pytest.mark.parametrize("scope_args", [[], ["--scope", "project"]])
     def test_rerun_leaves_config_yaml_byte_identical(self, monkeypatch, scope_args):
@@ -337,6 +350,32 @@ class TestQuickstart:
             app,
             ["admin", "quickstart", "--with-skills", "bogus", "--format", "json"],
         )
-        assert result.exit_code != 0
-        data = json.loads(result.stdout.strip())
-        assert data["status"] == "error"
+        assert result.exit_code == 2
+        assert json.loads(result.stdout) == {
+            "status": "error",
+            "error": "--with-skills must be 'user' or 'project', got 'bogus'",
+        }
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    def test_unknown_scope_exits_before_writing(self, monkeypatch, output_format):
+        """A ``--scope`` other than ``root`` or ``project`` writes nothing.
+
+        Only ``project`` was special-cased, so a typo ran the root setup:
+        it initialized the global config and data dirs and exited 0. The
+        value holds a ``[word]``, which Rich reads as a style tag and
+        deletes unless the text arm escapes it.
+        """
+        project_dir = self._enter_project(monkeypatch)
+        result = runner.invoke(
+            app,
+            ["admin", "quickstart", "--scope", "[project]", "--format", output_format],
+        )
+        msg = "--scope must be 'root' or 'project', got '[project]'"
+        assert result.exit_code == 2
+        if output_format == "json":
+            assert json.loads(result.stdout) == {"status": "error", "error": msg}
+        else:
+            assert plain(result.stdout).strip() == f"Error: {msg}"
+        assert not (self.tmp / "trellis-config").exists()
+        assert not (self.tmp / "trellis-data").exists()
+        assert not (project_dir / ".trellis").exists()

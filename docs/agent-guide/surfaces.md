@@ -31,7 +31,8 @@ $ trellis admin version --format json | jq '{api_version, mcp_tools_version}'
 
 - `api_major` bumps on REST breaking changes.  SDK refuses to talk
   to a different major.
-- `api_minor` bumps on REST additive changes.
+- `api_minor` bumps when the SDK comes to rely on a REST addition,
+  not on every additive change (see `src/trellis/api_version.py`).
 - `mcp_tools_version` bumps on MCP breaking changes.  Decoupled from
   `api_major` so MCP deployments don't move with REST migrations.
 
@@ -65,6 +66,7 @@ $ trellis admin version --format json | jq '{api_version, mcp_tools_version}'
 | Bulk ingest | `POST /api/v1/ingest/bulk` | — | — |
 | Policy CRUD | `/api/v1/policies[/...]` | — | — |
 | Stats / effectiveness | `/api/v1/stats`, `/api/v1/effectiveness`, `/api/v1/metrics/timeseries` | — | — |
+| Per-loop health (noise demotion, advisory generation/fitness, learning-candidate scoring, precedent promotion, tuner, feedback intake) | `GET /api/v1/loops` (admin scope) | — | — |
 
 [^chunks]: The three are not interchangeable on chunk rows, and the
     difference is deliberate. `GET /api/v1/search` and `client.search`

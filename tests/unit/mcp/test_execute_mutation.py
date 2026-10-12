@@ -8,15 +8,21 @@ in parallel.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 from mcp.shared.exceptions import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
+from pydantic import ValidationError
 
 from tests.unit.mcp.conftest import unwrap_tool
+from trellis.errors import ConfigError
 from trellis.mcp.server import execute_mutation as _execute_mutation
-from trellis.stores.base.event_log import EventType
+from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.schemas.trace import Trace
+from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.registry import StoreRegistry
+from trellis.stores.settings_store import SettingsStore, resolve_settings_path
 
 execute_mutation = unwrap_tool(_execute_mutation)
 
@@ -254,7 +260,8 @@ class TestExecuteMutationErrors:
     ) -> None:
         """Unexpected executor exceptions surface as INTERNAL_ERROR with
         the original cause chained via ``from`` and the command_id in
-        ``data`` for correlation."""
+        ``data`` for correlation. The message names the exception by its
+        type alone, because its text can be a driver's."""
         import trellis.mcp.server as server_mod
 
         class _ExplodingExecutor:
@@ -273,8 +280,8 @@ class TestExecuteMutationErrors:
             )
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
-        assert "execution failed" in err.error.message.lower()
-        assert "fake executor outage" in err.error.message
+        assert err.error.message == "execution failed: RuntimeError"
+        assert "fake executor outage" not in str(err.error.data)
         # ``from exc`` preserves the original cause.
         assert isinstance(excinfo.value.__cause__, RuntimeError)
         assert str(excinfo.value.__cause__) == "fake executor outage"
@@ -282,6 +289,24 @@ class TestExecuteMutationErrors:
         assert err.error.data["operation"] == "link.create"
         assert "command_id" in err.error.data
         assert err.error.data["error_class"] == "RuntimeError"
+
+    def test_a_trellis_error_keeps_its_text(self, temp_registry: StoreRegistry) -> None:
+        """A damaged policy file fails ``build_curate_executor`` with a
+        ``ConfigError``, whose text names the file and the fix."""
+        (temp_registry.stores_dir / "policies.json").write_text(
+            '{"polices": []}', encoding="utf-8"
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            execute_mutation(
+                operation="link.create",
+                args={"source_id": "a", "target_id": "b", "edge_kind": "k"},
+            )
+        err = excinfo.value
+        assert err.error.code == INTERNAL_ERROR
+        assert isinstance(err.__cause__, ConfigError)
+        assert err.error.message == f"execution failed: {err.__cause__}"
+        assert "policies.json" in err.error.message
 
     def test_missing_required_arg_returns_validation_error(
         self, temp_registry: StoreRegistry
@@ -292,13 +317,51 @@ class TestExecuteMutationErrors:
             args={"source_id": "a", "target_id": "b"},  # missing edge_kind
         )
         payload = json.loads(raw)
-        # The executor surfaces this as a FAILED CommandResult, which the
-        # tool relays verbatim — status is the executor's "failed", not
-        # the tool's pre-flight "error".
-        assert payload["status"] == "failed"
+        # The executor refuses this at Stage 1 with a REJECTED CommandResult,
+        # which the tool relays verbatim — status is the executor's
+        # "rejected", not the tool's pre-flight "error".
+        assert payload["status"] == "rejected"
         assert "validation failed" in payload["message"].lower()
         assert "edge_kind" in payload["message"]
         assert payload["operation"] == "link.create"
+
+    def test_a_missing_arg_is_reported_as_the_roster_refusal_is(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """Both Stage 1 refusals answer ``rejected`` with the same fields."""
+        missing_arg = json.loads(
+            execute_mutation(operation="link.create", args={"source_id": "syn-node-a"})
+        )
+        roster = json.loads(
+            execute_mutation(
+                operation="entity.create",
+                args={"entity_type": "service", "name": "syn-svc"},
+                actor="worker:embed-traces",
+            )
+        )
+        assert missing_arg["status"] == roster["status"] == "rejected"
+        assert sorted(missing_arg) == sorted(roster)
+        assert missing_arg["message"] == (
+            "Validation failed: Missing required args: edge_kind, target_id"
+        )
+
+    def test_feedback_record_refuses_an_out_of_range_rating(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        """A ``feedback.record`` rating of 5.0 is rejected and nothing is recorded.
+
+        ``execute_mutation`` passes caller ``args`` straight into the ``Command``.
+        """
+        raw = execute_mutation(
+            operation="feedback.record",
+            args={"target_id": "t1", "rating": 5.0},
+        )
+        payload = json.loads(raw)
+        assert payload["status"] == "rejected"
+        assert "rating" in payload["message"].lower()
+        assert not temp_registry.operational.event_log.get_events(
+            event_type=EventType.FEEDBACK_RECORDED, limit=5
+        )
 
     def test_handler_failure_surfaces_rejected_status(
         self, temp_registry: StoreRegistry
@@ -321,3 +384,232 @@ class TestExecuteMutationErrors:
         payload = json.loads(raw)
         assert payload["status"] == "rejected"
         assert "does not reference an existing entity" in payload["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# trace.ingest targets its trace
+# ---------------------------------------------------------------------------
+
+_TRACE: dict[str, Any] = {
+    "source": "agent",
+    "intent": "exercise the trace target",
+    "context": {"agent_id": "test-agent"},
+}
+
+
+def _ingest(trace: Any) -> dict[str, Any]:
+    return json.loads(execute_mutation(operation="trace.ingest", args={"trace": trace}))
+
+
+def _audit_event(registry: StoreRegistry, command_id: str) -> Event:
+    """Return the executor's one audit event for *command_id*."""
+    (event,) = [
+        event
+        for event_type in (EventType.MUTATION_EXECUTED, EventType.MUTATION_REJECTED)
+        for event in registry.operational.event_log.get_events(
+            event_type=event_type, limit=100
+        )
+        if event.payload.get("command_id") == command_id
+    ]
+    return event
+
+
+def _deny_traces(registry: StoreRegistry, operation: str) -> None:
+    """Declare one enforced ``deny`` rule for *operation*, scoped to traces."""
+    policy = Policy(
+        policy_type="mutation",
+        scope=PolicyScope(level="entity_type", value="trace"),
+        rules=[
+            PolicyRule(operation=operation, condition="synthetic-freeze", action="deny")
+        ],
+        enforcement="enforce",
+    )
+    (registry.stores_dir / "policies.json").write_text(
+        json.dumps({"policies": [policy.model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+
+
+class TestTraceIngestTarget:
+    """``trace.ingest`` targets its trace, as ``save_experience`` does.
+
+    ``trellis ingest trace`` and ``POST /api/v1/traces`` do the same. The
+    policy gate matches an ``entity_type`` scope on ``target_type``, and the
+    executor's audit event records ``target_type`` and ``target_id``.
+    """
+
+    def test_the_audit_event_names_each_stored_trace(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        traces = [
+            _TRACE,  # the id is minted when the server validates the trace
+            {**_TRACE, "trace_id": "synthetic-trace-1"},
+            Trace.model_validate(_TRACE),
+        ]
+        for trace in traces:
+            payload = _ingest(trace)
+            assert payload["status"] == "success", payload
+            stored = temp_registry.operational.trace_store.get(payload["created_id"])
+            assert stored is not None
+
+            event = _audit_event(temp_registry, payload["command_id"])
+
+            assert (event.event_type, event.entity_type, event.entity_id) == (
+                EventType.MUTATION_EXECUTED,
+                "trace",
+                stored.trace_id,
+            )
+
+    def test_a_policy_scoped_to_traces_refuses_the_ingest(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        _deny_traces(temp_registry, "trace.ingest")
+
+        payload = _ingest(_TRACE)
+
+        assert (payload["status"], payload["message"]) == (
+            "rejected",
+            "Denied by policy: synthetic-freeze",
+        )
+        assert temp_registry.operational.trace_store.count() == 0
+
+    def test_a_policy_scoped_to_traces_leaves_other_operations_alone(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        _deny_traces(temp_registry, "*")
+        graph = temp_registry.knowledge.graph_store
+        source_id = graph.upsert_node(
+            node_id=None, node_type="concept", properties={"name": "src"}
+        )
+        target_id = graph.upsert_node(
+            node_id=None, node_type="concept", properties={"name": "dst"}
+        )
+
+        link = json.loads(
+            execute_mutation(
+                operation="link.create",
+                args={
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "edge_kind": "entity_related_to",
+                    # A trace among another operation's args does not make
+                    # that operation a trace write.
+                    "trace": _TRACE,
+                },
+            )
+        )
+
+        assert link["status"] == "success", link
+        # The same policy is live: it refuses a trace.
+        assert _ingest(_TRACE)["status"] == "rejected"
+
+    @pytest.mark.parametrize(
+        "trace",
+        [
+            {"source": "agent", "intent": "exercise the trace target"},
+            json.dumps(_TRACE),
+            None,
+        ],
+        ids=["missing-field", "json-string", "null"],
+    )
+    def test_an_invalid_trace_is_still_refused_by_the_handler(
+        self, temp_registry: StoreRegistry, trace: Any
+    ) -> None:
+        """A trace that does not validate goes on untargeted.
+
+        A policy scoped to traces does not match it, and the handler refuses
+        it, naming the trace's validation error by its type.
+        """
+        _deny_traces(temp_registry, "trace.ingest")
+        with pytest.raises(ValidationError):
+            Trace.model_validate(trace)
+
+        payload = _ingest(trace)
+
+        assert (payload["status"], payload["message"]) == (
+            "failed",
+            "Execution failed: ValidationError",
+        )
+        assert temp_registry.operational.trace_store.count() == 0
+        event = _audit_event(temp_registry, payload["command_id"])
+        assert (event.entity_type, event.entity_id) == (None, None)
+
+
+class TestScheduleAdminOperationsAreNotMcpReachable:
+    """``schedule.update``/``job.run_request`` resolve as real operations
+
+    (``_resolve_operation`` finds them in the ``Operation`` enum) but have
+    no handler in ``build_curate_executor`` — only
+    ``trellis.mutate.build_schedule_executor`` wires them, and only the
+    admin REST route and ``trellis admin schedule`` build an executor from
+    that function. A mutate-scoped MCP credential must not be able to
+    edit a job's schedule or request a run, so this is the refusal, not
+    an oversight (see ``trellis.mutate.schedule_handlers``'s module
+    docstring).
+    """
+
+    @pytest.mark.parametrize("operation", ["schedule.update", "job.run_request"])
+    def test_no_handler_registered_is_a_plain_failed_result(
+        self, temp_registry: StoreRegistry, operation: str
+    ) -> None:
+        payload = json.loads(execute_mutation(operation=operation, args={}))
+
+        assert payload["status"] == "failed"
+        assert "no handler registered" in payload["message"].lower()
+        assert operation in payload["message"].lower()
+        # Not an McpError: a structured outcome, exactly like any other
+        # unhandled operation reaching this executor.
+
+    @pytest.mark.parametrize("operation", ["schedule.update", "job.run_request"])
+    def test_screaming_snake_form_is_refused_identically(
+        self, temp_registry: StoreRegistry, operation: str
+    ) -> None:
+        payload = json.loads(
+            execute_mutation(operation=operation.upper().replace(".", "_"), args={})
+        )
+
+        assert payload["status"] == "failed"
+        assert "no handler registered" in payload["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# settings.update is unreachable here
+# ---------------------------------------------------------------------------
+
+
+class TestSettingsUpdateIsUnreachable:
+    """``execute_mutation`` builds :func:`build_curate_executor`
+    (see the import above and the module docstring's "same five-stage
+    pipeline" line), which no longer registers
+    ``Operation.SETTINGS_UPDATE`` at all. Only the admin-scoped REST route
+    and ``trellis admin settings`` build the narrow
+    :func:`~trellis.mutate.build_settings_executor` that does -- this MCP
+    tool, being a generic surface, must not have a settings write path.
+
+    ``status`` stays ``"failed"`` -- nothing was evaluated and no
+    ``MUTATION_REJECTED`` event exists to name a reason, so relabelling
+    it ``"rejected"`` would claim an audit trail that was not written
+    (:func:`~trellis.mutate.redirect_unreachable_settings_update`'s own
+    docstring). Only the message changes, to name where the write *is*
+    reachable instead of a bare "no handler registered".
+    """
+
+    def test_settings_update_is_refused_as_no_handler_registered(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        raw = execute_mutation(
+            operation="settings.update",
+            args={"name": "pack_holdout_rate", "value": 0.9},
+        )
+        payload = json.loads(raw)
+
+        assert payload["status"] == "failed"
+        assert "No handler registered" in payload["message"]
+        assert "PUT" in payload["message"]
+        assert "/api/v1/settings/{name}" in payload["message"]
+        assert "trellis admin settings set" in payload["message"]
+
+        assert temp_registry.stores_dir is not None
+        path = resolve_settings_path(temp_registry.stores_dir)
+        if path is not None and path.exists():
+            assert SettingsStore(path).get("pack_holdout_rate") is None

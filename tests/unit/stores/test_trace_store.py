@@ -1,10 +1,12 @@
 """Tests for the TraceStore."""
 
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
+from tests.unit.stores.sqlite_write_lock import committed_rows, write_at_once
 from trellis.core.base import utc_now
 from trellis.errors import StoreError
 from trellis.schemas.enums import OutcomeStatus, TraceSource
@@ -127,3 +129,32 @@ def test_trace_with_steps(trace_store):
     assert retrieved is not None
     assert len(retrieved.steps) == 1
     assert retrieved.steps[0].name == "kubectl apply"
+
+
+def test_an_append_commits_at_once(trace_store, tmp_path: Path):
+    trace_store.append(_make_trace(trace_id="syn-trace-1"))
+
+    rows = committed_rows(tmp_path / "traces.db", "SELECT trace_id FROM traces")
+    assert rows == [("syn-trace-1",)]
+
+
+def test_a_failed_append_holds_no_write_lock(trace_store, tmp_path: Path):
+    """A duplicate append is rolled back, not left holding the write lock."""
+    first = _make_trace(trace_id="syn-trace-1")
+    trace_store.append(first)
+
+    with pytest.raises(StoreError, match=r"^Trace syn-trace-1 already exists$") as err:
+        trace_store.append(first)
+
+    assert isinstance(err.value.__cause__, sqlite3.IntegrityError)
+    assert trace_store._conn.in_transaction is False
+    write_at_once(
+        tmp_path / "traces.db",
+        "INSERT INTO traces (trace_id, source, intent, trace_json, created_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        ("syn-trace-2", "agent", "syn-other", "{}", utc_now().isoformat()),
+    )
+    rows = committed_rows(
+        tmp_path / "traces.db", "SELECT trace_id FROM traces ORDER BY trace_id"
+    )
+    assert rows == [("syn-trace-1",), ("syn-trace-2",)]

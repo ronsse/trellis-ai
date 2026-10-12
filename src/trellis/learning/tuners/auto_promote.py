@@ -44,6 +44,9 @@ is about to eyeball.
 
 from __future__ import annotations
 
+import math
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -51,6 +54,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.core.base import utc_now
+from trellis.core.write_config import TRUTHY, parse_finite_float, parse_finite_int
 from trellis.learning.tuners.promotion import (
     DEFAULT_MIN_EFFECT_SIZE,
     DEFAULT_MIN_SAMPLE_SIZE,
@@ -63,6 +67,7 @@ from trellis.learning.tuners.rollback import (
     PostPromotionReport,
     monitor_post_promotion,
 )
+from trellis.ops.parameter_reachability import reachability_reasons
 from trellis.stores.base.event_log import EventLog, EventType
 
 if TYPE_CHECKING:
@@ -149,6 +154,15 @@ class AutoPromotePolicy:
                 f"least as strict as the human-reviewed one."
             )
             raise ValueError(msg)
+        if not math.isfinite(self.min_effect_size):
+            msg = (
+                f"AutoPromotePolicy.min_effect_size={self.min_effect_size} "
+                "must be a finite number — a non-finite value compares False "
+                "against every bound in the effect-size gate "
+                "(`promotion.py`'s `comparable < policy.min_effect_size`), "
+                "which would let every proposal clear it."
+            )
+            raise ValueError(msg)
         if self.min_effect_size < DEFAULT_MIN_EFFECT_SIZE:
             msg = (
                 f"AutoPromotePolicy.min_effect_size={self.min_effect_size} is "
@@ -179,6 +193,101 @@ class AutoPromotePolicy:
         )
 
 
+#: Env vars for the three knobs ``SETTINGS_REGISTRY`` registers under
+#: ``learning.auto_promote.*`` — see :func:`resolve_auto_promote_overrides`.
+#: Bool follows the repo's ``TRELLIS_ENABLE_X`` convention, scalars
+#: ``TRELLIS_X`` (``trellis.core.write_config`` module docstring).
+AUTO_PROMOTE_ENABLED_ENV = "TRELLIS_ENABLE_AUTO_PROMOTE"
+AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV = "TRELLIS_AUTO_PROMOTE_MIN_SAMPLE_SIZE"
+AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV = "TRELLIS_AUTO_PROMOTE_MIN_EFFECT_SIZE"
+
+#: ``SETTINGS_REGISTRY`` keys for the same three knobs — dotted to mirror
+#: the ``config.yaml`` path they shadow (``learning.auto_promote.<key>``).
+AUTO_PROMOTE_ENABLED_SETTING = "learning.auto_promote.enabled"
+AUTO_PROMOTE_MIN_SAMPLE_SIZE_SETTING = "learning.auto_promote.min_sample_size"
+AUTO_PROMOTE_MIN_EFFECT_SIZE_SETTING = "learning.auto_promote.min_effect_size"
+
+
+def resolve_auto_promote_overrides(
+    *,
+    config_defaults: Mapping[str, bool | int | float] | None = None,
+    settings: Mapping[str, bool | int | float | str] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, bool | int | float]:
+    """Resolve the three tuner knobs: env > settings > config.yaml > default.
+
+    The one function every caller that builds an :class:`AutoPromotePolicy`
+    resolves ``enabled``/``min_sample_size``/``min_effect_size`` through —
+    see the ``learning.auto_promote.*`` entries in
+    :data:`trellis.core.settings_registry.SETTINGS_REGISTRY` and
+    :func:`trellis_cli.worker._build_auto_promote_policy`, its sole caller
+    today. ``config_defaults`` is the already-parsed ``learning.auto_promote``
+    section of ``config.yaml`` (``{}``/``None`` when absent) — this function
+    does not read that file itself, so a caller with no config.yaml concern
+    (a test, a future non-CLI worker) can resolve purely from settings/env.
+
+    Resolves precedence only. The caller still constructs
+    :class:`AutoPromotePolicy` with the result, and *that* construction is
+    what rejects a value looser than the manual-promotion floors
+    (:meth:`AutoPromotePolicy.__post_init__`) — this function never
+    duplicates that check.
+    """
+    src_env: Mapping[str, str] = os.environ if env is None else env
+    settings_map: Mapping[str, bool | int | float | str] = settings or {}
+    config_map: Mapping[str, bool | int | float] = config_defaults or {}
+
+    raw_enabled = src_env.get(AUTO_PROMOTE_ENABLED_ENV, "")
+    if raw_enabled.strip():
+        enabled: bool = raw_enabled.strip().lower() in TRUTHY
+    elif AUTO_PROMOTE_ENABLED_SETTING in settings_map:
+        enabled = bool(settings_map[AUTO_PROMOTE_ENABLED_SETTING])
+    else:
+        enabled = bool(config_map.get("enabled", False))
+
+    raw_min_sample = src_env.get(AUTO_PROMOTE_MIN_SAMPLE_SIZE_ENV, "")
+    if raw_min_sample.strip():
+        min_sample_size: int = parse_finite_int(raw_min_sample)
+    elif AUTO_PROMOTE_MIN_SAMPLE_SIZE_SETTING in settings_map:
+        min_sample_size = int(settings_map[AUTO_PROMOTE_MIN_SAMPLE_SIZE_SETTING])  # type: ignore[arg-type]
+    else:
+        min_sample_size = int(
+            config_map.get("min_sample_size", DEFAULT_AUTO_MIN_SAMPLE_SIZE)
+        )
+
+    raw_min_effect = src_env.get(AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV, "")
+    if raw_min_effect.strip():
+        # ``parse_finite_float`` deliberately does not reject a non-finite
+        # result (its own docstring says so) -- normalizing OverflowError
+        # into ValueError is all it promises. The explicit isfinite check
+        # below is this resolver's own policy for that result, matching
+        # ``parse_finite_int``'s rejection of ``min_sample_size`` above:
+        # without it, GET /api/v1/settings never constructs
+        # ``AutoPromotePolicy`` (so `__post_init__`'s isfinite check never
+        # runs) and a `nan`/`inf` env value reaches the response as a
+        # silent `effective_value: null` with no `parse_error` instead of
+        # degrading to the registry default like every other garbage env
+        # value in this family.
+        min_effect_size: float = parse_finite_float(raw_min_effect)
+        if not math.isfinite(min_effect_size):
+            msg = (
+                f"{AUTO_PROMOTE_MIN_EFFECT_SIZE_ENV}={raw_min_effect!r} must "
+                "be a finite number"
+            )
+            raise ValueError(msg)
+    elif AUTO_PROMOTE_MIN_EFFECT_SIZE_SETTING in settings_map:
+        min_effect_size = float(settings_map[AUTO_PROMOTE_MIN_EFFECT_SIZE_SETTING])  # type: ignore[arg-type]
+    else:
+        min_effect_size = float(
+            config_map.get("min_effect_size", DEFAULT_AUTO_MIN_EFFECT_SIZE)
+        )
+
+    return {
+        "enabled": enabled,
+        "min_sample_size": min_sample_size,
+        "min_effect_size": min_effect_size,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class AutoPromoteOutcome:
     """What happened to one proposal during an auto-promotion pass."""
@@ -205,6 +314,8 @@ class AutoPromoteReport:
     """Aggregate result of one :func:`run_auto_promotion` pass."""
 
     enabled: bool
+    #: The caller's flag. False means the tuner pass persisted its proposals and
+    #: cursor (if it saw outcomes), even when disabled.
     dry_run: bool
     proposals_considered: int
     auto_promoted: int
@@ -369,7 +480,7 @@ def run_auto_promotion(
 
     return AutoPromoteReport(
         enabled=policy.enabled,
-        dry_run=effective_dry_run,
+        dry_run=dry_run,
         proposals_considered=len(proposals),
         auto_promoted=auto_promoted,
         rolled_back=rolled_back,
@@ -395,12 +506,28 @@ def _evaluate(
     (:func:`_compute_effect_size` + :func:`_apply_policy`) so the gate the
     auto path applies is identical in shape to the manual one, only with
     stricter thresholds.
+
+    Also runs :func:`reachability_reasons`, the same check
+    :func:`promote_proposal` applies above its own policy gate. Today
+    every caller of this function (``run_auto_promotion``) only ever
+    reaches it with proposals ``RuleTuner.run`` already screened for
+    reachability, and the live promotion inside ``_promote_and_monitor``
+    re-checks it independently, so this did not change what got
+    promoted — but a dry run's reported ``reason`` disagreed with what a
+    live run of the same proposal would actually do, and a proposal
+    written before that screen existed (or by a tuner that skips it)
+    would reach this gate with no reachability opinion at all.
     """
     # Local import keeps the private gate primitives in one module.
     from trellis.learning.tuners.promotion import (  # noqa: PLC0415
         _apply_policy,
         _compute_effect_size,
     )
+
+    unreachable = reachability_reasons(proposal.scope, tuple(proposal.proposed_values))
+    if unreachable:
+        reason = "unreachable: " + "; ".join(r.detail for r in unreachable)
+        return False, reason, None
 
     baseline = parameter_store.resolve(proposal.scope)
     baseline_values = baseline.values if baseline else None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
@@ -11,7 +12,12 @@ from urllib.parse import urlparse
 
 import structlog
 
-from trellis.core.error_sanitize import describe_yaml_error
+from trellis.core.error_sanitize import (
+    describe_import_error,
+    describe_json_error,
+    describe_os_error,
+    describe_yaml_error,
+)
 from trellis.core.path_presence import path_is_present
 from trellis.errors import BackendNotInstalledError, ConfigError, ValidationError
 from trellis.stores.base import (
@@ -221,6 +227,13 @@ _EXTRA_FOR_BACKEND: dict[str, str] = {
 }
 
 
+def _backend_not_installed(backend: str) -> BackendNotInstalledError:
+    """Build the refusal for a backend whose import or setup needs a module."""
+    return BackendNotInstalledError(
+        backend_name=backend, extra=_EXTRA_FOR_BACKEND.get(backend)
+    )
+
+
 def _resolve_connectivity_check(explicit: bool | None) -> bool:
     """Return the effective connectivity-check flag for a validate() call."""
     if explicit is not None:
@@ -237,6 +250,22 @@ def _resolve_connectivity_check(explicit: bool | None) -> bool:
 # the one trailing newline a ``|`` block scalar leaves. A placeholder inside a
 # longer value (a${B}c, ${DATA}/kuzu) is not matched.
 _LITERAL_PLACEHOLDER = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?[-=?+][^}]*)?\}$")
+
+# The shape of a config.yaml key: lowercase letters, digits, ``_`` and ``-``
+# (an ``x-`` anchor block), the longest documented one 26 characters. A key
+# of any other shape, or a longer one such as a hex token, can be a value
+# typed where a key belongs (a DSN inside YAML flow braces, a password), so a
+# message or log line gives only its length.
+_NAMEABLE_KEY = re.compile(r"[a-z][a-z0-9_-]{0,29}")
+
+
+def _describe_key(key: object) -> str:
+    """Return a config key as a message or log line may show it."""
+    if isinstance(key, str):
+        if _NAMEABLE_KEY.fullmatch(key):
+            return key
+        return f"<{len(key)}-character key, not shown>"
+    return f"<{type(key).__name__} key, not shown>"
 
 
 def _literal_placeholders(
@@ -258,8 +287,9 @@ def _literal_placeholders(
     seen.add(id(node))
     if isinstance(node, dict):
         for key, value in node.items():
+            name = _describe_key(key)
             yield from _literal_placeholders(
-                value, f"{path}.{key}" if path else str(key), seen
+                value, f"{path}.{name}" if path else name, seen
             )
     else:
         for index, value in enumerate(node):
@@ -310,7 +340,7 @@ def _extract_store_config(data: dict[str, Any], config_source: str) -> dict[str,
             if expected_plane is None:
                 logger.warning(
                     "registry_config_unknown_store_type",
-                    store_type=store_type,
+                    store_type=_describe_key(store_type),
                     plane=plane_name,
                     source=config_source,
                 )
@@ -481,45 +511,67 @@ def _try_llm_embedder_plugin(
     )
 
 
-def _import_callable(dotted_path: str) -> Callable[[str], list[float]]:
+def _import_callable(
+    dotted_path: str, *, setting: str = "embeddings.provider"
+) -> Callable[[str], list[float]]:
     """Import a callable from a dotted module path (e.g. ``pkg.mod.func``).
 
-    Raises :class:`ConfigError` when the path is malformed, the module
-    cannot be imported, or the named attribute is not callable. Returning
-    ``None`` silently here would let a misconfigured ``TRELLIS_EMBEDDING_FN``
-    propagate as ``embedding_fn is None`` downstream, which masks the typo
-    behind a "no embeddings configured" branch.
+    Raises :class:`ConfigError` naming *setting* when the path is
+    malformed — not a string, with no dot, or with any dot-separated
+    segment empty (a leading, trailing, or doubled dot, e.g. ``.pkg.fn``,
+    ``pkg.``, ``pkg..fn``) — when importing its module raises
+    :class:`ImportError` (including a module that exists but cannot import
+    its own dependency), or when the named attribute is missing or not
+    callable. *setting* should name whichever of ``TRELLIS_EMBEDDING_FN``
+    (the env var) or ``embeddings.provider`` (the YAML key) supplied
+    *dotted_path*, so the operator edits the right one. Any other exception
+    raised by the target module's own top-level code while it imports is
+    that module's bug, not a bad path, and propagates unchanged rather than
+    being caught here (#794). Returning ``None`` silently here would let a
+    misconfigured ``TRELLIS_EMBEDDING_FN`` propagate as
+    ``embedding_fn is None`` downstream, which masks the typo behind a "no
+    embeddings configured" branch.
     """
     import importlib  # noqa: PLC0415
 
-    module_path, _, attr_name = dotted_path.rpartition(".")
-    if not module_path or not attr_name:
+    # Checked whole, before any import: a leading dot would reach
+    # `import_module` as a relative import (`TypeError`, not `ImportError`),
+    # and a non-string has no `.rpartition`. A non-string is named by its
+    # type, never echoed: a YAML mapping can hold a credential, and this
+    # message reaches the REST body and the error log.
+    is_str = isinstance(dotted_path, str)
+    if not (is_str and "." in dotted_path and all(dotted_path.split("."))):
+        shown = repr(dotted_path) if is_str else f"of type {type(dotted_path).__name__}"
         msg = (
-            f"Invalid embedding callable path {dotted_path!r} —"
+            f"Invalid embedding callable path {shown} —"
             " expected a dotted path like 'pkg.module.func'."
         )
-        raise ConfigError(msg, setting="embeddings.provider")
+        raise ConfigError(msg, setting=setting)
+    module_path, _, attr_name = dotted_path.rpartition(".")
     try:
         module = importlib.import_module(module_path)
     except ImportError as exc:
+        # describe_import_error, not str(exc): a transitive import can
+        # fail on a module other than module_path, and that module's own
+        # error text can carry whatever a third-party package put in it.
         msg = (
             f"Could not import embedding callable {dotted_path!r}:"
-            f" module {module_path!r} is not importable ({exc})."
+            f" {describe_import_error(exc)}."
         )
-        raise ConfigError(msg, setting="embeddings.provider") from exc
+        raise ConfigError(msg, setting=setting) from exc
     fn = getattr(module, attr_name, None)
     if fn is None:
         msg = (
             f"Embedding callable path {dotted_path!r} resolved, but"
             f" attribute {attr_name!r} is missing from {module_path!r}."
         )
-        raise ConfigError(msg, setting="embeddings.provider")
+        raise ConfigError(msg, setting=setting)
     if not callable(fn):
         msg = (
             f"Embedding callable path {dotted_path!r} resolved, but"
             f" {attr_name!r} is not callable."
         )
-        raise ConfigError(msg, setting="embeddings.provider")
+        raise ConfigError(msg, setting=setting)
     return fn  # type: ignore[no-any-return]
 
 
@@ -577,6 +629,11 @@ def _build_openai_embedding_fn(
     is not installed — returning ``None`` here silently demoted
     ``embeddings: provider: openai`` configs to no-embedding mode
     instead of telling the operator the extra is missing.
+
+    Raises :class:`ConfigError` when the SDK is installed but no API key
+    resolves from ``embeddings.api_key_env``, ``embeddings.api_key`` or
+    ``OPENAI_API_KEY``. The constructor's untyped ``openai.OpenAIError``
+    is chained as the cause; its text stays out of the message.
     """
     try:
         import openai  # noqa: PLC0415
@@ -596,7 +653,16 @@ def _build_openai_embedding_fn(
     if config.get("base_url"):
         kwargs["base_url"] = config["base_url"]
 
-    client = openai.OpenAI(**kwargs)
+    try:
+        client = openai.OpenAI(**kwargs)
+    except openai.OpenAIError as exc:
+        msg = (
+            "OpenAI embeddings are configured but no API key was found."
+            " Set embeddings.api_key_env to the name of an environment"
+            " variable holding the key, embeddings.api_key to a literal"
+            " value, or export OPENAI_API_KEY."
+        )
+        raise ConfigError(msg, setting="embeddings.api_key_env") from exc
 
     def _embed(text: str) -> list[float]:
         resp = client.embeddings.create(input=[text], model=model)
@@ -695,27 +761,64 @@ _BACKEND_URI_RULES: dict[str, tuple[str, frozenset[str]]] = {
 
 
 def _validate_uri(
-    backend: str, uri: str, allowed_schemes: frozenset[str]
+    backend: str, uri: object, allowed_schemes: frozenset[str]
 ) -> str | None:
     """Return an error message when ``uri`` is malformed; ``None`` on success.
 
     Parses with :func:`urlparse`, demands a non-empty scheme matching
     one of ``allowed_schemes``, and demands a non-empty netloc (the
     last check catches ``postgres:///dbname`` and ``://localhost``
-    typos that the scheme check alone would miss).
+    typos that the scheme check alone would miss). The message never
+    repeats the URI or its scheme: without ``//``, the user name parses
+    as the scheme, and the rest can hold a password.
     """
+    if not isinstance(uri, str):
+        return f"expected a string, got {type(uri).__name__}"
     parsed = urlparse(uri)
     expected = sorted(allowed_schemes)
     if not parsed.scheme:
         return f"empty URL scheme (expected one of {expected})"
     if parsed.scheme not in allowed_schemes:
         return (
-            f"unexpected URL scheme '{parsed.scheme}' for {backend} backend"
-            f" (expected one of {expected})"
+            f"unexpected URL scheme for {backend} backend (expected one of {expected})"
         )
     if not parsed.netloc:
-        return f"empty network location in URI '{uri}' (host:port required)"
+        return "empty network location (host:port required)"
     return None
+
+
+def _accepted_params(cls: Any) -> frozenset[str] | None:
+    """Return the keyword names ``cls(**params)`` accepts, or ``None``.
+
+    ``None`` means any key may be valid, so the constructor decides: it
+    takes ``**kwargs``, has no readable signature, or inspect would read a
+    declaration instead of the code a call runs. That is the case when the
+    class, or the ``__init__``, ``__new__`` or metaclass ``__call__`` its
+    call runs, declares a ``__signature__`` (as a pydantic model does) or
+    wraps another callable (``__wrapped__``, as ``functools.wraps``, wrapt
+    and the decorator package set); either can be narrower than what the
+    call binds. A wrapper nested deeper is read as itself, not as the
+    callable it wraps.
+    """
+    runs = (
+        cls,
+        getattr(cls, "__init__", None),
+        getattr(cls, "__new__", None),
+        getattr(type(cls), "__call__", None),  # noqa: B004 - the metaclass method
+    )
+    if any(
+        getattr(obj, "__signature__", None) is not None or hasattr(obj, "__wrapped__")
+        for obj in runs
+    ):
+        return None
+    try:
+        parameters = inspect.signature(cls, follow_wrapped=False).parameters.values()
+    except (TypeError, ValueError):
+        return None
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters):
+        return None
+    keyword = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    return frozenset(p.name for p in parameters if p.kind in keyword)
 
 
 class StoreRegistry:
@@ -760,6 +863,18 @@ class StoreRegistry:
     def stores_dir(self) -> Path | None:
         """Return the base directory for store files, or ``None``."""
         return self._stores_dir
+
+    @property
+    def classify_config(self) -> dict[str, Any]:
+        """Return the ``classify:`` block parsed from ``config.yaml``.
+
+        Read-only by convention, not by type: callers (e.g.
+        ``ClassifyRuleRevokeHandler``) use this to tell a config.yaml-
+        sourced rule apart from one in the operator overlay
+        (:class:`~trellis.stores.classify_overrides_store.ClassifyOverridesStore`)
+        -- never to write through it. Mutate ``config.yaml`` itself for that.
+        """
+        return self._classify_config
 
     @classmethod
     def from_config_dir(
@@ -815,7 +930,8 @@ class StoreRegistry:
                 raw_text = config_path.read_text()
             except OSError as exc:
                 msg = (
-                    f"Could not read Trellis config at {config_path}: {exc}."
+                    f"Could not read Trellis config at {config_path}: "
+                    f"{describe_os_error(exc)}."
                     " Check file permissions or pass an explicit config_dir."
                 )
                 raise ConfigError(msg, setting="config_dir") from exc
@@ -1000,7 +1116,7 @@ class StoreRegistry:
             return None
         return self._stores_dir / name
 
-    def _instantiate(self, store_type: str) -> Any:
+    def _instantiate(self, store_type: str) -> Any:  # noqa: PLR0915
         """Create a store instance from config."""
         backend, params = self._resolve_backend(store_type)
 
@@ -1022,7 +1138,10 @@ class StoreRegistry:
 
         import importlib  # noqa: PLC0415
 
-        module = importlib.import_module(module_path)
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise _backend_not_installed(backend) from exc
         cls = getattr(module, class_name)
 
         # For sqlite backends, default to stores_dir/<type>.db
@@ -1064,7 +1183,10 @@ class StoreRegistry:
         prepare = getattr(cls, "prepare_registry_params", None)
         if callable(prepare):
             ctx = self._registry_context(store_type, backend)
-            params = prepare(ctx, store_type, params)
+            try:
+                params = prepare(ctx, store_type, params)
+            except ImportError as exc:
+                raise _backend_not_installed(backend) from exc
 
         # For s3 backend, default bucket from env
         if backend == "s3" and "bucket" not in params:
@@ -1079,8 +1201,26 @@ class StoreRegistry:
                 raise ConfigError(msg, setting="TRELLIS_S3_BUCKET")
             params["bucket"] = bucket
 
+        # Refused here because Python's TypeError would quote the key, and a
+        # DSN written inside YAML flow braces is read as a key.
+        accepted = _accepted_params(cls)
+        if accepted is not None:
+            unexpected = [k for k in params if k not in accepted]
+            if unexpected:
+                msg = (
+                    f"stores.{store_type} sets "
+                    f"{', '.join(_describe_key(k) for k in unexpected)}, which the"
+                    f" {backend} backend does not accept; it accepts:"
+                    f" {', '.join(sorted(accepted)) or 'no keys'}"
+                )
+                raise ConfigError(msg, setting=f"stores.{store_type}")
+
         logger.info("store_instantiated", store_type=store_type, backend=backend)
-        return cls(**params)
+        try:
+            store = cls(**params)
+        except ImportError as exc:
+            raise _backend_not_installed(backend) from exc
+        return store
 
     def _registry_context(self, store_type: str, backend: str) -> RegistryContext:
         import os  # noqa: PLC0415
@@ -1121,6 +1261,8 @@ class StoreRegistry:
             if not isinstance(store_cfg, dict):
                 continue
             backend = store_cfg.get("backend", self._default_backend(store_type))
+            if not isinstance(backend, str):
+                continue  # _instantiate refuses it without repeating it
             rule = _BACKEND_URI_RULES.get(backend)
             if rule is None:
                 continue
@@ -1130,7 +1272,9 @@ class StoreRegistry:
                 continue
             err_msg = _validate_uri(backend, uri, allowed)
             if err_msg is not None:
-                failures.append((store_type, ConfigError(err_msg, setting=param)))
+                failures.append(
+                    (store_type, ConfigError(f"{param}: {err_msg}", setting=param))
+                )
         return failures
 
     def _resolve_substrate_class(self, store_type: str) -> type | None:
@@ -1155,10 +1299,7 @@ class StoreRegistry:
         try:
             module = importlib.import_module(module_path)
         except ImportError as exc:
-            raise BackendNotInstalledError(
-                backend_name=backend,
-                extra=_EXTRA_FOR_BACKEND.get(backend),
-            ) from exc
+            raise _backend_not_installed(backend) from exc
         cls = getattr(module, class_name, None)
         return cls if isinstance(cls, type) else None
 
@@ -1238,7 +1379,8 @@ class StoreRegistry:
             raw = path.read_text()
         except OSError as exc:
             msg = (
-                f"Could not read fingerprint meta at {path}: {exc}."
+                f"Could not read fingerprint meta at {path}: "
+                f"{describe_os_error(exc)}."
                 " Fix the underlying I/O error or delete the file to"
                 " reset the fingerprint store (first-boot semantics)."
             )
@@ -1246,8 +1388,17 @@ class StoreRegistry:
         try:
             data = json.loads(raw)
         except ValueError as exc:
+            # Broad ValueError, not just JSONDecodeError (what json.loads
+            # actually raises), per the catch this module already uses;
+            # describe_json_error needs that narrower shape, so anything
+            # else falls back to its type name.
+            detail = (
+                describe_json_error(exc)
+                if isinstance(exc, json.JSONDecodeError)
+                else type(exc).__name__
+            )
             msg = (
-                f"Could not parse fingerprint meta at {path}: {exc}."
+                f"Could not parse fingerprint meta at {path}: {detail}."
                 " The file is corrupt. Delete it to reset the fingerprint"
                 " store (first-boot semantics) and re-run validate."
             )
@@ -1322,6 +1473,41 @@ class StoreRegistry:
                 (store_type, ConfigError(msg, setting=f"stores.{store_type}.backend"))
             )
         return errors, to_write
+
+    def _check_embeddings_shape(self) -> list[tuple[str, Exception]]:
+        """Warn once, at registry load, when ``embeddings:`` cannot carry
+        a ``provider`` field at all.
+
+        :attr:`embedding_fn` already logs
+        ``embedding_config_not_mapping`` for this same shape -- a bare
+        string, bool, int, or list -- but only lazily, on first access.
+        A deployment whose request paths never happen to touch semantic
+        search (or never reach the degrade-to-keyword+graph callers that
+        do) would otherwise carry this misconfiguration invisibly for
+        its whole life. Hooking it into :meth:`validate`'s pre-flight
+        section, alongside :meth:`_check_embedding_dim_consistency`,
+        makes it fire deterministically wherever a deployment already
+        treats registry construction as a startup event (the FastAPI
+        lifespan calls ``validate()`` for exactly this reason) rather
+        than adding a second, independent probe.
+
+        Never returns an error: a malformed ``embeddings:`` block is not
+        fatal here either, matching :attr:`embedding_fn`'s own posture
+        of degrading it to "unconfigured" rather than raising -- this
+        check only makes that condition observable sooner. Knob name
+        only, never the value, which could be a pasted credential.
+        Wrapped whole, like :func:`trellis.core.version.resolve_stamp_staleness`
+        -- a bug in this advisory check must never block every other
+        store from validating.
+        """
+        try:
+            if self._embedding_config and not isinstance(
+                self._embedding_config, Mapping
+            ):
+                logger.warning("config.embeddings_malformed", knob="embeddings")
+        except Exception:  # advisory check; never fail validate()
+            return []
+        return []
 
     def _check_embedding_dim_consistency(self) -> list[tuple[str, Exception]]:
         """Ensure ``vector`` and ``graph`` configs agree on ``embedding_dim``.
@@ -1420,6 +1606,7 @@ class StoreRegistry:
         # consolidated report.
         errors.extend(self._check_uri_formats(targets))
         errors.extend(self._check_embedding_dim_consistency())
+        errors.extend(self._check_embeddings_shape())
 
         # Schema-fingerprint check (Logic Gap 4.5) — detects substrate
         # swaps and schema-version bumps that would otherwise corrupt
@@ -1555,45 +1742,190 @@ class StoreRegistry:
         dotted import path (e.g. ``mypackage.embeddings.embed``) for fully
         custom providers.
 
-        Returns ``None`` only when no embedding is configured at all
-        (no env var, no ``embeddings.provider``). Raises
-        :class:`BackendNotInstalledError` when ``provider: openai`` is
+        A non-empty ``TRELLIS_EMBEDDING_FN`` outranks ``embeddings.provider``:
+        the config block is never consulted, so a path that fails to resolve
+        raises rather than falling back to it.
+
+        Returns ``None`` when no embedding is configured at all (no env
+        var, ``embeddings.provider`` absent, ``null``, or ``""``), and
+        also when the whole ``embeddings:`` block is not a mapping (a
+        bare string, bool, int, or list) — that shape is logged at
+        ``WARNING`` (the key and the value's type only, never the value)
+        and treated as unconfigured rather than raised, since it has no
+        ``provider`` field for the checks below to inspect.
+        Raises :class:`BackendNotInstalledError` when ``provider: openai`` is
         configured but the ``llm-openai`` extra is missing, and
-        :class:`ConfigError` when the dotted-path provider can't be
-        imported or doesn't resolve to a callable.
+        :class:`ConfigError` when ``provider: openai`` finds no API key, or
+        a dotted path is malformed, raises :class:`ImportError` on import,
+        or names a missing or non-callable attribute — naming
+        ``TRELLIS_EMBEDDING_FN`` when the path came from the env var,
+        ``embeddings.provider`` when it came from config. Also raises
+        :class:`ConfigError` (setting ``embeddings.provider``) when
+        ``embeddings.provider`` is set to anything other than a string —
+        a YAML boolean (``provider: off`` parses to ``False``), a number, a
+        list, or a mapping — rather than silently treating it as "not
+        configured"; the message names only the value's type, never the
+        value itself. Any other exception the target module raises while
+        it imports propagates unchanged. A raise caches nothing, so the
+        next access resolves again; a callable or ``None`` is cached.
         """
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]
 
-        self._embedding_fn_cache = None  # default: not configured
+        resolved: Callable[[str], list[float]] | None = None
 
         # 1. Check env var for custom dotted-path callable
         import os  # noqa: PLC0415
 
         custom_path = os.environ.get("TRELLIS_EMBEDDING_FN")
         if custom_path:
-            self._embedding_fn_cache = _import_callable(custom_path)
-            if self._embedding_fn_cache is not None:
+            resolved = _import_callable(custom_path, setting="TRELLIS_EMBEDDING_FN")
+            if resolved is not None:
                 logger.info("embedding_fn_loaded", source="env", path=custom_path)
-                return self._embedding_fn_cache
-
-        # 2. Check config
-        provider = self._embedding_config.get("provider")
-        if not provider:
-            return None
-
-        if provider == "openai":
-            self._embedding_fn_cache = _build_openai_embedding_fn(
-                self._embedding_config
-            )
         else:
-            # Treat provider as a dotted import path
-            self._embedding_fn_cache = _import_callable(provider)
+            # 2. Check config
+            if isinstance(self._embedding_config, Mapping):
+                provider = self._embedding_config.get("provider")
+            else:
+                # A non-Mapping 'embeddings:' block (a bare string, bool,
+                # int, or list -- YAML allows all of these at that key)
+                # has no 'provider' field to read at all. Logged at
+                # WARNING so the misconfiguration is discoverable, naming
+                # only the key and the type: the value itself could be a
+                # pasted credential. Treated the same as "not configured"
+                # rather than raised, matching every other shape this
+                # property already treats that way -- a caller wrapping
+                # this property (trellis_api.routes.admin.runtime, every
+                # retrieve/strategies.py degrade-to-keyword+graph site)
+                # must see "no embedder" here, never an AttributeError.
+                logger.warning(
+                    "embedding_config_not_mapping",
+                    key="embeddings",
+                    type=type(self._embedding_config).__name__,
+                )
+                provider = None
+            # None and "" mean "not configured" (the pre-existing posture).
+            # Any other non-string (bool, int, list, mapping, ...) is an
+            # operator error rather than a second way to spell "off": YAML
+            # ``provider: off`` parses to the bool ``False``, which the old
+            # ``if provider:`` truthy check let through to this branch's
+            # ``else`` and silently treated as "not configured" — turning
+            # semantic search off with no error. Checked before the
+            # ``== "openai"`` dispatch so every non-string shape is caught
+            # here, not just the falsy ones; a truthy non-string (an int, a
+            # list, a mapping) would otherwise reach ``_import_callable``
+            # and raise there instead — still correct, but inconsistent
+            # with the falsy case, which this makes explicit for both.
+            if provider is not None and provider != "":
+                if not isinstance(provider, str):
+                    type_name = type(provider).__name__
+                    hint = (
+                        " Booleans are not accepted for embeddings.provider;"
+                        " delete the key or set it to null."
+                        if isinstance(provider, bool)
+                        else ""
+                    )
+                    # Named only by type, never echoed: a misplaced mapping
+                    # can hold a credential, and this message reaches the
+                    # REST body and the error log (same posture as
+                    # ``_import_callable``'s non-string check below).
+                    msg = (
+                        "embeddings.provider must be a string, got a value"
+                        f" of type {type_name}.{hint}"
+                    )
+                    raise ConfigError(msg, setting="embeddings.provider")
+                if provider == "openai":
+                    resolved = _build_openai_embedding_fn(self._embedding_config)
+                else:
+                    # Treat provider as a dotted import path
+                    resolved = _import_callable(provider)
 
-        if self._embedding_fn_cache is not None:
-            logger.info("embedding_fn_loaded", source="config", provider=provider)
+                if resolved is not None:
+                    logger.info(
+                        "embedding_fn_loaded", source="config", provider=provider
+                    )
 
-        return self._embedding_fn_cache
+        # Assigned only after resolution returns, so a raise leaves _UNSET.
+        self._embedding_fn_cache = resolved
+        return resolved
+
+    def embedding_source_label(self) -> str | None:
+        """Which knob :attr:`embedding_fn` would read from, for display only.
+
+        Mirrors that property's own precedence (``TRELLIS_EMBEDDING_FN``
+        wins over ``embeddings.provider``) but never builds a client and
+        never raises — it names only the *source*, which is always safe
+        to show: a dotted import path or a provider string is an
+        identifier the operator chose, never a credential. Returns
+        ``None`` when neither knob is set (nothing configured). Pair with
+        an actual :attr:`embedding_fn` read to know whether that source
+        resolved or raised.
+
+        Only safe to show once :attr:`embedding_fn` has actually
+        resolved: the "value" half of this label (the dotted path or
+        provider string) is operator-chosen text that is safe on the
+        *success* path, but a caller displaying a *failure* must use
+        :meth:`embedding_source_knob` instead, which never includes it —
+        a provider string a user mistyped a secret into would otherwise
+        echo verbatim in the one place a raise is reported.
+        """
+        import os  # noqa: PLC0415
+
+        custom_path = os.environ.get("TRELLIS_EMBEDDING_FN")
+        if custom_path:
+            return f"{custom_path} (TRELLIS_EMBEDDING_FN)"
+        # A non-Mapping 'embeddings:' block has no 'provider' field to
+        # read -- guarded the same way :attr:`embedding_fn` is, so this
+        # never raises. :meth:`embedding_fn` already treats that shape as
+        # unconfigured, so there is no resolved value to show here either.
+        if not isinstance(self._embedding_config, Mapping):
+            return None
+        provider = self._embedding_config.get("provider")
+        if isinstance(provider, str) and provider:
+            return f"{provider} (embeddings.provider)"
+        return None
+
+    def embedding_source_knob(self) -> str | None:
+        """Which knob *name* governs :attr:`embedding_fn`, with no value.
+
+        Same precedence as :meth:`embedding_source_label` (env wins over
+        config), but reports only ``"TRELLIS_EMBEDDING_FN"``,
+        ``"embeddings.provider"``, or ``"embeddings"`` (when the whole
+        block is a non-empty, non-Mapping value, so there is no
+        ``provider`` field to name) — never the dotted path or provider
+        string a caller supplied. Use this on a *failure* path, where the
+        configured value is exactly the attacker- or typo-controlled text
+        that must never reach a response body or a log line: unlike the
+        label, the value half here could be anything an operator pasted
+        into the knob, including a credential. Returns ``None`` when
+        neither knob is set.
+
+        A present-but-non-string ``provider`` (an int, a list, a bool, a
+        mapping) still names ``"embeddings.provider"`` here: that is the
+        exact knob :attr:`embedding_fn` raises ``ConfigError`` on for that
+        shape, so a caller building a failure message (``admin.runtime``)
+        must not lose the knob just because the bad value was not a
+        string. The truthy check mirrors :attr:`embedding_fn`'s own
+        ``provider is not None and provider != ""`` gate, not a bare
+        ``isinstance`` check, so the two never disagree on what counts as
+        "set".
+        """
+        import os  # noqa: PLC0415
+
+        if os.environ.get("TRELLIS_EMBEDDING_FN"):
+            return "TRELLIS_EMBEDDING_FN"
+        if not isinstance(self._embedding_config, Mapping):
+            # Guarded the same way :attr:`embedding_fn` is -- a non-empty
+            # scalar/list block is a knob the operator did set, just not
+            # in a shape that has a 'provider' field; an empty/falsy one
+            # normalises to ``{}`` before it ever reaches this attribute
+            # (see the constructor), so this branch only sees a truthy,
+            # malformed value.
+            return "embeddings" if self._embedding_config else None
+        provider = self._embedding_config.get("provider")
+        if provider is not None and provider != "":
+            return "embeddings.provider"
+        return None
 
     @property
     def budget_config(self) -> Any:
@@ -1612,6 +1944,98 @@ class StoreRegistry:
         self._budget_config_cache = BudgetConfig.from_dict(budgets_data)
         return self._budget_config_cache
 
+    def _classify_overrides_store(self) -> Any:
+        """Fresh
+        :class:`~trellis.stores.classify_overrides_store.ClassifyOverridesStore`.
+
+        Built per call, never cached — the same "re-read is what makes an
+        edit live without a restart" posture
+        ``trellis_api.routes.settings._get_settings_store`` documents. The
+        file is small (tens of rows at most), so re-reading it on every
+        domain-vocabulary resolution is cheap. ``None`` with no
+        ``stores_dir`` (an in-memory or storeless deployment): every caller
+        below passes that through as "no overlay", not an error.
+        """
+        from trellis.stores.classify_overrides_store import (  # noqa: PLC0415
+            ClassifyOverridesStore,
+            resolve_classify_overrides_path,
+        )
+
+        path = resolve_classify_overrides_path(self._stores_dir)
+        if path is None:
+            return None
+        return ClassifyOverridesStore(path)
+
+    def _record_classify_overlay_rejection(self, error: ConfigError) -> None:
+        """Make a degraded classify overlay visible to ``trellis analyze health``.
+
+        Mirrors :func:`trellis.mutate.policy_source._record_gate_load_failure`:
+        :meth:`build_ingestion_pipeline` raises before a
+        :class:`~trellis.mutate.commands.Command` exists, so there is no
+        ``MUTATION_REJECTED``, and this call sits outside a
+        ``MutationExecutor`` boundary, so there is no boundary rejection
+        either. A ``WRITE_REJECTED`` event is the only channel left, and
+        it is the one ``trellis analyze health`` already reads.
+
+        Unlike the policy file, this refusal is narrow, not global: see
+        :data:`~trellis.stores.classify_overrides_store.CLASSIFY_OVERLAY_SURFACE`
+        for why it belongs in :mod:`trellis.ops.capture_health`'s
+        ``NON_CAPTURE_SURFACES`` rather than the ``config:`` prefix's
+        global-recovery class.
+
+        Fail-soft: a broken event log must never escalate a refused
+        ``backfill`` into a different crash. The ``ConfigError`` is
+        re-raised by the caller either way.
+        """
+        # ``error``, not ``warning`` or ``info`` -- ``trellis_cli.main._root``
+        # defaults ``TRELLIS_LOG_LEVEL`` to ``WARNING``, and this is the
+        # line an operator meets the failure on before they think to run a
+        # health command.
+        logger.error(
+            "classify_overlay_load_failed",
+            error=str(error),
+            impact="backfill is refused until the overlay file loads or is fixed",
+        )
+
+        try:
+            event_log = self.operational.event_log
+        # GRACEFUL-DEGRADATION: telemetry only. An operational plane that
+        # cannot be resolved is a real problem, but not this one, and the
+        # ConfigError the caller is about to re-raise is the better error
+        # to surface.
+        except Exception:
+            logger.warning(
+                "classify_overlay_load_failed.event_log_unavailable",
+                exc_info=True,
+            )
+            return
+
+        from trellis.ops.write_health import record_write_rejection  # noqa: PLC0415
+        from trellis.stores.classify_overrides_store import (  # noqa: PLC0415
+            CLASSIFY_OVERLAY_SURFACE,
+        )
+
+        record_write_rejection(
+            event_log,
+            tool=CLASSIFY_OVERLAY_SURFACE,
+            error=error,
+            # An explicit row rather than ``classify_rejection``'s fallback,
+            # for the same reason the policy gate takes one: this is not a
+            # payload the caller can fix, and ``other@`` would pool it with
+            # every unclassified boundary failure. The ``msg`` is the
+            # ConfigError verbatim, so the recovery advice it carries
+            # reaches an operator reading the event without re-running
+            # ``backfill``.
+            rejections=[
+                {
+                    "kind": "config_unreadable",
+                    "loc": "classify_overrides.json",
+                    "msg": str(error)[:500],
+                }
+            ],
+            source=CLASSIFY_OVERLAY_SURFACE,
+        )
+
     def build_ingestion_pipeline(self) -> Any:
         """Construct the default deterministic ingestion ClassifierPipeline.
 
@@ -1625,18 +2049,67 @@ class StoreRegistry:
                   - chargeback
 
         The ``domain_keywords`` map merges over the built-in domain defaults
-        (config wins on key collision), so an operator can register a custom
-        domain by editing ``config.yaml`` alone — no code change. Reserved
-        policy-namespace domain names are rejected loudly here. Returns a
-        deterministic-only pipeline (no LLM); the enrichment worker wires the
-        LLM fallback separately. See
-        :func:`trellis.classify.factory.build_ingestion_pipeline`.
+        (config wins on key collision), then the operator overlay
+        (``classify_overrides.json``, applied via ``trellis classify
+        apply-rule`` / ``POST /api/v1/classify/rules``) merges over *that*
+        (overlay wins) — so an operator can register a custom domain either
+        by editing ``config.yaml`` or by approving a mined candidate, with
+        the approved one taking precedence. Reserved policy-namespace domain
+        names are rejected loudly here. Returns a deterministic-only
+        pipeline (no LLM); the enrichment worker wires the LLM fallback
+        separately. See :func:`trellis.classify.factory.build_ingestion_pipeline`.
+
+        Raises:
+            ConfigError: the operator overlay loaded degraded. Unlike
+                :meth:`domain_keyword_map` / :meth:`domain_alias_map` --
+                read for *display* (``trellis classify effective-rules``,
+                ``GET /api/v1/classify/rules``), where the caller reports
+                ``store_degradation`` alongside a necessarily partial
+                answer -- this pipeline is handed straight to ``trellis
+                classify backfill``, which *writes* tags back to every
+                scanned document. Building it from a partial overlay view
+                would silently retag documents as though an unparsed rule
+                had never been applied: a previously-approved domain
+                keyword simply stops contributing, and a previously-merged
+                alias stops resolving, with no signal anywhere other than
+                this exception. Failing closed here is cheap (one backfill
+                invocation refused) against that: a batch of documents
+                written with the wrong tags, indistinguishable afterwards
+                from documents the overlay never covered.
+
+                The refusal is also recorded as a ``WRITE_REJECTED`` event
+                before the ``ConfigError`` propagates
+                (:meth:`_record_classify_overlay_rejection`), so it reaches
+                ``trellis analyze health`` instead of surfacing only to
+                whichever caller happened to invoke ``backfill``.
         """
         from trellis.classify.factory import (  # noqa: PLC0415
             build_ingestion_pipeline,
         )
 
-        return build_ingestion_pipeline(self._classify_config)
+        overrides = self._classify_overrides_store()
+        degradation = overrides.degradation if overrides is not None else None
+        if degradation is not None:
+            msg = (
+                "Refusing to build the classification pipeline: the "
+                f"operator overlay at {degradation.path} loaded degraded "
+                f"({degradation.reason}: {degradation.detail}). "
+                f"{degradation.rows_loaded} applied rule(s) parsed; "
+                f"{degradation.rows_skipped_display} did not. Backfilling "
+                "now would retag documents using only the rules that "
+                "parsed, silently treating every other applied rule as "
+                "though it had never been approved -- including any "
+                "applied domain keyword, which controls whether a document "
+                "is hard-excluded from a domain-scoped query. Fix the "
+                f"overlay file, then retry: {degradation.recovery}"
+            )
+            error = ConfigError(msg, setting="classify_overrides.json")
+            self._record_classify_overlay_rejection(error)
+            raise error
+        overlay_domains = overrides.domain_keywords_map() if overrides else None
+        return build_ingestion_pipeline(
+            self._classify_config, overlay_domains=overlay_domains
+        )
 
     def domain_keyword_map(self) -> dict[str, list[str]]:
         """The ``domain -> [keywords]`` map this deployment's classifier owns.
@@ -1648,8 +2121,9 @@ class StoreRegistry:
         (:mod:`trellis.learning.tag_evolution`) needs to know which keywords are
         *already* owned so it neither re-proposes them nor reads its own prior
         promotions as fresh evidence. "Already owned" has to mean owned in this
-        deployment, not merely in the shipped defaults, which is why this reads
-        the config rather than the built-ins alone.
+        deployment — config.yaml *and* the applied overlay — not merely in the
+        shipped defaults, which is why this reads both rather than the
+        built-ins alone.
 
         Raises:
             ValueError: When the ``classify.domain_keywords`` block is
@@ -1660,7 +2134,11 @@ class StoreRegistry:
             effective_domain_keywords,
         )
 
-        return effective_domain_keywords(self._classify_config)
+        overrides = self._classify_overrides_store()
+        overlay_domains = overrides.domain_keywords_map() if overrides else None
+        return effective_domain_keywords(
+            self._classify_config, overlay_domains=overlay_domains
+        )
 
     def domain_alias_map(self) -> dict[str, str]:
         """The ``alias -> canonical`` domain merge map this deployment owns.
@@ -1668,17 +2146,24 @@ class StoreRegistry:
         Read by :mod:`trellis.learning.domain_normalization` so the analyzer
         neither re-proposes a merge the operator already made nor reads its own
         prior output as fresh evidence — the same self-filtering rule
-        :meth:`domain_keyword_map` serves for keyword promotion.
+        :meth:`domain_keyword_map` serves for keyword promotion. Includes
+        the applied overlay
+        (:class:`~trellis.stores.classify_overrides_store.ClassifyOverridesStore`),
+        which wins over ``config.yaml`` on a colliding alias.
 
         Raises:
-            ValueError: When the ``classify.domain_aliases`` block is
-                malformed, self-mapping, or chained.
+            ValueError: When the ``classify.domain_aliases`` block (merged
+                with the overlay) is malformed, self-mapping, or chained.
         """
         from trellis.classify.factory import (  # noqa: PLC0415
             effective_domain_aliases,
         )
 
-        return effective_domain_aliases(self._classify_config)
+        overrides = self._classify_overrides_store()
+        overlay_aliases = overrides.domain_aliases_map() if overrides else None
+        return effective_domain_aliases(
+            self._classify_config, overlay_aliases=overlay_aliases
+        )
 
     def domain_aspect_tags(self) -> frozenset[str]:
         """Domain tags that name an aspect of engagement, not a subject.

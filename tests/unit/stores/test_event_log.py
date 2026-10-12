@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
@@ -250,3 +251,71 @@ def test_payload_filters_limit_applied_after_filter(event_log: SQLiteEventLog):
     )
     assert len(events) == 3
     assert all(e.payload["domain"] == "billing" for e in events)
+
+
+def test_a_failed_append_holds_no_write_lock(event_log: SQLiteEventLog, tmp_path: Path):
+    """An INSERT that fails after taking the write lock is rolled back.
+
+    A duplicate ``event_id`` fails inside the transaction its INSERT opened.
+    Left open, that transaction keeps the database's write lock, and every
+    other connection's write waits out its timeout and then fails.
+    """
+    first = Event(event_type=EventType.ENTITY_CREATED, source="syn-first")
+    event_log.append(first)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        event_log.append(first.model_copy(update={"source": "syn-duplicate"}))
+
+    assert event_log._conn.in_transaction is False
+    # A zero timeout: the write takes the lock at once or raises "locked".
+    other = sqlite3.connect(tmp_path / "events.db", timeout=0, isolation_level=None)
+    stamp = utc_now().isoformat()
+    try:
+        other.execute("BEGIN IMMEDIATE")
+        other.execute(
+            "INSERT INTO events (event_id, event_type, source, occurred_at,"
+            " recorded_at) VALUES ('syn-other-1', 'entity.created', 'syn-other',"
+            " ?, ?)",
+            (stamp, stamp),
+        )
+        other.execute("COMMIT")
+        rows = other.execute(
+            "SELECT event_id, source FROM events ORDER BY occurred_at"
+        ).fetchall()
+    finally:
+        other.close()
+    assert rows == [(first.event_id, "syn-first"), ("syn-other-1", "syn-other")]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("payload", float("nan")),
+        ("payload", float("inf")),
+        ("payload", float("-inf")),
+        ("metadata", float("nan")),
+        ("metadata", float("inf")),
+    ],
+)
+def test_append_refuses_a_non_finite_float(
+    event_log: SQLiteEventLog, field: str, value: float
+):
+    """NaN/Infinity in a payload or metadata float must not reach storage.
+
+    SQLite's JSON functions parse the non-standard ``NaN``/``Infinity``
+    tokens Python's ``json`` module writes by default, so a silent
+    ``allow_nan=True`` dump would store unparseable-by-spec JSON text that
+    reads back fine here but breaks any strict JSON consumer (the REST
+    API, a non-Python backend). ``json.dumps(..., allow_nan=False)`` raises
+    before the INSERT runs, so nothing is written.
+    """
+    event = Event(
+        event_type=EventType.ENTITY_CREATED,
+        source="syn-source",
+        **{field: {"syn-score": value}},
+    )
+
+    with pytest.raises(ValueError):
+        event_log.append(event)
+
+    assert event_log.get_events() == []

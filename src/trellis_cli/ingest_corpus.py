@@ -16,6 +16,7 @@ import typer
 from rich.markup import escape
 
 from trellis.core.error_sanitize import sanitized_error_payload
+from trellis.core.path_presence import UnknownFileIdentity, file_identity
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
 from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
@@ -52,7 +53,8 @@ def _parse_tags(
                 )
             else:
                 console.print(
-                    f"[red]Invalid --tag {escape(repr(raw))}: expected k=v[/red]"
+                    f"[red]Invalid --tag {escape(repr(raw))}: expected k=v[/red]",
+                    soft_wrap=True,
                 )
             raise typer.Exit(code=EXIT_VALIDATION)
         metadata[key.strip()] = value.strip()
@@ -94,12 +96,13 @@ def _render_report(report: CorpusSyncReport) -> None:
         )
     for entry in report.pruned:
         pruned_name = entry.get("source_path") or entry["doc_id"]
-        console.print(f"  [red]prune [/red] {escape(pruned_name)}")
+        console.print(f"  [red]prune [/red] {escape(pruned_name)}", soft_wrap=True)
     for entry in report.prune_withheld:
         withheld_name = entry.get("source_path") or entry["doc_id"]
         console.print(
             f"  [yellow]withheld[/yellow] {escape(withheld_name)}: "
-            f"{escape(str(entry['detail']))}"
+            f"{escape(str(entry['detail']))}",
+            soft_wrap=True,
         )
     console.print(
         f"  new={counts['ingested']} updated={counts['updated']} "
@@ -120,7 +123,8 @@ def _render_report(report: CorpusSyncReport) -> None:
         )
         console.print(
             f"  [yellow]warning[/yellow] {escape(str(warning['kind']))}: "
-            f"{escape(detail)}"
+            f"{escape(detail)}",
+            soft_wrap=True,
         )
 
 
@@ -176,14 +180,20 @@ def ingest_corpus(
     exits 5 with status "partial".
     """
     root = Path(path)
-    if not root.exists():
+    # ``file_identity``, not ``path_is_present``: no legible failure sits
+    # downstream of a root whose ``stat`` fails.
+    identity = file_identity(root)
+    if identity is None or isinstance(identity, UnknownFileIdentity):
+        reason = "not found" if identity is None else f"unreadable ({identity.detail})"
         if output_format == "json":
             typer.echo(
-                json.dumps({"status": "error", "message": f"path not found: {path}"})
+                json.dumps({"status": "error", "message": f"path {reason}: {path}"})
             )
         else:
-            console.print(f"[red]Path not found: {escape(path)}[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+            console.print(
+                f"[red]Path {escape(reason)}: {escape(path)}[/red]", soft_wrap=True
+            )
+        raise typer.Exit(code=EXIT_VALIDATION)
 
     extra_metadata = _parse_tags(tag, domain, output_format)
 
@@ -206,7 +216,9 @@ def ingest_corpus(
         if output_format == "json":
             typer.echo(json.dumps(sanitized_error_payload(exc)))
         else:
-            console.print(f"[red]Corpus ingest failed: {escape(str(exc))}[/red]")
+            console.print(
+                f"[red]Corpus ingest failed: {escape(str(exc))}[/red]", soft_wrap=True
+            )
         raise typer.Exit(code=EXIT_INTERNAL) from None
 
     status, exit_code = _sync_outcome(report)

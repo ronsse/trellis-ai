@@ -17,7 +17,8 @@ from trellis.stores.base import (
     TunerStateStore,
 )
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.config import get_config_dir
+from trellis.stores.schedule_store import ScheduleStore
+from trellis_cli.config import get_config_dir, get_data_dir
 from trellis_cli.exit_codes import EXIT_INTERNAL
 
 logger = structlog.get_logger(__name__)
@@ -109,3 +110,15 @@ def get_tuner_state_store() -> TunerStateStore:
 def get_api_key_store() -> ApiKeyStore:
     """Open (or create) the operational-plane API-key store."""
     return _get_registry().operational.api_key_store
+
+
+def get_schedule_store() -> ScheduleStore:
+    """Open (or create) the schedule registry (``schedule.json``).
+
+    Not part of :class:`StoreRegistry` — like
+    :class:`~trellis.stores.base.policy.PolicyStore`, it is a plain
+    :class:`~trellis.stores.degradable_json_store.DegradableJsonStore`
+    file under the data dir, constructed directly rather than through
+    the registry's backend-selection machinery.
+    """
+    return ScheduleStore(get_data_dir() / "stores" / "schedule.json")

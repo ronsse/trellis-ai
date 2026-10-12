@@ -223,6 +223,7 @@ class TestDemoLoadColdStartFailures:
     def test_a_failed_cold_start_command_is_reported(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from trellis.errors import StoreError
         from trellis.stores.base.graph_query import NodeQuery
         from trellis.stores.sqlite.graph import SQLiteGraphStore
         from trellis_cli import demo
@@ -243,9 +244,11 @@ class TestDemoLoadColdStartFailures:
             if source_id in demo_ids and target_id in demo_ids:
                 return original(self, source_id, target_id, *args, **kwargs)
             refused.append((source_id, target_id))
-            # A markup-shaped tail, as store text quoting an id can carry.
+            # A markup-shaped tail, as store text quoting an id can carry. A
+            # StoreError, because only a TrellisError's text reaches the
+            # result message; any other exception is named by its type.
             msg = f"Cannot upsert edge: {source_id!r} -> {target_id!r} [document]"
-            raise ValueError(msg)
+            raise StoreError(msg, store="graph")
 
         monkeypatch.setattr(SQLiteGraphStore, "upsert_edge", refuse_cold_start_edges)
         result = runner.invoke(app, ["demo", "load"])

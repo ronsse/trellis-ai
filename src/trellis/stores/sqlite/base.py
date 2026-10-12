@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import sqlite3
 import threading
 import time
@@ -248,3 +249,47 @@ class SQLiteStoreBase:
             db_path=str(self._db_path),
             connections_closed=len(connections),
         )
+
+
+def reject_nul_key(key: str) -> None:
+    """Raise ``ValueError`` if *key* holds a NUL character.
+
+    No SQLite JSON path can name such a key (see :func:`json_key_path`). The
+    graph, vector and document stores call this before building one from a
+    filter key, so each refuses it with the same message.
+    """
+    if "\x00" in key:
+        msg = (
+            f"Filter key {key!r} holds a NUL character, "
+            "which a SQLite JSON path cannot name"
+        )
+        raise ValueError(msg)
+
+
+def json_key_path(key: str) -> str:
+    """Return the JSON path naming *key* as one object member: ``$."<key>"``.
+
+    The graph and vector stores bind this path as a statement parameter,
+    ``json_extract(<column>, ?)``, so no part of the key is ever SQL text.
+    Inside the quoted label a ``.``, ``[``, ``'`` or space is part of the
+    key, as every other backend reads it.
+
+    The label is the key as ``json.dumps`` writes it, the way both stores
+    write their JSON columns, with each ``\\"`` rewritten ``\\u0022``, because
+    a ``"`` written ``\\"`` matches on SQLite 3.53 but misses on 3.45 and
+    3.46. SQLite 3.45, 3.46 and 3.53 decode the escapes on both sides, and
+    releases before 3.45 compare the label with the stored text as written,
+    so the one spelling matches on each, save that before 3.45 a key holding
+    a ``"`` matches nothing under it. ``json.dumps`` also escapes a
+    lone surrogate, which sqlite3 cannot bind raw.
+
+    Raises:
+        ValueError: *key* holds a NUL character. SQLite rejects a raw NUL as
+            a bad path, and 3.45, 3.46 and 3.53 read ``\\u0000`` as the end
+            of the label and match the key's prefix instead. The graph
+            store's DSL compiler raises the same error for a field or
+            operator it cannot compile.
+    """
+    reject_nul_key(key)
+    escaped = json.dumps(key)[1:-1].replace('\\"', "\\u0022")
+    return f'$."{escaped}"'

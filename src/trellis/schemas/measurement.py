@@ -20,10 +20,11 @@ streams bounded.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from trellis.core.base import TrellisModel, utc_now
 from trellis.core.ids import generate_ulid
@@ -62,7 +63,16 @@ class Measurement(TrellisModel):
     metric_value: float
     """The measured value. ``Measurement`` rows are scalar by
     contract; richer payloads (lists/dicts/strings) belong on
-    :class:`Observation` instead."""
+    :class:`Observation` instead. Must be finite: NaN compares false
+    against everything, so no analysis can use it, and ``Infinity`` /
+    ``-Infinity`` are refused too — Postgres' JSONB has no token for
+    either, SQLite stores them as invalid JSON, and arithmetic over
+    them misleads: ``max()`` always picks an infinite value, and
+    ``inf - inf`` or ``0 * inf`` is NaN, which every threshold
+    comparison reads as False.
+    An undefined result (division by zero, an empty baseline) is not a
+    measurement; record nothing, or a ``None`` plus a reason field at
+    the call site, the pattern ``EffectSize`` already uses."""
 
     unit: str | None = None
     """Optional unit for the scalar value (``"percent"``,
@@ -81,3 +91,12 @@ class Measurement(TrellisModel):
     freshness/tag data). Defaults to ``{}`` for consistency with every
     other Trellis schema (``Evidence``, ``Entity``, ``Precedent``,
     ``Outcome``, ``Pack``) — saves consumers from ``None``-checks."""
+
+    @field_validator("metric_value", mode="after")
+    @classmethod
+    def _refuse_non_finite(cls, value: float) -> float:
+        """Refuse NaN, Infinity and -Infinity; see ``metric_value``."""
+        if not math.isfinite(value):
+            msg = "metric_value must be a finite number"
+            raise ValueError(msg)
+        return value

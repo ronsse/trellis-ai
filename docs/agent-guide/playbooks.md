@@ -58,7 +58,7 @@ trellis ingest trace /tmp/trace.json --format json
 **Expected output:**
 
 ```json
-{"status": "ingested", "trace_id": "01JRK5N7QF8GHTM2XVZP3CWD9E", "source": "agent", "intent": "Migrated user table to add email_verified column"}
+{"status": "ingested", "trace_id": "01JRK5N7QF8GHTM2XVZP3CWD9E", "source": "agent", "intent": "Migrated user table to add email_verified column", "already_ingested": false}
 ```
 
 4. (Optional) Record feedback if quality is known.
@@ -206,7 +206,7 @@ trellis curate feedback 01JRK5N7QF8GHTM2XVZP3CWD9E 0.4 \
 
 ### If It Fails
 
-- **Validation error:** Ensure `rating` is a valid float.
+- **Validation error:** `rating` must be a number from 0.0 to 1.0 inclusive. Anything else, NaN included, exits 2 and records nothing.
 - **No handler:** The feedback handler may not be registered. This is a system configuration issue.
 
 ---
@@ -386,7 +386,7 @@ Args: {"trace_id": "01JRK5N7QF", "success": true, "notes": "Clean implementation
 ### Key Points
 
 - All tools except `record_observation`, `query_observations` and `execute_mutation` return **markdown**, not JSON — ready for LLM consumption
-- Use `max_tokens` to control response size (default: 2000)
+- Use `max_tokens` to control response size (default 2000; `get_items` defaults to 4000, and the sectioned tools to `retrieval.budgets` in `config.yaml`, or 4000 if it is unset)
 - `get_context` searches documents, graph, and traces simultaneously
 - `search` is for targeted queries; `get_context` is for broad task context
 
@@ -442,8 +442,8 @@ client.close()
 
 ### If It Fails
 
-- **ConnectionError (remote mode):** Ensure the API server is running (`trellis admin serve`).
-- **Store not initialized (local mode):** Run `trellis admin init`.
+- **`TrellisTransportError`:** nothing answered at `base_url`; start the API server (`trellis admin serve`) and read its log, since a store misconfiguration stops it before it listens.
+- **`TrellisClientError` with a 401 status:** the client sent no credential to a server running `TRELLIS_AUTH_MODE=required`, or sent one the server does not accept; pass a valid key as `api_key=` to `TrellisClient`/`AsyncTrellisClient` rather than injecting `http=httpx.Client(headers=...)` by hand.
 
 ---
 
@@ -744,7 +744,7 @@ $ trellis admin check-extractors
 Tiered Extraction — Readiness Report
 
 LLM client:
-  OK configurable from ~/.trellis/config.yaml (provider=openai, model=gpt-4o-mini)
+  OK configurable from /home/user/.trellis/config.yaml (provider=openai, model=gpt-4o-mini)
   OK OPENAI_API_KEY/ANTHROPIC_API_KEY env var is set (env fallback available)
 
 Memory-extraction feature flag:
@@ -764,9 +764,9 @@ Exit codes are CI-friendly:
 |------|----------|---------|
 | `0`  | READY    | LLM client configured AND feature flag set. Pipeline will run. |
 | `1`  | WARN     | Non-fatal. Flag unset (pipeline inert) OR flag set with only env fallback available (works, but operators should move config into `llm:` block). |
-| `2`  | BLOCKED  | Feature flag is on but no `LLMClient` is obtainable anywhere. Extraction would silently skip in production — this is the configuration bug you most want the probe to catch. |
+| `1`  | BLOCKED  | Feature flag is on but no `LLMClient` is obtainable anywhere. Extraction would silently skip in production — this is the configuration bug you most want the probe to catch. |
 
-Use `--format json` for machine-readable output (same schema, plus a `warnings` array with severity/signal/message).
+Use `--format json` for machine-readable output (same schema, plus a `warnings` array with severity/signal/message); its `status` field (`warn` or `blocked`) tells the two exit-`1` rows apart.
 
 The probe resolves `memory_extraction`'s **route**, not the parent block, so the
 `provider=` / `model=` it reports are the ones the extractor will really call and
@@ -1004,4 +1004,101 @@ empty and the post-step writes are no-ops. Reconcile later once the server is
 back; nothing is lost on the host side. See
 [examples/hooks_generic_workflow.py](../../examples/hooks_generic_workflow.py)
 for a runnable end-to-end demo.
+
+## Playbook 15: Recovering from a broken embedder config
+
+**When to use:** `embed_on_ingest_resolve_failed` with `component=embedding_fn`
+(ingest-time, from `run_embed_on_ingest`), `mcp_prewarm_optional_unavailable`
+with `component=embedding_fn` (http startup), or a pack whose `axes.semantic`
+reads `"embedder_failed"` (retrieval-time, any surface) shows up. All three
+mean `registry.embedding_fn` is raising — a config error (bad
+`TRELLIS_EMBEDDING_FN` / `embeddings.provider` path, missing provider extra,
+missing API key), not a transient outage. The cause fails every ingest and
+every semantic-axis resolve identically until the setting is fixed, but
+nothing raises on it: the hook logs the resolve failure **once per distinct
+`(component, error_type, setting)` per process** rather than once per
+document — see each event's `error_type` and `setting` fields for what to
+fix; `reason` in a `run_embed_on_ingest` summary carries the same two fields
+and never the exception's own message text — and retrieval degrades instead
+of failing: keyword and graph still run, the pack carries `axes.semantic ==
+"embedder_failed"` plus `axes.embedder_error_type` / `axes.embedder_setting`
+(the same two fields, never the message), and
+`PACK_ASSEMBLED.strategy_failures` records one semantic entry per build
+without counting toward, or blocking, a required-strategy or
+all-axes-failed refusal.
+
+A broken `vector_store` resolve logs the same `embed_on_ingest_resolve_failed`
+(or `mcp_prewarm_optional_unavailable`) event with `component=vector_store`,
+and no-ops the same way; at retrieval time it is the pre-existing
+`axes.semantic == "misconfigured"` state (a *resolved* embedder whose vector
+backend failed), not `embedder_failed`. Its `setting` names a
+`stores.vector.*` key, or `backend.NAME` for a missing extra, rather than one
+of the embedder keys in step 1. A `ConfigError` can also mean the backend was
+unreachable when the store was first opened (pgvector reports a failed
+connection as `stores.vector.dsn`), so check reachability before editing
+anything. A failed store instantiation is not cached: once the backend is
+reachable, the next write resolves it again without a restart. An edited
+config still needs the restart step 2 describes. Step 2's "see the full
+cause" trick works unchanged here too — `reindex-vectors` resolves
+`vector_store` before its dry-run branch, so a `ConfigError` surfaces with
+its message at exit `5`. Either way, documents stored while the vector store
+was failing were never embedded, so step 3's backfill applies unchanged.
+
+### Steps
+
+1. **Read the fields, not a traceback.** `setting` names what to fix, and
+   it is not always an editable key:
+   - `TRELLIS_EMBEDDING_FN` or `embeddings.provider` — a bad dotted import
+     path, or (config only) a non-string value such as a YAML boolean
+     (`provider: off` parses to `False`); delete the key or set it to
+     `null` to mean "not configured" instead.
+   - `embeddings.api_key_env` — an OpenAI provider configured but no API
+     key resolved (set that key to the name of an env var holding it, set
+     `embeddings.api_key` to a literal, or export `OPENAI_API_KEY`).
+   - `backend.openai-embeddings` — the `llm-openai` extra is not
+     installed. This one names the backend, not a config key: there is
+     nothing to edit, only `uv pip install -e ".[llm-openai]"` to run.
+
+   `error_type` narrows the cause further: `BackendNotInstalledError` →
+   missing extra (see above), `ConfigError` → bad path or missing key,
+   anything else → the target module's own import-time bug.
+2. **Fix the setting** (install the extra, set the API key, correct the
+   dotted path) and **restart**. This is not because the resolve is
+   memoized — a raise caches nothing, so every later access re-resolves
+   and fails the same way — but because the `embeddings:` block is read
+   once, when the `StoreRegistry` is constructed; a running process
+   cannot see an edited `config.yaml` or environment afterward. Under MCP
+   **http** or the REST API, "restart" means restarting that server
+   process. Under MCP **stdio** there is one process per client session,
+   so it means relaunching the client (the session that owns the config),
+   not a server-side command. The CLI resolves a fresh `StoreRegistry` on
+   every invocation, so it needs no restart at all.
+   - **To see the full cause before fixing anything** — the dotted-path
+     sub-reason (module missing, attribute missing, not callable), or
+     `BackendNotInstalledError`'s install hint — `error_type`/`setting`
+     don't carry it, but the CLI boundary's rendered message does. Run
+     `trellis admin reindex-vectors --dry-run --format json`: it resolves
+     `registry.embedding_fn` before its dry-run branch, so the same
+     failure surfaces there with the original message, at exit code `5`.
+3. **Backfill what arrived while it was broken.** With
+   `TRELLIS_ENABLE_EMBED_ON_INGEST` on, documents written during the outage
+   were stored (ingest never fails on this) but never embedded. Run:
+
+   ```bash
+   trellis admin reindex-vectors --format json
+   ```
+
+   It walks every document missing a vector and embeds it through the now-fixed
+   `embedding_fn`, via the same `build_vector_row` core the live hook uses. See
+   [operations.md → `trellis admin reindex-vectors`](operations.md#trellis-admin-reindex-vectors-backfill)
+   for flags (`--batch-size`, `--limit`, `--force`, `--dry-run`).
+
+### If It Fails
+
+A fix that doesn't stick (the warning keeps recurring with the same
+`(component, error_type, setting)` after a restart) means the edited setting isn't the
+one actually read in this environment — check for an env var shadowing
+`config.yaml`, or a `TRELLIS_CONFIG_DIR` pointed somewhere other than
+expected. `trellis admin reindex-vectors` itself exits loudly (not silently
+indexing nothing) when the embedder or vector store is still unconfigured.
 

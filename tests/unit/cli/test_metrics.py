@@ -18,6 +18,7 @@ from trellis.schemas.parameters import (
     ParameterScope,
     ParameterSet,
 )
+from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.outcome import SQLiteOutcomeStore
 from trellis.stores.sqlite.parameter import SQLiteParameterStore
@@ -246,6 +247,7 @@ def test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes(
     if fmt == "json":
         payload = json.loads(dry.stdout)
         assert (payload["proposals_considered"], payload["pending_manual"]) == (2, 1)
+        assert payload["dry_run"] is True
     else:
         out = " ".join(plain(dry.output).split())
         assert "2 proposal(s) considered" in out
@@ -257,10 +259,65 @@ def test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes(
     live = runner.invoke(app, ["worker", "tune", "--format", "json"])
 
     assert live.exit_code == 0, plain(live.output)
-    assert json.loads(live.stdout)["auto_promoted"] == 1
+    live_payload = json.loads(live.stdout)
+    assert live_payload["auto_promoted"] == 1
+    assert live_payload["dry_run"] is False
     statuses = sorted(p.status for p in state.list_proposals())
     assert statuses == ["pending", "promoted"]
     assert state.get_cursor("rule_tuner") is not None
+
+
+@pytest.mark.parametrize(("args", "dry_run"), [([], False), (["--dry-run"], True)])
+def test_worker_tune_json_dry_run_is_the_flag_with_auto_promote_off(
+    cli_env, args: list[str], dry_run: bool
+) -> None:
+    """``"dry_run"`` is the ``--dry-run`` flag, not whether the pass promoted.
+
+    With auto-promote off, a run without ``--dry-run`` writes its proposals
+    and the cursor, and it used to report ``"dry_run": true``.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"], n=40, domain="orders")
+    state = cli_env["tuner_state"]
+
+    result = runner.invoke(app, ["worker", "tune", "--format", "json", *args])
+
+    assert result.exit_code == 0, plain(result.output)
+    payload = json.loads(result.stdout)
+    assert payload["enabled"] is False
+    assert payload["proposals_considered"] >= 1
+    assert payload["dry_run"] is dry_run
+    if dry_run:
+        assert state.list_proposals() == []
+        assert state.get_cursor("rule_tuner") is None
+    else:
+        assert state.list_proposals() != []
+        assert state.get_cursor("rule_tuner") is not None
+
+
+def test_worker_tune_live_run_emits_tune_cycle_completed_event(cli_env) -> None:
+    """A live ``worker tune`` leaves a durable, API-readable health record (e167).
+
+    Before this, a pass that promoted nothing emitted zero events, so
+    ``GET /admin/loops`` could not tell "ran and found nothing to do"
+    from "has never run". The dry-run side of this (no event at all)
+    is already pinned by
+    ``test_worker_tune_dry_run_writes_nothing_and_a_live_run_still_promotes``.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"], n=40, domain="orders")
+    events = cli_env["event_log"]
+
+    result = runner.invoke(app, ["worker", "tune", "--format", "json"])
+
+    assert result.exit_code == 0, plain(result.output)
+    payload = json.loads(result.stdout)
+    recorded = events.get_events(event_type=EventType.TUNE_CYCLE_COMPLETED, limit=10)
+    assert len(recorded) == 1, "exactly one pass ran, so exactly one event"
+    event_payload = recorded[0].payload
+    assert event_payload["tuner_name"] == payload["tuner_name"]
+    assert event_payload["proposals_considered"] == payload["proposals_considered"]
+    assert event_payload["auto_promoted"] == payload["auto_promoted"]
+    assert event_payload["pending_manual"] == payload["pending_manual"]
+    assert "write_provenance" in recorded[0].metadata
 
 
 def test_tune_text_renders_a_stored_domain_verbatim(
@@ -432,6 +489,7 @@ def test_metrics_promote_commit_changes_state(cli_env):
             "5",
             "--min-effect-size",
             "0.01",
+            "--allow-no-baseline",
             "--format",
             "json",
         ],
@@ -442,6 +500,228 @@ def test_metrics_promote_commit_changes_state(cli_env):
     assert payload["params_version"] is not None
 
     assert cli_env["tuner_state"].get_proposal(proposal_id).status == "promoted"
+
+
+def test_metrics_promote_commit_refuses_no_baseline_by_default(cli_env):
+    """The scope's first proposal (no ParameterSet snapshot yet) is refused
+    by bare ``--commit`` — ``PromotionPolicy.allow_no_baseline`` now
+    defaults to ``False``. Before this default flip, a bare ``--commit``
+    promoted a first proposal vacuously (#823's gate finding).
+
+    The refusal must also leave the proposal's stored status untouched
+    (not ``"rejected"``) so a later ``--allow-no-baseline`` call on the
+    *same* proposal can still succeed — see
+    ``test_metrics_promote_commit_with_allow_no_baseline_bootstraps_scope``.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
+
+    result = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "5",
+            "--min-effect-size",
+            "0.01",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "rejected"
+    assert payload["reason"] == "no_baseline_snapshot_for_scope"
+    assert payload["params_version"] is None
+
+    # Non-terminal: the stored proposal is still promotable, not "rejected".
+    assert cli_env["tuner_state"].get_proposal(proposal_id).status == "pending"
+
+
+def test_metrics_promote_no_baseline_refusal_text_hints_allow_no_baseline(cli_env):
+    """The text (non-JSON) refusal names the actual remedy.
+
+    Follow-up from the #828 gate: before this, the CLI's text output for
+    a ``no_baseline_...`` refusal said only the bare reason string, and
+    an operator reading it had no way to tell ``--allow-no-baseline``
+    (surgical) apart from ``--force`` (skips everything) without reading
+    the source. Both the dry-run preview and the ``--commit`` refusal
+    must show the hint; machine consumers reading ``--format json``
+    already see the ``no_baseline_...`` prefix in ``reason`` and need no
+    hint, so the JSON payload is unchanged (checked above).
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
+
+    dry_run = runner.invoke(
+        app,
+        ["metrics", "promote", proposal_id, "--min-sample-size", "5"],
+    )
+    assert dry_run.exit_code == 0, plain(dry_run.output)
+    assert "--allow-no-baseline" in plain(dry_run.output)
+
+    committed = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "5",
+        ],
+    )
+    assert committed.exit_code == 0, plain(committed.output)
+    assert "--allow-no-baseline" in plain(committed.output)
+
+    # A refusal that is NOT bootstrap-shaped gets no such hint — it would
+    # misdirect an operator toward a flag that cannot fix a sample-size or
+    # effect-size shortfall.
+    bootstrapped = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "5",
+            "--min-effect-size",
+            "0.01",
+            "--allow-no-baseline",
+        ],
+    )
+    assert bootstrapped.exit_code == 0, plain(bootstrapped.output)
+    assert "--allow-no-baseline" not in plain(bootstrapped.output)
+
+
+def test_metrics_promote_commit_with_allow_no_baseline_bootstraps_scope(cli_env):
+    """A no-baseline refusal is recoverable: the *same* proposal promotes
+    on a second call that adds ``--allow-no-baseline``, because the first
+    call's refusal did not mark it ``"rejected"``.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
+
+    refused = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "5",
+            "--min-effect-size",
+            "0.01",
+            "--format",
+            "json",
+        ],
+    )
+    assert json.loads(refused.stdout)["status"] == "rejected"
+
+    bootstrapped = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "5",
+            "--min-effect-size",
+            "0.01",
+            "--allow-no-baseline",
+            "--format",
+            "json",
+        ],
+    )
+    assert bootstrapped.exit_code == 0, bootstrapped.output
+    payload = json.loads(bootstrapped.stdout)
+    assert payload["status"] == "promoted"
+    assert payload["params_version"] is not None
+    assert cli_env["tuner_state"].get_proposal(proposal_id).status == "promoted"
+
+
+def test_metrics_promote_allow_no_baseline_still_enforces_sample_size_floor(cli_env):
+    """``--allow-no-baseline`` is surgical: it lifts only the baseline
+    rule, not ``--min-sample-size``.
+
+    With the floor raised above the seeded proposal's sample size,
+    ``--allow-no-baseline --commit`` still refuses on the sample-size
+    gate rather than promoting, and the stored status is terminally
+    ``"rejected"`` — a sample-size refusal, unlike a no-baseline one, has
+    no recovery path. A regression that routed ``--allow-no-baseline``
+    through ``force`` (skipping the whole policy gate, like ``--force``
+    does) would instead promote here.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
+
+    result = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--min-sample-size",
+            "999",
+            "--allow-no-baseline",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "rejected"
+    assert payload["reason"].startswith("sample_size=")
+
+    # Terminal: unlike a no-baseline refusal, a sample-size refusal marks
+    # the stored proposal "rejected".
+    assert cli_env["tuner_state"].get_proposal(proposal_id).status == "rejected"
+
+
+def test_metrics_promote_force_alone_still_bypasses_baseline_rule(cli_env):
+    """Decision (see PR body): ``--force`` keeps skipping the *whole*
+    policy gate, baseline rule included, rather than gaining a carve-out.
+
+    ``_apply_policy`` — sample size, effect size, non-numeric, and
+    baseline — has always been entirely inside promote_proposal's
+    ``if not force:`` branch; only the immutable-core and reachability
+    gates are force-proof. Pulling the baseline check out of that branch
+    so ``--force`` could no longer skip it would restructure a function
+    two other test files assert on directly, for a surface that is
+    already non-default and logged — the vacuous-default defect #823
+    found is fixed by the default flip alone. This test pins the
+    (unchanged) behaviour rather than silently letting it drift.
+    """
+    _seed_uncited_graph_outcomes(cli_env["outcome_store"])
+    tune_result = runner.invoke(app, ["metrics", "tune", "--format", "json"])
+    proposal_id = json.loads(tune_result.stdout)["proposals"][0]["proposal_id"]
+
+    result = runner.invoke(
+        app,
+        [
+            "metrics",
+            "promote",
+            proposal_id,
+            "--commit",
+            "--force",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "promoted"
 
 
 def test_metrics_promote_missing_proposal(cli_env):

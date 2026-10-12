@@ -523,7 +523,7 @@ A scalar / numeric / boolean measurement attached to an entity. Machine-comparab
 from trellis.retrieve import ObservationSearch, PackBuilder
 from trellis.retrieve.strategies import build_strategies
 
-strategies = build_strategies(registry)
+strategies = build_strategies(registry).strategies
 strategies.append(ObservationSearch(registry.knowledge.graph_store))
 pack = PackBuilder(strategies=strategies).build(
     intent="why is this column flagged?",
@@ -1018,7 +1018,6 @@ Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes
 | `evidence.ingest` | Ingest | Ingest evidence |
 | `evidence.attach` | Ingest | Attach evidence to a target |
 | `precedent.promote` | Curate | Promote trace to precedent |
-| `precedent.update` | Curate | Update a precedent |
 | `entity.create` | Curate | Create an entity |
 | `entity.update` | Curate | Update an entity |
 | `entity.merge` | Curate | Merge two entities |
@@ -1036,9 +1035,9 @@ Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes
 | Value | Description |
 |-------|-------------|
 | `success` | Command executed successfully |
-| `rejected` | Policy gate rejected the command |
-| `failed` | Execution failed (validation or handler error) |
-| `duplicate` | Idempotency key already seen |
+| `rejected` | Refused. `metadata["rejection_reason"]` names the cause: `immutable_core` (an unattended writer asked for an operation outside its allow-list), `validate` (the command named an unknown operation, lacked a required arg, or gave `feedback.record` a `rating` that is not a number from 0.0 to 1.0), `policy_violation` (the policy gate or a handler's `PolicyViolationError`), or the `code` of a handler's `ValidationError` (`handler_validate` if it set none) |
+| `failed` | No handler is registered for the operation, or the handler raised any other `TrellisError` (store errors included; `IdempotencyError` answers `duplicate`) or one of the exceptions in `trellis.mutate.executor._handler_panic_classes()` (Python built-ins, `sqlite3.Error`, plus `psycopg.Error` and the Bolt driver's `DriverError`/`Neo4jError` when those optional extras are installed). Also when the event log raises a `TrellisError` or one of those exceptions while checking the command's idempotency key: the handler does not run, and the `mutation.rejected` event carries `reason: idempotency_check_failed` |
+| `duplicate` | A command with this idempotency key already succeeded |
 
 ### BatchStrategy
 

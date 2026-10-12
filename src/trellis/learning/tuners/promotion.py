@@ -5,10 +5,15 @@ is the governed decision to turn it into an active
 :class:`ParameterSet`. This module runs the decision pipeline:
 
 1. **Validate** — the proposal exists and is still eligible
-   (``status == "pending" or "canary"``, not terminal), and its scope
+   (``status == "pending" or "canary"``, not terminal), its scope
    is not one of :data:`~trellis.mutate.immutable_core.GOVERNING_KEYS`
    — the parameters that gate *another* learning loop, which no tuner
-   may retune and which ``force=True`` does not unlock.
+   may retune and which ``force=True`` does not unlock — and
+   :func:`~trellis.ops.parameter_reachability.reachability_reasons`
+   reports no reason the scope is inert for a reader that resolves
+   it. ``force=True`` does not unlock this either: a promotion no
+   reader can ever resolve is not a risk/reward tradeoff a caller can
+   choose to accept.
 2. **Policy gate** — :class:`PromotionPolicy` check.  Rejects
    proposals that don't meet the minimum sample size or whose
    effect size against the active baseline is too small.
@@ -37,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.mutate.immutable_core import governing_key_refusal
+from trellis.ops.parameter_reachability import reachability_reasons
 from trellis.schemas.parameters import ParameterProposal, ParameterSet
 from trellis.stores.base.event_log import EventLog, EventType
 
@@ -71,12 +77,16 @@ class PromotionPolicy:
             this floor nor exempt the keys beside them from it; they
             are reported as :attr:`EffectSize.unbaselined_keys` and
             governed by ``allow_no_baseline``.
-        allow_no_baseline: When ``True`` (default) a proposal the
-            baseline cannot be compared against can still promote —
-            the bootstrap case. This covers both shapes: no active
-            snapshot for the scope at all, and a snapshot that carries
-            none of the proposed keys. When ``False`` the cell must
-            have a prior snapshot carrying at least one proposed key.
+        allow_no_baseline: When ``True`` a proposal the baseline cannot
+            be compared against can still promote — the bootstrap case.
+            This covers both shapes: no active snapshot for the scope at
+            all, and a snapshot that carries none of the proposed keys.
+            When ``False`` (default) the cell must have a prior snapshot
+            carrying at least one proposed key. The CLI's bare
+            ``--commit`` and the Review queue both inherit this default;
+            ``trellis metrics promote`` exposes ``--allow-no-baseline``
+            as the explicit, surgical opt-in — distinct from ``--force``,
+            which skips this gate along with every other one below.
         allow_non_numeric: When ``True`` (default) a proposal setting
             a non-numeric value (``str`` / ``bool``) skips the
             ``min_effect_size`` check. Numeric baselines always
@@ -85,7 +95,7 @@ class PromotionPolicy:
 
     min_sample_size: int = DEFAULT_MIN_SAMPLE_SIZE
     min_effect_size: float = DEFAULT_MIN_EFFECT_SIZE
-    allow_no_baseline: bool = True
+    allow_no_baseline: bool = False
     allow_non_numeric: bool = True
 
 
@@ -219,6 +229,18 @@ def _compute_effect_size(
     )
 
 
+#: Reason prefix for the two bootstrap-shaped ``_apply_policy`` refusals
+#: (no snapshot for the scope at all; a snapshot that carries none of the
+#: proposed keys) — the only reasons :func:`_reject` treats as
+#: non-terminal. Both are governed by ``PromotionPolicy.allow_no_baseline``
+#: and share the property that clears every other reason this module
+#: emits: the proposal itself did nothing wrong, the store just has
+#: nothing yet to compare it against, so a later call with
+#: ``allow_no_baseline=True`` (``trellis metrics promote
+#: --allow-no-baseline``) should still be able to promote it.
+_NO_BASELINE_REASON_PREFIX = "no_baseline_"
+
+
 def _reject(
     *,
     proposal_id: str,
@@ -229,23 +251,44 @@ def _reject(
     tuner_state: TunerStateStore,
     event_log: EventLog,
     source: str,
+    terminal: bool = True,
 ) -> PromotionResult:
     """Mark a proposal rejected, emit the audit event, and shape the result.
 
-    The one refusal constructor for :func:`promote_proposal`'s two gates
-    — the immutable core and :class:`PromotionPolicy` — so the audit
-    payload and the returned ``PromotionResult`` cannot drift between
-    them. The payload is byte-identical to the one the policy branch
-    emitted before this helper existed, ``effect_size`` included: a
-    governing-key refusal passes ``None`` for it, which is the key the
-    policy branch already wrote whenever the effect was incomputable.
+    The one refusal constructor for :func:`promote_proposal`'s three
+    gates — the immutable core, reachability and :class:`PromotionPolicy`
+    — so the audit payload and the returned ``PromotionResult`` cannot
+    drift between them. The payload is byte-identical to the one the
+    policy branch emitted before this helper existed, ``effect_size``
+    included: a governing-key or reachability refusal passes ``None``
+    for it, which is the key the policy branch already wrote whenever
+    the effect was incomputable.
+
+    ``terminal`` controls only whether the *stored proposal* moves to
+    ``"rejected"``. The immutable-core and reachability gates, and every
+    :class:`PromotionPolicy` reason except the bootstrap pair above, are
+    terminal: nothing about a later call changes the verdict, so leaving
+    the proposal retryable would just let an operator spam the same
+    refusal. The bootstrap pair is the one case where the store's own
+    state — "no comparable snapshot exists yet" — is what produced the
+    refusal, and a subsequent ``allow_no_baseline=True`` call is the
+    intended way to clear it; marking the proposal terminally
+    ``"rejected"`` first (the previous behaviour) made that call always
+    lose to the ``status in {"promoted", "rejected"}`` short-circuit
+    below, so the only way to promote a scope's first proposal was to
+    get the policy right on the very first attempt. The returned
+    ``PromotionResult.status`` is ``"rejected"`` either way — callers
+    (CLI, REST, UI) read the wire shape, not the store — but the
+    ``terminal`` flag rides along on the emitted event so the audit log
+    can tell the two apart too.
 
     :func:`reject_proposal` deliberately does **not** route through here.
     Its payload carries ``manual: True`` and no ``effect_size`` at all,
     and folding it in would silently add a key to an audit event that
     already ships.
     """
-    tuner_state.update_status(proposal_id, "rejected", notes=reason)
+    if terminal:
+        tuner_state.update_status(proposal_id, "rejected", notes=reason)
     event_log.emit(
         EventType.TUNER_PROPOSAL_REJECTED,
         source=source,
@@ -259,9 +302,15 @@ def _reject(
             "effect_size": effect.comparable_max if effect else None,
             "uncomparable_keys": list(effect.unbaselined_keys) if effect else [],
             "reason": reason,
+            "terminal": terminal,
         },
     )
-    logger.info("tuner.promotion.rejected", proposal_id=proposal_id, reason=reason)
+    logger.info(
+        "tuner.promotion.rejected",
+        proposal_id=proposal_id,
+        reason=reason,
+        terminal=terminal,
+    )
     return PromotionResult(
         proposal_id=proposal_id,
         status="rejected",
@@ -298,8 +347,10 @@ def promote_proposal(
         source: Event source label.  Pipe a human-readable tool name
             when promoting from the CLI.
         force: When ``True`` the policy gate is skipped.  Still
-            requires the proposal to exist and not be in a terminal
-            status; emits a ``force=true`` flag on the event payload.
+            requires the proposal to exist, not be in a terminal
+            status, clear the immutable-core check, and resolve to a
+            reachable scope; emits a ``force=true`` flag on the event
+            payload.
     """
     effective_policy = policy or PromotionPolicy()
 
@@ -338,6 +389,29 @@ def promote_proposal(
             source=source,
         )
 
+    # Reachability, above ``force`` and above the baseline resolve for the
+    # same reason as the immutable-core check: a promotion into a scope
+    # ParameterStore.resolve can never match is dead weight no value of the
+    # effect size changes, so skipping the policy gate does not reach it
+    # either. The generation-time screen in RuleTuner.run() catches this
+    # for proposals it produces, but a proposal already sitting in the
+    # store (written before that screen existed, or by a tuner that does
+    # not call it) reaches promotion unchecked unless it is re-checked
+    # here. An unrostered component_id yields no reasons — "no claim", not
+    # "reachable" — so it falls through unchanged (parameter_reachability).
+    unreachable = reachability_reasons(proposal.scope, tuple(proposal.proposed_values))
+    if unreachable:
+        return _reject(
+            proposal_id=proposal_id,
+            proposal=proposal,
+            reason="unreachable: " + "; ".join(r.detail for r in unreachable),
+            effect=None,
+            baseline_values=None,
+            tuner_state=tuner_state,
+            event_log=event_log,
+            source=source,
+        )
+
     baseline_snapshot = parameter_store.resolve(proposal.scope)
     baseline_values = baseline_snapshot.values if baseline_snapshot else None
 
@@ -351,6 +425,13 @@ def promote_proposal(
             effect=effect,
         )
         if gate_result is not None:
+            # The bootstrap pair of reasons ("no snapshot for the scope at
+            # all" / "no snapshot carries the proposed keys") is the one
+            # case where a later call, not a different proposal, is the
+            # intended remedy (``--allow-no-baseline``) — see _reject's
+            # ``terminal`` docstring. Every other policy reason (sample
+            # size, effect size, non-numeric) is terminal: nothing about
+            # calling again with the same values would change the verdict.
             return _reject(
                 proposal_id=proposal_id,
                 proposal=proposal,
@@ -360,6 +441,7 @@ def promote_proposal(
                 tuner_state=tuner_state,
                 event_log=event_log,
                 source=source,
+                terminal=not gate_result.startswith(_NO_BASELINE_REASON_PREFIX),
             )
 
     # Execute: merge the proposed values onto the baseline so partial
@@ -479,6 +561,20 @@ def preview_promotion(
             proposal_id=proposal_id,
             status="rejected",
             reason=governing,
+            proposed_values=dict(proposal.proposed_values),
+            baseline_values={},
+            sample_size=proposal.sample_size,
+        )
+
+    # Mirrors promote_proposal's reachability refusal, above the baseline
+    # resolve and above ``force``, for the same preview/commit parity
+    # reason the governing-key check above is here.
+    unreachable = reachability_reasons(proposal.scope, tuple(proposal.proposed_values))
+    if unreachable:
+        return PromotionPreview(
+            proposal_id=proposal_id,
+            status="rejected",
+            reason="unreachable: " + "; ".join(r.detail for r in unreachable),
             proposed_values=dict(proposal.proposed_values),
             baseline_values={},
             sample_size=proposal.sample_size,

@@ -74,6 +74,7 @@ def build_driver(
     pointing at the same instance; otherwise each store constructs its
     own pool.
     """
+    check_driver_installed()
     cfg = config or DriverConfig()
     return GraphDatabase.driver(
         uri,

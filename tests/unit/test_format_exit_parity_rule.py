@@ -845,8 +845,10 @@ def test_the_descent_reaches_every_format_branch_in_the_tree() -> None:
 def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
     """Vacuity guard, for the interprocedural half of the scan.
 
-    ``ingest._fail``, ``policy._exit_on_refused_write``,
-    ``analyze._exit_on_refused_advisory_write`` and ``main``'s two
+    ``admin._refuse_option``, ``ingest._fail``,
+    ``policy._exit_on_refused_write``,
+    ``analyze._exit_on_refused_advisory_write``,
+    ``classify.effective_rules`` and ``main``'s two
     boundary renderers are the shape: render on the caller's surface, then
     exit below the branch. If this set silently
     emptied, every command that delegates its exit to a helper would stop
@@ -857,14 +859,14 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
     helper costs a demotion to :data:`_CONDITIONAL_EXIT`, which is
     reported against either sibling. An extra one — a ``may``-exit helper
     counted as ``must`` — lets an arm that might exit stand in for one
-    that does, and nothing reports it. Naming all four also keeps the
+    that does, and nothing reports it. Naming each one also keeps the
     roster *derived*: it is recomputed from the tree here, so a new helper
     has to be admitted deliberately rather than inherited from a
-    hand-maintained list that drifts (the #443 shape). The last two
+    hand-maintained list that drifts (the #443 shape). ``main``'s two
     entries arrived that way: #459's boundary was written, the roster went
     red, and admitting it was a decision rather than an inheritance; #493
     added its sibling and the roster went red again, which is the roster
-    working.
+    working. ``admin._refuse_option`` arrived the same way.
 
     Keyed by *defining* module. Since #491 a helper is also visible to
     every module that imports it, which is
@@ -874,11 +876,21 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
     roster = _real_roster()
     helpers_by_module = {key: set(names) for key, names in roster.must.items() if names}
     assert helpers_by_module == {
+        # ``quickstart``'s and ``install-skills``' invalid-option refusal.
+        # Admitted deliberately: it exits on every path and defines no
+        # ``return``.
+        "admin": {"_refuse_option"},
         "analyze": {"_exit_on_refused_advisory_write"},
+        # ``trellis classify effective-rules``: every arm of its own
+        # format branch raises ``typer.Exit`` and the function defines no
+        # ``return``, so it has the must-exit shape in its own right (it is
+        # a command, not a helper another command delegates to). Admitted
+        # deliberately, per this docstring.
+        "classify": {"effective_rules"},
         "ingest": {"_fail"},
-        # The last two are the shared boundary's renderers — #459's for
+        # These two are the shared boundary's renderers — #459's for
         # ``TrellisError`` and #493's for ``PackAssemblyError``. Same
-        # shape as the other three (render on the caller's surface, then
+        # shape as the others (render on the caller's surface, then
         # exit below the format branch), reached from
         # ``_BoundaryGroup.invoke`` rather than from a command body. Both
         # admitted deliberately, per this docstring: each exits on every
@@ -923,11 +935,16 @@ def test_the_conditional_exit_helper_roster_is_exactly_the_private_may_exiters()
     }
     assert {k: v for k, v in conditional.items() if v} == {
         "admin": ["_load_graph_store_from_yaml", "_lookup_candidate_payload"],
+        # Same shape as curate._execute_command below: exits on a REJECTED
+        # or FAILED Command and returns on any other.
+        "admin_settings": ["_execute"],
         "analyze": [
             "_build_learning_registry_or_exit",
             "_exit_if_advisory_store_degraded",
         ],
-        "classify": ["_require_llm_facet_classifier"],
+        # Same shape as curate._execute_command above: exits on a
+        # REJECTED or FAILED Command and returns on any other.
+        "classify": ["_execute_classify_command", "_require_llm_facet_classifier"],
         # Exits on a REJECTED or FAILED command and returns on any other.
         "curate": ["_execute_command"],
         "ingest_corpus": ["_parse_tags"],

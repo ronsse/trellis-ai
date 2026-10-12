@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from trellis.errors import ConfigError
 from trellis.llm.protocol import EmbedderClient, LLMClient
 from trellis.llm.providers import openai as openai_provider
 from trellis.llm.providers.openai import (
@@ -271,8 +272,14 @@ def _install_fake_openai_module(
         def __init__(self, **kwargs: object) -> None:
             captured.append(kwargs)
 
+    class FakeOpenAIError(Exception):
+        """Stand-in for ``openai.OpenAIError``, unused by the capturing stub
+        above but present so ``from openai import AsyncOpenAI, OpenAIError``
+        resolves against this fake module like it does the real SDK."""
+
     fake_module = ModuleType("openai")
     fake_module.AsyncOpenAI = FakeAsyncOpenAI  # type: ignore[attr-defined]
+    fake_module.OpenAIError = FakeOpenAIError  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", fake_module)
     return captured
 
@@ -398,6 +405,94 @@ class TestConstructorKwargs:
         OpenAIClient()
         OpenAIEmbedder()
         assert captured == [{}, {}]
+
+
+# -- Tests: missing-key ConfigError translation (#786 follow-up 2) ---------
+#
+# ``_build_openai_embedding_fn`` (src/trellis/stores/registry.py) already
+# translates the SDK's own missing-credentials ``openai.OpenAIError`` into a
+# ``ConfigError`` naming a setting (#786). ``_build_async_client`` here has
+# the identical ``AsyncOpenAI(**kwargs)`` shape and, until this change, did
+# not. The constructor is monkeypatched to raise directly rather than
+# depending on the SDK's own env-var handling, which differs by SDK major
+# version (the #786 gate's T1 had to be adjusted for exactly that reason).
+
+
+class TestMissingKeyConfigError:
+    def test_client_missing_key_raises_configerror(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No key anywhere: the SDK's own error becomes a ``ConfigError``."""
+        openai = pytest.importorskip("openai")  # optional extra; skip when unavailable
+        sdk_error = openai.OpenAIError("Missing credentials ... OPENAI_API_KEY")
+
+        class _RaisingAsyncOpenAI:
+            def __init__(self, **kwargs: object) -> None:
+                raise sdk_error
+
+        monkeypatch.setattr(openai, "AsyncOpenAI", _RaisingAsyncOpenAI)
+        with pytest.raises(ConfigError) as exc_info:
+            OpenAIClient()
+        assert exc_info.value.setting == "llm.api_key_env"
+        assert exc_info.value.__cause__ is sdk_error
+        assert str(sdk_error) not in str(exc_info.value)
+
+    def test_embedder_missing_key_raises_configerror(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The embedder path names its own (different) setting."""
+        openai = pytest.importorskip("openai")  # optional extra; skip when unavailable
+        sdk_error = openai.OpenAIError("Missing credentials ... OPENAI_API_KEY")
+
+        class _RaisingAsyncOpenAI:
+            def __init__(self, **kwargs: object) -> None:
+                raise sdk_error
+
+        monkeypatch.setattr(openai, "AsyncOpenAI", _RaisingAsyncOpenAI)
+        with pytest.raises(ConfigError) as exc_info:
+            OpenAIEmbedder()
+        assert exc_info.value.setting == "llm.embedding.api_key_env"
+        assert exc_info.value.__cause__ is sdk_error
+        assert str(sdk_error) not in str(exc_info.value)
+
+    def test_non_openai_error_propagates_unwrapped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-``OpenAIError`` from the constructor is not a config error.
+
+        Mirrors #794's idiom for the registry's sync embedding-fn path: the
+        constructor is replaced wholesale, so the result does not depend on
+        which SDK version is installed.
+        """
+        openai = pytest.importorskip("openai")  # optional extra; skip when unavailable
+        synthetic_error = RuntimeError("synthetic")
+
+        class _RaisingAsyncOpenAI:
+            def __init__(self, **kwargs: object) -> None:
+                raise synthetic_error
+
+        monkeypatch.setattr(openai, "AsyncOpenAI", _RaisingAsyncOpenAI)
+        with pytest.raises(RuntimeError) as exc_info:
+            OpenAIClient()
+        assert exc_info.value is synthetic_error
+
+    def test_explicit_client_never_touches_constructor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``client=`` short-circuits ``_build_async_client`` entirely."""
+        openai = pytest.importorskip("openai")  # optional extra; skip when unavailable
+
+        class _RaisingAsyncOpenAI:
+            def __init__(self, **kwargs: object) -> None:
+                msg = "constructor must not be called"
+                raise AssertionError(msg)
+
+        monkeypatch.setattr(openai, "AsyncOpenAI", _RaisingAsyncOpenAI)
+        sentinel = SimpleNamespace()
+        client = OpenAIClient(client=sentinel)  # type: ignore[arg-type]
+        assert client._client is sentinel
+        embedder = OpenAIEmbedder(client=sentinel)  # type: ignore[arg-type]
+        assert embedder._client is sentinel
 
 
 # -- Tests: embedder request shape -----------------------------------------

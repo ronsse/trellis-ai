@@ -73,7 +73,7 @@ Three more env toggles control what an unauthenticated caller can reach. All thr
 ## `trellis worker curate` — the curation cycle (Tier 0 + Tier 2)
 
 ```bash
-trellis worker curate --output-dir DIR [--days 30] [--interval SECONDS] \
+trellis worker curate [--output-dir DIR] [--days 30] [--interval SECONDS] \
   [--dry-run] [--reconcile-first] \
   [--skip-noise-tags] [--skip-advisories] [--skip-learning] \
   [--no-meta-trace] [--format text|json]
@@ -83,7 +83,7 @@ One full curation cycle. It calls the curation library functions directly — no
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--output-dir` / `-o` | required | Directory the stage-4 review artifacts land in. |
+| `--output-dir` / `-o` | `$TRELLIS_LEARNING_ARTIFACTS_DIR`, else `<data_dir>/learning` | Directory the stage-4 review artifacts land in. The default is the directory the API's Review queue reads; pass this only to write somewhere the API does not look. |
 | `--days` | `30` | Days of EventLog history to scan. |
 | `--interval` | off | Loop mode: re-run every N seconds until SIGINT/SIGTERM. Plain sleep — **no scheduler dependency**. |
 | `--dry-run` | off | Analyze only — no noise tags, no advisory mutations, no artifacts. Each stage that runs still records its meta-Activity; add `--no-meta-trace` to skip that (see below). |
@@ -140,8 +140,9 @@ Runs one `RuleTuner` pass. **Default behaviour is a pure tuner pass** — byte-i
 Verified shape with auto-promote disabled (the default), demo data:
 
 ```json
-{"enabled": false, "dry_run": true, "proposals_considered": 0, "auto_promoted": 0,
- "rolled_back": 0, "pending_manual": 0, "outcomes": [], "tuner_name": "rule_tuner"}
+{"enabled": false, "dry_run": false, "proposals_considered": 0, "auto_promoted": 0,
+ "rolled_back": 0, "pending_manual": 0, "outcomes": [], "status": "ok",
+ "tuner_name": "rule_tuner"}
 ```
 
 `"enabled": false` is the tell that Tier-1 autonomy is off — the command did a tuner pass and promoted nothing.
@@ -152,7 +153,7 @@ Add a `learning.auto_promote` block with `enabled: true` to `$TRELLIS_CONFIG_DIR
 
 The auto thresholds **must be at least as strict as the manual-promote defaults** — the loader rejects looser values loudly. Monitoring is always armed; you cannot auto-promote without an armed rollback (Tier-1 invariant (b)).
 
-**What it writes/emits.** With auto-promote off: only the tuner's own `pending` proposals and its cursor; the tuner emits no events. `--dry-run` writes nothing in either mode. With auto-promote on, each autonomous action emits a **dedicated, self-identifying** event on top of the normal governance event:
+**What it writes/emits.** With auto-promote off: only the tuner's own `pending` proposals and its cursor; the tuner emits no events. `--dry-run` writes no rows in either mode. With auto-promote on, each autonomous action emits a **dedicated, self-identifying** event on top of the normal governance event:
 
 | Event | Emitted when |
 |---|---|
@@ -198,7 +199,7 @@ Three server-side decisions **wait for a human**. The workers prepare the artifa
 | Decision | Prepared by | Artifact / input | Human runs | Tier |
 |---|---|---|---|---|
 | **Promote a learning candidate** into a precedent node | `worker curate` stage 4 | `intent_learning_candidates.json` + `promotion_decisions.template.json` in `--output-dir` | Set `approved: true` on rows in the decisions file, then `trellis curate promote-learning --candidates intent_learning_candidates.json --decisions <filled-in>.json` | 2 |
-| **Promote a tuner parameter proposal** (when auto-promote is OFF, or for proposals below the auto gate) | `worker tune` / `trellis metrics tune` | a `pending` proposal | `trellis metrics promote <PROPOSAL_ID> --commit` (dry-run by default; `--commit` writes the snapshot) | 1→manual |
+| **Promote a tuner parameter proposal** (when auto-promote is OFF, or for proposals below the auto gate) | `worker tune` / `trellis metrics tune` | a `pending` proposal | `trellis metrics promote <PROPOSAL_ID> --commit` (dry-run by default; `--commit` writes the snapshot; add `--allow-no-baseline` for a scope with no comparable baseline yet) | 1→manual |
 | **Promote an open-string type** to the canonical ontology | `trellis analyze schema-evolution` | a `WELL_KNOWN_CANDIDATE` event / `candidate_id` | `trellis admin draft-promotion-adr <candidate_id>` to scaffold an ADR amendment, then a human authors + merges it | 3 |
 
 The pattern is identical each time: **the machine prepares, the human commits.** `worker curate` writes a decisions *template* and stops; `worker tune` (auto-off) leaves proposals `pending`; `analyze schema-evolution` only emits a candidate event. None of them crosses the irreversible line on its own.
@@ -229,11 +230,10 @@ TRELLIS_AUTH_MODE=required TRELLIS_API_KEY=$(op read 'op://...') \
 **Process 2 — the curation loop** (a second tmux pane or systemd service). Once a day, reconcile the feedback log first, then curate:
 
 ```bash
-trellis worker curate --output-dir /var/lib/trellis/review \
-  --reconcile-first --interval 86400 --format json
+trellis worker curate --reconcile-first --interval 86400 --format json
 ```
 
-`--interval 86400` re-runs the cycle every 24h with a plain sleep — no scheduler. `--reconcile-first` backfills any file-only `pack_feedback.jsonl` rows into the EventLog before each cycle so the curate pass never misses feedback. For a real scheduler (cron / systemd timer / GHA / K8s CronJob) instead of `--interval`, use the recipes in [`../deployment/scheduled-curation.md`](../deployment/scheduled-curation.md).
+With no `--output-dir`, the learning-candidate artifacts land in `<data_dir>/learning`, the directory Process 1's Review queue reads, so run both processes against the same data directory. If you set `TRELLIS_LEARNING_ARTIFACTS_DIR` to move it, set it on both. `--interval 86400` re-runs the cycle every 24h with a plain sleep — no scheduler. `--reconcile-first` backfills any file-only `pack_feedback.jsonl` rows into the EventLog before each cycle so the curate pass never misses feedback. For a real scheduler (cron / systemd timer / GHA / K8s CronJob) instead of `--interval`, use the recipes in [`../deployment/scheduled-curation.md`](../deployment/scheduled-curation.md).
 
 ### Verification checklist
 
@@ -252,7 +252,7 @@ curl -fsS http://localhost:8420/readyz           # readiness — backend status
 trellis worker curate --output-dir /tmp/trellis-check/review --dry-run --no-meta-trace --format json
 #   expect: {"status": "ok", ..., "candidates_path": null, "dry_run": true}
 
-# 3. Tune is a no-op when auto-promote is OFF (the default)
+# 3. Tune promotes nothing when auto-promote is OFF (dry-run — writes no proposals or cursor)
 trellis worker tune --dry-run --format json
 #   expect: {"enabled": false, ..., "auto_promoted": 0}
 

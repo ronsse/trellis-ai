@@ -295,6 +295,8 @@ app = typer.Typer(
     help="Trellis — shared experience store for AI agents and teams.",
     no_args_is_help=True,
     cls=_BoundaryGroup,
+    # Typer before 0.23 printed every frame's locals, config values included.
+    pretty_exceptions_show_locals=False,
 )
 
 

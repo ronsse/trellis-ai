@@ -34,7 +34,9 @@ Entities
   ``NodeRole.STRUCTURAL`` — see "Node role" below.
 * **File / CreativeWork** — each ``artifacts_produced`` ref
   (``artifact:<artifact_id>``); type derived from ``artifact_type``.
+  A ref whose ``artifact_id`` is empty names no record and is skipped.
 * **Dataset** — each ``evidence_used`` ref (``evidence:<evidence_id>``).
+  A ref whose ``evidence_id`` is empty names no record and is skipped.
 
 ID normalization
 ----------------
@@ -576,6 +578,16 @@ class _DraftBuilder:
 
     def _build_evidence(self, activity_id: str) -> None:
         for ref in self._trace.evidence_used:
+            # An empty id names no record. (The schema strips whitespace, so a
+            # blank id arrives empty; it accepts one so stored traces load.)
+            # Minted, it would be ``evidence:``, one node shared by every such
+            # ref of every trace. Logged, as _slug_or_none logs its skips.
+            if not ref.evidence_id:
+                logger.info(
+                    "trace_extraction_evidence_id_empty",
+                    trace_id=self._trace.trace_id,
+                )
+                continue
             entity_id = self._emit_entity(
                 entity_id=f"evidence:{ref.evidence_id}",
                 entity_type=DATASET,
@@ -590,6 +602,16 @@ class _DraftBuilder:
 
     def _build_artifacts(self, activity_id: str) -> None:
         for ref in self._trace.artifacts_produced:
+            # An empty id names no record, as in _build_evidence (the schema
+            # strips whitespace, so a blank id arrives empty). Minted, it
+            # would be ``artifact:``, one node shared by every such ref of
+            # every trace.
+            if not ref.artifact_id:
+                logger.info(
+                    "trace_extraction_artifact_id_empty",
+                    trace_id=self._trace.trace_id,
+                )
+                continue
             entity_type = (
                 FILE
                 if ref.artifact_type.lower() in _FILE_ARTIFACT_TYPES

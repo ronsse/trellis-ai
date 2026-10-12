@@ -34,7 +34,7 @@ def main() -> None:
             # 1. Ingest a trace describing some completed work.
             trace_id = client.ingest_trace(
                 {
-                    "source": "examples.sdk_local_demo",
+                    "source": "agent",
                     "intent": "Add retry logic to the payments client",
                     "steps": [
                         {

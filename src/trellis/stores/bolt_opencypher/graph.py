@@ -11,10 +11,117 @@ Note: most openCypher implementations do not support partial uniqueness
 constraints (``UNIQUE ... WHERE valid_to IS NULL``). The "at most one
 current version per ``node_id``" invariant is enforced by the
 close-then-insert transaction rather than by the database. Under
-concurrent writers, a second writer can observe a stale "no current"
-state and create a duplicate current row. Enterprise Neo4j / AuraDB
-users can layer a node key constraint on top; ArcadeDB users rely on
-single-writer discipline at the application layer.
+concurrent writers, an ``upsert_node`` can create a duplicate current
+row: it observes a stale "no current" state, or, on Neo4j, it closes a
+version that a concurrent ``upsert_node`` or ``update_node_if_current``
+has already closed and inserts beside that writer's version, because it
+re-reads nothing once it holds the row's lock. Enterprise Neo4j /
+AuraDB users can layer a node key constraint on top; ArcadeDB users
+rely on single-writer discipline at the application layer. Among
+``update_node_if_current`` calls holding one token exactly one writes,
+on both engines (measured against ``neo4j:2025.12`` and
+``arcadedata/arcadedb:26.8.1``). Where a node has two current rows,
+``get_node``, ``get_nodes_bulk`` (so ``get_subgraph``), ``search_nodes``,
+``query``, ``execute_node_query`` and ``count_nodes_by_type`` show the
+one with the later ``valid_from``, or the greater ``version_id`` between
+equal stamps (:func:`_one_version_per_node`), and those taking ``as_of``
+pick the same way among the rows valid at that instant. So a search hit,
+its type count and ``get_node`` on its id agree whichever way the search
+is sorted, and a listing's ``limit`` counts nodes.
+``upsert_node``, ``upsert_nodes_bulk`` and ``update_node_if_current``
+close every current row of the node they write and create one version,
+which carries ``created_at`` over from the shown row (:func:`_shown_row`);
+``update_node_if_current`` compares its token with the shown row. So the
+next write of the node heals the duplicate rather than failing on it,
+except a bulk spec equal to the shown row, which stays a no-op.
+``upsert_edge`` and ``upsert_edges_bulk`` attach the new edge version to
+the shown row of each endpoint, so such a node does not double an edge
+written from or to it. The existing-edge lookup that closes the prior
+version matches each endpoint by ``node_id`` on any row, closed or
+current: re-versioning a node does not move its rows' relationships
+(above), so an edge written before the re-version still hangs off the
+closed row. The lookup closes every current match with ``FOREACH``, as
+``upsert_node`` does for its own rows, so a triplet that already has two
+current versions heals on its next write, and carries
+``edge_id``/``created_at`` forward from the :func:`_shown_row` pick.
+
+``upsert_edge`` had its own race, separate from the node-duplication one
+above: an unprotected ``OPTIONAL MATCH`` for the existing edge followed
+by ``CREATE`` let two concurrent writers on the same
+``(source_id, target_id, edge_type)`` both observe "no current edge" and
+both create one, leaving two current rows for one logical edge. There is
+no uniqueness constraint on the edge rows themselves to fall back on,
+because historical rows share the same key, so ``upsert_edge`` first
+writes ``_cas_lock`` to the current rows of both endpoints, in sorted
+``node_id`` order, and only then resolves the endpoints and reads the
+existing edge. On Neo4j that write takes each row's lock, so an
+``upsert_node`` on either endpoint that is already in flight commits
+before the endpoints are resolved, and the edge lands on the row it left
+current; the sorted order keeps writers of ``x->y`` and ``y->x`` from
+deadlocking. But the endpoint rows are not the record two concurrent
+writers of *the same edge* actually contend over — the edge row is — so
+touching them does not reliably force that conflict, and on ArcadeDB
+(which takes no lock; a conflicting writer fails only at commit, and
+only when the commit happens to collide) two concurrent writers of one
+edge could still both commit and leave two current rows (the live
+failure ``test_concurrent_edge_update_leaves_one_current_row`` reproduced
+three times on ``live-infra.yml`` over 2026-10-10/11, across PR #848,
+PR #851 and a direct push to main).
+
+``upsert_edge`` closes that gap with an ``EdgeClaim`` node, keyed on the
+directed ``(source_id, target_id, edge_type)`` triplet under its own
+uniqueness constraint (mirroring the existing ``AliasClaim`` mechanism
+used by :meth:`upsert_alias` / :meth:`bind_alias_if_absent`) — the same
+genuine serialization point the node path lacked. Every ``upsert_edge``
+call ``MERGE``s this claim row, in the same transaction, before
+resolving the existing edge: two writers racing to create the claim for
+the first time (the create-edge race) conflict under the unique
+constraint — measured, six overlapping-transaction trials out of six,
+against ``arcadedata/arcadedb:26.8.1``.
+
+The update-edge race — two writers racing to re-version an
+*already-claimed* triplet, the shape the bug report reproduced — is
+**not** closed by touching the claim row the way
+``update_node_if_current`` touches ``cur`` (``SET ec._cas_lock = true
+REMOVE ec._cas_lock``): that pair is a net no-op, and measured against
+``arcadedata/arcadedb:26.8.1``, its commit check does not see it as a
+conflict at all — two overlapping transactions both committed in six of
+six trials, and with the touch in place the live failing-scenario check
+(``bolt_edge_create_race.check_concurrent_edge_update_leaves_one_current_row``)
+still failed 34 of 80 calls over 800 reps against one database, no
+better than the 28 of 80 the same harness measured on the code before
+this claim existed at all (2026-10-11 gate review). What does close it
+is a genuine content change on the claim row: ``SET ec.claim_token =
+$edge_claim_token`` with a token freshly generated in Python on every
+attempt. ArcadeDB's commit check does see that as a conflict
+(``Neo.TransientError.Transaction.DeadlockDetected``), which the Bolt
+driver's own managed-transaction retry (``max_transaction_retry_time``,
+:class:`BoltDriverConfig`) already retries with backoff, transparently
+to :meth:`_execute_edge_claim_write`'s own retry loop below — measured
+0 of 80 calls failed over 800 reps on the same harness, with the driver
+retrying 800 ``DeadlockDetected`` conflicts along the way. The claim row
+also carries ``source_id``/``target_id`` (stable for a given
+``claim_key``, so re-asserting them is not itself a race) so
+:meth:`delete_node` can find and purge it, and the claim is written only
+once both endpoints are confirmed to have a current row, so a vanished
+endpoint cannot leave an orphan claim.
+
+The write is executed through :meth:`_execute_edge_claim_write`, which
+re-runs the whole transaction on a lost claim race
+(:func:`_is_edge_claim_contention`, widened on ArcadeDB the same way
+:func:`_is_alias_claim_contention` is), so a retry always re-reads
+committed state rather than papering over a conflict that was never
+detected. Only single-row writers take the claim: ``upsert_edges_bulk``
+does not (it would need a sorted per-row claim order across every row
+it writes, like Postgres's bulk edge path), so a bulk write racing
+another writer of the same edge can still leave two current rows.
+
+ArcadeDB 26.10.1 ships the upstream page-slot fix (ArcadeDB PR #9270)
+and closes the underlying race on its own, measured 0 of 40 calls
+failed over 400 reps for both this fix and for the code before it, on
+the same harness. ``live-infra.yml`` stays pinned to 26.8.1 on purpose
+so the race — and this fix — remain testable in CI; a deployment
+already on 26.10.1 gets the fix from the engine, not from this claim.
 
 Per-backend subclasses override the **seams**:
 
@@ -45,6 +152,7 @@ import structlog
 
 from trellis.core.base import utc_now
 from trellis.core.ids import generate_ulid
+from trellis.errors import StoreError
 from trellis.schemas.graph import CompactionReport
 from trellis.schemas.well_known import normalize_entity_name
 from trellis.stores.base.edge_provenance import (
@@ -61,14 +169,19 @@ from trellis.stores.base.graph import (
     check_node_role_immutable,
     validate_document_ids,
     validate_node_role_args,
+    validate_node_search_args,
     validate_subgraph_depth,
+    validate_version_token,
 )
 from trellis.stores.base.graph_query import (
     DOC_LINK_FIELD,
     RANGE_OP_GLYPH,
     check_doc_link_clause,
 )
-from trellis.stores.bolt_opencypher.base import BoltSessionRunner
+from trellis.stores.bolt_opencypher.base import (
+    BoltSessionRunner,
+    open_errors_as_store_error,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -153,6 +266,23 @@ def _temporal_predicate_in_list(as_of: datetime | None, var: str) -> str:
     )
 
 
+#: What every whole-node read returns in place of ``n``. A shape-#2 vector
+#: store (Neo4j, ArcadeDB) keeps its ``embedding`` on these ``(:Node)``
+#: rows, and no GraphStore method returns it (:func:`_node_props_to_dict`
+#: reads named keys), so the projection keeps the vector off the wire.
+#: Both engines answer it with the key present and ``None``, which the
+#: conversion never reads. A read with a ``LIMIT`` sorts and limits ``n``
+#: in a ``WITH`` before projecting, so the engine builds a map only for
+#: the rows it returns.
+_NODE_WITHOUT_EMBEDDING = "n {.*, embedding: null} AS n"
+
+#: Sorts the rows bound to ``n`` newest first, for a ``LIMIT`` to follow.
+#: The key is projected before the sort: ArcadeDB 26.8.1 sorted 5,000
+#: current nodes by ``n.created_at`` in 245 ms, and by the projected key
+#: in 45 ms.
+_NEWEST_FIRST = "WITH n, n.created_at AS created_at ORDER BY created_at DESC "
+
+
 def _node_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
     """Convert a Bolt :Node's raw properties into the GraphStore dict shape.
 
@@ -179,6 +309,88 @@ def _node_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
         "valid_from": props.get("valid_from"),
         "valid_to": props.get("valid_to"),
     }
+
+
+def _node_search_name(properties: Any) -> str:
+    """The ``name`` text GET /graph/search matches and sorts by, or ``""``."""
+    name = properties.get("name") if isinstance(properties, dict) else None
+    return "" if name is None else str(name)
+
+
+def _matches_node_search(
+    node_id: Any, node_type: Any, properties: Any, needle: str
+) -> bool:
+    """Whether a node matches GET /graph/search's ``q``, lowercased as *needle*.
+
+    A plain substring of the name, ``node_id`` or ``node_type`` in any
+    case, so ``%``, ``_`` and a backslash are literal. Shared by
+    ``count_nodes_by_type`` and ``search_nodes`` so their counts agree.
+    """
+    haystacks = (_node_search_name(properties), str(node_id), str(node_type))
+    return any(needle in h.lower() for h in haystacks)
+
+
+def _shown_row(rows: str) -> str:
+    """Cypher for the row of the list *rows* that a node shows; ``null`` if empty.
+
+    The shown row has the later ``valid_from``, or the greater
+    ``version_id`` between equal stamps, so no choice rests on the order a
+    query returns rows in. Concurrent writers can leave a node two current
+    rows (the module docstring). The reads that pick through
+    :func:`_one_version_per_node` show this row, and the node writes
+    continue it, so a write carries over what those reads showed; the edge
+    writes attach their new version to it. Neo4j
+    compares the stamps as text, which is time order for the one spelling
+    every write uses (``_iso(utc_now())``, aware UTC); ArcadeDB reads them
+    as datetimes. Neither comparison can raise.
+    """
+    return (
+        f"reduce(shown = head({rows}), r IN tail({rows}) | "
+        "CASE WHEN r.valid_from > shown.valid_from OR "
+        "(r.valid_from = shown.valid_from AND r.version_id > shown.version_id) "
+        "THEN r ELSE shown END)"
+    )
+
+
+def _one_version_per_node(match: str) -> str:
+    """Cypher that keeps one of the rows *match* binds to ``n`` per ``node_id``.
+
+    The kept row is :func:`_shown_row`'s. ``get_node``, ``get_nodes_bulk``,
+    ``search_nodes``, ``count_nodes_by_type``, ``upsert_nodes_bulk``'s read
+    of the current versions, and ``query`` and ``execute_node_query``
+    through :func:`_shown_rows_passing` pick through here, so they agree on
+    the version of a node.
+    The rows are reduced rather than sorted: ArcadeDB 26.8.1 took 0.45 s
+    to sort 10,000 current rows by ``valid_from`` and ``version_id``, and
+    0.07 s to collect and reduce them.
+    """
+    return (
+        f"{match} WITH n.node_id AS node_id, collect(n) AS rows "
+        f"WITH {_shown_row('rows')} AS n "
+    )
+
+
+def _shown_rows_passing(where: str, filters: list[str]) -> str:
+    """Cypher binding ``n`` to each node's shown row that passes *filters*.
+
+    *where* chooses the rows :func:`_one_version_per_node` picks from: the
+    temporal filter, which keeps the rows ``get_node`` would pick from,
+    narrowed at most by a test that a node's rows pass or fail together,
+    such as one on ``node_id``. Both matches apply it. A filter on a field
+    such as ``node_type`` can pass on one of those rows and fail on
+    another, so it judges the row picked. The pick reads only the rows of
+    nodes with some row passing *filters*, so a filter that few nodes pass
+    stays cheap.
+    """
+    if not filters:
+        return _one_version_per_node(f"MATCH (n:Node) WHERE {where}")
+    passing = " AND ".join(filters)
+    candidates = (
+        f"MATCH (n:Node) WHERE {where} AND {passing} "
+        "WITH DISTINCT n.node_id AS candidate "
+        f"MATCH (n:Node {{node_id: candidate}}) WHERE {where}"
+    )
+    return _one_version_per_node(candidates) + f"WHERE {passing} "
 
 
 def _edge_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
@@ -225,6 +437,20 @@ def _alias_claim_key(source_system: str, raw_id: str) -> str:
     )
 
 
+def _edge_claim_key(source_id: str, target_id: str, edge_type: str) -> str:
+    """Return an injective, backend-portable key for one edge triplet.
+
+    Keyed on the directed ``(source_id, target_id, edge_type)`` triplet
+    ``upsert_edge``'s existing-edge ``OPTIONAL MATCH`` matches on — the
+    same shape :func:`_alias_claim_key` uses, for the same reason: a
+    JSON-encoded list so no separator choice can make two distinct
+    triplets collide.
+    """
+    return json.dumps(
+        [source_id, target_id, edge_type], ensure_ascii=False, separators=(",", ":")
+    )
+
+
 #: Label and key property of the alias claim node. The claim is the
 #: serialization point for every alias write: each writer ``MERGE``s it
 #: under a uniqueness constraint, so losing that race is how a concurrent
@@ -233,6 +459,15 @@ def _alias_claim_key(source_system: str, raw_id: str) -> str:
 #: apart — see :func:`_is_alias_claim_contention`.
 _ALIAS_CLAIM_LABEL = "AliasClaim"
 _ALIAS_CLAIM_KEY_PROPERTY = "claim_key"
+
+#: Label and key property of the edge claim node — the serialization
+#: point ``upsert_edge`` MERGEs under a uniqueness constraint so a
+#: concurrent re-versioner of the same ``(source_id, target_id,
+#: edge_type)`` triplet learns it lost instead of both committing a
+#: current row. Same identity-matching rationale as ``AliasClaim`` — see
+#: :func:`_is_edge_claim_contention`.
+_EDGE_CLAIM_LABEL = "EdgeClaim"
+_EDGE_CLAIM_KEY_PROPERTY = "claim_key"
 
 #: Phrases a unique-constraint violation carries, matched case-insensitively.
 #: Naming the claim's label and key property is necessary but not
@@ -257,6 +492,22 @@ def _names_token(message: str, token: str) -> bool:
         re.search(rf"(?<![0-9A-Za-z_]){re.escape(token)}(?![0-9A-Za-z_])", message)
         is not None
     )
+
+
+def _is_claim_contention(exc: Exception, label: str, key_property: str) -> bool:
+    """Return True when ``exc`` names a duplicate key on ``label``/``key_property``.
+
+    The mechanical half of :func:`_is_alias_claim_contention` and
+    :func:`_is_edge_claim_contention`, factored out because both claims
+    share one unique-constraint violation shape across both backends.
+    Each caller's own docstring carries the measurements specific to its
+    claim; this function only applies them.
+    """
+    message = str(getattr(exc, "message", "") or exc)
+    lowered = message.lower()
+    if not any(marker in lowered for marker in _UNIQUE_VIOLATION_MARKERS):
+        return False
+    return _names_token(message, label) and _names_token(message, key_property)
 
 
 def _is_alias_claim_contention(exc: Exception) -> bool:
@@ -297,13 +548,24 @@ def _is_alias_claim_contention(exc: Exception) -> bool:
     (:data:`_UNIQUE_VIOLATION_MARKERS`): the constraint's identity says
     *which* index a message is about, not that the index was violated.
     """
-    message = str(getattr(exc, "message", "") or exc)
-    lowered = message.lower()
-    if not any(marker in lowered for marker in _UNIQUE_VIOLATION_MARKERS):
-        return False
-    return _names_token(message, _ALIAS_CLAIM_LABEL) and _names_token(
-        message, _ALIAS_CLAIM_KEY_PROPERTY
-    )
+    return _is_claim_contention(exc, _ALIAS_CLAIM_LABEL, _ALIAS_CLAIM_KEY_PROPERTY)
+
+
+def _is_edge_claim_contention(exc: Exception) -> bool:
+    """Return True when an edge write lost the ``EdgeClaim`` unique race.
+
+    Same mechanism as :func:`_is_alias_claim_contention`, matched on
+    ``EdgeClaim``/``claim_key`` instead of ``AliasClaim``/``claim_key``:
+    ArcadeDB detects the duplicate only at commit and reports it on the
+    same ``Neo.ClientError.Transaction.TransactionNotFound`` channel;
+    Neo4j raises a schema-constraint error naming the same label and
+    property. Not independently measured against a live server the way
+    ``AliasClaim``'s violation shape was (see that function's docstring)
+    — the constraint DDL and the message shape both engines produce for
+    *any* unique-key violation are identical in mechanism and differ only
+    in the label, so this predicate rests on the same measurement.
+    """
+    return _is_claim_contention(exc, _EDGE_CLAIM_LABEL, _EDGE_CLAIM_KEY_PROPERTY)
 
 
 _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -323,6 +585,11 @@ _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
         "CREATE CONSTRAINT alias_claim_unique IF NOT EXISTS "
         f"FOR (c:{_ALIAS_CLAIM_LABEL}) "
         f"REQUIRE c.{_ALIAS_CLAIM_KEY_PROPERTY} IS UNIQUE"
+    ),
+    (
+        "CREATE CONSTRAINT edge_claim_unique IF NOT EXISTS "
+        f"FOR (c:{_EDGE_CLAIM_LABEL}) "
+        f"REQUIRE c.{_EDGE_CLAIM_KEY_PROPERTY} IS UNIQUE"
     ),
     # Lookup indexes
     "CREATE INDEX node_id_idx IF NOT EXISTS FOR (n:Node) ON (n.node_id)",
@@ -344,6 +611,51 @@ _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
         "FOR ()-[r:EDGE]-() ON (r.valid_from, r.valid_to)"
     ),
 )
+
+
+def _detach_delete_until_none(tx: ManagedTransaction, cypher: str, nid: str) -> int:
+    """Repeat a ``... DETACH DELETE x RETURN count(x) AS deleted`` statement
+    until it matches no row; return the total of the counts it reported.
+
+    Neo4j reads at READ COMMITTED and takes write locks: a DETACH DELETE
+    that waited on a writer's lock matched its rows before the wait, so a
+    version that writer created is invisible to that statement and visible
+    to the next one. A statement's count also includes a row that a
+    concurrent purge removed while it waited, so ``delete_node`` locks the
+    node's rows before its first count. ArcadeDB never waits (the
+    conflicting commit fails and the driver re-runs the whole transaction
+    function), so there the repeat finds nothing.
+    """
+    removed = 0
+    while True:
+        record = tx.run(cypher, nid=nid).single()
+        count = int(record["deleted"]) if record else 0
+        if count == 0:
+            return removed
+        removed += count
+
+
+def _missing_endpoint_message(row_index: int, end: str, node_id: str) -> str:
+    """The ``upsert_edges_bulk`` error for one row's missing endpoint.
+
+    Shared by round trip 1 (the up-front check) and the post-rollback
+    re-read in ``upsert_edges_bulk``'s transaction-failure handler, so the
+    two call sites cannot report the same defect in different words.
+    """
+    return f"upsert_edges_bulk[{row_index}]: {end} {node_id!r} has no current version"
+
+
+class _MissingEdgeRowError(Exception):
+    """Round trip 2 of ``upsert_edges_bulk`` dropped row ``row_index``.
+
+    Raised inside the transaction function so that the driver rolls the
+    transaction back. It is neither a ``DriverError`` nor a ``Neo4jError``,
+    so the managed-transaction retry loop re-raises it instead of retrying.
+    """
+
+    def __init__(self, row_index: int) -> None:
+        super().__init__(row_index)
+        self.row_index = row_index
 
 
 class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
@@ -373,12 +685,18 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         built the driver themselves (``close()`` will then close it),
         or ``owns_driver=False`` when the registry shared a driver
         across the graph + vector pair (``close()`` is a no-op).
+
+        The schema statements are the store's first round trip, so an
+        unreachable server or refused credentials fail here: a
+        ``DriverError`` or ``Neo4jError`` is raised as :class:`StoreError`
+        naming the error's type.
         """
         self._driver: Driver = driver
         self._database = database
         self._owns_driver = owns_driver
         if init_schema:
-            self._init_schema()
+            with open_errors_as_store_error("graph"):
+                self._init_schema()
 
     # ------------------------------------------------------------------
     # Schema
@@ -410,26 +728,29 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         if node_id is None:
             node_id = generate_ulid()
 
-        # One Cypher round trip: ``OPTIONAL MATCH`` finds an existing
-        # current row (if any), the WHERE filters out role-immutability
-        # conflicts so the CREATE only runs when the write is legal,
-        # ``coalesce`` carries ``created_at`` forward across versions.
-        # Previously this path made a separate ``get_node`` call to
-        # fetch the prior version — measured at ~50% of total upsert
-        # latency on AuraDB Free.
+        # One Cypher round trip: ``OPTIONAL MATCH`` finds the current
+        # rows (none, one, or the race's two), the WHERE filters out
+        # role-immutability conflicts with the shown row so the CREATE
+        # only runs when the write is legal, every current row is
+        # closed, and ``coalesce`` carries ``created_at`` forward from
+        # the shown row. Collecting the rows first keeps the CREATE to
+        # one per call: a CREATE per matched row would reuse one
+        # ``version_id`` and fail the unique constraint. A separate
+        # ``get_node`` call for the prior version would cost ~50% of
+        # total upsert latency (measured on AuraDB Free).
         now = _iso(utc_now())
         new_props = {
             "node_id": node_id,
             "version_id": generate_ulid(),
             "node_type": node_type,
             "node_role": node_role,
-            "generation_spec_json": json.dumps(generation_spec)
+            "generation_spec_json": json.dumps(generation_spec, allow_nan=False)
             if generation_spec is not None
             else None,
-            "document_ids_json": json.dumps(document_ids)
+            "document_ids_json": json.dumps(document_ids, allow_nan=False)
             if document_ids is not None
             else None,
-            "properties_json": json.dumps(properties or {}),
+            "properties_json": json.dumps(properties or {}, allow_nan=False),
             # ``created_at`` is set in Cypher via coalesce so we don't
             # need to know the prior value here.
             "updated_at": now,
@@ -437,11 +758,13 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "valid_to": None,
         }
 
-        cypher = """
-        OPTIONAL MATCH (old:Node {node_id: $node_id}) WHERE old.valid_to IS NULL
-        WITH old, old.node_role AS prior_role
+        cypher = f"""
+        OPTIONAL MATCH (cur:Node {{node_id: $node_id}}) WHERE cur.valid_to IS NULL
+        WITH collect(cur) AS current_rows
+        WITH current_rows, {_shown_row("current_rows")} AS old
+        WITH current_rows, old, old.node_role AS prior_role
         WHERE prior_role IS NULL OR prior_role = $node_role
-        SET old.valid_to = $now
+        FOREACH (c IN current_rows | SET c.valid_to = $now)
         WITH old, coalesce(old.created_at, $now) AS created_at_carry
         CREATE (n:Node)
         SET n = $new_props
@@ -472,6 +795,91 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             raise ValueError(msg)
         return node_id
 
+    def update_node_if_current(
+        self,
+        node_id: str,
+        expected_valid_from: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str,
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        validate_version_token(expected_valid_from)
+        validate_node_role_args(node_role, generation_spec)
+        validate_document_ids(document_ids)
+        now = _iso(utc_now())
+        new_props = {
+            "node_id": node_id,
+            "version_id": generate_ulid(),
+            "node_type": node_type,
+            "node_role": node_role,
+            "generation_spec_json": json.dumps(generation_spec, allow_nan=False)
+            if generation_spec is not None
+            else None,
+            "document_ids_json": json.dumps(document_ids, allow_nan=False)
+            if document_ids is not None
+            else None,
+            "properties_json": json.dumps(properties or {}, allow_nan=False),
+            "updated_at": now,
+            "valid_from": now,
+            "valid_to": None,
+        }
+        # No current row, no write: the shown row is then ``null`` and
+        # the token compare filters the CREATE. Setting and removing
+        # ``_cas_lock`` writes every current row before the token is
+        # re-read (Neo4j's lost-update idiom). Both engines need it:
+        # without it, two writers holding one token both wrote on Neo4j
+        # and on ArcadeDB (measured). On Neo4j the write takes the row's
+        # lock, so a writer that closed or purged the row commits first
+        # and the second WHERE sees it. ArcadeDB takes no lock: the loser
+        # fails, at commit with a code the driver retries or on the
+        # generic engine code that ``_execute_alias_write`` retries, and
+        # the re-run reads committed state. The token is compared with
+        # the shown row (``_shown_row``), the version ``get_node`` returns,
+        # and a write closes every current row, as ``upsert_node`` does.
+        # ``datetime()`` on both sides because ArcadeDB stores the ISO
+        # string as a DateTime, which never equals a string.
+        cypher = f"""
+        MATCH (cur:Node {{node_id: $node_id}})
+        WHERE cur.valid_to IS NULL
+        SET cur._cas_lock = true
+        REMOVE cur._cas_lock
+        WITH cur
+        WHERE cur.valid_to IS NULL
+        WITH collect(cur) AS current_rows
+        WITH current_rows, {_shown_row("current_rows")} AS old
+        WHERE datetime(old.valid_from) = datetime($expected_valid_from)
+          AND (old.node_role IS NULL OR old.node_role = $node_role)
+        FOREACH (c IN current_rows | SET c.valid_to = $now)
+        WITH old, coalesce(old.created_at, $now) AS created_at_carry
+        CREATE (n:Node)
+        SET n = $new_props
+        SET n.created_at = created_at_carry
+        RETURN n.node_id AS node_id
+        """
+
+        def _tx(tx: ManagedTransaction) -> bool:
+            record = tx.run(
+                cypher,
+                node_id=node_id,
+                expected_valid_from=expected_valid_from,
+                node_role=node_role,
+                now=now,
+                new_props=new_props,
+            ).single()
+            return record is not None
+
+        if self._execute_alias_write(_tx):
+            return True
+        # Nothing was written. A role conflict with the version the token
+        # names raises, as in ``upsert_node``; anything else is a refusal.
+        existing = self.get_node(node_id)
+        if existing is not None and existing["valid_from"] == expected_valid_from:
+            check_node_role_immutable(node_id, existing, node_role)
+        return False
+
     def upsert_nodes_bulk(
         self,
         nodes: list[dict[str, Any]],
@@ -494,6 +902,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 msg = f"upsert_nodes_bulk[{i}]: {exc}"
                 raise type(exc)(msg) from exc
             node_ids.append(spec.get("node_id") or generate_ulid())
+        self._reject_repeated_node_ids(nodes)
 
         # The pre-fetch + UNWIND share one session — opening a fresh
         # session for each round trip costs ~1ms each on AuraDB Free
@@ -555,16 +964,18 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                             "node_type": spec["node_type"],
                             "node_role": spec.get("node_role", "semantic"),
                             "generation_spec_json": (
-                                json.dumps(generation_spec)
+                                json.dumps(generation_spec, allow_nan=False)
                                 if generation_spec is not None
                                 else None
                             ),
                             "document_ids_json": (
-                                json.dumps(document_ids)
+                                json.dumps(document_ids, allow_nan=False)
                                 if document_ids is not None
                                 else None
                             ),
-                            "properties_json": json.dumps(spec.get("properties") or {}),
+                            "properties_json": json.dumps(
+                                spec.get("properties") or {}, allow_nan=False
+                            ),
                             "created_at": now,
                             "updated_at": now,
                             "valid_from": now,
@@ -579,7 +990,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # * Hot path (no prior rows for any of these node_ids) —
             #   issue a CREATE-only UNWIND. Skips the per-row
             #   ``OPTIONAL MATCH`` index lookup, the ``valid_to``
-            #   filter, the no-op ``SET old.valid_to``, and the
+            #   filter, the no-op close of current rows, and the
             #   ``coalesce`` on ``created_at``. Measured on AuraDB
             #   Free 2026-04-27: the OPTIONAL MATCH version ingested
             #   at ~45 nodes/sec; the loader script's CREATE-only
@@ -591,9 +1002,12 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             #
             # * Cold path (one or more rows have a prior current
             #   row) — full OPTIONAL MATCH version that carries
-            #   ``created_at`` forward and closes the prior version,
-            #   preserving SCD-2 semantics for re-ingest of an
-            #   existing node.
+            #   ``created_at`` forward from the shown row and closes
+            #   every current row, preserving SCD-2 semantics for
+            #   re-ingest of an existing node. Collecting the rows
+            #   keeps the CREATE to one per input row, as in
+            #   ``upsert_node``, so the race's second current row is
+            #   closed rather than failing the batch.
             #
             # ``created_at`` is set in both shapes to the row's
             # ``valid_from`` (== ``now``); the cold path's coalesce
@@ -613,14 +1027,15 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # a current version (unchanged no-ops were filtered out above).
             has_prior = any(nid in current_by_id for nid in write_node_ids)
             if has_prior:
-                cypher = """
+                cypher = f"""
                 UNWIND $rows AS row
-                OPTIONAL MATCH (old:Node {node_id: row.node_id})
-                  WHERE old.valid_to IS NULL
-                WITH row, old, coalesce(old.created_at, row.props.valid_from)
+                OPTIONAL MATCH (cur:Node {{node_id: row.node_id}})
+                  WHERE cur.valid_to IS NULL
+                WITH row, collect(cur) AS current_rows
+                WITH row, current_rows, {_shown_row("current_rows")} AS old
+                FOREACH (c IN current_rows | SET c.valid_to = row.props.valid_from)
+                WITH row, coalesce(old.created_at, row.props.valid_from)
                      AS created_at_carry
-                SET old.valid_to = row.props.valid_from
-                WITH row, created_at_carry
                 CREATE (n:Node)
                 SET n = row.props
                 SET n.created_at = created_at_carry
@@ -649,13 +1064,17 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         Returns the full parsed node (the ``get_node`` shape) so the bulk
         write path can both validate role immutability and detect an
         unchanged re-upsert (issue #195) without a second round trip.
+        A node with two current rows maps to the one ``get_node`` shows.
         ``created_at`` is still carried forward in the write Cypher via
         ``coalesce``.
         """
         if not node_ids:
             return {}
         cypher = (
-            "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL RETURN n"
+            _one_version_per_node(
+                "MATCH (n:Node) WHERE n.node_id IN $ids AND n.valid_to IS NULL"
+            )
+            + f"RETURN {_NODE_WITHOUT_EMBEDDING}"
         )
         records = session.execute_read(lambda tx: list(tx.run(cypher, ids=node_ids)))
         result: dict[str, dict[str, Any]] = {}
@@ -670,7 +1089,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         as_of: datetime | None = None,
     ) -> dict[str, Any] | None:
         where, params = _temporal_where(as_of, "n")
-        cypher = f"MATCH (n:Node {{node_id: $node_id}}) WHERE {where} RETURN n"
+        cypher = (
+            _one_version_per_node(f"MATCH (n:Node {{node_id: $node_id}}) WHERE {where}")
+            + f"RETURN {_NODE_WITHOUT_EMBEDDING}"
+        )
         record = self._run_read_single(cypher, node_id=node_id, **params)
         if record is None:
             return None
@@ -684,13 +1106,15 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         if not node_ids:
             return []
         where, params = _temporal_where(as_of, "n")
-        cypher = f"MATCH (n:Node) WHERE n.node_id IN $ids AND {where} RETURN n"
+        match = f"MATCH (n:Node) WHERE n.node_id IN $ids AND {where}"
+        cypher = _one_version_per_node(match) + f"RETURN {_NODE_WITHOUT_EMBEDDING}"
         records = self._run_read_list(cypher, ids=node_ids, **params)
         return [_node_props_to_dict(dict(r["n"])) for r in records]
 
     def get_node_history(self, node_id: str) -> list[dict[str, Any]]:
         cypher = (
-            "MATCH (n:Node {node_id: $node_id}) RETURN n ORDER BY n.valid_from DESC"
+            "MATCH (n:Node {node_id: $node_id}) "
+            f"RETURN {_NODE_WITHOUT_EMBEDDING} ORDER BY n.valid_from DESC"
         )
         records = self._run_read_list(cypher, node_id=node_id)
         return [_node_props_to_dict(dict(r["n"])) for r in records]
@@ -732,6 +1156,12 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         :func:`_is_alias_claim_contention`). Anything that is not claim
         contention propagates untouched, and exhausting the bound re-raises
         the last error rather than returning a made-up result.
+
+        :meth:`update_node_if_current` runs through here too. It touches no
+        claim, so only a backend that widens the predicate re-runs it:
+        ArcadeDB, where a compare-and-set that lost to a concurrent write
+        can fail on the generic engine code. The re-run reads committed
+        state, so it gives the answer a serialized run would.
         """
         last_error: Exception | None = None
         for _attempt in range(_ALIAS_CLAIM_RETRY_ATTEMPTS):
@@ -744,6 +1174,51 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     last_error = exc
                     logger.debug(
                         "alias_claim_contention_retry",
+                        attempt=_attempt + 1,
+                        attempts=_ALIAS_CLAIM_RETRY_ATTEMPTS,
+                    )
+        raise last_error  # type: ignore[misc]
+
+    def _is_edge_write_contention(self, exc: Exception) -> bool:
+        """Return True when ``exc`` means this edge write lost the ``EdgeClaim`` race.
+
+        Mirrors :meth:`_is_alias_write_contention` for the edge-triplet
+        claim :meth:`upsert_edge` MERGEs — see
+        :meth:`~trellis.stores.arcadedb.graph.ArcadeDBGraphStore._is_edge_write_contention`
+        for the ArcadeDB widening, a per-backend seam for the same reason
+        the alias one is.
+        """
+        return _is_edge_claim_contention(exc)
+
+    def _execute_edge_claim_write(
+        self, tx_function: Callable[[ManagedTransaction], Any]
+    ) -> Any:
+        """Run an edge write, re-running it when it loses the ``EdgeClaim`` race.
+
+        Mirrors :meth:`_execute_alias_write`. ``upsert_edge`` MERGEs the
+        ``EdgeClaim`` node that serializes every writer of one
+        ``(source_id, target_id, edge_type)`` triplet under a uniqueness
+        constraint, so this is a hard commit-time violation rather than
+        the optimistic "touch the endpoints and hope" a plain
+        ``session.execute_write`` depends on: endpoint nodes are not the
+        record two concurrent edge creations actually contend over, so
+        touching them cannot guarantee a conflict is raised between them.
+        The losing transaction is rolled back whole, so a retry re-reads
+        committed state — this time observing the winner's new current
+        edge as ``old`` — and reaches the same single-current-row answer
+        a serialized run would.
+        """
+        last_error: Exception | None = None
+        for _attempt in range(_ALIAS_CLAIM_RETRY_ATTEMPTS):
+            with self._driver.session(database=self._database) as session:
+                try:
+                    return session.execute_write(tx_function)
+                except Exception as exc:
+                    if not self._is_edge_write_contention(exc):
+                        raise
+                    last_error = exc
+                    logger.debug(
+                        "edge_claim_contention_retry",
                         attempt=_attempt + 1,
                         attempts=_ALIAS_CLAIM_RETRY_ATTEMPTS,
                     )
@@ -884,11 +1359,11 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                         entity_id=winner,
                     )
                 owner_record = tx.run(
-                    """
-                    MATCH (n:Node {node_id: $winner})
+                    f"""
+                    MATCH (n:Node {{node_id: $winner}})
                     WHERE n.valid_to IS NULL
                     SET n.node_id = n.node_id
-                    RETURN n
+                    RETURN {_NODE_WITHOUT_EMBEDDING}
                     """,
                     winner=winner,
                 ).single()
@@ -1075,12 +1550,18 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             extractor_tier=extractor_tier,
         )
 
-        # One Cypher round trip: endpoint MATCH + existing-edge
-        # OPTIONAL MATCH + close-old + create-new in a single query.
+        # One Cypher round trip: endpoint-lock prelude + edge-claim prelude +
+        # endpoint MATCH + existing-edge OPTIONAL MATCH + close-old +
+        # create-new, in a single query. Each endpoint is narrowed to the
+        # row it shows (``_shown_row``), so an endpoint with two current
+        # rows (the module docstring) gets one new version, on that row,
+        # rather than one per row. When an endpoint has no current row the
+        # aggregate still yields one row, of empty lists, on both
+        # engines, so ``s`` and ``t`` are both null; ``WHERE s IS NOT
+        # NULL`` drops that row, since a CREATE between nulls raises on
+        # Neo4j and links two new empty vertices on ArcadeDB.
         # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
-        # from any current version. Previously this path made a
-        # separate ``_find_current_edge`` call (~50% of total upsert
-        # latency on AuraDB Free).
+        # from any current version, so the write stays one round trip.
         now = _iso(utc_now())
         candidate_edge_id = generate_ulid()
         base_props = {
@@ -1088,7 +1569,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "source_id": source_id,
             "target_id": target_id,
             "edge_type": edge_type,
-            "properties_json": json.dumps(properties or {}),
+            "properties_json": json.dumps(properties or {}, allow_nan=False),
             "valid_from": now,
             "valid_to": None,
             "source_trace_id": source_trace_id,
@@ -1097,16 +1578,67 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "evidence_ref": evidence_ref,
             "extractor_tier": extractor_tier,
         }
+        # Sorted, so writers of x->y and y->x take the locks in one order.
+        lo_id, hi_id = sorted((source_id, target_id))
+        edge_claim_key = _edge_claim_key(source_id, target_id, edge_type)
 
-        cypher = """
-        MATCH (s:Node {node_id: $source_id}) WHERE s.valid_to IS NULL
-        MATCH (t:Node {node_id: $target_id}) WHERE t.valid_to IS NULL
-        OPTIONAL MATCH (s)-[old:EDGE {edge_type: $edge_type}]->(t)
+        cypher = f"""
+        // Lock both endpoints' current rows, lowest node_id first, before
+        // resolving either: a concurrent upsert_node writes `valid_to` on
+        // the row this writes `_cas_lock` to, so the endpoint MATCHes
+        // below see the state after it commits. `WITH count(...)` yields
+        // one row even when nothing matched, so a missing endpoint still
+        // reaches the `WHERE s IS NOT NULL AND t IS NOT NULL` gate below.
+        MATCH (lo_cand:Node {{node_id: $lo_id}}) WHERE lo_cand.valid_to IS NULL
+        SET lo_cand._cas_lock = true
+        REMOVE lo_cand._cas_lock
+        WITH count(lo_cand) AS _locked_lo
+        MATCH (hi_cand:Node {{node_id: $hi_id}}) WHERE hi_cand.valid_to IS NULL
+        SET hi_cand._cas_lock = true
+        REMOVE hi_cand._cas_lock
+        WITH count(hi_cand) AS _locked_hi
+        MATCH (s:Node {{node_id: $source_id}}) WHERE s.valid_to IS NULL
+        MATCH (t:Node {{node_id: $target_id}}) WHERE t.valid_to IS NULL
+        WITH collect(DISTINCT s) AS source_rows, collect(DISTINCT t) AS target_rows
+        WITH {_shown_row("source_rows")} AS s, {_shown_row("target_rows")} AS t
+        // A missing endpoint is gated out *before* the claim write below,
+        // not after: the claim must not be written for a triplet whose
+        // edge can never be created, or every future real writer of this
+        // triplet inherits an orphan claim row to contend with for no
+        // reason.
+        WHERE s IS NOT NULL AND t IS NOT NULL
+        // Claim the (source_id, target_id, edge_type) triplet before
+        // resolving `old`, for the same reason the endpoint locks run
+        // first: a concurrent re-versioner of this exact triplet must be
+        // forced to conflict here, not matched into silently. `MERGE`
+        // catches two writers racing to CREATE this claim for the first
+        // time (the EdgeClaim unique constraint). The `SET` below writes
+        // a fresh, per-attempt token: a genuine content change on the
+        // claim row, so two writers racing to re-version an
+        // *already-claimed* triplet (the module docstring's open race)
+        // commit a real conflicting write -- unlike a `_cas_lock`
+        // SET/REMOVE touch of an existing row, which ArcadeDB 26.8.1's
+        // commit check does not see as a conflict at all (measured: see
+        // the module docstring). `source_id`/`target_id` are written so
+        // ``delete_node`` can find and purge this row; they are
+        // stable for a given `claim_key`, so re-asserting them on a
+        // retry is not itself a race.
+        MERGE (ec:EdgeClaim {{claim_key: $edge_claim_key}})
+        SET ec.claim_token = $edge_claim_token,
+            ec.source_id = $source_id,
+            ec.target_id = $target_id
+        WITH s, t
+        // Each endpoint on any row, not only `s`/`t`: an edge stays on
+        // the row it was written to (module docstring).
+        OPTIONAL MATCH (:Node {{node_id: $source_id}})
+          -[old:EDGE {{edge_type: $edge_type}}]->(:Node {{node_id: $target_id}})
           WHERE old.valid_to IS NULL
-        WITH s, t, old,
+        WITH s, t, collect(old) AS old_rows
+        WITH s, t, old_rows, {_shown_row("old_rows")} AS old
+        WITH s, t, old_rows,
              coalesce(old.edge_id, $candidate_edge_id) AS edge_id_carry,
              coalesce(old.created_at, $now) AS created_at_carry
-        SET old.valid_to = $now
+        FOREACH (o IN old_rows | SET o.valid_to = $now)
         WITH s, t, edge_id_carry, created_at_carry
         CREATE (s)-[new:EDGE]->(t)
         SET new = $base_props
@@ -1114,15 +1646,34 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         SET new.created_at = created_at_carry
         RETURN new.edge_id AS edge_id
         """
-        record = self._run_write_single(
-            cypher,
-            source_id=source_id,
-            target_id=target_id,
-            edge_type=edge_type,
-            now=now,
-            candidate_edge_id=candidate_edge_id,
-            base_props=base_props,
-        )
+
+        def _tx(tx: ManagedTransaction) -> Any:
+            # Generated per attempt, inside the retried function, not once
+            # per ``upsert_edge`` call: a driver-level retry (the
+            # DeadlockDetected a real content write on an existing claim
+            # row provokes, see the module docstring) re-invokes this
+            # closure directly, bypassing ``_execute_edge_claim_write``'s
+            # own loop, so a token generated outside it would be reused
+            # across those attempts too. Reuse is harmless for
+            # correctness (only the attempt that actually commits is
+            # ever observed) but a fresh value per attempt keeps the
+            # claim row's content distinguishable call to call for
+            # debugging.
+            return tx.run(
+                cypher,
+                source_id=source_id,
+                target_id=target_id,
+                lo_id=lo_id,
+                hi_id=hi_id,
+                edge_type=edge_type,
+                now=now,
+                candidate_edge_id=candidate_edge_id,
+                base_props=base_props,
+                edge_claim_key=edge_claim_key,
+                edge_claim_token=generate_ulid(),
+            ).single()
+
+        record = self._execute_edge_claim_write(_tx)
         if record is None:
             msg = (
                 f"Cannot upsert edge: source {source_id!r} or target "
@@ -1183,7 +1734,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     "source_id": spec["source_id"],
                     "target_id": spec["target_id"],
                     "edge_type": spec["edge_type"],
-                    "properties_json": json.dumps(spec.get("properties") or {}),
+                    "properties_json": json.dumps(
+                        spec.get("properties") or {}, allow_nan=False
+                    ),
                     "valid_from": now,
                     "valid_to": None,
                     **per_row_provenance[i],
@@ -1193,10 +1746,11 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         ]
 
         # The endpoint pre-check + UNWIND write share one session.
-        # Endpoint validation stays a separate round trip because the
-        # bulk path promises a precise per-index error when an endpoint
-        # is missing — collapsing it into the UNWIND would silently drop
-        # the row instead. Existing-edge state, by contrast, is no
+        # Endpoint validation stays a separate round trip so a missing
+        # endpoint is refused, with its index, before the write runs. The
+        # UNWIND drops a row whose endpoint is not current; the check
+        # after it covers an endpoint that stops being current between
+        # the two round trips. Existing-edge state, by contrast, is no
         # longer pre-fetched: the single-row ``upsert_edge`` already
         # carries ``edge_id`` and ``created_at`` forward via ``coalesce``
         # inside one Cypher round trip, and the bulk path now does the
@@ -1205,8 +1759,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         with self._driver.session(database=self._database) as session:
             # Round trip 1 — validate that every source + target has a
             # current version. Done up front so a bad row gets a precise
-            # error pointing at its index, not a silent drop in the
-            # UNWIND.
+            # error pointing at its index before the write runs.
             endpoint_ids = sorted(
                 {spec["source_id"] for spec in edges}
                 | {spec["target_id"] for spec in edges}
@@ -1214,41 +1767,57 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             valid_endpoints = self._fetch_current_node_id_set(session, endpoint_ids)
             for i, spec in enumerate(edges):
                 if spec["source_id"] not in valid_endpoints:
-                    msg = (
-                        f"upsert_edges_bulk[{i}]: source "
-                        f"{spec['source_id']!r} has no current version"
+                    raise ValueError(
+                        _missing_endpoint_message(i, "source", spec["source_id"])
                     )
-                    raise ValueError(msg)
                 if spec["target_id"] not in valid_endpoints:
-                    msg = (
-                        f"upsert_edges_bulk[{i}]: target "
-                        f"{spec['target_id']!r} has no current version"
+                    raise ValueError(
+                        _missing_endpoint_message(i, "target", spec["target_id"])
                     )
-                    raise ValueError(msg)
 
             # Round trip 2 — close any existing current edges and create
-            # new versions in a single UNWIND. ``coalesce`` carries
-            # ``edge_id`` and ``created_at`` forward across versions,
-            # matching the single-row method's collapsed pattern.
-            # NB: the existing-edge check filters ``edge_type`` in
-            # the WHERE clause rather than via property-pattern
-            # binding ``{edge_type: row.edge_type}``. ArcadeDB's
-            # OPTIONAL MATCH does not resolve UNWIND row references
-            # inside relationship property-pattern binders (the
-            # match silently produces no rows), so ``old`` would
-            # always be NULL and the prior version would not get
-            # closed. Both Neo4j and ArcadeDB accept the WHERE form.
-            cypher = """
+            # new versions in a single UNWIND. Each row's endpoints are
+            # narrowed to the rows they show, as in ``upsert_edge``;
+            # grouping by ``row`` yields nothing for a row whose endpoint
+            # has no current row, so the MATCH drops it. ``_tx`` compares
+            # the rows written with the rows sent and raises
+            # ``_MissingEdgeRowError`` at the first dropped row; the raise
+            # rolls the transaction back, so no row of the batch is
+            # written.
+            # ``coalesce`` carries ``edge_id`` and ``created_at`` forward
+            # across versions, matching the single-row method's collapsed
+            # pattern.
+            # NB: both the existing-edge node_id check and the
+            # ``edge_type`` check filter in the WHERE clause rather
+            # than via property-pattern binding (``{node_id: row...}``
+            # / ``{edge_type: row.edge_type}``). ArcadeDB's OPTIONAL
+            # MATCH does not resolve UNWIND row references inside
+            # property-pattern binders (the match silently produces no
+            # rows), so ``old`` would always be NULL and the prior
+            # version would not get closed. Both Neo4j and ArcadeDB
+            # accept the WHERE form.
+            cypher = f"""
             UNWIND $rows AS row
-            MATCH (s:Node {node_id: row.source_id}) WHERE s.valid_to IS NULL
-            MATCH (t:Node {node_id: row.target_id}) WHERE t.valid_to IS NULL
-            OPTIONAL MATCH (s)-[old:EDGE]->(t)
-              WHERE old.edge_type = row.edge_type AND old.valid_to IS NULL
-            WITH s, t, row, old,
+            MATCH (s:Node {{node_id: row.source_id}}) WHERE s.valid_to IS NULL
+            MATCH (t:Node {{node_id: row.target_id}}) WHERE t.valid_to IS NULL
+            WITH row, collect(DISTINCT s) AS source_rows,
+                 collect(DISTINCT t) AS target_rows
+            WITH row, {_shown_row("source_rows")} AS s,
+                 {_shown_row("target_rows")} AS t
+            // Each endpoint on any row, not only `s`/`t` (module
+            // docstring), filtered in WHERE per the NB above.
+            OPTIONAL MATCH (old_s:Node)-[old:EDGE]->(old_t:Node)
+              WHERE old_s.node_id = row.source_id
+                AND old_t.node_id = row.target_id
+                AND old.edge_type = row.edge_type
+                AND old.valid_to IS NULL
+            WITH s, t, row, collect(old) AS old_rows
+            WITH s, t, row, old_rows, {_shown_row("old_rows")} AS old
+            WITH s, t, row, old_rows,
                  coalesce(old.edge_id, row.candidate_edge_id) AS edge_id_carry,
                  coalesce(old.created_at, row.props.valid_from)
                    AS created_at_carry
-            SET old.valid_to = row.props.valid_from
+            FOREACH (o IN old_rows | SET o.valid_to = row.props.valid_from)
             WITH s, t, row, edge_id_carry, created_at_carry
             CREATE (s)-[new:EDGE]->(t)
             SET new = row.props
@@ -1256,7 +1825,42 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             SET new.created_at = created_at_carry
             RETURN row.row_index AS row_index, edge_id_carry AS edge_id
             """
-            records = session.execute_write(lambda tx: list(tx.run(cypher, rows=rows)))
+
+            def _tx(tx: ManagedTransaction) -> list[Any]:
+                records = list(tx.run(cypher, rows=rows))
+                # Compare row indices, not counts: one UNWIND row yields
+                # exactly one RETURN row (the FOREACH above collapses
+                # every matched old edge into one close), but comparing
+                # indices rather than counts still catches a dropped row.
+                written = {int(r["row_index"]) for r in records}
+                for i in range(len(edges)):
+                    if i not in written:
+                        raise _MissingEdgeRowError(i)
+                return records
+
+            try:
+                records = session.execute_write(_tx)
+            except _MissingEdgeRowError as exc:
+                # Re-read the row's endpoints after the rollback, not inside
+                # the transaction: there, on ArcadeDB, the read can raise a
+                # raw driver ``DatabaseError`` once another writer has
+                # re-created the endpoint.
+                i = exc.row_index
+                spec = edges[i]
+                ids = [spec["source_id"], spec["target_id"]]
+                current = self._fetch_current_node_id_set(session, ids)
+                for end, node_id in zip(("source", "target"), ids, strict=True):
+                    if node_id not in current:
+                        raise ValueError(
+                            _missing_endpoint_message(i, end, node_id)
+                        ) from exc
+                # Both endpoints read as current now: the one the write's
+                # MATCH missed has been made current again since.
+                msg = (
+                    f"upsert_edges_bulk[{i}]: source {ids[0]!r} or target "
+                    f"{ids[1]!r} was not current when the write ran"
+                )
+                raise ValueError(msg) from exc
 
         # UNWIND iteration order isn't guaranteed; reorder by
         # ``row_index`` so the returned IDs line up with the input list.
@@ -1411,9 +2015,11 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         where, params = _temporal_where(as_of, "n")
-        conditions = [where]
+        # node_type judges the version shown, as in search_nodes, so the
+        # limit counts nodes and a node is listed only under that type.
+        filters = []
         if node_type is not None:
-            conditions.append("n.node_type = $node_type")
+            filters.append("n.node_type = $node_type")
             params["node_type"] = node_type
 
         # Scalar property filters are handled by decoding properties_json
@@ -1421,9 +2027,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # by filtering client-side, matching how query handles nested
         # filters in the Postgres backend.
         cypher = (
-            "MATCH (n:Node) WHERE "
-            + " AND ".join(conditions)
-            + " RETURN n ORDER BY n.created_at DESC LIMIT $limit"
+            _shown_rows_passing(where, filters)
+            + _NEWEST_FIRST
+            + "LIMIT $limit"
+            + f" RETURN {_NODE_WITHOUT_EMBEDDING}"
         )
         params["limit"] = limit * 4 if properties else limit
 
@@ -1446,27 +2053,115 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
     # ------------------------------------------------------------------
 
     def delete_node(self, node_id: str) -> bool:
-        def _tx(tx: ManagedTransaction) -> bool:
-            record = tx.run(
-                "MATCH (n:Node {node_id: $nid}) RETURN count(n) AS cnt",
-                nid=node_id,
-            ).single()
-            existed = bool(record and record["cnt"] > 0)
-            # DETACH DELETE cleans up all :EDGE relationships automatically.
-            tx.run(
-                "MATCH (n:Node {node_id: $nid}) DETACH DELETE n", nid=node_id
-            ).consume()
-            tx.run(
-                "MATCH (a:Alias {entity_id: $nid}) DETACH DELETE a", nid=node_id
-            ).consume()
-            tx.run(
-                "MATCH (c:AliasClaim {entity_id: $nid}) DETACH DELETE c",
-                nid=node_id,
-            ).consume()
-            return existed
+        """Purge the node in one managed transaction.
 
-        with self._driver.session(database=self._database) as session:
-            deleted = bool(session.execute_write(_tx))
+        The driver runs the transaction again on an error it can retry,
+        until ``max_transaction_retry_time`` runs out. A ``DriverError`` or
+        ``Neo4jError`` that ends the purge, retried or not, is raised as
+        :class:`StoreError` naming the node and the error's type. A
+        connection lost while the commit was outstanding
+        (``IncompleteCommit``) leaves the outcome open, so the store reads
+        the node's ``Node`` rows back in a new session. None left is taken
+        as a committed purge, which returns as it would have without the
+        error; a row left as a failed one, raised as above. When that read
+        fails too, the outcome is unknown, and the message says so.
+        """
+        from neo4j.exceptions import (  # noqa: PLC0415
+            DriverError,
+            IncompleteCommit,
+            Neo4jError,
+        )
+
+        # What the last run of ``_tx`` returned: when that run's commit is
+        # lost, ``execute_write`` raises instead of returning it.
+        removed_any = False
+
+        def _tx(tx: ManagedTransaction) -> bool:
+            nonlocal removed_any
+            # Take the write locks on the node's rows before counting. A
+            # statement that waits on a concurrent purge's lock still counts
+            # the rows it matched before the wait; this one waits instead,
+            # and the delete below matches only what that purge left. (A
+            # property SET on a row removed while it waited is a no-op; a
+            # label SET raises EntityNotFound.) A version created after
+            # this statement holds no lock of ours, so two purges can still
+            # both count it.
+            tx.run(
+                "MATCH (n:Node {node_id: $nid}) SET n.node_id = n.node_id",
+                nid=node_id,
+            ).consume()
+            # Each statement repeats until it removes nothing, so a version
+            # written by a transaction it waited on is removed too. DETACH
+            # DELETE cleans up all :EDGE relationships automatically.
+            removed = _detach_delete_until_none(
+                tx,
+                "MATCH (n:Node {node_id: $nid}) DETACH DELETE n "
+                "RETURN count(n) AS deleted",
+                node_id,
+            )
+            _detach_delete_until_none(
+                tx,
+                "MATCH (a:Alias {entity_id: $nid}) DETACH DELETE a "
+                "RETURN count(a) AS deleted",
+                node_id,
+            )
+            _detach_delete_until_none(
+                tx,
+                "MATCH (c:AliasClaim {entity_id: $nid}) DETACH DELETE c "
+                "RETURN count(c) AS deleted",
+                node_id,
+            )
+            # EdgeClaim rows carry the triplet's source_id/target_id (see
+            # the module docstring), so a purged node's id can be matched
+            # on either side -- the same redaction coverage AliasClaim
+            # already gets, closing the gap the AliasClaim-only purge left.
+            _detach_delete_until_none(
+                tx,
+                "MATCH (c:EdgeClaim {source_id: $nid}) DETACH DELETE c "
+                "RETURN count(c) AS deleted",
+                node_id,
+            )
+            _detach_delete_until_none(
+                tx,
+                "MATCH (c:EdgeClaim {target_id: $nid}) DETACH DELETE c "
+                "RETURN count(c) AS deleted",
+                node_id,
+            )
+            removed_any = removed > 0
+            return removed_any
+
+        # Outside ``_tx``: the driver retries only its own errors, so a
+        # StoreError raised in there would end the retries.
+        try:
+            with self._driver.session(database=self._database) as session:
+                deleted = bool(session.execute_write(_tx))
+        except IncompleteCommit as exc:
+            # The purge is one transaction, so its ``Node`` rows decide for
+            # its ``Alias`` and ``AliasClaim`` rows too. A concurrent purge
+            # or a write that re-creates the node before this read would
+            # mislead it.
+            try:
+                with self._driver.session(database=self._database) as session:
+                    # A session's default access mode is WRITE, so this
+                    # read runs on the writer. A reader might not show the
+                    # lost commit yet: it returned no bookmark to wait for.
+                    remaining = session.run(
+                        "MATCH (n:Node {node_id: $nid}) RETURN count(n) AS remaining",
+                        nid=node_id,
+                    ).single(strict=True)["remaining"]
+            except (DriverError, Neo4jError):
+                msg = (
+                    f"Purge of node {node_id} lost its connection during the "
+                    f"commit, so its outcome is unknown: {type(exc).__name__}"
+                )
+                raise StoreError(msg, store="graph") from exc
+            if remaining:
+                msg = f"Purge of node {node_id} failed: {type(exc).__name__}"
+                raise StoreError(msg, store="graph") from exc
+            deleted = removed_any
+        except (DriverError, Neo4jError) as exc:
+            msg = f"Purge of node {node_id} failed: {type(exc).__name__}"
+            raise StoreError(msg, store="graph") from exc
         if deleted:
             logger.debug("node_deleted", node_id=node_id)
         return deleted
@@ -1501,6 +2196,84 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         record = self._run_read_single(cypher)
         return int(record["cnt"]) if record else 0
 
+    def count_nodes_by_type(self, *, search: str | None = None) -> dict[str, int]:
+        # A node with two current rows counts once, under the type of the
+        # version search_nodes shows.
+        current = _one_version_per_node("MATCH (n:Node) WHERE n.valid_to IS NULL")
+        if not search:
+            cypher = f"{current}RETURN n.node_type AS node_type, count(*) AS cnt"
+            return {
+                str(r["node_type"]): int(r["cnt"]) for r in self._run_read_list(cypher)
+            }
+        # The name lives inside properties_json, which json.dumps wrote with
+        # non-ASCII escaped, so a Cypher CONTAINS on that string would miss
+        # non-ASCII names and decoding it in Cypher needs APOC. Match
+        # client-side instead, as query() does for property filters.
+        cypher = (
+            f"{current}RETURN n.node_id AS node_id, n.node_type AS node_type, "
+            "n.properties_json AS properties_json"
+        )
+        needle = search.lower()
+        counts: dict[str, int] = {}
+        for r in self._run_read_list(cypher):
+            props = json.loads(r["properties_json"] or "{}")
+            if _matches_node_search(r["node_id"], r["node_type"], props, needle):
+                node_type = str(r["node_type"])
+                counts[node_type] = counts.get(node_type, 0) + 1
+        return counts
+
+    def search_nodes(
+        self,
+        *,
+        search: str | None = None,
+        node_type: str | None = None,
+        sort: str = "created_at",
+        descending: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        validate_node_search_args(sort=sort, limit=limit, offset=offset)
+        direction = "DESC" if descending else "ASC"
+        # Matched client-side for the reason count_nodes_by_type gives, so
+        # each call fetches every current node (of node_type, when given).
+        # node_type is matched after one version per node is picked, so a node
+        # whose current rows differ in type is listed only under the type of
+        # the version shown.
+        type_filter = ""
+        params: dict[str, Any] = {}
+        if node_type:
+            type_filter = "WHERE n.node_type = $node_type "
+            params["node_type"] = node_type
+        cypher = (
+            _one_version_per_node("MATCH (n:Node) WHERE n.valid_to IS NULL")
+            + f"{type_filter}RETURN {_NODE_WITHOUT_EMBEDDING} "
+            f"ORDER BY n.created_at {direction}, n.node_id {direction}"
+        )
+        needle = search.lower() if search else None
+        rows: list[dict[str, Any]] = []
+        for r in self._run_read_list(cypher, **params):
+            node = _node_props_to_dict(dict(r["n"]))
+            if needle is None or _matches_node_search(
+                node["node_id"], node["node_type"], node["properties"], needle
+            ):
+                rows.append(node)
+        # node_id ends each key, as GraphStore.search_nodes states: the stable
+        # sort alone would leave rows that tie in created_at order.
+        if sort == "name":
+            rows.sort(
+                key=lambda node: (
+                    _node_search_name(node["properties"]),
+                    str(node["node_id"]),
+                ),
+                reverse=descending,
+            )
+        elif sort == "node_type":
+            rows.sort(
+                key=lambda node: (str(node["node_type"]), str(node["node_id"])),
+                reverse=descending,
+            )
+        return rows[offset : offset + limit], len(rows)
+
     def count_edges(self) -> int:
         cypher = "MATCH ()-[r:EDGE]->() WHERE r.valid_to IS NULL RETURN count(r) AS cnt"
         record = self._run_read_single(cypher)
@@ -1523,16 +2296,18 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         decoding the JSON. Same approach the legacy ``query()`` method
         uses; semantics match.
         """
-        cypher_parts, cypher_params, py_predicates = self._compile_node_query(query)
-        cypher = (
-            "MATCH (n:Node) WHERE "
-            + " AND ".join(cypher_parts)
-            + " RETURN n ORDER BY n.created_at DESC"
+        node_parts, field_parts, cypher_params, py_predicates = (
+            self._compile_node_query(query)
         )
         # Over-fetch when py_predicates are present to compensate for
         # client-side trimming.
         fetch_limit = query.limit * 10 if py_predicates else query.limit
-        cypher += f" LIMIT {int(fetch_limit)}"
+        cypher = (
+            _shown_rows_passing(" AND ".join(node_parts), field_parts)
+            + _NEWEST_FIRST
+            + f"LIMIT {int(fetch_limit)}"
+            + f" RETURN {_NODE_WITHOUT_EMBEDDING}"
+        )
 
         records = self._run_read_list(cypher, **cypher_params)
         results: list[dict[str, Any]] = []
@@ -1546,9 +2321,16 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
 
     def _compile_node_query(
         self, query: Any
-    ) -> tuple[list[str], dict[str, Any], list[Any]]:
-        """Pure compile — returns (cypher_where_parts, params, python_predicates)."""
-        cypher_parts: list[str] = [self._temporal_filter_cypher(query.as_of)]
+    ) -> tuple[list[str], list[str], dict[str, Any], list[Any]]:
+        """Pure compile — returns (node_parts, field_parts, params, python_predicates).
+
+        ``node_parts`` (the temporal filter and any ``node_id`` clause)
+        choose the rows a node's shown row is picked from; ``field_parts``
+        are the other top-level clauses, judged on the row picked
+        (:func:`_shown_rows_passing`).
+        """
+        node_parts: list[str] = [self._temporal_filter_cypher(query.as_of)]
+        field_parts: list[str] = []
         cypher_params: dict[str, Any] = {}
         if query.as_of is not None:
             cypher_params["as_of"] = query.as_of.isoformat()
@@ -1558,9 +2340,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 py_predicates.append(self._compile_property_predicate(clause))
                 continue
             frag, params = self._compile_top_level_clause(clause, i)
-            cypher_parts.append(frag)
+            (node_parts if clause.field == "node_id" else field_parts).append(frag)
             cypher_params.update(params)
-        return cypher_parts, cypher_params, py_predicates
+        return node_parts, field_parts, cypher_params, py_predicates
 
     @staticmethod
     def _compile_top_level_clause(clause: Any, idx: int) -> tuple[str, dict[str, Any]]:

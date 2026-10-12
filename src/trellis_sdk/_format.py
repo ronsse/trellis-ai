@@ -120,6 +120,7 @@ def format_sectioned_pack_as_markdown(
     max_tokens: int = 4000,
     *,
     withholding: WithholdingSummary | None = None,
+    axis_note: str = "",
 ) -> str:
     """Format a list of pack sections (as dicts) as markdown.
 
@@ -127,8 +128,17 @@ def format_sectioned_pack_as_markdown(
     and optionally ``max_tokens``.  Items within each section are
     rendered via :func:`format_pack_as_markdown` with a proportional
     slice of the overall budget.
+
+    ``axis_note`` is a pre-rendered line (or two, joined by a blank
+    line) naming a retrieval axis problem — built by the caller via
+    :func:`trellis_wire.axes.axis_note_from_payload` from the response's
+    ``axes`` block — or ``""`` when none applies. Same header placement
+    as ``trellis.retrieve.formatters.format_sectioned_pack_as_markdown``:
+    above the withholding note, not charged against the token budget.
     """
     lines = [f"# Context for: {intent}"]
+    if axis_note:
+        lines.append(axis_note)
     note = format_withholding_note(withholding)
     if note:
         lines.append(note)

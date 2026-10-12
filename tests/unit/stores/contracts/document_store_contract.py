@@ -882,16 +882,10 @@ class DocumentStoreContractTests:
 
         SQLite addresses a scalar filter through a JSON path, so a key
         holding a ``.`` reads as ``$.a.b`` — a nested lookup — unless the
-        component is quoted, and a key holding a ``"`` or a ``\`` has no
-        path spelling at all and would silently match nothing. Postgres
-        binds the key directly and was never exposed to any of them. The
+        component is quoted, and even inside the quotes a ``"`` or a ``\``
+        is read as path syntax rather than as part of the key. Postgres
+        binds the key directly and reads none of them as path syntax. The
         contract is that the key means itself on both.
-
-        The backslash case is here because it was **not** covered when the
-        other two were, and the omission was a live divergence: SQLite
-        returned nothing while Postgres returned the document, silently, in
-        the change (#409) whose stated purpose is that the two backends
-        agree about what a filter means. Found by the #455 review gate.
         """
         store.put("dotted", "filterable body", {"a.b": "x"})
         store.put("nested", "filterable body", {"a": {"b": "x"}})

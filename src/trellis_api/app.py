@@ -9,6 +9,7 @@ from pathlib import Path
 
 import structlog
 from fastapi import Depends, FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -20,6 +21,7 @@ from trellis.stores.registry import StoreRegistry
 from trellis_api.auth import require_scope, warn_if_unauthenticated
 from trellis_api.middleware import (
     request_id_middleware,
+    request_validation_error_handler,
     trellis_error_handler,
     unhandled_exception_handler,
 )
@@ -27,7 +29,30 @@ from trellis_api.observability import install_observability
 
 logger = structlog.get_logger(__name__)
 
+#: Default bind address. Loopback-only by default so a fresh install
+#: doesn't expose the unauthenticated API on the network. Container
+#: deployments that need to listen on the pod IP set
+#: ``TRELLIS_API_HOST=0.0.0.0`` (or pass ``--host``) explicitly.
+#:
+#: Defined here, above :func:`create_app`, because it is also that
+#: function's default parameter value — a default is evaluated once at
+#: function-definition time, so the name must already exist.
+DEFAULT_HOST = os.environ.get("TRELLIS_API_HOST", "127.0.0.1")
+DEFAULT_PORT = int(os.environ.get("TRELLIS_API_PORT", "8420"))
+
 _registry: StoreRegistry | None = None
+
+#: The host/port this process actually bound, recorded by
+#: :func:`create_app`. Both ``trellis serve --host``/``--port`` and
+#: ``trellis admin serve --host``/``--port`` accept a bind address as a
+#: CLI flag that never touches ``TRELLIS_API_HOST``/``TRELLIS_API_PORT``,
+#: so re-deriving from the environment inside a route would read the
+#: *default*, not the address uvicorn actually bound, whenever a flag was
+#: used instead of the env var. Recording the value the caller passed in
+#: is the only way the Runtime panel (``GET /api/v1/runtime``) can report
+#: a bind address that is never wrong.
+_bind_host: str = DEFAULT_HOST
+_bind_port: int = DEFAULT_PORT
 
 
 def get_registry() -> StoreRegistry:
@@ -36,6 +61,17 @@ def get_registry() -> StoreRegistry:
         msg = "StoreRegistry not initialized. Start the app with create_app()."
         raise RuntimeError(msg)
     return _registry
+
+
+def get_bind_info() -> tuple[str, int]:
+    """Return the ``(host, port)`` the running process actually bound.
+
+    Set once per :func:`create_app` call; falls back to the env-derived
+    defaults for any caller that builds the app directly (tests, the
+    in-process testing shim) without going through ``main()`` or the
+    ``trellis serve`` / ``trellis admin serve`` CLI commands.
+    """
+    return (_bind_host, _bind_port)
 
 
 @asynccontextmanager
@@ -61,6 +97,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
     _registry.close()
     _registry = None
     logger.info("api_stores_closed")
+
+
+def register_exception_handlers(app: FastAPI) -> None:
+    """Register the three handlers that shape an error response.
+
+    Shared by :func:`create_app` and the in-process testing shim
+    (:func:`trellis.testing.inmemory._build_app`), so a ``TrellisError`` or
+    a request validation error answers the same status and body from both,
+    except the shim's null ``request_id``. An untyped exception still raises
+    into a shim test: Starlette re-raises it after sending the 500, and the
+    shim's clients propagate it.
+    """
+    # Translate uncaught exceptions into a structured 500 envelope so
+    # responses don't leak internal types or stack frames.
+    app.add_exception_handler(Exception, unhandled_exception_handler)
+
+    # In front of it for the typed hierarchy: those exceptions were
+    # written for an operator and the catch-all discarded every word of
+    # them, answering ``500 internal_error`` for a damaged config file
+    # that names its own recovery command (#459). Registered on the base
+    # class — Starlette resolves a handler by walking the exception's
+    # MRO, so one registration covers every subclass and a new one is
+    # covered the day it is added, rather than the day someone remembers
+    # a roster (#443).
+    app.add_exception_handler(TrellisError, trellis_error_handler)
+
+    # Over FastAPI's default 422 handler, which raises on an error echoing
+    # ``NaN`` or ``Infinity`` from the body, so the catch-all answers 500.
+    # Every finite 422 is unchanged.
+    app.add_exception_handler(RequestValidationError, request_validation_error_handler)
 
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -94,10 +160,22 @@ def resolve_ui_enabled() -> bool:
     raise ConfigError(msg, setting=UI_ENABLED_ENV)
 
 
-def create_app() -> FastAPI:
-    """Create and configure the FastAPI application."""
+def create_app(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> FastAPI:
+    """Create and configure the FastAPI application.
+
+    ``host``/``port`` default to the env-derived values but are meant to
+    be passed explicitly by a caller that resolved them some other way
+    (a CLI ``--host``/``--port`` flag) — see :func:`get_bind_info`, which
+    the Runtime panel route reads instead of re-deriving from the
+    environment.
+    """
+    global _bind_host, _bind_port
+    _bind_host, _bind_port = host, port
+
     from trellis_api.routes import (  # noqa: PLC0415
         admin,
+        analyze,
+        classify_rules,
         curate,
         explore,
         extract,
@@ -107,6 +185,7 @@ def create_app() -> FastAPI:
         observations,
         policies,
         retrieve,
+        settings,
         version,
     )
 
@@ -127,19 +206,9 @@ def create_app() -> FastAPI:
     # version, and /api/v1 routes all log with the same request_id.
     app.add_middleware(BaseHTTPMiddleware, dispatch=request_id_middleware)
 
-    # Translate uncaught exceptions into a structured 500 envelope so
-    # responses don't leak internal types or stack frames.
-    app.add_exception_handler(Exception, unhandled_exception_handler)
-
-    # In front of it for the typed hierarchy: those exceptions were
-    # written for an operator and the catch-all discarded every word of
-    # them, answering ``500 internal_error`` for a damaged config file
-    # that names its own recovery command (#459). Registered on the base
-    # class — Starlette resolves a handler by walking the exception's
-    # MRO, so one registration covers every subclass and a new one is
-    # covered the day it is added, rather than the day someone remembers
-    # a roster (#443).
-    app.add_exception_handler(TrellisError, trellis_error_handler)
+    # The structured-500 / TrellisError / non-finite-422 handlers — shared
+    # with the in-process testing shim, see register_exception_handlers.
+    register_exception_handlers(app)
 
     # OpenTelemetry + Prometheus — no-op when the ``observability``
     # extra isn't installed or ``TRELLIS_DISABLE_OBSERVABILITY`` is set.
@@ -172,6 +241,7 @@ def create_app() -> FastAPI:
     # optional / required — see ``trellis_api.auth``). The map:
     #
     #   retrieve                     -> read
+    #   analyze                      -> read
     #   ingest                       -> ingest
     #   mutations / curate / extract -> mutate
     #   admin                        -> admin
@@ -181,6 +251,11 @@ def create_app() -> FastAPI:
     #   policies                     -> read, plus admin on POST/DELETE
     #                                   (route-level deps in
     #                                   routes/policies.py)
+    #   settings                     -> admin (both GET and PUT/POST)
+    #   classify_rules               -> read on the two GET routes, plus
+    #                                   admin on mine/apply/revoke/dismiss
+    #                                   (route-level deps in
+    #                                   routes/classify_rules.py)
     #
     # ``admin`` implies every other scope; the legacy ``TRELLIS_API_KEY``
     # shared secret is granted all scopes for backwards compatibility.
@@ -192,6 +267,9 @@ def create_app() -> FastAPI:
         admin.router, prefix="/api/v1", tags=["admin"], dependencies=admin_auth
     )
     app.include_router(
+        settings.router, prefix="/api/v1", tags=["settings"], dependencies=admin_auth
+    )
+    app.include_router(
         ingest.router, prefix="/api/v1", tags=["ingest"], dependencies=ingest_auth
     )
     app.include_router(
@@ -199,6 +277,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         explore.router, prefix="/api/v1", tags=["explore"], dependencies=read_auth
+    )
+    app.include_router(
+        analyze.router, prefix="/api/v1", tags=["analyze"], dependencies=read_auth
     )
     app.include_router(
         curate.router, prefix="/api/v1", tags=["curate"], dependencies=mutate_auth
@@ -221,6 +302,12 @@ def create_app() -> FastAPI:
         tags=["observations"],
         dependencies=read_auth,
     )
+    app.include_router(
+        classify_rules.router,
+        prefix="/api/v1",
+        tags=["classify"],
+        dependencies=read_auth,
+    )
 
     # Static UI at /ui — the page itself is unauthenticated; the UI
     # calls /api/v1 routes which ARE gated, and the page stores its key
@@ -231,14 +318,6 @@ def create_app() -> FastAPI:
         app.mount("/ui", StaticFiles(directory=str(_STATIC_DIR), html=True), name="ui")
 
     return app
-
-
-#: Default bind address. Loopback-only by default so a fresh install
-#: doesn't expose the unauthenticated API on the network. Container
-#: deployments that need to listen on the pod IP set
-#: ``TRELLIS_API_HOST=0.0.0.0`` (or pass ``--host``) explicitly.
-DEFAULT_HOST = os.environ.get("TRELLIS_API_HOST", "127.0.0.1")
-DEFAULT_PORT = int(os.environ.get("TRELLIS_API_PORT", "8420"))
 
 
 def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
@@ -254,7 +333,7 @@ def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     from trellis_api.logging import configure_logging  # noqa: PLC0415
 
     configure_logging()
-    app = create_app()
+    app = create_app(host=host, port=port)
     uvicorn.run(app, host=host, port=port)
 
 

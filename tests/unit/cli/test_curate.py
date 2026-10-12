@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -11,6 +12,10 @@ from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
 from trellis.learning import submit_learning_promotion
+from trellis.learning.candidate_auto_promote import (
+    CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_SETTING,
+    CANDIDATE_AUTO_PROMOTE_MODE_SETTING,
+)
 from trellis.mutate.commands import (
     Command,
     CommandResult,
@@ -18,7 +23,10 @@ from trellis.mutate.commands import (
     Operation,
 )
 from trellis.mutate.executor import MutationExecutor
+from trellis.stores.base.event_log import EventType
+from trellis.stores.settings_store import SettingsStore
 from trellis_cli import curate as curate_cli
+from trellis_cli.exit_codes import EXIT_VALIDATION
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -91,6 +99,77 @@ class TestCuratePromote:
         assert result.exit_code == 0, plain(result.output)
         rendered = " ".join(assert_coloured(result.stdout).split())
         assert "Message: Precedent promoted: [bold]t[/x]" in rendered
+
+    def test_message_long_text_prints_as_one_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_execute_command``'s ``Message:`` line (``markup=False``) echoes
+        ``result.message`` verbatim before raising on a refusal, in the
+        same function as that raise; a long one must not split at the
+        console width."""
+        monkeypatch.setenv("COLUMNS", "60")
+        long_message = "synthetic-rejection-message-" + "0123456789abcdef" * 4
+        executor = MagicMock(spec=MutationExecutor)
+        executor.execute.return_value = CommandResult(
+            command_id="cmd-msg-1",
+            status=CommandStatus.FAILED,
+            operation=Operation.PRECEDENT_PROMOTE,
+            message=long_message,
+        )
+        monkeypatch.setattr(
+            curate_cli, "build_curate_executor", lambda *_a, **_k: executor
+        )
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "promote",
+                "trace_123",
+                "--title",
+                "t",
+                "--description",
+                "d",
+            ],
+        )
+        assert result.exit_code != 0, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(long_message in line for line in lines), result.stdout
+
+    def test_warning_long_detail_prints_as_one_line(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_print_warnings`` prints a policy id and condition, or an audit
+        error, of any length; its callers (here ``_execute_command``) exit
+        non-zero after it on a refusal, and it must not split one at the
+        console width."""
+        monkeypatch.setenv("COLUMNS", "60")
+        long_detail = "synthetic-policy-detail-" + "0123456789abcdef" * 4
+        executor = MagicMock(spec=MutationExecutor)
+        executor.execute.return_value = CommandResult(
+            command_id="cmd-warn-1",
+            status=CommandStatus.REJECTED,
+            operation=Operation.PRECEDENT_PROMOTE,
+            message="rejected",
+            warnings=[long_detail],
+        )
+        monkeypatch.setattr(
+            curate_cli, "build_curate_executor", lambda *_a, **_k: executor
+        )
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "promote",
+                "trace_123",
+                "--title",
+                "t",
+                "--description",
+                "d",
+            ],
+        )
+        assert result.exit_code != 0, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(long_detail in line for line in lines), result.stdout
 
 
 class TestCurateEntity:
@@ -177,21 +256,41 @@ class TestCurateLink:
 
     def test_link_missing_source(self) -> None:
         result = runner.invoke(app, ["curate", "link", "nonexistent", "also_nope"])
-        assert result.exit_code == 1
+        assert result.exit_code == 2
+
+    def test_link_missing_source_json(self) -> None:
+        """A dangling endpoint is input to fix, reported like any refusal."""
+        result = runner.invoke(
+            app,
+            ["curate", "link", "nonexistent", "also_nope", "--format", "json"],
+        )
+        assert result.exit_code == 2
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+        assert data["command_id"]
 
 
 class TestCurateLabel:
+    def _create_node(self) -> str:
+        created = runner.invoke(
+            app, ["curate", "entity", "person", "Plain", "--format", "json"]
+        )
+        node_id: str = json.loads(created.stdout)["node_id"]
+        return node_id
+
     def test_label(self) -> None:
-        result = runner.invoke(app, ["curate", "label", "ent_1", "important"])
+        node_id = self._create_node()
+        result = runner.invoke(app, ["curate", "label", node_id, "important"])
         assert result.exit_code == 0
 
     def test_label_json(self) -> None:
+        node_id = self._create_node()
         result = runner.invoke(
             app,
             [
                 "curate",
                 "label",
-                "ent_1",
+                node_id,
                 "critical",
                 "--format",
                 "json",
@@ -199,15 +298,32 @@ class TestCurateLabel:
         )
         data = json.loads(result.stdout.strip())
         assert data["operation"] == "label.add"
+        assert data["status"] == "success"
+        assert data["created_id"] == node_id
+
+    def test_label_missing_node_json(self) -> None:
+        """A node id that names no node is input to fix, and nothing is written."""
+        result = runner.invoke(
+            app, ["curate", "label", "ghost", "critical", "--format", "json"]
+        )
+        assert result.exit_code == 2, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "rejected"
+        assert data["message"] == "Node not found: ghost"
+        assert data["created_id"] is None
+
+    def test_label_missing_node_text(self) -> None:
+        result = runner.invoke(app, ["curate", "label", "ghost", "critical"])
+        assert result.exit_code == 2, result.output
+        output = plain(result.output)
+        assert "Command rejected" in output
+        assert "Node not found: ghost" in output
 
     def test_label_message_echoes_the_label_verbatim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The label is applied before its message renders, as for promote."""
-        created = runner.invoke(
-            app, ["curate", "entity", "person", "Plain", "--format", "json"]
-        )
-        node_id = json.loads(created.stdout)["node_id"]
+        node_id = self._create_node()
         force_colour(monkeypatch, curate_cli)
         result = runner.invoke(app, ["curate", "label", node_id, "[bold]l[/x]"])
         assert result.exit_code == 0, plain(result.output)
@@ -261,18 +377,28 @@ class TestCurateRedact:
         )
         assert confirmed.exit_code == 0
 
-    def test_redact_missing_target_exits_store_code(self) -> None:
-        # NotFoundError is a StoreError -> FAILED -> EXIT_STORE (5), per
-        # the exit_codes map; the JSON keeps command_id so the failed
-        # attempt joins its MUTATION_REJECTED/EXECUTED audit event.
+    def test_redact_missing_target_json(self) -> None:
+        """A target id that names no node is input to fix: REJECTED, exit 2.
+
+        The JSON keeps ``command_id`` so the refused attempt joins its
+        MUTATION_REJECTED audit event.
+        """
         result = runner.invoke(
             app,
             ["curate", "redact", "ghost", "--yes", "--reason", "r", "--format", "json"],
         )
-        assert result.exit_code == 5
+        assert result.exit_code == 2, result.output
         data = json.loads(result.stdout.strip())
-        assert data["status"] == "failed"
+        assert data["status"] == "rejected"
+        assert data["message"] == "Node not found: ghost"
         assert data["command_id"]
+
+    def test_redact_missing_target_text(self) -> None:
+        result = runner.invoke(
+            app, ["curate", "redact", "ghost", "--yes", "--reason", "r"]
+        )
+        assert result.exit_code == 2, result.output
+        assert "Node not found: ghost" in plain(result.output)
 
     def test_redact_blank_reason_exits_validation_code(self) -> None:
         node_id = self._create_node()
@@ -312,7 +438,7 @@ class TestCurateRedact:
             app,
             ["curate", "redact", "ghost[/x]", "--yes", "--reason", "r"],
         )
-        assert result.exit_code == 5
+        assert result.exit_code == 2
         # 1. Colour really happened.
         rendered = assert_coloured(result.stdout)
         # 2. The markup token survived rendering byte-for-byte.
@@ -322,7 +448,7 @@ class TestCurateRedact:
         )
         # 3. And the error was printed rather than lost to a MarkupError
         #    somewhere upstream of it.
-        assert "Execution failed" in rendered
+        assert "Node not found" in rendered
 
 
 class TestCurateFeedback:
@@ -769,6 +895,299 @@ class TestPromotionVisibleToGetLessons:
         assert (
             len(list_precedents(registry.operational.event_log, domain="shipping")) == 0
         )
+
+
+def _auto_promote_candidate(
+    candidate_id: str = "cand-1",
+    *,
+    helpful_count: int = 5,
+    distinct_helpful_sessions: int = 3,
+    unhelpful_count: int = 0,
+) -> dict:
+    return {
+        "candidate_id": candidate_id,
+        "recommendation_type": "promote_precedent",
+        "precedent_name": f"Precedent for {candidate_id}",
+        "citation_evidence": {
+            "helpful_count": helpful_count,
+            "distinct_helpful_sessions": distinct_helpful_sessions,
+            "unhelpful_count": unhelpful_count,
+        },
+        "target_entity_ids": [],
+    }
+
+
+class TestCurateAutoPromoteCandidates:
+    """CLI-level coverage for ``curate auto-promote-candidates``."""
+
+    def _write_candidates(self, tmp_path: Path, candidates: list[dict]) -> Path:
+        path = tmp_path / "candidates.json"
+        path.write_text(json.dumps({"candidates": candidates}))
+        return path
+
+    def test_dry_run_overrides_a_stored_commit_mode(self, tmp_path: Path) -> None:
+        """Without --dry-run a stored mode=commit refuses the whole run
+        with a configuration error (exit 5) before any candidate is
+        evaluated; --dry-run must still work in that case, running
+        report-only and writing nothing — the policy must be forced to
+        report_only *before* it is constructed, not after.
+        """
+        stores_dir = Path(os.environ["TRELLIS_DATA_DIR"]) / "stores"
+        SettingsStore(stores_dir / "settings.json").set(
+            CANDIDATE_AUTO_PROMOTE_MODE_SETTING, "commit"
+        )
+        candidates_path = self._write_candidates(tmp_path, [_auto_promote_candidate()])
+
+        # Without --dry-run: the stored commit mode refuses construction.
+        refused = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(candidates_path),
+                "--format",
+                "json",
+            ],
+        )
+        assert refused.exit_code == 5, refused.output
+
+        # With --dry-run: forced to report_only before the policy is built.
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(candidates_path),
+                "--dry-run",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["mode"] == "report_only"
+        assert data["promoted_count"] == 0
+
+        event_log = curate_cli._get_registry().operational.event_log
+        mutation_events = event_log.get_events(event_type=EventType.MUTATION_EXECUTED)
+        assert mutation_events == []
+        # Both invocations emit an event: the refused run records its own
+        # refusal (exit 5, below), and the dry-run that followed records
+        # its completed evaluation -- every exit path writes a run event.
+        evaluated_events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )
+        assert len(evaluated_events) == 2
+        refused_event, ok_event = evaluated_events
+        assert refused_event.payload["outcome"] == "refused"
+        assert refused_event.payload["configured_mode"] == "commit"
+        assert ok_event.payload["outcome"] == "ok"
+        assert ok_event.payload["configured_mode"] == "commit"
+
+    def test_cli_resolves_the_policy_from_settings_not_a_hardcoded_default(
+        self, tmp_path: Path
+    ) -> None:
+        """The CLI must build its policy from settings/env, not a
+        hardcoded default: a stored min_helpful_count floor above the
+        candidate's helpful_count must flip its disposition.
+        """
+        stores_dir = Path(os.environ["TRELLIS_DATA_DIR"]) / "stores"
+        SettingsStore(stores_dir / "settings.json").set(
+            CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT_SETTING, 100
+        )
+        candidates_path = self._write_candidates(
+            tmp_path, [_auto_promote_candidate(helpful_count=5)]
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(candidates_path),
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["ineligible_count"] == 1
+        assert data["would_promote_count"] == 0
+        assert (
+            data["outcomes"][0]["disposition"]
+            == "ineligible:insufficient_helpful_count"
+        )
+
+    def test_malformed_candidates_file_exits_nonzero_and_emits_a_failed_event(
+        self, tmp_path: Path
+    ) -> None:
+        """A ``--candidates`` file that isn't valid JSON must still leave
+        a trace in the event stream, not just a CLI error with no record
+        for ``loop_health.py`` to see."""
+        bad_path = tmp_path / "bad.json"
+        bad_path.write_text("{not valid json")
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(bad_path),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code != 0
+
+        event_log = curate_cli._get_registry().operational.event_log
+        evaluated_events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )
+        assert len(evaluated_events) == 1
+        assert evaluated_events[0].payload["outcome"] == "failed"
+        assert evaluated_events[0].payload["error"]["type"] == "BadParameter"
+
+    def test_wrong_top_level_json_shape_exits_nonzero_and_emits_a_failed_event(
+        self, tmp_path: Path
+    ) -> None:
+        """A candidates file whose top level isn't a JSON object (e.g. a
+        bare array) must be refused and recorded the same way a malformed
+        file is -- it is not "zero candidates", it is a shape error."""
+        arr_path = tmp_path / "arr.json"
+        arr_path.write_text(json.dumps([1, 2, 3]))
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(arr_path),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code != 0
+
+        event_log = curate_cli._get_registry().operational.event_log
+        evaluated_events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )
+        assert len(evaluated_events) == 1
+        assert evaluated_events[0].payload["outcome"] == "failed"
+        assert evaluated_events[0].payload["error"]["type"] == "BadParameter"
+
+    def test_non_finite_env_override_exits_nonzero_and_emits_a_failed_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-finite env override (``inf``/``nan``/``1e999``) for one of
+        this command's int knobs must be refused and recorded, not crash
+        with an uncaught traceback and no event."""
+        monkeypatch.setenv("TRELLIS_CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT", "inf")
+        candidates_path = self._write_candidates(tmp_path, [])
+
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "auto-promote-candidates",
+                "--candidates",
+                str(candidates_path),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code != 0
+
+        event_log = curate_cli._get_registry().operational.event_log
+        evaluated_events = event_log.get_events(
+            event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+        )
+        assert len(evaluated_events) == 1
+        assert evaluated_events[0].payload["outcome"] == "failed"
+        assert evaluated_events[0].payload["error"]["type"] == "ValueError"
+
+    def test_non_finite_env_override_message_is_value_free(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The non-finite env override above is itself a resolver
+        ``ValueError`` whose ``str()`` embeds the raw rejected value —
+        plant a secret-shaped one and assert it reaches neither stdout
+        nor stderr nor the recorded event, in either output format, and
+        that the clean validation exit code is used (not an uncaught
+        traceback's exit 1)."""
+        secret = "SEKRETtb11aa"  # noqa: S105 - synthetic test placeholder, not a credential
+        monkeypatch.setenv("TRELLIS_CANDIDATE_AUTO_PROMOTE_MIN_HELPFUL_COUNT", secret)
+        for run_number, output_format in enumerate(("json", "text"), start=1):
+            candidates_path = self._write_candidates(tmp_path, [])
+
+            result = runner.invoke(
+                app,
+                [
+                    "curate",
+                    "auto-promote-candidates",
+                    "--candidates",
+                    str(candidates_path),
+                    "--format",
+                    output_format,
+                ],
+            )
+            assert result.exit_code == EXIT_VALIDATION, result.output
+            assert secret not in result.output
+
+            event_log = curate_cli._get_registry().operational.event_log
+            evaluated_events = event_log.get_events(
+                event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+            )
+            assert len(evaluated_events) == run_number
+            latest = evaluated_events[-1]
+            assert latest.payload["outcome"] == "failed"
+            assert latest.payload["error"]["type"] == "ValueError"
+            assert secret not in json.dumps(latest.payload)
+
+    def test_invalid_env_mode_rejected_with_clean_exit_and_value_free_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unrecognized ``TRELLIS_CANDIDATE_AUTO_PROMOTE_MODE`` must be
+        refused at resolve time with a clean, value-free exit — not
+        silently accepted (an invalid env mode plus ``--dry-run`` used to
+        exit 0 with ``outcome: ok``) and not a traceback embedding the
+        raw value."""
+        secret = "SEKRETmode4b2e1d"  # noqa: S105 - synthetic test placeholder, not a credential
+        monkeypatch.setenv("TRELLIS_CANDIDATE_AUTO_PROMOTE_MODE", secret)
+        candidates_path = self._write_candidates(tmp_path, [])
+
+        for run_number, extra_args in enumerate(([], ["--dry-run"]), start=1):
+            result = runner.invoke(
+                app,
+                [
+                    "curate",
+                    "auto-promote-candidates",
+                    "--candidates",
+                    str(candidates_path),
+                    "--format",
+                    "json",
+                    *extra_args,
+                ],
+            )
+            assert result.exit_code == EXIT_VALIDATION, result.output
+            assert secret not in result.output
+
+            event_log = curate_cli._get_registry().operational.event_log
+            evaluated_events = event_log.get_events(
+                event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED
+            )
+            assert len(evaluated_events) == run_number
+            latest = evaluated_events[-1]
+            assert latest.payload["outcome"] == "failed"
+            assert latest.payload["error"]["type"] == "ValueError"
+            assert latest.payload["configured_mode"] is None
+            assert secret not in json.dumps(latest.payload)
 
 
 class TestCurateHelp:

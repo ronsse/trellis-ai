@@ -29,6 +29,7 @@ any Bolt sessions open.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -36,6 +37,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from trellis.errors import StoreError
 from trellis.stores.bolt_opencypher.base import (
     BoltDriverConfig,
     check_driver_installed,
@@ -103,12 +105,21 @@ def build_arcadedb_driver(
     )
 
 
+def _failure_name(exc: BaseException) -> str:
+    """The type of a failed request, with the socket error urllib wrapped."""
+    if isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, BaseException):
+        return f"{type(exc).__name__}({type(exc.reason).__name__})"
+    return type(exc).__name__
+
+
 def _http_request(
     method: str,
     url: str,
     *,
     user: str,
     password: str,
+    operation: str,
+    store: str | None,
     body: dict[str, object] | None = None,
     timeout: float = 10.0,
 ) -> tuple[int, str]:
@@ -117,6 +128,13 @@ def _http_request(
     Used by :func:`ensure_database` and (via :class:`ArcadeDBVectorStore`)
     for SQL execution. Keeps the dependency footprint to the standard
     library — we don't pull ``httpx`` for two endpoints.
+
+    A non-2xx answer is returned for the caller to judge. A request that
+    gets no answer, or a reply that is not HTTP, raises :class:`StoreError`
+    naming ``operation`` and the error's type, chained to the error. The
+    error's text stays out of the message because it can carry the URL or
+    the server's reply, and a failed redaction writes the message to the
+    audit log.
     """
     auth = base64.b64encode(f"{user}:{password}".encode()).decode()
     data = json.dumps(body).encode() if body is not None else None
@@ -139,6 +157,9 @@ def _http_request(
     except urllib.error.HTTPError as exc:
         body_text = exc.read().decode() if exc.fp else ""
         return exc.code, body_text
+    except (OSError, http.client.HTTPException) as exc:
+        msg = f"{operation} failed: {_failure_name(exc)}"
+        raise StoreError(msg, store=store) from exc
 
 
 def ensure_database(
@@ -156,12 +177,18 @@ def ensure_database(
     ``http://localhost:2480``. The ``/api/v1/server`` endpoint accepts a
     ``"create database <name>"`` command and replies ``200`` on success,
     ``400`` with a descriptive body when the database already exists.
+    Any other answer, or none, raises :class:`StoreError` with the HTTP
+    status or the error's type, never the server's reply or the URL.
     """
+    operation = "ArcadeDB create-database"
+    # Only the graph store creates the database; the vector store expects it.
     status, body_text = _http_request(
         "POST",
         f"{http_url.rstrip('/')}/api/v1/server",
         user=user,
         password=password,
+        operation=operation,
+        store="graph",
         body={"command": f"create database {database}"},
     )
     if status == _HTTP_OK:
@@ -169,11 +196,8 @@ def ensure_database(
         return True
     if status == _HTTP_BAD_REQUEST and "already exists" in body_text.lower():
         return False
-    msg = (
-        f"ArcadeDB create-database returned {status}: {body_text[:200]}. "
-        f"URL: {http_url}, database: {database!r}"
-    )
-    raise RuntimeError(msg)
+    msg = f"{operation} failed: HTTP {status}"
+    raise StoreError(msg, store="graph")
 
 
 def execute_sql(
@@ -185,14 +209,17 @@ def execute_sql(
     *,
     params: dict[str, object] | None = None,
     timeout: float = 30.0,
+    store: str | None = None,
 ) -> list[dict[str, object]]:
     """Execute an ArcadeDB SQL command via the HTTP REST endpoint.
 
     Used by :class:`ArcadeDBVectorStore` for DDL (creating LSM_VECTOR
     indexes) and queries that openCypher doesn't expose
     (``vectorNeighbors`` etc.). Returns the parsed ``result`` array from
-    the response, or raises :class:`RuntimeError` with the server's
-    error body on failure.
+    the response. An answer other than ``200``, or none, raises
+    :class:`StoreError` with ``store`` set and the HTTP status or the
+    error's type in the message, never the server's reply, the command or
+    the URL.
 
     ``params`` are bound to ``:name`` placeholders in the SQL via
     ArcadeDB's parameter-binding protocol. Note: per-property type
@@ -205,20 +232,20 @@ def execute_sql(
     body: dict[str, object] = {"language": "sql", "command": command}
     if params is not None:
         body["params"] = params
+    operation = "ArcadeDB SQL command"
     status, body_text = _http_request(
         "POST",
         f"{http_url.rstrip('/')}/api/v1/command/{database}",
         user=user,
         password=password,
+        operation=operation,
+        store=store,
         body=body,
         timeout=timeout,
     )
     if status != _HTTP_OK:
-        msg = (
-            f"ArcadeDB SQL command failed with status {status}. "
-            f"Command: {command[:120]!r}. Body: {body_text[:300]}"
-        )
-        raise RuntimeError(msg)
+        msg = f"{operation} failed: HTTP {status}"
+        raise StoreError(msg, store=store)
     payload = json.loads(body_text)
     result = payload.get("result", [])
     if not isinstance(result, list):

@@ -15,6 +15,7 @@ Provides four entry points:
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -25,9 +26,11 @@ from pydantic import Field
 from trellis.classify.demotion_gate import (
     DemotionEvidence,
     NoiseDemotionScreen,
+    resolve_demotion_thresholds,
     screen_noise_candidates,
 )
 from trellis.core.base import TrellisModel
+from trellis.core.pack_holdout import drop_holdout
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.learning.pack_observations import join_pack_feedback
 from trellis.schemas.advisory import DriftPattern
@@ -242,10 +245,17 @@ class EffectivenessReport(TrellisModel):
     flags. It is not what gets demoted. :attr:`demotion_screen` carries
     the evidence gate's verdict over that proposal, and
     ``demotion_screen.admitted`` is the list
-    :func:`run_effectiveness_feedback` actually writes (#336). The two
+    :func:`run_effectiveness_feedback` *attempts* to write (#336). The two
     are reported separately on purpose: a proposal that shrinks by 60%
     at the gate is a fact about the proposal rule, and collapsing them
     into one number would hide it.
+
+    ``admitted`` is not what was written, either: the gate clears ids on
+    citation evidence alone, with no notion of which store an id belongs
+    to, so an admitted trace id or other non-document id reaches
+    :func:`~trellis.classify.feedback.apply_noise_tags` and nothing gets
+    written for it. :attr:`noise_tags_written` and
+    :attr:`noise_refused_not_document` carry that split (#833).
     """
 
     total_packs: int
@@ -258,6 +268,17 @@ class EffectivenessReport(TrellisModel):
     #: Gate verdict over ``noise_candidates``. ``None`` only when the
     #: report was built by a caller that did not screen.
     demotion_screen: NoiseDemotionScreen | None = None
+    #: Document-store writes :func:`apply_noise_tags` actually made for
+    #: ``demotion_screen.admitted``. ``None`` when this report was built
+    #: by :func:`analyze_effectiveness` alone (a dry run — no write was
+    #: attempted); ``0`` or higher once :func:`run_effectiveness_feedback`
+    #: has run, even when nothing ended up admitted.
+    noise_tags_written: int | None = None
+    #: Admitted ids :func:`apply_noise_tags` could not resolve in the
+    #: document store — a trace id or other non-document id the demotion
+    #: gate still admitted. Always empty when :attr:`noise_tags_written`
+    #: is ``None``.
+    noise_refused_not_document: list[str] = Field(default_factory=list)
 
 
 def analyze_effectiveness(
@@ -266,6 +287,7 @@ def analyze_effectiveness(
     days: int = 30,
     min_appearances: int = 2,
     registry: ParameterRegistry | None = None,
+    demotion_settings: Mapping[str, Any] | None = None,
 ) -> EffectivenessReport:
     """Analyze which injected context items correlate with task success.
 
@@ -300,6 +322,12 @@ def analyze_effectiveness(
         registry: Optional parameter registry. When provided, overrides
             the success-rating and noise-rate thresholds from the active
             parameter snapshot.
+        demotion_settings: Optional settings-store mapping resolved by the
+            caller (``trellis.stores.settings_store.load_settings_values``).
+            Supplies the noise-demotion gate's ``min_attributed_packs`` and
+            ``min_unhelpful_citations`` floors; see
+            :func:`trellis.classify.demotion_gate.resolve_demotion_thresholds`
+            for the env/settings/default resolution order.
 
     Returns:
         :class:`EffectivenessReport` with per-item ``success_rate``,
@@ -321,9 +349,10 @@ def analyze_effectiveness(
     # Canonical PACK_ASSEMBLED ⋈ FEEDBACK_RECORDED join (shared with the
     # learning-observation builder, domains report, and metrics
     # timeseries so the join semantics cannot drift between consumers).
-    # ``pack_event_count`` is the raw PACK_ASSEMBLED count for
-    # ``total_packs`` — distinct from ``len(pack_payloads)``, which dedups
-    # by ``entity_id`` and drops falsy ids.
+    # ``pack_event_count`` is the raw count of served (not withheld)
+    # PACK_ASSEMBLED events for ``total_packs`` — distinct from
+    # ``len(pack_payloads)``, which dedups by ``entity_id`` and drops
+    # falsy ids.
     feedback_events, pack_payloads, pack_event_count = join_pack_feedback(
         event_log, since=since, limit=1000
     )
@@ -381,6 +410,10 @@ def analyze_effectiveness(
     total_successes = sum(1 for v in pack_feedback.values() if v)
     overall_rate = total_successes / total_feedback if total_feedback > 0 else 0.0
 
+    min_attributed_packs, min_unhelpful_citations = resolve_demotion_thresholds(
+        demotion_settings
+    )
+
     return EffectivenessReport(
         total_packs=pack_event_count,
         total_feedback=total_feedback,
@@ -392,6 +425,8 @@ def analyze_effectiveness(
             noise_candidates,
             [DemotionEvidence.from_score_row(row) for row in item_scores],
             attributed_packs=attributed_packs,
+            min_attributed_packs=min_attributed_packs,
+            min_unhelpful_citations=min_unhelpful_citations,
         ),
     )
 
@@ -404,6 +439,7 @@ def run_effectiveness_feedback(
     min_appearances: int = 2,
     registry: ParameterRegistry | None = None,
     vector_store: VectorStore | None = None,
+    demotion_settings: Mapping[str, Any] | None = None,
 ) -> EffectivenessReport:
     """Analyse effectiveness **and** apply noise tags in one call.
 
@@ -418,7 +454,10 @@ def run_effectiveness_feedback(
        keeps serving the pre-demotion snapshot).
     3. Log the outcome for operational visibility.
 
-    Returns the :class:`EffectivenessReport` (unchanged from step 1).
+    Returns the :class:`EffectivenessReport` from step 1, with
+    :attr:`~EffectivenessReport.noise_tags_written` and
+    :attr:`~EffectivenessReport.noise_refused_not_document` filled in from
+    step 2 — the write outcome, not the gate's admission (#833).
     """
     from trellis.classify.feedback import apply_noise_tags  # noqa: PLC0415
 
@@ -427,13 +466,24 @@ def run_effectiveness_feedback(
         days=days,
         min_appearances=min_appearances,
         registry=registry,
+        demotion_settings=demotion_settings,
     )
 
     screen = report.demotion_screen
     admitted = list(screen.admitted) if screen is not None else []
+    # This function always attempts a write pass (or determines there is
+    # nothing to write), unlike analyze_effectiveness's read-only report —
+    # 0 here means "ran, nothing written", never "not attempted".
+    report = report.model_copy(update={"noise_tags_written": 0})
 
     if admitted:
-        updated = apply_noise_tags(admitted, document_store, vector_store)
+        result = apply_noise_tags(admitted, document_store, vector_store)
+        report = report.model_copy(
+            update={
+                "noise_tags_written": result.updated,
+                "noise_refused_not_document": result.refused_not_document,
+            }
+        )
         logger.info(
             "effectiveness_feedback_applied",
             noise_candidates=len(report.noise_candidates),
@@ -441,7 +491,8 @@ def run_effectiveness_feedback(
             refused=screen.refused_count if screen is not None else 0,
             refused_by_reason=screen.refused_by_reason if screen is not None else {},
             attributed_packs=report.attributed_packs,
-            items_updated=updated,
+            items_updated=result.updated,
+            items_refused_not_document=len(result.refused_not_document),
             days=days,
             success_rate=report.success_rate,
         )
@@ -721,6 +772,9 @@ def analyze_advisory_effectiveness(
         since=since,
         limit=DEFAULT_SCAN_LIMIT,
     ).events
+    # A withheld pack carries no advisories by design: kept, it and its
+    # feedback would land in every advisory's "without" arm.
+    pack_events, feedback_events = drop_holdout(pack_events, feedback_events)
 
     pack_advisories: dict[str, list[str]] = {}
     pack_occurred_at: dict[str, datetime] = {}

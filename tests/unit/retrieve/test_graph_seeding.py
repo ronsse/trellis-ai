@@ -277,7 +277,7 @@ def _graph_axis(strategies: list[Any]) -> GraphSearch:
 
 class TestBuildStrategiesSeeding:
     def test_no_embedder_deployment_still_gets_an_unseeded_graph_axis(self) -> None:
-        strategies = build_strategies(_Registry())  # type: ignore[arg-type]
+        strategies = build_strategies(_Registry()).strategies  # type: ignore[arg-type]
         assert not any(isinstance(s, SemanticSearch) for s in strategies)
         assert _graph_axis(strategies)._seed_extractor is None
 
@@ -290,7 +290,9 @@ class TestBuildStrategiesSeeding:
         to an optional dependency. Both halves of that are behaviour, so
         both are pinned.
         """
-        strategies = build_strategies(_Registry(lambda _text: [0.1, 0.2]))  # type: ignore[arg-type]
+        strategies = build_strategies(  # type: ignore[arg-type]
+            _Registry(lambda _text: [0.1, 0.2])
+        ).strategies
         assert any(isinstance(s, SemanticSearch) for s in strategies)
         assert _graph_axis(strategies)._seed_extractor is None
 
@@ -299,7 +301,7 @@ class TestBuildStrategiesSeeding:
         strategies = build_strategies(
             _Registry(),  # type: ignore[arg-type]
             graph_seed_extractor=extractor,
-        )
+        ).strategies
         assert _graph_axis(strategies)._seed_extractor is extractor
 
     def test_explicit_extractor_needs_no_embedder(self) -> None:
@@ -307,7 +309,7 @@ class TestBuildStrategiesSeeding:
         strategies = build_strategies(
             _Registry(),  # type: ignore[arg-type]
             graph_seed_extractor=_StubExtractor(["e1"]),
-        )
+        ).strategies
         assert not any(isinstance(s, SemanticSearch) for s in strategies)
         items = _graph_axis(strategies).search("q")
         assert items[0].metadata["graph_selection"] == GRAPH_SELECTION_SEEDED

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -16,11 +17,31 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+@dataclass(frozen=True)
+class NoiseTagResult:
+    """Outcome of one :func:`apply_noise_tags` call.
+
+    ``updated`` is the write count — the same contract the function's bare
+    ``int`` return used to carry. ``refused_not_document`` lists the ids
+    the caller handed in that resolve to nothing in ``document_store``: the
+    demotion gate (:mod:`trellis.classify.demotion_gate`) admitted them on
+    citation evidence alone, with no notion of which store an id belongs
+    to, so an admitted trace id or other non-document id reaches here and
+    nothing gets written for it (trellis-ai #833). A
+    caller that reported ``len(candidates_admitted)`` as "demoted" was
+    counting the gate's admission, not this function's writes, for every
+    id in this list.
+    """
+
+    updated: int
+    refused_not_document: list[str] = field(default_factory=list)
+
+
 def apply_noise_tags(
     noise_candidates: list[str],
     document_store: DocumentStore,
     vector_store: VectorStore | None = None,
-) -> int:
+) -> NoiseTagResult:
     """Update signal_quality to ``"noise"`` for items flagged by effectiveness analysis.
 
     Also stamps ``classified_at`` so the refreshed tag set is visible to
@@ -44,19 +65,24 @@ def apply_noise_tags(
     reported on the ``noise_tags_applied`` log line so a run that mirrored
     nothing says so.
 
-    Returns the number of items updated **in the document store** — the
-    authoritative count, unchanged by this parameter, since a document whose
-    vector row is missing (never embedded) is still legitimately demoted.
+    Returns a :class:`NoiseTagResult`. ``updated`` is the number of items
+    updated **in the document store** — the authoritative count, unchanged
+    by the ``vector_store`` parameter, since a document whose vector row is
+    missing (never embedded) is still legitimately demoted.
+    ``refused_not_document`` names every candidate that was not: nothing
+    was written for those ids, and a caller must not count them as applied.
     """
     if not noise_candidates:
-        return 0
+        return NoiseTagResult(updated=0)
 
     updated = 0
     vector_rows_synced = 0
+    refused_not_document: list[str] = []
     stamp = datetime.now(UTC).isoformat()
     for item_id in noise_candidates:
         doc = document_store.get(item_id)
         if doc is None:
+            refused_not_document.append(item_id)
             logger.debug("noise_candidate_not_found", item_id=item_id)
             continue
 
@@ -109,7 +135,8 @@ def apply_noise_tags(
     logger.info(
         "noise_tags_applied",
         updated=updated,
+        refused_not_document=len(refused_not_document),
         vector_rows_synced=vector_rows_synced,
         vector_store_supplied=vector_store is not None,
     )
-    return updated
+    return NoiseTagResult(updated=updated, refused_not_document=refused_not_document)

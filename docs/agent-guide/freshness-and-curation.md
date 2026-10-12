@@ -104,6 +104,7 @@ Refreshed jaffle-dbt
   Changed:           5
   Unchanged:         40
   Edges emitted:     63
+  Commands:          110 succeeded, 0 failed, 0 rejected, 0 duplicates
 
   Per-entity diffs:
     - model.my_project.fct_orders (dbt_model)
@@ -126,6 +127,10 @@ JSON mode (`--format json`):
   "changed_entities": 5,
   "unchanged_entities": 40,
   "edges_emitted": 63,
+  "succeeded": 110,
+  "failed": 0,
+  "rejected": 0,
+  "duplicates": 0,
   "diffs": [
     {
       "entity_id": "model.my_project.fct_orders",
@@ -147,7 +152,9 @@ JSON mode (`--format json`):
 }
 ```
 
-The JSON form is what cron / GHA workflows parse for alerting and metrics. Exit code is 0 when the refresh completes (even with zero diffs); non-zero only for genuine errors (missing source, unreadable input, extractor exceptions).
+The JSON form is what cron / GHA workflows parse for alerting and metrics. `succeeded`, `failed`, `rejected` and `duplicates` count the batch's command results by status. A diff compares the graph before and after, so an entity whose write was refused or failed counts as unchanged. The four counts are of commands, edge writes included, so `rejected` and `failed` say how many writes did not land, not which entities.
+
+Exit code is 0 unless every command was refused or failed, whatever the diff count; when some writes were refused or failed, the text output names how many and the first failure's message, and the JSON carries that message, sanitized, as `message` beside `"status": "refreshed"`. When every command is refused or fails, `status` is `"error"` with the first failure's sanitized `message`, and the exit is `3` for a policy refusal, `2` for any other refusal and `5` for a store failure, the rule `trellis ingest dbt-manifest` follows. Other errors (missing source, unreadable input, extractor exceptions) exit `1`.
 
 ---
 
@@ -394,12 +401,12 @@ Two feedback paths exist for historical reasons; see [CLAUDE.md](../../CLAUDE.md
 The selection-side half (effectiveness feedback → advisory generation → advisory fitness → learning candidates) runs as one operational command:
 
 ```bash
-trellis worker curate --output-dir ./review --days 30
+trellis worker curate --days 30
 # or unattended, every 6 hours, until SIGINT/SIGTERM:
-trellis worker curate --output-dir ./review --interval 21600
+trellis worker curate --interval 21600
 ```
 
-It calls the curation library functions directly and writes the promote-half review artifacts to `--output-dir`. **Promotion stays human-gated** — review `promotion_decisions.template.json`, approve rows, then run `trellis curate promote-learning` (Tier-2 of [`../design/adr-autonomy-ladder.md`](../design/adr-autonomy-ladder.md)). `--interval` is a plain-sleep convenience; Trellis introduces no scheduler dependency. See [operations.md](operations.md#trellis-worker-curate) for the full flag table. Per-stage `--skip-*` toggles let you run just the demote half (`--skip-advisories --skip-learning`) or just the promote-half scan.
+It calls the curation library functions directly and writes the promote-half review artifacts to `--output-dir`, by default the directory the API's Review queue reads (`TRELLIS_LEARNING_ARTIFACTS_DIR` when set, else `<data_dir>/learning`). **Promotion stays human-gated** — review `promotion_decisions.template.json`, approve rows, then run `trellis curate promote-learning` (Tier-2 of [`../design/adr-autonomy-ladder.md`](../design/adr-autonomy-ladder.md)). `--interval` is a plain-sleep convenience; Trellis introduces no scheduler dependency. See [operations.md](operations.md#trellis-worker-curate) for the full flag table. Per-stage `--skip-*` toggles let you run just the demote half (`--skip-advisories --skip-learning`) or just the promote-half scan.
 
 > **Running this server-side?** [`../getting-started/running-trellis.md`](../getting-started/running-trellis.md) is the operating runbook for every Trellis process — `admin serve` plus each `worker` command, their autonomy tiers, and the human-in-the-loop steps. For scheduler recipes (cron / systemd / GitHub Actions / K8s CronJob) and a recommended-cadence table, see [`../deployment/scheduled-curation.md`](../deployment/scheduled-curation.md).
 

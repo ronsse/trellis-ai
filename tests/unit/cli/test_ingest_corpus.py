@@ -127,9 +127,31 @@ class TestIngestCorpus:
         result = runner.invoke(
             app, ["ingest", "corpus", "/nope/missing", "--format", "json"]
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         data = json.loads(result.stdout.strip())
         assert data["status"] == "error"
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_an_unreadable_root_exits_2_and_says_why(
+        self, tmp_path: Path, shape: UnreadablePathShape, fmt: str
+    ) -> None:
+        root = tmp_path / "in" / "root"
+        args = [
+            "ingest",
+            "corpus",
+            str(root),
+            *(["--format", "json"] if fmt == "json" else []),
+        ]
+        with unreadable(shape, root):
+            result = runner.invoke(app, args)
+        assert result.exit_code == 2, result.output
+        if fmt == "json":
+            data = json.loads(result.stdout.strip())
+            assert data["status"] == "error"
+            assert shape.message_fragment in data["message"]
+        else:
+            assert shape.message_fragment in " ".join(plain(result.output).split())
 
     def test_text_output_mentions_counts(self, vault: Path) -> None:
         result = runner.invoke(app, ["ingest", "corpus", str(vault)])
@@ -440,3 +462,73 @@ class TestPruneFailsClosed:
             assert "root is not a directory" in entry["detail"]
         for relpath in _TREE:
             assert _stored(relpath), relpath
+
+
+# ---------------------------------------------------------------------------
+# The yellow ``withheld`` line, printed from ``_render_report`` before
+# ``ingest_corpus`` exits 5, carries a relpath an operator would copy, so
+# it passes ``soft_wrap=True`` like the red ``prune`` line it follows.
+# ---------------------------------------------------------------------------
+
+#: One token, no whitespace, longer than an 80-column console minus the
+#: "  withheld " prefix -- Rich must hard-wrap *inside* it unless
+#: soft_wrap=True leaves the line to the terminal.
+_LONG_WITHHELD_RELPATH = (
+    "synthetic-area-0123456789abcdef/synthetic-topic-0123456789abcdef/"
+    "synthetic-note-0123456789abcdef0123456789abcdef.md"
+)
+
+#: One token, no whitespace, longer than a 60-column console on its own:
+#: the directory name the yellow ``warning`` line's ``path=`` detail
+#: carries, which must split mid-token unless soft_wrap=True leaves the
+#: line to the terminal. The file that triggers it also sits under this
+#: directory, so the preceding ``withheld`` line, which soft-wraps too,
+#: carries the same token whole on its own line; scope a wrap check to
+#: the lines from the ``warning`` marker on, or it passes on the withheld
+#: line's say-so regardless of the warning line's own wrapping.
+_LONG_WARNING_DIRNAME = "synthetic-unreadable-" + "0123456789abcdef" * 4
+
+
+def _warning_section(lines: list[str]) -> list[str]:
+    index = next(
+        i for i, line in enumerate(lines) if line.strip().startswith("warning ")
+    )
+    return lines[index:]
+
+
+class TestWithheldLineDoesNotWrap:
+    def test_long_withheld_path_prints_as_one_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "80")
+        root = tmp_path / "corpus"
+        long_path = root / _LONG_WITHHELD_RELPATH
+        long_path.parent.mkdir(parents=True)
+        long_path.write_text("Quartz outlasts feldspar.\n", encoding="utf-8")
+        assert _ingest_json(str(root))[0] == 0
+
+        with unreadable(_shape("symlink_loop"), long_path):
+            result = _ingest(str(root), "--prune")
+
+        assert result.exit_code == 5, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(_LONG_WITHHELD_RELPATH in line for line in lines), result.stdout
+
+    def test_long_warning_detail_prints_as_one_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "60")
+        root = tmp_path / "corpus"
+        nested = root / _LONG_WARNING_DIRNAME / "doc.md"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("Quartz outlasts feldspar.\n", encoding="utf-8")
+        assert _ingest_json(str(root))[0] == 0
+
+        with unreadable(_shape("unsearchable_parent"), nested):
+            result = _ingest(str(root), "--prune")
+
+        assert result.exit_code == 5, result.output
+        lines = plain(result.stdout).splitlines()
+        assert any(_LONG_WARNING_DIRNAME in line for line in _warning_section(lines)), (
+            result.stdout
+        )

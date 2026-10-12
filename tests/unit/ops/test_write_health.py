@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from trellis.core.pack_holdout import HOLDOUT_KEY
 from trellis.ops.write_health import (
     _REPEAT_COLLISION_WARN,
     RejectionKind,
@@ -32,7 +33,7 @@ from trellis.ops.write_health import (
 from trellis.schemas import trace as trace_schemas
 from trellis.schemas.enums import OutcomeStatus
 from trellis.schemas.trace import EvidenceRef, Outcome, Trace, TraceStep
-from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.event_log import Event, EventLog, EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 #: Every model name in the trace schema. A hint may name only the model
@@ -769,6 +770,88 @@ class TestServeAttribution:
         assert report.pack_attribution_rate == pytest.approx(1.0)
 
 
+class TestFailedStrategies:
+    """``PACK_ASSEMBLED.strategy_failures`` tallied off the attribution scan."""
+
+    def test_failures_tallied_per_strategy_with_withheld_packs(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        now = datetime.now(tz=UTC).replace(microsecond=0)
+        withheld = {
+            HOLDOUT_KEY: True,
+            "strategy_failures": [{"strategy": "semantic"}, {"strategy": "graph"}],
+        }
+        served = {"strategy_failures": [{"strategy": "semantic"}]}
+        for hours_ago, payload in ((3, withheld), (2, {}), (1, served)):
+            event_log.append(
+                Event(
+                    event_type=EventType.PACK_ASSEMBLED,
+                    source="pack_builder",
+                    occurred_at=now - timedelta(hours=hours_ago),
+                    payload=payload,
+                )
+            )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.failed_strategies.packs == 2
+        assert report.failed_strategies.by_strategy == {"semantic": 2, "graph": 1}
+        assert report.failed_strategies.latest_at == now - timedelta(hours=1)
+
+    @pytest.mark.parametrize(
+        ("value", "packs", "by_strategy"),
+        [
+            ([], 1, {"semantic": 1}),
+            (None, 1, {"semantic": 1}),
+            ("semantic", 1, {"semantic": 1}),
+            ({"strategy": "graph"}, 1, {"semantic": 1}),
+            ([None, "graph"], 2, {"semantic": 1, "unknown": 2}),
+        ],
+    )
+    def test_an_empty_or_malformed_entry_never_fails_the_read(
+        self,
+        tmp_path: Path,
+        value: object,
+        packs: int,
+        by_strategy: dict[str, int],
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={"strategy_failures": value},
+        )
+        event_log.emit(EventType.PACK_ASSEMBLED, "pack_builder", payload={})
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={"strategy_failures": [{"strategy": "semantic"}]},
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.failed_strategies.packs == packs
+        assert report.failed_strategies.by_strategy == by_strategy
+
+    def test_failure_outside_window_is_not_counted(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.append(
+            Event(
+                event_type=EventType.PACK_ASSEMBLED,
+                source="pack_builder",
+                occurred_at=datetime.now(tz=UTC) - timedelta(days=10),
+                payload={"strategy_failures": [{"strategy": "semantic"}]},
+            )
+        )
+
+        report = summarize_serve_attribution(event_log, days=1)
+
+        assert report.failed_strategies.packs == 0
+        assert report.failed_strategies.by_strategy == {}
+        assert report.failed_strategies.latest_at is None
+
+
 class TestBackendHealth:
     def test_unattributed_feedback_warns(self, tmp_path: Path) -> None:
         """The starvation signature: feedback exists, none attributed."""
@@ -818,6 +901,55 @@ class TestBackendHealth:
         assert report.status == "ok"
         assert report.reasons == []
         assert report.model_dump()["write"]["attempts"] == 0
+
+    def test_failed_strategy_pack_warns_without_exception_text(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={
+                "strategy_failures": [
+                    {
+                        "strategy": "semantic",
+                        "error_class": "RuntimeError",
+                        "message": "secret/path/or.dsn=synthetic-never-real",
+                    }
+                ]
+            },
+        )
+
+        report = summarize_backend_health(event_log, days=1)
+
+        assert report.status == "warn"
+        assert any("semantic" in reason for reason in report.reasons)
+        assert any("failed retrieval strategy" in reason for reason in report.reasons)
+        dumped = json.dumps(report.model_dump(mode="json"))
+        assert "secret/path/or.dsn" not in dumped
+        assert "RuntimeError" not in dumped
+        for reason in report.reasons:
+            assert "secret/path/or.dsn" not in reason
+            assert "RuntimeError" not in reason
+
+    def test_only_clean_packs_add_no_failed_strategy_reason(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            "pack_builder",
+            payload={
+                "injected_items": [{"item_id": "a"}],
+                "strategy_failures": [],
+            },
+        )
+        event_log.emit(EventType.PACK_ASSEMBLED, "pack_builder", payload={})
+
+        report = summarize_backend_health(event_log, days=1)
+
+        assert report.status == "ok"
+        assert report.reasons == []
 
 
 class TestRetrievalAvailabilityDisclosure:

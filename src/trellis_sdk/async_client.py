@@ -27,7 +27,9 @@ from trellis_sdk._format import format_sectioned_pack_as_markdown
 from trellis_sdk._http import (
     SDK_API_MAJOR,
     SDK_API_MINOR,
+    api_key_headers,
     check_handshake,
+    describe_body_parse_error,
     pack_attribution,
     raise_for_status,
     wrap_transport_error,
@@ -41,6 +43,7 @@ from trellis_wire import (
     PackFeedbackRequest,
     PackFeedbackResponse,
 )
+from trellis_wire.axes import axis_note_from_payload
 from trellis_wire.withholding import withholding_from_payload
 
 if TYPE_CHECKING:
@@ -64,6 +67,11 @@ class AsyncTrellisClient:
     ``max_concurrency`` bounds how many requests can be in flight
     from a single client instance.  Raise it for parallel fan-out
     workloads; lower it to be gentle on shared infrastructure.
+
+    Pass ``api_key=`` with ``base_url=`` to send it as
+    ``Authorization: Bearer`` on every request, including the version
+    handshake; it is refused as
+    :class:`~trellis_sdk.client.TrellisClient` refuses it.
     """
 
     def __init__(
@@ -71,6 +79,7 @@ class AsyncTrellisClient:
         base_url: str | None = None,
         *,
         http: httpx.AsyncClient | None = None,
+        api_key: str | None = None,
         timeout: float = _DEFAULT_TIMEOUT_SECONDS,
         max_concurrency: int = _DEFAULT_MAX_CONCURRENCY,
         verify_version: bool = True,
@@ -85,6 +94,7 @@ class AsyncTrellisClient:
         if http is not None and base_url is not None:
             msg = "Pass base_url OR http, not both."
             raise ValueError(msg)
+        headers = api_key_headers(api_key, http_injected=http is not None)
 
         self._owns_http = http is None
         if http is not None:
@@ -93,6 +103,7 @@ class AsyncTrellisClient:
             self._http = httpx.AsyncClient(
                 base_url=cast("str", base_url).rstrip("/"),
                 timeout=timeout,
+                headers=headers,
             )
         self._verify_version = verify_version
         self._handshake_done = False
@@ -328,6 +339,7 @@ class AsyncTrellisClient:
             intent,
             max_tokens=max_tokens,
             withholding=withholding_from_payload(pack.get("withholding")),
+            axis_note=axis_note_from_payload(pack.get("axes")),
         )
 
     async def get_task_context(
@@ -366,6 +378,7 @@ class AsyncTrellisClient:
             intent,
             max_tokens=max_tokens,
             withholding=withholding_from_payload(pack.get("withholding")),
+            axis_note=axis_note_from_payload(pack.get("axes")),
         )
 
     async def get_entity(self, entity_id: str) -> dict[str, Any] | None:
@@ -460,7 +473,17 @@ class AsyncTrellisClient:
         except Exception as exc:  # JSONDecodeError / pydantic.ValidationError
             # A malformed 2xx body must stay inside the TrellisError
             # hierarchy — hooks' degradation contract depends on it.
-            msg = f"unexpected response body for {path}: {exc}"
+            # Describe, don't quote (#206): the body here may be a
+            # proxy/interstitial's own page rather than anything the
+            # Trellis server wrote, so a pydantic ValidationError's
+            # str() — which composes ``input_value=<that body's own
+            # field value>`` into every line by design — must not be
+            # quoted back whole. ``describe_body_parse_error`` is a
+            # local, dependency-free port (see its docstring): the
+            # SDK's remote/httpx path must not import ``trellis.*``
+            # (tests/unit/sdk/test_isolation.py).
+            detail = describe_body_parse_error(exc)
+            msg = f"unexpected response body for {path}: {detail}"
             raise TrellisProtocolError(msg, request_path=path) from exc
 
     # -- Observations + Measurements (Item 1 Phase 1) --

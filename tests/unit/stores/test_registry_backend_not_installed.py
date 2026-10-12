@@ -7,6 +7,9 @@ Covers C2 Phase 2 of the silent-fallback cleanup
   ``src/trellis/stores/registry.py`` now raises
   :class:`BackendNotInstalledError` (or a sibling
   :class:`ConfigError`) naming the missing extra.
+* ``StoreRegistry._instantiate`` raises it too, when a backend's module,
+  its registry preparation or its constructor needs a module that is not
+  installed.
 * The default-substrate path (SQLite + local blob) keeps working with
   no optional extras installed.
 * Installed-but-misconfigured cases raise a *different* error class
@@ -14,7 +17,8 @@ Covers C2 Phase 2 of the silent-fallback cleanup
   tell "extra missing" apart from "wrong knob".
 
 All synthetic missing-import scenarios use ``monkeypatch`` to make the
-import machinery raise; no extras are actually uninstalled. Tests run
+import machinery raise, or to clear the flag a guarded import sets; no
+extras are actually uninstalled. Tests run
 the same way whether or not ``[llm-openai]``, ``[neo4j]``,
 ``[arcadedb]`` etc. happen to be present in the test environment.
 """
@@ -40,6 +44,7 @@ from trellis.stores.registry import (
     StoreRegistry,
     _build_openai_embedding_fn,
     _import_callable,
+    _mask_api_key,
 )
 
 
@@ -265,6 +270,486 @@ def test_embedding_fn_property_propagates_backend_error(
         _ = registry.embedding_fn
 
 
+# -- _build_openai_embedding_fn raises on a missing key (#779 F-a) ---------
+
+
+def test_openai_embedding_fn_missing_key_raises_configerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No key anywhere: the SDK's own ``OpenAIError`` becomes a ``ConfigError``."""
+    openai = pytest.importorskip("openai")  # optional extra; skip when unavailable
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(ConfigError) as exc_info:
+        _build_openai_embedding_fn({"model": "text-embedding-3-small"})
+    assert exc_info.value.setting == "embeddings.api_key_env"
+    assert "OPENAI_API_KEY" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, openai.OpenAIError)
+    # The SDK's own wording, whatever its version, stays out of the message.
+    assert str(exc_info.value.__cause__) not in str(exc_info.value)
+
+
+def test_openai_embedding_fn_sdk_env_fallback_builds_callable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``OPENAI_API_KEY`` alone, with no key in config, still builds the callable."""
+    pytest.importorskip("openai")  # optional extra; skip when unavailable
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-obviously-fake-0000")
+    embed = _build_openai_embedding_fn({"model": "text-embedding-3-small"})
+    assert callable(embed)
+
+
+def test_openai_embed_network_error_survives_as_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``OpenAIError`` from the embeddings call itself is not a config error."""
+    pytest.importorskip("openai")  # optional extra; skip when unavailable
+    import openai
+
+    monkeypatch.setenv("FAKE_OPENAI_KEY_VAR", "sk-test-obviously-fake-0000")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    embed = _build_openai_embedding_fn(
+        {"model": "text-embedding-3-small", "api_key_env": "FAKE_OPENAI_KEY_VAR"}
+    )
+
+    def _raise_network_error(*args: Any, **kwargs: Any) -> Any:
+        synthetic_msg = "synthetic network failure"
+        raise openai.OpenAIError(synthetic_msg)
+
+    monkeypatch.setattr(
+        openai.resources.embeddings.Embeddings, "create", _raise_network_error
+    )
+    with pytest.raises(openai.OpenAIError) as exc_info:
+        embed("synthetic probe text")
+    assert not isinstance(exc_info.value, ConfigError)
+
+
+def test_openai_constructor_non_openai_error_propagates_unwrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-``OpenAIError`` from ``openai.OpenAI(...)`` propagates unwrapped.
+
+    Only ``openai.OpenAIError`` becomes a ``ConfigError`` (#786); any other
+    exception reaches the ``embedding_fn`` caller as itself. The constructor is
+    replaced, so the result does not depend on which SDK version is installed.
+    """
+    openai = pytest.importorskip("openai")  # optional extra; skip when unavailable
+    synthetic_error = RuntimeError("synthetic")
+
+    def _raise_non_openai_error(**kwargs: Any) -> Any:
+        raise synthetic_error
+
+    monkeypatch.setattr(openai, "OpenAI", _raise_non_openai_error)
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        embeddings={"provider": "openai", "api_key": "sk-test-1234"},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        _ = registry.embedding_fn
+    assert exc_info.value is synthetic_error
+
+
+# -- a failed resolution is not cached (#775 follow-up F1) -----------------
+
+_UNIMPORTABLE_PATH = "no_such_module_for_embedding_fn_cache_test.embed"
+
+
+def test_embedding_fn_retries_a_failed_env_var_until_it_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``TRELLIS_EMBEDDING_FN`` that fails to import raises on every call.
+
+    A raise caches nothing, so once the path imports, the next call
+    returns the callable rather than a cached error or "not configured".
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _UNIMPORTABLE_PATH)
+    registry = StoreRegistry.from_config_dir(
+        config_dir=tmp_path / "cfg", data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError):
+        _ = registry.embedding_fn
+    with pytest.raises(ConfigError):
+        _ = registry.embedding_fn
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "trellis.stores.registry._mask_api_key")
+    assert registry.embedding_fn is _mask_api_key
+
+
+def test_embedding_fn_raises_again_on_second_call_config_path(
+    tmp_path: Path,
+) -> None:
+    """An unimportable ``embeddings.provider`` raises on every call too."""
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        embeddings={"provider": _UNIMPORTABLE_PATH},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError):
+        _ = registry.embedding_fn
+    with pytest.raises(ConfigError):
+        _ = registry.embedding_fn
+
+
+# -- env var outranks config when both are set ----------------------------
+
+
+@pytest.mark.parametrize(
+    "config_provider",
+    [
+        pytest.param(
+            "trellis.stores.registry._import_callable",
+            id="config_resolves_to_a_different_callable",
+        ),
+        pytest.param(_UNIMPORTABLE_PATH, id="config_path_does_not_import"),
+        pytest.param("openai", id="config_provider_is_openai"),
+    ],
+)
+def test_embedding_fn_env_var_wins_when_config_also_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_provider: str
+) -> None:
+    """``TRELLIS_EMBEDDING_FN`` outranks ``embeddings.provider``.
+
+    Config is not resolved while the env var is set, so the env callable
+    comes back whether the provider names another callable, a path that
+    cannot import, or ``openai``.
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "trellis.stores.registry._mask_api_key")
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        embeddings={"provider": config_provider},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    assert registry.embedding_fn is _mask_api_key
+
+
+def test_embedding_fn_unimportable_env_var_raises_rather_than_using_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``TRELLIS_EMBEDDING_FN`` that cannot import raises; config is no fallback."""
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", _UNIMPORTABLE_PATH)
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        embeddings={"provider": "trellis.stores.registry._mask_api_key"},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError, match=_UNIMPORTABLE_PATH):
+        _ = registry.embedding_fn
+
+
+# -- F2: ConfigError's setting names the source that was wrong ------------
+#
+# (#794 gate follow-up.) A bad dotted path raises ConfigError either way,
+# but the *setting* it names must point at whichever of the env var or the
+# YAML key actually supplied the path.
+
+_BAD_DOTTED_PATHS = [
+    pytest.param("nodot", id="malformed"),
+    pytest.param(".pkg.fn", id="leading_dot"),
+    pytest.param("..fn", id="leading_dot_only"),
+    pytest.param(
+        "no_such_module_for_embedding_fn_setting_test.embed", id="missing_module"
+    ),
+    pytest.param(
+        "trellis.errors.no_such_attr_for_embedding_fn_setting_test",
+        id="missing_attribute",
+    ),
+    pytest.param("trellis.errors.__doc__", id="not_callable"),
+]
+
+
+@pytest.mark.parametrize("bad_path", _BAD_DOTTED_PATHS)
+def test_embedding_fn_env_var_bad_path_setting_names_the_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_path: str
+) -> None:
+    """A bad ``TRELLIS_EMBEDDING_FN`` path's ConfigError names the env var.
+
+    Not ``embeddings.provider``: that YAML key was never read, so pointing
+    an operator there sends them to edit the wrong setting.
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", bad_path)
+    registry = StoreRegistry.from_config_dir(
+        config_dir=tmp_path / "cfg", data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        _ = registry.embedding_fn
+    assert exc_info.value.setting == "TRELLIS_EMBEDDING_FN"
+
+
+@pytest.mark.parametrize("bad_path", _BAD_DOTTED_PATHS)
+def test_embedding_fn_config_provider_bad_path_setting_names_the_yaml_key(
+    tmp_path: Path, bad_path: str
+) -> None:
+    """The same bad path via ``embeddings.provider`` keeps naming the YAML key."""
+    config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": bad_path})
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        _ = registry.embedding_fn
+    assert exc_info.value.setting == "embeddings.provider"
+
+
+#: Non-string ``embeddings.provider`` values, truthy and falsy alike. The
+#: call-site type check (in ``StoreRegistry.embedding_fn``) raises on all
+#: of these before any of them reach ``_import_callable`` — a falsy one
+#: (``0``, ``False``, ``[]``, ``{}``) used to mean "not configured" via the
+#: old ``if provider:`` guard; only ``None`` and ``""`` still do (see
+#: ``test_embedding_fn_falsy_provider_values_stay_not_configured`` below).
+#: ``False`` is the motivating case: YAML ``provider: off`` parses to the
+#: bool ``False``, which silently turned semantic search off with no error.
+_NON_STRING_PROVIDERS = [
+    pytest.param(7, id="int"),
+    pytest.param([1, 2], id="list"),
+    pytest.param({"api_key": "synthetic-credential"}, id="mapping"),
+    pytest.param(0, id="zero"),
+    pytest.param(False, id="bool_false"),
+    pytest.param([], id="empty_list"),
+    pytest.param({}, id="empty_mapping"),
+]
+
+
+@pytest.mark.parametrize("bad_value", _NON_STRING_PROVIDERS)
+def test_embedding_fn_config_provider_non_string_raises_configerror_naming_the_yaml_key(
+    tmp_path: Path, bad_value: object
+) -> None:
+    """A non-string ``embeddings.provider`` (an int, a list, a mapping, a
+    bool, or a falsy value of any of those types) is an operator error,
+    named by its type rather than echoed.
+
+    ``_import_callable`` called ``dotted_path.rpartition(".")`` directly,
+    so a config.yaml author who wrote ``provider: 8080`` or a YAML list by
+    accident got ``AttributeError`` → REST 500 instead of the same
+    ``ConfigError`` a bad string path raises. The message reaches the REST
+    body and the error log, so a misplaced mapping's credential must not.
+
+    The falsy members (``0``, ``False``, ``[]``, ``{}``) are the newer
+    half of this parametrization: the old ``if provider:`` call-site guard
+    let them through as "not configured" with no error at all, which is
+    how YAML's ``provider: off`` (a bool ``False``) silently disabled
+    semantic search.
+    """
+    config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": bad_value})
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        _ = registry.embedding_fn
+    assert exc_info.value.setting == "embeddings.provider"
+    assert f"of type {type(bad_value).__name__}" in exc_info.value.message
+    assert repr(bad_value) not in exc_info.value.message
+    # The delete-the-key hint is for booleans only (YAML off/on/yes/no).
+    assert ("delete the key or set it to null" in exc_info.value.message) == (
+        isinstance(bad_value, bool)
+    )
+
+
+@pytest.mark.parametrize("bad_value", [pytest.param(True, id="bool_true")])
+def test_embedding_fn_config_provider_bool_true_raises_with_delete_hint(
+    tmp_path: Path, bad_value: object
+) -> None:
+    """A bool ``embeddings.provider`` gets a hint the other non-string types
+    don't: the operator is pointed at the one-line fix (delete the key, or
+    set it to ``null``) rather than left to guess that a boolean is even
+    the problem.
+
+    ``True`` is tested on its own because it is the one boolean value
+    that was already truthy under the *old* ``if provider:`` guard (so it
+    already reached ``_import_callable`` and already raised, just without
+    this hint) — pinning it keeps the hint addition from being credited to
+    a case that would have raised anyway.
+    """
+    config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": bad_value})
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(ConfigError) as exc_info:
+        _ = registry.embedding_fn
+    assert exc_info.value.setting == "embeddings.provider"
+    assert "of type bool" in exc_info.value.message
+    assert "delete the key or set it to null" in exc_info.value.message
+    # A second read refuses again rather than decaying to "not configured".
+    with pytest.raises(ConfigError):
+        _ = registry.embedding_fn
+
+
+@pytest.mark.parametrize(
+    "not_configured_value",
+    [
+        pytest.param(None, id="null"),
+        pytest.param("", id="empty_string"),
+    ],
+)
+def test_embedding_fn_falsy_provider_values_stay_not_configured(
+    tmp_path: Path, not_configured_value: object
+) -> None:
+    """``None`` (an absent or explicit ``null`` key) and ``""`` still mean
+    "not configured" — the only two values that do.
+
+    Every other falsy, non-string value (``0``, ``False``, ``[]``, ``{}``)
+    now raises instead (see ``_NON_STRING_PROVIDERS`` above); pinning just
+    these two here means widening that check further cannot silently start
+    rejecting the two spellings of "off" operators actually use.
+    """
+    config_dir = _write_config(
+        tmp_path / "cfg", embeddings={"provider": not_configured_value}
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    assert registry.embedding_fn is None
+
+
+def test_embedding_fn_bool_provider_degrades_pack_to_keyword_and_graph(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: ``provider: false`` degrades retrieval, it does not
+    crash it.
+
+    Q5-A (#838) made a persistently-raising ``registry.embedding_fn``
+    degrade a pack build to keyword + graph with ``semantic:
+    embedder_failed`` in the axes, rather than failing every retrieval
+    call. This is the only test in the suite that drives that whole path
+    — ``StoreRegistry`` config through to ``describe_axes`` — starting
+    from a realistic operator mistake (a YAML ``provider: off``/``False``)
+    rather than a synthetic raising stand-in.
+    """
+    from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
+
+    config_dir = _write_config(tmp_path / "cfg", embeddings={"provider": False})
+    data_dir = tmp_path / "data"
+    registry = StoreRegistry.from_config_dir(config_dir=config_dir, data_dir=data_dir)
+
+    builder = build_pack_builder(registry, surface="test")
+    assert builder.strategy_names == ["keyword", "graph"]
+
+    pack = builder.build("does this still serve a pack")
+
+    axes = describe_axes(
+        builder,
+        pack.retrieval_report.strategies_used,
+        embedder_configured=builder.embedder_configured,
+        embedder_resolve_failure=builder.embedder_resolve_failure,
+    )
+    assert axes["semantic"] == "embedder_failed"
+    assert axes["embedder_setting"] == "embeddings.provider"
+    assert axes["embedder_error_type"] == "ConfigError"
+
+
+# -- F1: a dotted path's own import-time failure is not a bad path --------
+
+
+@pytest.mark.parametrize("via_env", [True, False], ids=["env_var", "config_provider"])
+def test_embedding_fn_dotted_path_import_time_error_propagates_unwrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, via_env: bool
+) -> None:
+    """A dotted-path module whose own top-level code raises is not a bad path.
+
+    ``_import_callable`` catches only ``ImportError``; an unrelated exception
+    raised while the target module executes (not a missing module, not a
+    missing or non-callable attribute) is that module's bug and propagates
+    as itself — the dotted-path counterpart of #794's
+    ``test_openai_constructor_non_openai_error_propagates_unwrapped``.
+    """
+    monkeypatch.syspath_prepend(str(tmp_path))
+    module_name = "efp_raises_at_import_env" if via_env else "efp_raises_at_import_cfg"
+    (tmp_path / f"{module_name}.py").write_text(
+        "raise RuntimeError('synthetic import-time failure')\n"
+    )
+    dotted_path = f"{module_name}.target"
+    if via_env:
+        monkeypatch.setenv("TRELLIS_EMBEDDING_FN", dotted_path)
+        config_dir = tmp_path / "cfg"
+    else:
+        config_dir = _write_config(
+            tmp_path / "cfg", embeddings={"provider": dotted_path}
+        )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    # `pytest.raises(RuntimeError, ...)` alone proves "unwrapped": a
+    # `ConfigError` (TrellisError, not a RuntimeError) raised instead would
+    # already fail this context manager, so a further `isinstance` assertion
+    # here could never fail (#794 gate finding #5 flagged the same pattern).
+    with pytest.raises(RuntimeError, match="synthetic import-time failure"):
+        _ = registry.embedding_fn
+
+
+# -- F3: an empty TRELLIS_EMBEDDING_FN is not "set" ------------------------
+
+
+def test_embedding_fn_empty_env_var_falls_through_to_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``TRELLIS_EMBEDDING_FN=""`` is falsy, so config still resolves.
+
+    An env file that declares the var but leaves it blank should not be
+    treated as "set to an empty, malformed path" — ``if custom_path:``
+    falls through to ``embeddings.provider`` instead (#794 gate M4).
+    """
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "")
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        embeddings={"provider": "trellis.stores.registry._mask_api_key"},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    assert registry.embedding_fn is _mask_api_key
+
+
+def test_embedding_fn_not_configured_is_still_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``None`` for "not configured" is cached, not re-resolved per call.
+
+    An embedder configured after the first ``None`` answer does not change
+    the second answer.
+    """
+    registry = StoreRegistry.from_config_dir(
+        config_dir=tmp_path / "cfg", data_dir=tmp_path / "data"
+    )
+    assert registry.embedding_fn is None
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "trellis.stores.registry._mask_api_key")
+    assert registry.embedding_fn is None
+
+
+def test_embedding_fn_success_is_resolved_once_across_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful resolution is cached: the callable is built once.
+
+    Counts calls into ``_import_callable`` rather than asserting on
+    identity alone, so the test fails if a future change re-resolves on
+    every access even when the returned object happens to be memoized
+    some other way.
+    """
+    calls: list[str] = []
+    real_import_callable = _import_callable
+
+    def counting_import_callable(dotted_path: str, **kwargs: Any) -> Any:
+        calls.append(dotted_path)
+        return real_import_callable(dotted_path, **kwargs)
+
+    monkeypatch.setattr(
+        "trellis.stores.registry._import_callable", counting_import_callable
+    )
+    monkeypatch.setenv("TRELLIS_EMBEDDING_FN", "trellis.stores.registry._mask_api_key")
+    registry = StoreRegistry.from_config_dir(
+        config_dir=tmp_path / "cfg", data_dir=tmp_path / "data"
+    )
+    first = registry.embedding_fn
+    second = registry.embedding_fn
+    assert first is second
+    assert calls == ["trellis.stores.registry._mask_api_key"]
+
+
 # -- _import_callable raises ----------------------------------------------
 
 
@@ -275,11 +760,42 @@ def test_import_callable_bad_path_raises_configerror() -> None:
     assert "Invalid embedding callable path" in str(exc_info.value)
 
 
+#: Shapes with an empty dot-separated segment somewhere other than the
+#: leading position. ``pkg.`` and ``pkg..fn`` already raised ``ConfigError``
+#: before the shape check covered every segment — but via
+#: ``importlib.import_module`` failing and being caught by the
+#: ``except ImportError`` branch below, not via the malformed-path check.
+#: Asserting the *malformed* message (not just "some ConfigError") proves
+#: the shape check itself catches them, which a check that only recognizes
+#: a *leading* dot would not (it would still reach a ``ConfigError``, just
+#: via the import-failure branch, with a different message).
+_MALFORMED_SHAPES = [
+    pytest.param(".pkg.fn", id="leading_dot"),
+    pytest.param("..fn", id="leading_dot_only"),
+    pytest.param("pkg.", id="trailing_dot"),
+    pytest.param("pkg..fn", id="doubled_dot"),
+]
+
+
+@pytest.mark.parametrize("bad_path", _MALFORMED_SHAPES)
+def test_import_callable_empty_segment_raises_before_import(bad_path: str) -> None:
+    """Any empty dot-separated segment is malformed, not just a leading dot.
+
+    A leading-dot path (``.pkg.fn``, ``..fn``) reaches
+    ``importlib.import_module`` with a relative module name and no package
+    context, raising ``TypeError`` rather than ``ImportError`` — uncaught,
+    so it escaped as a REST 500 before this check covered every segment.
+    """
+    with pytest.raises(ConfigError) as exc_info:
+        _import_callable(bad_path)
+    assert "Invalid embedding callable path" in str(exc_info.value)
+
+
 def test_import_callable_missing_module_raises_configerror() -> None:
     """Module that doesn't exist raises ``ConfigError`` with a hint."""
     with pytest.raises(ConfigError) as exc_info:
         _import_callable("no_such_module_xyz.embed")
-    assert "is not importable" in str(exc_info.value)
+    assert "was not found" in str(exc_info.value)
 
 
 def test_import_callable_missing_attribute_raises_configerror() -> None:
@@ -351,6 +867,159 @@ def test_resolve_substrate_class_unknown_backend_still_returns_none(
         config_dir=config_dir, data_dir=tmp_path / "data"
     )
     assert registry._resolve_substrate_class("graph") is None
+
+
+# -- _instantiate raises --------------------------------------------------
+
+
+def test_instantiate_missing_module_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A backend module whose import needs a missing module raises loudly.
+
+    Pins the import site in ``_instantiate``: ``trellis.stores.postgres``
+    imports ``psycopg_pool`` at module level.
+    """
+    # Block the package too: an earlier test may have cached it, and a
+    # cached module would slip the import through.
+    _block_imports(monkeypatch, {"psycopg_pool", "psycopg", "trellis.stores.postgres"})
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        stores={
+            "knowledge": {
+                "document": {
+                    "backend": "postgres",
+                    "dsn": "postgresql://nobody@127.0.0.1:9/x",
+                },
+            },
+        },
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(BackendNotInstalledError) as exc_info:
+        _ = registry.knowledge.document_store
+    assert exc_info.value.backend_name == "postgres"
+    assert exc_info.value.extra == "cloud"
+    # The refusal names the extra, not the module that failed; the chained
+    # ImportError is what a traceback or an exc_info log line shows.
+    assert isinstance(exc_info.value.__cause__, ImportError)
+
+
+def test_instantiate_missing_neo4j_driver_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Registry preparation that needs a missing driver raises loudly.
+
+    Pins the preparation site in ``_instantiate``: the Neo4j store's
+    ``prepare_registry_params`` builds the driver before the constructor
+    runs.
+    """
+    # Both halves of a missing driver, so the test behaves the same with
+    # or without ``neo4j`` installed: the flag ``check_driver_installed``
+    # reads, and the name the guarded ``from neo4j import GraphDatabase``
+    # leaves unbound.
+    monkeypatch.setattr("trellis.stores.bolt_opencypher.base.HAS_NEO4J", False)
+    monkeypatch.delattr("trellis.stores.neo4j.base.GraphDatabase", raising=False)
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        stores={
+            "knowledge": {
+                # Preparation refuses a missing password before it builds
+                # the driver.
+                "graph": {
+                    "backend": "neo4j",
+                    "uri": "bolt://127.0.0.1:9",
+                    "password": "unused",
+                },
+            },
+        },
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(BackendNotInstalledError) as exc_info:
+        _ = registry.knowledge.graph_store
+    assert exc_info.value.backend_name == "neo4j"
+    assert exc_info.value.extra == "neo4j"
+    assert isinstance(exc_info.value.__cause__, ImportError)
+
+
+@pytest.mark.parametrize(
+    "ensure_setting",
+    [{}, {"ensure_database_exists": False}],
+    ids=["ensure-default", "ensure-off"],
+)
+def test_arcadedb_preparation_refuses_before_touching_the_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ensure_setting: dict[str, Any],
+) -> None:
+    """A missing driver is refused before ArcadeDB's preparation calls HTTP.
+
+    Preparation creates the database and migrates its schema over HTTP; with
+    ``ensure_database_exists`` off it still migrates the schema. Checking for
+    the driver afterwards changed the server first, and with the server down
+    it reported a connection error instead of the extra.
+    """
+    from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
+
+    monkeypatch.setattr("trellis.stores.bolt_opencypher.base.HAS_NEO4J", False)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "trellis.stores.arcadedb.graph.ensure_database",
+        lambda *_args: calls.append("ensure_database"),
+    )
+    monkeypatch.setattr(
+        ArcadeDBGraphStore,
+        "_init_arcadedb_edge_provenance_schema",
+        classmethod(lambda _cls, **_kwargs: calls.append("migrate_schema")),
+    )
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        stores={
+            "knowledge": {
+                "graph": {
+                    "backend": "arcadedb",
+                    "uri": "bolt://127.0.0.1:9",
+                    "password": "unused",
+                    **ensure_setting,
+                },
+            },
+        },
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(BackendNotInstalledError) as exc_info:
+        _ = registry.knowledge.graph_store
+    assert exc_info.value.backend_name == "arcadedb"
+    assert exc_info.value.extra == "arcadedb"
+    assert isinstance(exc_info.value.__cause__, ImportError)
+    assert calls == []
+
+
+def test_instantiate_constructor_import_error_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store constructor that needs a missing module raises loudly.
+
+    Pins the constructor site in ``_instantiate``: ``S3BlobStore.__init__``
+    raises ``ImportError`` when ``boto3`` is missing.
+    """
+    monkeypatch.setattr("trellis.stores.s3.blob.HAS_BOTO3", False)
+    config_dir = _write_config(
+        tmp_path / "cfg",
+        stores={"knowledge": {"blob": {"backend": "s3", "bucket": "b"}}},
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    with pytest.raises(BackendNotInstalledError) as exc_info:
+        _ = registry.knowledge.blob_store
+    assert exc_info.value.backend_name == "s3"
+    assert exc_info.value.extra == "cloud"
+    assert isinstance(exc_info.value.__cause__, ImportError)
 
 
 # -- _load_fingerprint_meta raises ---------------------------------------

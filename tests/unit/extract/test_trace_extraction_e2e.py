@@ -31,6 +31,7 @@ from trellis.mutate.commands import CommandStatus
 from trellis.retrieve.pack_builder import PackBudget, PackBuilder
 from trellis.retrieve.strategies import GraphSearch
 from trellis.schemas.trace import Trace
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 _TRACE_DATA: dict = {
@@ -164,7 +165,18 @@ class TestUnmigratedGraph:
         results = build_curate_executor(registry).execute_batch(batch)
         failed = [r for r in results if r.status is CommandStatus.FAILED]
         assert len(failed) == 1
-        assert "Cannot change node_role" in failed[0].message
+        # The store raises a ValueError, which the caller reads by its type;
+        # the audit event keeps the text that names the role conflict.
+        assert failed[0].message == "Execution failed: ValueError"
+        rejected = [
+            event
+            for event in registry.operational.event_log.get_events(
+                event_type=EventType.MUTATION_REJECTED
+            )
+            if event.payload["command_id"] == failed[0].command_id
+        ]
+        assert len(rejected) == 1
+        assert "Cannot change node_role" in rejected[0].payload["message"]
 
     async def test_reconciled_batch_has_no_failed_commands(
         self, registry: StoreRegistry
@@ -294,3 +306,81 @@ class TestEvidenceLands:
         assert properties[FILES_TOUCHED_PROPERTY] == ["src/a.py"]
         assert properties[FILES_READ_PROPERTY] == ["src/b.py"]
         assert properties[COMMANDS_RUN_PROPERTY] == ["pytest -q"]
+
+
+class TestBlankEvidenceRef:
+    """An empty ``evidence_id`` must not make unrelated traces neighbours."""
+
+    async def test_traces_with_an_empty_ref_share_no_node(
+        self, registry: StoreRegistry
+    ) -> None:
+        traces = [
+            Trace.model_validate(
+                {
+                    "source": "agent",
+                    "intent": "cite evidence",
+                    "evidence_used": [
+                        {"evidence_id": ""},
+                        {"evidence_id": f"syn-ev-{n}"},
+                    ],
+                    "context": {},
+                }
+            )
+            for n in ("a", "b")
+        ]
+        for trace in traces:
+            await _extract_into(registry, trace)
+
+        graph = registry.knowledge.graph_store
+
+        def neighbours(trace: Trace) -> set[str]:
+            node_id = f"trace:{trace.trace_id}"
+            return {
+                e["target_id"] if e["source_id"] == node_id else e["source_id"]
+                for e in graph.get_edges(node_id, direction="both")
+            }
+
+        assert [neighbours(t) for t in traces] == [
+            {"evidence:syn-ev-a"},
+            {"evidence:syn-ev-b"},
+        ]
+        assert graph.get_node("evidence:") is None
+
+
+class TestBlankArtifactRef:
+    """An empty ``artifact_id`` must not make unrelated traces neighbours."""
+
+    async def test_traces_with_an_empty_ref_share_no_node(
+        self, registry: StoreRegistry
+    ) -> None:
+        traces = [
+            Trace.model_validate(
+                {
+                    "source": "agent",
+                    "intent": "produce artifacts",
+                    "artifacts_produced": [
+                        {"artifact_id": "", "artifact_type": "file"},
+                        {"artifact_id": f"syn-art-{n}", "artifact_type": "file"},
+                    ],
+                    "context": {},
+                }
+            )
+            for n in ("a", "b")
+        ]
+        for trace in traces:
+            await _extract_into(registry, trace)
+
+        graph = registry.knowledge.graph_store
+
+        def neighbours(trace: Trace) -> set[str]:
+            node_id = f"trace:{trace.trace_id}"
+            return {
+                e["target_id"] if e["source_id"] == node_id else e["source_id"]
+                for e in graph.get_edges(node_id, direction="both")
+            }
+
+        assert [neighbours(t) for t in traces] == [
+            {"artifact:syn-art-a"},
+            {"artifact:syn-art-b"},
+        ]
+        assert graph.get_node("artifact:") is None

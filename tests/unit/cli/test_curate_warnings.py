@@ -46,8 +46,19 @@ def stores_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return stores
 
 
-def _declare(stores: Path, *, deny: bool = False) -> None:
-    rules = [PolicyRule(operation="*", condition="unusual write", action="warn")]
+def _declare(
+    stores: Path,
+    *,
+    warn: bool = True,
+    deny: bool = False,
+    conditions: tuple[str, ...] = ("unusual write",),
+) -> None:
+    rules = []
+    if warn:
+        rules.extend(
+            PolicyRule(operation="*", condition=condition, action="warn")
+            for condition in conditions
+        )
     if deny:
         rules.append(
             PolicyRule(operation="*", condition="not permitted", action="deny")
@@ -64,47 +75,175 @@ def _declare(stores: Path, *, deny: bool = False) -> None:
     )
 
 
-def _label(*extra: str, exit_code: int = 0) -> str:
-    result = runner.invoke(app, ["curate", "label", "ent_1", "important", *extra])
+@pytest.fixture
+def node_id(stores_dir: Path) -> str:
+    """An entity to label, created before the test body declares a policy."""
+    return _seed("labelled")
+
+
+def _label(node_id: str, *extra: str, exit_code: int = 0) -> str:
+    result = runner.invoke(app, ["curate", "label", node_id, "important", *extra])
     assert result.exit_code == exit_code, result.output
     return result.output
 
 
 class TestJsonFormat:
-    def test_warning_present_when_a_policy_fires(self, stores_dir: Path) -> None:
+    def test_warning_present_when_a_policy_fires(
+        self, stores_dir: Path, node_id: str
+    ) -> None:
         _declare(stores_dir)
-        data = json.loads(_label("--format", "json").strip())
+        data = json.loads(_label(node_id, "--format", "json").strip())
         assert data["warnings"] == [WARNING_TEXT]
 
-    def test_warning_survives_a_rejection(self, stores_dir: Path) -> None:
+    def test_warning_survives_a_rejection(self, stores_dir: Path, node_id: str) -> None:
         _declare(stores_dir, deny=True)
-        data = json.loads(_label("--format", "json", exit_code=2).strip())
+        data = json.loads(_label(node_id, "--format", "json", exit_code=3).strip())
         assert data["status"] == "rejected"
         assert data["warnings"] == [WARNING_TEXT]
 
-    def test_key_is_present_and_empty_with_no_policies(self, stores_dir: Path) -> None:
-        data = json.loads(_label("--format", "json").strip())
+    def test_key_is_present_and_empty_with_no_policies(self, node_id: str) -> None:
+        data = json.loads(_label(node_id, "--format", "json").strip())
         assert "warnings" in data, "absent key is indistinguishable from an old build"
         assert data["warnings"] == []
 
 
 class TestTextFormat:
-    def test_warning_is_printed(self, stores_dir: Path) -> None:
+    def test_warning_is_printed(self, stores_dir: Path, node_id: str) -> None:
         _declare(stores_dir)
-        assert WARNING_TEXT in plain(_label())
+        assert WARNING_TEXT in plain(_label(node_id))
 
-    def test_nothing_printed_when_no_policy_fires(self, stores_dir: Path) -> None:
+    def test_nothing_printed_when_no_policy_fires(self, node_id: str) -> None:
         """No policies must leave the rendering exactly as it was.
 
         The transparency property the JSON arm gives up on purpose: a human
         surface has no parser to mislead, so an empty ``Warning:`` line would
         be noise rather than evidence.
         """
-        assert "Warning:" not in plain(_label())
+        assert "Warning:" not in plain(_label(node_id))
 
-    def test_warning_survives_a_rejection(self, stores_dir: Path) -> None:
-        """A refusal exits 2 only after the text arm has printed its warnings."""
+    def test_warning_survives_a_rejection(self, stores_dir: Path, node_id: str) -> None:
+        """A policy refusal exits 3, after the text arm has printed its warnings."""
         _declare(stores_dir, deny=True)
-        output = plain(_label(exit_code=2))
+        output = plain(_label(node_id, exit_code=3))
         assert "Command rejected" in output
         assert WARNING_TEXT in output
+
+
+# The curate writes that build their own result, instead of going through
+# ``_execute_command`` as ``label``, ``promote`` and ``feedback`` do.
+_SITES = ["entity", "prune", "restore", "redact", "link"]
+
+
+def _seed(name: str) -> str:
+    """Create an entity before any policy exists, and return its id."""
+    result = runner.invoke(
+        app, ["curate", "entity", "concept", name, "--format", "json"]
+    )
+    assert result.exit_code == 0, result.output
+    return json.loads(result.output.strip())["node_id"]
+
+
+def _argv(command: str) -> list[str]:
+    """Build *command*'s argv, seeding the entities it needs."""
+    if command == "entity":
+        return ["curate", "entity", "concept", "n"]
+    if command == "prune":
+        # ``--apply`` skips the dry-run notice, so a warning line nested
+        # under that notice's ``if`` would go missing.
+        return ["curate", "prune", "--reason", "r", "--noise-documents", "--apply"]
+    if command == "restore":
+        return ["curate", "restore", "--item-id", "x1", "--reason", "r"]
+    if command == "redact":
+        return ["curate", "redact", _seed("a"), "--reason", "r", "--yes"]
+    return ["curate", "link", _seed("a"), _seed("b")]
+
+
+def _run(argv: list[str], *extra: str, exit_code: int = 0) -> str:
+    result = runner.invoke(app, [*argv, *extra])
+    assert result.exit_code == exit_code, result.output
+    return result.output
+
+
+@pytest.mark.parametrize("command", _SITES)
+class TestEveryCurateWrite:
+    """The other curate writes show a warning the way ``label`` does."""
+
+    def test_json_carries_the_warning(self, stores_dir: Path, command: str) -> None:
+        argv = _argv(command)
+        _declare(stores_dir)
+        data = json.loads(_run(argv, "--format", "json").strip())
+        assert data["warnings"] == [WARNING_TEXT]
+
+    def test_json_refusal_carries_the_warning(
+        self, stores_dir: Path, command: str
+    ) -> None:
+        argv = _argv(command)
+        _declare(stores_dir, deny=True)
+        output = _run(argv, "--format", "json", exit_code=3)
+        assert json.loads(output.strip())["warnings"] == [WARNING_TEXT]
+
+    def test_json_key_is_present_and_empty_with_no_policies(
+        self, stores_dir: Path, command: str
+    ) -> None:
+        data = json.loads(_run(_argv(command), "--format", "json").strip())
+        assert data["warnings"] == []
+
+    def test_json_refusal_with_no_warning_keeps_the_empty_key(
+        self, stores_dir: Path, command: str
+    ) -> None:
+        argv = _argv(command)
+        _declare(stores_dir, warn=False, deny=True)
+        output = _run(argv, "--format", "json", exit_code=3)
+        assert json.loads(output.strip())["warnings"] == []
+
+    def test_text_prints_the_warning(self, stores_dir: Path, command: str) -> None:
+        argv = _argv(command)
+        _declare(stores_dir)
+        assert WARNING_TEXT in plain(_run(argv))
+
+    def test_text_refusal_prints_the_warning(
+        self, stores_dir: Path, command: str
+    ) -> None:
+        argv = _argv(command)
+        _declare(stores_dir, deny=True)
+        assert WARNING_TEXT in plain(_run(argv, exit_code=3))
+
+
+def test_markup_in_a_policy_condition_prints_verbatim(stores_dir: Path) -> None:
+    """A policy's condition is free text, so the warning line escapes it.
+
+    Unescaped, ``[/x]`` raises ``MarkupError`` after the write has committed,
+    and the command exits 1. The id-markup rule cannot catch that, because
+    ``warning`` is not an id-shaped name.
+    """
+    _declare(stores_dir, conditions=("unusual [/x] write",))
+    output = plain(_run(_argv("prune")))
+    assert "Policy warning (pol-warn): unusual [/x] write" in output
+
+
+def test_markup_in_a_link_refusal_prints_verbatim(stores_dir: Path) -> None:
+    """A ``link`` refusal can quote the ids it was given, so its line escapes.
+
+    Unescaped, ``[/x]`` in an id raises ``MarkupError`` before the refusal or
+    its warning prints, and the traceback exits 1. The refusal exits 2.
+    """
+    source = _seed("a")
+    _declare(stores_dir)
+    output = plain(_run(["curate", "link", source, "ghost[/x]id"], exit_code=2))
+    assert "ghost[/x]id" in output
+    assert WARNING_TEXT in output
+
+
+def test_each_warning_gets_its_own_line(stores_dir: Path) -> None:
+    """Two warnings print two lines, in order, below the result.
+
+    Every other test here fires one warning, so a helper that printed only
+    the first would pass them all. Two is not exotic: a policy warning and
+    the ``audit_event_not_recorded`` note make two.
+    """
+    _declare(stores_dir, conditions=("unusual write", "second look"))
+    lines = plain(_run(_argv("entity"))).strip().splitlines()
+    assert [line.strip() for line in lines[-2:]] == [
+        f"Warning: {WARNING_TEXT}",
+        "Warning: Policy warning (pol-warn): second look",
+    ]

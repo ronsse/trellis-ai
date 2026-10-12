@@ -13,6 +13,7 @@ from trellis.retrieve.builder_factory import (
     SEMANTIC_AXIS_NOTES,
     build_pack_builder,
     describe_axes,
+    format_embedder_failed_note,
 )
 from trellis.retrieve.file_context import MATCH_FILES_TOUCHED, build_file_context
 from trellis.retrieve.precedents import list_precedents as _list_precedents
@@ -109,8 +110,8 @@ def pack(
       chunk rows on purpose, the excerpt is what the budget prices, and
       the flag would now suppress candidates the agent-facing path keeps.
     * ``--format json`` returns the pack, not a list of ids — same shape
-      as ``POST /api/v1/packs`` plus the axis report, so an operator's
-      preview and an agent's pack are directly comparable.
+      as ``POST /api/v1/packs``, so an operator's preview and an agent's
+      pack are directly comparable.
     """
     registry = _get_registry()
     builder = build_pack_builder(registry, surface="cli.retrieve")
@@ -130,12 +131,24 @@ def pack(
     # and ``build_strategies`` drops that axis with a log line the CLI's
     # WARNING default never prints. Reporting the result without reporting
     # the gap would reproduce #410 one layer up.
+    # Both kwargs come from the builder, not a second ``registry.embedding_fn``
+    # read — that property re-raises on every access when misconfigured
+    # (Q5-A).
     axes = describe_axes(
         builder,
         pack_result.retrieval_report.strategies_used,
-        embedder_configured=registry.embedding_fn is not None,
+        embedder_configured=builder.embedder_configured,
+        embedder_resolve_failure=builder.embedder_resolve_failure,
     )
-    axis_note = SEMANTIC_AXIS_NOTES.get(axes["semantic"], "")
+    # SEMANTIC_AXIS_NOTES has no "embedder_failed" entry: that state's
+    # note is dynamic (names the actual error type and setting), unlike
+    # every other state's fixed string.
+    if axes["semantic"] == "embedder_failed":
+        axis_note = format_embedder_failed_note(
+            axes["embedder_error_type"], axes["embedder_setting"]
+        )
+    else:
+        axis_note = SEMANTIC_AXIS_NOTES.get(axes["semantic"], "")
 
     # #404: read the summary the builder stamped, do not re-derive one.
     # The JSON arm emits the stamped payload verbatim rather than
@@ -294,7 +307,10 @@ def trace(
         if output_format == "json":
             emit_json({"status": "not_found", "trace_id": trace_id})
         else:
-            console.print(f"[yellow]Trace not found[/yellow]: {escape(trace_id)}")
+            console.print(
+                f"[yellow]Trace not found[/yellow]: {escape(trace_id)}",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
@@ -332,7 +348,10 @@ def entity(
         if output_format == "json":
             emit_json({"status": "not_found", "entity_id": entity_id})
         else:
-            console.print(f"[yellow]Entity not found[/yellow]: {escape(entity_id)}")
+            console.print(
+                f"[yellow]Entity not found[/yellow]: {escape(entity_id)}",
+                soft_wrap=True,
+            )
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if output_format == "json":
@@ -470,7 +489,8 @@ def file_context(
     if output_format not in ("text", "json", "jsonl"):
         console.print(
             f"[red]Unsupported --format {output_format!r};"
-            " expected one of: text, json, jsonl[/red]"
+            " expected one of: text, json, jsonl[/red]",
+            soft_wrap=True,
         )
         raise typer.Exit(EXIT_VALIDATION)
 

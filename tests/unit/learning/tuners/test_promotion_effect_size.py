@@ -138,7 +138,7 @@ def test_every_key_new_is_a_bootstrap_not_a_no_op():
     assert (
         _apply_policy(
             proposal=_proposal(proposed_values={"brand_new": 4.0}),
-            policy=PromotionPolicy(),
+            policy=PromotionPolicy(allow_no_baseline=True),
             baseline_values={"other": 1.0},
             effect=effect,
         )
@@ -223,6 +223,7 @@ def test_first_promotion_for_a_scope_emits_a_storable_payload(stores):
         parameter_store=params,
         tuner_state=state,
         event_log=events,
+        policy=PromotionPolicy(allow_no_baseline=True),
     )
 
     assert result.status == "promoted"

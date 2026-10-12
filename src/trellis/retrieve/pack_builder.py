@@ -18,17 +18,32 @@ Failure semantics (C2 Phase 4):
 
 from __future__ import annotations
 
+import os
 import re
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, TypeVar
 
 import structlog
 
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.base import utc_now
+from trellis.core.error_sanitize import (
+    SUPPRESSED_MARKER,
+    sanitize_error_message,
+    summarize_exception,
+)
 from trellis.core.hashing import content_hash
+from trellis.core.pack_holdout import (
+    HOLDOUT_ADVISORY_IDS_KEY,
+    HOLDOUT_ITEMS_KEY,
+    HOLDOUT_KEY,
+    HOLDOUT_RATE_KEY,
+    HOLDOUT_SECTIONS_KEY,
+    is_held_out,
+)
 from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.retrieve.concentration import measure_parent_concentration
@@ -60,6 +75,7 @@ from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.servable import strip_non_servable
 from trellis.retrieve.strategies import (
     RECENCY_CLOCK_METADATA_KEY,
+    EmbedderResolveFailure,
     SearchStrategy,
 )
 from trellis.retrieve.tier_mapping import TierMapper
@@ -83,6 +99,10 @@ from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.event_log import EventLog, EventType
 
 logger = structlog.get_logger()
+
+#: Bound for :meth:`PackBuilder._blind_advisories_for_empty_pack`, which
+#: must hand back the exact pack type it was given.
+_PackT = TypeVar("_PackT", Pack, SectionedPack)
 
 #: Default window for session-aware dedup. When a ``session_id`` is
 #: supplied, items served in prior packs within this window are excluded.
@@ -109,6 +129,70 @@ DEFAULT_SESSION_DEDUP_EVENT_LIMIT = 200
 #: and ``docs/agent-guide/pack-quality-evaluation.md`` for usage.
 PackEvaluator = Callable[[Pack], "QualityReport | None"]
 
+#: Kill switch for withholding advisories minted before the #394 generator
+#: repair (decision-ledger D-4, option B). Unset means **on**.
+#:
+#: A **read-side** knob, deliberately outside :mod:`trellis.core.write_config`
+#: for the same reason :data:`trellis.retrieve.builder_factory.GRAPH_SEEDING_ENV`
+#: lives there instead of here: that module is the one home for *ingest-time*
+#: behaviour, and this is what gets *served*, not what gets written.
+#:
+#: Pre-#394, the generator minted a fresh ULID ``advisory_id`` every nightly
+#: pass and never wrote ``AdvisoryEvidence.evidence_confidence`` (the field
+#: did not exist). #394 keyed ids on the finding instead
+#: (``adv-<category>-<hash>``), so a legacy ULID row can never collide with
+#: a regenerated one and is never replaced — it is stuck, forever, exactly
+#: as the old generator left it. decision-ledger D-4 calls these "known-
+#: degenerate output" the fitness loop must not be the first to see. Default
+#: **on** because that is the owner's chosen posture; the one-knob reversal
+#: is what makes it safe to ship without a live-store purge in the same
+#: change (clearing the rows is a separate, operator-only step).
+FILTER_LEGACY_ADVISORIES_ENV = "TRELLIS_FILTER_LEGACY_ADVISORIES"
+
+#: Settings-store key for the same knob (#settings-store PR 2/2) — see
+#: ``SettingSpec(name="filter_legacy_advisories")`` in
+#: :mod:`trellis.core.settings_registry`. Deliberately the same spelling as
+#: the setting name so a reader never has to map between the two.
+FILTER_LEGACY_ADVISORIES_SETTING = "filter_legacy_advisories"
+
+#: Accepted spellings, matching :mod:`trellis.retrieve.builder_factory`. A
+#: value in neither set is a typo, and a typo'd kill switch that silently
+#: keeps the default is how an operator ends up believing they disabled
+#: something they did not — so it warns rather than going quiet.
+_LEGACY_ADVISORY_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_LEGACY_ADVISORY_FALSEY = frozenset({"0", "false", "no", "off"})
+
+
+def _filter_legacy_advisories_enabled(settings: dict[str, Any] | None = None) -> bool:
+    """Read :data:`FILTER_LEGACY_ADVISORIES_ENV`, env > settings > default.
+
+    ``settings`` is the already-loaded ``name -> value`` mapping (e.g. from
+    :func:`trellis.stores.settings_store.load_settings_values`); a caller
+    with no settings access (or a direct :class:`PackBuilder` construction
+    that passes nothing) gets the env-only behaviour this had before
+    settings existed. Unset/unrecognised in the environment falls through
+    to :data:`FILTER_LEGACY_ADVISORIES_SETTING`; unset or non-bool there
+    means on — the same default either knob shipped with.
+
+    Read per build rather than at import, so a long-lived process picks up
+    an operator's change between runs — the same posture
+    :func:`trellis.retrieve.builder_factory._graph_seeding_enabled` takes.
+    """
+    raw = os.environ.get(FILTER_LEGACY_ADVISORIES_ENV, "").strip().lower()
+    if raw:
+        if raw in _LEGACY_ADVISORY_FALSEY:
+            return False
+        if raw not in _LEGACY_ADVISORY_TRUTHY:
+            logger.warning(
+                "filter_legacy_advisories_env_unrecognised",
+                var=FILTER_LEGACY_ADVISORIES_ENV,
+                value=raw,
+                effective=True,
+            )
+        return True
+    value = (settings or {}).get(FILTER_LEGACY_ADVISORIES_SETTING)
+    return value if isinstance(value, bool) else True
+
 
 class PackAssemblyError(RuntimeError):
     """Raised when pack assembly cannot make progress.
@@ -133,25 +217,105 @@ class PackAssemblyError(RuntimeError):
         self.strategy_failures = list(strategy_failures)
 
 
+def _audit_message(exc: Exception) -> str:
+    """Sanitized one-line summary of ``exc``, for the stored audit event.
+
+    Wrapped whole, not guarded by a list of exception types the way the
+    collect loop's own ``except Exception`` is — :func:`resolve_stamp_staleness`
+    (``trellis.core.version``) is the model CLAUDE.md names for this shape.
+    ``summarize_exception`` is not total: it reads ``exc.message`` on a
+    :class:`~trellis.errors.TrellisError`, which a subclass whose
+    ``__init__`` skips ``super().__init__()`` does not have, and it reads
+    driver-code attributes (``sqlstate``, ``code``, ``errno``) via
+    ``getattr`` with a default that only absorbs ``AttributeError`` — a
+    ``.code`` *property* that itself raises escapes that default. Both
+    call sites below run this inside the collect loop's own
+    GRACEFUL-DEGRADATION ``except Exception``, which exists precisely to
+    absorb arbitrary failures from the open ``SearchStrategy`` protocol;
+    an exotic exception shape must not turn that degrade into a crash.
+    Falling back to :data:`~trellis.core.error_sanitize.SUPPRESSED_MARKER`
+    means telemetry can never be the reason a strategy failure becomes
+    unrecoverable.
+    """
+    try:
+        return str(summarize_exception(exc)["message"])
+    except Exception:  # advisory; must never block a degrade
+        return SUPPRESSED_MARKER
+
+
 @dataclass(frozen=True)
 class StrategyFailure:
     """One entry per failed :class:`SearchStrategy.search` call.
 
     Attached to :class:`PackAssemblyError` when raised, and included in
     the ``PACK_ASSEMBLED`` event payload under ``strategy_failures``
-    when the build continues with survivors.
+    when the build continues with survivors. These two consumers have
+    different, incompatible disclosure rules for the same failure, so
+    this carries two message fields rather than one:
+
+    * ``message`` — the raw ``str(exc)``. ``PackAssemblyError`` quotes
+      this verbatim into the exception text
+      (:func:`_raise_if_blocking_strategy_failures`), and
+      :mod:`trellis_cli.main`'s plain-text render arm prints it
+      unsanitized to a human's terminal by design (#493,
+      ``tests/unit/cli/test_pack_assembly_boundary.py::test_the_machine_arm_suppresses_a_leaky_axis_message``)
+      — "it is going to a terminal, not into an artifact." The CLI's
+      own ``--format json`` arm and the MCP boundary already sanitize
+      this independently at render time
+      (:func:`~trellis.core.error_sanitize.sanitized_error_payload`,
+      :func:`~trellis.core.error_sanitize.render_exception_detail`), so
+      leaving it raw here does not leak it to either of those surfaces.
+    * ``audit_message`` — a sanitized one-line summary, computed once at
+      construction via the module-level :func:`_audit_message` helper
+      (``summarize_exception(exc)["message"]``, falling back to
+      :data:`~trellis.core.error_sanitize.SUPPRESSED_MARKER` if
+      summarizing itself raises) when a caller passes the original
+      exception, or at this constructor's own ``__post_init__`` when it
+      does not. This is what the two ``build``/``build_sectioned`` call
+      sites write into the *stored* ``PACK_ASSEMBLED`` event
+      (:meth:`to_audit_event_payload`) — a durable audit row has no
+      "it's just a terminal" excuse, so it never gets the raw, unbounded
+      ``str(exc)`` that could echo a DSN, credential or row value. When
+      a caller omits ``audit_message`` — the embedder-resolve branch
+      (:class:`~trellis.retrieve.strategies.EmbedderResolveFailure`) and
+      most tests, both constructing from an already-safe string rather
+      than a caught exception — ``__post_init__`` defaults it to
+      ``sanitize_error_message(message)``, never the raw ``message``
+      itself, so the stored form is sanitized by construction rather
+      than by caller discipline alone.
+
+    The axes block a pack response carries
+    (:func:`~trellis.retrieve.builder_factory.describe_axes`,
+    rendered by :func:`trellis_wire.axes.format_failed_axes_note`) never
+    reads either field — it names only which axes failed, never why —
+    so neither message can reach that agent-facing surface.
     """
 
     strategy: str
     error_class: str
     message: str
+    audit_message: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.audit_message is None:
+            object.__setattr__(
+                self, "audit_message", sanitize_error_message(self.message)
+            )
 
     def to_event_payload(self) -> dict[str, str]:
-        """Serialize for inclusion in the ``PACK_ASSEMBLED`` event."""
+        """Serialize for :mod:`trellis_cli.main`'s render helpers — raw ``message``."""
         return {
             "strategy": self.strategy,
             "error_class": self.error_class,
             "message": self.message,
+        }
+
+    def to_audit_event_payload(self) -> dict[str, str]:
+        """Serialize for the stored ``PACK_ASSEMBLED`` event — sanitized."""
+        return {
+            "strategy": self.strategy,
+            "error_class": self.error_class,
+            "message": self.audit_message or "",
         }
 
 
@@ -453,11 +617,29 @@ class PackBuilder:
         token_budget_validator: TokenCounter | None = None,
         content_floor: ContentFloorConfig | None = None,
         disclosure: DisclosureConfig | None = None,
+        project: str | None = None,
+        holdout_rate: float = 0.0,
+        embedder_configured: bool = False,
+        embedder_resolve_failure: EmbedderResolveFailure | None = None,
+        filter_legacy_advisories: bool | None = None,
     ) -> None:
+        if not 0.0 <= holdout_rate <= 1.0:
+            msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
+            raise ValueError(msg)
         self._strategies = strategies or []
         self._event_log = event_log
         self._advisory_store = advisory_store
         self._reranker = reranker
+        #: Whether an embedder resolved when :func:`build_strategies` built
+        #: ``strategies`` — the one-time outcome ``describe_axes`` call
+        #: sites read instead of re-reading ``registry.embedding_fn``
+        #: themselves (Q5-A).
+        self._embedder_configured = embedder_configured
+        #: Set when ``registry.embedding_fn`` raised instead of resolving.
+        #: ``None`` means either an embedder resolved or none is
+        #: configured at all — see :attr:`embedder_configured` to tell
+        #: those two apart.
+        self._embedder_resolve_failure = embedder_resolve_failure
         #: Fuzzy-dedup config. ``None`` disables (exact ``item_id`` dedup only).
         self._semantic_dedup = semantic_dedup
         #: Optional assembly-time evaluator. When set, :meth:`build` runs the
@@ -501,6 +683,67 @@ class PackBuilder:
         #: :data:`~trellis.retrieve.disclosure.DISCLOSURE_OFF` for the
         #: every-item-gets-a-body behaviour that preceded it.
         self._disclosure = disclosure or DEFAULT_DISCLOSURE
+        #: Project stamped on every ``PACK_ASSEMBLED`` payload: per process,
+        #: not per request, and ``None`` (never absent) when unknown.
+        self._project = project
+        #: Share of packs withheld for the pack-effect measurement
+        #: (:mod:`trellis.core.pack_holdout`). ``0.0`` withholds nothing;
+        #: the factory reads it from ``TRELLIS_PACK_HOLDOUT_RATE`` per build.
+        self._holdout_rate = holdout_rate
+        #: Resolved env > settings > default outcome for
+        #: :data:`FILTER_LEGACY_ADVISORIES_ENV`, or ``None`` to defer to a
+        #: live, env-only read in :meth:`_select_advisories` — the shape a
+        #: direct ``PackBuilder(...)`` construction (no factory in front of
+        #: it) relies on. :func:`trellis.retrieve.builder_factory.build_pack_builder`
+        #: resolves this once, with settings, and passes the bool in.
+        self._filter_legacy_advisories = filter_legacy_advisories
+
+    @property
+    def holdout_rate(self) -> float:
+        """The share of packs this builder withholds, in ``[0.0, 1.0]``."""
+        return self._holdout_rate
+
+    @property
+    def embedder_configured(self) -> bool:
+        """Whether an embedder resolved when this builder's strategies were built.
+
+        Sourced once, at construction, from
+        :attr:`~trellis.retrieve.strategies.BuildStrategiesResult.embedder_configured`
+        — callers must read this instead of ``registry.embedding_fn``,
+        which re-raises on every access when misconfigured (Q5-A).
+        """
+        return self._embedder_configured
+
+    @property
+    def embedder_resolve_failure(self) -> EmbedderResolveFailure | None:
+        """Set when resolving the embedder raised instead of resolving.
+
+        ``None`` means either an embedder resolved (:attr:`embedder_configured`
+        is ``True``) or none is configured at all. See
+        :func:`~trellis.retrieve.strategies.build_strategies`.
+        """
+        return self._embedder_resolve_failure
+
+    def _record_embedder_resolve_failure(
+        self, strategy_failures: list[StrategyFailure]
+    ) -> None:
+        """Append the embedder-resolve-failure entry, mutating in place.
+
+        Call this *after* ``_raise_if_blocking_strategy_failures`` has
+        already run against ``strategy_failures`` and
+        ``len(self._strategies)`` (Q5-A). The semantic axis never
+        reached ``self._strategies`` — ``build_strategies`` drops it
+        before construction when the embedder fails to resolve — so it
+        was never a candidate for the required-strategy or all-failed
+        blocking check, and appending here keeps it that way: visible to
+        ``PACK_ASSEMBLED.strategy_failures`` (and the
+        ``FailedStrategyReport`` tally it feeds) but never able to raise
+        :class:`PackAssemblyError` on its own.
+        """
+        if self._embedder_resolve_failure is not None:
+            strategy_failures.append(
+                self._embedder_resolve_failure.to_strategy_failure()
+            )
 
     def add_strategy(self, strategy: SearchStrategy) -> None:
         """Add a search strategy."""
@@ -520,7 +763,7 @@ class PackBuilder:
         """
         return [strategy.name for strategy in self._strategies]
 
-    def build(  # noqa: PLR0915
+    def build(  # noqa: PLR0912, PLR0915
         self,
         intent: str,
         *,
@@ -631,7 +874,15 @@ class PackBuilder:
         dedup; ``refresh=True`` remains the re-injection escape hatch.
         The payload carries ``index_mode`` so analyzers can tell the two
         serve shapes apart.
+
+        With a ``holdout_rate`` above zero the assembled pack is drawn for
+        the pack-effect holdout (:func:`~trellis.core.pack_holdout.is_held_out`
+        on its ``pack_id``). A withheld pack is returned empty, in the
+        normal shape and with nothing that names the holdout, and its
+        would-be items are recorded under ``holdout_items`` instead of
+        ``injected_items``; :meth:`build_sectioned` does the same per pack.
         """
+        start_time = time.perf_counter()
         budget = budget or PackBudget()
         all_items: list[PackItem] = []
         strategies_used: list[str] = []
@@ -682,6 +933,7 @@ class PackBuilder:
                         strategy=strategy.name,
                         error_class=type(exc).__name__,
                         message=str(exc),
+                        audit_message=_audit_message(exc),
                     )
                 )
                 continue
@@ -696,6 +948,7 @@ class PackBuilder:
             len(self._strategies),
             pack_kind="pack",
         )
+        self._record_embedder_resolve_failure(strategy_failures)
 
         # Promote metadata["source_strategy"] → strategy_source field
         all_items = self._promote_strategy_source(all_items)
@@ -819,7 +1072,7 @@ class PackBuilder:
             queries_run=len(strategies_used),
             candidates_found=candidates_found,
             items_selected=len(selected),
-            duration_ms=0,
+            duration_ms=round((time.perf_counter() - start_time) * 1000),
             strategies_used=strategies_used,
             rejected_items=rejected,
             budget_trace=budget_trace,
@@ -830,9 +1083,12 @@ class PackBuilder:
         # Capped at :attr:`_ADVISORY_MAX_COUNT` (#392); provenance is
         # stamped from the *served* set, because an advisory the caller
         # never saw cannot have influenced anything it did.
-        advisories, advisories_matched, advisories_explored = self._select_advisories(
-            domain
-        )
+        (
+            advisories,
+            advisories_matched,
+            advisories_explored,
+            advisories_filtered_legacy,
+        ) = self._select_advisories(domain)
         selected = self._attach_advisory_provenance(selected, advisories)
 
         # What this build removed and did not serve (#404). Computed from
@@ -860,6 +1116,33 @@ class PackBuilder:
             metadata={"withholding": withholding.as_telemetry()},
         )
 
+        telemetry: dict[str, Any] = {
+            "meta_filtered_count": meta_filtered_count,
+            "content_floor": floor_result.as_telemetry(),
+            "disclosure": disclosure_result.as_telemetry(),
+            "parent_concentration": concentration.as_telemetry(),
+            "withholding": withholding.as_telemetry(),
+            "advisories_matched": advisories_matched,
+            "advisories_explored": advisories_explored,
+            "advisories_filtered_legacy": advisories_filtered_legacy,
+        }
+        # The pack-effect holdout (:mod:`trellis.core.pack_holdout`), drawn
+        # once the pack id exists and the would-be pack is known. A withheld
+        # caller receives an ordinary empty pack: blind, so nothing in the
+        # response names the holdout, and the would-be pack is recorded
+        # apart from the served one in PACK_ASSEMBLED.
+        withheld_from: Pack | None = None
+        if is_held_out(pack.pack_id, self._holdout_rate):
+            withheld_from, pack = pack, self._withhold_flat(pack)
+            telemetry = self._withheld_flat_telemetry(index_mode=index_mode)
+
+        # R1 (#844): applied to the *served* pack only, after the holdout
+        # draw above — ``withheld_from`` already captured the true would-be
+        # advisories, so this cannot touch the audit trail. A pack that is
+        # naturally empty (never drawn into the holdout) must still look
+        # like a withheld one, which ``_withhold_flat`` already empties.
+        pack = self._blind_advisories_for_empty_pack(pack, has_items=bool(pack.items))
+
         # Optional assembly-time quality evaluation (fail-soft).
         self._attach_quality_report(pack)
 
@@ -868,14 +1151,9 @@ class PackBuilder:
             self._emit_telemetry(
                 pack,
                 strategy_failures=strategy_failures,
-                meta_filtered_count=meta_filtered_count,
-                content_floor=floor_result.as_telemetry(),
-                disclosure=disclosure_result.as_telemetry(),
-                parent_concentration=concentration.as_telemetry(),
-                withholding=withholding.as_telemetry(),
                 index_mode=index_mode,
-                advisories_matched=advisories_matched,
-                advisories_explored=advisories_explored,
+                withheld_from=withheld_from,
+                **telemetry,
             )
 
         return pack
@@ -916,6 +1194,7 @@ class PackBuilder:
             5. Cross-section dedup: keep each item in its highest-scoring section.
             6. Emit telemetry and return SectionedPack.
         """
+        start_time = time.perf_counter()
         mapper = tier_mapper or TierMapper()
 
         # 1. Collect candidate pool (same as build())
@@ -967,6 +1246,7 @@ class PackBuilder:
                         strategy=strategy.name,
                         error_class=type(exc).__name__,
                         message=str(exc),
+                        audit_message=_audit_message(exc),
                     )
                 )
                 continue
@@ -977,6 +1257,7 @@ class PackBuilder:
             len(self._strategies),
             pack_kind="sectioned pack",
         )
+        self._record_embedder_resolve_failure(strategy_failures)
 
         # 1a. Pairwise supersession gate (#613) — see build().
         all_items, superseded = partition_superseded(all_items)
@@ -1115,6 +1396,11 @@ class PackBuilder:
             )
         )
 
+        # Snapshotted once rather than per section: every section report
+        # describes the same build, and timing each separately would
+        # measure the loop body's own dict lookups, not retrieval.
+        section_duration_ms = round((time.perf_counter() - start_time) * 1000)
+
         # 4. Cross-section dedup — keep item only in its best section
         pack_sections: list[PackSection] = []
         for section_req in sections:
@@ -1139,6 +1425,7 @@ class PackBuilder:
                 queries_run=len(strategies_used),
                 candidates_found=len(raw_sections.get(section_req.name, [])),
                 items_selected=len(annotated),
+                duration_ms=section_duration_ms,
                 strategies_used=strategies_used,
                 rejected_items=[
                     floor_rejections[item.item_id]
@@ -1159,9 +1446,12 @@ class PackBuilder:
                 )
             )
 
-        advisories, advisories_matched, advisories_explored = self._select_advisories(
-            domain
-        )
+        (
+            advisories,
+            advisories_matched,
+            advisories_explored,
+            advisories_filtered_legacy,
+        ) = self._select_advisories(domain)
 
         # Stamp per-item advisory provenance across all sections
         # (Unit C1, foundation for D1 axis C semantic tightening).
@@ -1189,20 +1479,131 @@ class PackBuilder:
             metadata={"withholding": withholding.as_telemetry()},
         )
 
+        telemetry: dict[str, Any] = {
+            "meta_filtered_count": meta_filtered_count,
+            "semantic_dedup_rejected_count": semantic_dedup_rejected_count,
+            "content_floor": floor_result.as_telemetry(),
+            "withholding": withholding.as_telemetry(),
+            "advisories_matched": advisories_matched,
+            "advisories_explored": advisories_explored,
+            "advisories_filtered_legacy": advisories_filtered_legacy,
+        }
+        # The pack-effect holdout, drawn as in :meth:`build`: the whole
+        # sectioned pack is withheld or none of it.
+        withheld_from: SectionedPack | None = None
+        if is_held_out(sectioned_pack.pack_id, self._holdout_rate):
+            withheld_from = sectioned_pack
+            sectioned_pack = self._withhold_sectioned(sectioned_pack)
+            telemetry = self._withheld_sectioned_telemetry()
+
+        # R1 (#844): see the matching comment in :meth:`build` — applied
+        # after the holdout draw, so ``withheld_from`` keeps the true
+        # would-be advisories and only the served pack is blinded.
+        sectioned_pack = self._blind_advisories_for_empty_pack(
+            sectioned_pack,
+            has_items=any(section.items for section in sectioned_pack.sections),
+        )
+
         # 5. Emit telemetry
         if self._event_log is not None:
             self._emit_sectioned_telemetry(
                 sectioned_pack,
                 strategy_failures=strategy_failures,
-                meta_filtered_count=meta_filtered_count,
-                semantic_dedup_rejected_count=semantic_dedup_rejected_count,
-                content_floor=floor_result.as_telemetry(),
-                withholding=withholding.as_telemetry(),
-                advisories_matched=advisories_matched,
-                advisories_explored=advisories_explored,
+                withheld_from=withheld_from,
+                **telemetry,
             )
 
         return sectioned_pack
+
+    @staticmethod
+    def _withhold_flat(pack: Pack) -> Pack:
+        """The pack a withheld caller receives: the same pack, emptied.
+
+        Identity and request fields stay (``pack_id``, intent, budget,
+        session, run, intent family). Items and advisories go, and the
+        report and withholding summary are the ones a build that found
+        nothing carries, so the response reads like any greenfield pack.
+        """
+        report = pack.retrieval_report
+        return pack.model_copy(
+            update={
+                "items": [],
+                "advisories": [],
+                "retrieval_report": RetrievalReport(
+                    queries_run=report.queries_run,
+                    duration_ms=report.duration_ms,
+                    strategies_used=list(report.strategies_used),
+                ),
+                "metadata": {"withholding": summarize_withheld([], []).as_telemetry()},
+            }
+        )
+
+    @staticmethod
+    def _withhold_sectioned(pack: SectionedPack) -> SectionedPack:
+        """The sectioned pack a withheld caller receives: every section empty.
+
+        Section names and budgets stay, because the request fixed them;
+        each section's report is the one an empty section carries.
+        """
+        return pack.model_copy(
+            update={
+                "sections": [
+                    PackSection(
+                        name=section.name,
+                        retrieval_report=RetrievalReport(
+                            queries_run=section.retrieval_report.queries_run,
+                            duration_ms=section.retrieval_report.duration_ms,
+                            strategies_used=list(
+                                section.retrieval_report.strategies_used
+                            ),
+                        ),
+                        budget=section.budget,
+                    )
+                    for section in pack.sections
+                ],
+                "advisories": [],
+                "metadata": {"withholding": summarize_withheld([], []).as_telemetry()},
+            }
+        )
+
+    def _withheld_flat_telemetry(self, *, index_mode: bool) -> dict[str, Any]:
+        """Telemetry blocks for the empty pack a withheld caller received.
+
+        Each is what this builder computes over an empty item list, so a
+        withheld row's standard keys read as a greenfield pack's; the
+        would-be pack rides the ``holdout_*`` keys instead.
+        """
+        disclosure = apply_disclosure(
+            [], DISCLOSURE_OFF if index_mode else self._disclosure
+        )
+        return {
+            "meta_filtered_count": 0,
+            "content_floor": apply_content_floor(
+                [], self._content_floor
+            ).as_telemetry(),
+            "disclosure": disclosure.as_telemetry(),
+            "parent_concentration": measure_parent_concentration(
+                [], pointer_item_ids=frozenset()
+            ).as_telemetry(),
+            "withholding": summarize_withheld([], []).as_telemetry(),
+            "advisories_matched": 0,
+            "advisories_explored": [],
+            "advisories_filtered_legacy": 0,
+        }
+
+    def _withheld_sectioned_telemetry(self) -> dict[str, Any]:
+        """The sectioned counterpart of :meth:`_withheld_flat_telemetry`."""
+        return {
+            "meta_filtered_count": 0,
+            "semantic_dedup_rejected_count": 0,
+            "content_floor": apply_content_floor(
+                [], self._content_floor
+            ).as_telemetry(),
+            "withholding": summarize_withheld([], []).as_telemetry(),
+            "advisories_matched": 0,
+            "advisories_explored": [],
+            "advisories_filtered_legacy": 0,
+        }
 
     def _emit_sectioned_telemetry(
         self,
@@ -1215,8 +1616,15 @@ class PackBuilder:
         withholding: dict[str, Any] | None = None,
         advisories_matched: int | None = None,
         advisories_explored: list[str] | None = None,
+        advisories_filtered_legacy: int | None = None,
+        withheld_from: SectionedPack | None = None,
     ) -> None:
         """Emit telemetry event for a sectioned pack.
+
+        ``holdout`` / ``holdout_rate`` and, on a withheld pack's row,
+        ``holdout_sections`` / ``holdout_advisory_ids`` follow the flat
+        path (see :meth:`_emit_telemetry`); ``holdout_sections`` rows have
+        the shape of ``sections``.
 
         ``semantic_dedup_rejected_count`` (#259) mirrors the flat path's
         ``semantic_dedup_rejected`` payload field so near-duplicate
@@ -1231,6 +1639,14 @@ class PackBuilder:
         operator can see that a cap bound without inferring it from which
         build was deployed. Equal to ``len(advisory_ids)`` whenever the
         cap did not bind.
+
+        ``advisories_filtered_legacy`` (decision-ledger D-4, option B) is how
+        many matching advisories were withheld for predating the #394
+        generator repair — rows ``_is_legacy_advisory`` identifies by a
+        missing ``evidence_confidence``, dropped before ranking/capping so
+        one can never occupy an explore or cap slot. ``0`` when the
+        ``TRELLIS_FILTER_LEGACY_ADVISORIES`` knob is off, since nothing is
+        withheld in that case.
         """
         per_item_estimates = [
             item.estimated_tokens or self._token_counter.count(item.excerpt)
@@ -1245,6 +1661,15 @@ class PackBuilder:
             ],
             per_item_estimates=per_item_estimates,
         )
+        holdout: dict[str, Any] = {
+            HOLDOUT_KEY: withheld_from is not None,
+            HOLDOUT_RATE_KEY: self._holdout_rate,
+        }
+        if withheld_from is not None:
+            holdout[HOLDOUT_SECTIONS_KEY] = self._section_rows(withheld_from.sections)
+            holdout[HOLDOUT_ADVISORY_IDS_KEY] = [
+                a.advisory_id for a in withheld_from.advisories
+            ]
         self._event_log.emit(  # type: ignore[union-attr]
             EventType.PACK_ASSEMBLED,
             source="pack_builder",
@@ -1263,8 +1688,17 @@ class PackBuilder:
                 # need a second change once it is.
                 "run_id": pack.run_id,
                 "intent_family": pack.intent_family,
+                "project": self._project,
                 "section_count": len(pack.sections),
                 "total_items": pack.total_items,
+                # All sections share one build, so one timing: see
+                # ``_emit_telemetry``'s ``duration_ms`` note for what it
+                # measures. ``0`` only when the request named no sections.
+                "duration_ms": (
+                    pack.sections[0].retrieval_report.duration_ms
+                    if pack.sections
+                    else 0
+                ),
                 # Per-item content hashes (issue #258), flattened across
                 # sections. Symmetric with the flat pack payload so the
                 # served-set reader consults one field for both pack kinds.
@@ -1273,17 +1707,7 @@ class PackBuilder:
                     for section in pack.sections
                     for item in section.items
                 },
-                "sections": [
-                    {
-                        "name": s.name,
-                        "items_count": len(s.items),
-                        "item_ids": [i.item_id for i in s.items],
-                        "injected_advisory_ids": [
-                            list(i.injected_advisory_ids) for i in s.items
-                        ],
-                    }
-                    for s in pack.sections
-                ],
+                "sections": self._section_rows(pack.sections),
                 "advisory_ids": [a.advisory_id for a in pack.advisories],
                 "advisories_matched": (
                     len(pack.advisories)
@@ -1295,18 +1719,39 @@ class PackBuilder:
                 # running and found nothing to explore" is
                 # distinguishable from a build that has no slot at all.
                 "advisories_explored": list(advisories_explored or []),
+                "advisories_filtered_legacy": (
+                    0
+                    if advisories_filtered_legacy is None
+                    else advisories_filtered_legacy
+                ),
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
                 "semantic_dedup_rejected": semantic_dedup_rejected_count,
                 "content_floor": content_floor or {},
                 "withholding": withholding or {},
                 "strategy_failures": [
-                    sf.to_event_payload() for sf in (strategy_failures or [])
+                    sf.to_audit_event_payload() for sf in (strategy_failures or [])
                 ],
                 "meta_filtered_count": meta_filtered_count,
+                **holdout,
                 **token_budget_fields,
             },
         )
+
+    @staticmethod
+    def _section_rows(sections: Iterable[PackSection]) -> list[dict[str, Any]]:
+        """Per-section ``PACK_ASSEMBLED`` rows: name, count and item ids."""
+        return [
+            {
+                "name": s.name,
+                "items_count": len(s.items),
+                "item_ids": [i.item_id for i in s.items],
+                "injected_advisory_ids": [
+                    list(i.injected_advisory_ids) for i in s.items
+                ],
+            }
+            for s in sections
+        ]
 
     def _attach_quality_report(self, pack: Pack) -> None:
         """Run the optional evaluator and attach its report to the pack.
@@ -1383,8 +1828,20 @@ class PackBuilder:
         index_mode: bool = False,
         advisories_matched: int | None = None,
         advisories_explored: list[str] | None = None,
+        advisories_filtered_legacy: int | None = None,
+        withheld_from: Pack | None = None,
     ) -> None:
         """Emit a ContextRetrievalEvent for observability.
+
+        ``holdout`` and ``holdout_rate`` ride every row: whether the
+        pack-effect holdout withheld this pack, and the rate in force
+        (:mod:`trellis.core.pack_holdout`), so a row from a build without
+        the flag reads apart from a served one. ``pack`` is what the caller
+        received, so a withheld row's standard keys describe an empty pack
+        and ``injected_items`` is empty: no reader counts a withheld item
+        as served. ``withheld_from``, the pack as built, is recorded under
+        ``holdout_items`` (rows shaped like ``injected_items``) and
+        ``holdout_advisory_ids``.
 
         ``strategy_failures`` (C2 Phase 4) records each strategy that
         raised during this build but did not block assembly because a
@@ -1450,6 +1907,19 @@ class PackBuilder:
         operator can see that a cap bound without inferring it from which
         build was deployed. Equal to ``len(advisory_ids)`` whenever the
         cap did not bind.
+
+        ``advisories_filtered_legacy`` (decision-ledger D-4, option B) is how
+        many matching advisories were withheld for predating the #394
+        generator repair — rows ``_is_legacy_advisory`` identifies by a
+        missing ``evidence_confidence``, dropped before ranking/capping so
+        one can never occupy an explore or cap slot. ``0`` when the
+        ``TRELLIS_FILTER_LEGACY_ADVISORIES`` knob is off, since nothing is
+        withheld in that case.
+
+        ``duration_ms`` is wall-clock time for this build, from entry to
+        the point the :class:`RetrievalReport` is constructed (strategy
+        search through budget application). Health reporting had no
+        latency signal before this: every build hard-coded ``0``.
         """
         report = pack.retrieval_report
         token_budget_fields = self._build_token_budget_payload(
@@ -1466,6 +1936,15 @@ class PackBuilder:
                 b.item_tokens for b in report.budget_trace if b.included
             ],
         )
+        holdout: dict[str, Any] = {
+            HOLDOUT_KEY: withheld_from is not None,
+            HOLDOUT_RATE_KEY: self._holdout_rate,
+        }
+        if withheld_from is not None:
+            holdout[HOLDOUT_ITEMS_KEY] = self._injected_item_rows(withheld_from.items)
+            holdout[HOLDOUT_ADVISORY_IDS_KEY] = [
+                a.advisory_id for a in withheld_from.advisories
+            ]
         self._event_log.emit(  # type: ignore[union-attr]
             EventType.PACK_ASSEMBLED,
             source="pack_builder",
@@ -1481,6 +1960,7 @@ class PackBuilder:
                 # present, its value is ``None`` when unknown.
                 "run_id": pack.run_id,
                 "intent_family": pack.intent_family,
+                "project": self._project,
                 "items_count": len(pack.items),
                 "injected_item_ids": [item.item_id for item in pack.items],
                 # Per-item content hashes (issue #258): lets a later build in
@@ -1491,24 +1971,10 @@ class PackBuilder:
                     item.item_id: content_hash(item.excerpt or "")
                     for item in pack.items
                 },
-                "injected_items": [
-                    {
-                        "item_id": item.item_id,
-                        "item_type": item.item_type,
-                        "rank": item.rank,
-                        "selection_reason": item.selection_reason,
-                        "score_breakdown": item.score_breakdown,
-                        "estimated_tokens": item.estimated_tokens,
-                        "strategy_source": item.strategy_source,
-                        "injected_advisory_ids": list(item.injected_advisory_ids),
-                        # title / category / domain_system for the learning
-                        # join — see :func:`_item_attribution`.
-                        **_item_attribution(item),
-                    }
-                    for item in pack.items
-                ],
+                "injected_items": self._injected_item_rows(pack.items),
                 "strategies_used": report.strategies_used,
                 "candidates_found": report.candidates_found,
+                "duration_ms": report.duration_ms,
                 "budget_max_items": pack.budget.max_items,
                 "budget_max_tokens": pack.budget.max_tokens,
                 "rejected_items": [
@@ -1545,19 +2011,45 @@ class PackBuilder:
                 # running and found nothing to explore" is
                 # distinguishable from a build that has no slot at all.
                 "advisories_explored": list(advisories_explored or []),
+                "advisories_filtered_legacy": (
+                    0
+                    if advisories_filtered_legacy is None
+                    else advisories_filtered_legacy
+                ),
                 "reranker": self._reranker.name if self._reranker else None,
                 "semantic_dedup_enabled": self._semantic_dedup is not None,
                 "semantic_dedup_rejected": sum(
                     1 for r in report.rejected_items if r.reason == "semantic_dedup"
                 ),
                 "strategy_failures": [
-                    sf.to_event_payload() for sf in (strategy_failures or [])
+                    sf.to_audit_event_payload() for sf in (strategy_failures or [])
                 ],
                 "meta_filtered_count": meta_filtered_count,
                 "index_mode": index_mode,
+                **holdout,
                 **token_budget_fields,
             },
         )
+
+    @staticmethod
+    def _injected_item_rows(items: Iterable[PackItem]) -> list[dict[str, Any]]:
+        """Per-item ``PACK_ASSEMBLED`` rows, the shape the learning join reads."""
+        return [
+            {
+                "item_id": item.item_id,
+                "item_type": item.item_type,
+                "rank": item.rank,
+                "selection_reason": item.selection_reason,
+                "score_breakdown": item.score_breakdown,
+                "estimated_tokens": item.estimated_tokens,
+                "strategy_source": item.strategy_source,
+                "injected_advisory_ids": list(item.injected_advisory_ids),
+                # title / category / domain_system for the learning
+                # join — see :func:`_item_attribution`.
+                **_item_attribution(item),
+            }
+            for item in items
+        ]
 
     def _build_token_budget_payload(
         self,
@@ -1763,15 +2255,22 @@ class PackBuilder:
 
     def _select_advisories(
         self, domain: str | None
-    ) -> tuple[list[Any], int, list[str]]:
+    ) -> tuple[list[Any], int, list[str], int]:
         """Rank the matching advisories and cut them to the delivery cap.
 
-        Returns ``(served, matched, explored)`` — the advisories that ride
-        the pack, how many matched before the cap, and the ids among the
-        served that took the explore slot. The first two make the cap's
-        effect a property of the served record (``PACK_ASSEMBLED.payload
-        ["advisories_matched"]``) rather than an inference about which
-        build was deployed; the third does the same for the slot.
+        Returns ``(served, matched, explored, filtered_legacy)`` — the
+        advisories that ride the pack, how many matched before the cap, the
+        ids among the served that took the explore slot, and how many
+        pre-#394 rows (decision-ledger D-4, option B) were withheld by
+        :data:`FILTER_LEGACY_ADVISORIES_ENV` before ranking. The first two
+        make the cap's effect a property of the served record
+        (``PACK_ASSEMBLED.payload["advisories_matched"]``) rather than an
+        inference about which build was deployed; the third does the same
+        for the slot, and the fourth for the legacy filter — a withheld
+        legacy row has no ``RejectedItem`` to carry it (that schema is
+        ``PackItem``-only), so a counter in telemetry is the record.
+        Filtered *before* ranking and the cap, so a legacy row can never
+        occupy a slot a post-repair finding would have won.
 
         **The cap is self-reinforcing without a reserved slot** (#502).
         Selection reads ``confidence``; ``confidence`` is only ever moved
@@ -1941,10 +2440,18 @@ class PackBuilder:
         the ties are now larger, just lower down.
         """
         matching = self._get_matching_advisories(domain)
+        filtered_legacy = 0
+        effective_filter = self._filter_legacy_advisories
+        if effective_filter is None:
+            effective_filter = _filter_legacy_advisories_enabled()
+        if effective_filter:
+            before = len(matching)
+            matching = [a for a in matching if not self._is_legacy_advisory(a)]
+            filtered_legacy = before - len(matching)
         matching.sort(key=self._advisory_rank)
         cap = self._ADVISORY_MAX_COUNT
         if len(matching) <= cap:
-            return matching, len(matching), []
+            return matching, len(matching), [], filtered_legacy
 
         slots = self._ADVISORY_EXPLORE_SLOTS
         exploit = matching[: cap - slots]
@@ -1969,7 +2476,7 @@ class PackBuilder:
                     break
 
         served.sort(key=self._advisory_rank)
-        return served, len(matching), [a.advisory_id for a in explore]
+        return served, len(matching), [a.advisory_id for a in explore], filtered_legacy
 
     @staticmethod
     def _advisory_rank(advisory: Any) -> tuple[float, int, str]:
@@ -1979,6 +2486,27 @@ class PackBuilder:
             -advisory.evidence.sample_size,
             advisory.advisory_id,
         )
+
+    @staticmethod
+    def _is_legacy_advisory(advisory: Any) -> bool:
+        """True for a row minted before the #394 generator repair.
+
+        The repaired generator is the only writer that populates
+        ``AdvisoryEvidence.evidence_confidence`` — every one of its five
+        analysis methods sets it, four through the shared ``_evidence``
+        helper and ``_scope_analysis`` directly. The field did not exist
+        before #394, so a pre-repair row's stored JSON never carries it and
+        it loads as ``None``. It can never become populated afterwards
+        either: #394 also moved ``advisory_id`` from a fresh ULID per run to
+        a hash stable per finding, so a legacy ULID id never collides with
+        a regenerated one and ``AdvisoryStore.put_many`` can never replace
+        it in place (decision-ledger D-4). Measured against the live store
+        2026-10-10: exactly the 51 rows this predicate selects are also the
+        51 whose ``advisory_id`` does not start with ``"adv-"`` — either
+        discriminator alone is sufficient; this one is used because it is a
+        field the schema already carries, not a string convention on an id.
+        """
+        return advisory.evidence.evidence_confidence is None
 
     @classmethod
     def _advisory_is_explorable(cls, advisory: Any, *, now: datetime) -> bool:
@@ -2015,6 +2543,35 @@ class PackBuilder:
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=UTC)
         return bool((now - stamp).days > cls._ADVISORY_EXPLORE_STALE_DAYS)
+
+    def _blind_advisories_for_empty_pack(
+        self, pack: _PackT, *, has_items: bool
+    ) -> _PackT:
+        """Drop advisories from a served, item-less pack while the holdout
+        is live.
+
+        R1 (#844): ``_withhold_flat``/``_withhold_sectioned`` always empty
+        ``advisories`` on a withheld pack, so once a pack with no items can
+        carry an advisory block, "no items, no advisories" becomes the one
+        tell that separates a withheld empty pack from a merely empty one
+        — exactly the asymmetry the holdout exists to hide. Applying the
+        rule here, at assembly, keeps both ``PackBuilder.build`` and
+        ``build_sectioned`` blind the same way and keeps
+        ``PACK_ASSEMBLED.advisory_ids`` truthful: the ids reported are
+        always the ones actually served.
+
+        Call this only on the pack about to be returned, *after* the
+        holdout draw has already copied a would-be-held-out pack apart
+        (``withheld_from``) — that copy must keep the true matched
+        advisories for the audit trail, never this blinded view.
+
+        Inert at the default ``holdout_rate`` of 0, and inert whenever the
+        pack has items — advisory selection does not depend on item count
+        (:meth:`_select_advisories`), and that stays true here too.
+        """
+        if self._holdout_rate > 0 and not has_items and pack.advisories:
+            return pack.model_copy(update={"advisories": []})
+        return pack
 
     @staticmethod
     def _attach_advisory_provenance(

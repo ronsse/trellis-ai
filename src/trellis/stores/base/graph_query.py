@@ -56,7 +56,7 @@ Edge field paths (used with :class:`EdgeQuery`):
 
 Backends are responsible for parsing these paths into their native
 form (e.g., Postgres ``properties->>'team'``; SQLite
-``json_extract(properties_json, '$.team')``; Neo4j
+``json_extract(properties_json, ?)`` with ``$."team"`` bound; Neo4j
 ``n.properties.team``).
 """
 

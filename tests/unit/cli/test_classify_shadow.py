@@ -32,7 +32,7 @@ from trellis.schemas.parameters import ParameterScope, ParameterSet
 from trellis.stores.base.event_log import EventType
 from trellis_cli.admin import admin_app
 from trellis_cli.classify import classify_app
-from trellis_cli.exit_codes import EXIT_STORE
+from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
 from trellis_cli.main import app
 from trellis_cli.stores import _get_registry, _reset_registry
 
@@ -46,6 +46,24 @@ def cli_env(tmp_path, monkeypatch) -> None:
     init = runner.invoke(admin_app, ["init"])
     assert init.exit_code == 0, init.output
     _reset_registry()
+
+
+@pytest.fixture
+def config_yaml(tmp_path, monkeypatch) -> Path:
+    """``cli_env`` with a config dir whose name Rich parses as markup.
+
+    Printed without ``escape()``, ``cfg[dev]`` loses ``[dev]``. ``COLUMNS``
+    keeps the tmp path on one line: Rich folds a word wider than the console.
+    Returns the config.yaml the CLI reads.
+    """
+    config_dir = tmp_path / "cfg[dev]"
+    monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("COLUMNS", "500")
+    init = runner.invoke(admin_app, ["init"])
+    assert init.exit_code == 0, init.output
+    _reset_registry()
+    return config_dir / "config.yaml"
 
 
 def _run_json(*args: str) -> dict[str, Any]:
@@ -88,6 +106,56 @@ class TestShadowCommand:
         result = runner.invoke(classify_app, ["shadow"])
         assert result.exit_code != 0
         assert "llm" in result.output.lower()
+
+    @pytest.mark.parametrize("colour", [False, True], ids=["plain", "colour"])
+    def test_the_missing_sdk_hint_keeps_its_extra(
+        self, cli_env, monkeypatch: pytest.MonkeyPatch, colour: bool
+    ) -> None:
+        """Rich read ``[llm-openai]`` as a markup tag and deleted it.
+
+        Both install lines lost it: the hint's own, and the one
+        ``BackendNotInstalledError`` puts in its message, so neither
+        installed the SDK the error is about.
+        """
+        from unittest.mock import MagicMock
+
+        from trellis.errors import BackendNotInstalledError
+        from trellis_cli import classify as classify_cli
+
+        registry = MagicMock()
+        registry.build_llm_client.side_effect = BackendNotInstalledError(
+            backend_name="openai", extra="llm-openai"
+        )
+        monkeypatch.setattr(classify_cli, "_get_registry", lambda: registry)
+        if colour:
+            force_colour(monkeypatch, classify_cli)
+
+        result = runner.invoke(classify_app, ["shadow"])
+
+        assert result.exit_code == EXIT_INTERNAL, result.output
+        text = assert_coloured(result.stdout) if colour else plain(result.stdout)
+        text = " ".join(text.split())
+        assert "'uv pip install trellis-ai[llm-openai]'" in text
+        assert 'Run: uv pip install -e ".[llm-openai]"' in text
+
+    def test_the_no_client_hint_names_the_config_in_use(
+        self, config_yaml: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With ``TRELLIS_CONFIG_DIR`` set, ``~/.trellis`` is not the file read."""
+        from unittest.mock import MagicMock
+
+        from trellis_cli import classify as classify_cli
+
+        registry = MagicMock()
+        registry.build_llm_client.return_value = None
+        monkeypatch.setattr(classify_cli, "_get_registry", lambda: registry)
+
+        result = runner.invoke(classify_app, ["shadow"])
+
+        assert result.exit_code == EXIT_INTERNAL, result.output
+        text = " ".join(plain(result.stdout).split())
+        assert f"Add an 'llm:' block to {config_yaml} (provider," in text, text
+        assert "~/.trellis" not in text
 
     def test_the_race_counter_reaches_the_operator(self, cli_env, monkeypatch) -> None:
         """#421 — a counter nobody can read is not a counter.
@@ -249,6 +317,31 @@ class TestTagCandidatesCommand:
         # Every candidate states the limit of what the measurement supports.
         assert all(c["notes"] for c in payload["candidates"])
 
+    def test_the_promote_hint_routes_through_apply_rule(self, cli_env) -> None:
+        """Promotion is governed (#864): the footer points at apply-rule,
+        never at a config.yaml paste."""
+        _seed_thresholds()
+        _seed_shadowed(
+            [
+                (f"t{i}", f"todoist sprint planning notes {i}", ["task-management"])
+                for i in range(4)
+            ]
+            + [
+                (f"o{i}", f"unrelated musings about weather {i}", ["journal"])
+                for i in range(4)
+            ]
+        )
+        result = runner.invoke(classify_app, ["tag-candidates", "--no-emit"])
+        assert result.exit_code == 0, result.output
+        text = " ".join(plain(result.stdout).split())
+        assert "Not written to config.yaml" in text, text
+        assert "GET /api/v1/classify/candidates" in text, text
+        assert (
+            "trellis classify apply-rule tag_keyword todoist task-management "
+            "--source-event-id <event-id>"
+        ) in text, text
+        assert "revoke-rule tag_keyword" in text, text
+
     def test_emits_events_by_default_and_not_with_no_emit(self, cli_env) -> None:
         _seed_thresholds()
         _seed_shadowed(
@@ -309,6 +402,22 @@ class TestDomainCandidatesCommand:
         self._seed_fragmented()
         payload = _run_json("domain-candidates", "--no-emit")
         assert payload["domain_aliases_fragment"] == {"budget-hunting": "hunting"}
+
+    def test_the_merge_hint_routes_through_apply_rule(self, cli_env) -> None:
+        """Promotion is governed (#864): the footer points at apply-rule,
+        never at a config.yaml paste."""
+        self._seed_fragmented()
+        result = runner.invoke(classify_app, ["domain-candidates", "--no-emit"])
+        assert result.exit_code == 0, result.output
+        text = " ".join(plain(result.stdout).split())
+        assert "Not written to config.yaml" in text, text
+        assert "GET /api/v1/classify/candidates" in text, text
+        assert (
+            "trellis classify apply-rule domain_alias budget-hunting hunting "
+            "--source-event-id <event-id>"
+        ) in text, text
+        assert "revoke-rule domain_alias" in text, text
+        assert "in bulk" not in text, text
 
     def test_min_gain_hides_merges_that_change_nothing(self, cli_env) -> None:
         _seed_shadowed(
@@ -379,7 +488,10 @@ class TestDomainCandidatesCommand:
 
         rendered = assert_coloured(capsys.readouterr().out)
         visible = plain(rendered)
-        assert f"{alias}: {canonical}" in visible
+        assert (
+            f"trellis classify apply-rule domain_alias {alias} {canonical} "
+            "--source-event-id <event-id>"
+        ) in visible
         assert f"-> {canonical}" in visible
         assert f"{alias}:" in visible
         assert competitor in visible

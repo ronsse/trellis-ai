@@ -24,7 +24,6 @@ class Operation(StrEnum):
 
     # Curate
     PRECEDENT_PROMOTE = "precedent.promote"
-    PRECEDENT_UPDATE = "precedent.update"
     ENTITY_CREATE = "entity.create"
     ENTITY_UPDATE = "entity.update"
     ENTITY_MERGE = "entity.merge"
@@ -41,6 +40,20 @@ class Operation(StrEnum):
     REDACTION_APPLY = "redaction.apply"
     RETENTION_PRUNE = "retention.prune"
     RETENTION_RESTORE = "retention.restore"
+
+    # Admin — each routed only through its own admin-scope executor, never
+    # through ``create_curate_handlers``. SCHEDULE_UPDATE and
+    # JOB_RUN_REQUEST go through ``build_schedule_executor`` (see
+    # ``mutate/schedule_handlers.py``); SETTINGS_UPDATE is a *separate*
+    # executor, ``build_settings_executor`` (see
+    # ``mutate/handlers.py::create_settings_handlers``) — the two
+    # executors are disjoint, not one shared admin executor (gate #860b,
+    # follow-up 9).
+    SCHEDULE_UPDATE = "schedule.update"
+    JOB_RUN_REQUEST = "job.run_request"
+    SETTINGS_UPDATE = "settings.update"
+    CLASSIFY_RULE_APPLY = "classify_rule.apply"
+    CLASSIFY_RULE_REVOKE = "classify_rule.revoke"
 
 
 class CommandStatus(StrEnum):
@@ -84,7 +97,15 @@ class Command(VersionedModel):
 
 
 class CommandResult(VersionedModel):
-    """Result of executing a command through the pipeline."""
+    """Result of executing a command through the pipeline.
+
+    A REJECTED result names why in ``metadata["rejection_reason"]``, the
+    ``reason`` its ``MUTATION_REJECTED`` event carries: ``policy_violation``,
+    ``immutable_core``, ``validate`` (the operation registry's arg check),
+    or a handler's ``ValidationError.code`` (``handler_validate`` when it
+    set none). A caller holding only the result, such as the CLI choosing
+    an exit code, can then tell a policy refusal from any other.
+    """
 
     command_id: str
     status: CommandStatus
@@ -137,7 +158,6 @@ class OperationRegistry:
             "title",
             "description",
         }
-        self._schemas[Operation.PRECEDENT_UPDATE] = {"precedent_id"}
         self._schemas[Operation.ENTITY_CREATE] = {"entity_type", "name"}
         self._schemas[Operation.ENTITY_UPDATE] = {"entity_id"}
         self._schemas[Operation.ENTITY_MERGE] = {"source_id", "target_id"}
@@ -175,6 +195,24 @@ class OperationRegistry:
         # ``RETENTION_PRUNED`` payload), and a criteria-driven undo would
         # re-derive the same population that was wrong the first time.
         self._schemas[Operation.RETENTION_RESTORE] = {"item_ids", "reason"}
+        # Both schedule admin operations push their own field allowlist in
+        # the handler (``ScheduleUpdateHandler`` / ``JobRunRequestHandler``):
+        # every field but ``target_id`` is optional on an update, and a
+        # run-request takes none, so neither has a required-arg set here.
+        self._schemas[Operation.SCHEDULE_UPDATE] = set()
+        self._schemas[Operation.JOB_RUN_REQUEST] = set()
+        # ``value`` is required as a *key*, not a truthy value: ``None``
+        # means "remove the override" (SettingsUpdateHandler's own
+        # docstring), so the presence check below must not reject a
+        # literal null the way an `if not command.args.get("value")` would.
+        self._schemas[Operation.SETTINGS_UPDATE] = {"name", "value"}
+        self._schemas[Operation.CLASSIFY_RULE_APPLY] = {
+            "kind",
+            "key",
+            "target",
+            "source_event_id",
+        }
+        self._schemas[Operation.CLASSIFY_RULE_REVOKE] = {"kind", "key"}
 
     def validate(self, command: Command) -> tuple[bool, list[str]]:
         """Validate a command's args against its operation's schema.
@@ -187,6 +225,22 @@ class OperationRegistry:
         missing = required - set(command.args.keys())
         if missing:
             return False, [f"Missing required args: {', '.join(sorted(missing))}"]
+        # The one value checked here: a feedback rating is a 0.0-1.0 score,
+        # and POST /api/v1/commands/batch and MCP ``execute_mutation`` pass
+        # caller args straight through. The chained comparison is False for
+        # NaN and +/-Infinity, and compares an int too large for a float
+        # exactly, where ``math.isfinite`` would raise OverflowError.
+        if command.operation is Operation.FEEDBACK_RECORD:
+            rating = command.args["rating"]
+            if (
+                isinstance(rating, bool)
+                or not isinstance(rating, int | float)
+                or not 0.0 <= rating <= 1.0
+            ):
+                message = (
+                    f"rating must be a finite number in [0.0, 1.0], got {rating!r}"
+                )
+                return False, [message]
         return True, []
 
     def get_required_args(self, operation: Operation) -> set[str]:

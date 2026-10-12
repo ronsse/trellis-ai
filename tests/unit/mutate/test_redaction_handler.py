@@ -230,16 +230,32 @@ class TestRedactionApplyHandler:
         assert exc_info.value.code == "redaction_requires_event_log"
         assert kp_registry.knowledge.graph_store.get_node(node_id) is not None
 
-    def test_missing_target_raises_not_found(self, registry: StoreRegistry) -> None:
-        with pytest.raises(NotFoundError):
+    def test_missing_target_is_refused(self, registry: StoreRegistry) -> None:
+        with pytest.raises(ValidationError) as exc_info:
             RedactionApplyHandler(registry).handle(_redact("nonexistent"))
+        assert exc_info.value.code == "target_not_found"
+        assert str(exc_info.value) == "Node not found: nonexistent"
 
-    def test_missing_target_through_executor_is_failed(
+    def test_missing_target_through_executor_is_rejected(
         self, registry: StoreRegistry
     ) -> None:
-        result = build_curate_executor(registry).execute(_redact("nope"))
-        assert result.status == CommandStatus.FAILED
-        assert "not found" in result.message
+        """A miss is input to fix (REJECTED), not a store failure (FAILED)."""
+        node_id = _create_node(registry)
+        executor = build_curate_executor(registry)
+        applied = executor.execute(_redact(node_id))
+        missing = executor.execute(_redact("nope"))
+
+        assert applied.status == CommandStatus.SUCCESS
+        assert missing.status == CommandStatus.REJECTED
+        assert missing.message == "Node not found: nope"
+        assert missing.metadata["rejection_reason"] == "target_not_found"
+        rejected = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED
+        )
+        assert [
+            (e.payload["command_id"], e.payload["status"], e.payload["reason"])
+            for e in rejected
+        ] == [(missing.command_id, "rejected", "target_not_found")]
 
     def test_concurrent_purge_loser_fails_without_event(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
@@ -281,14 +297,18 @@ class TestRedactionApplyHandler:
         assert "audit emit failed" in message
         assert registry.knowledge.graph_store.get_node(node_id) is None
 
-    def test_re_redaction_fails_not_found(self, registry: StoreRegistry) -> None:
+    def test_re_redaction_is_refused(self, registry: StoreRegistry) -> None:
         # Redaction is not idempotent by design — a second submission
-        # names a target that no longer exists. Callers wanting
-        # at-most-once semantics supply Command.idempotency_key.
+        # names a target that no longer exists, so it is refused like any
+        # other missing target. Callers wanting at-most-once semantics
+        # supply Command.idempotency_key.
         node_id = _create_node(registry)
         executor = build_curate_executor(registry)
-        assert executor.execute(_redact(node_id)).status == CommandStatus.SUCCESS
-        assert executor.execute(_redact(node_id)).status == CommandStatus.FAILED
+        first = executor.execute(_redact(node_id))
+        second = executor.execute(_redact(node_id))
+        assert first.status == CommandStatus.SUCCESS
+        assert second.status == CommandStatus.REJECTED
+        assert second.metadata["rejection_reason"] == "target_not_found"
 
     def test_happy_path_through_executor(self, registry: StoreRegistry) -> None:
         node_id = _create_node(registry)

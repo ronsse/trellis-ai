@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
+from tests.recovery_command import expected_recovery
 from trellis.errors import StaleStoreWriteError
 from trellis.learning import PROMOTE_RECOMMENDATIONS
 from trellis.retrieve.token_pricing import _INPUT_PRICE_PER_MTOK
@@ -115,6 +116,88 @@ class TestApplyNoiseTags:
             ["analyze", "apply-noise-tags", "--days", "14", "--min-appearances", "3"],
         )
         assert result.exit_code == 0
+
+    @staticmethod
+    def _seed_phantom_admission(registry: StoreRegistry) -> None:
+        """Five packs citing a non-document id unhelpful — gate-admissible.
+
+        Mirrors ``test_live_run_separates_written_from_refused_not_document``
+        in ``tests/unit/cli/test_worker.py``: the demotion gate admits on
+        citation evidence alone, with no notion of which store an id
+        belongs to, so a trace id reaches ``apply_noise_tags`` here too.
+        """
+        event_log = registry.operational.event_log
+        phantom = "ac:trace:phantom"
+        for i in range(5):
+            pack_id = f"ac-phantom-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "intent_family": "ac-test",
+                    "domain": "ac-test",
+                    "injected_item_ids": [phantom],
+                    "injected_items": [
+                        {
+                            "item_id": phantom,
+                            "item_type": "trace",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "run_id": f"ac-run-{i}",
+                    "intent_family": "ac-test",
+                    "outcome": "failure",
+                    "success": False,
+                    "helpful_item_ids": [],
+                    "unhelpful_item_ids": [phantom],
+                },
+            )
+
+    def test_json_reports_refused_not_document_for_a_non_document_admission(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        """A gate-admitted trace id writes nothing and is named refused.
+
+        Before this fix ``noise_candidates_tagged``-shaped counts (here,
+        the bare ``model_dump()`` echoed the gate's admission) had no way
+        to say that an admitted id was never a document; now the report
+        carries ``noise_tags_written`` (0, not 1) and
+        ``noise_refused_not_document`` (the id), the same fields
+        ``run_effectiveness_feedback`` populates for every caller.
+        """
+        self._seed_phantom_admission(temp_stores)
+        result = runner.invoke(app, ["analyze", "apply-noise-tags", "--format", "json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["demotion_screen"]["admitted"] == ["ac:trace:phantom"]
+        assert data["noise_tags_written"] == 0
+        assert data["noise_refused_not_document"] == ["ac:trace:phantom"]
+
+    def test_text_shows_the_refused_not_document_line(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed_phantom_admission(temp_stores)
+        result = runner.invoke(app, ["analyze", "apply-noise-tags"])
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.stdout)
+        assert "Noise tags applied to 0 of 1 proposed item(s)" in rendered
+        assert "1 admitted item(s) refused: not found in the document store" in rendered
+        # The refused id is listed once, under "refused" — not also under
+        # the corrected "applied" count, which lists only written ids.
+        assert rendered.count("ac:trace:phantom") == 1
 
 
 class TestTokenUsage:
@@ -652,7 +735,7 @@ class TestAdvisoryCommandsOnADegradedStore:
         assert result.exit_code == EXIT_STORE, result.output
         data = json.loads(result.stdout.strip())
         assert data["store_degradation"]["reason"] == "malformed_json"
-        assert data["store_degradation"]["recovery"] == f"mv {path} {path}.corrupt"
+        assert data["store_degradation"]["recovery"] == expected_recovery(path)
         assert data["advisories_stored"] == 0
 
     def test_effectiveness_exits_store_rather_than_traceback(
@@ -934,6 +1017,117 @@ class TestLearningCandidates:
         )
         ids = {d["candidate_id"] for d in decisions["decisions"]}
         assert candidate["candidate_id"] in ids
+
+    def test_text_surface_singular_candidate_wording(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """One promotion-ready candidate reads as singular, not '1 candidates'."""
+        # Mirrors ``_seed_promote_signal`` but reports ``had_retry`` on every
+        # round, so ``retry_rate`` is measured (``0.0``) rather than ``None``
+        # — unrelated to this fix, but the candidates table the text surface
+        # renders below the promotion-ready line formats ``retry_rate`` as a
+        # percentage and has no None-guard, which an unmeasured rate trips.
+        item_id = "lc:doc:helpful"
+        event_log = temp_stores.operational.event_log
+        for i in range(3):
+            pack_id = f"lc-pack-retry-{i}"
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "intent": "test intent",
+                    "domain": "lc-test",
+                    "injected_items": [
+                        {
+                            "item_id": item_id,
+                            "item_type": "document",
+                            "rank": 0,
+                            "strategy_source": "document",
+                        }
+                    ],
+                    "injected_item_ids": [item_id],
+                },
+            )
+            event_log.emit(
+                EventType.FEEDBACK_RECORDED,
+                source="test",
+                entity_id=pack_id,
+                entity_type="pack",
+                payload={
+                    "pack_id": pack_id,
+                    "outcome": "success",
+                    "success": True,
+                    "helpful_item_ids": [item_id],
+                    "had_retry": False,
+                },
+            )
+        out_dir = tmp_path / "review"
+
+        result = runner.invoke(
+            app,
+            ["analyze", "learning-candidates", "--output-dir", str(out_dir)],
+        )
+
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.output)
+        assert "1 candidate promotion-ready" in rendered
+        assert "1 candidates" not in rendered
+
+    def test_text_surface_renders_unmeasured_retry_rate_as_na(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        """An unmeasured ``retry_rate`` must not crash the text-mode table.
+
+        ``_seed_promote_signal`` emits ``FEEDBACK_RECORDED`` payloads with
+        no ``had_retry`` key at all, so scoring.py's ``retry_observed_count``
+        stays 0 and ``retry_rate`` is ``None`` (a sparse-signal fact, never
+        a measured zero — see the ``metrics_coverage`` comments in
+        ``src/trellis/learning/scoring.py``). Formatting ``None`` with
+        ``:.1%`` raises ``TypeError``; the Rich table must show a
+        placeholder instead.
+        """
+        self._seed_promote_signal(temp_stores)
+        out_dir = tmp_path / "review"
+
+        result = runner.invoke(
+            app,
+            ["analyze", "learning-candidates", "--output-dir", str(out_dir)],
+        )
+
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.output)
+        assert "n/a" in rendered
+        assert "Candidates by Recommendation" in rendered
+
+    def test_title_less_candidate_named_from_its_document(
+        self, tmp_path: Path, temp_stores: StoreRegistry
+    ) -> None:
+        # The command hands its document store to the artifact write
+        # (#845), so a resolvable title-less item gets a readable name.
+        temp_stores.knowledge.document_store.put(
+            "lc:doc:named",
+            "---\nkind: note\n---\n# Readable Doc Heading\n\nBody line.",
+            {},
+        )
+        self._seed_promote_signal(temp_stores, item_id="lc:doc:named")
+        out_dir = tmp_path / "review"
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "learning-candidates",
+                "--output-dir",
+                str(out_dir),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        name = data["candidates"][0]["precedent_name"]
+        assert name.endswith(":: Readable Doc Heading"), name
 
     def test_min_support_filters(
         self, tmp_path: Path, temp_stores: StoreRegistry
@@ -1739,3 +1933,61 @@ class TestAnalyzeHealthStraySection:
         # The pre-existing rate is reported unchanged beside it: the caller
         # did cite, which is exactly why one number cannot carry both facts.
         assert serve["pack_attribution_rate"] == pytest.approx(1.0)
+
+
+class TestAnalyzeHealthFailedStrategySection:
+    """A failed strategy reaches ``analyze health``; its exception text never does."""
+
+    def _seed(self, registry: StoreRegistry, *, strategy: str = "semantic") -> None:
+        event_log = registry.operational.event_log
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="pack_1",
+            entity_type="pack",
+            payload={
+                "strategy_failures": [
+                    {
+                        "strategy": strategy,
+                        "error_class": "RuntimeError",
+                        "message": "synthetic/secret/path.db never-a-real-dsn",
+                    }
+                ]
+            },
+        )
+
+    def test_text_warns_with_the_strategy_name_verbatim(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        # A markup-shaped name must neither crash Rich nor lose its tag text.
+        self._seed(temp_stores, strategy="[bold]sem[/x]")
+
+        result = runner.invoke(app, ["analyze", "health"])
+
+        assert result.exit_code == 0, result.output
+        out = " ".join(plain(result.stdout).split())
+        assert "WARN" in out
+        assert "failed retrieval strategy ([bold]sem[/x]: 1)" in out
+        assert "synthetic/secret/path.db" not in out
+        assert "RuntimeError" not in out
+
+    def test_json_carries_the_failed_strategy_fields(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._seed(temp_stores, strategy="graph")
+
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "warn"
+        assert any("graph" in reason for reason in payload["reasons"])
+        failed = payload["serve"]["failed_strategies"]
+        assert failed["packs"] == 1
+        assert failed["by_strategy"] == {"graph": 1}
+        assert failed["latest_at"] is not None
+        # Counts and strategy names only — never the exception text, in
+        # either the dedicated block or anywhere else in the payload.
+        dumped = result.stdout
+        assert "synthetic/secret/path.db" not in dumped
+        assert "RuntimeError" not in dumped

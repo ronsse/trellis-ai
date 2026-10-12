@@ -25,6 +25,7 @@ guarded by parity tests (see ``tests/unit/wire/test_parity.py``).
 
 from trellis_wire.base import WireModel, WireRequestModel
 from trellis_wire.dtos import (
+    AxisReportResponse,
     BatchCommandItem,
     BatchCommandRequest,
     BatchCommandResponse,
@@ -86,6 +87,7 @@ __all__ = [
     "SectionedPackRequest",
     "SectionedPackResponse",
     "WithholdingResponse",
+    "AxisReportResponse",
     # Curate
     "PromoteRequest",
     "LinkRequest",

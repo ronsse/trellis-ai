@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
+import sys
 from collections import OrderedDict
-from typing import Protocol
+from typing import Any, Protocol
 
 import structlog
 
+from trellis.core.error_sanitize import summarize_exception
 from trellis.errors import (
     IdempotencyError,
     PolicyViolationError,
@@ -38,10 +41,12 @@ AUDIT_EMIT_FAILED_MARKER = "audit_event_not_recorded"
 #: The full warning. Built from the marker so the two cannot drift apart.
 #: Deliberately neutral about what the command did — it is appended to
 #: SUCCESS, FAILED, REJECTED and DUPLICATE results alike, and on three of
-#: those nothing was written to any store.
+#: those nothing was written to any store. ``{error}`` is the exception's
+#: type, plus ``: <message>`` only for a ``TrellisError``; see
+#: ``MutationExecutor._emit_event``.
 _AUDIT_EMIT_FAILED_TEMPLATE = (
     AUDIT_EMIT_FAILED_MARKER + ": the {event_type} event for this command "
-    "could not be written to the event log ({error_type}: {error}). The "
+    "could not be written to the event log ({error}). The "
     "outcome this result reports stands; only its audit record is missing."
 )
 
@@ -54,6 +59,11 @@ _AUDIT_EMIT_FAILED_TEMPLATE = (
 # operator logs. We list the canonical Python panic types explicitly;
 # new backends should map their own errors into ``StoreError`` (one
 # of the typed catches above) rather than relying on this fallback.
+# ``sqlite3.Error`` is listed because the default SQLite stores raise it
+# unmapped, from writes that share no seam to map it at. Most Postgres and
+# Bolt (Neo4j, ArcadeDB) graph writes raise their driver's own errors the
+# same way, but both drivers are optional extras, so
+# ``_optional_driver_panics`` below supplies those classes.
 _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
     RuntimeError,
     OSError,
@@ -65,22 +75,51 @@ _UNEXPECTED_HANDLER_FAILURE: tuple[type[BaseException], ...] = (
     AssertionError,
     LookupError,
     ArithmeticError,
+    sqlite3.Error,
 )
 
-# Exception classes the audit-emit guard in ``_emit_event`` catches. Same
+
+def _optional_driver_panics() -> tuple[type[BaseException], ...]:
+    """``psycopg.Error`` and the Bolt driver's ``DriverError``/``Neo4jError``,
+    for whichever of the two packages is already imported.
+
+    Read from ``sys.modules``, never imported: a driver's exception can
+    only exist once its module is imported, so an import here would add
+    nothing but a way for a broken install to raise in place of the
+    handler's own error. ``getattr`` has a default because a module that
+    another thread is still importing is in ``sys.modules`` before its
+    classes are. Not cached, so a driver first imported after an earlier
+    catch is found on the next one.
+    """
+    found = (
+        getattr(sys.modules.get(module), name, None)
+        for module, name in (
+            ("psycopg", "Error"),
+            ("neo4j.exceptions", "DriverError"),
+            ("neo4j.exceptions", "Neo4jError"),
+        )
+    )
+    return tuple(cls for cls in found if cls is not None)
+
+
+def _handler_panic_classes() -> tuple[type[BaseException], ...]:
+    """The full ``except`` tuple for an unexpected handler panic."""
+    return (*_UNEXPECTED_HANDLER_FAILURE, *_optional_driver_panics())
+
+
+# Exception classes the audit-emit guard in ``_emit_event`` catches, and
+# Stage 3's persisted idempotency read, a call on the same event log. Same
 # enumerate-don't-bare-except discipline as the tuple above, and for the same
 # reason: a broad ``except Exception`` here would be flagged by the
 # silent-fallback audit, and correctly — the guard does not swallow the
-# failure, it converts it into a warning on the result plus a traceback in
-# operator logs. ``StoreError`` is what a well-behaved backend raises; the
-# panic tuple covers a backend that does not, because an event log that
-# raises ``ConnectionError`` instead must not be the difference between a
-# degraded result and an aborted batch.
-_AUDIT_EMIT_FAILURE: tuple[type[BaseException], ...] = (
-    StoreError,
-    TrellisError,
-    *_UNEXPECTED_HANDLER_FAILURE,
-)
+# failure, it converts it into a warning on the result plus an ``error``
+# line in operator logs. ``StoreError`` is what a well-behaved backend
+# raises; the panic tuple covers a backend that does not, because an event
+# log that raises ``ConnectionError`` instead must not be the difference
+# between a degraded result and an aborted batch.
+def _audit_emit_failure_classes() -> tuple[type[BaseException], ...]:
+    """The full ``except`` tuple for the audit-emit guard."""
+    return (StoreError, TrellisError, *_handler_panic_classes())
 
 
 def _audit_warnings(audit_warning: str | None) -> list[str]:
@@ -138,7 +177,10 @@ class MutationExecutor:
         self._event_log = event_log
         self._handlers: dict[str, CommandHandler] = handlers or {}
         self._idempotency_cache_size = idempotency_cache_size
-        # FIFO-bounded cache of seen idempotency keys. OrderedDict preserves
+        # FIFO-bounded cache of the idempotency keys of succeeded commands: a
+        # key is recorded once its handler has succeeded (or the persisted
+        # check finds it), never for a refused or failed command, so a
+        # corrected retry under the same key runs. OrderedDict preserves
         # insertion order; overflow evicts the oldest key via popitem(last=False).
         # When event_log is attached, evicted keys are still rejected via
         # event_log.has_idempotency_key() (authoritative, cross-restart).
@@ -176,6 +218,7 @@ class MutationExecutor:
                 status=CommandStatus.REJECTED,
                 operation=command.operation,
                 message=roster_refusal,
+                metadata={"rejection_reason": "immutable_core"},
             )
 
         valid, errors = self._registry.validate(command)
@@ -185,10 +228,11 @@ class MutationExecutor:
             audit = self._emit_rejection(command, reason="validate", message=message)
             return CommandResult(
                 command_id=command.command_id,
-                status=CommandStatus.FAILED,
+                status=CommandStatus.REJECTED,
                 operation=command.operation,
                 message=message,
                 warnings=_audit_warnings(audit),
+                metadata={"rejection_reason": "validate"},
             )
 
         # Stage 2: Policy Check
@@ -231,12 +275,13 @@ class MutationExecutor:
                     operation=command.operation,
                     message=message,
                     warnings=[*policy_warnings, *_audit_warnings(audit)],
+                    metadata={"rejection_reason": "policy_violation"},
                 )
 
         # Stage 3: Idempotency Check
-        duplicate = self._check_idempotency(command, log, policy_warnings)
-        if duplicate is not None:
-            return duplicate
+        idempotency_outcome = self._check_idempotency(command, log, policy_warnings)
+        if idempotency_outcome is not None:
+            return idempotency_outcome
 
         # Stage 4: Execute
         handler = self._handlers.get(command.operation)
@@ -260,11 +305,16 @@ class MutationExecutor:
             # if the handler didn't supply one via ValidationError.code).
             log.warning("handler_rejected", errors=exc.errors)
             reason = exc.code if exc.code != "VALIDATION_ERROR" else "handler_validate"
+            summary = summarize_exception(exc)
             audit = self._emit_rejection(
                 command,
                 reason=reason,
-                message=str(exc),
+                message=summary["message"],
                 policy_warnings=policy_warnings,
+                error_type=summary["error_type"],
+                error_code=summary["error_code"],
+                constraint=summary.get("constraint"),
+                cause=summary.get("cause"),
             )
             return CommandResult(
                 command_id=command.command_id,
@@ -272,6 +322,7 @@ class MutationExecutor:
                 operation=command.operation,
                 message=str(exc),
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
+                metadata={"rejection_reason": reason},
             )
         except PolicyViolationError as exc:
             # Handlers may evaluate row-level policies that the gate
@@ -293,6 +344,7 @@ class MutationExecutor:
                 operation=command.operation,
                 message=str(exc),
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
+                metadata={"rejection_reason": "policy_violation"},
             )
         except IdempotencyError as exc:
             # Handler-level duplicate detection (e.g., a downstream
@@ -316,25 +368,38 @@ class MutationExecutor:
         except (StoreError, TrellisError) as exc:
             # Typed Trellis failures other than the rejection set
             # above: backend/store errors, generic TrellisErrors,
-            # MutationErrors. Emit FAILED audit event with the
-            # exception type attached so consumers can branch on
-            # ``error_type`` rather than parsing the stringified
-            # message, then return a structured FAILED CommandResult
-            # so batch processing (SEQUENTIAL / CONTINUE_ON_ERROR)
-            # can keep going. The store name and code are bound on
-            # the structlog event for operator correlation.
+            # MutationErrors. Log the exception type as ``error_type``
+            # so operators can filter on it rather than parse the
+            # message, emit a FAILED audit event, then return a
+            # structured FAILED CommandResult so batch processing
+            # (SEQUENTIAL / CONTINUE_ON_ERROR) can keep going. The
+            # store name and code are bound on the structlog event for
+            # operator correlation.
+            #
+            # The message is logged and the traceback is not. The
+            # Postgres and Bolt purges raise ``StoreError(<type-only
+            # message>) from <driver error>`` because a server's text
+            # can carry query text and values (#702, #713), and
+            # rendering exc_info would print that chained cause. The
+            # untyped path below keeps its traceback.
             store_name = getattr(exc, "store", None)
-            log.exception(
+            log.error(  # noqa: TRY400 — no traceback on purpose; see above
                 "handler_typed_error",
                 error_type=type(exc).__name__,
+                error=str(exc),
                 error_code=getattr(exc, "code", None),
                 store=store_name,
             )
+            summary = summarize_exception(exc)
             audit = self._emit(
                 command,
                 CommandStatus.FAILED,
-                str(exc),
+                summary["message"],
                 policy_warnings=policy_warnings,
+                error_type=summary["error_type"],
+                error_code=summary["error_code"],
+                constraint=summary.get("constraint"),
+                cause=summary.get("cause"),
             )
             return CommandResult(
                 command_id=command.command_id,
@@ -343,7 +408,7 @@ class MutationExecutor:
                 message=f"Execution failed: {exc}",
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
-        except _UNEXPECTED_HANDLER_FAILURE as exc:
+        except _handler_panic_classes() as exc:
             # An untyped exception escaped the handler — almost
             # certainly a programming bug or a backend/network panic
             # rather than an expected failure mode. Log with
@@ -361,19 +426,36 @@ class MutationExecutor:
             # so the silent-fallback audit treats it as a guard
             # rather than a broad swallow.
             log.exception("handler_failed_unexpected", error_type=type(exc).__name__)
+            summary = summarize_exception(exc)
             audit = self._emit(
                 command,
                 CommandStatus.FAILED,
-                str(exc),
+                summary["message"],
                 policy_warnings=policy_warnings,
+                error_type=summary["error_type"],
+                error_code=summary["error_code"],
+                constraint=summary.get("constraint"),
+                cause=summary.get("cause"),
             )
+            # The caller reads the type alone. No TrellisError reaches this
+            # catch, and the text of anything else can be a driver's, which
+            # can carry query text and values. The traceback above keeps the
+            # exception's own text in full; the audit event keeps only
+            # ``summarize_exception``'s sanitized summary, never that text.
             return CommandResult(
                 command_id=command.command_id,
                 status=CommandStatus.FAILED,
                 operation=command.operation,
-                message=f"Execution failed: {exc}",
+                message=f"Execution failed: {type(exc).__name__}",
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
+
+        # Only a command whose handler succeeded makes its key a duplicate.
+        # Every refused or failed exit above returned without recording it,
+        # so a corrected retry under the same key runs. The persisted check
+        # agrees: it counts only MUTATION_EXECUTED events.
+        if command.idempotency_key:
+            self._record_idempotency_key(command.idempotency_key)
 
         # Stage 5: Emit Event
         #
@@ -484,12 +566,22 @@ class MutationExecutor:
         message: str,
         *,
         policy_warnings: list[str] | None = None,
+        error_type: str | None = None,
+        error_code: str | None = None,
+        constraint: str | None = None,
+        cause: dict[str, Any] | None = None,
     ) -> str | None:
         """Emit a SUCCESS or FAILED event to the event log if available.
 
         Rejection paths (validate / policy / idempotency) emit through
         :meth:`_emit_rejection` instead so every rejection event carries a
         ``reason`` field naming the stage that rejected the command.
+
+        ``error_type`` / ``error_code`` / ``constraint`` / ``cause`` are the
+        :func:`~trellis.core.error_sanitize.summarize_exception` fields a
+        FAILED caller passes alongside its already-sanitized ``message``;
+        omitted (``None``) on the SUCCESS path, which has no exception to
+        summarize.
 
         Returns whatever :meth:`_emit_event` returns — ``None`` when the
         event landed, a warning string when it did not.
@@ -505,6 +597,10 @@ class MutationExecutor:
             status,
             message,
             policy_warnings=policy_warnings,
+            error_type=error_type,
+            error_code=error_code,
+            constraint=constraint,
+            cause=cause,
         )
 
     def _check_idempotency(
@@ -515,12 +611,17 @@ class MutationExecutor:
     ) -> CommandResult | None:
         """Stage 3 — return a DUPLICATE result if this command is a replay.
 
-        Extracted verbatim from :meth:`execute` so the stage list there
-        reads as a sequence of gates rather than as one of them inlined.
-        Returns ``None`` when the command is not a replay, having recorded
-        its key for the next call. ``policy_warnings`` is threaded in rather
-        than recomputed: a duplicate is an outcome reachable after Stage 2,
-        so it carries the warnings like every other one.
+        A method of its own so the stage list in :meth:`execute` reads as
+        a sequence of gates rather than as one of them inlined.
+        Returns ``None`` when the command is not a replay, without recording
+        its key: :meth:`execute` records it only once the handler has
+        succeeded, so a refused or failed command leaves the key free for a
+        corrected retry. Returns a FAILED result, with a ``mutation.rejected``
+        event whose ``reason`` is ``idempotency_check_failed``, when the
+        event log raises instead of answering whether the key was seen.
+        ``policy_warnings`` is threaded in rather than recomputed: both
+        results are outcomes reachable after Stage 2, so they carry the
+        warnings like every other one.
         """
         if not command.idempotency_key:
             return None
@@ -544,10 +645,51 @@ class MutationExecutor:
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
 
-        # Check persisted events for cross-restart deduplication
-        if self._event_log is not None and self._event_log.has_idempotency_key(
-            command.idempotency_key,
-        ):
+        if self._event_log is None:
+            return None
+
+        # Check persisted events for cross-restart deduplication. The read
+        # fails closed: running the handler without an answer could write
+        # the command twice, which is what this stage exists to prevent. It
+        # catches what ``_emit_event`` catches from the same event log. The
+        # CommandResult names the exception's type only, not its text, as
+        # the typed store errors' CommandResult does (#702, #713); the
+        # audit event carries ``summarize_exception``'s sanitized summary
+        # instead, same as the typed and panic paths, so the stored event
+        # names more than the driver's class (the owner's requirement).
+        # Neither carries a traceback; if the rejection event cannot be
+        # written either, ``_emit_event`` logs that failure without one
+        # too, since this one is its context. The key is not recorded, so
+        # a retry once the event log recovers runs.
+        try:
+            persisted = self._event_log.has_idempotency_key(command.idempotency_key)
+        except _audit_emit_failure_classes() as exc:
+            result_message = f"Idempotency check failed: {type(exc).__name__}"
+            log.error(  # noqa: TRY400 — no traceback on purpose; see above
+                "idempotency_check_failed",
+                key=command.idempotency_key,
+                error_type=type(exc).__name__,
+            )
+            summary = summarize_exception(exc)
+            audit = self._emit_rejection(
+                command,
+                reason="idempotency_check_failed",
+                message=f"Idempotency check failed: {summary['message']}",
+                policy_warnings=policy_warnings,
+                error_type=summary["error_type"],
+                error_code=summary["error_code"],
+                constraint=summary.get("constraint"),
+                cause=summary.get("cause"),
+            )
+            return CommandResult(
+                command_id=command.command_id,
+                status=CommandStatus.FAILED,
+                operation=command.operation,
+                message=result_message,
+                warnings=[*policy_warnings, *_audit_warnings(audit)],
+            )
+
+        if persisted:
             self._record_idempotency_key(command.idempotency_key)
             message = f"Duplicate command (persisted): {command.idempotency_key}"
             log.info("duplicate_command_persisted", key=command.idempotency_key)
@@ -565,7 +707,6 @@ class MutationExecutor:
                 warnings=[*policy_warnings, *_audit_warnings(audit)],
             )
 
-        self._record_idempotency_key(command.idempotency_key)
         return None
 
     def _emit_rejection(
@@ -575,13 +716,17 @@ class MutationExecutor:
         reason: str,
         message: str,
         policy_warnings: list[str] | None = None,
+        error_type: str | None = None,
+        error_code: str | None = None,
+        constraint: str | None = None,
+        cause: dict[str, Any] | None = None,
     ) -> str | None:
         """Emit a uniform :attr:`EventType.MUTATION_REJECTED` event.
 
         Called from every rejection stage (``immutable_core`` / ``validate``
-        / ``policy_violation`` / ``idempotency_replay``) so the audit trail
-        is symmetric — one event per rejection, ``reason`` discriminates the
-        stage.
+        / ``policy_violation`` / ``idempotency_replay`` /
+        ``idempotency_check_failed``) so the audit trail is symmetric — one
+        event per rejection, ``reason`` discriminates the stage.
 
         ``policy_warnings`` is forwarded by every caller downstream of
         Stage 2 — see the rule stated there. Stage 1 (``validate``) is the
@@ -589,6 +734,13 @@ class MutationExecutor:
         The key stays absent from the payload when the list is empty, so a
         deployment that has declared no policies emits a byte-identical
         event to the pre-gate world.
+
+        ``error_type`` / ``error_code`` / ``constraint`` / ``cause`` are the
+        :func:`~trellis.core.error_sanitize.summarize_exception` fields a
+        caller rejecting from a caught exception passes alongside its
+        already-sanitized ``message``; omitted (``None``) by rejection
+        sites with no exception of their own (a duplicate idempotency key
+        is not an error).
 
         Returns whatever :meth:`_emit_event` returns — ``None`` when the
         event landed, a warning string when it did not.
@@ -600,6 +752,10 @@ class MutationExecutor:
             message,
             reason=reason,
             policy_warnings=policy_warnings,
+            error_type=error_type,
+            error_code=error_code,
+            constraint=constraint,
+            cause=cause,
         )
 
     def _emit_event(
@@ -611,11 +767,30 @@ class MutationExecutor:
         *,
         reason: str | None = None,
         policy_warnings: list[str] | None = None,
+        error_type: str | None = None,
+        error_code: str | None = None,
+        constraint: str | None = None,
+        cause: dict[str, Any] | None = None,
     ) -> str | None:
         """Build the payload and emit a single executor event.
 
         Returns ``None`` when the event was written, and a warning string
         naming the missing event when the write raised.
+
+        ``error_type`` / ``error_code`` / ``constraint`` / ``cause`` are
+        added to the payload only when given (``None`` leaves the key
+        absent, as ``reason`` already does), so a SUCCESS event — which
+        passes none of them — stays byte-identical to the pre-this-change
+        payload. A FAILED or REJECTED caller passes
+        :func:`~trellis.core.error_sanitize.summarize_exception`'s fields;
+        ``message`` is that same summary's ``message``, not ``str(exc)`` —
+        the audit record gets a structured, leak-safe summary of the
+        error, while the :class:`CommandResult` a caller reads is built
+        separately, upstream, from the raw exception, and is unchanged by
+        this. ``cause`` is that summary's own nested dict — present only
+        when the caller's exception chained one via ``raise ... from
+        exc`` — and is stored as-is, already sanitized by
+        ``summarize_exception``.
 
         **Emitting the audit event can never change what the pipeline
         reports.** That is the whole invariant, and it is stated here rather
@@ -634,10 +809,18 @@ class MutationExecutor:
         batch down on a *failed* one, so the guard sits at the single seam
         every stage already routes through.
 
-        The failure is never swallowed: it is logged with a traceback at
-        ``error`` (``TRELLIS_LOG_LEVEL`` defaults to ``WARNING``, so anything
-        lower is a no-op on the CLI — #425) and stated on the returned
-        :class:`CommandResult` under :data:`AUDIT_EMIT_FAILED_MARKER`.
+        The failure is never swallowed: it is logged at ``error``
+        (``TRELLIS_LOG_LEVEL`` defaults to ``WARNING``, so anything lower is
+        a no-op on the CLI — #425) and stated on the returned
+        :class:`CommandResult` under :data:`AUDIT_EMIT_FAILED_MARKER`. The
+        line names the exception's type, adds its message only when it is a
+        ``TrellisError``, and carries no traceback. The warning follows the
+        same rule, since REST, MCP and the CLI hand it to the caller and a
+        driver's text can carry query text and values. An emit from inside an
+        ``except`` block (a failed handler, a failed idempotency read) has
+        the failure being audited as its error's context, so a rendered
+        traceback would print that failure, a driver's text included (#702,
+        #713), even when the emit's own error is clean.
 
         Measured before it was written: over the 3,655 governed mutations
         this deployment has executed since 2026-07-06, zero Stage 5 emits
@@ -660,6 +843,14 @@ class MutationExecutor:
         }
         if reason is not None:
             payload["reason"] = reason
+        if error_type is not None:
+            payload["error_type"] = error_type
+        if error_code is not None:
+            payload["error_code"] = error_code
+        if constraint is not None:
+            payload["constraint"] = constraint
+        if cause is not None:
+            payload["cause"] = cause
         # Added only when a policy actually fired -- non-blockingly on
         # the SUCCESS path, or ahead of the blocking rule on the
         # ``policy_violation`` rejection path. Keeping the key absent
@@ -676,17 +867,23 @@ class MutationExecutor:
                 entity_type=command.target_type,
                 payload=payload,
             )
-        except _AUDIT_EMIT_FAILURE as exc:
-            logger.exception(
+        except _audit_emit_failure_classes() as exc:
+            # No traceback, and no text Trellis did not write; see the
+            # docstring.
+            logger.error(  # noqa: TRY400 — no traceback on purpose; see above
                 "audit_emit_failed",
                 command_id=command.command_id,
                 operation=command.operation,
                 event_type=event_type,
                 error_type=type(exc).__name__,
+                error=str(exc) if isinstance(exc, TrellisError) else None,
             )
             return _AUDIT_EMIT_FAILED_TEMPLATE.format(
                 event_type=event_type,
-                error_type=type(exc).__name__,
-                error=exc,
+                error=(
+                    f"{type(exc).__name__}: {exc}"
+                    if isinstance(exc, TrellisError)
+                    else type(exc).__name__
+                ),
             )
         return None

@@ -284,14 +284,19 @@ edits the decisions file and submits approved promotions through the
 governed mutation pipeline.
 
 ```bash
-# 1. Discover candidates
-trellis analyze learning-candidates --format json > candidates.json
+# 1. Discover candidates: writes intent_learning_candidates.json and
+#    promotion_decisions.template.json to $TRELLIS_LEARNING_ARTIFACTS_DIR,
+#    else <data_dir>/learning (the directory the API's Review queue reads);
+#    the JSON output names both paths
+trellis analyze learning-candidates --format json
 
-# 2. Operator edits decisions.json, sets `approved: true` on rows to keep
+# 2. Operator copies the template to decisions.json, sets `approved: true`
+#    on rows to keep
 
 # 3. Submit
 trellis curate promote-learning \
-  --candidates candidates.json --decisions decisions.json --format json
+  --candidates <data_dir>/learning/intent_learning_candidates.json \
+  --decisions decisions.json --format json
 ```
 
 `--dry-run` prints the planned mutations without executing them.
@@ -436,8 +441,12 @@ The five checks it runs, equivalent to running these manually:
 # 1. Liveness — should always return 200
 curl -fsS http://localhost:8420/healthz
 
-# 2. Readiness — 200 only when every cloud backend round-trips
-curl -fsS http://localhost:8420/readyz | jq
+# 2. Readiness — 200 only when every cloud backend round-trips.
+#    smoke-test sends the resolved key here too, so the per-backend
+#    breakdown shows on an auth-required deployment; without a key
+#    (or with one readyz itself rejects) the breakdown is withheld and
+#    smoke-test notes it rather than reporting a bare pass/fail.
+curl -fsS -H "X-API-Key: $TRELLIS_API_KEY" http://localhost:8420/readyz | jq
 
 # 3. Auth — should 401 without the key, 200 with it
 curl -fsS -o /dev/null -w "%{http_code}\n" \
@@ -448,8 +457,9 @@ curl -fsS -o /dev/null -w "%{http_code}\n" \
 
 # 4. Metrics — should return Prometheus-format text (404 means the
 #    [observability] extra isn't installed; smoke-test reports this
-#    as INFO rather than FAIL)
-curl -fsS http://localhost:8420/metrics | head
+#    as INFO rather than FAIL). smoke-test sends the key here too, so
+#    a gated /metrics (TRELLIS_METRICS_PUBLIC=false) doesn't 401.
+curl -fsS -H "X-API-Key: $TRELLIS_API_KEY" http://localhost:8420/metrics | head
 ```
 
 If `/readyz` returns `degraded` with `event_log` or `document_store`

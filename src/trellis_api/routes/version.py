@@ -15,6 +15,8 @@ write-behaviour environment) and follows the same posture as the
 from __future__ import annotations
 
 import copy
+import os
+from pathlib import Path
 
 from fastapi import APIRouter, Depends
 
@@ -27,12 +29,33 @@ from trellis.api_version import (
     api_version_string,
 )
 from trellis.core.base import get_version
+from trellis.core.write_config import WriteBehaviourConfig, resolve_overridden_by
 from trellis.core.write_provenance import get_write_provenance
+from trellis.stores.settings_store import load_settings_values
 from trellis_api.auth import AuthContext, authenticate_optional
 from trellis_api.routes.health import OPS_DETAIL_PUBLIC, resolve_ops_detail
 from trellis_wire.dtos import VersionResponse
 
 router = APIRouter()
+
+
+def _resolve_stores_dir() -> Path:
+    """``<data_dir>/stores``, read the same two env vars registry.py does.
+
+    Deliberately **not** ``StoreRegistry.from_config_dir(...).stores_dir``:
+    this route has no store dependency today
+    (``test_version_route_needs_no_store`` — calling it twice with no
+    store fixture configured must not raise) and a settings-aware read
+    must not add one. Mirrors
+    :meth:`trellis.stores.registry.StoreRegistry.from_config_dir`'s own
+    inline resolution rather than importing it, which is the same
+    ``TRELLIS_CONFIG_DIR`` / ``TRELLIS_DATA_DIR`` pair with the same
+    defaults.
+    """
+    default_config_dir = str(Path.home() / ".trellis")
+    config_dir = Path(os.environ.get("TRELLIS_CONFIG_DIR", default_config_dir))
+    data_dir = Path(os.environ.get("TRELLIS_DATA_DIR", str(config_dir / "data")))
+    return data_dir / "stores"
 
 
 @router.get("/api/version", response_model=VersionResponse, tags=["version"])
@@ -61,10 +84,26 @@ def api_version(
     ``source_tree_commit`` keys are absent here in the deployment shape
     this route was written for.  They appear when the API is served from
     an editable install whose working tree has moved on.
+
+    ``write_behaviour_settings`` is gated the same way, for the same
+    reason — a knob's ``overridden_by`` sits beside its env-sourced
+    counterpart in ``write_provenance.env_flags``, so splitting the gate
+    between them would publish half the same fact.  Unlike
+    ``write_provenance`` (a stamp frozen once per process) this is read
+    fresh from ``<data_dir>/stores/settings.json`` on every call, same as
+    ``trellis admin write-config`` — this process's container may have
+    no store configured at all, in which case every row reports
+    ``"env"``/``"default"`` and never ``"settings"``.
     """
     provenance = None
+    settings_rows = None
     if ctx is not None or resolve_ops_detail() == OPS_DETAIL_PUBLIC:
         provenance = copy.deepcopy(get_write_provenance())
+        settings_values = load_settings_values(_resolve_stores_dir())
+        config = WriteBehaviourConfig.from_env_and_settings(settings=settings_values)
+        settings_rows = config.describe(
+            overridden_by=resolve_overridden_by(settings=settings_values)
+        )
     return VersionResponse(
         api_major=API_MAJOR,
         api_minor=API_MINOR,
@@ -74,4 +113,5 @@ def api_version(
         package_version=get_version(),
         mcp_tools_version=MCP_TOOLS_VERSION,
         write_provenance=provenance,
+        write_behaviour_settings=settings_rows,
     )

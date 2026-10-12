@@ -418,6 +418,54 @@ class TestPackAttributionRequirement:
         assert _payloads(temp_registry) == []
         assert _rows(temp_registry) == []
 
+    def test_enforced_via_settings_rejects_and_hands_back_the_served_ids(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A settings-only override reaches this enforcement site too.
+
+        ``require_pack_attribution`` is ``settings_live=True`` in
+        ``SETTINGS_REGISTRY`` — proven here end to end, not just at the
+        ``WriteBehaviourConfig.from_env_and_settings`` unit level, mirroring
+        the env-based assertion above with no env var set at all.
+        """
+        from trellis.stores.settings_store import SettingsStore
+
+        monkeypatch.delenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", raising=False)
+        assert temp_registry.stores_dir is not None
+        SettingsStore(temp_registry.stores_dir / "settings.json").set(
+            "require_pack_attribution", True
+        )
+        self._serve_pack(temp_registry, "pack_a", ["doc_1", "doc_2"])
+
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(pack_id="pack_a", rating=0.4)
+
+        data = excinfo.value.error.data
+        assert isinstance(data, dict)
+        assert data["item_ids"] == ["doc_1", "doc_2"]
+        assert _payloads(temp_registry) == []
+
+    def test_env_still_wins_over_a_settings_override_here(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The env > settings precedence holds at this real call site: a
+        settings row saying "require attribution" must not override an
+        explicit env var saying "don't".
+        """
+        from trellis.stores.settings_store import SettingsStore
+
+        assert temp_registry.stores_dir is not None
+        SettingsStore(temp_registry.stores_dir / "settings.json").set(
+            "require_pack_attribution", True
+        )
+        monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "0")
+        self._serve_pack(temp_registry, "pack_a", ["doc_1", "doc_2"])
+
+        result = record_feedback(pack_id="pack_a", rating=0.4)
+
+        assert "Feedback recorded" in result
+        assert len(_payloads(temp_registry)) == 1
+
     def test_enforced_call_is_recorded_once_cited(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -771,6 +819,57 @@ class TestBodiedAttributionRequirement:
         ]
         assert _payloads(temp_registry) == []
         assert _rows(temp_registry) == []
+
+    def test_enforced_via_settings_hands_back_only_the_unjudged_bodies(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``require_bodied_attribution`` is settings-live too — proven end
+        to end with no env var set, mirroring the env-based test above.
+        """
+        from trellis.stores.settings_store import SettingsStore
+
+        monkeypatch.delenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", raising=False)
+        assert temp_registry.stores_dir is not None
+        SettingsStore(temp_registry.stores_dir / "settings.json").set(
+            "require_bodied_attribution", True
+        )
+        self._serve(
+            temp_registry,
+            "pack_b",
+            ["doc_1", "doc_2", "doc_3", "doc_4"],
+            ["doc_4"],
+        )
+
+        with pytest.raises(McpError) as excinfo:
+            record_feedback(pack_id="pack_b", rating=0.5, helpful_item_ids=["doc_1"])
+
+        data = excinfo.value.error.data
+        assert isinstance(data, dict)
+        assert data["item_ids"] == ["doc_2", "doc_3"]
+        assert _payloads(temp_registry) == []
+
+    def test_env_still_wins_over_a_settings_override_here(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.stores.settings_store import SettingsStore
+
+        assert temp_registry.stores_dir is not None
+        SettingsStore(temp_registry.stores_dir / "settings.json").set(
+            "require_bodied_attribution", True
+        )
+        monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "0")
+        self._serve(
+            temp_registry,
+            "pack_b",
+            ["doc_1", "doc_2", "doc_3", "doc_4"],
+            ["doc_4"],
+        )
+
+        result = record_feedback(
+            pack_id="pack_b", rating=0.5, helpful_item_ids=["doc_1"]
+        )
+
+        assert "Feedback recorded" in result
 
     def test_a_followed_advisory_cannot_discharge_an_item_verdict(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch

@@ -29,6 +29,15 @@ import pytest
 
 pytest.importorskip("neo4j")
 
+from tests.unit.stores.bolt_embedding_reads import (
+    EMBEDDED,
+    EMBEDDED_VECTOR,
+    WHOLE_NODE_READS,
+    assert_read_leaves_embedding_out,
+    run_every_whole_node_read,
+    seed_embedded_nodes,
+)
+
 URI = os.environ.get("TRELLIS_TEST_ARCADEDB_URI", "")
 USER = os.environ.get("TRELLIS_TEST_ARCADEDB_USER", "root")
 PASSWORD = os.environ.get("TRELLIS_TEST_ARCADEDB_PASSWORD", "")
@@ -128,6 +137,15 @@ def test_upsert_without_node_raises(stores):
     _graph, vector = stores
     with pytest.raises(ValueError, match="has no current version"):
         vector.upsert("ghost", _vec(0.1, 0.2, 0.3))
+
+
+def test_upsert_refuses_a_non_finite_metadata_value(stores):
+    """``upsert_bulk`` calls ``upsert`` per item, so one fix site covers both."""
+    graph, vector = stores
+    _make_node(graph, "a")
+    with pytest.raises(ValueError, match="not JSON compliant"):
+        vector.upsert("a", _vec(0.1, 0.2, 0.3), metadata={"score": float("nan")})
+    assert vector.get("a") is None
 
 
 def test_upsert_bulk_propagates_missing_node(stores):
@@ -273,3 +291,25 @@ def test_get_node_without_embedding_returns_none(stores):
     graph, vector = stores
     _make_node(graph, "no_vec")
     assert vector.get("no_vec") is None
+
+
+# ----------------------------------------------------------------------
+# Graph reads leave the embedding out
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("read", sorted(WHOLE_NODE_READS))
+def test_whole_node_read_skips_embedding(stores, monkeypatch, read):
+    graph, vector = stores
+    assert_read_leaves_embedding_out(graph, vector, monkeypatch, read)
+
+
+def test_similarity_search_after_graph_reads(stores):
+    graph, vector = stores
+    seed_embedded_nodes(graph, vector)
+    run_every_whole_node_read(graph)
+    got = vector.get(EMBEDDED)
+    assert got is not None
+    assert got["vector"] == pytest.approx(EMBEDDED_VECTOR)
+    results = vector.query(EMBEDDED_VECTOR, top_k=1)
+    assert [r["item_id"] for r in results] == [EMBEDDED]

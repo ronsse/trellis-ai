@@ -43,6 +43,7 @@ import structlog
 import typer
 from rich.markup import escape
 
+from trellis.core.error_sanitize import render_exception_detail
 from trellis.stores.base.event_log import EventType
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
 from trellis_cli.output import build_console
@@ -276,11 +277,12 @@ def generate_proposals_command(
         raise
     except Exception as exc:
         logger.exception("generate_proposals_failed")
-        message = f"{type(exc).__name__}: {exc}"
+        # Describe, don't quote: str(exc) can carry raw driver text (#206).
+        message = f"{type(exc).__name__}: {render_exception_detail(exc)}"
         if output_format == "json":
             print(json.dumps({"error": "store_error", "message": message}))
         else:
-            console.print(f"[red]store error: {message}[/red]")
+            console.print(f"[red]store error: {escape(message)}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_STORE) from exc
 
     if output_format == "json":
@@ -338,11 +340,12 @@ def list_proposals_command(
         raise
     except Exception as exc:
         logger.exception("list_proposals_failed")
-        message = f"{type(exc).__name__}: {exc}"
+        # Describe, don't quote: str(exc) can carry raw driver text (#206).
+        message = f"{type(exc).__name__}: {render_exception_detail(exc)}"
         if output_format == "json":
             print(json.dumps({"error": "store_error", "message": message}))
         else:
-            console.print(f"[red]store error: {message}[/red]")
+            console.print(f"[red]store error: {escape(message)}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_STORE) from exc
 
     rows = [_event_to_listing_row(event) for event in events]
@@ -402,11 +405,12 @@ def show_proposal_command(
         raise
     except Exception as exc:
         logger.exception("show_proposal_failed")
-        message = f"{type(exc).__name__}: {exc}"
+        # Describe, don't quote: str(exc) can carry raw driver text (#206).
+        message = f"{type(exc).__name__}: {render_exception_detail(exc)}"
         if output_format == "json":
             print(json.dumps({"error": "store_error", "message": message}))
         else:
-            console.print(f"[red]store error: {message}[/red]")
+            console.print(f"[red]store error: {escape(message)}[/red]", soft_wrap=True)
         raise typer.Exit(code=EXIT_STORE) from exc
 
     if not matches:
@@ -427,7 +431,8 @@ def show_proposal_command(
         else:
             console.print(
                 "[red]No PROPOSAL_DRAFTED event for proposal_id="
-                f"{escape(repr(proposal_id))}.[/red]"
+                f"{escape(repr(proposal_id))}.[/red]",
+                soft_wrap=True,
             )
             console.print(
                 "[dim]Run 'trellis admin list-proposals' to see available IDs.[/dim]"

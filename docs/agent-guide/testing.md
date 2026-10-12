@@ -330,8 +330,9 @@ site through a real `MutationExecutor`, `SQLiteEventLog` and
 `DefaultPolicyGate`, one test per site, each running a batch of at least two
 commands with distinct ids and asserting the message fragment its site writes,
 so a test cannot pass by reaching a neighbouring branch. Two of those shapes are
-shared — `Duplicate command: <key>` at both replay sites, `Execution failed:
-<exc>` at both handler-failure sites — and there it is the command shape and the
+shared — `Duplicate command: <key>` at both replay sites, `Execution failed:` at
+both handler-failure sites (then the exception's text at the typed catch, its
+type name at the untyped one) — and there it is the command shape and the
 exception type that separate them, so the site-to-test map is proved by running
 each single-site fold (M1.n below) rather than by reading the fragment. Every
 site was reachable without mocking a seam. The module docstring carries the

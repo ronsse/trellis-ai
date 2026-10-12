@@ -5,11 +5,23 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from structlog.testing import capture_logs
 
-from trellis.retrieve.advisory_generator import AdvisoryGenerator
+if TYPE_CHECKING:
+    import pytest
+
+from tests.recovery_command import expected_recovery
+from trellis.retrieve.advisory_generator import (
+    MIN_EFFECT_SIZE_ENV,
+    MIN_EFFECT_SIZE_SETTING,
+    MIN_SAMPLE_SIZE_ENV,
+    MIN_SAMPLE_SIZE_SETTING,
+    AdvisoryGenerator,
+    resolve_advisory_thresholds,
+)
 from trellis.retrieve.effectiveness import run_advisory_fitness_loop
 from trellis.retrieve.formatters import format_advisories_as_markdown
 from trellis.schemas.advisory import AdvisoryCategory, AdvisoryStatus
@@ -62,6 +74,275 @@ def _feedback_event(
         pack_id,
         {"pack_id": pack_id, "success": success},
     )
+
+
+class TestResolveAdvisoryThresholds:
+    """``resolve_advisory_thresholds`` is the one path every caller (the
+    nightly curation worker, the REST route and the CLI command) uses to
+    turn a settings-store snapshot into the two thresholds the generator
+    is constructed with.
+    """
+
+    def test_no_env_and_no_settings_returns_the_module_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        assert resolve_advisory_thresholds(None) == (5, 0.15)
+
+    def test_a_settings_only_override_is_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: 12, MIN_EFFECT_SIZE_SETTING: 0.3}
+
+        assert resolve_advisory_thresholds(settings) == (12, 0.3)
+
+    def test_env_beats_a_settings_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "20")
+        monkeypatch.setenv(MIN_EFFECT_SIZE_ENV, "0.5")
+        settings = {MIN_SAMPLE_SIZE_SETTING: 12, MIN_EFFECT_SIZE_SETTING: 0.3}
+
+        assert resolve_advisory_thresholds(settings) == (20, 0.5)
+
+    def test_an_unparseable_env_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "not-a-number")
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 5
+
+    def test_an_unparseable_settings_value_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stored side has its own ``except`` block, independent of
+        the env side above -- a malformed *stored* sample size must fall
+        back to the default too.
+        """
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: "not-a-number"}
+
+        sample_size, _effect_size = resolve_advisory_thresholds(settings)
+
+        assert sample_size == 5
+
+    def test_a_non_finite_env_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``int(float("inf"))`` raises ``OverflowError``, not
+        ``ValueError`` -- routing through ``validate_value`` (which
+        checks ``math.isfinite`` first) means the bare
+        ``except (TypeError, ValueError)`` here never needs to see one.
+        """
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "inf")
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 5
+
+    def test_a_non_finite_settings_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: float("nan")}
+
+        sample_size, _effect_size = resolve_advisory_thresholds(settings)
+
+        assert sample_size == 5
+
+    def test_a_negative_env_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "-1")
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 5
+
+    def test_a_negative_settings_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: -1}
+
+        sample_size, _effect_size = resolve_advisory_thresholds(settings)
+
+        assert sample_size == 5
+
+    def test_a_nan_env_effect_size_never_fails_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """B4: a ``nan`` effect floor must never fail open. ``effect <
+        nan`` is always ``False``, so an unguarded ``nan`` floor would
+        skip nothing it should skip -- this must resolve to the module
+        default (0.15) instead.
+        """
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.setenv(MIN_EFFECT_SIZE_ENV, "nan")
+
+        _sample_size, effect_size = resolve_advisory_thresholds(None)
+
+        assert effect_size == 0.15
+
+    def test_a_nan_settings_effect_size_never_fails_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_EFFECT_SIZE_SETTING: float("nan")}
+
+        _sample_size, effect_size = resolve_advisory_thresholds(settings)
+
+        assert effect_size == 0.15
+
+    def test_a_negative_env_effect_size_never_fails_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.setenv(MIN_EFFECT_SIZE_ENV, "-1.0")
+
+        _sample_size, effect_size = resolve_advisory_thresholds(None)
+
+        assert effect_size == 0.15
+
+    def test_an_out_of_range_settings_effect_size_never_fails_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """5.5 is outside the registered ``0..1`` bound -- it must be
+        rejected by ``validate_value``'s bounds check, not passed
+        straight through as a floor nothing can cross.
+        """
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_EFFECT_SIZE_SETTING: 5.5}
+
+        _sample_size, effect_size = resolve_advisory_thresholds(settings)
+
+        assert effect_size == 0.15
+
+    def test_the_exact_maximum_settings_sample_size_is_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``advisory_min_sample_size`` is registered with
+        ``maximum=1_000_000`` -- a sanity cap against a typo or an
+        overflow-class value, not an operational ceiling, so the cap
+        value itself must still resolve rather than be rejected.
+        """
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: 1_000_000}
+
+        sample_size, _effect_size = resolve_advisory_thresholds(settings)
+
+        assert sample_size == 1_000_000
+
+    def test_one_past_the_maximum_settings_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+        settings = {MIN_SAMPLE_SIZE_SETTING: 1_000_001}
+
+        sample_size, _effect_size = resolve_advisory_thresholds(settings)
+
+        assert sample_size == 5
+
+    def test_the_exact_maximum_env_sample_size_is_honoured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "1000000")
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 1_000_000
+
+    def test_one_past_the_maximum_env_sample_size_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, "1000001")
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 5
+
+
+def _assert_no_env_value_leak(logs: list[dict], event: str, secret: str) -> dict:
+    """SF3 (env half): the log line for a malformed env value must carry
+    ``var=<ENV_NAME>`` and ``error_type=...``, never the raw value --
+    matching the settings-store half #867 already fixed. Checking for
+    the full secret is not enough on its own (a truncating formatter
+    could still leak a damaging fragment), so this also rules out every
+    8-character substring of it appearing anywhere in the captured
+    entries.
+    """
+    matches = [entry for entry in logs if entry["event"] == event]
+    assert len(matches) == 1, logs
+    entry = matches[0]
+    rendered = repr(entry)
+    assert secret not in rendered, rendered
+    for start in range(len(secret) - 7):
+        chunk = secret[start : start + 8]
+        assert chunk not in rendered, (chunk, rendered)
+    return entry
+
+
+class TestEnvLogLineNeverLeaksTheRawValue:
+    """SF3 (env half). The settings-store half of this bug (a malformed
+    *stored* value logged at ``value=<raw>``) was fixed in #867; the env
+    half -- the exact same resolvers' *other* branch -- was not. A
+    secret-shaped env override (an API key pasted into the wrong
+    variable, say) must not reach stderr when it fails to parse.
+    """
+
+    def test_bad_env_int_logs_the_var_name_not_the_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        needle = "sk-proj-FAKEAdvisoryEnvIntNeedle000111"
+        monkeypatch.setenv(MIN_SAMPLE_SIZE_ENV, needle)
+        monkeypatch.delenv(MIN_EFFECT_SIZE_ENV, raising=False)
+
+        with capture_logs() as logs:
+            sample_size, _effect_size = resolve_advisory_thresholds(None)
+
+        assert sample_size == 5
+        entry = _assert_no_env_value_leak(
+            logs, "advisory_generator.bad_env_int", needle
+        )
+        assert entry["var"] == MIN_SAMPLE_SIZE_ENV
+        assert "error_type" in entry
+        assert "value" not in entry
+
+    def test_bad_env_float_logs_the_var_name_not_the_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        needle = "sk-proj-FAKEAdvisoryEnvFloatNeedle000111"
+        monkeypatch.delenv(MIN_SAMPLE_SIZE_ENV, raising=False)
+        monkeypatch.setenv(MIN_EFFECT_SIZE_ENV, needle)
+
+        with capture_logs() as logs:
+            _sample_size, effect_size = resolve_advisory_thresholds(None)
+
+        assert effect_size == 0.15
+        entry = _assert_no_env_value_leak(
+            logs, "advisory_generator.bad_env_float", needle
+        )
+        assert entry["var"] == MIN_EFFECT_SIZE_ENV
+        assert "error_type" in entry
+        assert "value" not in entry
 
 
 class TestAdvisoryGeneratorEmpty:
@@ -1044,7 +1325,7 @@ class TestDegradedStoreCannotUnsuppress:
 
         assert report.store_degradation is not None
         assert report.store_degradation["reason"] == "malformed_json"
-        assert report.store_degradation["recovery"] == f"mv {path} {path}.corrupt"
+        assert report.store_degradation["recovery"] == expected_recovery(path)
 
         lines = [
             e
@@ -1053,7 +1334,7 @@ class TestDegradedStoreCannotUnsuppress:
         ]
         assert len(lines) == 1
         assert lines[0]["log_level"] == "error"
-        assert lines[0]["recovery"] == f"mv {path} {path}.corrupt"
+        assert lines[0]["recovery"] == expected_recovery(path)
 
     def test_the_event_log_is_never_read(self, tmp_path: Path) -> None:
         """Refuse before analysing, not after.
