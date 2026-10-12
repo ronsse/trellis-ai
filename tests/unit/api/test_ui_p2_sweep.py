@@ -227,16 +227,13 @@ def test_not_found_detail_names_the_id_never_renders_blank() -> None:
     assert re.search(r"\? `Pack \$\{packId\} was not found\.`", page) is not None
 
 
-def test_event_not_found_names_the_loaded_window_not_just_the_id() -> None:
-    """Events page by a cursor window, not an id lookup, so a miss must say
-    which window was searched -- an id-shaped message alone would be
-    misleading (the id might exist outside the loaded window)."""
+def test_event_detail_uses_a_direct_id_lookup_not_the_loaded_window() -> None:
+    """``GET /events/{id}`` reaches the whole log, so a miss means the id
+    genuinely doesn't exist -- not merely that it fell outside whatever
+    cursor window the list view happened to have loaded."""
     page = _page()
-    found = re.search(
-        r'Event <span class="mono">\$\{escHtml\(eventId\)\}</span>'
-        r" was not found in \$\{windowDesc\}",
-        page,
-    )
+    assert "await fetchJSON(`/events/${encodeURIComponent(eventId)}`)" in page
+    found = re.search(r"\? `Event \$\{eventId\} was not found\.`", page)
     assert found is not None
 
 

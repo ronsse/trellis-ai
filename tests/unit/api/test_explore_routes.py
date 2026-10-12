@@ -104,8 +104,56 @@ def test_documents_search(client, registry):
     assert resp.status_code == 200
     data = resp.json()
     assert data["count"] == 1
+    assert data["total"] == 1
+    assert data["total_exact"] is True
     assert data["documents"][0]["doc_id"] == "doc-pg"
     assert "rank" in data["documents"][0]
+
+
+def test_documents_search_is_paged_the_same_way_as_the_list(client, registry):
+    """A search's ``offset``/``limit`` apply to its matches, same as the
+    unfiltered list -- not ignored the way an earlier version of this route
+    ignored ``offset`` whenever ``q`` was set."""
+    store = registry.knowledge.document_store
+    for i in range(5):
+        store.put(f"doc-postgres-{i}", f"postgres note {i}", None)
+
+    page1 = client.get(
+        "/api/v1/documents", params={"q": "postgres", "limit": 2, "offset": 0}
+    ).json()
+    page2 = client.get(
+        "/api/v1/documents", params={"q": "postgres", "limit": 2, "offset": 2}
+    ).json()
+
+    assert page1["total"] == 5
+    assert page1["total_exact"] is True
+    assert page1["count"] == 2
+    assert page2["count"] == 2
+    assert page2["offset"] == 2
+    ids_1 = {d["doc_id"] for d in page1["documents"]}
+    ids_2 = {d["doc_id"] for d in page2["documents"]}
+    assert ids_1.isdisjoint(ids_2)
+
+
+def test_documents_search_total_is_inexact_past_the_scan_bound(client, registry):
+    """A query matching at or past the scan bound reports ``total_exact:
+    false`` instead of a silently wrong exact count -- the same caution
+    ``get_event``'s default scan takes for the same reason."""
+    store = registry.knowledge.document_store
+    for i in range(3):
+        store.put(f"doc-{i}", f"postgres note {i}", None)
+
+    from trellis_api.routes import explore as explore_module
+
+    original = explore_module._SEARCH_SCAN_LIMIT
+    explore_module._SEARCH_SCAN_LIMIT = 2
+    try:
+        data = client.get("/api/v1/documents", params={"q": "postgres"}).json()
+    finally:
+        explore_module._SEARCH_SCAN_LIMIT = original
+
+    assert data["total"] == 2
+    assert data["total_exact"] is False
 
 
 def test_documents_excludes_chunks_by_default(client, registry):
@@ -348,6 +396,39 @@ def test_events_bad_event_type_422(client):
 def test_events_bad_order_422(client):
     resp = client.get("/api/v1/events", params={"order": "sideways"})
     assert resp.status_code == 422
+
+
+def test_event_get_by_id(client, registry):
+    log = _seed_events(registry)
+    [target] = log.get_events(event_type=EventType.MEMORY_STORED, limit=1)
+    resp = client.get(f"/api/v1/events/{target.event_id}")
+    assert resp.status_code == 200
+    event = resp.json()["event"]
+    assert event["event_id"] == target.event_id
+    assert event["event_type"] == EventType.MEMORY_STORED.value
+    # Full payload by default, unlike the list view's stripped rows.
+    assert event["payload"]["doc_id"] == "doc-1"
+
+
+def test_event_get_by_id_reaches_outside_a_recent_window(client, registry):
+    """An id not in the newest page is still found, not read as missing."""
+    log = registry.operational.event_log
+    old = log.emit(EventType.MEMORY_STORED, source="mcp_server", entity_id="doc-old")
+    for i in range(5):
+        log.emit(EventType.ENTITY_CREATED, source="curate", entity_id=f"ent-{i}")
+    # A 1-row window would miss ``old`` entirely.
+    resp = client.get("/api/v1/events", params={"limit": 1, "order": "desc"})
+    assert resp.json()["events"][0]["event_id"] != old.event_id
+
+    resp = client.get(f"/api/v1/events/{old.event_id}")
+    assert resp.status_code == 200
+    assert resp.json()["event"]["event_id"] == old.event_id
+
+
+def test_event_get_by_id_404(client):
+    resp = client.get("/api/v1/events/no-such-event-id")
+    assert resp.status_code == 404
+    assert "no-such-event-id" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

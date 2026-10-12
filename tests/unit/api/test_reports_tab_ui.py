@@ -69,6 +69,24 @@ def test_reports_view_is_wired_into_nav_and_switch_view() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_load_reports_tab_does_not_auto_run_a_report() -> None:
+    """Opening the tab populates the picker and the param form but does not
+    call ``runReport()`` itself -- the operator picks a report and clicks
+    Run. (A report can be expensive; running the first one in the list on
+    every visit, including visits that only wanted a different report, was
+    unasked-for work.) The empty output panel says so instead of reading
+    as blank/broken."""
+    page = _page()
+    body = _between(
+        page,
+        "async function loadReportsTab() {",
+        "\n        function onReportPickerChange() {",
+    )
+    try_block = _between(body, "onReportPickerChange();", "} catch (err) {")
+    assert "runReport()" not in try_block
+    assert "empty-state" in try_block
+
+
 def test_load_reports_tab_fetch_failure_renders_visible_error() -> None:
     page = _page()
     body = _between(

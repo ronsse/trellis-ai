@@ -154,6 +154,13 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
     # Query
     # ------------------------------------------------------------------
 
+    def get_event(self, event_id: str) -> Event | None:
+        """Direct primary-key lookup -- reaches the whole log, not a window."""
+        with self._mapped_conn("get_event") as conn, conn.cursor() as cur:
+            cur.execute("SELECT * FROM events WHERE event_id = %s", (event_id,))
+            row = cur.fetchone()
+        return self._row_to_event(row) if row is not None else None
+
     def get_events(
         self,
         *,
