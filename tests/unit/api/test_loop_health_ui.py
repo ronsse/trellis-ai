@@ -1,4 +1,4 @@
-"""The Loops tab renders per-loop health truthfully (e167).
+"""The Loops tab renders per-loop health truthfully.
 
 Static assertions on ``index.html``'s own markup/script, mirroring the
 pattern in ``test_ui_review_truth.py``: no browser, no JS engine — pin the
@@ -18,6 +18,10 @@ Three claims under test:
    long stale.
 3. A fetch failure on ``GET /loops`` renders a visible error in
    ``#loops-rows``, not a silent empty state.
+4. ``operator_hint``, when the server sets it, renders as a small secondary
+   footnote -- never folded into ``description`` or ``what_it_changes``,
+   which stay plain operator prose (``LoopHealthRow.operator_hint``'s
+   docstring).
 """
 
 from __future__ import annotations
@@ -79,8 +83,8 @@ def test_real_run_timestamp_uses_fmt_utc_and_time_ago() -> None:
     body = _render_loop_row_body(_page())
     else_branch = _between(body, "} else {", "\n            }\n")
     # fmtUtc/fmtDateUtc were collapsed into fmtTime (one UTC-labelled
-    # formatter family, e174 item 3) -- this still pins a UTC-rendering
-    # call, not just any timestamp read.
+    # formatter family) -- this still pins a UTC-rendering call, not just
+    # any timestamp read.
     assert "fmtTime(loop.last_run_at)" in else_branch
     assert "timeAgo(loop.last_run_at)" in else_branch
 
@@ -202,6 +206,34 @@ def test_fetch_failure_renders_visible_error_in_loops_rows() -> None:
     assert "container.innerHTML" in catch_block
     assert "err.message" in catch_block
     assert "color:var(--error)" in catch_block
+
+
+# ---------------------------------------------------------------------------
+# 4. operator_hint renders as its own secondary footnote.
+# ---------------------------------------------------------------------------
+
+
+def test_operator_hint_renders_as_a_separate_footnote() -> None:
+    body = _render_loop_row_body(_page())
+    assert "loop.operator_hint" in body
+    # Guarded, not unconditionally interpolated -- a loop with no hint
+    # must not render an empty/undefined footnote div.
+    assert re.search(r"loop\.operator_hint\s*\?", body)
+    assert "escHtml(loop.operator_hint)" in body
+
+
+def test_operator_hint_is_never_folded_into_description_or_what_it_changes() -> None:
+    body = _render_loop_row_body(_page())
+    description_line = re.search(
+        r'<div class="loop-row-desc">\$\{escHtml\(loop\.description\)\}</div>', body
+    )
+    what_it_changes_line = re.search(
+        r"<em>What it changes:</em> \$\{escHtml\(loop\.what_it_changes\)\}", body
+    )
+    assert description_line is not None
+    assert what_it_changes_line is not None
+    assert "operator_hint" not in description_line.group(0)
+    assert "operator_hint" not in what_it_changes_line.group(0)
 
 
 def test_loops_view_is_wired_into_nav_and_switch_view() -> None:

@@ -1,8 +1,7 @@
 """``trellis admin schedule set`` / ``run`` — CLI parity for the admin REST surface.
 
-Mirrors ``trellis_api.routes.admin``'s ``patch_admin_job`` / ``run_admin_job``
-(plan p1 PR 6, ``docs/design/p1-ui-control-plane.md`` (b)): the same
-writable fields (``enabled``, ``cadence``, ``timeout_seconds`` via
+Mirrors ``trellis_api.routes.admin``'s ``patch_admin_job`` / ``run_admin_job``:
+the same writable fields (``enabled``, ``cadence``, ``timeout_seconds`` via
 ``set``; ``run_requested_at`` via ``run``), the same catalog-name
 validation, the same refusal when the schedule store is degraded or
 stale, and the same audit events (``SCHEDULE_UPDATED`` /

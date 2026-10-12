@@ -22,6 +22,9 @@ Claims under test:
    ``init()`` already makes (no second request), and distinguishes
    ready / degraded / unknown with a hover title -- never defaulting
    silently to "ready".
+6. The picker's ``<option>`` text is each report's human ``title``
+   (B15), with the raw report ``name`` demoted to secondary text next
+   to the description -- never the primary label.
 """
 
 from __future__ import annotations
@@ -183,3 +186,28 @@ def test_readiness_pill_css_classes_exist() -> None:
     assert ".readiness-pill.is-ready { background: var(--success); }" in page
     assert ".readiness-pill.is-degraded { background: var(--error); }" in page
     assert ".readiness-pill.is-unknown { background: var(--text-dim); }" in page
+
+
+# ---------------------------------------------------------------------------
+# 6. Picker option text is the title; the raw name is secondary text.
+# ---------------------------------------------------------------------------
+
+
+def test_picker_option_text_is_the_title_not_the_raw_name() -> None:
+    page = _page()
+    found = re.search(r"picker\.innerHTML = reports\.map\(r =>\s*\n\s*`([^`]*)`", page)
+    assert found is not None, "picker option template literal not found"
+    option_template = found.group(1)
+    assert 'value="${escHtml(r.name)}"' in option_template
+    assert ">${escHtml(r.title || r.name)}</option>" in option_template
+
+
+def test_report_description_shows_the_raw_name_as_secondary_text() -> None:
+    body = _between(
+        _page(),
+        "function onReportPickerChange() {",
+        "\n        async function runReport",
+    )
+    assert "report-description" in body
+    assert "escHtml(name)" in body
+    assert "<code" in body

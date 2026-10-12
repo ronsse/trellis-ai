@@ -1081,7 +1081,7 @@ class MetricsTimeseriesResponse(WireModel):
     scanned_events: int | None = None
 
 
-# -- Loop health (e167) --
+# -- Loop health --
 
 
 class LoopHealthRowResponse(WireModel):
@@ -1128,7 +1128,7 @@ class LoopHealthResponse(WireModel):
     loops: list[LoopHealthRowResponse] = Field(default_factory=list)
 
 
-# -- Admin: scheduled jobs (plan p1 PR 6) --
+# -- Admin: scheduled jobs --
 #
 # DTOs backing ``GET``/``PATCH /api/v1/admin/jobs`` and
 # ``POST /api/v1/admin/jobs/{name}/run``. The writable surface is

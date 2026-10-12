@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reference host-side dispatcher for Trellis's schedule registry
-# (trellis-ai#e166, plan p1 "UI control plane" §(b)).
+# (the ``GET``/``PATCH /admin/jobs`` API and matching CLI).
 #
 # DOCUMENTATION ONLY. This file is not installed, symlinked, sourced, or
 # run by anything in trellis-ai or its CI. Copy it into the deployment
@@ -48,8 +48,8 @@
 #     ever read from `schedule.json`; the operator places the executable
 #     at `$TRELLIS_HOST_JOBS_DIR/<name>` themselves, outside the shared
 #     data mount.
-# Editing `schedule.json` — by hand, or (once plan p1 PR 6 ships) over an
-# API — can therefore change only *whether* and *when* a catalog job
+# Editing `schedule.json` — by hand, or over the admin API — can
+# therefore change only *whether* and *when* a catalog job
 # runs, never *what* runs. See `src/trellis/schedule/catalog.py` and
 # `src/trellis/stores/schedule_store.py`'s module docstring for the full
 # argument, of which this script is the other half.
@@ -57,7 +57,7 @@
 # Why ONE dispatcher + ONE cron line, not one cron line per job (the shape
 # of the real nightly scripts — capture/curate/backup/roadmap — that this
 # is modeled on): the whole point of the registry is that a job's
-# cadence and enabled flag become editable later (a UI, plan p1 PR 6)
+# cadence and enabled flag are editable from the admin API/CLI
 # without ever touching crontab again. A fixed per-job crontab line
 # is exactly what the registry replaces; this script is what reads it.
 #

@@ -348,7 +348,7 @@ def test_no_browser_confirm_or_alert_dialog_in_tag_rules_section() -> None:
     section = _between(
         page,
         "// -- Tag rules: mined candidate review (Apply/Revoke) --",
-        "// === Settings (e179) ===",
+        "// === Settings ===",
     )
     assert not re.search(r"(?<![A-Za-z0-9_])confirm\(", section)
     assert not re.search(r"(?<![A-Za-z0-9_])alert\(", section)

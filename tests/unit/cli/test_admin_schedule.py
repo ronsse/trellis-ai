@@ -1,7 +1,7 @@
 """CLI contract for the schedule registry: record-job-run, due-jobs, init-schedule,
 set, run.
 
-``set``/``run`` are the CLI-parity half of plan p1 PR 6's admin REST surface
+``set``/``run`` are the CLI-parity half of the admin REST surface
 (``GET``/``PATCH /admin/jobs``, ``POST /admin/jobs/{name}/run`` in
 ``trellis_api.routes.admin``) and a "Schedules" tab in the admin UI now cover
 the same ground from a browser.

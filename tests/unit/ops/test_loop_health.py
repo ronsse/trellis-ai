@@ -1,4 +1,4 @@
-"""Tests for `trellis.ops.loop_health.summarize_loop_health` (e167).
+"""Tests for `trellis.ops.loop_health.summarize_loop_health`.
 
 The one claim the brief makes load-bearing: a loop with no event yet
 reads "never run", never a zero that looks identical to "ran and found

@@ -22,6 +22,7 @@ write or claiming the stored value is already in force.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -70,6 +71,25 @@ def _get_settings_store(registry: StoreRegistry) -> SettingsStore:
         msg = "stores_dir must be set on registry to use SettingsStore"
         raise ValueError(msg)
     return SettingsStore(path)
+
+
+def resolve_env_pinned_bool_setting(
+    name: str, env_fn: Callable[[], bool], settings_values: dict[str, Any]
+) -> bool:
+    """One env-pinned boolean registry entry's effective value.
+
+    env > settings > default -- the loop inside :func:`_effective_values`
+    below (``GET /settings``'s ``effective_value``) and the Advisories
+    route's "withheld (legacy)" badge both call this, so neither can
+    drift from the other's precedence for the same setting.
+    """
+    spec = SETTINGS_REGISTRY[name]
+    source = resolve_source(spec, settings_values)
+    if source == "env":
+        return env_fn()
+    if source == "settings":
+        return bool(settings_values[name])
+    return bool(spec.default)
 
 
 def _effective_values(
@@ -149,14 +169,7 @@ def _effective_values(
         ("graph_seeding", _graph_seeding_enabled),
         ("filter_legacy_advisories", _filter_legacy_advisories_enabled),
     ):
-        spec = SETTINGS_REGISTRY[name]
-        source = resolve_source(spec, settings_values)
-        if source == "env":
-            effective[name] = env_fn()
-        elif source == "settings":
-            effective[name] = bool(settings_values[name])
-        else:
-            effective[name] = spec.default
+        effective[name] = resolve_env_pinned_bool_setting(name, env_fn, settings_values)
 
     from trellis.classify.demotion_gate import (  # noqa: PLC0415
         resolve_demotion_thresholds,
@@ -294,8 +307,7 @@ def _entry(
         ),
         # The raw override on disk, if any -- distinct from
         # effective_value, which may instead be the env or default value
-        # while a stored override sits inert underneath it (brief e179
-        # step 2's env-pin truthfulness).
+        # while a stored override sits inert underneath it.
         "stored_value": stored_row.value if stored_row is not None else None,
         # Re-gate #867 B4/B6: a malformed stored row (``1e999``, ``nan``,
         # a string where an int belongs) makes every resolver above fall
@@ -334,7 +346,7 @@ def _entry(
                 else None
             )
         ),
-        # "Last changed ... when" (brief e179 step 1). The store never
+        # "Last changed ... when". The store never
         # records who changed a setting -- SettingRow carries no
         # changed_by field, and SettingsUpdateHandler's changed_by is
         # audit-event-only -- so this reports only what the store
@@ -488,15 +500,14 @@ def list_settings() -> dict[str, Any]:
         "store_degradation": (
             degradation.to_dict() if degradation is not None else None
         ),
-        # This process's own read, not a fleet-wide value (plan
-        # p1-ui-control-plane.md's PR 3/4 acceptance check): a
+        # This process's own read, not a fleet-wide value: a
         # multi-container deployment has one settings.json per container
         # unless it is bind-mounted, and nothing about this route lets a
         # caller tell the two cases apart without this label.
         "read_by": "trellis-api",
         # Human-facing group labels, keyed the same way as each entry's
         # "group" field, so the UI's filter box never hardcodes a display
-        # name (brief e179 step 8).
+        # name.
         "groups": dict(GROUP_LABELS),
     }
 

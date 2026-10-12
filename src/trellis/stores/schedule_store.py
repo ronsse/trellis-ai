@@ -4,8 +4,7 @@ Same failure posture as :class:`~trellis.stores.policy_store.PolicyStore`
 and :class:`~trellis.stores.advisory_store.AdvisoryStore`, built on the
 shared :class:`~trellis.stores.degradable_json_store.DegradableJsonStore`:
 **the read degrades and the write refuses.** A host dispatcher cron and a
-containerised API are both future readers of the same bind-mounted
-``schedule.json`` (see ``docs/design/p1-ui-control-plane.md`` §(b)); a
+containerised API both read the same bind-mounted ``schedule.json``; a
 store that rewrote a partially-read file would silently drop whatever
 didn't parse, which for a schedule registry means a job quietly stops
 being dispatched rather than erroring.
@@ -23,7 +22,7 @@ rejects a legacy or tampered row still carrying the old ``command``
 field — in both cases :meth:`_parse_row` raises and the row degrades
 (``invalid_rows``) rather than being treated as something to run. So
 this file — shared, read-write-mounted into every container, and
-API-editable once a later PR lands — can change only *whether* and
+API-editable — can change only *whether* and
 *when* a catalog job runs, never *what* runs. The one thing that execs a
 job is the host dispatcher (``docs/ops/job-dispatcher.sh.example``,
 documented but not installed), and it reads the command from
@@ -46,9 +45,9 @@ logger = structlog.get_logger(__name__)
 class ScheduleStore(DegradableJsonStore[ScheduledJob]):
     """Load and save the job schedule registry from a JSON file.
 
-    Backs ``trellis admin due-jobs`` and (read-only, for now) the
-    reference dispatcher script. There is no REST route and no UI on this
-    store yet — both are a later PR (plan p1, PR 6).
+    Backs ``trellis admin due-jobs``, the reference dispatcher script
+    (read-only), and the admin ``GET``/``PATCH /admin/jobs`` routes and
+    Schedules tab, which read and write this store.
 
     File format::
 

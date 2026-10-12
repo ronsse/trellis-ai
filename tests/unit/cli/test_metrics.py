@@ -295,7 +295,7 @@ def test_worker_tune_json_dry_run_is_the_flag_with_auto_promote_off(
 
 
 def test_worker_tune_live_run_emits_tune_cycle_completed_event(cli_env) -> None:
-    """A live ``worker tune`` leaves a durable, API-readable health record (e167).
+    """A live ``worker tune`` leaves a durable, API-readable health record.
 
     Before this, a pass that promoted nothing emitted zero events, so
     ``GET /admin/loops`` could not tell "ran and found nothing to do"

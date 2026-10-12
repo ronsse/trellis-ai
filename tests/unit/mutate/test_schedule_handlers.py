@@ -1,5 +1,5 @@
-"""Tests for ``ScheduleUpdateHandler``/``JobRunRequestHandler`` (plan p1 PR 6
-rework): the only code that calls :meth:`ScheduleStore.put`, reachable only
+"""Tests for ``ScheduleUpdateHandler``/``JobRunRequestHandler``: the only
+code that calls :meth:`ScheduleStore.put`, reachable only
 through :func:`trellis.mutate.build_schedule_executor` — never through
 :func:`trellis.mutate.build_curate_executor`'s handler dict, which backs
 ``POST /api/v1/commands/batch`` and MCP ``execute_mutation``. A mutate-scoped
