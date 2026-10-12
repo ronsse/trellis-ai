@@ -532,6 +532,20 @@ class EventType(StrEnum):
     #: audit does not have to reconstruct settings state from elsewhere.
     LEARNING_AUTO_PROMOTE_EVALUATED = "learning.auto_promote_evaluated"
 
+    #: Emitted once per ``trellis curate evaluate-precedent-demotion`` run
+    #: (see ``trellis.learning.precedent_evidence_gate``). Report-only,
+    #: like :attr:`LEARNING_AUTO_PROMOTE_EVALUATED`: this module never
+    #: demotes anything, so every precedent's disposition is one of
+    #: ``would_demote``, ``refused`` (see its own ``reason`` field for the
+    #: slug) or ``skipped`` (already demoted, archived, or otherwise not
+    #: the current lifecycle state), and the run writes nothing besides
+    #: this event. Payload carries ``mode`` (always ``"report_only"``
+    #: today), ``min_unhelpful_citations``, ``attribution_caveat`` (only a
+    #: flat ``get_context`` pack can supply evidence; ``get_lessons`` and
+    #: sectioned packs cannot), ``dispositions`` (per-precedent) and
+    #: ``counts``.
+    LEARNING_AUTO_DEMOTE_EVALUATED = "learning.auto_demote_evaluated"
+
     #: Emitted by the governed settings write path
     #: (``SettingsUpdateHandler`` / ``Operation.SETTINGS_UPDATE``) on every
     #: successful set or reset of one ``settings.json`` override. Payload:

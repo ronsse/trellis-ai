@@ -28,6 +28,14 @@ from trellis.learning.candidate_auto_promote import (
     run_candidate_auto_promotion,
     sanitize_configured_mode,
 )
+from trellis.learning.precedent_evidence_gate import (
+    MIN_UNHELPFUL_CITATIONS,
+    emit_precedent_demotion_failure_event,
+    evaluate_precedent_demotions,
+)
+from trellis.learning.precedent_evidence_gate import (
+    report_to_dict as precedent_demotion_report_to_dict,
+)
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -37,7 +45,7 @@ from trellis.mutate import (
 from trellis.stores.settings_store import load_settings_values
 from trellis_cli.exit_codes import EXIT_VALIDATION, refusal_exit_code
 from trellis_cli.output import build_console, emit_json
-from trellis_cli.stores import _get_registry, get_event_log
+from trellis_cli.stores import _get_registry, get_event_log, get_graph_store
 
 curate_app = typer.Typer(no_args_is_help=True)
 console = build_console()
@@ -1087,3 +1095,73 @@ def auto_promote_candidates(
     console.print(f"  ineligible: {report.ineligible_count}")
     for outcome in report.outcomes:
         console.print(f"  - {escape(outcome.candidate_id)}: {outcome.disposition}")
+
+
+@curate_app.command("evaluate-precedent-demotion")
+def evaluate_precedent_demotion(
+    min_unhelpful_citations: int = typer.Option(
+        MIN_UNHELPFUL_CITATIONS,
+        "--min-unhelpful-citations",
+        min=1,
+        help=(
+            "Override for the per-precedent unhelpful-citation floor. "
+            "Provisional: borrowed from trellis.classify.demotion_gate, "
+            "measured for noise documents, not for precedents."
+        ),
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Evaluate current precedents for demotion — report-only, writes nothing.
+
+    Judges every precedent with a successful ``precedent.promote`` event
+    against the citations its own packs collected since it was promoted,
+    joining ``PACK_ASSEMBLED.injected_items`` to ``FEEDBACK_RECORDED`` by
+    pack id. A precedent demotes only on a floor of unhelpful citations —
+    never on the absence of helpful ones — and any precedent cited helpful
+    at least as often as unhelpful is refused regardless of the unhelpful
+    count. An already-demoted or archived precedent, or one otherwise not
+    in the current lifecycle state, is reported as skipped rather than
+    judged.
+
+    Only a precedent served through a flat ``get_context`` pack can
+    accumulate evidence this way: ``get_lessons`` and sectioned packs emit
+    no per-item attribution, so a precedent reachable only through those
+    surfaces always refuses for want of evidence, regardless of how useful
+    it actually is. See ``attribution_caveat`` in this command's own
+    output (every format) for the same statement.
+
+    Every run — including one that fails before evaluating a single
+    precedent — emits at least one ``LEARNING_AUTO_DEMOTE_EVALUATED``
+    event and writes nothing else: no demotion, no node change, no commit
+    mode exists for this command.
+    """
+    event_log = get_event_log()
+    graph_store = get_graph_store()
+    try:
+        report = evaluate_precedent_demotions(
+            event_log,
+            graph_store,
+            min_unhelpful_citations=min_unhelpful_citations,
+        )
+    except Exception as exc:
+        emit_precedent_demotion_failure_event(event_log, error=exc)
+        raise
+
+    if output_format == "json":
+        emit_json(precedent_demotion_report_to_dict(report))
+        return
+
+    console.print("[bold]Evaluate Precedent Demotion[/bold] — mode=report_only")
+    if report.scan.truncated:
+        # Same placement as `analyze token-usage`: before any count,
+        # because a truncated discovery or join scan can under-count
+        # unhelpful citations and read as "no evidence" rather than
+        # "didn't look far enough".
+        console.print(f"  [yellow]window[/yellow] {report.scan.note}")
+    console.print(f"  {escape(report.attribution_caveat)}", soft_wrap=True)
+    console.print(f"  would_demote: {report.would_demote_count}")
+    console.print(f"  refused: {report.refused_count}")
+    console.print(f"  skipped: {report.skipped_count}")
+    for outcome in report.outcomes:
+        detail = outcome.reason or outcome.disposition
+        console.print(f"  - {escape(outcome.entity_id)}: {escape(detail)}")

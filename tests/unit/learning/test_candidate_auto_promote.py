@@ -77,7 +77,7 @@ from trellis.learning.candidate_auto_promote import (
     sanitize_configured_mode,
 )
 from trellis.mutate import build_curate_executor
-from trellis.mutate.commands import Operation
+from trellis.mutate.commands import Command, Operation
 from trellis.mutate.executor import MutationExecutor
 from trellis.stores.base.event_log import Event, EventLog, EventType
 from trellis.stores.registry import StoreRegistry
@@ -991,6 +991,58 @@ class TestAlreadyPromotedScanOrderMatchesUnderTruncation:
         assert len(already_promoted) == _PROMOTION_SCAN_LIMIT
         assert newest_entity_id in already_promoted
         assert oldest_entity_id not in already_promoted
+
+
+class TestScanAlreadyPromotedEntityIdsIncludesDemoted:
+    """Regression guard for "no flapping": ``precedent.promote`` /
+    ``MUTATION_EXECUTED`` events are immutable, and demotion only ever
+    *adds* a new event plus a new SCD-2 node version -- it never deletes
+    or edits the original promote event. So a demoted entity must stay
+    in this scan's result forever, or the auto-promote job would read it
+    as not-yet-promoted and propose it all over again.
+
+    The tempting, wrong "fix" this guards against: adding an "and not
+    currently demoted" filter to the scan, on the plausible-sounding but
+    backwards reasoning that a demoted precedent should not count as
+    already promoted. The point of the unfiltered scan is the opposite:
+    staying excluded from re-*proposal* is exactly what keeping the old
+    promote event in the result set achieves.
+    """
+
+    def test_promote_then_demote_entity_id_still_scanned(self, tmp_path: Path) -> None:
+        registry = StoreRegistry(stores_dir=tmp_path / "stores")
+        try:
+            executor = build_curate_executor(registry)
+            policy = _force_commit_policy(enabled=True)
+            candidate = _candidate("cand-1")
+
+            promote_report = run_candidate_auto_promotion(
+                candidates=[candidate],
+                policy=policy,
+                event_log=registry.operational.event_log,
+                executor=executor,
+                graph_store=registry.knowledge.graph_store,
+            )
+            entity_id = promote_report.outcomes[0].entity_id
+
+            demote_result = executor.execute(
+                Command(
+                    operation=Operation.PRECEDENT_DEMOTE,
+                    target_id=entity_id,
+                    target_type="precedent",
+                    args={"target_id": entity_id, "reason": "test demotion"},
+                    requested_by="cli:test-demote",
+                )
+            )
+            assert demote_result.status == "success", demote_result
+
+            already_promoted = _scan_already_promoted_entity_ids(
+                registry.operational.event_log
+            )
+
+            assert entity_id in already_promoted
+        finally:
+            registry.close()
 
 
 class TestComputeAgreementMetric:
